@@ -61,7 +61,11 @@ test('reports show response times against the target, member activity and a CSV 
     .click();
   await page.getByLabel('Reply').fill('Yes, we do.');
   await page.getByRole('button', { name: 'Send' }).click();
-  await expect(page.getByText('Yes, we do.')).toBeVisible();
+  const thread = page.getByRole('list', { name: /^Messages with/ });
+  await expect(thread.getByText('Yes, we do.')).toBeVisible();
+  // Leave only once the reply was handed to WhatsApp and the thread refreshed, so no refresh of
+  // this page is still in flight when the next one is opened.
+  await expect(thread.getByText('Sent to WhatsApp')).toBeVisible({ timeout: 20_000 });
 
   // Reports is in the navigation now that the module is available.
   await expect(page.getByRole('link', { name: 'Reports' }).first()).toBeAttached();

@@ -46,8 +46,10 @@ test('an inbound WhatsApp message appears live, the agent replies and delivery u
 
   await page.getByLabel('Reply').fill('Yes, in all sizes.');
   await page.getByRole('button', { name: 'Send' }).click();
-  await expect(page.getByText('Yes, in all sizes.')).toBeVisible();
-  await expect(page.getByText('Sent to WhatsApp')).toBeVisible({ timeout: 20_000 });
+  // Scoped to the thread: the conversation list shows the same text as its preview.
+  const thread = page.getByRole('list', { name: /^Messages with/ });
+  await expect(thread.getByText('Yes, in all sizes.')).toBeVisible();
+  await expect(thread.getByText('Sent to WhatsApp')).toBeVisible({ timeout: 20_000 });
 
   // The request reached "Meta" with this company's token and the customer's number.
   const sent = (await standInRequests(request))
