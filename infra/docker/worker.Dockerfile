@@ -27,10 +27,13 @@ RUN --mount=type=cache,id=pnpm,target=/pnpm/store --mount=type=secret,id=extra_c
     if [ -f /run/secrets/extra_ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/extra_ca; fi; \
     pnpm install --frozen-lockfile
 COPY . .
+# `deploy` re-checks its lockfile against pnpm's supply-chain policies, which needs full registry
+# metadata for any dependency that published recently; --prefer-offline lets it fetch that
+# metadata while packages still come from the store (exact versions from the lockfile).
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store --mount=type=secret,id=extra_ca,required=false \
     if [ -f /run/secrets/extra_ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/extra_ca; fi; \
     pnpm --filter @w360/worker build \
- && pnpm --filter @w360/worker deploy --prod --offline /out \
+ && pnpm --filter @w360/worker deploy --prod --prefer-offline /out \
  && cp -r apps/worker/dist /out/dist \
  && cp -r packages/db/migrations /out/migrations
 
