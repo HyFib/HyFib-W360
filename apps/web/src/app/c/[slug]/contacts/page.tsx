@@ -87,6 +87,11 @@ export default async function ContactsPage({
                 </a>
               </Button>
             ) : null}
+            {can(ctx, 'campaigns.read') ? (
+              <Button asChild variant="outline">
+                <Link href={`${base}/segments`}>Segments</Link>
+              </Button>
+            ) : null}
             {can(ctx, 'contacts.import') ? (
               <Button asChild variant="outline">
                 <Link href={`${base}/import`}>Import</Link>
@@ -100,7 +105,7 @@ export default async function ContactsPage({
           </>
         }
       />
-      <div className="grid gap-4">
+      <div className="grid grid-cols-1 gap-4">
         <form
           method="get"
           className="flex flex-wrap items-end gap-3"

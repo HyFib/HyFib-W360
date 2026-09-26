@@ -156,3 +156,144 @@ Decision: an in-house RFC 4180 reader/writer (quoted fields, doubled quotes, emb
 CRLF/LF/CR, BOM, delimiter detection; hard limits on bytes, rows, columns and field length) and a
 formula-safe writer. Import runs through a server action, so files are limited to just under the
 1 MB action body limit; larger imports would need a streaming upload endpoint.
+
+## ADR-021 Campaign audiences: frozen snapshot, live checks (2026-09-26)
+
+Decision: submitting a campaign inserts one `campaign_recipients` row per matching contact (the
+snapshot), classified with the same SQL the review screen shows (pending, or skipped with a
+reason). Recipients hold ids and outcomes only; phone numbers and variable values are read live
+when the runner queues them, so erasure and later edits apply. Every recipient is checked again
+when queued (erasure, number, suppression, consent, variables, frequency cap, spending cap) and by
+the send worker right before dispatch (consent, suppression, template approval, campaign status).
+Alternatives: snapshotting phones and values (stale data, erasure would have to rewrite campaign
+rows) or evaluating the segment at send time (the audience a member approved could silently
+change). Limit: 50,000 recipients per campaign until load tests (phase 7) justify more.
+
+## ADR-022 Campaign runner on the existing send pipeline (2026-09-26)
+
+Decision: a `campaign.run` job ticks every 10 seconds per running campaign (self-rescheduled; the
+per-minute sweep re-signals lost ticks through `ops.campaigns_due`). A tick holds the campaign's
+row lock and a per-company advisory lock, so two campaigns of one company never race on the
+frequency cap, and queues at most `rate_per_minute`-worth (or the number's rate) of recipients,
+bounded by 500 per tick and by sends still waiting in the queue. Each recipient becomes an ordinary
+message + send intent + `message.send` job, so pacing per number, unknown-outcome handling and
+send-time policy checks are the Phase 2 ones. Campaign threads are created resolved, so they do
+not flood the open inbox; a reply reopens them. Pause and cancel cancel unclaimed send intents in
+the same transaction as the status change (row locks make "claimed or cancelled" exclusive); a send
+that returns to the queue after a retryable error meets a claim-time campaign check.
+
+## ADR-023 Rate cards entered by platform staff; estimates, not charges (2026-09-26)
+
+Decision: Meta prices are not shipped with HyFib. Platform administrators copy Meta's published
+rate card for a currency into `ops.rate_cards` (market, calling codes, price per category, source
+URL, effective time); cards are immutable once published (triggers) and corrected by withdrawal
+plus a new card. Prices are integer millionths of the major unit because per-message prices are
+fractions of a minor unit. Estimates use the card in force when a message is queued, the list price
+(tier 0) and assume every message is charged: an upper bound, since Meta charges delivered messages
+and free windows and volume tiers are not applied. Spending caps compare these estimates; Meta bills
+the company directly (ADR-011), so no wallet funds are reserved for campaign sends.
+
+## ADR-024 Approval and sending authority (2026-09-26)
+
+Decision: companies can require approval; the approver must hold `campaigns.approve` and differ
+from the member who submitted. Sends run under the submitter's authority (the member who resumes a
+paused campaign takes over). The runner pauses the campaign when that member leaves the company or
+loses `campaigns.send`, so revoking a member stops their campaigns, like their other queued work.
+
+## ADR-025 Campaign attribution: last touch within 72 hours (2026-09-26)
+
+Decision: a reply (any inbound message except reactions and system notices, on the same number) or
+a marketing opt-out is attributed to the most recent campaign message queued to that contact in the
+72 hours before it, once, and recorded on the recipient row when it arrives. Clicks and conversions
+are reported as not measured: Meta does not report website-button taps, HyFib does not rewrite
+links, and no conversion source is connected. Metric definitions are versioned (ADR-026 when
+reports persist them). Only a message WhatsApp accepted can be credited (a failed or unsent message
+cannot have caused a reply or an opt-out; Meta's 131050 failure means the customer had already
+stopped marketing messages), and the reply and opt-out rates count delivered recipients only, so
+they never exceed their denominator.
+
+## ADR-026 Reports: computed on request under persisted definitions (2026-09-26)
+
+Decision: reports are computed when requested from the operational tables, in one repeatable-read
+read-only transaction under the company's RLS scope, rather than from pre-aggregated tables. Each
+reported number follows a row in `ops.metric_definitions` (numerator, denominator, window, time-zone
+rule, missing-data semantics, freshness); rows are immutable and a change is a new version in a new
+migration, kept equal to the code registry by a test. Periods are whole days in the company's time
+zone, at most 92 days. Metrics HyFib cannot measure are persisted as unavailable with the reason and
+shown instead of a number. Reconsider materialised daily aggregates when a company's report queries
+approach the statement timeout (the `(tenant_id, created_at)` message index and the turn indexes
+bound today's queries); the definitions stay the contract either way.
+
+## ADR-027 Reply turns maintained by database triggers (2026-09-26)
+
+Decision: response times are measured on reply turns (first customer message without a member reply
+→ member reply or resolve) recorded in `app.conversation_turns` by triggers on `app.messages` and
+`app.conversations` instead of by each caller, so inbox replies, template sends, ingestion and any
+future write path are covered identically; a partial unique index keeps one open turn per
+conversation under concurrent inbound messages. A reply counts when the member sends it (a later
+WhatsApp failure shows in the messaging report, not as an unanswered turn). Times are absolute;
+business-hours calendars are a later extension (H-011). Turns started before the release are not
+reconstructed.
+
+## ADR-028 Estimated Meta charges from Meta's pricing object (2026-09-26)
+
+Decision: the messaging report estimates charges only for delivered messages that Meta's status
+webhook marked `billable` (research M-065, M-076), at the list price of the published rate card in
+force when each message was recorded, by the market of the number Meta delivered to and Meta's
+pricing category. Messages Meta marked free, messages without pricing yet and billable messages that
+cannot be priced are counted by reason, never estimated. Volume tiers are not applied, so the
+estimate can exceed the invoice for utility and authentication; Meta's invoice is authoritative.
+Reconciling with Meta's `pricing_analytics` (M-078, SDK-sourced, not verified) is backlog. A
+campaign's estimate currency is fixed the first time it prices a message.
+
+## ADR-029 Teams route conversations but do not change who can read them (2026-09-26)
+
+Decision: teams are routing groups. A conversation's team decides who receives it (number team,
+keyword team, round robin with availability and limits); visibility stays with the permission
+matrix (`inbox.read_all`, or `inbox.read_assigned` for assigned-to-me plus the unassigned queue).
+Making team queues private would change live-update routing (events carry only the assignee) and
+every visibility check at once; it is a separate, reviewed change if customers need it. Routing
+runs under one advisory lock per company taken after conversation row locks (end of a webhook batch;
+the sweep uses one transaction per conversation), so limits and rotation hold under concurrency.
+Availability is an explicit switch that defaults to off: automatic assignment to someone who is not
+working is worse than a waiting queue that the sweep drains when they start. A reopened conversation
+keeps its assignee; members who leave, are suspended or lose inbox access have their conversations
+returned to the queue.
+
+## ADR-030 Business hours apply to the target; absolute times stay reported (2026-09-26)
+
+Decision: when business hours are on, the first-response target (inbox timers, "answered within
+target" v2, "overdue") counts opening hours only; first response is reported both in absolute time
+and in business hours (new definition), and resolution time in absolute time. Reports apply the
+company's current calendar to the whole period, stated in the definitions, instead of versioning
+calendars; the calendar is company-wide (per-team calendars and targets are backlog). Definitions
+whose text said business hours were not supported got new versions (v2) rather than edits.
+
+## ADR-031 Conversation cases maintained by triggers (2026-09-26)
+
+Decision: resolution time is measured on cases (open → resolve) recorded in
+`app.conversation_cases` by triggers on `app.conversations`, for the same reason as reply turns
+(ADR-027): every write path is covered and the rows are immutable once resolved. Conversations that
+were already open when migration 0009 ran get their first case when they are next reopened; no
+cases are reconstructed.
+
+## ADR-032 CSAT through interactive reply buttons inside the service window (2026-09-26)
+
+Decision: a resolve by a member sends one question with three reply buttons (research M-157:
+1 to 3 buttons, titles up to 20 characters, ids up to 256), only inside the 24-hour customer service
+window, only to contacts who have not opted out of non-marketing messages (the utility consent
+check used for templates), at most once per conversation per 24 hours, re-checked at send time.
+Outside the window nothing is sent (a template-based survey would be a business-initiated charge
+and needs its own consent decision). Every resolve records a survey row, sent or skipped with the
+reason, so coverage is reportable. The answer is the first tap whose button id and `context.id`
+(M-158) match the conversation's survey; later taps are stored as messages but do not change it.
+Taps never reopen a conversation or start a reply turn. The score is the share of best ratings among
+answers; the response rate uses delivered surveys as the denominator.
+
+## ADR-033 Collision warning at send time instead of presence (2026-09-26)
+
+Decision: collisions are caught where they cause harm, when a reply is queued: under the
+conversation's row lock, a reply is refused once if another member's reply is newer than the
+newest message the sender had seen; the sender reads it and sends again. This needs no presence
+heartbeats and cannot be missed by a disconnected browser. Live "someone is typing" presence is
+backlog.

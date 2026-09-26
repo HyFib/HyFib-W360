@@ -52,11 +52,11 @@ verification, app review, Embedded Signup configuration).
 
 - **P3-01 Contacts & CRM fields** — _implemented (2026-09-26)_: custom fields, tags, search and
   filters, import preview/mapping/row errors, one contact per number (dedupe across manual, import
-  and inbound), formula-safe export, erasure. **Remaining:** saved segments (with campaigns), safe
-  merge (H-019), role-based number masking (W-044), bulk tag edits.
+  and inbound), formula-safe export, erasure; saved segments (P3-04). **Remaining:** safe merge
+  (H-019), role-based number masking (W-044), bulk tag edits.
 - **P3-02 Consent & suppression** — _implemented (2026-09-26)_: consent events with provenance,
   opt-out/opt-in keywords, Meta 131050 opt-outs, suppression list, send-time enforcement (race test
-  with a queued template). **Remaining:** re-run the race test with campaigns (P3-04); review Meta's
+  with a queued template, and with campaigns). **Remaining:** review Meta's
   opt-in guidance (M-131) and per-market consent law; consent capture from growth tools (phase 4).
 - **P3-03 Templates** — _implemented (2026-09-26), not verified against Meta_: drafts, validation,
   write-ahead submission with lost-response reconciliation, Graph listing sync (webhook-triggered
@@ -65,13 +65,36 @@ verification, app review, Embedded Signup configuration).
   example format must be confirmed), named parameters, authentication/OTP, carousel, LTO, copy-code
   and catalog templates, editing approved templates (`POST /{template-id}`), template library
   (W-070), and a sandbox run with a real WABA.
-- **P3-04 Campaigns**: audience snapshot, approval workflow, timezone/DST scheduling, pacing,
-  frequency caps, budget guardrails, pause/resume/cancel (idempotent), per-recipient outcomes,
-  analytics with documented denominators. T: 10k-recipient campaign in staging.
-- **P3-05 Reports**: messaging outcomes and cost estimates (versioned rate tables), inbox SLA, agent
-  activity, campaign funnels; metric definitions persisted.
-- **P3-06 Inbox advanced**: teams, round-robin/capacity routing, business hours, SLA timers, saved
-  replies, mentions, CSAT.
+- **P3-04 Campaigns** — _implemented (2026-09-26), sends verified against the Graph stand-in
+  only_: saved segments (incl. campaign-response retargeting), drafts with a review panel,
+  audience snapshots re-checked when queued and before dispatch, optional four-eyes approval,
+  wall-clock scheduling with daylight-saving rules, sending windows, deadlines, pacing, marketing
+  frequency cap, message and estimated spending caps (platform rate cards), pause/resume and
+  idempotent cancel, test sends, per-recipient outcomes, last-touch reply/opt-out attribution,
+  results with denominators, CSV export. Local 10,000-recipient run: snapshot 0.6 s, all recipients
+  queued in 21 ticks. **Remaining:** the 10k run in staging with real dispatch, per-recipient time
+  zones, A/B variants, messaging-tier awareness (read the number's limit from Meta), campaign
+  sends through the public API (P5-08), media-header templates.
+- **P3-05 Reports** — _implemented (2026-09-26); provider data verified against the Graph stand-in
+  only_: persisted, versioned metric definitions; periods of whole days in the company time zone;
+  messaging outcomes with denominators; estimated Meta charges from Meta's billable flag and
+  published rate cards, with unpriced reasons; inbox queue and reply-turn response times against a
+  company first-response target (turns recorded by triggers); member activity; campaign funnels;
+  unavailable metrics shown with reasons; audited formula-safe exports; business-hours figures,
+  resolution times and CSAT (with P3-06). **Remaining:** reconciliation with Meta's
+  `pricing_analytics` (M-078, verify first), materialised daily aggregates if report queries near
+  the statement timeout, scheduled report emails, automation/deal/retention reports once those
+  modules exist.
+- **P3-06 Inbox advanced** — _implemented (2026-09-26); CSAT sends verified against the Graph
+  stand-in only_: teams with members and numbers, keyword and number routing, round robin with
+  explicit availability and per-member limits, a minute sweep, release when members leave;
+  business hours and closed days; reply-due timers and a longest-waiting order; team, number and
+  customer filters; conversation cases and resolution times; business-hours report figures; saved
+  replies; note mentions; a send-time collision warning; CSAT surveys with three reply buttons.
+  **Remaining:** per-team SLA targets and calendars, SLA breach notifications (email or in-app),
+  presence and typing indicators, conversation tags (W-035), private team queues (would change
+  visibility, ADR-029), mention emails, CSAT by template outside the window (needs a consent
+  decision), CSAT with a real WABA, transcript download (W-042), phone-number masking (W-044).
 
 ## Phase 4 — automation, Flows, CRM, commerce
 

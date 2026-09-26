@@ -109,6 +109,33 @@ function graphError(
   });
 }
 
+/**
+ * Checks an interactive reply-button message against the limits in Meta's OpenAPI spec (research
+ * M-157): 1 to 3 buttons of type "reply", unique non-empty titles of at most 20 characters, ids of
+ * at most 256 characters without surrounding spaces, and a body of at most 1024 characters.
+ */
+function interactiveProblem(body: unknown): string | null {
+  const b = body as { type?: unknown; interactive?: Record<string, unknown> } | undefined;
+  if (b?.type !== 'interactive') return null;
+  const interactive = b.interactive;
+  if (!interactive || interactive.type !== 'button') return 'interactive.type';
+  const text = (interactive.body as { text?: unknown } | undefined)?.text;
+  if (typeof text !== 'string' || text.length === 0 || text.length > 1024) return 'body.text';
+  const buttons = (interactive.action as { buttons?: unknown } | undefined)?.buttons;
+  if (!Array.isArray(buttons) || buttons.length < 1 || buttons.length > 3) return 'action.buttons';
+  const titles = new Set<string>();
+  for (const button of buttons as { type?: unknown; reply?: { id?: unknown; title?: unknown } }[]) {
+    const id = button.reply?.id;
+    const title = button.reply?.title;
+    if (button.type !== 'reply') return 'buttons.type';
+    if (typeof id !== 'string' || !id || id.length > 256 || id.trim() !== id) return 'reply.id';
+    if (typeof title !== 'string' || !title || title.length > 20 || titles.has(title))
+      return 'reply.title';
+    titles.add(title);
+  }
+  return null;
+}
+
 export async function startGraphStandIn(options: {
   appId: string;
   appSecret: string;
@@ -218,6 +245,8 @@ export async function startGraphStandIn(options: {
         return json(res, 200, { success: true });
       }
       if (req.method === 'POST' && first && second === 'messages') {
+        const invalid = interactiveProblem(body);
+        if (invalid) return graphError(res, 400, 100, `(#100) Invalid parameter: ${invalid}`);
         const behaviour = state.sendQueue.shift() ?? { kind: 'accept' };
         if (behaviour.kind === 'drop_connection') {
           req.socket.destroy();

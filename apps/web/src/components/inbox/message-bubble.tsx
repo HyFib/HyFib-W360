@@ -69,8 +69,32 @@ function Body({ type, content }: { type: string; content: unknown }) {
     case 'reaction':
       return <p>{text(c.emoji) ? `Reacted ${text(c.emoji)}` : 'Removed a reaction'}</p>;
     case 'interactive': {
+      if (c.csat === true) {
+        const buttons = Array.isArray(c.buttons)
+          ? (c.buttons as unknown[]).map(text).filter(Boolean)
+          : [];
+        return (
+          <div className="grid gap-1">
+            <p className="text-xs font-medium uppercase tracking-wide opacity-70">CSAT survey</p>
+            <p className="whitespace-pre-wrap break-words">{text(c.body) ?? ''}</p>
+            {buttons.length > 0 ? (
+              <p className="text-xs opacity-80">Buttons: {buttons.join(' · ')}</p>
+            ) : null}
+          </div>
+        );
+      }
       const reply = (c.reply ?? {}) as Record<string, unknown>;
-      return <p>{text(reply.title) ?? 'Interactive reply'}</p>;
+      const answer = text(reply.id)?.startsWith('w360csat:');
+      return (
+        <p>
+          {answer ? (
+            <span className="block text-xs font-medium uppercase tracking-wide opacity-70">
+              CSAT answer
+            </span>
+          ) : null}
+          {text(reply.title) ?? 'Interactive reply'}
+        </p>
+      );
     }
     case 'button':
       return <p>{text(c.text) ?? 'Button reply'}</p>;
@@ -84,13 +108,15 @@ function Body({ type, content }: { type: string; content: unknown }) {
       if (c.redacted === true) return <p className="italic">Content removed</p>;
       const rendered = (c.rendered ?? {}) as Record<string, unknown>;
       const template = (c.template ?? {}) as Record<string, unknown>;
+      const campaign = (c.campaign ?? {}) as Record<string, unknown>;
       const buttons = Array.isArray(rendered.buttons)
         ? (rendered.buttons as { text?: unknown }[]).map((b) => text(b.text)).filter(Boolean)
         : [];
       return (
         <div className="grid gap-1">
           <p className="text-xs font-medium uppercase tracking-wide opacity-70">
-            Template · {text(template.name) ?? 'unknown'}
+            {text(campaign.name) ? `Campaign “${text(campaign.name)}” · ` : ''}Template ·{' '}
+            {text(template.name) ?? 'unknown'}
           </p>
           {text(rendered.header) ? <p className="font-semibold">{text(rendered.header)}</p> : null}
           <p className="whitespace-pre-wrap break-words">{text(rendered.body) ?? ''}</p>
@@ -130,12 +156,22 @@ export function MessageBubble({
         )}
       >
         <span className="sr-only">
-          {outbound ? `${message.senderName ?? 'Your team'} replied` : 'Customer wrote'}:{' '}
+          {outbound
+            ? message.senderType === 'campaign'
+              ? 'Campaign message'
+              : message.senderType === 'system'
+                ? 'Automatic message'
+                : `${message.senderName ?? 'Your team'} replied`
+            : 'Customer wrote'}
+          :{' '}
         </span>
         <Body type={message.type} content={message.content} />
         <p className="mt-1 flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
           <time dateTime={message.providerTimestamp ?? message.createdAt}>{at}</time>
-          {outbound && message.senderName ? <span>· {message.senderName}</span> : null}
+          {outbound && message.senderType === 'system' ? <span>· Sent automatically</span> : null}
+          {outbound && message.senderName && message.senderType !== 'system' ? (
+            <span>· {message.senderName}</span>
+          ) : null}
           {outbound ? (
             <span className={message.status === 'failed' ? 'text-destructive' : undefined}>
               · {STATUS_LABELS[message.status] ?? message.status}

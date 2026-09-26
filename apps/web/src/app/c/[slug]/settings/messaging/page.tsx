@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
 import { can } from '@w360/domain';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
+import { CampaignSettingsForm } from '@/components/settings/campaign-settings';
 import {
   ConsentKeywordsForm,
   ContactFieldsManager,
@@ -22,11 +23,12 @@ export default async function MessagingSettingsPage({
   const { slug } = await params;
   const ctx = await requireTenant(slug);
   if (!can(ctx, 'contacts.read')) notFound();
-  const { consent, contacts } = await getRuntime();
-  const [settings, fields, suppressions] = await Promise.all([
+  const { consent, contacts, campaigns } = await getRuntime();
+  const [settings, fields, suppressions, campaignSettings] = await Promise.all([
     consent.getSettings(ctx),
     contacts.listFields(ctx),
     consent.listSuppressions(ctx, { limit: 200 }),
+    can(ctx, 'campaigns.read') ? campaigns.getSettings(ctx) : Promise.resolve(null),
   ]);
   const manage = can(ctx, 'tenant.settings.manage');
   const tz = ctx.tenant.timezone;
@@ -44,6 +46,22 @@ export default async function MessagingSettingsPage({
           <ConsentKeywordsForm slug={ctx.tenant.slug} initial={settings} canEdit={manage} />
         </CardContent>
       </Card>
+      {campaignSettings ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Campaigns</CardTitle>
+            <CardDescription>Approval, marketing frequency and cost estimates.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <CampaignSettingsForm
+              slug={ctx.tenant.slug}
+              initial={campaignSettings}
+              currencies={campaignSettings.availableCurrencies}
+              canEdit={manage}
+            />
+          </CardContent>
+        </Card>
+      ) : null}
       <Card>
         <CardHeader>
           <CardTitle>Suppression list</CardTitle>

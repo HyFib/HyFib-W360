@@ -37,7 +37,15 @@ export default async function PlatformHome({
   ]);
   return (
     <div className="grid gap-6">
-      <h1 className="text-2xl font-semibold tracking-tight">Platform administration</h1>
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <h1 className="text-2xl font-semibold tracking-tight">Platform administration</h1>
+        <Link
+          href="/platform/rate-cards"
+          className="text-sm text-primary underline-offset-4 hover:underline"
+        >
+          Meta rate cards
+        </Link>
+      </div>
       <p className="text-sm text-muted-foreground">
         Customer content is not visible here. Viewing company data requires a reasoned, time-boxed
         support grant that the company can see in its audit log.

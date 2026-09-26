@@ -28,6 +28,18 @@ made. This checklist records the evidence required per gate; unchecked items blo
 - [ ] Real credentials configured in the secret manager (DB roles, keyring, auth secret, SMTP, Meta, Razorpay)
 - [ ] Meta business verification, app review/advanced access, live-mode app (docs/META-SETUP.md)
 - [ ] Live integration checks on approved accounts (messaging, templates, webhooks)
+- [ ] A campaign to test recipients on an approved sandbox number (consent re-checks, pause,
+      cancel, delivery statuses, reply attribution) and the 10,000-recipient run in staging
+- [ ] Meta rate cards for each launch currency entered and published by platform staff from
+      Meta's current published cards (none ship with HyFib)
+- [ ] Report numbers compared with WhatsApp Manager and Meta's invoice for a sandbox period
+      (delivery counts, billable flags, estimated charges); differences explained in the
+      definitions
+- [ ] Migrations 0008 and 0010 (`CREATE INDEX CONCURRENTLY`) applied on production-sized data and
+      the indexes confirmed valid
+- [ ] A CSAT survey sent to a test recipient on an approved sandbox number: the reply-button message
+      is accepted and delivered, and a real tap arrives with `button_reply` and `context.id` as in
+      research M-158
 - [ ] Tenant-isolation and security gates passing in CI on the release commit
 - [ ] Measured load behaviour against the test envelope (k6 results)
 - [ ] Backup restoration drill performed and timings recorded (RPO/RTO)

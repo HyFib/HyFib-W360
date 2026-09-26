@@ -23,14 +23,26 @@ import {
   PgBossJobQueue,
   RazorpayClient,
   createBillingService,
+  createBusinessHoursService,
+  createCampaignsService,
+  createCsatService,
+  createReportsService,
   createConsentService,
   createContactsService,
   createInboxService,
   createOnboardingService,
   createPlatformService,
+  createRateCardsService,
+  createSavedRepliesService,
+  createSegmentsService,
+  createTeamsService,
   createTemplatesService,
   createTenancyService,
   type BillingService,
+  type BusinessHoursService,
+  type CampaignsService,
+  type CsatService,
+  type ReportsService,
   type ConsentService,
   type ContactsService,
   type InboxService,
@@ -38,6 +50,10 @@ import {
   type OnboardingService,
   type OutboundDeps,
   type PlatformService,
+  type RateCardsService,
+  type SavedRepliesService,
+  type SegmentsService,
+  type TeamsService,
   type TemplatesService,
   type TenancyService,
 } from '@w360/domain';
@@ -63,10 +79,18 @@ export interface Runtime {
   tenancy: TenancyService;
   platform: PlatformService;
   inbox: InboxService;
+  teams: TeamsService;
+  businessHours: BusinessHoursService;
+  savedReplies: SavedRepliesService;
+  csat: CsatService;
   outbound: OutboundDeps;
   contacts: ContactsService;
   consent: ConsentService;
   templates: TemplatesService;
+  segments: SegmentsService;
+  campaigns: CampaignsService;
+  rateCards: RateCardsService;
+  reports: ReportsService;
   /** Null until the Meta app is configured (WhatsApp connection is then reported unavailable). */
   meta: MetaConfig | null;
   onboarding: OnboardingService | null;
@@ -138,11 +162,19 @@ async function init(): Promise<Runtime> {
     invitationTtlHours: config.INVITATION_TTL_HOURS,
   });
   const platform = createPlatformService({ db, platformDb, clock: systemClock });
-  const inbox = createInboxService({ db, clock: systemClock });
+  const inbox = createInboxService({ db, clock: systemClock, jobs, signer });
+  const teams = createTeamsService({ db, clock: systemClock });
+  const businessHours = createBusinessHoursService({ db, clock: systemClock });
+  const savedReplies = createSavedRepliesService({ db, clock: systemClock });
+  const csat = createCsatService({ db, clock: systemClock });
   const outbound: OutboundDeps = { db, jobs, signer, clock: systemClock };
   const contacts = createContactsService({ db, clock: systemClock });
   const consent = createConsentService({ db, clock: systemClock });
   const templates = createTemplatesService({ db, jobs, signer, clock: systemClock });
+  const segments = createSegmentsService({ db, clock: systemClock });
+  const campaigns = createCampaignsService({ db, jobs, signer, clock: systemClock });
+  const rateCards = createRateCardsService({ platformDb, clock: systemClock });
+  const reports = createReportsService({ db, clock: systemClock });
   const meta = metaConfigFrom(config);
   const onboarding = meta
     ? createOnboardingService({
@@ -186,10 +218,18 @@ async function init(): Promise<Runtime> {
     tenancy,
     platform,
     inbox,
+    teams,
+    businessHours,
+    savedReplies,
+    csat,
     outbound,
     contacts,
     consent,
     templates,
+    segments,
+    campaigns,
+    rateCards,
+    reports,
     meta,
     onboarding,
     razorpay,

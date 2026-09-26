@@ -3,6 +3,8 @@ import { AppError, forbidden, notFound, uuidv7, type Clock, type Keyring } from 
 import { QUEUES } from '@w360/contracts';
 import {
   and,
+  campaignRecipients,
+  campaigns,
   channelAccounts,
   contactIdentities,
   contacts,
@@ -24,12 +26,14 @@ import {
   type Tx,
 } from '@w360/db';
 import { assertCan, can, type TenantContext } from '../authz/context';
+import { recountedCounters } from '../campaigns/counters';
 import {
   PROVIDER_MARKETING_OPT_OUT_CODE,
   checkTemplateEligibility,
   recordProviderMarketingOptOut,
 } from '../consent/service';
 import { phoneFromWaId, waRecipientFromPhone } from '../contacts/phone';
+import { csatSendBlock } from '../inbox/csat';
 import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
 import { buildTemplateSend, sendSpecFor, templateParamsSchema } from '../templates/definition';
@@ -54,6 +58,11 @@ export const sendTextSchema = z.object({
     .min(1, 'Type a message')
     .max(4096, 'Messages are limited to 4096 characters'),
   clientKey: z.string().regex(/^[A-Za-z0-9_-]{8,100}$/),
+  /**
+   * The newest message the member had seen when writing. If another member replied after it, the
+   * send is refused once so the member can read that reply first (collision warning).
+   */
+  afterMessageId: z.uuid().optional(),
 });
 
 export { credentialAad } from './credentials';
@@ -112,6 +121,30 @@ export async function queueTextMessage(deps: OutboundDeps, ctx: TenantContext, i
       .for('update');
     if (!locked || !canSeeConversation(ctx, locked.assignedMembershipId))
       throw notFound('Conversation');
+    if (data.afterMessageId) {
+      // Under the conversation lock, so two members replying at once cannot both miss the other.
+      const collision = await tx.execute<{ name: string | null }>(sql`
+        select u.name
+          from app.messages m
+          join app.messages seen on seen.tenant_id = m.tenant_id and seen.id = ${data.afterMessageId}::uuid
+                                and seen.conversation_id = m.conversation_id
+          left join app.memberships ms on ms.tenant_id = m.tenant_id and ms.id = m.sender_membership_id
+          left join auth.users u on u.id = ms.user_id
+         where m.tenant_id = ${ctx.tenant.id}::uuid and m.conversation_id = ${locked.id}::uuid
+           and m.direction = 'outbound' and m.sender_type = 'agent'
+           and m.sender_membership_id is distinct from ${ctx.membership.id}::uuid
+           and (m.created_at, m.id) > (seen.created_at, seen.id)
+         order by m.created_at desc
+         limit 1`);
+      const other = collision.rows[0];
+      if (other) {
+        throw new AppError(
+          'conflict',
+          `${other.name ?? 'Another member'} replied after you opened this conversation. Read the latest messages, then send again.`,
+          { details: { collision: true } },
+        );
+      }
+    }
     const [channel] = await tx
       .select({
         status: channelAccounts.status,
@@ -537,6 +570,7 @@ export async function processSendIntent(
         contactId: conversations.contactId,
         messageType: messages.type,
         templateId: messages.templateId,
+        campaignId: messages.campaignId,
       })
       .from(messages)
       .innerJoin(
@@ -562,6 +596,67 @@ export async function processSendIntent(
       )
       .where(and(eq(messages.tenantId, scope.tenantId), eq(messages.id, current.messageId)));
     if (!ctx) throw new Error('Send intent refers to a missing message');
+    // A campaign message waits for its campaign: once the campaign is paused or cancelled (for
+    // example a send that went back to the queue after a retryable error), it is not sent.
+    if (ctx.campaignId) {
+      const [campaign] = await tx
+        .select({ status: campaigns.status })
+        .from(campaigns)
+        .where(and(eq(campaigns.tenantId, scope.tenantId), eq(campaigns.id, ctx.campaignId)));
+      if (campaign?.status === 'paused' || campaign?.status === 'canceled') {
+        const paused = campaign.status === 'paused';
+        const code = paused ? 'campaign_paused' : 'campaign_canceled';
+        const reason = paused
+          ? 'Not sent: the campaign was paused.'
+          : 'Not sent: the campaign was cancelled.';
+        await tx
+          .update(sendIntents)
+          .set({
+            state: 'canceled',
+            leaseUntil: null,
+            resolvedAt: now,
+            lastErrorCode: code,
+            lastError: reason,
+          })
+          .where(and(eq(sendIntents.tenantId, scope.tenantId), eq(sendIntents.id, intentId)));
+        await tx
+          .update(messages)
+          .set({
+            status: 'canceled',
+            statusRank: STATUS_RANK.canceled,
+            statusAt: now,
+            errorCode: code,
+            errorTitle: reason,
+          })
+          .where(and(eq(messages.tenantId, scope.tenantId), eq(messages.id, current.messageId)));
+        // A paused campaign sends this recipient again when resumed (counters are recomputed then).
+        await tx
+          .update(campaignRecipients)
+          .set(
+            paused
+              ? {
+                  state: 'pending',
+                  messageId: null,
+                  queuedAt: null,
+                  market: null,
+                  estimatedCostMicros: null,
+                }
+              : { state: 'canceled' },
+          )
+          .where(
+            and(
+              eq(campaignRecipients.tenantId, scope.tenantId),
+              eq(campaignRecipients.messageId, current.messageId),
+            ),
+          );
+        await emitTenantEvent(tx, scope.tenantId, {
+          type: 'message.status',
+          conversationId: ctx.conversationId,
+          payload: { messageId: current.messageId },
+        });
+        return { kind: 'campaign_stopped' as const };
+      }
+    }
     // Business-initiated templates: re-check the template and the contact's consent now, under
     // the intent's row lock, so an opt-out recorded after queueing still stops the send.
     let blocked: { code: string; message: string } | null = null;
@@ -592,6 +687,17 @@ export async function processSendIntent(
         if (!eligibility.ok) blocked = { code: eligibility.code, message: eligibility.message };
       }
     }
+    // A CSAT survey (interactive message) is sent only while the contact still accepts
+    // non-marketing messages; an opt-out after the resolve stops it here.
+    if (!blocked && ctx.messageType === 'interactive') {
+      const to = (current.request as { to?: unknown }).to;
+      blocked = await csatSendBlock(tx, {
+        tenantId: scope.tenantId,
+        messageId: current.messageId,
+        contactId: ctx.contactId,
+        recipient: typeof to === 'string' ? phoneFromWaId(to) : null,
+      });
+    }
     return { kind: 'claimed' as const, intent: current, ...ctx, blocked };
   });
   if (outcome.kind === 'not_due') {
@@ -601,6 +707,7 @@ export async function processSendIntent(
       channelAccountId: outcome.channelAccountId,
     };
   }
+  if (outcome.kind === 'campaign_stopped') return { outcome: 'canceled' };
   if (outcome.kind !== 'claimed') return { outcome: 'not_claimable' };
   const claimed = outcome;
   const { intent } = claimed;
@@ -1038,8 +1145,9 @@ export async function findStaleSendIntents(
 }
 
 /**
- * Stops an intent that must not be sent any more (company suspended, sender removed). The message
- * is marked failed with a reason the agent can see; nothing is sent.
+ * Stops an intent that must not be sent any more (company suspended, sender removed); nothing is
+ * sent. A member's message is marked failed with a reason the agent can see; a campaign message is
+ * cancelled and its recipient returned to the campaign (see below).
  */
 export async function cancelSendIntent(
   db: Database,
@@ -1049,12 +1157,31 @@ export async function cancelSendIntent(
   clock: Clock,
 ): Promise<boolean> {
   return db.run(scope, async (tx) => {
+    const [target] = await tx
+      .select({ messageId: sendIntents.messageId, campaignId: messages.campaignId })
+      .from(sendIntents)
+      .innerJoin(
+        messages,
+        and(eq(messages.tenantId, sendIntents.tenantId), eq(messages.id, sendIntents.messageId)),
+      )
+      .where(and(eq(sendIntents.tenantId, scope.tenantId), eq(sendIntents.id, intentId)));
+    if (!target) return false;
+    // A campaign send locks its campaign first, in the runner's order, so a concurrent tick or
+    // pause cannot deadlock with this cancellation.
+    const [campaign] = target.campaignId
+      ? await tx
+          .select({ status: campaigns.status })
+          .from(campaigns)
+          .where(and(eq(campaigns.tenantId, scope.tenantId), eq(campaigns.id, target.campaignId)))
+          .for('update')
+      : [];
+    const now = clock.now();
     const [intent] = await tx
       .update(sendIntents)
       .set({
         state: 'canceled',
         leaseUntil: null,
-        resolvedAt: clock.now(),
+        resolvedAt: now,
         lastErrorCode: reason.code,
         lastError: reason.message,
       })
@@ -1070,14 +1197,45 @@ export async function cancelSendIntent(
     const [message] = await tx
       .update(messages)
       .set({
-        status: 'failed',
-        statusRank: STATUS_RANK.failed,
-        statusAt: clock.now(),
+        // A campaign message never left, so it is cancelled and its recipient sent again later; a
+        // member's message is shown as failed with the reason.
+        status: campaign ? 'canceled' : 'failed',
+        statusRank: campaign ? STATUS_RANK.canceled : STATUS_RANK.failed,
+        statusAt: now,
         errorCode: reason.code,
         errorTitle: reason.message,
       })
       .where(and(eq(messages.tenantId, scope.tenantId), eq(messages.id, intent.messageId)))
       .returning({ conversationId: messages.conversationId });
+    if (campaign && target.campaignId) {
+      // The recipient goes back to pending, so the campaign sends it when it runs again (another
+      // member resumes it, or the company is reactivated) unless its deadline expires it first. A
+      // finished or cancelled campaign will not run again, so the recipient is cancelled.
+      const ended = campaign.status === 'completed' || campaign.status === 'canceled';
+      await tx
+        .update(campaignRecipients)
+        .set(
+          ended
+            ? { state: 'canceled' }
+            : {
+                state: 'pending',
+                messageId: null,
+                queuedAt: null,
+                market: null,
+                estimatedCostMicros: null,
+              },
+        )
+        .where(
+          and(
+            eq(campaignRecipients.tenantId, scope.tenantId),
+            eq(campaignRecipients.messageId, intent.messageId),
+          ),
+        );
+      await tx
+        .update(campaigns)
+        .set(recountedCounters(scope.tenantId, target.campaignId))
+        .where(and(eq(campaigns.tenantId, scope.tenantId), eq(campaigns.id, target.campaignId)));
+    }
     await emitTenantEvent(tx, scope.tenantId, {
       type: 'message.status',
       conversationId: message?.conversationId ?? null,

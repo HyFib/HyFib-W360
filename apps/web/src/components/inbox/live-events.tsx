@@ -1,6 +1,6 @@
 'use client';
 import { useRouter } from 'next/navigation';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 interface LiveEvent {
   conversationId: string | null;
@@ -8,19 +8,31 @@ interface LiveEvent {
 
 /**
  * Subscribes to the company's live-update stream and refreshes server-rendered data when something
- * relevant changes. Falls back to polling (with a durable cursor) when streaming keeps failing, and
- * reloads the page when access is revoked.
+ * relevant changes. The stream resumes from `since` (the event-log position read before the page
+ * loaded its data), so changes between the render and the connection are not missed. Falls back
+ * to polling (with a durable cursor) when streaming keeps failing, and reloads the page when
+ * access is revoked.
  */
-export function LiveEvents({ slug, conversationId }: { slug: string; conversationId?: string }) {
+export function LiveEvents({
+  slug,
+  conversationId,
+  since,
+}: {
+  slug: string;
+  conversationId?: string;
+  since?: string;
+}) {
   const router = useRouter();
   const [mode, setMode] = useState<'connecting' | 'live' | 'polling' | 'offline'>('connecting');
   const [announcement, setAnnouncement] = useState('');
+  // The position of the first render; later renders (router.refresh) must not restart the stream.
+  const resumeFrom = useRef<string | null>(since ?? null);
 
   useEffect(() => {
     let source: EventSource | null = null;
     let refreshTimer: ReturnType<typeof setTimeout> | null = null;
     let pollTimer: ReturnType<typeof setTimeout> | null = null;
-    let cursor: string | null = null;
+    let cursor: string | null = resumeFrom.current;
     let failures = 0;
     let stopped = false;
 
@@ -47,6 +59,7 @@ export function LiveEvents({ slug, conversationId }: { slug: string; conversatio
         if (res.ok) {
           const body = (await res.json()) as { events: LiveEvent[]; cursor: string };
           cursor = body.cursor;
+          resumeFrom.current = body.cursor;
           if (body.events.length > 0) scheduleRefresh(body.events);
           setMode('polling');
         } else {
@@ -69,7 +82,8 @@ export function LiveEvents({ slug, conversationId }: { slug: string; conversatio
     if (typeof EventSource === 'undefined') {
       startPolling();
     } else {
-      source = new EventSource(`/api/c/${slug}/events`);
+      const resume = cursor ? `?cursor=${encodeURIComponent(cursor)}` : '';
+      source = new EventSource(`/api/c/${slug}/events${resume}`);
       source.addEventListener('open', () => {
         // After a reconnect, resynchronise once: events older than the log's retention window
         // cannot be replayed from the cursor.
@@ -79,7 +93,10 @@ export function LiveEvents({ slug, conversationId }: { slug: string; conversatio
       });
       source.addEventListener('update', (event) => {
         const message = event as MessageEvent<string>;
-        if (message.lastEventId) cursor = message.lastEventId;
+        if (message.lastEventId) {
+          cursor = message.lastEventId;
+          resumeFrom.current = message.lastEventId;
+        }
         try {
           scheduleRefresh([JSON.parse(message.data) as LiveEvent]);
         } catch {

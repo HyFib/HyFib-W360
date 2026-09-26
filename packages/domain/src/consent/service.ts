@@ -22,6 +22,7 @@ import {
   type Tx,
 } from '@w360/db';
 import { assertCan, type TenantContext } from '../authz/context';
+import { attributeCampaignOptOut } from '../campaigns/attribution';
 import { recordAudit, type RequestMeta } from '../audit';
 import { normalizePhone } from '../contacts/phone';
 import { parseInput } from '../validation';
@@ -87,8 +88,29 @@ export interface ConsentEventInput {
   occurredAt: Date;
 }
 
+/** Opt-outs that can be a reaction to a campaign (not imports or erasure). */
+const ATTRIBUTABLE_OPT_OUT_SOURCES: ReadonlySet<ConsentSource> = new Set<ConsentSource>([
+  'keyword',
+  'provider',
+  'agent',
+  'api',
+]);
+
 export async function recordConsentEvents(tx: Tx, events: ConsentEventInput[]): Promise<void> {
   if (events.length === 0) return;
+  for (const e of events) {
+    if (
+      e.action === 'opt_out' &&
+      e.purpose === 'marketing' &&
+      ATTRIBUTABLE_OPT_OUT_SOURCES.has(e.source)
+    ) {
+      await attributeCampaignOptOut(tx, {
+        tenantId: e.tenantId,
+        contactId: e.contactId,
+        at: e.occurredAt,
+      });
+    }
+  }
   await tx.insert(consentEvents).values(
     events.map((e) => ({
       id: uuidv7(),

@@ -1,5 +1,207 @@
 # Progress
 
+## 2026-09-26 — Phase 3: inbox teams, routing, business hours, CSAT (P3-06)
+
+Status: **implementation complete for the advanced inbox, production blocked** (routing, timers,
+saved replies and mentions work on HyFib's own data; CSAT surveys are WhatsApp interactive messages
+verified only against the test-only Graph stand-in, which checks them against the limits in Meta's
+OpenAPI spec; a real tap from a sandbox number is a release item).
+
+### Completed
+
+- **Schema (migrations 0009, 0010):** teams, team members and member availability;
+  `conversations.team_id` and a number's default team (`channel_accounts.default_team_id`);
+  business hours and closed days; `app.conversation_cases` (open → resolve, maintained by triggers,
+  immutable once resolved); saved replies; note mentions (deleted with their note); CSAT surveys
+  (sent or skipped with a reason, first answer only, guarded by a trigger); the reply-turn trigger
+  ignores CSAT taps; `ops.conversations_to_route` (definer, ids only) for the routing sweep; eleven
+  metric definition rows (four new versions whose text said business hours were not supported, and
+  business-hours first response, overdue, resolution time, CSAT surveys, response rate, score and
+  CSAT per member). The team index is built concurrently in its own migration.
+- **Routing:** keyword teams (whole words, any script) before the number's team; round robin to
+  the next available member below the team's limit; one advisory lock per company; a minute sweep;
+  immediate routing when a member becomes available or a team is saved; release of a member's
+  conversations when they are suspended, removed, leave or lose inbox access; routing decisions in
+  the audit log. Teams never change visibility (ADR-029).
+- **Business hours and timers:** weekly ranges and closed days in the company time zone
+  (daylight-saving aware); reply-due timers in the inbox list and thread, paused outside business
+  hours; a longest-waiting order; team, number and customer filters.
+- **Reports:** first response in business hours, overdue now, answered within target counted in
+  business hours when business hours are on, resolution times from cases, a CSAT section with
+  delivered and answered denominators and skip reasons, CSAT per member, new CSV columns and a CSAT
+  export.
+- **Saved replies, mentions, collisions:** supervisors manage saved replies with `{{name}}`,
+  `{{agent}}` and `{{company}}` placeholders filled for the conversation; notes mention members who
+  can see the conversation (Inbox → Mentions with an unread count); a reply is refused once when
+  another member replied after the sender's last seen message.
+- **CSAT:** on resolve, one question with three reply buttons inside the service window for contacts
+  who have not opted out, at most once a day per conversation, re-checked at send time; the first
+  tap matching the survey's button id and message context is recorded; taps never reopen the
+  conversation, start a reply turn or count as keywords or campaign replies. Research rows M-157
+  and M-158 record the reply-button limits and webhook shape from Meta's OpenAPI spec, fetched
+  directly from GitHub (developers.facebook.com is blocked here).
+- **Web:** Settings → Inbox (target, business hours, closed days, CSAT), Settings → Teams (teams,
+  routing, who is taking conversations), Settings → Saved replies; inbox availability switch, filters,
+  mentions view, timers, team control, saved-reply picker, mention picker, CSAT status and messages;
+  reports sections. The response target moved from Settings → Messaging to Settings → Inbox.
+- **Found while testing:** paging through the longest-waiting order repeated the first row on the
+  next page, because turn start times carry microseconds and cursors milliseconds; the order and
+  cursor now use millisecond-truncated times. Drizzle writes `FOR UPDATE OF` with a schema-qualified
+  table name, which PostgreSQL rejects; the CSAT answer lock uses a plain row lock instead.
+
+### Test commands and results (local, 2026-09-26, fresh database)
+
+| Command                                                      | Result                                                                                                                                                                                                                                                                                                                                                                                       |
+| ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`         | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                               |
+| `pnpm test` (unit)                                           | 104 passed (adds business-time arithmetic across closing times, weekends, closed days and 23/25-hour days, open/closed status, paused timers, range parsing, keyword matching and rotation)                                                                                                                                                                                                  |
+| `pnpm test:integration` (PostgreSQL 18.x)                    | 190 passed: inbox advanced 14 (teams, number and keyword routing, rotation, limits with six simultaneous customers, the sweep, release on suspension, team moves, cases, list filters and timers, saved replies, mentions, collisions), CSAT 6, reports 16 (adds business-hours figures, resolution times and CSAT against hand-computed values with a fixed clock), plus the earlier suites |
+| `pnpm test:e2e --project=chromium --project=mobile-chromium` | 30 passed (15 tests × 2), including settings for business hours, closed days, CSAT, a round-robin team and a saved reply, routing to the available owner, the team filter, a saved reply sent, the CSAT question and a tap, the CSAT report, and no horizontal overflow on the new pages                                                                                                     |
+
+### Known gaps (tracked in BACKLOG.md)
+
+Per-team SLA targets and calendars, breach notifications, presence and typing indicators,
+conversation tags, private team queues, mention emails, CSAT outside the service window, a CSAT run
+with a real WABA.
+
+## 2026-09-26 — Phase 3: reports (P3-05)
+
+Status: **implementation complete for reports, production blocked** (every number is computed from
+HyFib's own records, so reports are only as real as the messaging behind them: delivery statuses
+and pricing come from Meta's webhooks, verified here only with the test-only Graph stand-in; cost
+estimates need platform staff to publish Meta's current rate cards, none ship with HyFib).
+
+### Completed
+
+- **Schema (migrations 0007, 0008):** `ops.metric_definitions` (what each number counts,
+  denominator, window, time-zone rule, missing-data semantics, freshness; immutable, versioned, and
+  kept identical to the registry in `packages/domain/src/reports/definitions.ts` by a test);
+  `app.conversation_turns` (reply turns: start at the first customer message without a member reply,
+  end on a member reply or when the conversation is resolved) maintained by triggers on
+  `app.messages` and `app.conversations`, so every write path is covered; the company's
+  first-response target; `campaigns.estimate_currency`; a `(tenant_id, created_at)` index on
+  messages built concurrently in its own migration.
+- **Reports service:** one repeatable-read, read-only snapshot per report, periods of whole days in
+  the company's time zone (daylight-saving days have their real length; a skipped midnight starts
+  the day at its first real instant; at most 92 days):
+  - messaging outcomes by day and sender with explicit denominators, and Meta's failure codes;
+  - estimated Meta charges: delivered messages Meta marked billable, priced at the list price of the
+    published rate card in force when each message was recorded, by the recipient's market and
+    Meta's pricing category; free and not-yet-priced messages, and each reason a billable message
+    could not be priced, are listed instead of guessed;
+  - inbox queue now (open, unassigned, waiting, longest wait, reply windows closing, waiting past the
+    target, by assignee) and reply turns of the period (median and 90th-percentile first response,
+    share within the target, resolved without a reply, reply-time spread, per day);
+  - member activity (replies and templates sent, turns answered first with their median, resolves
+    from the audit log; members who can reply are listed even when quiet);
+  - campaign funnels for campaigns started in the period;
+  - automation outcomes, deal outcomes and retention cohorts reported as not available, with the
+    reason.
+- **Exports:** one CSV per section, formula-safe, `reports.export` only, audited before any data is
+  returned (`report.exported` with the period).
+- **Inbox:** resolving or reopening a conversation is audited (`conversation.status_changed`);
+  Settings → Messaging → Inbox response target.
+- **Web:** Reports page (period presets and custom dates, the sections above, definitions of every
+  number) and export route; the Reports module is now available.
+- **Found while building and testing:**
+  - a campaign's estimates used the company's current billing currency on every tick, so changing
+    the currency during a run would have mixed currencies; the currency is now fixed per campaign
+    the first time it is known;
+  - the inbox live stream started "now", so a message arriving between the page render and the
+    browser connecting stayed hidden until the next event; pages now pass the event-log position
+    read before loading their data and the stream replays from there;
+  - several pages scrolled sideways on phones (grids let wide tables stretch the page, header
+    buttons did not wrap); 17 company pages (lists, forms and settings) were measured at 412 px
+    and now fit, and e2e tests assert no horizontal overflow on the reports and contacts pages
+    (detail pages were not measured);
+  - the integration fixture minted WhatsApp ids from a per-file counter, so two test files could
+    collide (seen once on PostgreSQL 17 in CI); ids are now random.
+- **Review findings on the campaigns slice (PR #4), fixed with regression tests:**
+  - when the member whose authority a campaign used left, sends the worker rejected stayed
+    "queued" with failed messages and the pause did not release the rest, so a resumed campaign
+    never reached those recipients; rejected and unclaimed sends now return their recipients to
+    pending (also after a company suspension) and the counters are recomputed;
+  - opt-outs were credited to the last campaign message even when it had failed, and reply and
+    opt-out rates could exceed their delivered denominator; only messages WhatsApp accepted are
+    credited now, rates count delivered recipients only, and a 131050 failure is recorded before
+    its opt-out so the failing message itself is never credited.
+
+### Test commands and results (local, 2026-09-26, fresh database)
+
+| Command                                                      | Result                                                                                                                                                                                                                                                                                                                             |
+| ------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`         | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                     |
+| `pnpm test` (unit)                                           | 96 passed (adds report periods: presets, company date, 23- and 25-hour days, skipped midnights, validation; exact export amounts)                                                                                                                                                                                                  |
+| `pnpm test:integration` (PostgreSQL 18.x)                    | 166 passed: reports 12 (definitions persisted = registry and immutable, turns through real ingest/reply/resolve paths and immutable, report numbers against hand-computed values, exports and permissions, isolation), campaigns 17 (adds the launcher-removed regression and failed-message attribution), plus the earlier suites |
+| `pnpm test:e2e --project=chromium --project=mobile-chromium` | 28 passed (14 tests × 2), including a response target set, two customers writing, one answered, the report's numbers, a CSV export and a rejected over-long period                                                                                                                                                                 |
+
+### Known gaps (tracked in BACKLOG.md)
+
+Business-hours calendars for response times; reconciling estimates with Meta's
+`pricing_analytics` (research M-078, not verified); automation, deal and retention reports (their
+modules are not built); scheduled report emails.
+
+## 2026-09-26 — Phase 3: campaigns and saved segments (P3-04)
+
+Status: **implementation complete for campaigns and segments, production blocked** (campaign
+sends are verified only against the test-only Graph stand-in; a real Meta app, app review and a
+sandbox WABA with test recipients are external prerequisites; cost estimates need platform staff to
+copy Meta's current rate cards, none ship with HyFib; the 10,000-recipient run happened locally, not
+in staging). Reports (P3-05) are not built yet.
+
+### Completed
+
+- **Schema (migration 0006):** segments; campaigns (template, number, variable mapping, audience,
+  wall-clock schedule, window, pacing, caps, approval, lifecycle, counters); campaign recipients (ids
+  and outcomes only) and campaign history (append-only); `messages.campaign_id`; company campaign
+  settings (approval, marketing frequency cap, estimate currency); platform rate cards (immutable
+  once published, guarded by triggers); `ops.campaigns_due` (definer, app role only). **Found by the
+  10,000-recipient test:** with statistics stale after a bulk import, the planner used the
+  `(tenant_id, purpose, status)` consent index and the `(tenant_id, whatsapp_account_id, wa_id)`
+  identity index for per-contact lookups, making the snapshot quadratic (6.4 s and 1.7 M buffer hits
+  for 10,000 contacts, a statement timeout in the test). The migration drops that consent index and
+  adds a per-contact identity index; the same query now takes about 0.1 s.
+- **Segments:** tags, consent, typed custom fields, creation date (company time zone), source, recent
+  inbound messages, calling code and campaign responses (retargeting), all/any, parameterised SQL,
+  preview, version-checked edits, archive.
+- **Campaigns:** draft editor with a live preview and a review panel; submission freezes the
+  audience; optional four-eyes approval; scheduling in IANA time zones (gaps move forward, repeated
+  times use the first occurrence); sending window; deadline; pacing; marketing frequency cap; message
+  and estimated spending caps; pause/resume (resumer takes over); idempotent cancel; test sends to
+  existing contacts through the normal consent checks; per-recipient outcomes, last-touch reply and
+  opt-out attribution within 72 hours, results with explicit denominators, failure codes explained,
+  formula-safe audited CSV export.
+- **Runner:** `campaign.run` ticks under the campaign's row lock and a per-company advisory lock,
+  re-check each recipient with fresh data and queue ordinary messages through the Phase 2 pipeline
+  (batch insert of messages, intents and jobs); the send worker refuses messages of paused or
+  cancelled campaigns; the messaging sweep re-signals lost ticks. **Found by tests:** automatic pauses
+  for a spending or message cap first released the sends queued in the same tick; only authority,
+  template and number problems release queued sends now.
+- **Platform:** rate-card console (CSV in Meta's layout, publish, withdraw with a reason; platform
+  audit log).
+- **Web:** Campaigns (list, new, draft/review, approval, controls, results, history, recipients,
+  export), Contacts → Segments, Settings → Messaging → Campaigns, Platform → Meta rate cards. The
+  Campaigns module is now available.
+
+### Test commands and results (local, 2026-09-26, fresh database)
+
+| Command                                                      | Result                                                                                                                                                                                                                                                                                             |
+| ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`         | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                     |
+| `pnpm test` (unit)                                           | 90 passed (adds time zones and daylight saving, sending windows, variable mapping, cost arithmetic and prefixes, rate-card CSV)                                                                                                                                                                    |
+| `pnpm test:integration` (PostgreSQL 18.x)                    | 153 passed: campaigns 16 (segments, lifecycle and attribution, live re-checks, test sends, cancel races, approval, pause/resume, launcher losing permission, schedules and windows, frequency cap, spending and message caps, isolation, 10,000 recipients), isolation 45, plus the earlier suites |
+| `pnpm test:e2e --project=chromium --project=mobile-chromium` | 26 passed (13 tests × 2), including a campaign drafted, reviewed, started, queued by the worker, sent to the Graph stand-in, delivery counted, recipients and export                                                                                                                               |
+
+10,000-recipient run (local, one machine, PostgreSQL 18 in Docker): snapshot 629 ms; 21 runner ticks
+queued all 10,000 messages in 7.0 s. Real sending is paced by the per-number rate (default 20 per
+second, about 8.5 minutes for 10,000) and by Meta's limits; that part was not measured.
+
+### Known gaps (tracked in BACKLOG.md)
+
+Reports (P3-05); the 10,000-recipient run in staging with real dispatch; per-recipient time zones;
+A/B variants; reading the number's messaging tier from Meta; campaign sends through the public API;
+media-header templates.
+
 ## 2026-09-26 — Phase 3: contacts, consent and templates
 
 Status: **implementation complete for contacts, consent and templates, production blocked**

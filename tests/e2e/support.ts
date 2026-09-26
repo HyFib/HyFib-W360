@@ -71,3 +71,15 @@ export function totp(secretBase32: string, now = Date.now()): string {
   const code = (hmac.readUInt32BE(offset) & 0x7fffffff) % 1_000_000;
   return code.toString().padStart(6, '0');
 }
+
+/**
+ * WCAG reflow: the page must not scroll sideways at the current viewport (wide tables scroll
+ * inside their own container instead).
+ */
+export async function expectNoHorizontalOverflow(page: Page) {
+  const [scrollWidth, viewportWidth] = await page.evaluate(() => [
+    document.documentElement.scrollWidth,
+    document.documentElement.clientWidth,
+  ]);
+  expect(scrollWidth, 'page is wider than the viewport').toBeLessThanOrEqual(viewportWidth);
+}

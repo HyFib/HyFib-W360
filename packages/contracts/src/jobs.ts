@@ -151,6 +151,17 @@ export const QUEUES = {
     deadLetter: 'dead-letter',
     deleteAfterHours: 72,
   },
+  campaignRun: {
+    name: 'campaign.run',
+    policy: 'exclusive',
+    retryLimit: 3,
+    retryDelaySeconds: 10,
+    retryBackoff: true,
+    retryDelayMaxSeconds: 120,
+    expireInSeconds: 120,
+    deadLetter: 'dead-letter',
+    deleteAfterHours: 24,
+  },
   deadLetter: {
     name: 'dead-letter',
     policy: 'standard',

@@ -19,6 +19,7 @@ import {
   type Database,
   type Tx,
 } from '@w360/db';
+import { attributeCampaignReply } from '../campaigns/attribution';
 import { contactForPhone } from '../contacts/service';
 import { phoneFromWaId } from '../contacts/phone';
 import {
@@ -28,6 +29,8 @@ import {
   recordProviderMarketingOptOut,
   type MessagingSettings,
 } from '../consent/service';
+import { isCsatTap, recordCsatAnswer } from '../inbox/csat';
+import { routeConversation, type RouteOptions } from '../inbox/routing';
 import { emitTenantEvent } from './events';
 import {
   metaEnvelopeSchema,
@@ -333,6 +336,9 @@ async function ingestMessagesChange(tx: Tx, ctx: ChangeContext): Promise<void> {
     contactList.find((c) => (from && (c.wa_id === from || c.user_id === from)) || false) ??
     (contactList.length === 1 ? contactList[0] : undefined);
 
+  // Conversations to route once every message of this change is stored (routing takes the
+  // company's routing lock last, after the conversation row locks taken below).
+  const toRoute = new Map<string, RouteOptions>();
   for (const raw of ctx.value.messages ?? []) {
     const parsed = metaMessageSchema.safeParse(raw);
     if (!parsed.success) {
@@ -397,7 +403,21 @@ async function ingestMessagesChange(tx: Tx, ctx: ChangeContext): Promise<void> {
     if (type === 'system')
       await applyIdentityChange(tx, ctx.tenantId, channel.whatsappAccountId, content);
 
-    const keywordText = consentText(type, content);
+    // A tap on a CSAT button answers the survey: it is not a new question, so it neither reopens
+    // the conversation nor counts as unread, a keyword, a campaign reply or a routing trigger.
+    const csatTap = isCsatTap(type, content);
+    if (csatTap) {
+      const reply = content.reply as { id: string };
+      await recordCsatAnswer(tx, {
+        tenantId: ctx.tenantId,
+        conversationId: conversation.id,
+        buttonId: reply.id,
+        contextExternalId: m.context?.id ?? null,
+        responseMessageId: messageId,
+        answeredAt: providerAt,
+      });
+    }
+    const keywordText = csatTap ? null : consentText(type, content);
     if (keywordText) {
       settings ??= await loadMessagingSettings(tx, ctx.tenantId);
       const matched = await applyInboundConsentKeyword(tx, {
@@ -412,12 +432,21 @@ async function ingestMessagesChange(tx: Tx, ctx: ChangeContext): Promise<void> {
       if (matched) ctx.summary.consentKeywords += 1;
     }
 
+    if (type !== 'system' && type !== 'reaction' && !csatTap) {
+      await attributeCampaignReply(tx, {
+        tenantId: ctx.tenantId,
+        contactId,
+        channelAccountId: channel.id,
+        at: providerAt,
+      });
+    }
+
     const newer = !conversation.lastMessageAt || providerAt >= conversation.lastMessageAt;
-    const reopened = conversation.status === 'resolved';
+    const reopened = conversation.status === 'resolved' && !csatTap;
     await tx
       .update(conversations)
       .set({
-        unreadCount: sql`${conversations.unreadCount} + 1`,
+        ...(csatTap ? {} : { unreadCount: sql`${conversations.unreadCount} + 1` }),
         lastInboundAt: sql`greatest(${conversations.lastInboundAt}, ${providerAt.toISOString()}::timestamptz)`,
         ...(newer ? { lastMessageAt: providerAt, lastMessagePreview: preview.slice(0, 200) } : {}),
         ...(reopened
@@ -435,6 +464,16 @@ async function ingestMessagesChange(tx: Tx, ctx: ChangeContext): Promise<void> {
       assignedMembershipId: conversation.assignedMembershipId,
       payload: { messageId, reopened },
     });
+    if (type !== 'system' && type !== 'reaction' && !csatTap) {
+      const newCase = conversation.created || reopened;
+      const queued = toRoute.get(conversation.id);
+      if (!queued || (newCase && !queued.newCase)) {
+        toRoute.set(conversation.id, { newCase, text: newCase ? keywordText : null });
+      }
+    }
+  }
+  for (const [conversationId, options] of toRoute) {
+    await routeConversation(tx, ctx.tenantId, conversationId, options);
   }
 
   for (const raw of ctx.value.statuses ?? []) {
@@ -489,31 +528,6 @@ async function ingestMessagesChange(tx: Tx, ctx: ChangeContext): Promise<void> {
       ctx.summary.orphanStatuses += 1;
       continue;
     }
-    if (
-      s.status === 'failed' &&
-      s.errors?.some((e) => Number(e.code) === PROVIDER_MARKETING_OPT_OUT_CODE)
-    ) {
-      const [thread] = await tx
-        .select({ contactId: conversations.contactId })
-        .from(conversations)
-        .where(
-          and(
-            eq(conversations.tenantId, ctx.tenantId),
-            eq(conversations.id, message.conversationId),
-          ),
-        );
-      if (thread) {
-        await recordProviderMarketingOptOut(tx, {
-          tenantId: ctx.tenantId,
-          contactId: thread.contactId,
-          channelAccountId: channel.id,
-          externalMessageId: s.id,
-          occurredAt: providerAt,
-          providerTime: true,
-        });
-        ctx.summary.providerOptOuts += 1;
-      }
-    }
     const next = providerStatusToMessageStatus(s.status);
     if (next && shouldAdvance(message.status, next)) {
       await tx
@@ -538,6 +552,33 @@ async function ingestMessagesChange(tx: Tx, ctx: ChangeContext): Promise<void> {
         conversationId: message.conversationId,
         payload: { messageId: message.id, status: next },
       });
+    }
+    // After the status update, so attribution never credits the failing message itself: 131050
+    // means the customer had already stopped marketing messages before this one.
+    if (
+      s.status === 'failed' &&
+      s.errors?.some((e) => Number(e.code) === PROVIDER_MARKETING_OPT_OUT_CODE)
+    ) {
+      const [thread] = await tx
+        .select({ contactId: conversations.contactId })
+        .from(conversations)
+        .where(
+          and(
+            eq(conversations.tenantId, ctx.tenantId),
+            eq(conversations.id, message.conversationId),
+          ),
+        );
+      if (thread) {
+        await recordProviderMarketingOptOut(tx, {
+          tenantId: ctx.tenantId,
+          contactId: thread.contactId,
+          channelAccountId: channel.id,
+          externalMessageId: s.id,
+          occurredAt: providerAt,
+          providerTime: true,
+        });
+        ctx.summary.providerOptOuts += 1;
+      }
     }
   }
 }
@@ -628,10 +669,11 @@ async function upsertConversation(
   channelAccountId: string,
   contactId: string,
 ) {
-  await tx
+  const inserted = await tx
     .insert(conversations)
     .values({ id: uuidv7(), tenantId, channelAccountId, contactId })
-    .onConflictDoNothing();
+    .onConflictDoNothing()
+    .returning({ id: conversations.id });
   const [row] = await tx
     .select({
       id: conversations.id,
@@ -649,7 +691,7 @@ async function upsertConversation(
     )
     .for('update');
   if (!row) throw new Error('Conversation upsert failed');
-  return row;
+  return { ...row, created: inserted.length > 0 };
 }
 
 /** `user_changed_user_id` / `user_changed_number` system messages update the stored identity. */

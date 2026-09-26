@@ -3,6 +3,7 @@ import { Badge, EmptyState } from '@w360/ui';
 import { cn } from '@w360/ui/cn';
 import type { ConversationSummary } from '@w360/domain';
 import { formatShort } from '@/lib/format';
+import { ReplyTimer } from './reply-timer';
 
 export function ConversationList({
   slug,
@@ -19,6 +20,7 @@ export function ConversationList({
   timeZone: string;
   nextCursor: string | null;
 }) {
+  const now = new Date();
   if (items.length === 0) {
     return (
       <EmptyState
@@ -66,8 +68,21 @@ export function ConversationList({
                 </span>
                 <span className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
                   <span>{c.assignedName ? `Assigned to ${c.assignedName}` : 'Unassigned'}</span>
+                  {c.teamName ? <span>· {c.teamName}</span> : null}
                   {!c.windowOpen ? <span>· Window closed</span> : null}
                 </span>
+                {c.waitingSince ? (
+                  <span className="text-xs text-muted-foreground">
+                    <ReplyTimer
+                      waitingSince={c.waitingSince}
+                      replyDueAt={c.replyDueAt}
+                      overdue={c.overdue}
+                      timerPausedUntil={c.timerPausedUntil}
+                      timeZone={timeZone}
+                      now={now}
+                    />
+                  </span>
+                ) : null}
               </Link>
             </li>
           );

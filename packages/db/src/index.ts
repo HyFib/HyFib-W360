@@ -15,6 +15,7 @@ export {
   lt,
   lte,
   inArray,
+  notInArray,
   isNull,
   isNotNull,
   desc,

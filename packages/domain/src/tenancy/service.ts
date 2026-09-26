@@ -43,6 +43,7 @@ import {
 } from '@w360/contracts';
 import { assertCan, type TenantContext } from '../authz/context';
 import { canAssignRoles, ROLE_LABELS } from '../authz/permissions';
+import { INBOX_WORKER_ROLES, releaseMemberConversations } from '../inbox/routing';
 import { recordAudit, type RequestMeta } from '../audit';
 import { enqueueEmail, type OutboxDeps } from '../email/outbox';
 
@@ -321,6 +322,10 @@ export function createTenancyService(deps: TenancyDeps) {
           .update(memberships)
           .set({ roles: data.roles })
           .where(eq(memberships.id, target.id));
+        // A member who can no longer answer conversations stops holding any.
+        if (!data.roles.some((r) => INBOX_WORKER_ROLES.includes(r))) {
+          await releaseMemberConversations(tx, ctx.tenant.id, target.id);
+        }
         await recordAudit(
           tx,
           ctx,
@@ -369,6 +374,9 @@ export function createTenancyService(deps: TenancyDeps) {
           .update(memberships)
           .set({ status: data.status, statusChangedAt: clock.now(), statusChangedBy: ctx.user.id })
           .where(eq(memberships.id, target.id));
+        if (data.status !== 'active') {
+          await releaseMemberConversations(tx, ctx.tenant.id, target.id);
+        }
         await recordAudit(
           tx,
           ctx,
@@ -396,6 +404,7 @@ export function createTenancyService(deps: TenancyDeps) {
           .where(
             and(eq(memberships.id, ctx.membership.id), eq(memberships.tenantId, ctx.tenant.id)),
           );
+        await releaseMemberConversations(tx, ctx.tenant.id, ctx.membership.id);
         await recordAudit(
           tx,
           ctx,

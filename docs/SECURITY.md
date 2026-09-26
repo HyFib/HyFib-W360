@@ -23,6 +23,8 @@ security operations. It is not a compliance claim; see `docs/THREAT-MODEL.md` fo
 | Live updates       | SSE and polling endpoints authenticate the session, resolve membership per request, re-validate every 30 s, carry ids only and filter events by conversation visibility; unauthenticated or non-member requests get 404.                                                                                                                                                                                                                                                                                                                                                                                                      |
 | Payments           | Card entry only inside Razorpay Checkout's frame; the Checkout signature is verified against our stored order id and the payment is then fetched from Razorpay; only captured payments credit, exactly once, through SECURITY DEFINER functions; runtime roles cannot write ledger rows or balances; webhooks verified over the raw body (current + previous secret) and stored before 200; only card network, issuer, last four digits and expiry stored (no PAN/CVV); billing actions limited to owner and billing roles (MFA-required roles) and audited. Step-up re-authentication for payment settings is not built yet. |
 | Contacts & consent | Consent is append-only (runtime role can only insert events; current state is written by a SECURITY DEFINER trigger); every template send re-checks consent and the suppression list under the send intent's row lock; erasure is one audited definer function; the status-history guard allows clearing recipient ids only inside it; CSV import caps size, rows, columns and field length and never echoes row contents; CSV export is formula-safe and audited.                                                                                                                                                            |
+| Campaigns          | Audience snapshots without personal data; recipients re-checked (erasure, suppression, consent, variables, frequency cap, spending cap) when queued and again by the send worker before dispatch; pause/cancel cancel unclaimed sends atomically; one runner tick per campaign and per company; sends under a named member's authority; four-eyes approval option; formula-safe audited export; rate cards immutable once published.                                                                                                                                                                                          |
+| Reports            | Aggregates and member names only (no message content or contact details), computed in one read-only snapshot under the company's RLS scope; reply turns written only by database triggers (runtime role cannot rewrite or delete them); metric definitions global and read-only; per-section exports need `reports.export`, are formula-safe and audited before data is returned.                                                                                                                                                                                                                                             |
 | Templates          | Created, deleted and listed only by the worker with the stored WABA token (never in the browser); webhooks for templates are signals routed through verified WABA bindings and never change status on their own; submission is write-ahead so a lost response cannot create a duplicate.                                                                                                                                                                                                                                                                                                                                      |
 | Supply chain       | Exact pins + lockfile, pnpm minimum release age, explicit install-script allowlist, `pnpm audit` and gitleaks in CI, GitHub Actions pinned by SHA, Trivy image scanning, Dependabot.                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 
@@ -97,6 +99,30 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   removing one needs `tenant.settings.manage` (it re-enables messaging).
 - Deleting a template Meta already has needs `templates.submit` as well as `templates.write`.
 - Erasing a contact needs `contacts.delete` (also while the company is suspended).
+- Campaigns: drafts and segments need `campaigns.write`; submitting needs `campaigns.write` and
+  `campaigns.send`; approving (when the company requires it) needs `campaigns.approve` and a member
+  other than the submitter; pausing, resuming, cancelling a started campaign, changing its caps and
+  test sends need `campaigns.send`. Sends run under the submitter's (or the resuming member's)
+  authority and the runner pauses the campaign if that member leaves or loses `campaigns.send`.
+  Per-recipient lists need `contacts.read`; the per-recipient CSV export needs `contacts.export`.
+  Campaign settings (approval, frequency cap, estimate currency) need `tenant.settings.manage`.
+- Rate cards are platform data: only platform administrators create, publish and withdraw them
+  (platform audit log); companies read published cards.
+- Reports need `reports.read` (they contain aggregates and member names only, so roles without
+  inbox or contact access, such as analysts and marketers, can read them); CSV exports need
+  `reports.export` and are audited (`report.exported`). The inbox response target needs
+  `tenant.settings.manage`; resolving and reopening conversations is audited.
+- Inbox teams (P3-06): creating, editing and deleting teams (members, numbers, routing keywords,
+  round robin, limits) and saved replies need `inbox.supervise` (audited); moving a conversation
+  between teams needs `inbox.assign` (audited, version-checked); members set their own
+  availability with `inbox.reply`, and `inbox.assign` may set anyone's (audited). Business hours,
+  closed days and CSAT settings need `tenant.settings.manage` (audited). Teams never widen
+  visibility. Mentions: only active members who can see the conversation at that moment can be
+  mentioned, and a member's mentions are listed only for conversations they can still see.
+  Automatic assignment only reaches active members whose role can read and answer conversations.
+- CSAT taps: a tap is recorded only when its button id names a survey of the same conversation and
+  its `context.id` is that survey's message; nothing in the tap is trusted beyond selecting one of
+  the three scores, and a tap can never reopen a conversation.
 
 Platform roles (`ops.platform_admins`): `platform_owner` and `platform_operator`. Both require MFA;
 all actions are audited; neither can read customer content without a support grant.

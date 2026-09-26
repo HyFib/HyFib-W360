@@ -13,6 +13,7 @@ export default async function SettingsLayout({
   const { slug } = await params;
   const ctx = await requireTenant(slug);
   const base = `/c/${ctx.tenant.slug}/settings`;
+  const inbox = ctx.permissions.has('inbox.read_all') || ctx.permissions.has('inbox.read_assigned');
   const tabs = [
     { href: base, label: 'General' },
     { href: `${base}/members`, label: 'Members' },
@@ -22,6 +23,13 @@ export default async function SettingsLayout({
       : []),
     ...(ctx.permissions.has('contacts.read')
       ? [{ href: `${base}/messaging`, label: 'Messaging' }]
+      : []),
+    ...(inbox || ctx.permissions.has('tenant.settings.manage')
+      ? [{ href: `${base}/inbox`, label: 'Inbox' }]
+      : []),
+    ...(inbox ? [{ href: `${base}/teams`, label: 'Teams' }] : []),
+    ...(ctx.permissions.has('inbox.reply') || ctx.permissions.has('inbox.supervise')
+      ? [{ href: `${base}/saved-replies`, label: 'Saved replies' }]
       : []),
     ...(ctx.permissions.has('audit.read') ? [{ href: `${base}/audit`, label: 'Audit log' }] : []),
     { href: `${base}/modules`, label: 'Modules' },

@@ -2,7 +2,11 @@
 import { useRouter } from 'next/navigation';
 import { useId, useState } from 'react';
 import { Select } from '@w360/ui';
-import { assignConversationAction, setConversationStatusAction } from '@/app/actions/inbox';
+import {
+  assignConversationAction,
+  setConversationStatusAction,
+  setConversationTeamAction,
+} from '@/app/actions/inbox';
 import { FormError } from '@/components/form-status';
 import { ClientButton } from '@/components/client-form';
 
@@ -134,6 +138,64 @@ export function ConversationControls({
             </ClientButton>
           )
         ) : null}
+      </div>
+      <FormError message={error} />
+    </div>
+  );
+}
+
+/** Moves the conversation to another team (members who manage assignments). */
+export function TeamControl({
+  slug,
+  conversationId,
+  version,
+  teamId,
+  teams,
+}: {
+  slug: string;
+  conversationId: string;
+  version: number;
+  teamId: string | null;
+  teams: { id: string; name: string }[];
+}) {
+  const router = useRouter();
+  const selectId = useId();
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  return (
+    <div className="grid gap-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <label htmlFor={selectId} className="text-sm text-muted-foreground">
+          Team
+        </label>
+        <Select
+          id={selectId}
+          className="w-auto min-w-40"
+          value={teamId ?? ''}
+          disabled={busy}
+          onChange={(event) => {
+            setBusy(true);
+            setError(null);
+            void setConversationTeamAction(slug, {
+              conversationId,
+              teamId: event.target.value || null,
+              expectedVersion: version,
+            }).then((r) => {
+              setBusy(false);
+              if (!r.ok) {
+                setError(r.message);
+                if (r.code === 'conflict') router.refresh();
+              }
+            });
+          }}
+        >
+          <option value="">No team</option>
+          {teams.map((t) => (
+            <option key={t.id} value={t.id}>
+              {t.name}
+            </option>
+          ))}
+        </Select>
       </div>
       <FormError message={error} />
     </div>

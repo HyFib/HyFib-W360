@@ -5,7 +5,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./template-definition": "./src/templates/definition.ts"
+    "./template-definition": "./src/templates/definition.ts",
+    "./metric-definitions": "./src/reports/definitions.ts"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json"

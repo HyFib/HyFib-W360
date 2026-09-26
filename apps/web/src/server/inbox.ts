@@ -1,5 +1,5 @@
 import 'server-only';
-import { can, type TenantContext } from '@w360/domain';
+import { can, currentEventCursor, type TenantContext } from '@w360/domain';
 import type { InboxQuery } from '@/components/inbox/inbox-shell';
 import { getRuntime } from './runtime';
 
@@ -9,13 +9,59 @@ export function canUseInbox(ctx: TenantContext): boolean {
   return can(ctx, 'inbox.read_all') || can(ctx, 'inbox.read_assigned');
 }
 
-/** Parses the list filters from the URL (untrusted) and loads one page of conversations. */
-export async function loadInboxList(ctx: TenantContext, sp: SearchParams) {
+/**
+ * The company event-log position before a page reads its data. The page hands it to LiveEvents so
+ * the live stream replays anything that changed after the render, instead of starting "now" and
+ * missing events that arrive before the browser connects.
+ */
+export async function liveEventCursor(ctx: TenantContext): Promise<string> {
+  const { db } = await getRuntime();
+  return currentEventCursor(db, ctx.scope);
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const one = (v: string | string[] | undefined) => (typeof v === 'string' ? v : undefined);
+
+/** Parses the list filters from the URL (untrusted; the service validates them again). */
+export function parseInboxQuery(ctx: TenantContext, sp: SearchParams): InboxQuery {
   const views: InboxQuery['view'][] = ['mine', 'unassigned', 'all'];
   const view = views.find((v) => v === sp.view) ?? (can(ctx, 'inbox.read_all') ? 'all' : 'mine');
   const status: InboxQuery['status'] = sp.status === 'resolved' ? 'resolved' : 'open';
-  const cursor = typeof sp.cursor === 'string' ? sp.cursor : undefined;
-  const { inbox } = await getRuntime();
-  const list = await inbox.listConversations(ctx, { view, status, ...(cursor ? { cursor } : {}) });
-  return { query: { view, status } satisfies InboxQuery, views, list };
+  const team = one(sp.team);
+  const channel = one(sp.channel);
+  const q = one(sp.q)?.trim().slice(0, 100);
+  return {
+    view,
+    status,
+    ...(team && (team === 'none' || UUID.test(team)) ? { team } : {}),
+    ...(channel && UUID.test(channel) ? { channel } : {}),
+    ...(q ? { q } : {}),
+    order: sp.order === 'waiting' && status === 'open' ? 'waiting' : 'recent',
+  };
+}
+
+/** Loads one page of conversations, the filter options and the member's inbox state. */
+export async function loadInboxList(ctx: TenantContext, sp: SearchParams) {
+  const query = parseInboxQuery(ctx, sp);
+  const views: InboxQuery['view'][] = ['mine', 'unassigned', 'all'];
+  const cursor = one(sp.cursor);
+  const { inbox, teams } = await getRuntime();
+  const [list, teamOptions, channelOptions, mentions, available] = await Promise.all([
+    inbox.listConversations(ctx, { ...query, ...(cursor ? { cursor } : {}) }),
+    teams.teamOptions(ctx),
+    can(ctx, 'channels.read') ? teams.channelOptions(ctx) : Promise.resolve([]),
+    inbox.unreadMentionCount(ctx),
+    can(ctx, 'inbox.reply') ? teams.getAvailability(ctx) : Promise.resolve(null),
+  ]);
+  return {
+    query,
+    views,
+    list,
+    filters: {
+      teams: teamOptions,
+      channels: channelOptions.map((c) => ({ id: c.id, label: c.label })),
+    },
+    unreadMentions: mentions,
+    available,
+  };
 }

@@ -169,6 +169,83 @@ and requests a sync. Improve the template (quality) or use another one; do not r
 **Import rejected.** Row errors name the row and the problem, never the row's contents. Files must
 be under the upload limit and 5,000 rows; split larger files.
 
+## 10A. Campaigns
+
+**A campaign seems stuck ("Sending" with no progress).** The detail page shows why a campaign waits:
+a sending window that has not opened, pacing, or a pause reason. Check the worker logs for
+`campaign tick` with the campaign id (`outcome` progress, waiting, busy, paused, completed) and the
+`campaign.run` queue depth. The per-minute messaging sweep re-signals a running campaign whose next
+tick is more than 30 seconds late (`campaign ticks signalled`). Sends then follow the send runbooks
+above (message.send queue, unknown outcomes).
+
+**Stop a campaign now (wrong audience or content).** Cancel it from the detail page (members with
+`campaigns.send`): pending recipients and queued sends that no worker has claimed are cancelled in
+one transaction; sends already handed to Meta cannot be recalled. Pausing instead keeps the
+remaining recipients for later.
+
+**Paused by HyFib.** The reason is on the page: template no longer approved (fix or replace the
+template, then resume), number inactive (reconnect, then resume), spending or message cap reached
+(raise it, then resume), the sending member left or lost permission (another member with
+`campaigns.send` resumes it under their name; sends not yet handed to Meta went back to the
+campaign and are sent then), or no rate card for the cap's currency (platform staff publish one,
+or remove the cap).
+
+**Many failures with 131049.** Meta's per-user marketing limit: those customers received too many
+marketing messages from businesses. Do not resend; wait at least 24 hours (M-062) and consider the
+company's frequency cap.
+
+**Rate card mistake.** Platform staff withdraw the card (with a reason; audited) and publish a
+corrected one. Estimates recorded on recipients already queued keep the old price; new estimates use
+the card in force when each message is queued.
+
+## 10B. Reports
+
+**A report number looks wrong.** Open "How these numbers are counted" on the Reports page: each
+number names its definition (key and version), denominator, window and time-zone rule. Common causes:
+delivery statuses or pricing not received yet (Meta webhooks; check webhook ingestion, section 4),
+a period that includes today, or the company's time zone (Settings → Company) differing from the
+viewer's. Response times start when HyFib received the customer's message; the target and the
+business-hours figures count opening hours only when business hours are on (section 10C), other
+times are absolute.
+
+**Response times missing for older conversations.** Reply turns are recorded from the release that
+added reports (migration 0007); earlier conversations have none. Nothing to repair.
+
+**Estimated charges show unpriced messages.** The report lists why: no billing currency (Settings →
+Messaging), no published rate card for the currency and period (platform staff publish one), a
+pricing category the card has no rate for, a market missing from the card or an erased recipient.
+Estimates never replace Meta's invoice.
+
+**A report is slow or times out.** Reports run under the normal statement timeout. Try a shorter
+period (the page allows at most 92 days); check that migration 0008's
+`app.messages_tenant_created_idx` exists and is valid (`\d app.messages`); record the company and
+period for the materialised-aggregate follow-up (ADR-026).
+
+## 10C. Inbox routing, business hours and CSAT
+
+**New conversations are not being assigned.** Check, in order: the conversation's team (inbox
+filter or thread) and that the team assigns round robin (Settings → Teams); that at least one team
+member is available (Settings → Teams shows who is taking conversations) and below the team's limit
+of open conversations; that the member is active and has a role that can answer (owner,
+administrator, supervisor, agent). Waiting conversations are picked up within a minute by the
+messaging sweep (worker log "waiting conversations assigned") or immediately when a member becomes
+available. The audit log records each decision as `conversation.routed` (rule `keyword` or
+`number`). A conversation that already has an assignee is never re-routed.
+
+**A reply timer or "overdue" looks wrong.** Timers use the company time zone (Settings → General)
+and, when business hours are on, only the opening hours and closed days in Settings → Inbox. A timer
+shown as paused resumes at the next opening. Reports apply the current calendar to past periods.
+
+**CSAT surveys are not sent.** Each resolve records a survey with a reason when nothing was sent
+(Reports → CSAT lists the reasons): the 24-hour window had closed, the customer opted out or the
+number is suppressed, the contact was erased or has no phone number, the WhatsApp number is inactive,
+or the customer was asked in the last 24 hours. A survey that was queued but failed shows Meta's
+error on the message in the thread (for example a consent change before dispatch: `opted_out`).
+
+**Migration 0010 failed.** It builds `app.conversations_team_idx` concurrently. If it failed, an
+INVALID index can remain: run `DROP INDEX CONCURRENTLY app.conversations_team_idx;` and run the
+migrations again.
+
 ## 11. Compromised company (tenant) or account
 
 1. Suspend the company in `/platform` with a reason (stops outbound activity; ingestion continues).
@@ -181,7 +258,10 @@ be under the upload limit and 5,000 rows; split larger files.
 
 ## 12. Migration failure
 
-1. The runner applies each file in a transaction; a failure rolls back that file and stops.
+1. The runner applies each file in a transaction; a failure rolls back that file and stops. Files
+   starting with `-- migrate:no-transaction` (a single `CREATE INDEX CONCURRENTLY`, such as 0008)
+   are not transactional: a failure can leave an INVALID index. Drop it
+   (`DROP INDEX CONCURRENTLY app.messages_tenant_created_idx;`) and run the migrations again.
 2. Fix forward: write a new migration that repairs state; never edit an applied file (checksums).
 3. If an app release depends on the failed migration, keep the previous release running (migrations
    are backward compatible by policy).

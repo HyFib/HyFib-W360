@@ -1,6 +1,7 @@
 'use client';
+import { useRouter } from 'next/navigation';
 import { useId, useRef, useState, useSyncExternalStore } from 'react';
-import { Button, Textarea } from '@w360/ui';
+import { Button, Select, Textarea } from '@w360/ui';
 import { sendReplyAction } from '@/app/actions/inbox';
 import { FormError } from '@/components/form-status';
 import { ClientForm } from '@/components/client-form';
@@ -22,23 +23,39 @@ function readDraft(key: string): string {
 // sessionStorage has no same-tab change events; the draft is read once per render.
 const noSubscription = () => () => undefined;
 
+export interface ComposerSavedReply {
+  id: string;
+  shortcut: string;
+  title: string;
+  /** Text with placeholders already filled in for this conversation. */
+  text: string;
+  /** Placeholders that had no value (for example a customer without a name). */
+  missing: string[];
+}
+
 /**
  * Reply composer. Drafts are kept in this tab's sessionStorage under a key that includes the member,
  * the company and the conversation, so a draft never appears in another company or for another
  * person using the same browser. Each submission carries an idempotency key; if the network fails
- * mid-request the same key is reused, so a retry cannot create a duplicate message.
+ * mid-request the same key is reused, so a retry cannot create a duplicate message. It also carries
+ * the newest message shown, so a reply another member sent meanwhile is shown before this one goes.
  */
 export function Composer({
   slug,
   conversationId,
   draftKey,
   disabledReason,
+  savedReplies = [],
+  latestMessageId,
 }: {
   slug: string;
   conversationId: string;
   draftKey: string;
   disabledReason: string | null;
+  savedReplies?: ComposerSavedReply[];
+  latestMessageId?: string;
 }) {
+  const router = useRouter();
   const id = useId();
   // Server render has no draft; the client reads it from storage (no hydration mismatch).
   const storedDraft = useSyncExternalStore(
@@ -50,6 +67,7 @@ export function Composer({
   const text = edited ?? storedDraft;
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
   const pendingKey = useRef<string | null>(null);
 
   const update = (value: string) => {
@@ -73,6 +91,7 @@ export function Composer({
         conversationId,
         text: body,
         clientKey: pendingKey.current,
+        ...(latestMessageId ? { afterMessageId: latestMessageId } : {}),
       });
       if (result.ok) {
         pendingKey.current = null;
@@ -81,6 +100,8 @@ export function Composer({
         setError(result.message);
         // A typed refusal created nothing; an internal error might have, so keep the key.
         if (result.code !== 'internal') pendingKey.current = null;
+        // Someone else replied meanwhile: show their message; the draft stays for a second try.
+        if (result.code === 'conflict') router.refresh();
       }
     } catch {
       setError('The message could not be sent because the connection failed. Try again.');
@@ -124,10 +145,45 @@ export function Composer({
         }}
       />
       <FormError message={error} />
-      <div className="flex items-center justify-between gap-2">
+      {notice ? (
+        <p className="text-xs text-muted-foreground" role="status">
+          {notice}
+        </p>
+      ) : null}
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <span id={`${id}-hint`} className="text-xs text-muted-foreground">
           Ctrl + Enter to send · {text.length}/{MAX_LENGTH}
         </span>
+        {savedReplies.length > 0 ? (
+          <>
+            <label htmlFor={`${id}-saved`} className="sr-only">
+              Insert a saved reply
+            </label>
+            <Select
+              id={`${id}-saved`}
+              className="w-auto min-w-40"
+              value=""
+              onChange={(event) => {
+                const chosen = savedReplies.find((r) => r.id === event.target.value);
+                if (!chosen) return;
+                const next = text.trim() ? `${text.trimEnd()}\n${chosen.text}` : chosen.text;
+                update(next.slice(0, MAX_LENGTH));
+                setNotice(
+                  chosen.missing.includes('name')
+                    ? `Inserted “${chosen.title}”. This customer has no name on file, so {{name}} was left empty: check the text.`
+                    : `Inserted “${chosen.title}”. Review it before sending.`,
+                );
+              }}
+            >
+              <option value="">Saved replies…</option>
+              {savedReplies.map((r) => (
+                <option key={r.id} value={r.id}>
+                  /{r.shortcut} · {r.title}
+                </option>
+              ))}
+            </Select>
+          </>
+        ) : null}
         <Button type="submit" disabled={busy || text.trim().length === 0}>
           {busy ? 'Sending…' : 'Send'}
         </Button>

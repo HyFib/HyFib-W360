@@ -120,6 +120,29 @@ export function inboundMessage(
   });
 }
 
+/** A customer's tap on a reply button of the message `contextId` (research M-158). */
+export function buttonReply(
+  wabaId: string,
+  phoneNumberId: string,
+  waId: string,
+  button: { id: string; title: string },
+  contextId: string,
+) {
+  return envelope(wabaId, phoneNumberId, {
+    contacts: [{ profile: { name: 'Priya Customer' }, wa_id: waId }],
+    messages: [
+      {
+        from: waId,
+        id: `wamid.e2e.${randomUUID()}`,
+        timestamp: String(Math.floor(Date.now() / 1000)),
+        type: 'interactive',
+        interactive: { type: 'button_reply', button_reply: button },
+        context: { from: '919000012345', id: contextId },
+      },
+    ],
+  });
+}
+
 export function statusUpdate(
   wabaId: string,
   phoneNumberId: string,

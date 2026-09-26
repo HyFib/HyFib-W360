@@ -33,15 +33,15 @@ export const MODULES: ModuleDefinition[] = [
     path: '/contacts',
     permission: 'contacts.read',
     status: 'available',
-    reason: 'Saved segments arrive with campaigns.',
   },
   {
     key: 'campaigns',
     label: 'Campaigns',
     path: '/campaigns',
     permission: 'campaigns.read',
-    status: 'planned',
-    reason: 'Phase 3: campaigns with consent and suppression checks at send time.',
+    status: 'available',
+    reason:
+      'Template campaigns to saved segments with approval, scheduling, pacing and caps. Per-recipient time zones and A/B tests are not supported yet.',
   },
   {
     key: 'templates',
@@ -97,8 +97,9 @@ export const MODULES: ModuleDefinition[] = [
     label: 'Reports',
     path: '/reports',
     permission: 'reports.read',
-    status: 'planned',
-    reason: 'Phase 3: messaging, inbox and campaign reports.',
+    status: 'available',
+    reason:
+      'Messaging outcomes, estimated Meta charges, inbox response times, member activity and campaign funnels. Automation, deal and retention reports need modules that are not available yet.',
   },
   {
     key: 'integrations',

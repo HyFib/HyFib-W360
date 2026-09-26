@@ -199,6 +199,138 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   worker skips the 24-hour window check for templates but re-checks template approval, consent and
   the suppression list inside the claim transaction before any request leaves.
 
+## 6B. Segments and campaigns **[built — sends verified against a local Graph stand-in only]**
+
+- **Segments** (`packages/domain/src/campaigns/segments.ts`): saved, dynamic lists of conditions
+  (tags, consent, typed custom fields, creation date in the company's time zone, source, last
+  inbound message, calling code, response to an earlier campaign) combined with all/any. They
+  compile to parameterised SQL over `app.contacts`; erased contacts never match.
+- **Campaign lifecycle** (`campaigns/service.ts`): draft → (pending_approval →) scheduled → running
+  → completed, with paused and canceled. Submitting runs the readiness checks, freezes the audience
+  (`campaign_recipients`, one row per contact, pending or skipped with a reason, no personal data)
+  and records the submitter. With approval required, a different member with `campaigns.approve`
+  approves. Sends run under the submitter's (or the resuming member's) authority.
+- **Scheduling** (`campaigns/schedule.ts`): a wall-clock time in an IANA zone resolved with Node's
+  ICU data; a time inside a daylight-saving gap moves forward by the jump, a repeated time means its
+  first occurrence, and the adjustment is stored and shown. An optional daily sending window (which
+  may wrap midnight) delays ticks until it opens. `stop_after_hours` bounds the sending period;
+  recipients not reached by then are recorded as expired, so a campaign held up by a suspension is
+  never replayed days later.
+- **Runner** (`campaigns/runner.ts`, queue `campaign.run`): one tick about every 10 seconds per
+  running campaign under the campaign row lock and a per-company advisory lock. It pauses when the
+  template is no longer sendable, the number is inactive, the sending member lost authority, a cap
+  is reached or rates are missing; otherwise it takes the next pending recipients (pacing by
+  `rate_per_minute` or the number's rate, at most 500 per tick, bounded by sends still queued),
+  re-checks each with fresh data and queues ordinary messages + send intents + `message.send` jobs
+  (batch insert). Campaign threads are created resolved; a reply reopens them. The per-minute
+  messaging sweep re-signals ticks through `ops.campaigns_due` (active companies only).
+- **Guardrails:** marketing frequency cap per contact (company setting; counts marketing templates
+  from campaigns and the inbox), message cap, estimated spending cap (rate cards, ADR-023), pacing,
+  approval, sending window, deadline. Meta's own limits (per-user marketing limit 131049, messaging
+  tiers) still apply and show as failures with Meta's code.
+- **Pause and cancel:** both cancel unclaimed send intents in the transaction that changes the
+  status; pausing returns those recipients to pending, cancelling cancels them and every pending
+  recipient. Cancelling is idempotent. The send worker also refuses a campaign message whose
+  campaign is paused or cancelled (a send that returned to the queue after a retryable error). A
+  send the worker rejects because its sending member left or the company is suspended returns its
+  recipient to pending (cancelled if the campaign has ended), so a resumed or reactivated
+  campaign still reaches them, subject to its deadline.
+- **Outcomes and attribution:** delivery progress is read from the linked message; replies and
+  marketing opt-outs are attributed last-touch within 72 hours to a message WhatsApp accepted, by
+  ingestion and consent recording (ADR-025); the reply and opt-out rates count delivered
+  recipients only. Analytics compute rates with explicit denominators from `METRIC_DEFINITIONS`
+  (`packages/domain/src/reports/definitions.ts`); clicks and conversions are reported as not
+  measured. Per-recipient CSV export is formula-safe and audited.
+- **Rate cards** (`ops.rate_cards`, `rate_card_prefixes`, `rate_card_prices`): entered by platform
+  staff from Meta's published cards (platform console), immutable once published; companies read
+  published cards only.
+
+## 6C. Reports **[built — numbers come from HyFib's own records; provider data verified against a local Graph stand-in only]**
+
+- **Computed on request, never stored** (`packages/domain/src/reports/service.ts`): one
+  repeatable-read, read-only transaction per report inside the company's RLS scope, so every number
+  on a page comes from the same snapshot; statement timeouts still apply. There are no
+  pre-aggregated tables to drift from the source rows (ADR-026). Reports show aggregates and member
+  names only, never message content or contact details.
+- **Definitions** (`ops.metric_definitions`, registry in `reports/definitions.ts`): each number's
+  numerator, denominator, window, time-zone rule, missing-data semantics and freshness, versioned
+  and immutable; a test keeps the table equal to the registry. Metrics HyFib cannot measure
+  (clicks, conversions, automation outcomes, deal outcomes, retention cohorts) are rows with
+  `available = false` and a reason, shown instead of numbers.
+- **Periods** (`reports/period.ts`): whole calendar days in the company's time zone, from local
+  midnight to local midnight (daylight-saving days last 23 or 25 hours; a skipped midnight starts the
+  day at its first real instant), at most 92 days; days are bucketed with `AT TIME ZONE` in SQL.
+- **Reply turns** (`app.conversation_turns`): written only by triggers. An inbound customer message
+  (not a reaction or system notice) opens a turn if none is open (the partial unique index makes
+  this idempotent under concurrency); a member's outbound message closes it as replied; resolving
+  the conversation closes it as resolved (crediting the acting member). Turns hold ids and
+  timestamps only, so erasure leaves them. First-response times are measured from HyFib's receipt of
+  the customer message to the member's send, in absolute time and, when business hours are on, in
+  business hours (§6D).
+- **Cost estimates:** delivered messages (Meta charges per delivered message) that Meta's status
+  webhook marked billable, priced with the published rate card for the company's billing currency in
+  force when each message was recorded, by the market of the number Meta delivered to and Meta's
+  pricing category. Messages Meta marked free, messages without pricing yet, and billable messages
+  that could not be priced (no currency, no card, category without a rate, unknown market or erased
+  recipient, no price) are counted separately rather than estimated. Campaign estimates keep the
+  currency fixed when the campaign first priced a message (`campaigns.estimate_currency`).
+- **Exports:** one formula-safe CSV per section, `reports.export` only; the export is audited
+  (`report.exported`) before data is returned.
+- **Live inbox updates** (§6): pages read the event-log position before loading their data and hand
+  it to the browser, which opens the stream from there, so nothing that changes between the render
+  and the connection is missed.
+
+## 6D. Inbox teams, routing, business hours and CSAT **[built — CSAT sends verified against a local Graph stand-in only]**
+
+- **Teams and routing** (`packages/domain/src/inbox/routing.ts`, `teams.ts`; migration 0009): a
+  conversation belongs to at most one team. When a conversation starts a new case (created, or
+  reopened after a resolve) routing places it in the first team (by name) whose routing keyword
+  appears in the customer's message, otherwise in the team its number starts conversations in
+  (`channel_accounts.default_team_id`). A round-robin team then assigns it to the next available
+  member (explicit per-member availability, default off) below the team's limit of open
+  conversations; with nobody eligible it waits in the team's queue. Routing never changes an
+  existing assignment, so a reopened conversation stays with its assignee. All routing in a company
+  runs under one transaction-scoped advisory lock (taken after the conversation row locks, at the
+  end of a webhook batch), so rotation and limits hold under concurrent arrivals. A minute sweep
+  (`ops.conversations_to_route`, SECURITY DEFINER, ids only) assigns waiting conversations when a
+  member becomes available or a place frees up; becoming available and saving a team route at once.
+  Suspending, removing or demoting a member returns their conversations to the queue.
+  **Teams never change visibility**: `inbox.read_assigned` still sees assigned-to-me plus the
+  unassigned queue (ADR-029).
+- **Business hours** (`inbox/business-hours.ts`): weekly intervals (ISO weekdays, `24:00` closes at
+  midnight) and closed days in the company's time zone, turned into real instants with the same
+  daylight-saving rules as campaign schedules; pure functions add business minutes, measure business
+  time and find the next opening.
+- **Reply-due timers** (`inbox/sla.ts`): the open reply turn's start plus the first-response target,
+  counted in business hours when business hours are on (the timer pauses while closed), else absolute
+  time. The inbox list and thread show waiting time, due time, overdue and paused states; a
+  longest-waiting order pages on `date_trunc('milliseconds', started_at)` so keyset cursors
+  round-trip exactly.
+- **Cases** (`app.conversation_cases`): opened by a trigger when a conversation is created or
+  reopened and closed when it is resolved (resolver and assignee recorded); guarded like reply turns
+  (a resolved case never changes). Resolution times are measured on cases.
+- **Reports** (§6C): business-hours reply times are the overlap of each turn with the company's
+  opening periods, computed in SQL against an `unnest` of periods generated in TypeScript for the
+  report's range; new versioned definitions (ADR-030).
+- **Saved replies** (`inbox/saved-replies.ts`): shared answers with `{{name}}`, `{{agent}}` and
+  `{{company}}` placeholders, filled server-side for the conversation; the composer inserts the text
+  and the member sends it as an ordinary reply.
+- **Mentions** (`app.note_mentions`): a note can name members who can see the conversation at that
+  moment; Inbox → Mentions lists a member's mentions in conversations they can still see, with an
+  unread count cleared when they open the conversation.
+- **Collision warning** (`queueTextMessage` `afterMessageId`): under the conversation row lock, a
+  reply is refused once when another member's reply is newer than the newest message the sender had
+  seen; the composer refreshes the thread and keeps the draft (ADR-033).
+- **CSAT** (`inbox/csat.ts`, ADR-032): inside the resolve transaction, if CSAT is on, a survey is
+  recorded: either an interactive message with three reply buttons (ids `w360csat:<survey>:<score>`,
+  limits from Meta's OpenAPI spec, research M-157) queued through the ordinary send pipeline, or a
+  skip reason (window closed, opted out, suppressed, erased, no phone number, number inactive, asked
+  in the last 24 hours). The send worker re-checks the contact's consent before dispatch. Ingestion
+  records the customer's first tap when its button id and `context.id` (the survey message's WAMID,
+  M-158) match the conversation's survey; a tap never reopens the conversation, counts as unread,
+  starts a reply turn (trigger, migration 0009), matches a consent keyword or counts as a campaign
+  reply.
+
 ## 7. Commercial model and billing **[built: wallet, top-ups, auto-recharge — verified against a local Razorpay stand-in only; subscriptions planned]**
 
 - **Who pays Meta:** as a Meta Tech Provider HyFib has no credit line; each customer adds its own
