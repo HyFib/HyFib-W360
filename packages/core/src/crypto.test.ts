@@ -38,8 +38,12 @@ describe('Keyring', () => {
   it('parses environment specs and validates key length', () => {
     const ring = Keyring.fromEnv(`k1:${k1.toString('base64')}, k2:${k2.toString('base64')}`, 'k2');
     expect(ring.currentKeyId).toBe('k2');
-    expect(() => Keyring.fromEnv(`k1:${randomBytes(16).toString('base64')}`, 'k1')).toThrow(/32 bytes/);
-    expect(() => Keyring.fromEnv(`k1:${k1.toString('base64')}`, 'missing')).toThrow(/not configured/);
+    expect(() => Keyring.fromEnv(`k1:${randomBytes(16).toString('base64')}`, 'k1')).toThrow(
+      /32 bytes/,
+    );
+    expect(() => Keyring.fromEnv(`k1:${k1.toString('base64')}`, 'missing')).toThrow(
+      /not configured/,
+    );
   });
 });
 
@@ -55,5 +59,18 @@ describe('HMAC helpers', () => {
     expect(constantTimeEqual('abc', 'abc')).toBe(true);
     expect(constantTimeEqual('abc', 'abd')).toBe(false);
     expect(constantTimeEqual('abc', 'abcd')).toBe(false);
+  });
+});
+
+describe('AppError brand', () => {
+  it('is recognised even when the class identity differs (duplicated bundles)', async () => {
+    const { AppError, isAppError } = await import('./errors');
+    const err = new AppError('conflict', 'x');
+    const clone = Object.assign(Object.create(Error.prototype) as Error, err);
+    Object.defineProperty(clone, Symbol.for('w360.app-error'), { value: true });
+    expect(isAppError(err)).toBe(true);
+    expect(isAppError(clone)).toBe(true);
+    expect(isAppError(new Error('plain'))).toBe(false);
+    expect(isAppError(null)).toBe(false);
   });
 });

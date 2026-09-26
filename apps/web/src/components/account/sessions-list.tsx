@@ -13,7 +13,13 @@ export interface SessionRow {
   userAgent: string | null;
 }
 
-export function SessionsList({ sessions, currentSessionId }: { sessions: SessionRow[]; currentSessionId: string }) {
+export function SessionsList({
+  sessions,
+  currentSessionId,
+}: {
+  sessions: SessionRow[];
+  currentSessionId: string;
+}) {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
 
@@ -36,7 +42,10 @@ export function SessionsList({ sessions, currentSessionId }: { sessions: Session
       <FormError message={error} />
       <ul className="grid gap-2">
         {sessions.map((s) => (
-          <li key={s.id} className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border p-3 text-sm">
+          <li
+            key={s.id}
+            className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border p-3 text-sm"
+          >
             <div className="grid gap-0.5">
               <span className="font-medium">{summariseAgent(s.userAgent)}</span>
               <span className="text-xs text-muted-foreground">
@@ -47,13 +56,19 @@ export function SessionsList({ sessions, currentSessionId }: { sessions: Session
             {s.id === currentSessionId ? (
               <Badge tone="info">This device</Badge>
             ) : (
-              <Button size="sm" variant="outline" onClick={() => void revoke(s.token)}>Sign out</Button>
+              <Button size="sm" variant="outline" onClick={() => void revoke(s.token)}>
+                Sign out
+              </Button>
             )}
           </li>
         ))}
       </ul>
       {sessions.length > 1 ? (
-        <div><Button variant="outline" onClick={() => void revokeOthers()}>Sign out all other sessions</Button></div>
+        <div>
+          <Button variant="outline" onClick={() => void revokeOthers()}>
+            Sign out all other sessions
+          </Button>
+        </div>
       ) : null}
     </div>
   );
@@ -61,7 +76,25 @@ export function SessionsList({ sessions, currentSessionId }: { sessions: Session
 
 function summariseAgent(ua: string | null): string {
   if (!ua) return 'Unknown device';
-  const browser = /Firefox\//.test(ua) ? 'Firefox' : /Edg\//.test(ua) ? 'Edge' : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : 'Browser';
-  const os = /Windows/.test(ua) ? 'Windows' : /Mac OS X/.test(ua) ? 'macOS' : /Android/.test(ua) ? 'Android' : /iPhone|iPad/.test(ua) ? 'iOS' : /Linux/.test(ua) ? 'Linux' : 'Unknown OS';
+  const browser = /Firefox\//.test(ua)
+    ? 'Firefox'
+    : /Edg\//.test(ua)
+      ? 'Edge'
+      : /Chrome\//.test(ua)
+        ? 'Chrome'
+        : /Safari\//.test(ua)
+          ? 'Safari'
+          : 'Browser';
+  const os = /Windows/.test(ua)
+    ? 'Windows'
+    : /Mac OS X/.test(ua)
+      ? 'macOS'
+      : /Android/.test(ua)
+        ? 'Android'
+        : /iPhone|iPad/.test(ua)
+          ? 'iOS'
+          : /Linux/.test(ua)
+            ? 'Linux'
+            : 'Unknown OS';
   return `${browser} on ${os}`;
 }

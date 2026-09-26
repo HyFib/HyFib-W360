@@ -14,7 +14,10 @@ export async function createCompanyAction(input: unknown): Promise<ActionResult<
   });
 }
 
-export async function updateCompanySettingsAction(slug: string, input: unknown): Promise<ActionResult> {
+export async function updateCompanySettingsAction(
+  slug: string,
+  input: unknown,
+): Promise<ActionResult> {
   return runAction(async () => {
     const ctx = await tenantForAction(slug);
     const { tenancy } = await getRuntime();
@@ -24,7 +27,10 @@ export async function updateCompanySettingsAction(slug: string, input: unknown):
   });
 }
 
-export async function updateCompanySecurityAction(slug: string, input: unknown): Promise<ActionResult> {
+export async function updateCompanySecurityAction(
+  slug: string,
+  input: unknown,
+): Promise<ActionResult> {
   return runAction(async () => {
     const ctx = await tenantForAction(slug);
     const { tenancy } = await getRuntime();
@@ -44,7 +50,10 @@ export async function inviteMemberAction(slug: string, input: unknown): Promise<
   });
 }
 
-export async function resendInvitationAction(slug: string, invitationId: string): Promise<ActionResult> {
+export async function resendInvitationAction(
+  slug: string,
+  invitationId: string,
+): Promise<ActionResult> {
   return runAction(async () => {
     const ctx = await tenantForAction(slug);
     const { tenancy } = await getRuntime();
@@ -54,7 +63,10 @@ export async function resendInvitationAction(slug: string, invitationId: string)
   });
 }
 
-export async function revokeInvitationAction(slug: string, invitationId: string): Promise<ActionResult> {
+export async function revokeInvitationAction(
+  slug: string,
+  invitationId: string,
+): Promise<ActionResult> {
   return runAction(async () => {
     const ctx = await tenantForAction(slug);
     const { tenancy } = await getRuntime();
@@ -93,7 +105,9 @@ export async function leaveCompanyAction(slug: string): Promise<ActionResult> {
   });
 }
 
-export async function acceptInvitationAction(token: string): Promise<ActionResult<{ slug: string }>> {
+export async function acceptInvitationAction(
+  token: string,
+): Promise<ActionResult<{ slug: string }>> {
   return runAction(async () => {
     const session = await sessionForAction();
     const { tenancy } = await getRuntime();

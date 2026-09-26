@@ -1,6 +1,13 @@
 'use client';
 import { LogOut, Shield, UserRound } from 'lucide-react';
-import { Menu, MenuContent, MenuItem, MenuLabel, MenuSeparator, MenuTrigger } from '@w360/ui/client';
+import {
+  Menu,
+  MenuContent,
+  MenuItem,
+  MenuLabel,
+  MenuSeparator,
+  MenuTrigger,
+} from '@w360/ui/client';
 import { authClient } from '@/lib/auth-client';
 
 /** Full page load so no client state from the current company context survives. */
@@ -8,7 +15,15 @@ function fullNavigate(path: string) {
   window.location.assign(path);
 }
 
-export function UserMenu({ name, email, isPlatformAdmin }: { name: string; email: string; isPlatformAdmin: boolean }) {
+export function UserMenu({
+  name,
+  email,
+  isPlatformAdmin,
+}: {
+  name: string;
+  email: string;
+  isPlatformAdmin: boolean;
+}) {
   async function signOut() {
     await authClient.signOut();
     // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- full load deliberately drops all client state when the company/identity context changes

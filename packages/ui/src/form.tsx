@@ -1,4 +1,10 @@
-import type { InputHTMLAttributes, LabelHTMLAttributes, ReactNode, SelectHTMLAttributes, TextareaHTMLAttributes } from 'react';
+import type {
+  InputHTMLAttributes,
+  LabelHTMLAttributes,
+  ReactNode,
+  SelectHTMLAttributes,
+  TextareaHTMLAttributes,
+} from 'react';
 import { cn } from './cn';
 
 const fieldBase =
@@ -16,9 +22,18 @@ export function Select({ className, ...props }: SelectHTMLAttributes<HTMLSelectE
   return <select className={cn(fieldBase, 'h-10 py-2 pr-8', className)} {...props} />;
 }
 
-export function Label({ className, htmlFor, children, ...props }: LabelHTMLAttributes<HTMLLabelElement>) {
+export function Label({
+  className,
+  htmlFor,
+  children,
+  ...props
+}: LabelHTMLAttributes<HTMLLabelElement>) {
   return (
-    <label htmlFor={htmlFor} className={cn('text-sm font-medium leading-none text-foreground', className)} {...props}>
+    <label
+      htmlFor={htmlFor}
+      className={cn('text-sm font-medium leading-none text-foreground', className)}
+      {...props}
+    >
       {children}
     </label>
   );
@@ -29,17 +44,27 @@ export interface FieldProps {
   label: ReactNode;
   description?: ReactNode;
   error?: string | undefined;
-  children: (aria: { id: string; 'aria-describedby'?: string; 'aria-invalid'?: boolean }) => ReactNode;
+  children: (aria: {
+    id: string;
+    'aria-describedby'?: string;
+    'aria-invalid'?: boolean;
+  }) => ReactNode;
   className?: string;
 }
 
 /** Label + control + description + error, wired together for assistive technology. */
 export function Field({ id, label, description, error, children, className }: FieldProps) {
-  const describedBy = [description ? `${id}-description` : null, error ? `${id}-error` : null].filter(Boolean).join(' ');
+  const describedBy = [description ? `${id}-description` : null, error ? `${id}-error` : null]
+    .filter(Boolean)
+    .join(' ');
   return (
     <div className={cn('grid gap-2', className)}>
       <Label htmlFor={id}>{label}</Label>
-      {children({ id, ...(describedBy ? { 'aria-describedby': describedBy } : {}), ...(error ? { 'aria-invalid': true } : {}) })}
+      {children({
+        id,
+        ...(describedBy ? { 'aria-describedby': describedBy } : {}),
+        ...(error ? { 'aria-invalid': true } : {}),
+      })}
       {description ? (
         <p id={`${id}-description`} className="text-xs text-muted-foreground">
           {description}
@@ -54,11 +79,17 @@ export function Field({ id, label, description, error, children, className }: Fi
   );
 }
 
-export function Checkbox({ className, ...props }: Omit<InputHTMLAttributes<HTMLInputElement>, 'type'>) {
+export function Checkbox({
+  className,
+  ...props
+}: Omit<InputHTMLAttributes<HTMLInputElement>, 'type'>) {
   return (
     <input
       type="checkbox"
-      className={cn('size-4 rounded border-input accent-[var(--color-primary)] focus-visible:ring-2 focus-visible:ring-ring', className)}
+      className={cn(
+        'size-4 rounded border-input accent-[var(--color-primary)] focus-visible:ring-2 focus-visible:ring-ring',
+        className,
+      )}
       {...props}
     />
   );

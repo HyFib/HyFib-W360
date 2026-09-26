@@ -23,7 +23,11 @@ export async function processEmailOutbox(
   const claimed = await deps.db.run(systemScope, async (tx) => {
     const rows = await tx
       .update(emailOutbox)
-      .set({ status: 'sending', lockedUntil: new Date(now.getTime() + LEASE_MS), attempts: sql`${emailOutbox.attempts} + 1` })
+      .set({
+        status: 'sending',
+        lockedUntil: new Date(now.getTime() + LEASE_MS),
+        attempts: sql`${emailOutbox.attempts} + 1`,
+      })
       .where(
         and(
           eq(emailOutbox.id, outboxId),
@@ -50,33 +54,56 @@ export async function processEmailOutbox(
   let rendered;
   try {
     if (!claimed.payloadCiphertext) throw new Error('payload missing');
-    const payload = emailPayloadSchema.parse(JSON.parse(deps.keyring.decryptString(claimed.payloadCiphertext, outboxAad(claimed.id))));
+    const payload = emailPayloadSchema.parse(
+      JSON.parse(deps.keyring.decryptString(claimed.payloadCiphertext, outboxAad(claimed.id))),
+    );
     rendered = renderEmail(payload);
   } catch {
-    await finish({ status: 'failed', lastError: 'payload could not be decrypted or validated', payloadCiphertext: null });
+    await finish({
+      status: 'failed',
+      lastError: 'payload could not be decrypted or validated',
+      payloadCiphertext: null,
+    });
     return 'failed_permanent';
   }
 
   try {
     const result = await deps.sender.send({ to: claimed.toAddress, ...rendered });
-    await finish({ status: 'sent', sentAt: deps.clock.now(), providerMessageId: result.providerMessageId, payloadCiphertext: null, lastError: null });
+    await finish({
+      status: 'sent',
+      sentAt: deps.clock.now(),
+      providerMessageId: result.providerMessageId,
+      payloadCiphertext: null,
+      lastError: null,
+    });
     return 'sent';
   } catch (error) {
     const permanent = error instanceof EmailSendError && error.permanent;
     const exhausted = claimed.attempts >= EMAIL_MAX_ATTEMPTS;
     const message = error instanceof Error ? error.message.slice(0, 500) : 'send failed';
     if (permanent || exhausted) {
-      await finish({ status: 'failed', lastError: permanent ? `permanent: ${message}` : `attempts exhausted: ${message}`, payloadCiphertext: null });
+      await finish({
+        status: 'failed',
+        lastError: permanent ? `permanent: ${message}` : `attempts exhausted: ${message}`,
+        payloadCiphertext: null,
+      });
       return 'failed_permanent';
     }
     const backoffMs = Math.min(60 * 60_000, 30_000 * 2 ** Math.max(0, claimed.attempts - 1));
-    await finish({ status: 'pending', lastError: message, nextAttemptAt: new Date(deps.clock.now().getTime() + backoffMs) });
+    await finish({
+      status: 'pending',
+      lastError: message,
+      nextAttemptAt: new Date(deps.clock.now().getTime() + backoffMs),
+    });
     return 'retry_scheduled';
   }
 }
 
 /** Outbox rows that should have been processed but have no live job (lost signal or expired lease). */
-export async function findStaleOutboxRows(deps: { db: Database; clock: Clock }, limit = 500): Promise<string[]> {
+export async function findStaleOutboxRows(
+  deps: { db: Database; clock: Clock },
+  limit = 500,
+): Promise<string[]> {
   const now = deps.clock.now();
   const staleBefore = new Date(now.getTime() - 60_000);
   return deps.db.run(

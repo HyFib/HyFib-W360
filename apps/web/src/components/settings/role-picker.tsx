@@ -32,7 +32,11 @@ export function RolePicker({
               className="mt-0.5"
               checked={checked}
               disabled={o.disabled}
-              onChange={(e) => onChange(e.target.checked ? [...value, o.value] : value.filter((r) => r !== o.value))}
+              onChange={(e) =>
+                onChange(
+                  e.target.checked ? [...value, o.value] : value.filter((r) => r !== o.value),
+                )
+              }
             />
             <Label htmlFor={id} className="grid gap-0.5 font-normal">
               <span className="font-medium">{o.label}</span>

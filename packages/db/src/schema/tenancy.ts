@@ -1,11 +1,28 @@
 import { sql } from 'drizzle-orm';
-import { boolean, inet, integer, jsonb, pgSchema, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import {
+  boolean,
+  inet,
+  integer,
+  jsonb,
+  pgSchema,
+  text,
+  timestamp,
+  uuid,
+} from 'drizzle-orm/pg-core';
 
 export const appSchema = pgSchema('app');
 
 const tz = (name: string) => timestamp(name, { withTimezone: true, mode: 'date' });
 
-export const TENANT_ROLES = ['owner', 'admin', 'supervisor', 'agent', 'marketer', 'analyst', 'billing'] as const;
+export const TENANT_ROLES = [
+  'owner',
+  'admin',
+  'supervisor',
+  'agent',
+  'marketer',
+  'analyst',
+  'billing',
+] as const;
 export type TenantRole = (typeof TENANT_ROLES)[number];
 
 export const TENANT_STATUSES = ['active', 'suspended', 'pending_deletion', 'deleted'] as const;
@@ -21,7 +38,9 @@ export const tenants = appSchema.table('tenants', {
   status: text('status', { enum: TENANT_STATUSES }).notNull().default('active'),
   statusReason: text('status_reason'),
   statusChangedAt: tz('status_changed_at'),
-  billingMode: text('billing_mode', { enum: ['direct_meta', 'partner_billed'] }).notNull().default('direct_meta'),
+  billingMode: text('billing_mode', { enum: ['direct_meta', 'partner_billed'] })
+    .notNull()
+    .default('direct_meta'),
   timezone: text('timezone').notNull().default('Asia/Kolkata'),
   locale: text('locale').notNull().default('en'),
   dataRegion: text('data_region').notNull().default('in'),
@@ -52,7 +71,9 @@ export const invitations = appSchema.table('invitations', {
   email: text('email').notNull(),
   roles: text('roles').array().notNull().$type<TenantRole[]>(),
   tokenHash: text('token_hash').notNull(),
-  status: text('status', { enum: ['pending', 'accepted', 'revoked', 'expired'] }).notNull().default('pending'),
+  status: text('status', { enum: ['pending', 'accepted', 'revoked', 'expired'] })
+    .notNull()
+    .default('pending'),
   expiresAt: tz('expires_at').notNull(),
   invitedByUserId: text('invited_by_user_id').notNull(),
   acceptedByUserId: text('accepted_by_user_id'),
@@ -65,7 +86,13 @@ export const invitations = appSchema.table('invitations', {
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });
 
-export const AUDIT_ACTOR_TYPES = ['user', 'system', 'platform_admin', 'api_key', 'provider'] as const;
+export const AUDIT_ACTOR_TYPES = [
+  'user',
+  'system',
+  'platform_admin',
+  'api_key',
+  'provider',
+] as const;
 export type AuditActorType = (typeof AUDIT_ACTOR_TYPES)[number];
 
 export const auditEvents = appSchema.table('audit_events', {
@@ -81,7 +108,10 @@ export const auditEvents = appSchema.table('audit_events', {
   correlationId: text('correlation_id'),
   ipAddress: inet('ip_address'),
   userAgent: text('user_agent'),
-  metadata: jsonb('metadata').notNull().default(sql`'{}'::jsonb`).$type<Record<string, unknown>>(),
+  metadata: jsonb('metadata')
+    .notNull()
+    .default(sql`'{}'::jsonb`)
+    .$type<Record<string, unknown>>(),
 });
 
 export const userPreferences = appSchema.table('user_preferences', {

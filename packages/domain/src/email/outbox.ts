@@ -38,7 +38,12 @@ export async function enqueueEmail(
   await deps.jobs.enqueue(
     tx,
     QUEUES.emailSend.name,
-    deps.signer.sign({ kind: 'email.send', tenantId: input.tenantId ?? null, actorUserId: null, ref: id }),
+    deps.signer.sign({
+      kind: 'email.send',
+      tenantId: input.tenantId ?? null,
+      actorUserId: null,
+      ref: id,
+    }),
     { singletonKey: id },
   );
   return id;

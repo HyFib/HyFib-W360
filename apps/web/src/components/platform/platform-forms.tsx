@@ -1,7 +1,12 @@
 'use client';
 import { useState } from 'react';
 import { Button, Checkbox, Field, Input, Label, Select, Textarea } from '@w360/ui';
-import { grantSupportAccessAction, resetUserMfaAction, revokeSupportAccessAction, setTenantStatusAction } from '@/app/actions/platform';
+import {
+  grantSupportAccessAction,
+  resetUserMfaAction,
+  revokeSupportAccessAction,
+  setTenantStatusAction,
+} from '@/app/actions/platform';
 import { FormError, FormSuccess } from '@/components/form-status';
 
 const SCOPES = [
@@ -26,15 +31,40 @@ export function TenantStatusForm({ tenantId, status }: { tenantId: string; statu
     if (!result.ok) setError(result.message);
     else setReason('');
   }
-  if (status !== 'active' && status !== 'suspended') return <p className="text-sm text-muted-foreground">Status changes are unavailable while the company is {status}.</p>;
+  if (status !== 'active' && status !== 'suspended')
+    return (
+      <p className="text-sm text-muted-foreground">
+        Status changes are unavailable while the company is {status}.
+      </p>
+    );
   return (
     <form onSubmit={submit} className="grid gap-3" noValidate>
       <FormError message={error} />
-      <Field id="status-reason" label={target === 'suspended' ? 'Reason for suspension (visible to the company)' : 'Reason for reactivation'}>
-        {(aria) => <Textarea {...aria} value={reason} onChange={(e) => setReason(e.target.value)} minLength={10} maxLength={2000} required />}
+      <Field
+        id="status-reason"
+        label={
+          target === 'suspended'
+            ? 'Reason for suspension (visible to the company)'
+            : 'Reason for reactivation'
+        }
+      >
+        {(aria) => (
+          <Textarea
+            {...aria}
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            minLength={10}
+            maxLength={2000}
+            required
+          />
+        )}
       </Field>
       <div>
-        <Button type="submit" variant={target === 'suspended' ? 'destructive' : 'primary'} disabled={busy || reason.trim().length < 10}>
+        <Button
+          type="submit"
+          variant={target === 'suspended' ? 'destructive' : 'primary'}
+          disabled={busy || reason.trim().length < 10}
+        >
           {target === 'suspended' ? 'Suspend company' : 'Reactivate company'}
         </Button>
       </div>
@@ -52,7 +82,12 @@ export function SupportGrantForm({ tenantId }: { tenantId: string }) {
     event.preventDefault();
     setError(null);
     setDone(null);
-    const result = await grantSupportAccessAction({ tenantId, reason, scopes, durationMinutes: Number(duration) });
+    const result = await grantSupportAccessAction({
+      tenantId,
+      reason,
+      scopes,
+      durationMinutes: Number(duration),
+    });
     if (!result.ok) setError(result.message);
     else setDone(`Access granted until ${new Date(result.data.expiresAt).toUTCString()}.`);
   }
@@ -61,7 +96,14 @@ export function SupportGrantForm({ tenantId }: { tenantId: string }) {
       <FormError message={error} />
       <FormSuccess message={done} />
       <Field id="grant-reason" label="Reason (ticket reference and purpose; shown to the company)">
-        {(aria) => <Textarea {...aria} value={reason} onChange={(e) => setReason(e.target.value)} maxLength={2000} />}
+        {(aria) => (
+          <Textarea
+            {...aria}
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            maxLength={2000}
+          />
+        )}
       </Field>
       <fieldset className="grid gap-2">
         <legend className="text-sm font-medium">Scope</legend>
@@ -70,9 +112,15 @@ export function SupportGrantForm({ tenantId }: { tenantId: string }) {
             <Checkbox
               id={`scope-${s.value}`}
               checked={scopes.includes(s.value)}
-              onChange={(e) => setScopes(e.target.checked ? [...scopes, s.value] : scopes.filter((x) => x !== s.value))}
+              onChange={(e) =>
+                setScopes(
+                  e.target.checked ? [...scopes, s.value] : scopes.filter((x) => x !== s.value),
+                )
+              }
             />
-            <Label htmlFor={`scope-${s.value}`} className="font-normal">{s.label}</Label>
+            <Label htmlFor={`scope-${s.value}`} className="font-normal">
+              {s.label}
+            </Label>
           </div>
         ))}
       </fieldset>
@@ -86,7 +134,11 @@ export function SupportGrantForm({ tenantId }: { tenantId: string }) {
           </Select>
         )}
       </Field>
-      <div><Button type="submit" disabled={reason.trim().length < 10 || scopes.length === 0}>Grant time-boxed access</Button></div>
+      <div>
+        <Button type="submit" disabled={reason.trim().length < 10 || scopes.length === 0}>
+          Grant time-boxed access
+        </Button>
+      </div>
     </form>
   );
 }
@@ -95,10 +147,21 @@ export function RevokeGrantButton({ grantId }: { grantId: string }) {
   const [error, setError] = useState<string | null>(null);
   return (
     <span className="inline-grid gap-1">
-      <Button size="sm" variant="outline" onClick={async () => { const r = await revokeSupportAccessAction(grantId); if (!r.ok) setError(r.message); }}>
+      <Button
+        size="sm"
+        variant="outline"
+        onClick={async () => {
+          const r = await revokeSupportAccessAction(grantId);
+          if (!r.ok) setError(r.message);
+        }}
+      >
         Revoke
       </Button>
-      {error ? <span role="alert" className="text-xs text-destructive">{error}</span> : null}
+      {error ? (
+        <span role="alert" className="text-xs text-destructive">
+          {error}
+        </span>
+      ) : null}
     </span>
   );
 }
@@ -114,14 +177,33 @@ export function MfaResetForm({ userId, name }: { userId: string; name: string })
     if (!result.ok) setError(result.message);
     else setDone(true);
   }
-  if (done) return <FormSuccess message={`Two-factor authentication reset for ${name}; all their sessions were signed out.`} />;
+  if (done)
+    return (
+      <FormSuccess
+        message={`Two-factor authentication reset for ${name}; all their sessions were signed out.`}
+      />
+    );
   return (
     <form onSubmit={submit} className="grid gap-2" noValidate>
       <FormError message={error} />
-      <Field id={`mfa-${userId}`} label={`Reset two-factor for ${name} (identity verified out of band)`}>
-        {(aria) => <Input {...aria} placeholder="How identity was verified, ticket reference" value={reason} onChange={(e) => setReason(e.target.value)} />}
+      <Field
+        id={`mfa-${userId}`}
+        label={`Reset two-factor for ${name} (identity verified out of band)`}
+      >
+        {(aria) => (
+          <Input
+            {...aria}
+            placeholder="How identity was verified, ticket reference"
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+          />
+        )}
       </Field>
-      <div><Button type="submit" size="sm" variant="destructive" disabled={reason.trim().length < 10}>Reset two-factor</Button></div>
+      <div>
+        <Button type="submit" size="sm" variant="destructive" disabled={reason.trim().length < 10}>
+          Reset two-factor
+        </Button>
+      </div>
     </form>
   );
 }

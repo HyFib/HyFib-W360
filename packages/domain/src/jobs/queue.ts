@@ -18,13 +18,21 @@ export interface EnqueueOptions {
 }
 
 export interface JobQueue {
-  enqueue(tx: Tx | null, queue: QueueName, envelope: JobEnvelope, options?: EnqueueOptions): Promise<string | null>;
+  enqueue(
+    tx: Tx | null,
+    queue: QueueName,
+    envelope: JobEnvelope,
+    options?: EnqueueOptions,
+  ): Promise<string | null>;
 }
 
 /** Adapts a drizzle transaction to pg-boss's minimal database interface. */
 function transactionExecutor(tx: Tx) {
   return {
-    async executeSql(text: string, values: unknown[] = []): Promise<{ rows: Record<string, unknown>[] }> {
+    async executeSql(
+      text: string,
+      values: unknown[] = [],
+    ): Promise<{ rows: Record<string, unknown>[] }> {
       const parts = text.split(/(\$\d+)/g);
       const chunks: SQL[] = parts.map((part) => {
         const match = /^\$(\d+)$/.exec(part);
@@ -42,7 +50,12 @@ function transactionExecutor(tx: Tx) {
 export class PgBossJobQueue implements JobQueue {
   constructor(private readonly boss: PgBoss) {}
 
-  async enqueue(tx: Tx | null, queue: QueueName, envelope: JobEnvelope, options: EnqueueOptions = {}) {
+  async enqueue(
+    tx: Tx | null,
+    queue: QueueName,
+    envelope: JobEnvelope,
+    options: EnqueueOptions = {},
+  ) {
     return this.boss.send(queue, envelope, {
       ...(options.singletonKey ? { singletonKey: options.singletonKey } : {}),
       ...(options.startAfter ? { startAfter: options.startAfter } : {}),
@@ -57,7 +70,12 @@ export class PgBossJobQueue implements JobQueue {
 export class RecordingJobQueue implements JobQueue {
   readonly jobs: { queue: QueueName; envelope: JobEnvelope; options: EnqueueOptions }[] = [];
 
-  async enqueue(_tx: Tx | null, queue: QueueName, envelope: JobEnvelope, options: EnqueueOptions = {}) {
+  async enqueue(
+    _tx: Tx | null,
+    queue: QueueName,
+    envelope: JobEnvelope,
+    options: EnqueueOptions = {},
+  ) {
     this.jobs.push({ queue, envelope, options });
     return `job-${this.jobs.length}`;
   }

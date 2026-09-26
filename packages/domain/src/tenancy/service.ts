@@ -1,6 +1,7 @@
 import type { z } from 'zod';
 import {
   AppError,
+  isAppError,
   conflict,
   forbidden,
   maskEmail,
@@ -120,7 +121,10 @@ export function createTenancyService(deps: TenancyDeps) {
 
   return {
     /** Creates a company with the caller as owner. Requires a verified email (enforced in SQL). */
-    async createCompany(userId: string, input: CreateCompanyInput | unknown): Promise<{ tenantId: string; slug: string }> {
+    async createCompany(
+      userId: string,
+      input: CreateCompanyInput | unknown,
+    ): Promise<{ tenantId: string; slug: string }> {
       const data = parse(createCompanySchema, input);
       const tenantId = uuidv7();
       const membershipId = uuidv7();
@@ -132,10 +136,13 @@ export function createTenancyService(deps: TenancyDeps) {
           await tx
             .insert(userPreferences)
             .values({ userId, lastTenantId: tenantId })
-            .onConflictDoUpdate({ target: userPreferences.userId, set: { lastTenantId: tenantId } });
+            .onConflictDoUpdate({
+              target: userPreferences.userId,
+              set: { lastTenantId: tenantId },
+            });
         });
       } catch (error) {
-        if (error instanceof AppError && error.code === 'conflict') {
+        if (isAppError(error) && error.code === 'conflict') {
           throw new AppError('conflict', 'That company address is already taken. Choose another.', {
             issues: [{ path: 'slug', message: 'Already taken' }],
           });
@@ -192,11 +199,18 @@ export function createTenancyService(deps: TenancyDeps) {
         await tx
           .insert(userPreferences)
           .values({ userId: ctx.user.id, lastTenantId: ctx.tenant.id })
-          .onConflictDoUpdate({ target: userPreferences.userId, set: { lastTenantId: ctx.tenant.id } });
+          .onConflictDoUpdate({
+            target: userPreferences.userId,
+            set: { lastTenantId: ctx.tenant.id },
+          });
       });
     },
 
-    async updateSettings(ctx: TenantContext, input: unknown, meta: RequestMeta = {}): Promise<void> {
+    async updateSettings(
+      ctx: TenantContext,
+      input: unknown,
+      meta: RequestMeta = {},
+    ): Promise<void> {
       assertCan(ctx, 'tenant.settings.manage');
       const data = parse(updateCompanySettingsSchema, input);
       await db.run(ctx.scope, async (tx) => {
@@ -206,20 +220,29 @@ export function createTenancyService(deps: TenancyDeps) {
           .where(eq(tenants.id, ctx.tenant.id))
           .returning({ id: tenants.id });
         if (changed.length !== 1) throw notFound('Company');
-        await recordAudit(tx, ctx, {
-          action: 'tenant.settings_updated',
-          subjectType: 'tenant',
-          subjectId: ctx.tenant.id,
-          metadata: {
-            changed: Object.entries(data)
-              .filter(([k, v]) => (ctx.tenant as Record<string, unknown>)[k] !== v)
-              .map(([k]) => k),
+        await recordAudit(
+          tx,
+          ctx,
+          {
+            action: 'tenant.settings_updated',
+            subjectType: 'tenant',
+            subjectId: ctx.tenant.id,
+            metadata: {
+              changed: Object.entries(data)
+                .filter(([k, v]) => (ctx.tenant as Record<string, unknown>)[k] !== v)
+                .map(([k]) => k),
+            },
           },
-        }, meta);
+          meta,
+        );
       });
     },
 
-    async updateSecurity(ctx: TenantContext, input: unknown, meta: RequestMeta = {}): Promise<void> {
+    async updateSecurity(
+      ctx: TenantContext,
+      input: unknown,
+      meta: RequestMeta = {},
+    ): Promise<void> {
       assertCan(ctx, 'tenant.security.manage');
       const data = parse(updateCompanySecuritySchema, input);
       await db.run(ctx.scope, async (tx) => {
@@ -227,12 +250,17 @@ export function createTenancyService(deps: TenancyDeps) {
           .update(tenants)
           .set({ requireMfaAllMembers: data.requireMfaAllMembers })
           .where(eq(tenants.id, ctx.tenant.id));
-        await recordAudit(tx, ctx, {
-          action: 'tenant.security_updated',
-          subjectType: 'tenant',
-          subjectId: ctx.tenant.id,
-          metadata: { requireMfaAllMembers: data.requireMfaAllMembers },
-        }, meta);
+        await recordAudit(
+          tx,
+          ctx,
+          {
+            action: 'tenant.security_updated',
+            subjectType: 'tenant',
+            subjectId: ctx.tenant.id,
+            metadata: { requireMfaAllMembers: data.requireMfaAllMembers },
+          },
+          meta,
+        );
       });
     },
 
@@ -260,14 +288,25 @@ export function createTenancyService(deps: TenancyDeps) {
       );
     },
 
-    async changeMemberRoles(ctx: TenantContext, input: unknown, meta: RequestMeta = {}): Promise<void> {
+    async changeMemberRoles(
+      ctx: TenantContext,
+      input: unknown,
+      meta: RequestMeta = {},
+    ): Promise<void> {
       assertCan(ctx, 'members.manage');
       const data = parse(changeMemberRolesSchema, input);
       await db.run(ctx.scope, async (tx) => {
         const [target] = await tx
-          .select({ id: memberships.id, userId: memberships.userId, roles: memberships.roles, status: memberships.status })
+          .select({
+            id: memberships.id,
+            userId: memberships.userId,
+            roles: memberships.roles,
+            status: memberships.status,
+          })
           .from(memberships)
-          .where(and(eq(memberships.id, data.membershipId), eq(memberships.tenantId, ctx.tenant.id)))
+          .where(
+            and(eq(memberships.id, data.membershipId), eq(memberships.tenantId, ctx.tenant.id)),
+          )
           .for('update');
         if (!target || target.status === 'removed') throw notFound('Member');
         const touchesOwner = target.roles.includes('owner') || data.roles.includes('owner');
@@ -278,27 +317,47 @@ export function createTenancyService(deps: TenancyDeps) {
         if (target.userId === ctx.user.id && !target.roles.includes('owner')) {
           throw forbidden('You cannot change your own roles.');
         }
-        await tx.update(memberships).set({ roles: data.roles }).where(eq(memberships.id, target.id));
-        await recordAudit(tx, ctx, {
-          action: 'member.roles_changed',
-          subjectType: 'membership',
-          subjectId: target.id,
-          metadata: { from: target.roles, to: data.roles },
-        }, meta);
+        await tx
+          .update(memberships)
+          .set({ roles: data.roles })
+          .where(eq(memberships.id, target.id));
+        await recordAudit(
+          tx,
+          ctx,
+          {
+            action: 'member.roles_changed',
+            subjectType: 'membership',
+            subjectId: target.id,
+            metadata: { from: target.roles, to: data.roles },
+          },
+          meta,
+        );
       });
     },
 
-    async setMemberStatus(ctx: TenantContext, input: unknown, meta: RequestMeta = {}): Promise<void> {
+    async setMemberStatus(
+      ctx: TenantContext,
+      input: unknown,
+      meta: RequestMeta = {},
+    ): Promise<void> {
       assertCan(ctx, 'members.manage');
       const data = parse(memberStatusSchema, input);
       await db.run(ctx.scope, async (tx) => {
         const [target] = await tx
-          .select({ id: memberships.id, userId: memberships.userId, roles: memberships.roles, status: memberships.status })
+          .select({
+            id: memberships.id,
+            userId: memberships.userId,
+            roles: memberships.roles,
+            status: memberships.status,
+          })
           .from(memberships)
-          .where(and(eq(memberships.id, data.membershipId), eq(memberships.tenantId, ctx.tenant.id)))
+          .where(
+            and(eq(memberships.id, data.membershipId), eq(memberships.tenantId, ctx.tenant.id)),
+          )
           .for('update');
         if (!target) throw notFound('Member');
-        if (target.userId === ctx.user.id) throw forbidden('Use “Leave company” to remove yourself.');
+        if (target.userId === ctx.user.id)
+          throw forbidden('Use “Leave company” to remove yourself.');
         if (target.roles.includes('owner') && !ctx.permissions.has('members.manage_owners')) {
           throw forbidden('Only owners can suspend or remove another owner.');
         }
@@ -310,12 +369,22 @@ export function createTenancyService(deps: TenancyDeps) {
           .update(memberships)
           .set({ status: data.status, statusChangedAt: clock.now(), statusChangedBy: ctx.user.id })
           .where(eq(memberships.id, target.id));
-        await recordAudit(tx, ctx, {
-          action: data.status === 'active' ? 'member.restored' : data.status === 'suspended' ? 'member.suspended' : 'member.removed',
-          subjectType: 'membership',
-          subjectId: target.id,
-          metadata: { previous: target.status },
-        }, meta);
+        await recordAudit(
+          tx,
+          ctx,
+          {
+            action:
+              data.status === 'active'
+                ? 'member.restored'
+                : data.status === 'suspended'
+                  ? 'member.suspended'
+                  : 'member.removed',
+            subjectType: 'membership',
+            subjectId: target.id,
+            metadata: { previous: target.status },
+          },
+          meta,
+        );
       });
     },
 
@@ -324,8 +393,15 @@ export function createTenancyService(deps: TenancyDeps) {
         await tx
           .update(memberships)
           .set({ status: 'removed', statusChangedAt: clock.now(), statusChangedBy: ctx.user.id })
-          .where(and(eq(memberships.id, ctx.membership.id), eq(memberships.tenantId, ctx.tenant.id)));
-        await recordAudit(tx, ctx, { action: 'member.left', subjectType: 'membership', subjectId: ctx.membership.id }, meta);
+          .where(
+            and(eq(memberships.id, ctx.membership.id), eq(memberships.tenantId, ctx.tenant.id)),
+          );
+        await recordAudit(
+          tx,
+          ctx,
+          { action: 'member.left', subjectType: 'membership', subjectId: ctx.membership.id },
+          meta,
+        );
       });
     },
 
@@ -351,10 +427,17 @@ export function createTenancyService(deps: TenancyDeps) {
             .limit(200),
         { accessMode: 'read only' },
       );
-      return rows.map((r) => ({ ...r, status: r.status === 'pending' && r.expiresAt <= now ? 'expired' : r.status }));
+      return rows.map((r) => ({
+        ...r,
+        status: r.status === 'pending' && r.expiresAt <= now ? 'expired' : r.status,
+      }));
     },
 
-    async createInvitation(ctx: TenantContext, input: unknown, meta: RequestMeta = {}): Promise<{ invitationId: string }> {
+    async createInvitation(
+      ctx: TenantContext,
+      input: unknown,
+      meta: RequestMeta = {},
+    ): Promise<{ invitationId: string }> {
       assertCan(ctx, 'members.invite');
       const data = parse(inviteMemberSchema, input);
       if (!canAssignRoles(ctx.membership.roles, data.roles)) {
@@ -369,15 +452,26 @@ export function createTenancyService(deps: TenancyDeps) {
           .select({ id: memberships.id, status: memberships.status })
           .from(memberships)
           .innerJoin(users, eq(users.id, memberships.userId))
-          .where(and(eq(memberships.tenantId, ctx.tenant.id), sql`lower(${users.email}) = ${data.email}`));
+          .where(
+            and(
+              eq(memberships.tenantId, ctx.tenant.id),
+              sql`lower(${users.email}) = ${data.email}`,
+            ),
+          );
         if (existingMember.some((m) => m.status === 'active' || m.status === 'suspended')) {
           throw conflict('This person is already a member of the company.');
         }
         const [{ recent } = { recent: 0 }] = await tx
           .select({ recent: sql<number>`count(*)::int` })
           .from(invitations)
-          .where(and(eq(invitations.tenantId, ctx.tenant.id), gt(invitations.createdAt, new Date(now.getTime() - 86400_000))));
-        if (recent >= MAX_INVITES_PER_DAY) throw new AppError('rate_limited', 'Daily invitation limit reached.');
+          .where(
+            and(
+              eq(invitations.tenantId, ctx.tenant.id),
+              gt(invitations.createdAt, new Date(now.getTime() - 86400_000)),
+            ),
+          );
+        if (recent >= MAX_INVITES_PER_DAY)
+          throw new AppError('rate_limited', 'Daily invitation limit reached.');
 
         // Lazily retire an expired pending invitation for the same address so a new one can be issued.
         await tx
@@ -394,8 +488,15 @@ export function createTenancyService(deps: TenancyDeps) {
         const pending = await tx
           .select({ id: invitations.id })
           .from(invitations)
-          .where(and(eq(invitations.tenantId, ctx.tenant.id), eq(invitations.email, data.email), eq(invitations.status, 'pending')));
-        if (pending.length > 0) throw conflict('An invitation is already pending for this address. Resend it instead.');
+          .where(
+            and(
+              eq(invitations.tenantId, ctx.tenant.id),
+              eq(invitations.email, data.email),
+              eq(invitations.status, 'pending'),
+            ),
+          );
+        if (pending.length > 0)
+          throw conflict('An invitation is already pending for this address. Resend it instead.');
 
         await tx.insert(invitations).values({
           id: invitationId,
@@ -406,19 +507,33 @@ export function createTenancyService(deps: TenancyDeps) {
           expiresAt,
           invitedByUserId: ctx.user.id,
         });
-        await sendInvitationEmail(tx, ctx, { id: invitationId, email: data.email, roles: data.roles, expiresAt }, token);
-        await recordAudit(tx, ctx, {
-          action: 'member.invited',
-          subjectType: 'invitation',
-          subjectId: invitationId,
-          metadata: { email: maskEmail(data.email), roles: data.roles },
-        }, meta);
+        await sendInvitationEmail(
+          tx,
+          ctx,
+          { id: invitationId, email: data.email, roles: data.roles, expiresAt },
+          token,
+        );
+        await recordAudit(
+          tx,
+          ctx,
+          {
+            action: 'member.invited',
+            subjectType: 'invitation',
+            subjectId: invitationId,
+            metadata: { email: maskEmail(data.email), roles: data.roles },
+          },
+          meta,
+        );
       });
       return { invitationId };
     },
 
     /** Issues a fresh token (invalidating the old link) and extends the expiry. */
-    async resendInvitation(ctx: TenantContext, input: unknown, meta: RequestMeta = {}): Promise<void> {
+    async resendInvitation(
+      ctx: TenantContext,
+      input: unknown,
+      meta: RequestMeta = {},
+    ): Promise<void> {
       assertCan(ctx, 'members.invite');
       const { invitationId } = parse(invitationIdSchema, input);
       const token = randomToken();
@@ -431,29 +546,65 @@ export function createTenancyService(deps: TenancyDeps) {
           .where(and(eq(invitations.id, invitationId), eq(invitations.tenantId, ctx.tenant.id)))
           .for('update');
         if (!inv) throw notFound('Invitation');
-        if (inv.status !== 'pending') throw new AppError('precondition_failed', 'Only pending invitations can be resent.');
+        if (inv.status !== 'pending')
+          throw new AppError('precondition_failed', 'Only pending invitations can be resent.');
         if (!canAssignRoles(ctx.membership.roles, inv.roles)) throw forbidden();
-        if (inv.sendCount > MAX_RESENDS) throw new AppError('rate_limited', 'This invitation has been resent too many times.');
+        if (inv.sendCount > MAX_RESENDS)
+          throw new AppError('rate_limited', 'This invitation has been resent too many times.');
         await tx
           .update(invitations)
-          .set({ tokenHash: sha256Hex(token), expiresAt, sendCount: inv.sendCount + 1, lastSentAt: now })
+          .set({
+            tokenHash: sha256Hex(token),
+            expiresAt,
+            sendCount: inv.sendCount + 1,
+            lastSentAt: now,
+          })
           .where(eq(invitations.id, inv.id));
-        await sendInvitationEmail(tx, ctx, { id: inv.id, email: inv.email, roles: inv.roles, expiresAt }, token);
-        await recordAudit(tx, ctx, { action: 'member.invitation_resent', subjectType: 'invitation', subjectId: inv.id }, meta);
+        await sendInvitationEmail(
+          tx,
+          ctx,
+          { id: inv.id, email: inv.email, roles: inv.roles, expiresAt },
+          token,
+        );
+        await recordAudit(
+          tx,
+          ctx,
+          { action: 'member.invitation_resent', subjectType: 'invitation', subjectId: inv.id },
+          meta,
+        );
       });
     },
 
-    async revokeInvitation(ctx: TenantContext, input: unknown, meta: RequestMeta = {}): Promise<void> {
+    async revokeInvitation(
+      ctx: TenantContext,
+      input: unknown,
+      meta: RequestMeta = {},
+    ): Promise<void> {
       assertCan(ctx, 'members.invite');
       const { invitationId } = parse(invitationIdSchema, input);
       await db.run(ctx.scope, async (tx) => {
         const updated = await tx
           .update(invitations)
           .set({ status: 'revoked', revokedAt: clock.now(), revokedByUserId: ctx.user.id })
-          .where(and(eq(invitations.id, invitationId), eq(invitations.tenantId, ctx.tenant.id), eq(invitations.status, 'pending')))
+          .where(
+            and(
+              eq(invitations.id, invitationId),
+              eq(invitations.tenantId, ctx.tenant.id),
+              eq(invitations.status, 'pending'),
+            ),
+          )
           .returning({ id: invitations.id });
         if (updated.length === 0) throw notFound('Pending invitation');
-        await recordAudit(tx, ctx, { action: 'member.invitation_revoked', subjectType: 'invitation', subjectId: invitationId }, meta);
+        await recordAudit(
+          tx,
+          ctx,
+          {
+            action: 'member.invitation_revoked',
+            subjectType: 'invitation',
+            subjectId: invitationId,
+          },
+          meta,
+        );
       });
     },
 
@@ -488,7 +639,10 @@ export function createTenancyService(deps: TenancyDeps) {
       );
     },
 
-    async acceptInvitation(userId: string, token: string): Promise<{ tenantId: string; slug: string }> {
+    async acceptInvitation(
+      userId: string,
+      token: string,
+    ): Promise<{ tenantId: string; slug: string }> {
       const parsed = invitationTokenSchema.safeParse(token);
       if (!parsed.success) throw notFound('Invitation');
       return db.run(authenticatedUserScope(userId), async (tx) => {
@@ -497,7 +651,10 @@ export function createTenancyService(deps: TenancyDeps) {
         );
         const tenantId = res.rows[0]?.tenant_id;
         if (!tenantId) throw notFound('Invitation');
-        const [company] = await tx.select({ slug: tenants.slug }).from(tenants).where(eq(tenants.id, tenantId));
+        const [company] = await tx
+          .select({ slug: tenants.slug })
+          .from(tenants)
+          .where(eq(tenants.id, tenantId));
         if (!company) throw notFound('Company');
         await tx
           .insert(userPreferences)
@@ -548,7 +705,10 @@ export function createTenancyService(deps: TenancyDeps) {
       const hasMore = rows.length > query.limit;
       const page = rows.slice(0, query.limit);
       const last = page[page.length - 1];
-      return { events: page, nextCursor: hasMore && last ? encodeCursor(last.occurredAt, last.id) : null };
+      return {
+        events: page,
+        nextCursor: hasMore && last ? encodeCursor(last.occurredAt, last.id) : null,
+      };
     },
   };
 }

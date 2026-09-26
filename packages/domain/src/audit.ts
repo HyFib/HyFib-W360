@@ -1,5 +1,12 @@
 import { uuidv7 } from '@w360/core';
-import { auditEvents, securityEvents, systemScope, type AuditActorType, type Database, type Tx } from '@w360/db';
+import {
+  auditEvents,
+  securityEvents,
+  systemScope,
+  type AuditActorType,
+  type Database,
+  type Tx,
+} from '@w360/db';
 import type { TenantContext } from './authz/context';
 
 /**
@@ -74,7 +81,11 @@ export interface SecurityEvent {
 }
 
 /** Security events outside any tenant context. Insert-only for runtime roles. */
-export async function recordSecurityEvent(db: Database, event: SecurityEvent, meta: RequestMeta = {}): Promise<void> {
+export async function recordSecurityEvent(
+  db: Database,
+  event: SecurityEvent,
+  meta: RequestMeta = {},
+): Promise<void> {
   await db.run(systemScope, async (tx) => {
     await tx.insert(securityEvents).values({
       id: uuidv7(),
@@ -97,5 +108,7 @@ function normalizeIp(ip: string | null | undefined): string | null {
   if (!ip) return null;
   const first = (ip.split(',')[0] ?? '').trim();
   const unwrapped = first.startsWith('::ffff:') ? first.slice(7) : first;
-  return IPV4.test(unwrapped) || (IPV6.test(unwrapped) && unwrapped.includes(':')) ? unwrapped : null;
+  return IPV4.test(unwrapped) || (IPV6.test(unwrapped) && unwrapped.includes(':'))
+    ? unwrapped
+    : null;
 }

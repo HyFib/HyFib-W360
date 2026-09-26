@@ -42,7 +42,14 @@ export interface FieldIssue {
   message: string;
 }
 
+/**
+ * Brand shared through the global symbol registry. Bundlers can include this module more than once
+ * (for example in separate server chunks), which breaks `instanceof`; the brand does not.
+ */
+const APP_ERROR_BRAND = Symbol.for('w360.app-error');
+
 export class AppError extends Error {
+  readonly [APP_ERROR_BRAND] = true;
   readonly code: AppErrorCode;
   readonly httpStatus: number;
   /** Safe, user-presentable message. Never include secrets or other tenants' data. */
@@ -75,7 +82,11 @@ export const validationFailed = (message: string, issues: FieldIssue[] = []) =>
   new AppError('validation_failed', message, { issues });
 
 export function isAppError(value: unknown): value is AppError {
-  return value instanceof AppError;
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    (value as Record<symbol, unknown>)[APP_ERROR_BRAND] === true
+  );
 }
 
 /** Normalises an unknown thrown value into an Error for logging without losing the cause. */

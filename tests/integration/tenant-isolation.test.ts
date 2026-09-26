@@ -33,7 +33,9 @@ const scopeB = () => authorizedTenantScope(fx.tenantB.id, fx.ownerB.id);
 describe('database roles', () => {
   it('runtime roles are not superusers, cannot bypass RLS and own no protected tables', async () => {
     for (const pool of [dbs.appPool, dbs.authPool, dbs.platformPool]) {
-      const role = await pool.query(`SELECT rolname, rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user`);
+      const role = await pool.query(
+        `SELECT rolname, rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user`,
+      );
       expect(role.rows[0].rolsuper).toBe(false);
       expect(role.rows[0].rolbypassrls).toBe(false);
       const owned = await pool.query(
@@ -57,7 +59,11 @@ describe('database roles', () => {
        WHERE n.nspname = 'app' AND c.relkind IN ('r', 'p')`);
     expect(res.rows.length).toBeGreaterThan(0);
     for (const row of res.rows) {
-      expect({ table: row.relname, rls: row.relrowsecurity, forced: row.relforcerowsecurity }).toEqual({
+      expect({
+        table: row.relname,
+        rls: row.relrowsecurity,
+        forced: row.relforcerowsecurity,
+      }).toEqual({
         table: row.relname,
         rls: true,
         forced: true,
@@ -89,10 +95,18 @@ describe('database roles', () => {
   });
 
   it('the auth role cannot read company data and the app role cannot read credentials', async () => {
-    await expect(dbs.authPool.query('SELECT * FROM app.tenants')).rejects.toThrow(/permission denied/);
-    await expect(dbs.appPool.query('SELECT password FROM auth.accounts')).rejects.toThrow(/permission denied/);
-    await expect(dbs.appPool.query('SELECT token FROM auth.sessions')).rejects.toThrow(/permission denied/);
-    await expect(dbs.appPool.query('SELECT secret FROM auth.two_factors')).rejects.toThrow(/permission denied/);
+    await expect(dbs.authPool.query('SELECT * FROM app.tenants')).rejects.toThrow(
+      /permission denied/,
+    );
+    await expect(dbs.appPool.query('SELECT password FROM auth.accounts')).rejects.toThrow(
+      /permission denied/,
+    );
+    await expect(dbs.appPool.query('SELECT token FROM auth.sessions')).rejects.toThrow(
+      /permission denied/,
+    );
+    await expect(dbs.appPool.query('SELECT secret FROM auth.two_factors')).rejects.toThrow(
+      /permission denied/,
+    );
   });
 });
 
@@ -123,7 +137,9 @@ describe('missing or invalid context fails closed', () => {
     try {
       await client.query('BEGIN');
       await client.query(`SELECT set_config('app.tenant_id', 'not-a-uuid', true)`);
-      await expect(client.query('SELECT count(*) FROM app.invitations')).rejects.toThrow(/invalid input syntax for type uuid/);
+      await expect(client.query('SELECT count(*) FROM app.invitations')).rejects.toThrow(
+        /invalid input syntax for type uuid/,
+      );
       await client.query('ROLLBACK');
     } finally {
       client.release();
@@ -139,19 +155,29 @@ describe('missing or invalid context fails closed', () => {
 describe('cross-tenant access through guessed identifiers', () => {
   it('reads by id across tenants return nothing', async () => {
     const result = await dbs.app.run(scopeA(), async (tx) => {
-      const tenant = await tx.execute(sql`select id from app.tenants where id = ${fx.tenantB.id}::uuid`);
+      const tenant = await tx.execute(
+        sql`select id from app.tenants where id = ${fx.tenantB.id}::uuid`,
+      );
       const membership = await tx.execute(
         sql`select id from app.memberships where id = ${fx.tenantB.ownerMembershipId}::uuid`,
       );
-      const audit = await tx.execute(sql`select id from app.audit_events where tenant_id = ${fx.tenantB.id}::uuid`);
-      return { tenant: tenant.rows.length, membership: membership.rows.length, audit: audit.rows.length };
+      const audit = await tx.execute(
+        sql`select id from app.audit_events where tenant_id = ${fx.tenantB.id}::uuid`,
+      );
+      return {
+        tenant: tenant.rows.length,
+        membership: membership.rows.length,
+        audit: audit.rows.length,
+      };
     });
     expect(result).toEqual({ tenant: 0, membership: 0, audit: 0 });
   });
 
   it('updates across tenants affect zero rows', async () => {
     const affected = await dbs.app.run(scopeA(), async (tx) => {
-      const t = await tx.execute(sql`update app.tenants set name = 'pwned' where id = ${fx.tenantB.id}::uuid`);
+      const t = await tx.execute(
+        sql`update app.tenants set name = 'pwned' where id = ${fx.tenantB.id}::uuid`,
+      );
       const m = await tx.execute(
         sql`update app.memberships set status = 'suspended' where id = ${fx.tenantB.ownerMembershipId}::uuid`,
       );
@@ -159,7 +185,9 @@ describe('cross-tenant access through guessed identifiers', () => {
     });
     expect(affected).toEqual({ t: 0, m: 0 });
     const name = await dbs.app.run(scopeB(), async (tx) => {
-      const r = await tx.execute<{ name: string }>(sql`select name from app.tenants where id = ${fx.tenantB.id}::uuid`);
+      const r = await tx.execute<{ name: string }>(
+        sql`select name from app.tenants where id = ${fx.tenantB.id}::uuid`,
+      );
       return r.rows[0]?.name;
     });
     expect(name).not.toBe('pwned');
@@ -176,10 +204,14 @@ describe('cross-tenant access through guessed identifiers', () => {
   });
 
   it('moving a row to another tenant is rejected', async () => {
-    const { invitationId } = await invite(dbs, fx.tenantA, fx.ownerA, 'move-me@example.test', ['agent']);
+    const { invitationId } = await invite(dbs, fx.tenantA, fx.ownerA, 'move-me@example.test', [
+      'agent',
+    ]);
     await expect(
       dbs.app.run(scopeA(), (tx) =>
-        tx.execute(sql`update app.invitations set tenant_id = ${fx.tenantB.id}::uuid where id = ${invitationId}::uuid`),
+        tx.execute(
+          sql`update app.invitations set tenant_id = ${fx.tenantB.id}::uuid where id = ${invitationId}::uuid`,
+        ),
       ),
     ).rejects.toThrow(/permission denied|not permitted/);
   });
@@ -211,7 +243,9 @@ describe('connection pool reuse', () => {
     const isolated = connectTestDatabases({ appPoolMax: 1 });
     try {
       const a = await isolated.app.run(scopeA(), async (tx) => {
-        const r = await tx.execute<{ n: number }>(sql`select count(*)::int as n from app.memberships`);
+        const r = await tx.execute<{ n: number }>(
+          sql`select count(*)::int as n from app.memberships`,
+        );
         return r.rows[0]!.n;
       });
       expect(a).toBe(2); // owner A and agent A
@@ -223,7 +257,9 @@ describe('connection pool reuse', () => {
       });
       expect(none).toEqual({ n: 0, t: null });
       const b = await isolated.app.run(scopeB(), async (tx) => {
-        const r = await tx.execute<{ tenant_id: string }>(sql`select distinct tenant_id from app.memberships`);
+        const r = await tx.execute<{ tenant_id: string }>(
+          sql`select distinct tenant_id from app.memberships`,
+        );
         return r.rows.map((x) => x.tenant_id);
       });
       expect(b).toEqual([fx.tenantB.id]);
@@ -239,12 +275,16 @@ describe('connection pool reuse', () => {
       await client.query(`SET app.tenant_id = '${fx.tenantA.id}'`); // simulated bug: session-level
       client.release();
       const seen = await isolated.app.run(systemScope, async (tx) => {
-        const r = await tx.execute<{ n: number }>(sql`select count(*)::int as n from app.memberships`);
+        const r = await tx.execute<{ n: number }>(
+          sql`select count(*)::int as n from app.memberships`,
+        );
         return r.rows[0]!.n;
       });
       expect(seen).toBe(0);
       const inB = await isolated.app.run(scopeB(), async (tx) => {
-        const r = await tx.execute<{ tenant_id: string }>(sql`select distinct tenant_id from app.memberships`);
+        const r = await tx.execute<{ tenant_id: string }>(
+          sql`select distinct tenant_id from app.memberships`,
+        );
         return r.rows.map((x) => x.tenant_id);
       });
       expect(inB).toEqual([fx.tenantB.id]);
@@ -263,7 +303,9 @@ describe('connection pool reuse', () => {
         }),
       ).rejects.toThrow('boom');
       const t = await isolated.app.run(systemScope, async (tx) => {
-        const r = await tx.execute<{ t: string | null }>(sql`select app.current_tenant_id()::text as t`);
+        const r = await tx.execute<{ t: string | null }>(
+          sql`select app.current_tenant_id()::text as t`,
+        );
         return r.rows[0]!.t;
       });
       expect(t).toBeNull();
@@ -277,9 +319,13 @@ describe('connection pool reuse', () => {
       const scope = i % 2 === 0 ? scopeA() : scopeB();
       const expected = i % 2 === 0 ? fx.tenantA.id : fx.tenantB.id;
       return dbs.app.run(scope, async (tx) => {
-        const r = await tx.execute<{ tenant_id: string }>(sql`select distinct tenant_id from app.memberships`);
+        const r = await tx.execute<{ tenant_id: string }>(
+          sql`select distinct tenant_id from app.memberships`,
+        );
         await tx.execute(sql`select pg_sleep(0.005)`);
-        const again = await tx.execute<{ t: string }>(sql`select app.current_tenant_id()::text as t`);
+        const again = await tx.execute<{ t: string }>(
+          sql`select app.current_tenant_id()::text as t`,
+        );
         return { ids: r.rows.map((x) => x.tenant_id), ctx: again.rows[0]!.t, expected };
       });
     });
@@ -307,15 +353,17 @@ describe('user scope (no company selected)', () => {
     const temp = await createUser(dbs);
     const { token } = await invite(dbs, fx.tenantA, fx.ownerA, temp.email, ['analyst']);
     await acceptInvitation(dbs, temp, token);
-    const before = await dbs.app.run(authenticatedUserScope(temp.id), async (tx) =>
-      (await tx.execute(sql`select id from app.tenants`)).rows.length,
+    const before = await dbs.app.run(
+      authenticatedUserScope(temp.id),
+      async (tx) => (await tx.execute(sql`select id from app.tenants`)).rows.length,
     );
     expect(before).toBe(1);
     await dbs.app.run(scopeA(), (tx) =>
       tx.execute(sql`update app.memberships set status = 'removed' where user_id = ${temp.id}`),
     );
-    const after = await dbs.app.run(authenticatedUserScope(temp.id), async (tx) =>
-      (await tx.execute(sql`select id from app.tenants`)).rows.length,
+    const after = await dbs.app.run(
+      authenticatedUserScope(temp.id),
+      async (tx) => (await tx.execute(sql`select id from app.tenants`)).rows.length,
     );
     expect(after).toBe(0);
   });
@@ -328,7 +376,9 @@ describe('privilege boundaries inside a tenant', () => {
       sql`update app.tenants set slug = 'hijack' where id = ${fx.tenantA.id}::uuid`,
       sql`update app.tenants set billing_mode = 'partner_billed' where id = ${fx.tenantA.id}::uuid`,
     ]) {
-      await expect(dbs.app.run(scopeA(), (tx) => tx.execute(statement))).rejects.toThrow(/permission denied|not permitted/);
+      await expect(dbs.app.run(scopeA(), (tx) => tx.execute(statement))).rejects.toThrow(
+        /permission denied|not permitted/,
+      );
     }
   });
 
@@ -343,13 +393,19 @@ describe('privilege boundaries inside a tenant', () => {
 
   it('audit events are append-only', async () => {
     await expect(
-      dbs.app.run(scopeA(), (tx) => tx.execute(sql`update app.audit_events set action = 'tampered'`)),
+      dbs.app.run(scopeA(), (tx) =>
+        tx.execute(sql`update app.audit_events set action = 'tampered'`),
+      ),
     ).rejects.toThrow(/permission denied|not permitted/);
-    await expect(dbs.app.run(scopeA(), (tx) => tx.execute(sql`delete from app.audit_events`))).rejects.toThrow(
-      /permission denied|not permitted/,
-    );
+    await expect(
+      dbs.app.run(scopeA(), (tx) => tx.execute(sql`delete from app.audit_events`)),
+    ).rejects.toThrow(/permission denied|not permitted/);
     // Even the owner role cannot rewrite history without the dedicated retention path.
-    await expect(dbs.ownerPool.query(`ALTER TABLE app.audit_events NO FORCE ROW LEVEL SECURITY; UPDATE app.audit_events SET action = 'x'`)).rejects.toThrow(/append-only/);
+    await expect(
+      dbs.ownerPool.query(
+        `ALTER TABLE app.audit_events NO FORCE ROW LEVEL SECURITY; UPDATE app.audit_events SET action = 'x'`,
+      ),
+    ).rejects.toThrow(/append-only/);
   });
 });
 
@@ -362,7 +418,9 @@ describe('company creation and invitations', () => {
   it('cannot be invoked from inside a company context', async () => {
     await expect(
       dbs.app.run(scopeA(), (tx) =>
-        tx.execute(sql`select app.create_tenant(${uuidv7()}::uuid, ${uuidv7()}::uuid, 'Sneaky Co', 'sneaky-co', 'UTC', 'en')`),
+        tx.execute(
+          sql`select app.create_tenant(${uuidv7()}::uuid, ${uuidv7()}::uuid, 'Sneaky Co', 'sneaky-co', 'UTC', 'en')`,
+        ),
       ),
     ).rejects.toBeInstanceOf(AppError);
   });
@@ -382,7 +440,9 @@ describe('company creation and invitations', () => {
     const invited = await createUser(dbs);
     const intruder = await createUser(dbs);
     const { token } = await invite(dbs, fx.tenantA, fx.ownerA, invited.email, ['supervisor']);
-    await expect(acceptInvitation(dbs, intruder, token)).rejects.toMatchObject({ code: 'forbidden' });
+    await expect(acceptInvitation(dbs, intruder, token)).rejects.toMatchObject({
+      code: 'forbidden',
+    });
     await expect(acceptInvitation(dbs, invited, token)).resolves.toBe(fx.tenantA.id);
     await expect(acceptInvitation(dbs, invited, token)).rejects.toMatchObject({ code: 'conflict' });
 
@@ -390,13 +450,17 @@ describe('company creation and invitations', () => {
     const expired = await invite(dbs, fx.tenantA, fx.ownerA, late.email, ['agent'], {
       expiresAt: new Date(Date.now() - 1000),
     });
-    await expect(acceptInvitation(dbs, late, expired.token)).rejects.toMatchObject({ code: 'precondition_failed' });
+    await expect(acceptInvitation(dbs, late, expired.token)).rejects.toMatchObject({
+      code: 'precondition_failed',
+    });
   });
 
   it('an unverified account cannot accept an invitation', async () => {
     const pending = await createUser(dbs, { verified: false });
     const { token } = await invite(dbs, fx.tenantA, fx.ownerA, pending.email, ['agent']);
-    await expect(acceptInvitation(dbs, pending, token)).rejects.toMatchObject({ code: 'forbidden' });
+    await expect(acceptInvitation(dbs, pending, token)).rejects.toMatchObject({
+      code: 'forbidden',
+    });
   });
 
   it('a suspended member cannot use an invitation to restore access', async () => {
@@ -407,7 +471,9 @@ describe('company creation and invitations', () => {
       tx.execute(sql`update app.memberships set status = 'suspended' where user_id = ${member.id}`),
     );
     const second = await invite(dbs, fx.tenantA, fx.ownerA, member.email, ['admin']);
-    await expect(acceptInvitation(dbs, member, second.token)).rejects.toMatchObject({ code: 'forbidden' });
+    await expect(acceptInvitation(dbs, member, second.token)).rejects.toMatchObject({
+      code: 'forbidden',
+    });
   });
 });
 
@@ -417,10 +483,18 @@ describe('last-owner protection', () => {
     const t = await createTenant(dbs, owner);
     const scope = authorizedTenantScope(t.id, owner.id);
     await expect(
-      dbs.app.run(scope, (tx) => tx.execute(sql`update app.memberships set roles = '{admin}' where id = ${t.ownerMembershipId}::uuid`)),
+      dbs.app.run(scope, (tx) =>
+        tx.execute(
+          sql`update app.memberships set roles = '{admin}' where id = ${t.ownerMembershipId}::uuid`,
+        ),
+      ),
     ).rejects.toMatchObject({ code: 'precondition_failed' });
     await expect(
-      dbs.app.run(scope, (tx) => tx.execute(sql`update app.memberships set status = 'removed' where id = ${t.ownerMembershipId}::uuid`)),
+      dbs.app.run(scope, (tx) =>
+        tx.execute(
+          sql`update app.memberships set status = 'removed' where id = ${t.ownerMembershipId}::uuid`,
+        ),
+      ),
     ).rejects.toMatchObject({ code: 'precondition_failed' });
   });
 
@@ -430,21 +504,35 @@ describe('last-owner protection', () => {
     const t = await createTenant(dbs, o1);
     const { token } = await invite(dbs, t, o1, o2.email, ['owner']);
     await acceptInvitation(dbs, o2, token);
-    const memberships = await dbs.app.run(authorizedTenantScope(t.id, o1.id), async (tx) =>
-      (await tx.execute<{ id: string; user_id: string }>(sql`select id, user_id from app.memberships`)).rows,
+    const memberships = await dbs.app.run(
+      authorizedTenantScope(t.id, o1.id),
+      async (tx) =>
+        (
+          await tx.execute<{ id: string; user_id: string }>(
+            sql`select id, user_id from app.memberships`,
+          )
+        ).rows,
     );
     const m1 = memberships.find((m) => m.user_id === o1.id)!.id;
     const m2 = memberships.find((m) => m.user_id === o2.id)!.id;
 
     const demote = (actor: string, target: string) =>
       dbs.app.run(authorizedTenantScope(t.id, actor), async (tx) => {
-        await tx.execute(sql`update app.memberships set roles = '{admin}' where id = ${target}::uuid`);
+        await tx.execute(
+          sql`update app.memberships set roles = '{admin}' where id = ${target}::uuid`,
+        );
         await tx.execute(sql`select pg_sleep(0.2)`); // widen the race window
       });
     const results = await Promise.allSettled([demote(o1.id, m2), demote(o2.id, m1)]);
     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
-    const owners = await dbs.app.run(authorizedTenantScope(t.id, o1.id), async (tx) =>
-      (await tx.execute(sql`select id from app.memberships where status = 'active' and 'owner' = any(roles)`)).rows,
+    const owners = await dbs.app.run(
+      authorizedTenantScope(t.id, o1.id),
+      async (tx) =>
+        (
+          await tx.execute(
+            sql`select id from app.memberships where status = 'active' and 'owner' = any(roles)`,
+          )
+        ).rows,
     );
     expect(owners).toHaveLength(1);
   });
@@ -453,19 +541,29 @@ describe('last-owner protection', () => {
 describe('platform administration role', () => {
   it('reads across companies but only updates status columns', async () => {
     const admin = await createUser(dbs);
-    const visible = await dbs.platform.run(admin.id, async (tx) =>
-      (await tx.execute(sql`select id from app.tenants where id in (${fx.tenantA.id}::uuid, ${fx.tenantB.id}::uuid)`)).rows,
+    const visible = await dbs.platform.run(
+      admin.id,
+      async (tx) =>
+        (
+          await tx.execute(
+            sql`select id from app.tenants where id in (${fx.tenantA.id}::uuid, ${fx.tenantB.id}::uuid)`,
+          )
+        ).rows,
     );
     expect(visible).toHaveLength(2);
     await expect(
-      dbs.platform.run(admin.id, (tx) => tx.execute(sql`update app.tenants set name = 'x' where id = ${fx.tenantA.id}::uuid`)),
+      dbs.platform.run(admin.id, (tx) =>
+        tx.execute(sql`update app.tenants set name = 'x' where id = ${fx.tenantA.id}::uuid`),
+      ),
     ).rejects.toThrow(/permission denied|not permitted/);
     await expect(
       dbs.platform.run(admin.id, (tx) => tx.execute(sql`select password from auth.accounts`)),
     ).rejects.toThrow(/permission denied|not permitted/);
     await expect(
       dbs.platform.run(admin.id, (tx) =>
-        tx.execute(sql`insert into app.memberships (id, tenant_id, user_id, roles) values (${uuidv7()}::uuid, ${fx.tenantA.id}::uuid, ${admin.id}, '{owner}')`),
+        tx.execute(
+          sql`insert into app.memberships (id, tenant_id, user_id, roles) values (${uuidv7()}::uuid, ${fx.tenantA.id}::uuid, ${admin.id}, '{owner}')`,
+        ),
       ),
     ).rejects.toThrow(/permission denied|not permitted/);
   });
@@ -476,8 +574,14 @@ describe('support access is reasoned, scoped and time-boxed', () => {
     const operator = await createUser(dbs, { name: 'Support Operator' });
     await invite(dbs, fx.tenantB, fx.ownerB, 'support-probe@example.test', ['agent']);
     const visible = () =>
-      dbs.platform.run(operator.id, async (tx) =>
-        (await tx.execute(sql`select id from app.invitations where tenant_id = ${fx.tenantB.id}::uuid`)).rows.length,
+      dbs.platform.run(
+        operator.id,
+        async (tx) =>
+          (
+            await tx.execute(
+              sql`select id from app.invitations where tenant_id = ${fx.tenantB.id}::uuid`,
+            )
+          ).rows.length,
       );
     expect(await visible()).toBe(0);
 
@@ -497,13 +601,21 @@ describe('support access is reasoned, scoped and time-boxed', () => {
     );
     expect(await visible()).toBeGreaterThan(0);
     // The grant does not extend to other companies.
-    const other = await dbs.platform.run(operator.id, async (tx) =>
-      (await tx.execute(sql`select id from app.invitations where tenant_id = ${fx.tenantA.id}::uuid`)).rows.length,
+    const other = await dbs.platform.run(
+      operator.id,
+      async (tx) =>
+        (
+          await tx.execute(
+            sql`select id from app.invitations where tenant_id = ${fx.tenantA.id}::uuid`,
+          )
+        ).rows.length,
     );
     expect(other).toBe(0);
 
     await dbs.platform.run(operator.id, (tx) =>
-      tx.execute(sql`update ops.support_access_grants set revoked_at = now(), revoked_by = ${operator.id} where id = ${grantId}::uuid`),
+      tx.execute(
+        sql`update ops.support_access_grants set revoked_at = now(), revoked_by = ${operator.id} where id = ${grantId}::uuid`,
+      ),
     );
     expect(await visible()).toBe(0);
   });
@@ -526,8 +638,14 @@ describe('support access is reasoned, scoped and time-boxed', () => {
   });
 
   it('tenants can see support grants on their own company only', async () => {
-    const rows = await dbs.app.run(scopeA(), async (tx) =>
-      (await tx.execute<{ tenant_id: string }>(sql`select tenant_id from ops.support_access_grants`)).rows,
+    const rows = await dbs.app.run(
+      scopeA(),
+      async (tx) =>
+        (
+          await tx.execute<{ tenant_id: string }>(
+            sql`select tenant_id from ops.support_access_grants`,
+          )
+        ).rows,
     );
     expect(rows.every((r) => r.tenant_id === fx.tenantA.id)).toBe(true);
   });
@@ -550,18 +668,31 @@ describe('support access is reasoned, scoped and time-boxed', () => {
     const victim = await createUser(dbs, { twoFactor: true });
     const notAdmin = await createUser(dbs);
     await expect(
-      dbs.platform.run(notAdmin.id, (tx) => tx.execute(sql`select ops.platform_reset_user_mfa(${victim.id}, 'Verified identity by phone')`)),
+      dbs.platform.run(notAdmin.id, (tx) =>
+        tx.execute(
+          sql`select ops.platform_reset_user_mfa(${victim.id}, 'Verified identity by phone')`,
+        ),
+      ),
     ).rejects.toMatchObject({ code: 'forbidden' });
     const admin = await createUser(dbs);
-    await dbs.ownerPool.query(`INSERT INTO ops.platform_admins (user_id, role) VALUES ($1, 'platform_operator')`, [admin.id]);
+    await dbs.ownerPool.query(
+      `INSERT INTO ops.platform_admins (user_id, role) VALUES ($1, 'platform_operator')`,
+      [admin.id],
+    );
     await expect(
-      dbs.platform.run(admin.id, (tx) => tx.execute(sql`select ops.platform_reset_user_mfa(${victim.id}, 'short')`)),
+      dbs.platform.run(admin.id, (tx) =>
+        tx.execute(sql`select ops.platform_reset_user_mfa(${victim.id}, 'short')`),
+      ),
     ).rejects.toMatchObject({ code: 'precondition_failed' });
     await dbs.platform.run(admin.id, (tx) =>
-      tx.execute(sql`select ops.platform_reset_user_mfa(${victim.id}, 'Verified identity via registered phone callback')`),
+      tx.execute(
+        sql`select ops.platform_reset_user_mfa(${victim.id}, 'Verified identity via registered phone callback')`,
+      ),
     );
-    const after = await dbs.authPool.query('SELECT two_factor_enabled FROM auth.users WHERE id = $1', [victim.id]);
+    const after = await dbs.authPool.query(
+      'SELECT two_factor_enabled FROM auth.users WHERE id = $1',
+      [victim.id],
+    );
     expect(after.rows[0].two_factor_enabled).toBe(false);
   });
 });
-

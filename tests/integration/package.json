@@ -11,7 +11,8 @@
     "@w360/core": "workspace:*",
     "@w360/db": "workspace:*",
     "@w360/domain": "workspace:*",
-    "pg": "8.23.0"
+    "pg": "8.23.0",
+    "pg-boss": "12.34.0"
   },
   "devDependencies": {
     "@types/pg": "8.23.1",

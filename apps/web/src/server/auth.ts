@@ -25,18 +25,26 @@ export function createAuth(deps: {
   const production = config.NODE_ENV === 'production';
   const trustedOrigins = [
     config.APP_BASE_URL,
-    ...(config.TRUSTED_ORIGINS ?? '').split(',').map((o) => o.trim()).filter(Boolean),
+    ...(config.TRUSTED_ORIGINS ?? '')
+      .split(',')
+      .map((o) => o.trim())
+      .filter(Boolean),
   ];
 
   const queueEmail = async (to: string, payload: Parameters<typeof enqueueEmail>[2]['payload']) => {
-    await db.run(systemScope, (tx) => enqueueEmail(outbox, tx, { to, payload }).then(() => undefined));
+    await db.run(systemScope, (tx) =>
+      enqueueEmail(outbox, tx, { to, payload }).then(() => undefined),
+    );
   };
 
   return betterAuth({
     appName: 'HyFib W360',
     baseURL: config.APP_BASE_URL,
     secret: config.BETTER_AUTH_SECRET,
-    database: drizzleAdapter(drizzle({ client: deps.authPool }), { provider: 'pg', schema: betterAuthSchema }),
+    database: drizzleAdapter(drizzle({ client: deps.authPool }), {
+      provider: 'pg',
+      schema: betterAuthSchema,
+    }),
     trustedOrigins,
     telemetry: { enabled: false },
     emailAndPassword: {
@@ -52,10 +60,18 @@ export function createAuth(deps: {
       },
       onPasswordReset: async ({ user }) => {
         await queueEmail(user.email, { kind: 'auth.password_changed', name: user.name });
-        await recordSecurityEvent(db, { eventType: 'auth.password_reset', severity: 'info', userId: user.id });
+        await recordSecurityEvent(db, {
+          eventType: 'auth.password_reset',
+          severity: 'info',
+          userId: user.id,
+        });
       },
       onExistingUserSignUp: async ({ user }) => {
-        await recordSecurityEvent(db, { eventType: 'auth.signup_existing_email', severity: 'info', userId: user.id });
+        await recordSecurityEvent(db, {
+          eventType: 'auth.signup_existing_email',
+          severity: 'info',
+          userId: user.id,
+        });
       },
       customSyntheticUser: ({ coreFields, id }) => ({ ...coreFields, id, twoFactorEnabled: false }),
     },
@@ -97,13 +113,20 @@ export function createAuth(deps: {
       defaultCookieAttributes: { httpOnly: true, sameSite: 'lax', secure: production, path: '/' },
       ipAddress: {
         ...(config.TRUSTED_PROXIES
-          ? { trustedProxies: config.TRUSTED_PROXIES.split(',').map((p) => p.trim()).filter(Boolean) }
+          ? {
+              trustedProxies: config.TRUSTED_PROXIES.split(',')
+                .map((p) => p.trim())
+                .filter(Boolean),
+            }
           : {}),
       },
     },
     onAPIError: {
       onError: (error) => {
-        logger.warn({ err: error instanceof Error ? error.message : String(error) }, 'auth api error');
+        logger.warn(
+          { err: error instanceof Error ? error.message : String(error) },
+          'auth api error',
+        );
       },
     },
     plugins: [

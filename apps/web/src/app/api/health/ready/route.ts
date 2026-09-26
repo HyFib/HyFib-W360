@@ -8,9 +8,17 @@ export async function GET(): Promise<Response> {
   const started = Date.now();
   try {
     const runtime = await getRuntime();
-    await runtime.db.run(systemScope, (tx) => tx.execute(sql`select 1`), { accessMode: 'read only' });
-    return Response.json({ status: 'ready', dbLatencyMs: Date.now() - started }, { headers: { 'Cache-Control': 'no-store' } });
+    await runtime.db.run(systemScope, (tx) => tx.execute(sql`select 1`), {
+      accessMode: 'read only',
+    });
+    return Response.json(
+      { status: 'ready', dbLatencyMs: Date.now() - started },
+      { headers: { 'Cache-Control': 'no-store' } },
+    );
   } catch {
-    return Response.json({ status: 'unavailable' }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
+    return Response.json(
+      { status: 'unavailable' },
+      { status: 503, headers: { 'Cache-Control': 'no-store' } },
+    );
   }
 }

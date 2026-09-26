@@ -1,6 +1,12 @@
 import { Alert } from '@w360/ui';
 
-export function FormError({ message, reference }: { message: string | null | undefined; reference?: string | undefined }) {
+export function FormError({
+  message,
+  reference,
+}: {
+  message: string | null | undefined;
+  reference?: string | undefined;
+}) {
   if (!message) return null;
   return (
     <Alert tone="danger">

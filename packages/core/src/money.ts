@@ -33,8 +33,10 @@ export function parseMajorUnits(input: string, currency: CurrencyCode): bigint {
   const match = /^(-)?(\d{1,15})(?:\.(\d+))?$/.exec(trimmed);
   if (!match) throw new RangeError(`Invalid amount "${input}"`);
   const [, sign, whole, fraction = ''] = match;
-  if (fraction.length > exponent) throw new RangeError(`Amount "${input}" has too many decimal places`);
-  const minor = BigInt(whole ?? '0') * 10n ** BigInt(exponent) + BigInt(fraction.padEnd(exponent, '0') || '0');
+  if (fraction.length > exponent)
+    throw new RangeError(`Amount "${input}" has too many decimal places`);
+  const minor =
+    BigInt(whole ?? '0') * 10n ** BigInt(exponent) + BigInt(fraction.padEnd(exponent, '0') || '0');
   return sign ? -minor : minor;
 }
 

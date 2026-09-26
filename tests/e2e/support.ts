@@ -19,7 +19,9 @@ export async function waitForEmail(to: string, subjectIncludes: string): Promise
   await expect
     .poll(
       async () => {
-        const res = await fetch(`${MAILPIT}/api/v1/search?query=${encodeURIComponent(`to:"${to}"`)}`);
+        const res = await fetch(
+          `${MAILPIT}/api/v1/search?query=${encodeURIComponent(`to:"${to}"`)}`,
+        );
         const body = (await res.json()) as { messages: MailpitSummary[] };
         found = body.messages.find((m) => m.Subject.includes(subjectIncludes));
         return Boolean(found);
@@ -38,7 +40,10 @@ export function firstLink(text: string): string {
   return match[0];
 }
 
-export async function signUpAndVerify(page: Page, opts: { name: string; email: string; password: string; next?: string }) {
+export async function signUpAndVerify(
+  page: Page,
+  opts: { name: string; email: string; password: string; next?: string },
+) {
   await page.goto(opts.next ? `/sign-up?next=${encodeURIComponent(opts.next)}` : '/sign-up');
   await page.getByLabel('Your name').fill(opts.name);
   await page.getByLabel('Work email').fill(opts.email);

@@ -13,8 +13,8 @@ const externalThirdParty = {
 };
 
 await build({
-  entryPoints: ['src/main.ts'],
-  outfile: 'dist/main.js',
+  entryPoints: { main: 'src/main.ts', migrate: '../../packages/db/src/cli/migrate.ts' },
+  outdir: 'dist',
   bundle: true,
   platform: 'node',
   format: 'esm',
@@ -22,5 +22,7 @@ await build({
   sourcemap: true,
   legalComments: 'none',
   plugins: [externalThirdParty],
-  banner: { js: "import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);" },
+  banner: {
+    js: "import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);",
+  },
 });

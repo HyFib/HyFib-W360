@@ -55,10 +55,14 @@ export function mapDatabaseError(error: unknown): unknown {
       return new AppError('forbidden', 'Operation not permitted.', { cause: error });
     case '40001':
     case '40P01':
-      return new AppError('conflict', 'The operation conflicted with a concurrent change. Please retry.', {
-        cause: error,
-        details: { retryable: true },
-      });
+      return new AppError(
+        'conflict',
+        'The operation conflicted with a concurrent change. Please retry.',
+        {
+          cause: error,
+          details: { retryable: true },
+        },
+      );
     default:
       return error;
   }

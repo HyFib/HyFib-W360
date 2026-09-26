@@ -15,7 +15,9 @@ export default async function OnboardingPage() {
   const timezones = Intl.supportedValuesOf('timeZone');
   return (
     <div className="flex min-h-dvh flex-col bg-muted/40">
-      <header className="px-6 py-5"><Brand /></header>
+      <header className="px-6 py-5">
+        <Brand />
+      </header>
       <main id="main" className="flex flex-1 justify-center px-4 pb-16 pt-6">
         <div className="grid w-full max-w-md gap-4">
           <CreateCompanyForm timezones={timezones} defaultTimezone="Asia/Kolkata" />
@@ -25,7 +27,12 @@ export default async function OnboardingPage() {
               {companies.map((c, i) => (
                 <span key={c.slug}>
                   {i > 0 ? ', ' : ''}
-                  <Link href={`/c/${c.slug}`} className="text-primary underline-offset-4 hover:underline">{c.name}</Link>
+                  <Link
+                    href={`/c/${c.slug}`}
+                    className="text-primary underline-offset-4 hover:underline"
+                  >
+                    {c.name}
+                  </Link>
                 </span>
               ))}
             </p>

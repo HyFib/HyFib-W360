@@ -3,7 +3,13 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { cn } from '@w360/ui/cn';
 
-export function AppNav({ base, items }: { base: string; items: { key: string; label: string; path: string }[] }) {
+export function AppNav({
+  base,
+  items,
+}: {
+  base: string;
+  items: { key: string; label: string; path: string }[];
+}) {
   const pathname = usePathname();
   return (
     <nav aria-label="Main" className="grid gap-1">

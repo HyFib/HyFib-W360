@@ -1,11 +1,13 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from './fixtures';
 import { firstLink, signUpAndVerify, uniqueEmail, waitForEmail } from './support';
 
 const PASSWORD = 'correct horse battery staple 42';
 
 test.describe.configure({ mode: 'serial' });
 
-test('owner signs up, verifies email, creates a company and invites a teammate who joins', async ({ browser }) => {
+test('owner signs up, verifies email, creates a company and invites a teammate who joins', async ({
+  browser,
+}) => {
   const ownerEmail = uniqueEmail('owner');
   const agentEmail = uniqueEmail('agent');
   const slug = `e2e-${Date.now().toString(36)}`;
@@ -37,7 +39,12 @@ test('owner signs up, verifies email, creates a company and invites a teammate w
   const agent = await agentCtx.newPage();
   await agent.goto(invitePath);
   await expect(agent.getByRole('heading', { name: 'Join E2E Trading Co' })).toBeVisible();
-  await signUpAndVerify(agent, { name: 'Arjun Agent', email: agentEmail, password: PASSWORD, next: invitePath });
+  await signUpAndVerify(agent, {
+    name: 'Arjun Agent',
+    email: agentEmail,
+    password: PASSWORD,
+    next: invitePath,
+  });
   await agent.goto(invitePath);
   await agent.getByRole('button', { name: 'Accept invitation' }).click();
   await expect(agent).toHaveURL(new RegExp(`/c/${slug}$`));
@@ -55,7 +62,9 @@ test('owner signs up, verifies email, creates a company and invites a teammate w
   await agentCtx.close();
 });
 
-test('a user cannot open a company they do not belong to (same 404 as a missing company)', async ({ browser }) => {
+test('a user cannot open a company they do not belong to (same 404 as a missing company)', async ({
+  browser,
+}) => {
   const aEmail = uniqueEmail('tenant-a');
   const bEmail = uniqueEmail('tenant-b');
   const slugA = `iso-a-${Date.now().toString(36)}`;
@@ -82,11 +91,31 @@ test('a user cannot open a company they do not belong to (same 404 as a missing 
   await ctxB.close();
 });
 
-test('unauthenticated visitors are sent to sign-in and security headers are present', async ({ page }) => {
+test('unauthenticated visitors are sent to sign-in and security headers are present', async ({
+  page,
+}) => {
   const response = await page.goto('/c/anything');
   await expect(page).toHaveURL(/\/sign-in\?next=%2Fc%2Fanything/);
   const headers = response?.headers() ?? {};
   expect(headers['content-security-policy']).toContain("frame-ancestors 'none'");
   expect(headers['x-content-type-options']).toBe('nosniff');
   expect(headers['cache-control']).toContain('no-store');
+});
+
+test('choosing a company address that is taken shows a clear field error', async ({ page }) => {
+  const email = uniqueEmail('dup');
+  const slug = `dup-${Date.now().toString(36)}`;
+  await signUpAndVerify(page, { name: 'Dana Dup', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('First Co');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+  await page.goto('/onboarding');
+  await page.getByLabel('Company name').fill('Second Co');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(
+    page.getByText('That company address is already taken. Choose another.'),
+  ).toBeVisible();
+  await expect(page.getByText('Already taken', { exact: true })).toBeVisible();
 });

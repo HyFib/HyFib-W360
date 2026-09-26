@@ -1,4 +1,10 @@
-import { createCipheriv, createDecipheriv, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHmac,
+  randomBytes,
+  timingSafeEqual,
+} from 'node:crypto';
 
 /**
  * Envelope-free symmetric encryption for secrets at rest (provider tokens, OAuth secrets, queued
@@ -40,7 +46,10 @@ export class Keyring {
    */
   static fromEnv(spec: string, primaryKeyId: string): Keyring {
     const keys: Record<string, Buffer> = {};
-    for (const part of spec.split(',').map((p) => p.trim()).filter(Boolean)) {
+    for (const part of spec
+      .split(',')
+      .map((p) => p.trim())
+      .filter(Boolean)) {
       const idx = part.indexOf(':');
       if (idx <= 0) throw new Error('Malformed encryption key entry; expected "kid:base64"');
       const kid = part.slice(0, idx);
@@ -64,12 +73,19 @@ export class Keyring {
       cipher.final(),
     ]);
     const tag = cipher.getAuthTag();
-    return [VERSION, this.primaryKeyId, iv.toString('base64url'), body.toString('base64url'), tag.toString('base64url')].join(':');
+    return [
+      VERSION,
+      this.primaryKeyId,
+      iv.toString('base64url'),
+      body.toString('base64url'),
+      tag.toString('base64url'),
+    ].join(':');
   }
 
   decrypt(ciphertext: string, aad: string): Buffer {
     const parts = ciphertext.split(':');
-    if (parts.length !== 5 || parts[0] !== VERSION) throw new Error('Unsupported ciphertext format');
+    if (parts.length !== 5 || parts[0] !== VERSION)
+      throw new Error('Unsupported ciphertext format');
     const [, kid, ivB64, bodyB64, tagB64] = parts as [string, string, string, string, string];
     const key = this.keys.get(kid);
     if (!key) throw new Error(`Encryption key "${kid}" is not available`);

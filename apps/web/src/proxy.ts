@@ -9,6 +9,7 @@ export function proxy(request: NextRequest) {
   const nonce = Buffer.from(crypto.randomUUID()).toString('base64');
   const requestId = crypto.randomUUID();
   const isDev = process.env.NODE_ENV === 'development';
+  const httpsOrigin = (process.env.APP_BASE_URL ?? '').startsWith('https://');
   const csp = [
     "default-src 'self'",
     `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${isDev ? " 'unsafe-eval'" : ''}`,
@@ -22,7 +23,7 @@ export function proxy(request: NextRequest) {
     "base-uri 'self'",
     "form-action 'self'",
     "frame-ancestors 'none'",
-    ...(isDev ? [] : ['upgrade-insecure-requests']),
+    ...(httpsOrigin ? ['upgrade-insecure-requests'] : []),
   ].join('; ');
 
   const requestHeaders = new Headers(request.headers);

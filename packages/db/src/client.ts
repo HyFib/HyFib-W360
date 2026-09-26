@@ -58,9 +58,14 @@ export function createDatabase(pool: pg.Pool): Database {
   const db = drizzle({ client: pool, schema });
   return {
     pool,
-    async run<T>(scope: Scope, fn: (tx: Tx) => Promise<T>, options: TransactionOptions = {}): Promise<T> {
+    async run<T>(
+      scope: Scope,
+      fn: (tx: Tx) => Promise<T>,
+      options: TransactionOptions = {},
+    ): Promise<T> {
       const tenantId = scope.kind === 'tenant' ? scope.tenantId : '';
-      const userId = scope.kind === 'tenant' ? (scope.userId ?? '') : scope.kind === 'user' ? scope.userId : '';
+      const userId =
+        scope.kind === 'tenant' ? (scope.userId ?? '') : scope.kind === 'user' ? scope.userId : '';
       try {
         return await db.transaction(
           async (tx) => {

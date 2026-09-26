@@ -1,4 +1,13 @@
-import { authorizedTenantScope, and, eq, memberships, sql, systemScope, type Database, type TenantScope } from '@w360/db';
+import {
+  authorizedTenantScope,
+  and,
+  eq,
+  memberships,
+  sql,
+  systemScope,
+  type Database,
+  type TenantScope,
+} from '@w360/db';
 import type { JobEnvelope } from '@w360/contracts';
 import { recordSecurityEvent } from '../audit';
 import type { JobSigner } from './envelope';
@@ -14,7 +23,10 @@ import type { JobSigner } from './envelope';
  */
 export type JobAuthorization =
   | { outcome: 'authorized'; envelope: JobEnvelope; scope: TenantScope | null }
-  | { outcome: 'rejected'; reason: 'invalid_signature' | 'unexpected_kind' | 'tenant_missing' | 'actor_not_member' }
+  | {
+      outcome: 'rejected';
+      reason: 'invalid_signature' | 'unexpected_kind' | 'tenant_missing' | 'actor_not_member';
+    }
   | { outcome: 'deferred'; reason: 'tenant_suspended' };
 
 export interface AuthorizeJobOptions {
@@ -37,20 +49,25 @@ export async function authorizeJob(
     });
     return { outcome: 'rejected', reason: 'invalid_signature' };
   }
-  if (envelope.kind !== options.expectedKind) return { outcome: 'rejected', reason: 'unexpected_kind' };
+  if (envelope.kind !== options.expectedKind)
+    return { outcome: 'rejected', reason: 'unexpected_kind' };
   if (envelope.tenantId === null) return { outcome: 'authorized', envelope, scope: null };
 
   const tenantId = envelope.tenantId;
   const status = await deps.db.run(
     systemScope,
     async (tx) => {
-      const res = await tx.execute<{ status: string | null }>(sql`select app.tenant_status(${tenantId}::uuid) as status`);
+      const res = await tx.execute<{ status: string | null }>(
+        sql`select app.tenant_status(${tenantId}::uuid) as status`,
+      );
       return res.rows[0]?.status ?? null;
     },
     { accessMode: 'read only' },
   );
-  if (status === null || status === 'deleted') return { outcome: 'rejected', reason: 'tenant_missing' };
-  if (options.requireActiveTenant && status !== 'active') return { outcome: 'deferred', reason: 'tenant_suspended' };
+  if (status === null || status === 'deleted')
+    return { outcome: 'rejected', reason: 'tenant_missing' };
+  if (options.requireActiveTenant && status !== 'active')
+    return { outcome: 'deferred', reason: 'tenant_suspended' };
 
   const scope = authorizedTenantScope(tenantId, envelope.actorUserId);
   if (options.requireActiveActor && envelope.actorUserId) {
@@ -61,7 +78,13 @@ export async function authorizeJob(
         const rows = await tx
           .select({ id: memberships.id })
           .from(memberships)
-          .where(and(eq(memberships.tenantId, tenantId), eq(memberships.userId, actorId), eq(memberships.status, 'active')));
+          .where(
+            and(
+              eq(memberships.tenantId, tenantId),
+              eq(memberships.userId, actorId),
+              eq(memberships.status, 'active'),
+            ),
+          );
         return rows.length > 0;
       },
       { accessMode: 'read only' },

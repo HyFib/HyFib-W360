@@ -34,7 +34,14 @@ describe('permission matrix', () => {
   });
 
   it('suspension blocks every outbound capability', () => {
-    for (const p of ['inbox.reply', 'campaigns.send', 'automations.publish', 'templates.submit', 'members.invite', 'channels.manage'] as const) {
+    for (const p of [
+      'inbox.reply',
+      'campaigns.send',
+      'automations.publish',
+      'templates.submit',
+      'members.invite',
+      'channels.manage',
+    ] as const) {
       expect(ALLOWED_WHEN_SUSPENDED.has(p)).toBe(false);
     }
     expect(ALLOWED_WHEN_SUSPENDED.has('billing.manage')).toBe(true);

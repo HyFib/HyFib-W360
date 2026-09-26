@@ -7,11 +7,15 @@ export default function AuthLayout({ children }: { children: ReactNode }) {
       <header className="px-6 py-5">
         <Brand />
       </header>
-      <main id="main" className="flex flex-1 items-start justify-center px-4 pb-16 pt-6 sm:items-center">
+      <main
+        id="main"
+        className="flex flex-1 items-start justify-center px-4 pb-16 pt-6 sm:items-center"
+      >
         <div className="w-full max-w-sm">{children}</div>
       </main>
       <footer className="px-6 py-4 text-center text-xs text-muted-foreground">
-        Uses the official WhatsApp Business Platform. WhatsApp is a trademark of its owner; HyFib W360 is an independent product.
+        Uses the official WhatsApp Business Platform. WhatsApp is a trademark of its owner; HyFib
+        W360 is an independent product.
       </footer>
     </div>
   );

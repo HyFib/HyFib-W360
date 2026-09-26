@@ -44,7 +44,10 @@ export interface Runtime {
 async function init(): Promise<Runtime> {
   const config = loadWebConfig();
   const logger = createLogger({ name: 'w360-web', level: config.LOG_LEVEL });
-  const keyring = Keyring.fromEnv(config.W360_ENCRYPTION_KEYS, config.W360_ENCRYPTION_PRIMARY_KEY_ID);
+  const keyring = Keyring.fromEnv(
+    config.W360_ENCRYPTION_KEYS,
+    config.W360_ENCRYPTION_PRIMARY_KEY_ID,
+  );
 
   const appPool = createPool({
     connectionString: config.DATABASE_URL_APP,

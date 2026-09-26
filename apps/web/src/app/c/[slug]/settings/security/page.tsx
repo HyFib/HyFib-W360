@@ -8,7 +8,11 @@ import { requireTenant } from '@/server/session';
 export const metadata: Metadata = { title: 'Security settings' };
 export const dynamic = 'force-dynamic';
 
-export default async function SecuritySettingsPage({ params }: { params: Promise<{ slug: string }> }) {
+export default async function SecuritySettingsPage({
+  params,
+}: {
+  params: Promise<{ slug: string }>;
+}) {
   const { slug } = await params;
   const ctx = await requireTenant(slug);
   assertCan(ctx, 'tenant.read');
@@ -32,7 +36,10 @@ export default async function SecuritySettingsPage({ params }: { params: Promise
           <CardTitle>Your account</CardTitle>
           <CardDescription>
             Manage your password, two-factor authentication and active sessions in{' '}
-            <Link href="/account" className="text-primary underline-offset-4 hover:underline">account settings</Link>.
+            <Link href="/account" className="text-primary underline-offset-4 hover:underline">
+              account settings
+            </Link>
+            .
           </CardDescription>
         </CardHeader>
       </Card>

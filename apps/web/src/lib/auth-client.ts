@@ -8,7 +8,9 @@ export const authClient = createAuthClient({
     twoFactorClient({
       onTwoFactorRedirect() {
         const next = new URLSearchParams(window.location.search).get('next');
-        window.location.assign(next ? `/two-factor?next=${encodeURIComponent(next)}` : '/two-factor');
+        window.location.assign(
+          next ? `/two-factor?next=${encodeURIComponent(next)}` : '/two-factor',
+        );
       },
     }),
   ],
@@ -16,6 +18,7 @@ export const authClient = createAuthClient({
 
 /** Only same-site relative paths are accepted as post-login destinations (no open redirects). */
 export function safeNextPath(value: string | null | undefined, fallback = '/'): string {
-  if (!value || !value.startsWith('/') || value.startsWith('//') || value.includes('\\')) return fallback;
+  if (!value || !value.startsWith('/') || value.startsWith('//') || value.includes('\\'))
+    return fallback;
   return value;
 }

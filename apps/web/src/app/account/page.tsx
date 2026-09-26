@@ -29,8 +29,15 @@ export default async function AccountPage() {
   return (
     <div className="min-h-dvh bg-muted/30">
       <header className="flex items-center justify-between border-b border-border bg-background px-6 py-4">
-        <Link href="/" className="rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><Brand /></Link>
-        <Link href="/" className="text-sm text-primary underline-offset-4 hover:underline">Back to workspace</Link>
+        <Link
+          href="/"
+          className="rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <Brand />
+        </Link>
+        <Link href="/" className="text-sm text-primary underline-offset-4 hover:underline">
+          Back to workspace
+        </Link>
       </header>
       <main id="main" className="mx-auto grid max-w-3xl gap-6 px-4 py-8">
         <h1 className="text-2xl font-semibold tracking-tight">Account & security</h1>
@@ -39,36 +46,64 @@ export default async function AccountPage() {
             <CardTitle>Profile</CardTitle>
             <CardDescription>{session.user.email}</CardDescription>
           </CardHeader>
-          <CardContent><ProfileForm name={session.user.name} /></CardContent>
+          <CardContent>
+            <ProfileForm name={session.user.name} />
+          </CardContent>
         </Card>
         <Card id="security">
           <CardHeader>
             <CardTitle>Two-factor authentication</CardTitle>
-            <CardDescription>Required for owners, administrators and billing members.</CardDescription>
+            <CardDescription>
+              Required for owners, administrators and billing members.
+            </CardDescription>
           </CardHeader>
-          <CardContent><TwoFactorSettings enabled={session.user.twoFactorEnabled} /></CardContent>
+          <CardContent>
+            <TwoFactorSettings enabled={session.user.twoFactorEnabled} />
+          </CardContent>
         </Card>
         <Card>
-          <CardHeader><CardTitle>Password</CardTitle></CardHeader>
-          <CardContent><ChangePasswordForm /></CardContent>
+          <CardHeader>
+            <CardTitle>Password</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <ChangePasswordForm />
+          </CardContent>
         </Card>
         <Card>
           <CardHeader>
             <CardTitle>Active sessions</CardTitle>
             <CardDescription>Sign out devices you no longer use.</CardDescription>
           </CardHeader>
-          <CardContent><SessionsList sessions={sessions} currentSessionId={session.sessionId} /></CardContent>
+          <CardContent>
+            <SessionsList sessions={sessions} currentSessionId={session.sessionId} />
+          </CardContent>
         </Card>
         <Card>
-          <CardHeader><CardTitle>Companies</CardTitle></CardHeader>
+          <CardHeader>
+            <CardTitle>Companies</CardTitle>
+          </CardHeader>
           <CardContent>
             {companies.length === 0 ? (
-              <p className="text-sm text-muted-foreground">You are not a member of any company yet. <Link className="text-primary underline-offset-4 hover:underline" href="/onboarding">Create one</Link>.</p>
+              <p className="text-sm text-muted-foreground">
+                You are not a member of any company yet.{' '}
+                <Link
+                  className="text-primary underline-offset-4 hover:underline"
+                  href="/onboarding"
+                >
+                  Create one
+                </Link>
+                .
+              </p>
             ) : (
               <ul className="grid gap-2 text-sm">
                 {companies.map((c) => (
                   <li key={c.slug} className="flex justify-between gap-2">
-                    <Link href={`/c/${c.slug}`} className="font-medium text-primary underline-offset-4 hover:underline">{c.name}</Link>
+                    <Link
+                      href={`/c/${c.slug}`}
+                      className="font-medium text-primary underline-offset-4 hover:underline"
+                    >
+                      {c.name}
+                    </Link>
                     <span className="text-muted-foreground">{c.roles.join(', ')}</span>
                   </li>
                 ))}

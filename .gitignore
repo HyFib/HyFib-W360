@@ -20,3 +20,4 @@ pnpm-debug.log*
 .local/
 *.pem
 *.key
+next-env.d.ts

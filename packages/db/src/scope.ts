@@ -43,7 +43,8 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  */
 export function authorizedTenantScope(tenantId: string, userId: string | null): TenantScope {
   if (!UUID_RE.test(tenantId)) throw new Error('Invalid tenant id for scope');
-  if (userId !== null && (userId.length === 0 || userId.length > 200)) throw new Error('Invalid user id for scope');
+  if (userId !== null && (userId.length === 0 || userId.length > 200))
+    throw new Error('Invalid user id for scope');
   return { kind: 'tenant', tenantId, userId } as TenantScope;
 }
 

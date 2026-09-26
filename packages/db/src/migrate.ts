@@ -34,11 +34,18 @@ export interface MigrationResult {
   pgBossVersion: number | null;
 }
 
-export async function loadMigrations(dir: URL = MIGRATIONS_DIR): Promise<MigrationFile[]> {
-  const entries = (await readdir(dir)).filter((f) => /^\d{4}_[a-z0-9_]+\.sql$/.test(f)).sort();
+/** Directory holding the SQL files; overridable for bundled deployments (container images). */
+function migrationsDir(dir?: URL): string {
+  if (dir) return dir.pathname;
+  return process.env.W360_MIGRATIONS_DIR ?? MIGRATIONS_DIR.pathname;
+}
+
+export async function loadMigrations(dir?: URL): Promise<MigrationFile[]> {
+  const base = migrationsDir(dir);
+  const entries = (await readdir(base)).filter((f) => /^\d{4}_[a-z0-9_]+\.sql$/.test(f)).sort();
   const files: MigrationFile[] = [];
   for (const file of entries) {
-    const sql = await readFile(join(dir.pathname, file), 'utf8');
+    const sql = await readFile(join(base, file), 'utf8');
     files.push({
       version: file.slice(0, 4),
       name: file,
@@ -69,18 +76,22 @@ async function ensureTrackingTable(client: pg.PoolClient): Promise<void> {
     )`);
 }
 
-export async function migrationStatus(
-  connectionString: string,
-): Promise<{ applied: { version: string; name: string; checksum: string }[]; pending: string[]; mismatched: string[] }> {
+export async function migrationStatus(connectionString: string): Promise<{
+  applied: { version: string; name: string; checksum: string }[];
+  pending: string[];
+  mismatched: string[];
+}> {
   const files = await loadMigrations();
   const client = new pg.Client({ connectionString, application_name: 'w360-migrate-status' });
   await client.connect();
   try {
     const exists = await client.query(`SELECT to_regclass('w360_migrations.applied') AS t`);
     const applied = exists.rows[0]?.t
-      ? (await client.query<{ version: string; name: string; checksum: string }>(
-          `SELECT version, name, checksum FROM w360_migrations.applied ORDER BY version`,
-        )).rows
+      ? (
+          await client.query<{ version: string; name: string; checksum: string }>(
+            `SELECT version, name, checksum FROM w360_migrations.applied ORDER BY version`,
+          )
+        ).rows
       : [];
     const byVersion = new Map(applied.map((a) => [a.version, a]));
     const pending = files.filter((f) => !byVersion.has(f.version)).map((f) => f.name);
@@ -101,7 +112,11 @@ export async function runMigrations(options: {
 }): Promise<MigrationResult> {
   const log = options.log ?? (() => undefined);
   const appRole = options.runtimeRoles?.app ?? 'w360_app';
-  const pool = new pg.Pool({ connectionString: options.connectionString, max: 2, application_name: 'w360-migrate' });
+  const pool = new pg.Pool({
+    connectionString: options.connectionString,
+    max: 2,
+    application_name: 'w360-migrate',
+  });
   const client = await pool.connect();
   const result: MigrationResult = { applied: [], alreadyApplied: [], pgBossVersion: null };
   try {
@@ -109,16 +124,20 @@ export async function runMigrations(options: {
     await ensureTrackingTable(client);
     const files = await loadMigrations();
     const applied = new Map(
-      (await client.query<{ version: string; checksum: string; name: string }>(
-        'SELECT version, checksum, name FROM w360_migrations.applied',
-      )).rows.map((r) => [r.version, r]),
+      (
+        await client.query<{ version: string; checksum: string; name: string }>(
+          'SELECT version, checksum, name FROM w360_migrations.applied',
+        )
+      ).rows.map((r) => [r.version, r]),
     );
 
     for (const [version, row] of applied) {
       const file = files.find((f) => f.version === version);
       if (!file) throw new Error(`Applied migration ${row.name} is missing from the repository`);
       if (file.checksum !== row.checksum) {
-        throw new Error(`Migration ${row.name} was modified after being applied; add a new migration instead`);
+        throw new Error(
+          `Migration ${row.name} was modified after being applied; add a new migration instead`,
+        );
       }
     }
 
@@ -140,7 +159,9 @@ export async function runMigrations(options: {
           await client.query('COMMIT');
         } catch (error) {
           await client.query('ROLLBACK');
-          throw new Error(`Migration ${file.name} failed: ${(error as Error).message}`, { cause: error });
+          throw new Error(`Migration ${file.name} failed: ${(error as Error).message}`, {
+            cause: error,
+          });
         }
       } else {
         await client.query(file.sql);
@@ -178,13 +199,16 @@ async function installJobSchema(client: pg.PoolClient, log: (m: string) => void)
       throw error;
     }
   } else {
-    const currentRaw = (await client.query<{ version: number }>(`SELECT version FROM ${PGBOSS_SCHEMA}.version`)).rows[0]
-      ?.version;
+    const currentRaw = (
+      await client.query<{ version: number }>(`SELECT version FROM ${PGBOSS_SCHEMA}.version`)
+    ).rows[0]?.version;
     if (currentRaw === undefined) throw new Error('pg-boss version table is empty');
     const current = Number(currentRaw);
     const target = pgBossTargetVersion();
     if (current > target) {
-      throw new Error(`pg-boss schema version ${current} is newer than this release supports (${target}); refusing to continue`);
+      throw new Error(
+        `pg-boss schema version ${current} is newer than this release supports (${target}); refusing to continue`,
+      );
     }
     if (current < target) {
       const plans = getMigrationPlans(PGBOSS_SCHEMA, current);
@@ -199,15 +223,19 @@ async function installJobSchema(client: pg.PoolClient, log: (m: string) => void)
       }
     }
   }
-  const version = (await client.query<{ version: number }>(`SELECT version FROM ${PGBOSS_SCHEMA}.version`)).rows[0]
-    ?.version;
+  const version = (
+    await client.query<{ version: number }>(`SELECT version FROM ${PGBOSS_SCHEMA}.version`)
+  ).rows[0]?.version;
   return Number(version);
 }
 
 /** Schema version this pg-boss release installs, read from its public construction plan. */
 export function pgBossTargetVersion(): number {
-  const match = /INSERT INTO \S+\.version\s*\(version\)\s*VALUES\s*\('(\d+)'\)/i.exec(getConstructionPlans(PGBOSS_SCHEMA));
-  if (!match?.[1]) throw new Error('Unable to determine pg-boss schema version from construction plan');
+  const match = /INSERT INTO \S+\.version\s*\(version\)\s*VALUES\s*\('(\d+)'\)/i.exec(
+    getConstructionPlans(PGBOSS_SCHEMA),
+  );
+  if (!match?.[1])
+    throw new Error('Unable to determine pg-boss schema version from construction plan');
   return Number(match[1]);
 }
 
@@ -215,12 +243,18 @@ async function grantJobSchema(client: pg.PoolClient, appRole: string): Promise<v
   const role = pg.escapeIdentifier(appRole);
   await client.query(`REVOKE ALL ON SCHEMA ${PGBOSS_SCHEMA} FROM PUBLIC`);
   await client.query(`GRANT USAGE ON SCHEMA ${PGBOSS_SCHEMA} TO ${role}`);
-  await client.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ${PGBOSS_SCHEMA} TO ${role}`);
+  await client.query(
+    `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ${PGBOSS_SCHEMA} TO ${role}`,
+  );
   await client.query(`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA ${PGBOSS_SCHEMA} TO ${role}`);
   await client.query(`GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA ${PGBOSS_SCHEMA} TO ${role}`);
 }
 
-async function declareQueues(connectionString: string, queues: QueueDefinition[], log: (m: string) => void) {
+async function declareQueues(
+  connectionString: string,
+  queues: QueueDefinition[],
+  log: (m: string) => void,
+) {
   const boss = new PgBoss({
     connectionString,
     schema: PGBOSS_SCHEMA,
@@ -231,11 +265,15 @@ async function declareQueues(connectionString: string, queues: QueueDefinition[]
     max: 2,
     application_name: 'w360-migrate-queues',
   });
-  boss.on('error', (error: unknown) => log(`pg-boss error during queue declaration: ${(error as Error).message}`));
+  boss.on('error', (error: unknown) =>
+    log(`pg-boss error during queue declaration: ${(error as Error).message}`),
+  );
   await boss.start();
   try {
     // Dead-letter targets must exist before queues that reference them.
-    const ordered = [...queues].sort((a, b) => Number(Boolean(a.deadLetter)) - Number(Boolean(b.deadLetter)));
+    const ordered = [...queues].sort(
+      (a, b) => Number(Boolean(a.deadLetter)) - Number(Boolean(b.deadLetter)),
+    );
     for (const q of ordered) {
       const options = {
         retryLimit: q.retryLimit,

@@ -7,7 +7,9 @@ import { defineConfig, devices } from '@playwright/test';
 const baseURL = process.env.E2E_BASE_URL ?? 'http://localhost:3000';
 // Local sandboxes may provide a preinstalled Chromium instead of Playwright's pinned download.
 const chromiumExecutable = process.env.PW_CHROMIUM_EXECUTABLE;
-const chromiumLaunch = chromiumExecutable ? { launchOptions: { executablePath: chromiumExecutable } } : {};
+const chromiumLaunch = chromiumExecutable
+  ? { launchOptions: { executablePath: chromiumExecutable } }
+  : {};
 
 export default defineConfig({
   testDir: '.',

@@ -3,7 +3,13 @@ import { PageHeader } from '@/components/page-header';
 import { SettingsTabs } from '@/components/settings/settings-tabs';
 import { requireTenant } from '@/server/session';
 
-export default async function SettingsLayout({ children, params }: { children: ReactNode; params: Promise<{ slug: string }> }) {
+export default async function SettingsLayout({
+  children,
+  params,
+}: {
+  children: ReactNode;
+  params: Promise<{ slug: string }>;
+}) {
   const { slug } = await params;
   const ctx = await requireTenant(slug);
   const base = `/c/${ctx.tenant.slug}/settings`;

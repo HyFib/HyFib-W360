@@ -16,9 +16,19 @@ async function main(): Promise<void> {
 
   await rt.boss.start();
   const concurrency = rt.config.WORKER_CONCURRENCY;
-  await rt.boss.work(QUEUES.emailSend.name, { localConcurrency: concurrency, batchSize: 1 }, emailSendHandler(rt));
-  await rt.boss.work(QUEUES.outboxSweep.name, { localConcurrency: 1, batchSize: 1 }, outboxSweepHandler(rt));
-  await rt.boss.schedule(QUEUES.outboxSweep.name, '* * * * *', null, { singletonKey: 'outbox-sweep' });
+  await rt.boss.work(
+    QUEUES.emailSend.name,
+    { localConcurrency: concurrency, batchSize: 1 },
+    emailSendHandler(rt),
+  );
+  await rt.boss.work(
+    QUEUES.outboxSweep.name,
+    { localConcurrency: 1, batchSize: 1 },
+    outboxSweepHandler(rt),
+  );
+  await rt.boss.schedule(QUEUES.outboxSweep.name, '* * * * *', null, {
+    singletonKey: 'outbox-sweep',
+  });
   rt.logger.info({ concurrency }, 'worker started');
 
   const shutdown = async (signal: string) => {

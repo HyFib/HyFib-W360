@@ -26,9 +26,20 @@ export function ProfileForm({ name }: { name: string }) {
       <FormError message={error} />
       <FormSuccess message={saved ? 'Name updated.' : null} />
       <Field id="profile-name" label="Name">
-        {(aria) => <Input {...aria} autoComplete="name" value={value} onChange={(e) => setValue(e.target.value)} />}
+        {(aria) => (
+          <Input
+            {...aria}
+            autoComplete="name"
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+          />
+        )}
       </Field>
-      <div><Button type="submit" disabled={value.trim() === name}>Save</Button></div>
+      <div>
+        <Button type="submit" disabled={value.trim() === name}>
+          Save
+        </Button>
+      </div>
     </form>
   );
 }
@@ -46,7 +57,11 @@ export function ChangePasswordForm() {
       setError('Use at least 12 characters.');
       return;
     }
-    const result = await authClient.changePassword({ currentPassword: current, newPassword: next, revokeOtherSessions: true });
+    const result = await authClient.changePassword({
+      currentPassword: current,
+      newPassword: next,
+      revokeOtherSessions: true,
+    });
     if (result.error) setError('Current password is incorrect, or the new password was rejected.');
     else {
       setSaved(true);
@@ -59,12 +74,32 @@ export function ChangePasswordForm() {
       <FormError message={error} />
       <FormSuccess message={saved ? 'Password changed. Other sessions were signed out.' : null} />
       <Field id="current-password" label="Current password">
-        {(aria) => <Input {...aria} type="password" autoComplete="current-password" value={current} onChange={(e) => setCurrent(e.target.value)} />}
+        {(aria) => (
+          <Input
+            {...aria}
+            type="password"
+            autoComplete="current-password"
+            value={current}
+            onChange={(e) => setCurrent(e.target.value)}
+          />
+        )}
       </Field>
       <Field id="new-password" label="New password" description="At least 12 characters.">
-        {(aria) => <Input {...aria} type="password" autoComplete="new-password" value={next} onChange={(e) => setNext(e.target.value)} />}
+        {(aria) => (
+          <Input
+            {...aria}
+            type="password"
+            autoComplete="new-password"
+            value={next}
+            onChange={(e) => setNext(e.target.value)}
+          />
+        )}
       </Field>
-      <div><Button type="submit" disabled={!current || !next}>Change password</Button></div>
+      <div>
+        <Button type="submit" disabled={!current || !next}>
+          Change password
+        </Button>
+      </div>
     </form>
   );
 }

@@ -8,7 +8,8 @@ import { correlationId, getCurrentSession, type CurrentSession } from './session
 export async function sessionForAction(): Promise<CurrentSession> {
   const session = await getCurrentSession();
   if (!session) throw new AppError('unauthenticated', 'Your session has ended. Sign in again.');
-  if (!session.user.emailVerified) throw new AppError('forbidden', 'Verify your email address first.');
+  if (!session.user.emailVerified)
+    throw new AppError('forbidden', 'Verify your email address first.');
   return session;
 }
 
@@ -21,7 +22,16 @@ export async function tenantForAction(slug: unknown): Promise<TenantContext> {
   const session = await sessionForAction();
   const runtime = await getRuntime();
   return resolveTenantContext(
-    { db: runtime.db, clock: runtime.clock, mfaGracePeriodHours: runtime.config.MFA_GRACE_PERIOD_HOURS },
-    { userId: session.user.id, sessionId: session.sessionId, tenantSlug: slug, correlationId: await correlationId() },
+    {
+      db: runtime.db,
+      clock: runtime.clock,
+      mfaGracePeriodHours: runtime.config.MFA_GRACE_PERIOD_HOURS,
+    },
+    {
+      userId: session.user.id,
+      sessionId: session.sessionId,
+      tenantSlug: slug,
+      correlationId: await correlationId(),
+    },
   );
 }

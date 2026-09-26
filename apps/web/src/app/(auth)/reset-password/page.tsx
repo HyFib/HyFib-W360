@@ -10,5 +10,7 @@ export default async function ResetPasswordPage({
   searchParams: Promise<{ token?: string; error?: string }>;
 }) {
   const { token, error } = await searchParams;
-  return <ResetPasswordForm token={typeof token === 'string' ? token : null} invalid={Boolean(error)} />;
+  return (
+    <ResetPasswordForm token={typeof token === 'string' ? token : null} invalid={Boolean(error)} />
+  );
 }

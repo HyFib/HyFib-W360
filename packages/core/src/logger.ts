@@ -38,7 +38,9 @@ export const REDACT_PATHS = [
 
 export type { Logger };
 
-export function createLogger(options: { name: string; level?: string; pretty?: boolean } & Partial<LoggerOptions>): Logger {
+export function createLogger(
+  options: { name: string; level?: string; pretty?: boolean } & Partial<LoggerOptions>,
+): Logger {
   const { name, level, ...rest } = options;
   return pino({
     name,

@@ -1,7 +1,15 @@
 import { z } from 'zod';
 
 /** Validation shared by browser forms and server services. Servers always re-validate. */
-export const TENANT_ROLE_VALUES = ['owner', 'admin', 'supervisor', 'agent', 'marketer', 'analyst', 'billing'] as const;
+export const TENANT_ROLE_VALUES = [
+  'owner',
+  'admin',
+  'supervisor',
+  'agent',
+  'marketer',
+  'analyst',
+  'billing',
+] as const;
 
 export const roleSchema = z.enum(TENANT_ROLE_VALUES);
 export const rolesSchema = z
@@ -25,7 +33,12 @@ function isValidTimeZone(tz: string): boolean {
   }
 }
 
-export const timezoneSchema = z.string().trim().min(1).max(64).refine(isValidTimeZone, 'Unknown time zone');
+export const timezoneSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(64)
+  .refine(isValidTimeZone, 'Unknown time zone');
 export const localeSchema = z.string().regex(/^[a-z]{2}(-[A-Z]{2})?$/, 'Invalid locale');
 
 export const companyNameSchema = z.string().trim().min(2, 'At least 2 characters').max(120);
@@ -47,7 +60,12 @@ export const updateCompanySecuritySchema = z.object({
   requireMfaAllMembers: z.boolean(),
 });
 
-export const emailSchema = z.string().trim().toLowerCase().max(320).pipe(z.email('Enter a valid email address'));
+export const emailSchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .max(320)
+  .pipe(z.email('Enter a valid email address'));
 
 export const inviteMemberSchema = z.object({
   email: emailSchema,
@@ -66,12 +84,17 @@ export const memberStatusSchema = z.object({
 
 export const invitationIdSchema = z.object({ invitationId: z.uuid() });
 
-export const invitationTokenSchema = z.string().regex(/^[A-Za-z0-9_-]{32,64}$/, 'Invalid invitation link');
+export const invitationTokenSchema = z
+  .string()
+  .regex(/^[A-Za-z0-9_-]{32,64}$/, 'Invalid invitation link');
 
 export const auditQuerySchema = z.object({
   cursor: z.string().max(200).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
-  action: z.string().regex(/^[a-z][a-z0-9_.]{2,99}$/).optional(),
+  action: z
+    .string()
+    .regex(/^[a-z][a-z0-9_.]{2,99}$/)
+    .optional(),
 });
 
 export const passwordSchema = z

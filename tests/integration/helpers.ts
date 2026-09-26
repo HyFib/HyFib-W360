@@ -24,11 +24,31 @@ export interface TestDatabases {
 
 export function connectTestDatabases(options: { appPoolMax?: number } = {}): TestDatabases {
   const urls = inject('dbUrls');
-  const appPool = createPool({ connectionString: urls.app, max: options.appPoolMax ?? 5, applicationName: 'it-app' });
-  const authPool = new pg.Pool({ connectionString: urls.auth, max: 3, application_name: 'it-auth' });
-  const platformPool = createPool({ connectionString: urls.platform, max: 2, applicationName: 'it-platform' });
-  const ownerPool = new pg.Pool({ connectionString: urls.owner, max: 2, application_name: 'it-owner' });
-  const adminPool = new pg.Pool({ connectionString: urls.admin, max: 2, application_name: 'it-admin' });
+  const appPool = createPool({
+    connectionString: urls.app,
+    max: options.appPoolMax ?? 5,
+    applicationName: 'it-app',
+  });
+  const authPool = new pg.Pool({
+    connectionString: urls.auth,
+    max: 3,
+    application_name: 'it-auth',
+  });
+  const platformPool = createPool({
+    connectionString: urls.platform,
+    max: 2,
+    applicationName: 'it-platform',
+  });
+  const ownerPool = new pg.Pool({
+    connectionString: urls.owner,
+    max: 2,
+    application_name: 'it-owner',
+  });
+  const adminPool = new pg.Pool({
+    connectionString: urls.admin,
+    max: 2,
+    application_name: 'it-admin',
+  });
   const app = createDatabase(appPool);
   const platform = createPlatformDatabase(platformPool);
   return {
@@ -40,7 +60,13 @@ export function connectTestDatabases(options: { appPoolMax?: number } = {}): Tes
     ownerPool,
     adminPool,
     async close() {
-      await Promise.all([appPool.end(), authPool.end(), platformPool.end(), ownerPool.end(), adminPool.end()]);
+      await Promise.all([
+        appPool.end(),
+        authPool.end(),
+        platformPool.end(),
+        ownerPool.end(),
+        adminPool.end(),
+      ]);
     },
   };
 }
@@ -60,7 +86,9 @@ export async function createUser(
 ): Promise<TestUser> {
   userCounter += 1;
   const id = `usr_${randomToken(12)}`;
-  const email = (options.email ?? `user${userCounter}.${randomToken(4).toLowerCase()}@example.test`).toLowerCase();
+  const email = (
+    options.email ?? `user${userCounter}.${randomToken(4).toLowerCase()}@example.test`
+  ).toLowerCase();
   const name = options.name ?? `Test User ${userCounter}`;
   await dbs.authPool.query(
     `INSERT INTO auth.users (id, name, email, email_verified, two_factor_enabled) VALUES ($1, $2, $3, $4, $5)`,
@@ -75,10 +103,18 @@ export interface TestTenant {
   ownerMembershipId: string;
 }
 
-export async function createTenant(dbs: TestDatabases, owner: TestUser, slug?: string): Promise<TestTenant> {
+export async function createTenant(
+  dbs: TestDatabases,
+  owner: TestUser,
+  slug?: string,
+): Promise<TestTenant> {
   const tenantId = uuidv7();
   const membershipId = uuidv7();
-  const s = slug ?? `co-${randomToken(6).toLowerCase().replace(/[^a-z0-9]/g, 'x')}`;
+  const s =
+    slug ??
+    `co-${randomToken(6)
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, 'x')}`;
   await dbs.app.run(authenticatedUserScope(owner.id), async (tx) => {
     await tx.execute(
       sql`select app.create_tenant(${tenantId}::uuid, ${membershipId}::uuid, ${'Company ' + s}, ${s}, 'Asia/Kolkata', 'en')`,
@@ -108,7 +144,11 @@ export async function invite(
   return { token, invitationId };
 }
 
-export async function acceptInvitation(dbs: TestDatabases, user: TestUser, token: string): Promise<string> {
+export async function acceptInvitation(
+  dbs: TestDatabases,
+  user: TestUser,
+  token: string,
+): Promise<string> {
   const membershipId = uuidv7();
   return dbs.app.run(authenticatedUserScope(user.id), async (tx) => {
     const res = await tx.execute<{ tenant_id: string }>(

@@ -293,6 +293,12 @@ importers:
       '@types/node':
         specifier: 24.19.0
         version: 24.19.0
+      '@types/pg':
+        specifier: 8.23.1
+        version: 8.23.1
+      pg:
+        specifier: 8.23.0
+        version: 8.23.0
 
   tests/integration:
     dependencies:
@@ -311,6 +317,9 @@ importers:
       pg:
         specifier: 8.23.0
         version: 8.23.0
+      pg-boss:
+        specifier: 12.34.0
+        version: 12.34.0
     devDependencies:
       '@types/pg':
         specifier: 8.23.1

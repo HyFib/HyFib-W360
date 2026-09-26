@@ -42,7 +42,10 @@ export const platformAuditEvents = opsSchema.table('platform_audit_events', {
   reason: text('reason'),
   result: text('result', { enum: ['success', 'denied', 'failure'] }).notNull(),
   correlationId: text('correlation_id'),
-  metadata: jsonb('metadata').notNull().default(sql`'{}'::jsonb`).$type<Record<string, unknown>>(),
+  metadata: jsonb('metadata')
+    .notNull()
+    .default(sql`'{}'::jsonb`)
+    .$type<Record<string, unknown>>(),
 });
 
 export const securityEvents = opsSchema.table('security_events', {
@@ -55,7 +58,10 @@ export const securityEvents = opsSchema.table('security_events', {
   ipAddress: inet('ip_address'),
   userAgent: text('user_agent'),
   correlationId: text('correlation_id'),
-  details: jsonb('details').notNull().default(sql`'{}'::jsonb`).$type<Record<string, unknown>>(),
+  details: jsonb('details')
+    .notNull()
+    .default(sql`'{}'::jsonb`)
+    .$type<Record<string, unknown>>(),
 });
 
 export const emailOutbox = opsSchema.table('email_outbox', {
@@ -64,7 +70,9 @@ export const emailOutbox = opsSchema.table('email_outbox', {
   kind: text('kind').notNull(),
   toAddress: text('to_address').notNull(),
   payloadCiphertext: text('payload_ciphertext'),
-  status: text('status', { enum: ['pending', 'sending', 'sent', 'failed', 'cancelled'] }).notNull().default('pending'),
+  status: text('status', { enum: ['pending', 'sending', 'sent', 'failed', 'cancelled'] })
+    .notNull()
+    .default('pending'),
   attempts: integer('attempts').notNull().default(0),
   nextAttemptAt: tz('next_attempt_at').notNull().defaultNow(),
   lockedUntil: tz('locked_until'),

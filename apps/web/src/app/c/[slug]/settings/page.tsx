@@ -6,7 +6,11 @@ import { requireTenant } from '@/server/session';
 export const metadata: Metadata = { title: 'General settings' };
 export const dynamic = 'force-dynamic';
 
-export default async function GeneralSettingsPage({ params }: { params: Promise<{ slug: string }> }) {
+export default async function GeneralSettingsPage({
+  params,
+}: {
+  params: Promise<{ slug: string }>;
+}) {
   const { slug } = await params;
   const ctx = await requireTenant(slug);
   assertCan(ctx, 'tenant.read');

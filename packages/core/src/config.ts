@@ -5,9 +5,7 @@ import { z } from 'zod';
  * the deployment populates from its secret manager. Optional provider sections evaluate to `null`
  * when unset; the corresponding capability is then reported as unavailable rather than faked.
  */
-const bool = z
-  .enum(['true', 'false', '1', '0'])
-  .transform((v) => v === 'true' || v === '1');
+const bool = z.enum(['true', 'false', '1', '0']).transform((v) => v === 'true' || v === '1');
 
 const secret = (min = 32) => z.string().min(min, `must be at least ${min} characters`);
 
@@ -58,8 +56,18 @@ const webSchema = baseSchema.extend({
   TRUSTED_ORIGINS: z.string().optional(),
   /** Comma-separated IPs/CIDRs of the load balancers in front of the app (for client IP resolution). */
   TRUSTED_PROXIES: z.string().optional(),
-  INVITATION_TTL_HOURS: z.coerce.number().int().min(1).max(24 * 30).default(168),
-  MFA_GRACE_PERIOD_HOURS: z.coerce.number().int().min(0).max(24 * 30).default(72),
+  INVITATION_TTL_HOURS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(24 * 30)
+    .default(168),
+  MFA_GRACE_PERIOD_HOURS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(24 * 30)
+    .default(72),
 });
 
 const workerSchema = baseSchema.extend({
@@ -82,7 +90,9 @@ export class ConfigError extends Error {
 function parse<T extends z.ZodType>(schema: T, env: NodeJS.ProcessEnv): z.infer<T> {
   const result = schema.safeParse(env);
   if (!result.success) {
-    const lines = result.error.issues.map((i) => `  - ${i.path.join('.') || '(root)'}: ${i.message}`);
+    const lines = result.error.issues.map(
+      (i) => `  - ${i.path.join('.') || '(root)'}: ${i.message}`,
+    );
     throw new ConfigError(`Invalid configuration:\n${lines.join('\n')}`);
   }
   return result.data;
@@ -97,11 +107,13 @@ function isLoopbackUrl(value: string): boolean {
 function assertProductionSafety(config: BaseConfig & { BETTER_AUTH_SECRET?: string }): void {
   if (config.NODE_ENV !== 'production') return;
   const problems: string[] = [];
-  if (config.APP_ENV === 'local') problems.push('APP_ENV=local is not allowed with a production build');
+  if (config.APP_ENV === 'local')
+    problems.push('APP_ENV=local is not allowed with a production build');
   if (config.APP_ENV === 'test') {
     // Production builds under test (CI end-to-end runs) must stay on loopback so this mode can
     // never serve real users.
-    if (!isLoopbackUrl(config.APP_BASE_URL)) problems.push('APP_ENV=test requires a loopback APP_BASE_URL');
+    if (!isLoopbackUrl(config.APP_BASE_URL))
+      problems.push('APP_ENV=test requires a loopback APP_BASE_URL');
   } else if (!config.APP_BASE_URL.startsWith('https://')) {
     problems.push('APP_BASE_URL must use https');
   }
@@ -114,7 +126,8 @@ function assertProductionSafety(config: BaseConfig & { BETTER_AUTH_SECRET?: stri
     if (value && weak.test(value)) problems.push(`${key} looks like a development placeholder`);
   }
   if (!config.SMTP_HOST) problems.push('SMTP_HOST is required in production');
-  if (problems.length) throw new ConfigError(`Unsafe production configuration:\n  - ${problems.join('\n  - ')}`);
+  if (problems.length)
+    throw new ConfigError(`Unsafe production configuration:\n  - ${problems.join('\n  - ')}`);
 }
 
 export function loadWebConfig(env: NodeJS.ProcessEnv = process.env): WebConfig {
@@ -139,8 +152,10 @@ export interface MetaConfig {
 
 /** Returns Meta configuration only when all mandatory values are present. */
 export function metaConfigFrom(config: BaseConfig): MetaConfig | null {
-  const { META_APP_ID, META_APP_SECRET, META_GRAPH_API_VERSION, META_WEBHOOK_VERIFY_TOKEN } = config;
-  if (!META_APP_ID || !META_APP_SECRET || !META_GRAPH_API_VERSION || !META_WEBHOOK_VERIFY_TOKEN) return null;
+  const { META_APP_ID, META_APP_SECRET, META_GRAPH_API_VERSION, META_WEBHOOK_VERIFY_TOKEN } =
+    config;
+  if (!META_APP_ID || !META_APP_SECRET || !META_GRAPH_API_VERSION || !META_WEBHOOK_VERIFY_TOKEN)
+    return null;
   return {
     appId: META_APP_ID,
     appSecret: META_APP_SECRET,

@@ -1,6 +1,17 @@
 'use client';
 import { useState } from 'react';
-import { Button, Card, CardContent, CardDescription, CardHeader, CardTitle, Checkbox, Field, Input, Label } from '@w360/ui';
+import {
+  Button,
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+  Checkbox,
+  Field,
+  Input,
+  Label,
+} from '@w360/ui';
 import { authClient, safeNextPath } from '@/lib/auth-client';
 import { FormError } from '@/components/form-status';
 
@@ -22,7 +33,11 @@ export function TwoFactorForm({ next }: { next: string | null }) {
         : await authClient.twoFactor.verifyBackupCode({ code: trimmed, trustDevice });
     setBusy(false);
     if (result.error) {
-      setError(result.error.status === 429 ? 'Too many attempts. Wait a minute.' : 'That code is not valid.');
+      setError(
+        result.error.status === 429
+          ? 'Too many attempts. Wait a minute.'
+          : 'That code is not valid.',
+      );
       return;
     }
     window.location.assign(safeNextPath(next));
@@ -31,9 +46,13 @@ export function TwoFactorForm({ next }: { next: string | null }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle><span className="text-xl">Two-factor verification</span></CardTitle>
+        <CardTitle>
+          <span className="text-xl">Two-factor verification</span>
+        </CardTitle>
         <CardDescription>
-          {mode === 'totp' ? 'Enter the 6-digit code from your authenticator app.' : 'Enter one of your unused backup codes.'}
+          {mode === 'totp'
+            ? 'Enter the 6-digit code from your authenticator app.'
+            : 'Enter one of your unused backup codes.'}
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -53,11 +72,26 @@ export function TwoFactorForm({ next }: { next: string | null }) {
             )}
           </Field>
           <div className="flex items-center gap-2">
-            <Checkbox id="trust" checked={trustDevice} onChange={(e) => setTrustDevice(e.target.checked)} />
-            <Label htmlFor="trust" className="font-normal">Trust this device for 30 days</Label>
+            <Checkbox
+              id="trust"
+              checked={trustDevice}
+              onChange={(e) => setTrustDevice(e.target.checked)}
+            />
+            <Label htmlFor="trust" className="font-normal">
+              Trust this device for 30 days
+            </Label>
           </div>
-          <Button type="submit" disabled={busy || code.length < 6}>{busy ? 'Verifying…' : 'Verify'}</Button>
-          <Button variant="link" onClick={() => { setMode(mode === 'totp' ? 'backup' : 'totp'); setCode(''); setError(null); }}>
+          <Button type="submit" disabled={busy || code.length < 6}>
+            {busy ? 'Verifying…' : 'Verify'}
+          </Button>
+          <Button
+            variant="link"
+            onClick={() => {
+              setMode(mode === 'totp' ? 'backup' : 'totp');
+              setCode('');
+              setError(null);
+            }}
+          >
             {mode === 'totp' ? 'Use a backup code instead' : 'Use an authenticator code instead'}
           </Button>
         </form>

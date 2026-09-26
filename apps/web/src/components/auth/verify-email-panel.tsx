@@ -15,16 +15,24 @@ export function VerifyEmailPanel({ email }: { email: string | null }) {
     setError(null);
     const result = await authClient.sendVerificationEmail({ email, callbackURL: '/onboarding' });
     setBusy(false);
-    if (result.error) setError(result.error.status === 429 ? 'Please wait before requesting another link.' : 'Could not send the link.');
+    if (result.error)
+      setError(
+        result.error.status === 429
+          ? 'Please wait before requesting another link.'
+          : 'Could not send the link.',
+      );
     else setMessage('A new confirmation link is on its way.');
   }
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle><span className="text-xl">Confirm your email</span></CardTitle>
+        <CardTitle>
+          <span className="text-xl">Confirm your email</span>
+        </CardTitle>
         <CardDescription>
-          {email ? `We sent a confirmation link to ${email}.` : 'We sent you a confirmation link.'} Open it to continue.
+          {email ? `We sent a confirmation link to ${email}.` : 'We sent you a confirmation link.'}{' '}
+          Open it to continue.
         </CardDescription>
       </CardHeader>
       <CardContent className="grid gap-3">

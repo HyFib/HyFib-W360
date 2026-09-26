@@ -22,7 +22,9 @@ export function AcceptInvitationButton({ token }: { token: string }) {
   return (
     <div className="grid gap-3">
       <FormError message={error} />
-      <Button onClick={accept} disabled={busy}>{busy ? 'Joining…' : 'Accept invitation'}</Button>
+      <Button onClick={accept} disabled={busy}>
+        {busy ? 'Joining…' : 'Accept invitation'}
+      </Button>
     </div>
   );
 }

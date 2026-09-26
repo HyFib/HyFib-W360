@@ -104,7 +104,11 @@ export function createPlatformService(deps: PlatformDeps) {
             activeMembers: sql<number>`(select count(*)::int from app.memberships m where m.tenant_id = ${tenants.id} and m.status = 'active')`,
           })
           .from(tenants)
-          .where(search ? sql`(lower(${tenants.name}) like ${`%${search}%`} or ${tenants.slug} like ${`%${search}%`})` : undefined)
+          .where(
+            search
+              ? sql`(lower(${tenants.name}) like ${`%${search}%`} or ${tenants.slug} like ${`%${search}%`})`
+              : undefined,
+          )
           .orderBy(desc(tenants.createdAt))
           .limit(limit),
       );
@@ -120,14 +124,18 @@ export function createPlatformService(deps: PlatformDeps) {
           .for('update');
         if (!current) throw notFound('Company');
         if (current.status === 'deleted' || current.status === 'pending_deletion') {
-          throw new AppError('precondition_failed', 'Companies being deleted cannot change status here.');
+          throw new AppError(
+            'precondition_failed',
+            'Companies being deleted cannot change status here.',
+          );
         }
         if (current.status === data.status) return;
         await tx
           .update(tenants)
           .set({ status: data.status, statusReason: data.reason, statusChangedAt: clock.now() })
           .where(eq(tenants.id, data.tenantId));
-        const action = data.status === 'suspended' ? 'platform.tenant_suspended' : 'platform.tenant_reactivated';
+        const action =
+          data.status === 'suspended' ? 'platform.tenant_suspended' : 'platform.tenant_reactivated';
         await tx.insert(platformAuditEvents).values({
           id: uuidv7(),
           actorUserId: actor.userId,
@@ -152,12 +160,18 @@ export function createPlatformService(deps: PlatformDeps) {
       });
     },
 
-    async grantSupportAccess(actor: PlatformActor, input: unknown): Promise<{ grantId: string; expiresAt: Date }> {
+    async grantSupportAccess(
+      actor: PlatformActor,
+      input: unknown,
+    ): Promise<{ grantId: string; expiresAt: Date }> {
       const data = parse(supportGrantSchema, input);
       const grantId = uuidv7();
       const expiresAt = new Date(clock.now().getTime() + data.durationMinutes * 60_000);
       await platformDb.run(actor.userId, async (tx) => {
-        const [exists] = await tx.select({ id: tenants.id }).from(tenants).where(eq(tenants.id, data.tenantId));
+        const [exists] = await tx
+          .select({ id: tenants.id })
+          .from(tenants)
+          .where(eq(tenants.id, data.tenantId));
         if (!exists) throw notFound('Company');
         await tx.insert(supportAccessGrants).values({
           id: grantId,
@@ -187,7 +201,11 @@ export function createPlatformService(deps: PlatformDeps) {
           subjectId: grantId,
           result: 'success',
           correlationId: actor.correlationId,
-          metadata: { reason: data.reason, scopes: data.scopes, expiresAt: expiresAt.toISOString() },
+          metadata: {
+            reason: data.reason,
+            scopes: data.scopes,
+            expiresAt: expiresAt.toISOString(),
+          },
         });
       });
       return { grantId, expiresAt };
@@ -229,7 +247,12 @@ export function createPlatformService(deps: PlatformDeps) {
           })
           .from(supportAccessGrants)
           .innerJoin(tenants, eq(tenants.id, supportAccessGrants.tenantId))
-          .where(and(isNull(supportAccessGrants.revokedAt), gt(supportAccessGrants.expiresAt, clock.now())))
+          .where(
+            and(
+              isNull(supportAccessGrants.revokedAt),
+              gt(supportAccessGrants.expiresAt, clock.now()),
+            ),
+          )
           .orderBy(desc(supportAccessGrants.createdAt)),
       );
     },
@@ -248,7 +271,12 @@ export function createPlatformService(deps: PlatformDeps) {
       if (!z.uuid().safeParse(tenantId).success) throw notFound('Company');
       return platformDb.run(actor.userId, async (tx) =>
         tx
-          .select({ userId: memberships.userId, name: users.name, roles: memberships.roles, status: memberships.status })
+          .select({
+            userId: memberships.userId,
+            name: users.name,
+            roles: memberships.roles,
+            status: memberships.status,
+          })
           .from(memberships)
           .innerJoin(users, eq(users.id, memberships.userId))
           .where(and(eq(memberships.tenantId, tenantId), sql`'owner' = any(${memberships.roles})`)),

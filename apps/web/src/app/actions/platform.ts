@@ -23,7 +23,9 @@ export async function setTenantStatusAction(input: unknown): Promise<ActionResul
   });
 }
 
-export async function grantSupportAccessAction(input: unknown): Promise<ActionResult<{ expiresAt: string }>> {
+export async function grantSupportAccessAction(
+  input: unknown,
+): Promise<ActionResult<{ expiresAt: string }>> {
   return runAction(async () => {
     const { actor, runtime } = await actorForAction();
     const result = await runtime.platform.grantSupportAccess(actor, input);

@@ -5,18 +5,33 @@ import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { passwordSchema } from '@w360/contracts';
-import { Button, Card, CardContent, CardDescription, CardHeader, CardTitle, Field, Input } from '@w360/ui';
+import {
+  Button,
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+  Field,
+  Input,
+} from '@w360/ui';
 import { authClient } from '@/lib/auth-client';
 import { FormError, FormSuccess } from '@/components/form-status';
 
 const schema = z
   .object({ password: passwordSchema, confirm: z.string() })
-  .refine((v) => v.password === v.confirm, { path: ['confirm'], message: 'Passwords do not match' });
+  .refine((v) => v.password === v.confirm, {
+    path: ['confirm'],
+    message: 'Passwords do not match',
+  });
 
 export function ResetPasswordForm({ token, invalid }: { token: string | null; invalid: boolean }) {
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState(false);
-  const form = useForm<z.input<typeof schema>>({ resolver: zodResolver(schema), defaultValues: { password: '', confirm: '' } });
+  const form = useForm<z.input<typeof schema>>({
+    resolver: zodResolver(schema),
+    defaultValues: { password: '', confirm: '' },
+  });
 
   const onSubmit = form.handleSubmit(async ({ password }) => {
     if (!token) return;
@@ -32,7 +47,9 @@ export function ResetPasswordForm({ token, invalid }: { token: string | null; in
   return (
     <Card>
       <CardHeader>
-        <CardTitle><span className="text-xl">Choose a new password</span></CardTitle>
+        <CardTitle>
+          <span className="text-xl">Choose a new password</span>
+        </CardTitle>
         <CardDescription>Your other sessions will be signed out.</CardDescription>
       </CardHeader>
       <CardContent className="grid gap-4">
@@ -41,18 +58,45 @@ export function ResetPasswordForm({ token, invalid }: { token: string | null; in
         ) : done ? (
           <>
             <FormSuccess message="Password updated. You can now sign in." />
-            <Link href="/sign-in" className="text-primary underline-offset-4 hover:underline">Go to sign in</Link>
+            <Link href="/sign-in" className="text-primary underline-offset-4 hover:underline">
+              Go to sign in
+            </Link>
           </>
         ) : (
           <form onSubmit={onSubmit} className="grid gap-4" noValidate>
             <FormError message={error} />
-            <Field id="password" label="New password" description="At least 12 characters." error={form.formState.errors.password?.message}>
-              {(aria) => <Input type="password" autoComplete="new-password" {...aria} {...form.register('password')} />}
+            <Field
+              id="password"
+              label="New password"
+              description="At least 12 characters."
+              error={form.formState.errors.password?.message}
+            >
+              {(aria) => (
+                <Input
+                  type="password"
+                  autoComplete="new-password"
+                  {...aria}
+                  {...form.register('password')}
+                />
+              )}
             </Field>
-            <Field id="confirm" label="Confirm password" error={form.formState.errors.confirm?.message}>
-              {(aria) => <Input type="password" autoComplete="new-password" {...aria} {...form.register('confirm')} />}
+            <Field
+              id="confirm"
+              label="Confirm password"
+              error={form.formState.errors.confirm?.message}
+            >
+              {(aria) => (
+                <Input
+                  type="password"
+                  autoComplete="new-password"
+                  {...aria}
+                  {...form.register('confirm')}
+                />
+              )}
             </Field>
-            <Button type="submit" disabled={form.formState.isSubmitting}>Update password</Button>
+            <Button type="submit" disabled={form.formState.isSubmitting}>
+              Update password
+            </Button>
           </form>
         )}
       </CardContent>

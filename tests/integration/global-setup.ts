@@ -32,12 +32,20 @@ function urlFor(adminUrl: string, database: string, user?: string, password?: st
 
 declare module 'vitest' {
   export interface ProvidedContext {
-    dbUrls: { admin: string; owner: string; app: string; auth: string; platform: string; name: string };
+    dbUrls: {
+      admin: string;
+      owner: string;
+      app: string;
+      auth: string;
+      platform: string;
+      name: string;
+    };
   }
 }
 
 export default async function setup(project: TestProject): Promise<() => Promise<void>> {
-  const adminUrl = process.env.TEST_DATABASE_ADMIN_URL ?? 'postgres://postgres:postgres@127.0.0.1:54329/postgres';
+  const adminUrl =
+    process.env.TEST_DATABASE_ADMIN_URL ?? 'postgres://postgres:postgres@127.0.0.1:54329/postgres';
   const dbName = `w360_it_${Date.now().toString(36)}_${process.pid}`;
   const admin = new pg.Client({ connectionString: adminUrl });
   await admin.connect();

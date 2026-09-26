@@ -42,7 +42,11 @@ export function escapeHtml(value: string): string {
     .replace(/'/g, '&#39;');
 }
 
-function layout(title: string, paragraphs: string[], action?: { label: string; url: string }): string {
+function layout(
+  title: string,
+  paragraphs: string[],
+  action?: { label: string; url: string },
+): string {
   const body = paragraphs.map((p) => `<p style="margin:0 0 16px">${escapeHtml(p)}</p>`).join('');
   const button = action
     ? `<p style="margin:24px 0"><a href="${escapeHtml(action.url)}" style="background:#0f766e;color:#ffffff;padding:12px 20px;border-radius:6px;text-decoration:none;display:inline-block">${escapeHtml(action.label)}</a></p>
@@ -59,30 +63,55 @@ function layout(title: string, paragraphs: string[], action?: { label: string; u
 export function renderEmail(payload: EmailPayload): RenderedEmail {
   switch (payload.kind) {
     case 'auth.verify_email': {
-      const lines = [`Hi ${payload.name},`, 'Confirm your email address to finish setting up your HyFib W360 account. The link expires in 24 hours.'];
+      const lines = [
+        `Hi ${payload.name},`,
+        'Confirm your email address to finish setting up your HyFib W360 account. The link expires in 24 hours.',
+      ];
       return {
         subject: 'Confirm your email address',
         text: `${lines.join('\n\n')}\n\n${payload.url}\n\nIf you did not create an account, you can ignore this email.`,
-        html: layout('Confirm your email address', [...lines, 'If you did not create an account, you can ignore this email.'], {
-          label: 'Confirm email',
-          url: payload.url,
-        }),
+        html: layout(
+          'Confirm your email address',
+          [...lines, 'If you did not create an account, you can ignore this email.'],
+          {
+            label: 'Confirm email',
+            url: payload.url,
+          },
+        ),
       };
     }
     case 'auth.reset_password': {
-      const lines = [`Hi ${payload.name},`, 'We received a request to reset your password. The link expires in 1 hour and can be used once.'];
+      const lines = [
+        `Hi ${payload.name},`,
+        'We received a request to reset your password. The link expires in 1 hour and can be used once.',
+      ];
       return {
         subject: 'Reset your password',
         text: `${lines.join('\n\n')}\n\n${payload.url}\n\nIf you did not request this, you can ignore this email; your password stays the same.`,
-        html: layout('Reset your password', [...lines, 'If you did not request this, you can ignore this email; your password stays the same.'], {
-          label: 'Choose a new password',
-          url: payload.url,
-        }),
+        html: layout(
+          'Reset your password',
+          [
+            ...lines,
+            'If you did not request this, you can ignore this email; your password stays the same.',
+          ],
+          {
+            label: 'Choose a new password',
+            url: payload.url,
+          },
+        ),
       };
     }
     case 'auth.password_changed': {
-      const lines = [`Hi ${payload.name},`, 'Your password was just changed and your other sessions were signed out.', 'If this was not you, reset your password immediately and contact your administrator.'];
-      return { subject: 'Your password was changed', text: lines.join('\n\n'), html: layout('Your password was changed', lines) };
+      const lines = [
+        `Hi ${payload.name},`,
+        'Your password was just changed and your other sessions were signed out.',
+        'If this was not you, reset your password immediately and contact your administrator.',
+      ];
+      return {
+        subject: 'Your password was changed',
+        text: lines.join('\n\n'),
+        html: layout('Your password was changed', lines),
+      };
     }
     case 'tenant.invitation': {
       const roleText = payload.roles.join(', ');
@@ -93,14 +122,21 @@ export function renderEmail(payload: EmailPayload): RenderedEmail {
       return {
         subject: `You're invited to ${payload.companyName} on HyFib W360`,
         text: `${lines.join('\n\n')}\n\n${payload.url}`,
-        html: layout(`Join ${payload.companyName}`, lines, { label: 'Review invitation', url: payload.url }),
+        html: layout(`Join ${payload.companyName}`, lines, {
+          label: 'Review invitation',
+          url: payload.url,
+        }),
       };
     }
     case 'billing.notice': {
       return {
         subject: `${payload.subject} · ${payload.companyName}`,
         text: `${payload.lines.join('\n\n')}${payload.url ? `\n\n${payload.url}` : ''}`,
-        html: layout(payload.subject, payload.lines, payload.url ? { label: 'Open billing', url: payload.url } : undefined),
+        html: layout(
+          payload.subject,
+          payload.lines,
+          payload.url ? { label: 'Open billing', url: payload.url } : undefined,
+        ),
       };
     }
   }

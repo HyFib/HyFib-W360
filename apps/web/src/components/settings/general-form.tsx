@@ -4,7 +4,17 @@ import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import type { z } from 'zod';
 import { updateCompanySettingsSchema } from '@w360/contracts';
-import { Button, Card, CardContent, CardFooter, CardHeader, CardTitle, Field, Input, Select } from '@w360/ui';
+import {
+  Button,
+  Card,
+  CardContent,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+  Field,
+  Input,
+  Select,
+} from '@w360/ui';
 import { updateCompanySettingsAction } from '@/app/actions/tenancy';
 import { FormError, FormSuccess } from '@/components/form-status';
 
@@ -23,14 +33,20 @@ export function GeneralSettingsForm({
 }) {
   const [error, setError] = useState<{ message: string; reference?: string } | null>(null);
   const [saved, setSaved] = useState(false);
-  const form = useForm<Values>({ resolver: zodResolver(updateCompanySettingsSchema), defaultValues: initial });
+  const form = useForm<Values>({
+    resolver: zodResolver(updateCompanySettingsSchema),
+    defaultValues: initial,
+  });
 
   const onSubmit = form.handleSubmit(async (values) => {
     setError(null);
     setSaved(false);
     const result = await updateCompanySettingsAction(slug, values);
     if (!result.ok) {
-      setError({ message: result.message, ...(result.reference ? { reference: result.reference } : {}) });
+      setError({
+        message: result.message,
+        ...(result.reference ? { reference: result.reference } : {}),
+      });
       return;
     }
     setSaved(true);
@@ -48,16 +64,28 @@ export function GeneralSettingsForm({
           <Field id="name" label="Company name" error={form.formState.errors.name?.message}>
             {(aria) => <Input disabled={!canEdit} {...aria} {...form.register('name')} />}
           </Field>
-          <Field id="timezone" label="Time zone" description="Used for schedules, business hours and reports." error={form.formState.errors.timezone?.message}>
+          <Field
+            id="timezone"
+            label="Time zone"
+            description="Used for schedules, business hours and reports."
+            error={form.formState.errors.timezone?.message}
+          >
             {(aria) => (
               <Select disabled={!canEdit} {...aria} {...form.register('timezone')}>
                 {timezones.map((tz) => (
-                  <option key={tz} value={tz}>{tz}</option>
+                  <option key={tz} value={tz}>
+                    {tz}
+                  </option>
                 ))}
               </Select>
             )}
           </Field>
-          <Field id="locale" label="Language" description="Interface language for company-wide content." error={form.formState.errors.locale?.message}>
+          <Field
+            id="locale"
+            label="Language"
+            description="Interface language for company-wide content."
+            error={form.formState.errors.locale?.message}
+          >
             {(aria) => (
               <Select disabled={!canEdit} {...aria} {...form.register('locale')}>
                 <option value="en">English</option>
@@ -67,7 +95,9 @@ export function GeneralSettingsForm({
         </CardContent>
         {canEdit ? (
           <CardFooter>
-            <Button type="submit" disabled={form.formState.isSubmitting}>Save changes</Button>
+            <Button type="submit" disabled={form.formState.isSubmitting}>
+              Save changes
+            </Button>
           </CardFooter>
         ) : null}
       </form>

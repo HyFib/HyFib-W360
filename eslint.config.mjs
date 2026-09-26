@@ -28,7 +28,12 @@ export default tseslint.config(
       '@typescript-eslint/no-explicit-any': 'error',
       '@typescript-eslint/no-unused-vars': [
         'error',
-        { argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrors: 'all', caughtErrorsIgnorePattern: '^_' },
+        {
+          argsIgnorePattern: '^_',
+          varsIgnorePattern: '^_',
+          caughtErrors: 'all',
+          caughtErrorsIgnorePattern: '^_',
+        },
       ],
       '@typescript-eslint/consistent-type-imports': ['error', { fixStyle: 'inline-type-imports' }],
       'no-console': ['error', { allow: ['warn', 'error'] }],
@@ -37,7 +42,8 @@ export default tseslint.config(
         'error',
         {
           selector: "CallExpression[callee.name='setTimeout'][arguments.length<2]",
-          message: 'setTimeout requires an explicit delay; avoid arbitrary sleeps in production code.',
+          message:
+            'setTimeout requires an explicit delay; avoid arbitrary sleeps in production code.',
         },
       ],
     },

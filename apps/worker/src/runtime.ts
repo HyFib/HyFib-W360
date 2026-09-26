@@ -10,7 +10,13 @@ import {
   type WorkerConfig,
 } from '@w360/core';
 import { assertRuntimeRoleSafety, createDatabase, createPool, type Database } from '@w360/db';
-import { JobSigner, PgBossJobQueue, SmtpEmailSender, type EmailSender, type JobQueue } from '@w360/domain';
+import {
+  JobSigner,
+  PgBossJobQueue,
+  SmtpEmailSender,
+  type EmailSender,
+  type JobQueue,
+} from '@w360/domain';
 
 export interface WorkerRuntime {
   config: WorkerConfig;
@@ -28,14 +34,20 @@ export interface WorkerRuntime {
 export async function createWorkerRuntime(): Promise<WorkerRuntime> {
   const config = loadWorkerConfig();
   const logger = createLogger({ name: 'w360-worker', level: config.LOG_LEVEL });
-  const keyring = Keyring.fromEnv(config.W360_ENCRYPTION_KEYS, config.W360_ENCRYPTION_PRIMARY_KEY_ID);
+  const keyring = Keyring.fromEnv(
+    config.W360_ENCRYPTION_KEYS,
+    config.W360_ENCRYPTION_PRIMARY_KEY_ID,
+  );
   const pool = createPool({
     connectionString: config.DATABASE_URL_APP,
     max: config.DATABASE_POOL_MAX_APP,
     applicationName: 'w360-worker',
     statementTimeoutMs: config.DATABASE_STATEMENT_TIMEOUT_MS,
   });
-  await assertRuntimeRoleSafety(pool, { strict: config.NODE_ENV === 'production', warn: (m) => logger.warn(m) });
+  await assertRuntimeRoleSafety(pool, {
+    strict: config.NODE_ENV === 'production',
+    warn: (m) => logger.warn(m),
+  });
   const db = createDatabase(pool);
 
   const boss = new PgBoss({

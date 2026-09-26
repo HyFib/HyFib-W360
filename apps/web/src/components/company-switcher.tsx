@@ -1,6 +1,13 @@
 'use client';
 import { Check, ChevronsUpDown, Plus } from 'lucide-react';
-import { Menu, MenuContent, MenuItem, MenuLabel, MenuSeparator, MenuTrigger } from '@w360/ui/client';
+import {
+  Menu,
+  MenuContent,
+  MenuItem,
+  MenuLabel,
+  MenuSeparator,
+  MenuTrigger,
+} from '@w360/ui/client';
 import { rememberCompanyAction } from '@/app/actions/tenancy';
 
 interface Company {
@@ -17,7 +24,13 @@ function fullNavigate(path: string) {
  * Switching company performs a full page load so no client state (drafts, caches, open streams)
  * from the previous company survives into the next one.
  */
-export function CompanySwitcher({ current, companies }: { current: Company; companies: Company[] }) {
+export function CompanySwitcher({
+  current,
+  companies,
+}: {
+  current: Company;
+  companies: Company[];
+}) {
   async function switchTo(slug: string) {
     await rememberCompanyAction(slug);
     // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- full load deliberately drops all client state when the company/identity context changes
@@ -33,10 +46,17 @@ export function CompanySwitcher({ current, companies }: { current: Company; comp
       <MenuContent>
         <MenuLabel>Your companies</MenuLabel>
         {companies.map((c) => (
-          <MenuItem key={c.slug} onSelect={() => (c.slug === current.slug ? undefined : void switchTo(c.slug))}>
+          <MenuItem
+            key={c.slug}
+            onSelect={() => (c.slug === current.slug ? undefined : void switchTo(c.slug))}
+          >
             <span className="flex-1 truncate">{c.name}</span>
-            {c.status !== 'active' ? <span className="text-xs text-warning">{c.status}</span> : null}
-            {c.slug === current.slug ? <Check aria-label="Current company" className="size-4" /> : null}
+            {c.status !== 'active' ? (
+              <span className="text-xs text-warning">{c.status}</span>
+            ) : null}
+            {c.slug === current.slug ? (
+              <Check aria-label="Current company" className="size-4" />
+            ) : null}
           </MenuItem>
         ))}
         <MenuSeparator />

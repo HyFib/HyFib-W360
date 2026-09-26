@@ -4,13 +4,29 @@ import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import type { z } from 'zod';
 import { createCompanySchema, slugify } from '@w360/contracts';
-import { Button, Card, CardContent, CardDescription, CardHeader, CardTitle, Field, Input, Select } from '@w360/ui';
+import {
+  Button,
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+  Field,
+  Input,
+  Select,
+} from '@w360/ui';
 import { createCompanyAction } from '@/app/actions/tenancy';
 import { FormError } from '@/components/form-status';
 
 type Values = z.input<typeof createCompanySchema>;
 
-export function CreateCompanyForm({ timezones, defaultTimezone }: { timezones: string[]; defaultTimezone: string }) {
+export function CreateCompanyForm({
+  timezones,
+  defaultTimezone,
+}: {
+  timezones: string[];
+  defaultTimezone: string;
+}) {
   const [error, setError] = useState<{ message: string; reference?: string } | null>(null);
   const [slugTouched, setSlugTouched] = useState(false);
   const form = useForm<Values>({
@@ -22,7 +38,10 @@ export function CreateCompanyForm({ timezones, defaultTimezone }: { timezones: s
     setError(null);
     const result = await createCompanyAction(values);
     if (!result.ok) {
-      setError({ message: result.message, ...(result.reference ? { reference: result.reference } : {}) });
+      setError({
+        message: result.message,
+        ...(result.reference ? { reference: result.reference } : {}),
+      });
       for (const issue of result.issues ?? []) {
         if (issue.path === 'slug' || issue.path === 'name' || issue.path === 'timezone') {
           form.setError(issue.path, { message: issue.message });
@@ -43,8 +62,13 @@ export function CreateCompanyForm({ timezones, defaultTimezone }: { timezones: s
   return (
     <Card>
       <CardHeader>
-        <CardTitle><span className="text-xl">Create your company</span></CardTitle>
-        <CardDescription>Each company has its own team, WhatsApp numbers, contacts and billing. You can belong to several.</CardDescription>
+        <CardTitle>
+          <span className="text-xl">Create your company</span>
+        </CardTitle>
+        <CardDescription>
+          Each company has its own team, WhatsApp numbers, contacts and billing. You can belong to
+          several.
+        </CardDescription>
       </CardHeader>
       <CardContent>
         <form onSubmit={onSubmit} className="grid gap-4" noValidate>
@@ -52,7 +76,12 @@ export function CreateCompanyForm({ timezones, defaultTimezone }: { timezones: s
           <Field id="name" label="Company name" error={form.formState.errors.name?.message}>
             {(aria) => <Input autoComplete="organization" {...aria} {...nameField} />}
           </Field>
-          <Field id="slug" label="Company address" description="Used in your workspace URL: /c/your-address" error={form.formState.errors.slug?.message}>
+          <Field
+            id="slug"
+            label="Company address"
+            description="Used in your workspace URL: /c/your-address"
+            error={form.formState.errors.slug?.message}
+          >
             {(aria) => (
               <Input
                 {...aria}
@@ -65,7 +94,11 @@ export function CreateCompanyForm({ timezones, defaultTimezone }: { timezones: s
           <Field id="timezone" label="Time zone" error={form.formState.errors.timezone?.message}>
             {(aria) => (
               <Select {...aria} {...form.register('timezone')}>
-                {timezones.map((tz) => <option key={tz} value={tz}>{tz}</option>)}
+                {timezones.map((tz) => (
+                  <option key={tz} value={tz}>
+                    {tz}
+                  </option>
+                ))}
               </Select>
             )}
           </Field>

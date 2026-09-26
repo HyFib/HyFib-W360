@@ -42,7 +42,12 @@ export interface TenantContext {
   readonly permissions: ReadonlySet<Permission>;
   /** Role permissions before restrictions (used to explain why something is unavailable). */
   readonly rolePermissions: ReadonlySet<Permission>;
-  readonly mfa: { required: boolean; satisfied: boolean; graceEndsAt: Date | null; blocking: boolean };
+  readonly mfa: {
+    required: boolean;
+    satisfied: boolean;
+    graceEndsAt: Date | null;
+    blocking: boolean;
+  };
   readonly sessionId: string | null;
   readonly correlationId: string;
   readonly scope: TenantScope;
@@ -103,13 +108,15 @@ export async function resolveTenantContext(
   const now = deps.clock.now();
   const mfaRequired = row.requireMfaAllMembers || isPrivileged(row.roles);
   const mfaSatisfied = !mfaRequired || row.twoFactorEnabled;
-  const graceEndsAt = mfaRequired && !mfaSatisfied
-    ? new Date(row.joinedAt.getTime() + deps.mfaGracePeriodHours * 3600_000)
-    : null;
+  const graceEndsAt =
+    mfaRequired && !mfaSatisfied
+      ? new Date(row.joinedAt.getTime() + deps.mfaGracePeriodHours * 3600_000)
+      : null;
   const mfaBlocking = graceEndsAt !== null && now >= graceEndsAt;
 
   let effective = new Set(rolePermissions);
-  if (row.status !== 'active') effective = new Set([...effective].filter((p) => ALLOWED_WHEN_SUSPENDED.has(p)));
+  if (row.status !== 'active')
+    effective = new Set([...effective].filter((p) => ALLOWED_WHEN_SUSPENDED.has(p)));
   if (mfaBlocking) effective = new Set([...effective].filter((p) => ALLOWED_WITHOUT_MFA.has(p)));
 
   return {
@@ -123,7 +130,12 @@ export async function resolveTenantContext(
       billingMode: row.billingMode,
       requireMfaAllMembers: row.requireMfaAllMembers,
     },
-    user: { id: input.userId, email: row.email, name: row.userName, twoFactorEnabled: row.twoFactorEnabled },
+    user: {
+      id: input.userId,
+      email: row.email,
+      name: row.userName,
+      twoFactorEnabled: row.twoFactorEnabled,
+    },
     membership: { id: row.membershipId, roles: row.roles, joinedAt: row.joinedAt },
     permissions: effective,
     rolePermissions,
@@ -143,10 +155,16 @@ export function assertCan(ctx: TenantContext, permission: Permission): void {
   if (ctx.permissions.has(permission)) return;
   if (ctx.rolePermissions.has(permission)) {
     if (ctx.mfa.blocking) {
-      throw new AppError('mfa_required', 'Set up two-factor authentication to continue using this company.');
+      throw new AppError(
+        'mfa_required',
+        'Set up two-factor authentication to continue using this company.',
+      );
     }
     if (ctx.tenant.status !== 'active') {
-      throw new AppError('tenant_suspended', 'This company is suspended; this action is unavailable.');
+      throw new AppError(
+        'tenant_suspended',
+        'This company is suspended; this action is unavailable.',
+      );
     }
   }
   throw forbidden();

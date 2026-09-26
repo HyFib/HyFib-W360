@@ -20,13 +20,19 @@ export default async function AuditPage({
   const ctx = await requireTenant(slug);
   assertCan(ctx, 'audit.read');
   const { tenancy } = await getRuntime();
-  const page = await tenancy.listAuditEvents(ctx, { cursor: typeof cursor === 'string' ? cursor : undefined, limit: 50 });
+  const page = await tenancy.listAuditEvents(ctx, {
+    cursor: typeof cursor === 'string' ? cursor : undefined,
+    limit: 50,
+  });
   const base = `/c/${ctx.tenant.slug}/settings/audit`;
   return (
     <Card>
       <CardContent className="pt-6">
         {page.events.length === 0 ? (
-          <EmptyState title="No audit events" description="Sensitive actions such as invitations, role changes and settings updates are recorded here." />
+          <EmptyState
+            title="No audit events"
+            description="Sensitive actions such as invitations, role changes and settings updates are recorded here."
+          />
         ) : (
           <>
             <Table>
@@ -42,22 +48,53 @@ export default async function AuditPage({
               <TBody>
                 {page.events.map((e) => (
                   <TR key={e.id}>
-                    <TD className="whitespace-nowrap"><time dateTime={e.occurredAt.toISOString()}>{e.occurredAt.toISOString().replace('T', ' ').slice(0, 19)}</time></TD>
+                    <TD className="whitespace-nowrap">
+                      <time dateTime={e.occurredAt.toISOString()}>
+                        {e.occurredAt.toISOString().replace('T', ' ').slice(0, 19)}
+                      </time>
+                    </TD>
                     <TD>
                       <div>{e.actorName ?? '—'}</div>
-                      <div className="text-xs text-muted-foreground">{e.actorType === 'platform_admin' ? 'HyFib platform staff' : e.actorType}</div>
+                      <div className="text-xs text-muted-foreground">
+                        {e.actorType === 'platform_admin' ? 'HyFib platform staff' : e.actorType}
+                      </div>
                     </TD>
-                    <TD><code className="text-xs">{e.action}</code></TD>
-                    <TD className="text-xs text-muted-foreground">{e.subjectType ? `${e.subjectType}` : '—'}</TD>
-                    <TD><Badge tone={e.result === 'success' ? 'success' : e.result === 'denied' ? 'warning' : 'danger'}>{e.result}</Badge></TD>
+                    <TD>
+                      <code className="text-xs">{e.action}</code>
+                    </TD>
+                    <TD className="text-xs text-muted-foreground">
+                      {e.subjectType ? `${e.subjectType}` : '—'}
+                    </TD>
+                    <TD>
+                      <Badge
+                        tone={
+                          e.result === 'success'
+                            ? 'success'
+                            : e.result === 'denied'
+                              ? 'warning'
+                              : 'danger'
+                        }
+                      >
+                        {e.result}
+                      </Badge>
+                    </TD>
                   </TR>
                 ))}
               </TBody>
             </Table>
             <div className="mt-4 flex justify-end gap-3 text-sm">
-              {cursor ? <Link href={base} className="text-primary underline-offset-4 hover:underline">Newest</Link> : null}
+              {cursor ? (
+                <Link href={base} className="text-primary underline-offset-4 hover:underline">
+                  Newest
+                </Link>
+              ) : null}
               {page.nextCursor ? (
-                <Link href={`${base}?cursor=${encodeURIComponent(page.nextCursor)}`} className="text-primary underline-offset-4 hover:underline">Older</Link>
+                <Link
+                  href={`${base}?cursor=${encodeURIComponent(page.nextCursor)}`}
+                  className="text-primary underline-offset-4 hover:underline"
+                >
+                  Older
+                </Link>
               ) : null}
             </div>
           </>

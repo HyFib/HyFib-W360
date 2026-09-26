@@ -2,7 +2,15 @@ import type { HTMLAttributes } from 'react';
 import { cn } from './cn';
 
 export function Card({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn('rounded-lg border border-border bg-card text-card-foreground shadow-xs', className)} {...props} />;
+  return (
+    <div
+      className={cn(
+        'rounded-lg border border-border bg-card text-card-foreground shadow-xs',
+        className,
+      )}
+      {...props}
+    />
+  );
 }
 
 export function CardHeader({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
@@ -26,5 +34,10 @@ export function CardContent({ className, ...props }: HTMLAttributes<HTMLDivEleme
 }
 
 export function CardFooter({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn('flex items-center gap-2 border-t border-border px-6 py-4', className)} {...props} />;
+  return (
+    <div
+      className={cn('flex items-center gap-2 border-t border-border px-6 py-4', className)}
+      {...props}
+    />
+  );
 }

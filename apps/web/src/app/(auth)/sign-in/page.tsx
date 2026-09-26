@@ -6,7 +6,11 @@ import { getCurrentSession } from '@/server/session';
 export const metadata: Metadata = { title: 'Sign in' };
 export const dynamic = 'force-dynamic';
 
-export default async function SignInPage({ searchParams }: { searchParams: Promise<{ next?: string }> }) {
+export default async function SignInPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ next?: string }>;
+}) {
   const { next } = await searchParams;
   const session = await getCurrentSession();
   if (session?.user.emailVerified) redirect('/');

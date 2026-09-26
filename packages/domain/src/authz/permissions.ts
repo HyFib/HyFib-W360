@@ -145,7 +145,11 @@ export const ROLE_PERMISSIONS: Record<TenantRole, ReadonlySet<Permission>> = {
 };
 
 /** Roles whose members must use multi-factor authentication (after the grace period). */
-export const PRIVILEGED_ROLES: ReadonlySet<TenantRole> = new Set<TenantRole>(['owner', 'admin', 'billing']);
+export const PRIVILEGED_ROLES: ReadonlySet<TenantRole> = new Set<TenantRole>([
+  'owner',
+  'admin',
+  'billing',
+]);
 
 /**
  * Permissions that remain available while a company is suspended: read access, exports, billing
@@ -178,7 +182,10 @@ export const ALLOWED_WHEN_SUSPENDED: ReadonlySet<Permission> = new Set<Permissio
 ]);
 
 /** Permissions available before a privileged member completes required MFA set-up. */
-export const ALLOWED_WITHOUT_MFA: ReadonlySet<Permission> = new Set<Permission>(['tenant.read', 'members.read']);
+export const ALLOWED_WITHOUT_MFA: ReadonlySet<Permission> = new Set<Permission>([
+  'tenant.read',
+  'members.read',
+]);
 
 export function permissionsForRoles(roles: readonly TenantRole[]): Set<Permission> {
   const result = new Set<Permission>();
@@ -193,18 +200,36 @@ export function isPrivileged(roles: readonly TenantRole[]): boolean {
 }
 
 /** Only owners may grant or revoke the owner role; admins may manage every other role. */
-export function canAssignRoles(actorRoles: readonly TenantRole[], targetRoles: readonly TenantRole[]): boolean {
+export function canAssignRoles(
+  actorRoles: readonly TenantRole[],
+  targetRoles: readonly TenantRole[],
+): boolean {
   if (actorRoles.includes('owner')) return true;
   if (!actorRoles.includes('admin')) return false;
   return !targetRoles.includes('owner');
 }
 
 export const ROLE_LABELS: Record<TenantRole, { label: string; description: string }> = {
-  owner: { label: 'Owner', description: 'Full control, including billing, ownership and company deletion.' },
-  admin: { label: 'Administrator', description: 'Manages members, channels, settings and integrations.' },
-  supervisor: { label: 'Supervisor', description: 'Oversees the shared inbox, assignments and team performance.' },
+  owner: {
+    label: 'Owner',
+    description: 'Full control, including billing, ownership and company deletion.',
+  },
+  admin: {
+    label: 'Administrator',
+    description: 'Manages members, channels, settings and integrations.',
+  },
+  supervisor: {
+    label: 'Supervisor',
+    description: 'Oversees the shared inbox, assignments and team performance.',
+  },
   agent: { label: 'Agent', description: 'Handles assigned conversations and customer records.' },
-  marketer: { label: 'Marketer', description: 'Builds audiences, templates, campaigns and automations.' },
+  marketer: {
+    label: 'Marketer',
+    description: 'Builds audiences, templates, campaigns and automations.',
+  },
   analyst: { label: 'Analyst', description: 'Reads reports and aggregated analytics.' },
-  billing: { label: 'Billing', description: 'Manages plans, wallet, payment methods and invoices.' },
+  billing: {
+    label: 'Billing',
+    description: 'Manages plans, wallet, payment methods and invoices.',
+  },
 };
