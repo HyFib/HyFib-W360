@@ -26,6 +26,25 @@ export interface RecordedRequest {
   wamid?: string;
 }
 
+export interface TemplateFixture {
+  id: string;
+  name: string;
+  language: string;
+  status: string;
+  category: string;
+  components: unknown[];
+  rejected_reason?: string;
+  quality_score?: { score: string; date: number };
+}
+
+export type TemplateCreateBehaviour =
+  | { kind: 'accept'; status?: string }
+  | { kind: 'error'; status: number; code: number; message: string }
+  /** Creates the template, then drops the connection before answering (lost response). */
+  | { kind: 'create_then_drop' }
+  /** Refuses the connection-level request without creating anything. */
+  | { kind: 'drop_connection' };
+
 export interface StandInState {
   appId: string;
   appSecret: string;
@@ -45,6 +64,14 @@ export interface StandInState {
   registerError: { status: number; code: number; message: string } | null;
   requests: RecordedRequest[];
   wamidCounter: number;
+  /** Templates per WABA id, in listing order. */
+  templates: Map<string, TemplateFixture[]>;
+  templateCreateQueue: TemplateCreateBehaviour[];
+  /** When true, listing with fields beyond the defaults fails with code 100. */
+  rejectExtraTemplateFields: boolean;
+  /** Recipient -> WhatsApp id returned in send responses (defaults to the recipient). */
+  waIdFor: Map<string, string>;
+  templateCounter: number;
 }
 
 export interface GraphStandIn {
@@ -100,6 +127,11 @@ export async function startGraphStandIn(options: {
     registerError: null,
     requests: [],
     wamidCounter: 0,
+    templates: new Map(),
+    templateCreateQueue: [],
+    rejectExtraTemplateFields: false,
+    waIdFor: new Map(),
+    templateCounter: 0,
   };
   for (const token of options.acceptTokens ?? []) {
     state.tokens.set(token, {
@@ -200,11 +232,90 @@ export async function startGraphStandIn(options: {
         state.wamidCounter += 1;
         const wamid = behaviour.wamid ?? `wamid.test.${Date.now()}.${state.wamidCounter}`;
         entry.wamid = wamid;
+        const to = String((body as { to?: unknown } | undefined)?.to ?? '');
         return json(res, 200, {
           messaging_product: 'whatsapp',
-          contacts: [{ input: 'x', wa_id: 'x' }],
+          contacts: [{ input: to, wa_id: state.waIdFor.get(to) ?? to }],
           messages: [{ id: wamid }],
         });
+      }
+      if (first && second === 'message_templates') {
+        const list = state.templates.get(first) ?? [];
+        state.templates.set(first, list);
+        if (req.method === 'POST') {
+          const b = (body ?? {}) as Record<string, unknown>;
+          if (
+            typeof b.name !== 'string' ||
+            typeof b.language !== 'string' ||
+            typeof b.category !== 'string' ||
+            !Array.isArray(b.components)
+          ) {
+            return graphError(res, 400, 100, 'Invalid parameter');
+          }
+          const behaviour = state.templateCreateQueue.shift() ?? { kind: 'accept' };
+          if (behaviour.kind === 'drop_connection') {
+            req.socket.destroy();
+            return;
+          }
+          if (behaviour.kind === 'error') {
+            return graphError(res, behaviour.status, behaviour.code, behaviour.message);
+          }
+          if (list.some((t) => t.name === b.name && t.language === b.language)) {
+            return graphError(res, 400, 100, 'Content in this language already exists');
+          }
+          state.templateCounter += 1;
+          const created: TemplateFixture = {
+            id: String(9_000_000_000 + state.templateCounter),
+            name: b.name,
+            language: b.language,
+            status: behaviour.kind === 'accept' ? (behaviour.status ?? 'PENDING') : 'PENDING',
+            category: b.category,
+            components: b.components,
+          };
+          list.push(created);
+          if (behaviour.kind === 'create_then_drop') {
+            req.socket.destroy();
+            return;
+          }
+          return json(res, 200, {
+            id: created.id,
+            status: created.status,
+            category: created.category,
+          });
+        }
+        if (req.method === 'GET') {
+          const fields = url.searchParams.get('fields');
+          if (
+            state.rejectExtraTemplateFields &&
+            fields &&
+            /rejected_reason|quality_score/.test(fields)
+          ) {
+            return graphError(res, 400, 100, 'Tried accessing nonexisting field');
+          }
+          const limit = Math.min(Number(url.searchParams.get('limit') ?? '25') || 25, 100);
+          const after = url.searchParams.get('after');
+          const offset = after ? Number(Buffer.from(after, 'base64url').toString('utf8')) : 0;
+          const page = list.slice(offset, offset + limit);
+          const nextOffset = offset + page.length;
+          const cursor = (n: number) => Buffer.from(String(n)).toString('base64url');
+          return json(res, 200, {
+            data: page,
+            paging: {
+              cursors: { before: cursor(offset), after: cursor(nextOffset) },
+              ...(nextOffset < list.length
+                ? { next: `https://graph.example/next?after=${cursor(nextOffset)}` }
+                : {}),
+            },
+          });
+        }
+        if (req.method === 'DELETE') {
+          const name = url.searchParams.get('name');
+          const hsmId = url.searchParams.get('hsm_id');
+          const index = list.findIndex((t) => t.name === name && (!hsmId || t.id === hsmId));
+          if (index < 0) return graphError(res, 400, 100, 'Template not found');
+          list.splice(index, 1);
+          return json(res, 200, { success: true });
+        }
       }
       if (req.method === 'GET' && first && !second) {
         const number = state.numbers.get(first);

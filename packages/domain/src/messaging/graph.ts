@@ -25,6 +25,17 @@ export type GraphResult<T> =
       detail?: string;
     };
 
+export interface RemoteTemplate {
+  id: string;
+  name: string;
+  language: string;
+  status: string;
+  category: string;
+  components: unknown[];
+  rejectedReason: string | null;
+  qualityScore: string | null;
+}
+
 export interface GraphClientOptions {
   baseUrl: string;
   version: string;
@@ -105,7 +116,7 @@ export class GraphClient {
   }
 
   private async request<T>(
-    method: 'GET' | 'POST',
+    method: 'GET' | 'POST' | 'DELETE',
     path: string,
     options: { token?: string; query?: Record<string, string>; body?: unknown },
     map: (json: Record<string, unknown>) => T | null,
@@ -171,8 +182,98 @@ export class GraphClient {
       (json) => {
         const messages = json.messages as { id?: unknown }[] | undefined;
         const id = messages?.[0]?.id;
-        return typeof id === 'string' && id.length > 0 ? { messageId: id } : null;
+        if (typeof id !== 'string' || id.length === 0) return null;
+        // The WhatsApp id Meta resolved the recipient to (it can differ from the number sent).
+        const waId = (json.contacts as { wa_id?: unknown }[] | undefined)?.[0]?.wa_id;
+        return {
+          messageId: id,
+          waId: typeof waId === 'string' && /^[0-9]{6,20}$/.test(waId) ? waId : null,
+        };
       },
+    );
+  }
+
+  /** POST /{waba-id}/message_templates (response: id, status, category). */
+  createTemplate(wabaId: string, token: string, body: Record<string, unknown>) {
+    return this.request(
+      'POST',
+      `/${encodeURIComponent(wabaId)}/message_templates`,
+      { token, body },
+      (json) =>
+        typeof json.id === 'string' && json.id.length > 0
+          ? {
+              id: json.id,
+              status: typeof json.status === 'string' ? json.status : null,
+              category: typeof json.category === 'string' ? json.category : null,
+            }
+          : null,
+    );
+  }
+
+  /**
+   * GET /{waba-id}/message_templates, one page (Graph cursor pagination: `after`, `limit`).
+   * `fields` null requests Meta's default fields.
+   */
+  listTemplates(
+    wabaId: string,
+    token: string,
+    options: { after?: string | null; fields?: string | null; limit?: number } = {},
+  ) {
+    const query: Record<string, string> = { limit: String(options.limit ?? 100) };
+    if (options.fields) query.fields = options.fields;
+    if (options.after) query.after = options.after;
+    return this.request(
+      'GET',
+      `/${encodeURIComponent(wabaId)}/message_templates`,
+      { token, query },
+      (json) => {
+        if (!Array.isArray(json.data)) return null;
+        const templates: RemoteTemplate[] = [];
+        for (const raw of json.data as Record<string, unknown>[]) {
+          if (
+            typeof raw.id !== 'string' ||
+            typeof raw.name !== 'string' ||
+            typeof raw.language !== 'string' ||
+            typeof raw.status !== 'string' ||
+            typeof raw.category !== 'string'
+          ) {
+            continue;
+          }
+          const quality = raw.quality_score as { score?: unknown } | string | undefined;
+          templates.push({
+            id: raw.id,
+            name: raw.name,
+            language: raw.language,
+            status: raw.status,
+            category: raw.category,
+            components: Array.isArray(raw.components) ? raw.components : [],
+            rejectedReason: typeof raw.rejected_reason === 'string' ? raw.rejected_reason : null,
+            qualityScore:
+              typeof quality === 'string'
+                ? quality
+                : typeof quality?.score === 'string'
+                  ? quality.score
+                  : null,
+          });
+        }
+        const paging = json.paging as { next?: unknown; cursors?: { after?: unknown } } | undefined;
+        const after = paging?.cursors?.after;
+        return {
+          templates,
+          skipped: (json.data as unknown[]).length - templates.length,
+          after: typeof paging?.next === 'string' && typeof after === 'string' ? after : null,
+        };
+      },
+    );
+  }
+
+  /** DELETE /{waba-id}/message_templates?name=&hsm_id= (one language version of a template). */
+  deleteTemplate(wabaId: string, token: string, template: { name: string; hsmId: string }) {
+    return this.request(
+      'DELETE',
+      `/${encodeURIComponent(wabaId)}/message_templates`,
+      { token, query: { name: template.name, hsm_id: template.hsmId } },
+      (json) => (json.success === true ? { deleted: true } : null),
     );
   }
 

@@ -4,7 +4,6 @@ import {
   authorizedTenantScope,
   channelAccounts,
   contactIdentities,
-  contacts,
   conversations,
   eq,
   lt,
@@ -16,9 +15,19 @@ import {
   systemScope,
   webhookQuarantine,
   webhookReceipts,
+  whatsappAccounts,
   type Database,
   type Tx,
 } from '@w360/db';
+import { contactForPhone } from '../contacts/service';
+import { phoneFromWaId } from '../contacts/phone';
+import {
+  PROVIDER_MARKETING_OPT_OUT_CODE,
+  applyInboundConsentKeyword,
+  loadMessagingSettings,
+  recordProviderMarketingOptOut,
+  type MessagingSettings,
+} from '../consent/service';
 import { emitTenantEvent } from './events';
 import {
   metaEnvelopeSchema,
@@ -55,10 +64,25 @@ interface Summary {
   statuses: number;
   duplicateStatuses: number;
   orphanStatuses: number;
+  consentKeywords: number;
+  providerOptOuts: number;
+  templateSyncRequests: number;
   quarantined: number;
   malformed: number;
   unhandledFields: Record<string, number>;
 }
+
+/**
+ * Template webhook fields (M-034, M-036). Their payloads are documented only by third parties, so
+ * they are used purely as a signal: the WABA's templates are re-read from the Graph API, which is
+ * authoritative.
+ */
+export const TEMPLATE_WEBHOOK_FIELDS: ReadonlySet<string> = new Set([
+  'message_template_status_update',
+  'message_template_quality_update',
+  'message_template_components_update',
+  'template_category_update',
+]);
 
 const LEASE_MS = 2 * 60_000;
 const MEDIA_TYPES = new Set(['image', 'video', 'audio', 'document', 'sticker']);
@@ -155,6 +179,9 @@ export async function processMetaWebhookReceipt(
       statuses: 0,
       duplicateStatuses: 0,
       orphanStatuses: 0,
+      consentKeywords: 0,
+      providerOptOuts: 0,
+      templateSyncRequests: 0,
       quarantined: 0,
       malformed: 0,
       unhandledFields: {},
@@ -163,6 +190,15 @@ export async function processMetaWebhookReceipt(
     for (const entry of envelope.data.entry) {
       for (const change of entry.changes) {
         summary.changes += 1;
+        if (TEMPLATE_WEBHOOK_FIELDS.has(change.field)) {
+          const requested = await requestTemplateSync(deps, entry.id);
+          if (requested) summary.templateSyncRequests += 1;
+          else {
+            summary.quarantined += 1;
+            await quarantine('unknown_asset', { waba: entry.id, field: change.field });
+          }
+          continue;
+        }
         if (change.field !== 'messages') {
           summary.unhandledFields[change.field] = (summary.unhandledFields[change.field] ?? 0) + 1;
           continue;
@@ -230,6 +266,50 @@ export async function processMetaWebhookReceipt(
   }
 }
 
+/**
+ * Marks a WABA's templates for re-sync (the template sweep performs it). The WABA is resolved only
+ * through its verified asset binding.
+ */
+async function requestTemplateSync(deps: IngestDeps, wabaExternalId: string): Promise<boolean> {
+  const binding = await deps.db.run(
+    systemScope,
+    async (tx) => {
+      const res = await tx.execute<{ tenant_id: string; internal_id: string }>(
+        sql`select * from ops.resolve_provider_asset('meta_whatsapp', 'waba', ${wabaExternalId})`,
+      );
+      return res.rows[0] ?? null;
+    },
+    { accessMode: 'read only' },
+  );
+  if (!binding) return false;
+  await deps.db.run(authorizedTenantScope(binding.tenant_id, null), (tx) =>
+    tx
+      .update(whatsappAccounts)
+      .set({ templatesSyncRequestedAt: deps.clock.now() })
+      .where(
+        and(
+          eq(whatsappAccounts.tenantId, binding.tenant_id),
+          eq(whatsappAccounts.id, binding.internal_id),
+        ),
+      ),
+  );
+  return true;
+}
+
+/** The text a consent keyword can be matched against, per inbound message type. */
+function consentText(type: string, content: Record<string, unknown>): string | null {
+  if (type === 'text') return typeof content.text === 'string' ? content.text : null;
+  if (type === 'button') {
+    if (typeof content.text === 'string') return content.text;
+    return typeof content.payload === 'string' ? content.payload : null;
+  }
+  if (type === 'interactive') {
+    const reply = content.reply as { title?: unknown } | null | undefined;
+    return typeof reply?.title === 'string' ? reply.title : null;
+  }
+  return null;
+}
+
 interface ChangeContext {
   tenantId: string;
   channelAccountId: string;
@@ -247,6 +327,7 @@ async function ingestMessagesChange(tx: Tx, ctx: ChangeContext): Promise<void> {
     );
   if (!channel) throw new Error('Asset binding refers to a missing channel account');
 
+  let settings: MessagingSettings | null = null;
   const contactList = ctx.value.contacts ?? [];
   const findContact = (from: string | undefined): MetaContact | undefined =>
     contactList.find((c) => (from && (c.wa_id === from || c.user_id === from)) || false) ??
@@ -315,6 +396,21 @@ async function ingestMessagesChange(tx: Tx, ctx: ChangeContext): Promise<void> {
     }
     if (type === 'system')
       await applyIdentityChange(tx, ctx.tenantId, channel.whatsappAccountId, content);
+
+    const keywordText = consentText(type, content);
+    if (keywordText) {
+      settings ??= await loadMessagingSettings(tx, ctx.tenantId);
+      const matched = await applyInboundConsentKeyword(tx, {
+        tenantId: ctx.tenantId,
+        contactId,
+        channelAccountId: channel.id,
+        messageId,
+        text: keywordText,
+        occurredAt: providerAt,
+        settings,
+      });
+      if (matched) ctx.summary.consentKeywords += 1;
+    }
 
     const newer = !conversation.lastMessageAt || providerAt >= conversation.lastMessageAt;
     const reopened = conversation.status === 'resolved';
@@ -392,6 +488,31 @@ async function ingestMessagesChange(tx: Tx, ctx: ChangeContext): Promise<void> {
       // The WAMID is not (yet) known: the send worker applies these when it records the WAMID.
       ctx.summary.orphanStatuses += 1;
       continue;
+    }
+    if (
+      s.status === 'failed' &&
+      s.errors?.some((e) => Number(e.code) === PROVIDER_MARKETING_OPT_OUT_CODE)
+    ) {
+      const [thread] = await tx
+        .select({ contactId: conversations.contactId })
+        .from(conversations)
+        .where(
+          and(
+            eq(conversations.tenantId, ctx.tenantId),
+            eq(conversations.id, message.conversationId),
+          ),
+        );
+      if (thread) {
+        await recordProviderMarketingOptOut(tx, {
+          tenantId: ctx.tenantId,
+          contactId: thread.contactId,
+          channelAccountId: channel.id,
+          externalMessageId: s.id,
+          occurredAt: providerAt,
+          providerTime: true,
+        });
+        ctx.summary.providerOptOuts += 1;
+      }
     }
     const next = providerStatusToMessageStatus(s.status);
     if (next && shouldAdvance(message.status, next)) {
@@ -481,12 +602,12 @@ async function upsertIdentity(
     }
     return existing.contactId;
   }
-  const contactId = uuidv7();
-  await tx.insert(contacts).values({
-    id: contactId,
-    tenantId,
+  // A new identity joins the contact that already has this number (manual entry, import or
+  // another company number), so one person is one contact.
+  const contactId = await contactForPhone(tx, tenantId, {
+    phoneE164: phoneFromWaId(info.waId),
     displayName: info.profileName?.slice(0, 200) ?? null,
-    phoneE164: info.waId ? `+${info.waId}` : null,
+    source: 'whatsapp',
   });
   await tx.insert(contactIdentities).values({
     id: uuidv7(),

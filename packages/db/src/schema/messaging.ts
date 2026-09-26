@@ -45,6 +45,8 @@ export const whatsappAccounts = appSchema.table('whatsapp_accounts', {
     .default(sql`'{}'::text[]`),
   tokenCheckedAt: tz('token_checked_at'),
   connectedByUserId: text('connected_by_user_id'),
+  templatesSyncRequestedAt: tz('templates_sync_requested_at'),
+  templatesSyncedAt: tz('templates_synced_at'),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });
@@ -89,11 +91,21 @@ export const channelOnboardingSessions = appSchema.table('channel_onboarding_ses
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });
 
+export const CONTACT_SOURCES = ['whatsapp', 'manual', 'import', 'api'] as const;
+export type ContactSource = (typeof CONTACT_SOURCES)[number];
+
 export const contacts = appSchema.table('contacts', {
   id: uuid('id').primaryKey(),
   tenantId: uuid('tenant_id').notNull(),
   displayName: text('display_name'),
   phoneE164: text('phone_e164'),
+  email: text('email'),
+  attributes: jsonb('attributes')
+    .notNull()
+    .default(sql`'{}'::jsonb`)
+    .$type<Record<string, string | number | boolean>>(),
+  source: text('source', { enum: CONTACT_SOURCES }).notNull().default('whatsapp'),
+  erasedAt: tz('erased_at'),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });
@@ -200,6 +212,7 @@ export const messages = appSchema.table('messages', {
   referral: jsonb('referral').$type<Record<string, unknown>>(),
   pricing: jsonb('pricing').$type<Record<string, unknown>>(),
   providerTimestamp: tz('provider_timestamp'),
+  templateId: uuid('template_id'),
   createdAt: tz('created_at').notNull().defaultNow(),
 });
 

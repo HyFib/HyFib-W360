@@ -1,16 +1,18 @@
 import { z } from 'zod';
-import { AppError, notFound, uuidv7, type Clock, type Keyring } from '@w360/core';
+import { AppError, forbidden, notFound, uuidv7, type Clock, type Keyring } from '@w360/core';
 import { QUEUES } from '@w360/contracts';
 import {
   and,
   channelAccounts,
   contactIdentities,
+  contacts,
   conversations,
   desc,
   eq,
   inArray,
   isNull,
   messageStatusEvents,
+  messageTemplates,
   messages,
   or,
   sendIntents,
@@ -22,12 +24,25 @@ import {
   type Tx,
 } from '@w360/db';
 import { assertCan, can, type TenantContext } from '../authz/context';
+import {
+  PROVIDER_MARKETING_OPT_OUT_CODE,
+  checkTemplateEligibility,
+  recordProviderMarketingOptOut,
+} from '../consent/service';
+import { phoneFromWaId, waRecipientFromPhone } from '../contacts/phone';
 import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
+import { buildTemplateSend, sendSpecFor, templateParamsSchema } from '../templates/definition';
+import { markTemplateFromSendError } from '../templates/service';
+import { credentialAad } from './credentials';
 import { emitTenantEvent } from './events';
 import type { GraphClient } from './graph';
 import { takeToken } from './rate-limit';
 import { STATUS_RANK, providerStatusToMessageStatus } from './status';
+
+/** Meta template send errors (M-063/M-094): template paused, template disabled. */
+const TEMPLATE_PAUSED_CODE = 132015;
+const TEMPLATE_DISABLED_CODE = 132016;
 
 export const SERVICE_WINDOW_MS = 24 * 3600_000;
 
@@ -41,9 +56,7 @@ export const sendTextSchema = z.object({
   clientKey: z.string().regex(/^[A-Za-z0-9_-]{8,100}$/),
 });
 
-export function credentialAad(tenantId: string, whatsappAccountId: string): string {
-  return `tenant:${tenantId}|whatsapp_account:${whatsappAccountId}`;
-}
+export { credentialAad } from './credentials';
 
 export interface OutboundDeps {
   db: Database;
@@ -211,6 +224,243 @@ export async function queueTextMessage(deps: OutboundDeps, ctx: TenantContext, i
   });
 }
 
+export const sendTemplateSchema = z.object({
+  contactId: z.uuid(),
+  channelAccountId: z.uuid(),
+  templateId: z.uuid(),
+  params: templateParamsSchema,
+  clientKey: z.string().regex(/^[A-Za-z0-9_-]{8,100}$/),
+});
+
+async function lockConversationFor(
+  tx: Tx,
+  tenantId: string,
+  channelAccountId: string,
+  contactId: string,
+) {
+  await tx
+    .insert(conversations)
+    .values({ id: uuidv7(), tenantId, channelAccountId, contactId })
+    .onConflictDoNothing();
+  const [row] = await tx
+    .select({
+      id: conversations.id,
+      assignedMembershipId: conversations.assignedMembershipId,
+    })
+    .from(conversations)
+    .where(
+      and(
+        eq(conversations.tenantId, tenantId),
+        eq(conversations.channelAccountId, channelAccountId),
+        eq(conversations.contactId, contactId),
+      ),
+    )
+    .for('update');
+  if (!row) throw new Error('Conversation upsert failed');
+  return row;
+}
+
+/**
+ * Queues an approved template to one contact (business-initiated; allowed outside the 24-hour
+ * window). Utility templates need `inbox.reply` or `campaigns.send`; marketing templates need
+ * `campaigns.send`. Consent and suppression are checked now and again right before dispatch.
+ * Idempotent per client key.
+ */
+export async function queueTemplateMessage(deps: OutboundDeps, ctx: TenantContext, input: unknown) {
+  const parsed = sendTemplateSchema.safeParse(input);
+  if (!parsed.success) {
+    throw new AppError('validation_failed', parsed.error.issues[0]?.message ?? 'Invalid message', {
+      issues: parsed.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })),
+    });
+  }
+  const data = parsed.data;
+  if (!can(ctx, 'inbox.reply') && !can(ctx, 'campaigns.send')) assertCan(ctx, 'inbox.reply');
+  const now = deps.clock.now();
+  return deps.db.run(ctx.scope, async (tx) => {
+    const [existing] = await tx
+      .select({ id: messages.id })
+      .from(messages)
+      .where(and(eq(messages.tenantId, ctx.tenant.id), eq(messages.clientKey, data.clientKey)));
+    if (existing) return { messageId: existing.id, duplicate: true };
+
+    const [template] = await tx
+      .select()
+      .from(messageTemplates)
+      .where(
+        and(eq(messageTemplates.tenantId, ctx.tenant.id), eq(messageTemplates.id, data.templateId)),
+      );
+    if (!template) throw notFound('Template');
+    if (template.category === 'MARKETING' && !can(ctx, 'campaigns.send')) {
+      throw forbidden('Sending marketing templates needs the campaign sending permission.');
+    }
+    if (template.status !== 'approved') {
+      throw new AppError('precondition_failed', 'Only templates approved by Meta can be sent.');
+    }
+    const spec = sendSpecFor(template.category, template.components);
+    if (!spec.supported) throw new AppError('unsupported', spec.reason);
+    if (
+      data.params.header.length !== spec.headerParams ||
+      data.params.body.length !== spec.bodyParams
+    ) {
+      throw new AppError('validation_failed', 'Fill in every variable of the template.');
+    }
+
+    const [channel] = await tx
+      .select({
+        status: channelAccounts.status,
+        whatsappAccountId: channelAccounts.whatsappAccountId,
+      })
+      .from(channelAccounts)
+      .where(
+        and(
+          eq(channelAccounts.tenantId, ctx.tenant.id),
+          eq(channelAccounts.id, data.channelAccountId),
+        ),
+      );
+    if (!channel) throw notFound('WhatsApp number');
+    if (channel.whatsappAccountId !== template.whatsappAccountId) {
+      throw new AppError(
+        'validation_failed',
+        'This template belongs to another WhatsApp account than the chosen number.',
+      );
+    }
+    if (channel.status !== 'active') {
+      throw new AppError(
+        'precondition_failed',
+        'This WhatsApp number is not active. Reconnect it in Settings → Channels.',
+      );
+    }
+
+    const [contact] = await tx
+      .select({ id: contacts.id, phone: contacts.phoneE164, erasedAt: contacts.erasedAt })
+      .from(contacts)
+      .where(and(eq(contacts.tenantId, ctx.tenant.id), eq(contacts.id, data.contactId)));
+    if (!contact) throw notFound('Contact');
+    const [identity] = await tx
+      .select({ waId: contactIdentities.waId })
+      .from(contactIdentities)
+      .where(
+        and(
+          eq(contactIdentities.tenantId, ctx.tenant.id),
+          eq(contactIdentities.contactId, contact.id),
+          eq(contactIdentities.whatsappAccountId, channel.whatsappAccountId),
+          sql`${contactIdentities.waId} is not null`,
+        ),
+      )
+      .limit(1);
+    const recipientPhone = phoneFromWaId(identity?.waId) ?? contact.phone;
+    if (!recipientPhone) {
+      throw new AppError('precondition_failed', 'This contact has no phone number to send to.');
+    }
+    const eligibility = await checkTemplateEligibility(tx, {
+      tenantId: ctx.tenant.id,
+      contactId: contact.id,
+      recipientPhones: [recipientPhone],
+      category: template.category,
+    });
+    if (!eligibility.ok) throw new AppError('precondition_failed', eligibility.message);
+
+    const conv = await lockConversationFor(tx, ctx.tenant.id, data.channelAccountId, contact.id);
+    if (!can(ctx, 'campaigns.send') && !canSeeConversation(ctx, conv.assignedMembershipId)) {
+      throw notFound('Contact');
+    }
+    const built = buildTemplateSend(template, spec, data.params);
+    const messageId = uuidv7();
+    const intentId = uuidv7();
+    const request = {
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to: waRecipientFromPhone(recipientPhone),
+      type: 'template',
+      template: built.template,
+    };
+    await tx.insert(messages).values({
+      id: messageId,
+      tenantId: ctx.tenant.id,
+      conversationId: conv.id,
+      channelAccountId: data.channelAccountId,
+      direction: 'outbound',
+      type: 'template',
+      content: {
+        template: {
+          id: template.id,
+          name: template.name,
+          language: template.language,
+          category: template.category,
+        },
+        rendered: built.rendered,
+      },
+      status: 'queued',
+      statusRank: STATUS_RANK.queued,
+      senderType: 'agent',
+      senderMembershipId: ctx.membership.id,
+      clientKey: data.clientKey,
+      templateId: template.id,
+    });
+    await tx.insert(sendIntents).values({
+      id: intentId,
+      tenantId: ctx.tenant.id,
+      messageId,
+      channelAccountId: data.channelAccountId,
+      request,
+      actorUserId: ctx.user.id,
+    });
+    // An agent who starts a thread takes it; campaign senders without inbox access do not.
+    const claim = conv.assignedMembershipId === null && can(ctx, 'inbox.reply');
+    await tx
+      .update(conversations)
+      .set({
+        lastMessageAt: now,
+        lastMessagePreview: built.rendered.body.slice(0, 200),
+        status: 'open',
+        ...(claim ? { assignedMembershipId: ctx.membership.id } : {}),
+        version: sql`${conversations.version} + 1`,
+      })
+      .where(and(eq(conversations.tenantId, ctx.tenant.id), eq(conversations.id, conv.id)));
+    await emitTenantEvent(tx, ctx.tenant.id, {
+      type: 'message.created',
+      conversationId: conv.id,
+      assignedMembershipId: claim ? ctx.membership.id : conv.assignedMembershipId,
+      payload: { messageId },
+    });
+    await deps.jobs.enqueue(
+      tx,
+      QUEUES.messageSend.name,
+      deps.signer.sign({
+        kind: 'message.send',
+        tenantId: ctx.tenant.id,
+        actorUserId: ctx.user.id,
+        ref: intentId,
+      }),
+      { singletonKey: intentId, group: { id: data.channelAccountId } },
+    );
+    return { messageId, conversationId: conv.id, duplicate: false };
+  });
+}
+
+/**
+ * Records the WhatsApp id Meta resolved a template recipient to, so the customer's replies join
+ * this contact even when that id differs from the number we sent to.
+ */
+async function linkIdentityFromSend(
+  tx: Tx,
+  input: { tenantId: string; whatsappAccountId: string; contactId: string; waId: string },
+) {
+  await tx.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`${input.tenantId}|${input.whatsappAccountId}|w:${input.waId}`}, 7361))`,
+  );
+  await tx
+    .insert(contactIdentities)
+    .values({
+      id: uuidv7(),
+      tenantId: input.tenantId,
+      contactId: input.contactId,
+      whatsappAccountId: input.whatsappAccountId,
+      waId: input.waId,
+    })
+    .onConflictDoNothing();
+}
+
 export type SendOutcome =
   | 'accepted'
   | 'failed'
@@ -284,6 +534,9 @@ export async function processSendIntent(
         whatsappAccountId: channelAccounts.whatsappAccountId,
         credential: whatsappAccounts.credentialCiphertext,
         lastInboundAt: conversations.lastInboundAt,
+        contactId: conversations.contactId,
+        messageType: messages.type,
+        templateId: messages.templateId,
       })
       .from(messages)
       .innerJoin(
@@ -309,7 +562,37 @@ export async function processSendIntent(
       )
       .where(and(eq(messages.tenantId, scope.tenantId), eq(messages.id, current.messageId)));
     if (!ctx) throw new Error('Send intent refers to a missing message');
-    return { kind: 'claimed' as const, intent: current, ...ctx };
+    // Business-initiated templates: re-check the template and the contact's consent now, under
+    // the intent's row lock, so an opt-out recorded after queueing still stops the send.
+    let blocked: { code: string; message: string } | null = null;
+    if (ctx.messageType === 'template' && ctx.templateId) {
+      const [template] = await tx
+        .select({ status: messageTemplates.status, category: messageTemplates.category })
+        .from(messageTemplates)
+        .where(
+          and(
+            eq(messageTemplates.tenantId, scope.tenantId),
+            eq(messageTemplates.id, ctx.templateId),
+          ),
+        );
+      if (!template || template.status !== 'approved') {
+        blocked = {
+          code: 'template_not_approved',
+          message: `The template is ${template?.status ?? 'missing'}; the message was not sent.`,
+        };
+      } else {
+        const to = (current.request as { to?: unknown }).to;
+        const recipient = typeof to === 'string' ? phoneFromWaId(to) : null;
+        const eligibility = await checkTemplateEligibility(tx, {
+          tenantId: scope.tenantId,
+          contactId: ctx.contactId,
+          recipientPhones: recipient ? [recipient] : [],
+          category: template.category,
+        });
+        if (!eligibility.ok) blocked = { code: eligibility.code, message: eligibility.message };
+      }
+    }
+    return { kind: 'claimed' as const, intent: current, ...ctx, blocked };
   });
   if (outcome.kind === 'not_due') {
     return {
@@ -349,7 +632,7 @@ export async function processSendIntent(
     });
   };
 
-  const fail = (code: string, reason: string) =>
+  const fail = (code: string, reason: string, extra?: (tx: Tx) => Promise<void>) =>
     settle(
       {
         state: 'failed',
@@ -365,6 +648,7 @@ export async function processSendIntent(
         errorTitle: reason.slice(0, 500),
       },
       'message.status',
+      extra,
     );
 
   // Send-time policy checks.
@@ -386,9 +670,15 @@ export async function processSendIntent(
     );
     return { outcome: 'deferred', retryAt, channelAccountId: intent.channelAccountId };
   }
+  if (claimed.blocked) {
+    await fail(claimed.blocked.code, claimed.blocked.message);
+    return { outcome: 'failed' };
+  }
+  const isTemplate = claimed.messageType === 'template';
   if (
-    !claimed.lastInboundAt ||
-    deps.clock.now().getTime() - claimed.lastInboundAt.getTime() > SERVICE_WINDOW_MS
+    !isTemplate &&
+    (!claimed.lastInboundAt ||
+      deps.clock.now().getTime() - claimed.lastInboundAt.getTime() > SERVICE_WINDOW_MS)
   ) {
     await fail(
       'window_closed',
@@ -430,8 +720,23 @@ export async function processSendIntent(
         statusAt: deps.clock.now(),
       },
       'message.status',
-      (tx) =>
-        applyEarlyStatuses(tx, scope.tenantId, intent.messageId, intent.channelAccountId, wamid),
+      async (tx) => {
+        await applyEarlyStatuses(
+          tx,
+          scope.tenantId,
+          intent.messageId,
+          intent.channelAccountId,
+          wamid,
+        );
+        if (isTemplate && result.data.waId) {
+          await linkIdentityFromSend(tx, {
+            tenantId: scope.tenantId,
+            whatsappAccountId: claimed.whatsappAccountId,
+            contactId: claimed.contactId,
+            waId: result.data.waId,
+          });
+        }
+      },
     );
     return { outcome: 'accepted' };
   }
@@ -480,9 +785,35 @@ export async function processSendIntent(
         ),
     );
   }
+  const code = result.code;
   await fail(
-    String(result.code ?? result.httpStatus ?? result.kind),
+    String(code ?? result.httpStatus ?? result.kind),
     result.detail ?? result.title,
+    async (tx) => {
+      const at = deps.clock.now();
+      if (code === PROVIDER_MARKETING_OPT_OUT_CODE) {
+        await recordProviderMarketingOptOut(tx, {
+          tenantId: scope.tenantId,
+          contactId: claimed.contactId,
+          channelAccountId: intent.channelAccountId,
+          externalMessageId: null,
+          occurredAt: at,
+          providerTime: false,
+        });
+      }
+      if (
+        claimed.templateId &&
+        (code === TEMPLATE_PAUSED_CODE || code === TEMPLATE_DISABLED_CODE)
+      ) {
+        await markTemplateFromSendError(
+          tx,
+          scope.tenantId,
+          claimed.templateId,
+          code === TEMPLATE_PAUSED_CODE ? 'paused' : 'disabled',
+          at,
+        );
+      }
+    },
   );
   return { outcome: 'failed' };
 }

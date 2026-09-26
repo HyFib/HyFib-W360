@@ -14,6 +14,7 @@ import {
 } from '@w360/domain';
 import type { WorkerRuntime } from '../runtime';
 import { RetryableJobError } from './email';
+import { signalDueTemplateSyncs } from './templates';
 
 /** Processes one stored Meta webhook receipt (idempotent; see processMetaWebhookReceipt). */
 export function webhookProcessHandler(rt: WorkerRuntime) {
@@ -159,6 +160,8 @@ export function messagingSweepHandler(rt: WorkerRuntime) {
         { singletonKey: intent.id, group: { id: intent.channelAccountId } },
       );
     }
+    const templateSyncs = await signalDueTemplateSyncs(rt);
+    if (templateSyncs > 0) rt.logger.info({ templateSyncs }, 'template syncs signalled');
     const retention = await applyMessagingRetention(rt.db);
     if (retention.bodiesErased + retention.receiptsDeleted + retention.eventsPruned > 0) {
       rt.logger.info(retention, 'messaging retention applied');

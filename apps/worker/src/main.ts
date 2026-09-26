@@ -13,6 +13,11 @@ import {
   messagingSweepHandler,
   webhookProcessHandler,
 } from './handlers/messaging';
+import {
+  templateDeleteHandler,
+  templateSubmitHandler,
+  templateSyncHandler,
+} from './handlers/templates';
 import { createWorkerRuntime } from './runtime';
 
 /**
@@ -65,6 +70,21 @@ async function main(): Promise<void> {
   await rt.boss.schedule(QUEUES.messagingSweep.name, '* * * * *', null, {
     singletonKey: 'messaging-sweep',
   });
+  await rt.boss.work(
+    QUEUES.templateSubmit.name,
+    { localConcurrency: 2, batchSize: 1 },
+    templateSubmitHandler(rt),
+  );
+  await rt.boss.work(
+    QUEUES.templateDelete.name,
+    { localConcurrency: 2, batchSize: 1 },
+    templateDeleteHandler(rt),
+  );
+  await rt.boss.work(
+    QUEUES.templateSync.name,
+    { localConcurrency: 2, batchSize: 1 },
+    templateSyncHandler(rt),
+  );
   await rt.boss.work(
     QUEUES.billingEventProcess.name,
     { localConcurrency: concurrency, batchSize: 1 },
