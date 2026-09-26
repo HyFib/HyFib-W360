@@ -1,0 +1,132 @@
+import 'server-only';
+import { PgBoss } from 'pg-boss';
+import {
+  Keyring,
+  createLogger,
+  loadWebConfig,
+  systemClock,
+  type Clock,
+  type Logger,
+  type WebConfig,
+} from '@w360/core';
+import { assertRuntimeRoleSafety, createDatabase, createPool, type Database } from '@w360/db';
+import { createPlatformDatabase } from '@w360/db/platform';
+import {
+  JobSigner,
+  PgBossJobQueue,
+  createPlatformService,
+  createTenancyService,
+  type JobQueue,
+  type PlatformService,
+  type TenancyService,
+} from '@w360/domain';
+import { createAuth, type Auth } from './auth';
+
+/**
+ * Process-wide dependencies for the web tier, created lazily on first use so that `next build`
+ * never needs runtime secrets. One instance per server process (cached on globalThis so that
+ * development hot reloads do not leak pools).
+ */
+export interface Runtime {
+  config: WebConfig;
+  logger: Logger;
+  clock: Clock;
+  keyring: Keyring;
+  db: Database;
+  jobs: JobQueue;
+  signer: JobSigner;
+  auth: Auth;
+  tenancy: TenancyService;
+  platform: PlatformService;
+  shutdown(): Promise<void>;
+}
+
+async function init(): Promise<Runtime> {
+  const config = loadWebConfig();
+  const logger = createLogger({ name: 'w360-web', level: config.LOG_LEVEL });
+  const keyring = Keyring.fromEnv(config.W360_ENCRYPTION_KEYS, config.W360_ENCRYPTION_PRIMARY_KEY_ID);
+
+  const appPool = createPool({
+    connectionString: config.DATABASE_URL_APP,
+    max: config.DATABASE_POOL_MAX_APP,
+    applicationName: 'w360-web',
+    statementTimeoutMs: config.DATABASE_STATEMENT_TIMEOUT_MS,
+  });
+  const authPool = createPool({
+    connectionString: config.DATABASE_URL_AUTH,
+    max: config.DATABASE_POOL_MAX_AUTH,
+    applicationName: 'w360-web-auth',
+  });
+  const platformPool = createPool({
+    connectionString: config.DATABASE_URL_PLATFORM,
+    max: config.DATABASE_POOL_MAX_PLATFORM,
+    applicationName: 'w360-web-platform',
+  });
+
+  const strict = config.NODE_ENV === 'production';
+  for (const pool of [appPool, authPool, platformPool]) {
+    await assertRuntimeRoleSafety(pool, { strict, warn: (m) => logger.warn(m) });
+  }
+
+  const db = createDatabase(appPool);
+  const platformDb = createPlatformDatabase(platformPool);
+
+  // Producer-only pg-boss instance: no maintenance, no schema changes, no scheduling.
+  const boss = new PgBoss({
+    connectionString: config.DATABASE_URL_APP,
+    schema: 'pgboss',
+    migrate: false,
+    createSchema: false,
+    supervise: false,
+    schedule: false,
+    max: 2,
+    application_name: 'w360-web-jobs',
+  });
+  boss.on('error', (error: unknown) => logger.error({ err: error }, 'pg-boss error'));
+  await boss.start();
+
+  const jobs = new PgBossJobQueue(boss);
+  const signer = new JobSigner(config.W360_JOB_SIGNING_KEY);
+  const outbox = { keyring, jobs, signer };
+  const auth = createAuth({ config, authPool, db, outbox, logger });
+
+  const tenancy = createTenancyService({
+    ...outbox,
+    db,
+    clock: systemClock,
+    appBaseUrl: config.APP_BASE_URL,
+    invitationTtlHours: config.INVITATION_TTL_HOURS,
+  });
+  const platform = createPlatformService({ db, platformDb, clock: systemClock });
+
+  logger.info({ env: config.APP_ENV }, 'web runtime initialised');
+
+  return {
+    config,
+    logger,
+    clock: systemClock,
+    keyring,
+    db,
+    jobs,
+    signer,
+    auth,
+    tenancy,
+    platform,
+    async shutdown() {
+      await boss.stop({ graceful: true, timeout: 10_000 });
+      await Promise.allSettled([appPool.end(), authPool.end(), platformPool.end()]);
+    },
+  };
+}
+
+const holder = globalThis as unknown as { __w360Runtime?: Promise<Runtime> };
+
+export function getRuntime(): Promise<Runtime> {
+  if (!holder.__w360Runtime) {
+    holder.__w360Runtime = init().catch((error: unknown) => {
+      holder.__w360Runtime = undefined;
+      throw error;
+    });
+  }
+  return holder.__w360Runtime;
+}

@@ -56,6 +56,9 @@ const webSchema = baseSchema.extend({
   DATABASE_POOL_MAX_PLATFORM: z.coerce.number().int().min(1).max(20).default(2),
   BETTER_AUTH_SECRET: secret(),
   TRUSTED_ORIGINS: z.string().optional(),
+  /** Comma-separated IPs/CIDRs of the load balancers in front of the app (for client IP resolution). */
+  TRUSTED_PROXIES: z.string().optional(),
+  INVITATION_TTL_HOURS: z.coerce.number().int().min(1).max(24 * 30).default(168),
   MFA_GRACE_PERIOD_HOURS: z.coerce.number().int().min(0).max(24 * 30).default(72),
 });
 
@@ -86,12 +89,21 @@ function parse<T extends z.ZodType>(schema: T, env: NodeJS.ProcessEnv): z.infer<
 }
 
 /** Production safety rules that cannot be expressed per-field. */
+function isLoopbackUrl(value: string): boolean {
+  const host = new URL(value).hostname;
+  return host === 'localhost' || host === '127.0.0.1' || host === '[::1]';
+}
+
 function assertProductionSafety(config: BaseConfig & { BETTER_AUTH_SECRET?: string }): void {
   if (config.NODE_ENV !== 'production') return;
   const problems: string[] = [];
-  if (!config.APP_BASE_URL.startsWith('https://')) problems.push('APP_BASE_URL must use https');
-  if (config.APP_ENV === 'local' || config.APP_ENV === 'test') {
-    problems.push('APP_ENV must be staging or production when NODE_ENV=production');
+  if (config.APP_ENV === 'local') problems.push('APP_ENV=local is not allowed with a production build');
+  if (config.APP_ENV === 'test') {
+    // Production builds under test (CI end-to-end runs) must stay on loopback so this mode can
+    // never serve real users.
+    if (!isLoopbackUrl(config.APP_BASE_URL)) problems.push('APP_ENV=test requires a loopback APP_BASE_URL');
+  } else if (!config.APP_BASE_URL.startsWith('https://')) {
+    problems.push('APP_BASE_URL must use https');
   }
   const weak = /(changeme|dev-only|example|insecure)/i;
   for (const [key, value] of Object.entries({

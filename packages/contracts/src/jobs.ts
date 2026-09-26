@@ -10,6 +10,11 @@ import { z } from 'zod';
  */
 export interface QueueDefinition {
   name: string;
+  /**
+   * 'exclusive': at most one created/retry/active job per singletonKey (used as a wake-up signal
+   * for a durable row, so duplicate signals collapse). 'standard': no key uniqueness.
+   */
+  policy: 'standard' | 'exclusive';
   retryLimit: number;
   retryDelaySeconds: number;
   retryBackoff: boolean;
@@ -23,6 +28,7 @@ export interface QueueDefinition {
 export const QUEUES = {
   emailSend: {
     name: 'email.send',
+    policy: 'exclusive',
     retryLimit: 8,
     retryDelaySeconds: 30,
     retryBackoff: true,
@@ -33,6 +39,7 @@ export const QUEUES = {
   },
   outboxSweep: {
     name: 'ops.outbox-sweep',
+    policy: 'exclusive',
     retryLimit: 1,
     retryDelaySeconds: 30,
     retryBackoff: false,
@@ -41,6 +48,7 @@ export const QUEUES = {
   },
   webhookProcess: {
     name: 'webhook.process',
+    policy: 'exclusive',
     retryLimit: 10,
     retryDelaySeconds: 10,
     retryBackoff: true,
@@ -51,6 +59,7 @@ export const QUEUES = {
   },
   messageSend: {
     name: 'message.send',
+    policy: 'exclusive',
     retryLimit: 12,
     retryDelaySeconds: 5,
     retryBackoff: true,
@@ -61,6 +70,7 @@ export const QUEUES = {
   },
   billingEventProcess: {
     name: 'billing.event-process',
+    policy: 'exclusive',
     retryLimit: 10,
     retryDelaySeconds: 15,
     retryBackoff: true,
@@ -71,6 +81,7 @@ export const QUEUES = {
   },
   autoRecharge: {
     name: 'billing.auto-recharge',
+    policy: 'exclusive',
     retryLimit: 0,
     retryDelaySeconds: 60,
     retryBackoff: false,
@@ -80,6 +91,7 @@ export const QUEUES = {
   },
   deadLetter: {
     name: 'dead-letter',
+    policy: 'standard',
     retryLimit: 0,
     retryDelaySeconds: 0,
     retryBackoff: false,

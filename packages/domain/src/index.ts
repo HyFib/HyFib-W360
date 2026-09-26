@@ -7,3 +7,6 @@ export * from './email/outbox';
 export * from './email/templates';
 export * from './email/sender';
 export * from './tenancy/service';
+export * from './platform/service';
+export * from './jobs/authorize';
+export * from './email/process';

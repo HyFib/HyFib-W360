@@ -120,7 +120,7 @@ export function createTenancyService(deps: TenancyDeps) {
 
   return {
     /** Creates a company with the caller as owner. Requires a verified email (enforced in SQL). */
-    async createCompany(userId: string, input: CreateCompanyInput): Promise<{ tenantId: string; slug: string }> {
+    async createCompany(userId: string, input: CreateCompanyInput | unknown): Promise<{ tenantId: string; slug: string }> {
       const data = parse(createCompanySchema, input);
       const tenantId = uuidv7();
       const membershipId = uuidv7();

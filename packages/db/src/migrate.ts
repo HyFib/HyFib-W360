@@ -249,8 +249,13 @@ async function declareQueues(connectionString: string, queues: QueueDefinition[]
       const existing = await boss.getQueue(q.name);
       if (!existing) {
         log(`creating queue ${q.name}`);
-        await boss.createQueue(q.name, options);
+        await boss.createQueue(q.name, { ...options, policy: q.policy });
       } else {
+        if ((existing.policy ?? 'standard') !== q.policy) {
+          throw new Error(
+            `Queue ${q.name} has policy ${existing.policy} but the release expects ${q.policy}; policy changes need a planned queue migration (see docs/RUNBOOKS.md)`,
+          );
+        }
         const { deadLetter: _deadLetter, ...updatable } = options;
         await boss.updateQueue(q.name, updatable);
       }
