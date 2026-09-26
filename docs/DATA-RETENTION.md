@@ -19,16 +19,20 @@ they are not a statement of legal compliance. Retention jobs are phase 5–7 unl
 | Jobs                                        | `pgboss.*`                                                                  | Completed jobs 1–7 days per queue; dead letters 30 days **[built]**                                                             | Payloads contain only ids and signatures.                                                                                                                                                                                                                                |
 | Webhook receipts                            | `ops.webhook_receipts`, `ops.webhook_quarantine`                            | Raw payload erased after 7 days; rows (and quarantine entries) deleted after 90 days **[built]**                                | Encrypted at rest; replay possible only while the payload exists.                                                                                                                                                                                                        |
 | Live-update events                          | `app.tenant_events`                                                         | 7 days **[built]**                                                                                                              | Ids and types only; clients resynchronise after longer gaps.                                                                                                                                                                                                             |
-| Messages & media                            | `app.messages`, object storage                                              | Company-configurable (default 2 years, proposed; not enforced yet); media not stored yet                                        | Deleting a contact deletes their messages (phase 3).                                                                                                                                                                                                                     |
-| Contacts & consent records (phase 3)        | `app.contacts`, `app.consents`                                              | Contacts until deleted; consent evidence kept for the retention required to prove consent                                       | Consent withdrawal is recorded, not erased, where proof is needed.                                                                                                                                                                                                       |
+| Messages & media                            | `app.messages`, object storage                                              | Company-configurable (default 2 years, proposed; not enforced yet); media files not stored yet (metadata only)                  | Erasing a contact redacts their message contents **[built]** (rows stay so delivery history and counts remain consistent).                                                                                                                                               |
+| Contacts, tags, custom values, import runs  | `app.contacts`, `app.contact_tags`, `app.contact_imports`                   | Until the contact is erased or the company deleted                                                                              | Erasure **[built]**: name, number, email, tags, custom values, WhatsApp identities, notes and media records deleted; the contact row stays as an empty tombstone. Import runs keep counts and row numbers, never row contents.                                           |
+| Consent history                             | `app.consent_events`, `app.contact_consents`                                | Kept after erasure for as long as proof of consent is needed (period to be set per market) **[built: append-only, no purge]**   | Evidence holds message ids, keywords, import ids and row numbers, member notes and provider error codes — no message text. Erasure appends opt-outs.                                                                                                                     |
+| Suppression list                            | `app.suppressions`                                                          | Until removed by a member with settings permission                                                                              | Only the number, reason and an optional note. Erasure can add the number so a re-import or new inbound message is never messaged with templates.                                                                                                                         |
+| Templates                                   | `app.message_templates`, `app.template_status_events`                       | Until the company is deleted (deleted templates stay as `deleted` with their history)                                           | Company content, not personal data.                                                                                                                                                                                                                                      |
 | Billing ledger, top-ups, mandates, attempts | `app.ledger_*`, `app.topups`, `app.payment_mandates`, `app.auto_recharge_*` | As required by tax law (e.g. 8 years for Indian GST records — verify with a tax adviser) **[built: append-only, no purge yet]** | Retained even after company deletion (legal basis to be confirmed). Mandates hold only provider references and card network, issuer, last four digits and expiry; no card number or CVV is ever received. Razorpay webhook bodies follow the webhook-receipt rule above. |
 
 ## Export
 
 - Company export (owners, `tenant.export`): members, settings, audit log, and later contacts,
   conversations and campaigns, delivered as a time-limited private download (phase 5).
-- Spreadsheet exports neutralise formula injection (cells starting with `=`, `+`, `-`, `@`, tab or
-  carriage return are prefixed) (phase 3).
+- Contact export (`contacts.export`) **[built]**: streaming CSV. Cells starting with `=`, `+`, `-`,
+  `@`, tab or carriage return are prefixed with an apostrophe (formula injection), except validated
+  E.164 numbers; every export is audited.
 
 ## Deletion semantics (distinguish clearly in UI and contracts)
 
@@ -41,8 +45,21 @@ they are not a statement of legal compliance. Retention jobs are phase 5–7 unl
 4. **Legally retained records:** billing and tax records and security audit evidence are retained
    for their statutory period with personal data minimised.
 
+## Contact erasure **[built]**
+
+`app.erase_contact` (members with `contacts.delete`; allowed while a company is suspended) runs in
+one transaction: cancels queued template and text sends, redacts every message in the contact's
+conversations to `{"redacted": true}`, clears recipient ids in delivery history (the only change a
+guard trigger allows, and only inside the function), deletes notes, media records, identities and
+tags, clears the contact's personal fields and appends marketing and utility opt-outs. Consent
+history is kept as evidence. Media files are not stored yet; when media storage lands, erasure must
+also delete the stored files. Data already sent to Meta is governed by Meta's terms (see deletion
+semantics above).
+
 ## Consent withdrawal and suppression
 
-Opt-out keywords and manual suppression stop all future marketing sends immediately, including
-already-queued campaign recipients (checked at send time). Suppression entries are retained so the
-opt-out is honoured if the contact is re-imported.
+Opt-out keywords, Meta's "user stopped marketing messages" error (131050) and manual suppression
+stop future template sends immediately, including templates already queued: consent and the
+suppression list are re-checked right before dispatch **[built]**. Imports never override an
+existing opt-out. Suppression entries are retained so the opt-out is honoured if the number is
+re-imported or writes in again.

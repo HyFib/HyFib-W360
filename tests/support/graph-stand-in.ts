@@ -149,6 +149,14 @@ export async function startGraphStandIn(options: {
       if (req.method === 'GET' && url.pathname === '/__stand-in/requests') {
         return json(res, 200, state.requests);
       }
+      // Test control: set a template's review status, as Meta's review would.
+      if (req.method === 'POST' && url.pathname === '/__stand-in/template-status') {
+        const b = (body ?? {}) as { wabaId?: string; name?: string; status?: string };
+        const template = state.templates.get(String(b.wabaId))?.find((t) => t.name === b.name);
+        if (!template || typeof b.status !== 'string') return json(res, 404, { ok: false });
+        template.status = b.status;
+        return json(res, 200, { ok: true });
+      }
       const segments = url.pathname.split('/').filter(Boolean);
       const [version, first, second] = segments;
       const entry: RecordedRequest = {

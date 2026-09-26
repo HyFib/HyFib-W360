@@ -39,6 +39,9 @@ function Body({ type, content }: { type: string; content: unknown }) {
     string,
     unknown
   >;
+  if (c.redacted === true && type !== 'template') {
+    return <p className="italic">Content removed</p>;
+  }
   switch (type) {
     case 'text':
       return <p className="whitespace-pre-wrap break-words">{text(c.text) ?? ''}</p>;
@@ -77,6 +80,29 @@ function Body({ type, content }: { type: string; content: unknown }) {
       return <p>Sent an order{text(c.text) ? `: ${text(c.text)}` : ''}</p>;
     case 'system':
       return <p className="italic">WhatsApp account update</p>;
+    case 'template': {
+      if (c.redacted === true) return <p className="italic">Content removed</p>;
+      const rendered = (c.rendered ?? {}) as Record<string, unknown>;
+      const template = (c.template ?? {}) as Record<string, unknown>;
+      const buttons = Array.isArray(rendered.buttons)
+        ? (rendered.buttons as { text?: unknown }[]).map((b) => text(b.text)).filter(Boolean)
+        : [];
+      return (
+        <div className="grid gap-1">
+          <p className="text-xs font-medium uppercase tracking-wide opacity-70">
+            Template · {text(template.name) ?? 'unknown'}
+          </p>
+          {text(rendered.header) ? <p className="font-semibold">{text(rendered.header)}</p> : null}
+          <p className="whitespace-pre-wrap break-words">{text(rendered.body) ?? ''}</p>
+          {text(rendered.footer) ? (
+            <p className="text-xs opacity-80">{text(rendered.footer)}</p>
+          ) : null}
+          {buttons.length > 0 ? (
+            <p className="text-xs opacity-80">Buttons: {buttons.join(' · ')}</p>
+          ) : null}
+        </div>
+      );
+    }
     default:
       return <p className="italic">This message type is not supported yet.</p>;
   }

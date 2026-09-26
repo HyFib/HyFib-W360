@@ -118,3 +118,41 @@ Context: the build environment blocked direct access to wati.io, developers.face
 business.whatsapp.com and razorpay.com. Decision: use search-index summaries of official pages and
 official GitHub sources (Meta SDKs, Razorpay markdown docs export), label every claim with evidence
 type and confidence, and require direct re-verification before launch claims.
+
+## ADR-017 One contact per phone number per company (2026-09-26)
+
+Decision: `contacts (tenant_id, phone_e164)` is unique. Manual entry, CSV import and inbound
+WhatsApp identities resolve to the same contact; the unique index arbitrates concurrent creators
+(`INSERT … ON CONFLICT DO NOTHING`, then read), so no advisory locks are needed and a 5,000-row
+import does not exhaust the lock table. The Wa id Meta returns on a template send is stored as an
+identity so replies from a number Meta rewrote (for example country-specific formats) still reach
+the same contact. BSUID-only identities create phone-less contacts. Numbers without an
+international prefix are never guessed: manual entry requires `+`/`00`, imports state how bare
+numbers are read.
+
+## ADR-018 Consent as append-only events with derived state (2026-09-26)
+
+Decision: purposes `marketing` and `utility`. Runtime code only inserts `consent_events` (source,
+actor, evidence, occurred_at); `contact_consents` is written by a SECURITY DEFINER trigger. Later
+events win; an opt-out wins a tie. Meta timestamps are whole seconds, so a customer's opt-out is
+placed at the end of its second and an opt-in at the start: within that uncertainty an opt-out wins.
+Imports record opt-ins only with the importer's attestation and never over an existing opt-out.
+Marketing templates need a recorded opt-in by default (company setting); service-window replies are
+never blocked by consent. Enforcement happens when a template is queued and again, authoritatively,
+right before dispatch.
+
+## ADR-019 Templates: Graph listing is the source of truth (2026-09-26)
+
+Decision: template webhooks (payloads documented only by third parties) only mark the WABA for a
+re-sync; status, category, quality and rejection reasons come from `GET /{WABA_ID}/message_templates`.
+Submission is write-ahead (`submitting` before the request). A lost response is adopted by name and
+language at the next sync; a submission Meta never received fails after 10 minutes and must be
+resubmitted by a member. Nothing is resubmitted automatically. Scope for the first slice: text
+headers, positional variables, static buttons; everything else is shown as not sendable.
+
+## ADR-020 CSV without a dependency (2026-09-26) (reversible)
+
+Decision: an in-house RFC 4180 reader/writer (quoted fields, doubled quotes, embedded line breaks,
+CRLF/LF/CR, BOM, delimiter detection; hard limits on bytes, rows, columns and field length) and a
+formula-safe writer. Import runs through a server action, so files are limited to just under the
+1 MB action body limit; larger imports would need a streaming upload endpoint.

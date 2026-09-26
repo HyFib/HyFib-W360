@@ -413,8 +413,8 @@ CREATE POLICY definer_read ON app.message_templates FOR SELECT TO w360_definer U
 GRANT SELECT (tenant_id, id, status, templates_sync_requested_at, templates_synced_at) ON app.whatsapp_accounts TO w360_definer;
 GRANT SELECT (tenant_id, whatsapp_account_id, status) ON app.message_templates TO w360_definer;
 
--- Connected WABAs whose templates need a sync: a webhook asked for one, templates are waiting for
--- review (every 5 minutes), or the last full sync is older than 6 hours.
+-- Connected WABAs of active companies whose templates need a sync: a webhook asked for one,
+-- templates are waiting for review (every 5 minutes), or the last full sync is older than 6 hours.
 CREATE FUNCTION ops.template_sync_due(p_limit integer)
   RETURNS TABLE (tenant_id uuid, whatsapp_account_id uuid)
   LANGUAGE sql STABLE SECURITY DEFINER
@@ -422,6 +422,7 @@ CREATE FUNCTION ops.template_sync_due(p_limit integer)
   AS $$
   SELECT w.tenant_id, w.id
     FROM app.whatsapp_accounts w
+    JOIN app.tenants t ON t.id = w.tenant_id AND t.status = 'active'
    WHERE w.status = 'connected'
      AND (w.templates_synced_at IS NULL
           OR w.templates_synced_at < now() - interval '6 hours'

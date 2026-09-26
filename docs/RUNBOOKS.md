@@ -139,7 +139,37 @@ app.auto_recharge_attempts WHERE tenant_id = … ORDER BY created_at DESC`. `unk
    `SELECT tenant_id FROM app.ledger_accounts GROUP BY tenant_id HAVING sum(CASE WHEN normal_side =
 'debit' THEN balance_minor ELSE -balance_minor END) <> 0` must return no rows.
 
-## 10. Compromised company (tenant) or account
+## 10. Contacts, consent and templates
+
+**A customer says they opted out but still received a template.** Open the contact: the consent
+history lists every event with its source and time. Compare with the message's send time in the
+conversation. Sends re-check consent right before dispatch, so a template sent after a recorded
+opt-out is a defect: collect the message id and the consent event ids (no message text) and open a
+security/privacy incident. If the opt-out was never recorded (for example the customer wrote a
+sentence rather than a keyword), record it manually with a note.
+
+**Erasure request.** A member with `contacts.delete` erases the contact from its page (keep the
+number suppressed unless the requester asks otherwise). The action is audited
+(`contact.erased`). Data already delivered to Meta is outside our database (see
+docs/DATA-RETENTION.md).
+
+**Template stuck in "Submitting".** The worker could not confirm Meta's answer. The next sync
+(within 5 minutes) adopts the template if Meta created it; after 10 minutes without a match it is
+marked "Submission failed" and can be submitted again. Check worker logs for `template job` and the
+`template.submit` / `template.sync` queues; a sync failing permanently is recorded in the audit log
+as `templates.sync_failed`.
+
+**Template statuses look stale.** Press "Refresh from Meta" on the Templates page. If the account
+shows as not connected, reconnect it in Settings → Channels. Verify that the Meta app is subscribed
+to the template webhook fields (docs/META-SETUP.md).
+
+**A template send failed with 132015 / 132016.** Meta paused or disabled the template; HyFib marks it
+and requests a sync. Improve the template (quality) or use another one; do not resend blindly.
+
+**Import rejected.** Row errors name the row and the problem, never the row's contents. Files must
+be under the upload limit and 5,000 rows; split larger files.
+
+## 11. Compromised company (tenant) or account
 
 1. Suspend the company in `/platform` with a reason (stops outbound activity; ingestion continues).
 2. For a compromised user: reset MFA via platform recovery (verified out of band), which signs out
@@ -149,18 +179,18 @@ app.auto_recharge_attempts WHERE tenant_id = … ORDER BY created_at DESC`. `unk
 4. Review the company audit log and security events; export evidence; notify the owner.
 5. Reactivate with a reason once clean.
 
-## 11. Migration failure
+## 12. Migration failure
 
 1. The runner applies each file in a transaction; a failure rolls back that file and stops.
 2. Fix forward: write a new migration that repairs state; never edit an applied file (checksums).
 3. If an app release depends on the failed migration, keep the previous release running (migrations
    are backward compatible by policy).
 
-## 12. Key rotation
+## 13. Key rotation
 
 See `docs/SECURITY.md#secret-and-key-rotation`.
 
-## 13. Queue policy changes
+## 14. Queue policy changes
 
 Changing a queue's pg-boss policy is refused by the migration runner. Create a new queue name with
 the new policy, deploy producers to the new queue, drain the old one, then retire it.

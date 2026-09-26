@@ -50,11 +50,21 @@ verification, app review, Embedded Signup configuration).
 
 ## Phase 3 — contacts, consent, templates, campaigns, reports
 
-- **P3-01 Contacts & CRM fields**: custom fields, tags, segments (saved filters → SQL), import
-  preview/mapping/row errors, dedupe, safe merge, export (formula-safe), deletion.
-- **P3-02 Consent & suppression**: consent events with provenance, opt-out keywords, suppression
-  lists; enforced at send time. T: opt-out during a running campaign stops queued sends (race test).
-- **P3-03 Templates**: drafts, validation, submission, status sync, versioning, archive.
+- **P3-01 Contacts & CRM fields** — _implemented (2026-09-26)_: custom fields, tags, search and
+  filters, import preview/mapping/row errors, one contact per number (dedupe across manual, import
+  and inbound), formula-safe export, erasure. **Remaining:** saved segments (with campaigns), safe
+  merge (H-019), role-based number masking (W-044), bulk tag edits.
+- **P3-02 Consent & suppression** — _implemented (2026-09-26)_: consent events with provenance,
+  opt-out/opt-in keywords, Meta 131050 opt-outs, suppression list, send-time enforcement (race test
+  with a queued template). **Remaining:** re-run the race test with campaigns (P3-04); review Meta's
+  opt-in guidance (M-131) and per-market consent law; consent capture from growth tools (phase 4).
+- **P3-03 Templates** — _implemented (2026-09-26), not verified against Meta_: drafts, validation,
+  write-ahead submission with lost-response reconciliation, Graph listing sync (webhook-triggered
+  and periodic), deletion, status history, template sends from contacts and the inbox.
+  **Remaining:** media headers (Resumable Upload + media storage), URL buttons with variables (the
+  example format must be confirmed), named parameters, authentication/OTP, carousel, LTO, copy-code
+  and catalog templates, editing approved templates (`POST /{template-id}`), template library
+  (W-070), and a sandbox run with a real WABA.
 - **P3-04 Campaigns**: audience snapshot, approval workflow, timezone/DST scheduling, pacing,
   frequency caps, budget guardrails, pause/resume/cancel (idempotent), per-recipient outcomes,
   analytics with documented denominators. T: 10k-recipient campaign in staging.

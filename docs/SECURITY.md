@@ -22,6 +22,8 @@ security operations. It is not a compliance claim; see `docs/THREAT-MODEL.md` fo
 | Provider tokens    | Exchanged server-side from Embedded Signup codes, verified with `debug_token` and an ownership check, stored AES-256-GCM with AAD (company + account), never sent to browsers or logs; registration PINs encrypted the same way.                                                                                                                                                                                                                                                                                                                                                                                              |
 | Live updates       | SSE and polling endpoints authenticate the session, resolve membership per request, re-validate every 30 s, carry ids only and filter events by conversation visibility; unauthenticated or non-member requests get 404.                                                                                                                                                                                                                                                                                                                                                                                                      |
 | Payments           | Card entry only inside Razorpay Checkout's frame; the Checkout signature is verified against our stored order id and the payment is then fetched from Razorpay; only captured payments credit, exactly once, through SECURITY DEFINER functions; runtime roles cannot write ledger rows or balances; webhooks verified over the raw body (current + previous secret) and stored before 200; only card network, issuer, last four digits and expiry stored (no PAN/CVV); billing actions limited to owner and billing roles (MFA-required roles) and audited. Step-up re-authentication for payment settings is not built yet. |
+| Contacts & consent | Consent is append-only (runtime role can only insert events; current state is written by a SECURITY DEFINER trigger); every template send re-checks consent and the suppression list under the send intent's row lock; erasure is one audited definer function; the status-history guard allows clearing recipient ids only inside it; CSV import caps size, rows, columns and field length and never echoes row contents; CSV export is formula-safe and audited.                                                                                                                                                            |
+| Templates          | Created, deleted and listed only by the worker with the stored WABA token (never in the browser); webhooks for templates are signals routed through verified WABA bindings and never change status on their own; submission is write-ahead so a lost response cannot create a duplicate.                                                                                                                                                                                                                                                                                                                                      |
 | Supply chain       | Exact pins + lockfile, pnpm minimum release age, explicit install-script allowlist, `pnpm audit` and gitleaks in CI, GitHub Actions pinned by SHA, Trivy image scanning, Dependabot.                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 
 ## Permission matrix
@@ -83,6 +85,18 @@ remain).
 | `billing.manage`         |   ✓   |       |            |       |          |         |    ✓    |            ✓            |
 
 MFA required (after grace period): owner, admin, billing.
+
+Phase 3 rules on top of the matrix (enforced in domain services and re-checked where noted):
+
+- Sending a template: utility templates need `inbox.reply` or `campaigns.send`; marketing templates
+  need `campaigns.send`. Members without inbox access can send from a contact page but do not see
+  or claim the conversation. Consent and suppression are checked when queued and again before
+  dispatch.
+- Consent keywords, the marketing opt-in requirement and custom contact fields need
+  `tenant.settings.manage`. Adding a number to the suppression list needs `contacts.write`;
+  removing one needs `tenant.settings.manage` (it re-enables messaging).
+- Deleting a template Meta already has needs `templates.submit` as well as `templates.write`.
+- Erasing a contact needs `contacts.delete` (also while the company is suspended).
 
 Platform roles (`ops.platform_admins`): `platform_owner` and `platform_operator`. Both require MFA;
 all actions are audited; neither can read customer content without a support grant.

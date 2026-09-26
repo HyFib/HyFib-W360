@@ -4,6 +4,7 @@ import { QUEUES } from '@w360/contracts';
 import {
   and,
   asc,
+  channelAccounts,
   desc,
   eq,
   inArray,
@@ -18,7 +19,7 @@ import {
   type TenantScope,
   type Tx,
 } from '@w360/db';
-import { assertCan, type TenantContext } from '../authz/context';
+import { assertCan, can, type TenantContext } from '../authz/context';
 import { recordAudit, recordSystemAudit, type RequestMeta } from '../audit';
 import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
@@ -555,6 +556,37 @@ export function createTemplatesService(deps: TemplateDeps) {
           `sync:${whatsappAccountId}`,
         );
       });
+    },
+
+    /** Active numbers a member who may send templates can send from. */
+    async sendChannels(ctx: TenantContext) {
+      if (!can(ctx, 'inbox.reply') && !can(ctx, 'campaigns.send')) return [];
+      const rows = await db.run(
+        ctx.scope,
+        (tx) =>
+          tx
+            .select({
+              id: channelAccounts.id,
+              displayPhoneNumber: channelAccounts.displayPhoneNumber,
+              verifiedName: channelAccounts.verifiedName,
+              whatsappAccountId: channelAccounts.whatsappAccountId,
+            })
+            .from(channelAccounts)
+            .where(
+              and(
+                eq(channelAccounts.tenantId, ctx.tenant.id),
+                eq(channelAccounts.status, 'active'),
+              ),
+            )
+            .orderBy(asc(channelAccounts.createdAt)),
+        { accessMode: 'read only' },
+      );
+      return rows.map((r) => ({
+        id: r.id,
+        label:
+          [r.verifiedName, r.displayPhoneNumber].filter(Boolean).join(' · ') || 'WhatsApp number',
+        whatsappAccountId: r.whatsappAccountId,
+      }));
     },
 
     async syncStatus(ctx: TenantContext) {

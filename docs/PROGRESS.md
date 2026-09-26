@@ -1,5 +1,66 @@
 # Progress
 
+## 2026-09-26 — Phase 3: contacts, consent and templates
+
+Status: **implementation complete for contacts, consent and templates, production blocked**
+(template submission, sync and sends are verified only against the test-only Graph stand-in; a real
+Meta app with `whatsapp_business_management`, app review and a sandbox WABA are external
+prerequisites; Meta's opt-in guidance (M-131) and per-market consent law still need review).
+Campaigns and reports (P3-04, P3-05) are not built.
+
+### Completed
+
+- **Schema (migration 0005):** contact email, typed custom values, source and erasure time; one
+  contact per number (unique index); tags, custom field definitions, import runs; append-only
+  consent events with trigger-maintained state (definer trigger); suppression list; company
+  messaging settings; message templates with status history; template sync bookkeeping per WABA;
+  `messages.template_id`; `app.erase_contact` and `ops.template_sync_due` (definer, app role only);
+  a status-history guard that lets only the erasure function clear recipient ids. Found by the new
+  tests: PostgreSQL regular expressions cap repetition counts at 255, so the template-name check is
+  a character class plus a length check.
+- **Contacts:** create, edit (numbers from WhatsApp are read-only), tags, typed custom fields,
+  search and filters with keyset pages, CSV import (preview, explicit mapping, national or
+  international numbers, never guessed; row errors by row number; consent only with an attestation
+  and never over an opt-out), streaming formula-safe export, erasure. Inbound identities join the
+  contact that already has the number, and the WhatsApp id Meta returns on a template send becomes
+  an identity.
+- **Consent:** keyword opt-outs/opt-ins from inbound text, quick-reply and interactive replies
+  (company-configurable lists), member-recorded consent with a note, import consent, Meta 131050
+  opt-outs, erasure opt-outs. Opt-outs win ties and the one-second uncertainty of Meta timestamps
+  (found by a test in which a STOP sent in the same second as an agent's opt-in lost).
+- **Templates:** editor with live preview and local validation; write-ahead submission; sync from
+  the paged Graph listing (default-fields fallback), adoption of lost create responses and of
+  templates made in WhatsApp Manager, failure of submissions Meta never received; deletion; template
+  webhooks as sync signals through verified WABA bindings; per-minute sweep.
+- **Template sends:** from a contact page (utility: inbox or campaign permission; marketing:
+  campaign permission) and from the inbox when the 24-hour window has closed; consent, suppression
+  and template approval re-checked right before dispatch; 132015/132016 mark the template paused or
+  disabled; 131050 records an opt-out.
+- **Web:** Contacts (list, add, detail, import, export), Templates (list per account with refresh,
+  editor, detail with history), Settings → Messaging (keywords, marketing opt-in requirement,
+  suppression list, custom fields); the inbox renders template messages and offers templates when
+  the window is closed. Contacts and Templates modules are now available.
+
+### Test commands and results (local, 2026-09-26, fresh database)
+
+| Command                                                      | Result                                                                                                                                                       |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`         | 0 problems / all files formatted / all workspace packages pass                                                                                               |
+| `pnpm test` (unit)                                           | 72 passed (adds phone normalisation, CSV reader/writer, consent keywords and timing, template definitions)                                                   |
+| `pnpm test:integration` (PostgreSQL 18.x)                    | 136 passed: contacts/consent/erasure 13, templates 12, isolation 44 (new function-privilege assertions), messaging 21, billing 30, jobs/email 14, services 2 |
+| `pnpm test:e2e --project=chromium --project=mobile-chromium` | 24 passed (12 tests × 2), including contact creation, consent, CSV import/export and a template drafted, submitted, approved, synced and sent from the inbox |
+
+Firefox and WebKit are not installed in this sandbox; they run in CI. Meta traffic in these tests
+comes from the test-only Graph stand-in (`tests/support/graph-stand-in.ts`); no template has been
+submitted to the real Graph API.
+
+### Known gaps (tracked in BACKLOG.md)
+
+Campaigns and saved segments (P3-04), reports (P3-05), safe contact merge (H-019), number masking
+(W-044), media headers and other template types, URL buttons with variables (example format
+unconfirmed, M-151), editing approved templates, sandbox verification of template submission, sync
+fields (`rejected_reason`, `quality_score`) and template webhook payloads.
+
 ## 2026-09-26 — Phase 5 financial core (section 8A)
 
 Status: **implementation complete for the wallet, top-up and auto-recharge slice, production

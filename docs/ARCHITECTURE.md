@@ -172,6 +172,33 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 - **Not built yet:** media download to private object storage, templates and template sends,
   message search, token health checks via `debug_token`, Meta-side deregistration on disconnect.
 
+## 6A. Contacts, consent and templates **[built — templates verified against a local Graph stand-in only]**
+
+- **Contacts** (`packages/domain/src/contacts`): one row per phone number per company (unique
+  index). Manual entry, CSV import and inbound identities converge on it; the WhatsApp id returned by
+  a template send is stored as an identity. Custom fields are typed definitions with values in
+  `contacts.attributes`. Import is a synchronous server action (preview → mapping → one
+  transaction, batched by 500); export streams CSV from keyset batches, each in its own read-only
+  transaction. Erasure is `app.erase_contact` (SECURITY DEFINER), leaving an empty tombstone row so
+  conversations and delivery history keep their foreign keys.
+- **Consent** (`packages/domain/src/consent`): append-only `consent_events`; a definer trigger
+  maintains `contact_consents` (later wins, opt-out wins ties). Sources: keyword messages (matched
+  in ingestion on newly stored text, button and interactive replies), member notes, import
+  attestations, Meta error 131050 (status webhook or send response) and erasure. Company settings
+  hold the keyword lists and the marketing opt-in requirement.
+- **Templates** (`packages/domain/src/templates`): editor model ↔ Meta component format
+  (`definition.ts`, also exported to the browser as `@w360/domain/template-definition` because it
+  depends only on zod); drafts and status history in `message_templates` /
+  `template_status_events`. Worker queues: `template.submit` (write-ahead create),
+  `template.delete`, `template.sync` (paged listing, reconcile by id then by name and language).
+  Syncs are signalled by template webhooks (`whatsapp_accounts.templates_sync_requested_at`), by the
+  per-minute messaging sweep (`ops.template_sync_due`: requested, in review every 5 minutes, or older
+  than 6 hours) and by members.
+- **Template sends** reuse the Phase 2 pipeline: `queueTemplateMessage` writes the message and send
+  intent (type `template`, rendered text stored for the thread, request body without secrets); the
+  worker skips the 24-hour window check for templates but re-checks template approval, consent and
+  the suppression list inside the claim transaction before any request leaves.
+
 ## 7. Commercial model and billing **[built: wallet, top-ups, auto-recharge — verified against a local Razorpay stand-in only; subscriptions planned]**
 
 - **Who pays Meta:** as a Meta Tech Provider HyFib has no credit line; each customer adds its own

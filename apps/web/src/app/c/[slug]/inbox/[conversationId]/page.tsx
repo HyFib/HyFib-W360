@@ -12,8 +12,10 @@ import { MessageBubble, type ThreadMessage } from '@/components/inbox/message-bu
 import { NoteForm } from '@/components/inbox/note-form';
 import { formatDateTime } from '@/lib/format';
 import { canUseInbox, loadInboxList, type SearchParams } from '@/server/inbox';
+import { TemplateSender } from '@/components/templates/template-sender';
 import { getRuntime } from '@/server/runtime';
 import { requireTenant } from '@/server/session';
+import { sendableTemplates } from '@/server/templates';
 
 export const metadata: Metadata = { title: 'Conversation' };
 export const dynamic = 'force-dynamic';
@@ -38,11 +40,12 @@ export default async function ConversationPage({
     if (isAppError(error) && error.code === 'not_found') notFound();
     throw error;
   }
-  const [{ query, views, list }, members] = await Promise.all([
+  const [{ query, views, list }, members, templates] = await Promise.all([
     loadInboxList(ctx, sp),
     can(ctx, 'inbox.assign') && can(ctx, 'members.read')
       ? inbox.assignableMembers(ctx)
       : Promise.resolve([]),
+    sendableTemplates(ctx),
   ]);
   const conv = thread.conversation;
   const unread = list.items.find((i) => i.id === conv.id)?.unreadCount ?? 0;
@@ -52,7 +55,7 @@ export default async function ConversationPage({
     : !conv.channelActive
       ? 'This WhatsApp number is not active. An administrator can reconnect it in Settings → Channels.'
       : !conv.windowOpen
-        ? 'The 24-hour customer service window has closed. Free-form replies are not allowed until the customer writes again; template messages arrive in a later release.'
+        ? 'The 24-hour customer service window has closed. Free-form replies are not allowed until the customer writes again; you can send an approved template instead.'
         : !conv.identity.hasPhone
           ? 'This contact is known only by a WhatsApp user id. Replying to user ids is not enabled until Meta’s request format is verified.'
           : null;
@@ -139,6 +142,27 @@ export default async function ConversationPage({
             draftKey={`w360:draft:${ctx.user.id}:${ctx.tenant.id}:${conv.id}`}
             disabledReason={disabledReason}
           />
+          {canReply && conv.channelActive && !conv.windowOpen && can(ctx, 'templates.read') ? (
+            <Card>
+              <CardHeader>
+                <CardTitle>Send a template</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <TemplateSender
+                  slug={ctx.tenant.slug}
+                  contactId={conv.contactId}
+                  channels={[
+                    {
+                      id: conv.channelAccountId,
+                      label: conv.channelName ?? 'WhatsApp',
+                      whatsappAccountId: conv.whatsappAccountId,
+                    },
+                  ]}
+                  templates={templates}
+                />
+              </CardContent>
+            </Card>
+          ) : null}
         </div>
         <Card className="h-fit">
           <CardHeader>

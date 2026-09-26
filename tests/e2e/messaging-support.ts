@@ -99,14 +99,20 @@ export function randomWaId(): string {
   return `9198${digits(8)}`;
 }
 
-export function inboundMessage(wabaId: string, phoneNumberId: string, waId: string, text: string) {
+export function inboundMessage(
+  wabaId: string,
+  phoneNumberId: string,
+  waId: string,
+  text: string,
+  sentAt: Date = new Date(),
+) {
   return envelope(wabaId, phoneNumberId, {
     contacts: [{ profile: { name: 'Priya Customer' }, wa_id: waId }],
     messages: [
       {
         from: waId,
         id: `wamid.e2e.${randomUUID()}`,
-        timestamp: String(Math.floor(Date.now() / 1000)),
+        timestamp: String(Math.floor(sentAt.getTime() / 1000)),
         type: 'text',
         text: { body: text },
       },

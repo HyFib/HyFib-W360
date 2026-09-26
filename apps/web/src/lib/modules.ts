@@ -32,8 +32,8 @@ export const MODULES: ModuleDefinition[] = [
     label: 'Contacts',
     path: '/contacts',
     permission: 'contacts.read',
-    status: 'planned',
-    reason: 'Phase 3: contacts, consent and segments.',
+    status: 'available',
+    reason: 'Saved segments arrive with campaigns.',
   },
   {
     key: 'campaigns',
@@ -48,8 +48,9 @@ export const MODULES: ModuleDefinition[] = [
     label: 'Templates',
     path: '/templates',
     permission: 'templates.read',
-    status: 'planned',
-    reason: 'Phase 3: template drafts, Meta submission and approval sync.',
+    status: 'available',
+    reason:
+      'Text, marketing and utility templates. Media headers, authentication templates and buttons with variables are not supported yet.',
   },
   {
     key: 'automations',

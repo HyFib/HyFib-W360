@@ -381,6 +381,14 @@ describe('template sync', () => {
     ).toBe(true);
     const unknown = await fx.deliver(fx.fieldBody('123456789012', 'template_category_update', {}));
     expect(unknown.outcome).toBe('quarantined');
+    // Suspended companies are left out of the sweep until they are reactivated.
+    await fx.query(`UPDATE app.tenants SET status = 'suspended' WHERE id = $1`, [c.tenant.id]);
+    expect(
+      (await findTemplateSyncsDue(fx.dbs.app, 500)).some(
+        (d) => d.whatsappAccountId === c.whatsappAccountId,
+      ),
+    ).toBe(false);
+    await fx.query(`UPDATE app.tenants SET status = 'active' WHERE id = $1`, [c.tenant.id]);
   });
 
   it('deletes a template at Meta and marks it deleted', async () => {

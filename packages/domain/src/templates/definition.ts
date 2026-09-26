@@ -449,6 +449,16 @@ export interface RenderedTemplate {
   buttons: { type: TemplateButton['type']; text: string }[];
 }
 
+/** The template's text with its {{n}} placeholders (filled in by the sender as values are typed). */
+export function renderPlaceholders(def: TemplateDefinition): RenderedTemplate {
+  return {
+    header: def.header.type === 'text' ? def.header.text : null,
+    body: def.body.text,
+    footer: def.footer,
+    buttons: def.buttons.map((b) => ({ type: b.type, text: b.text })),
+  };
+}
+
 /** Preview of a definition with its example values (editor and template list). */
 export function renderExample(def: TemplateDefinition): RenderedTemplate {
   return {

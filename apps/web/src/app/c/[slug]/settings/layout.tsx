@@ -20,6 +20,9 @@ export default async function SettingsLayout({
     ...(ctx.permissions.has('channels.read')
       ? [{ href: `${base}/channels`, label: 'Channels' }]
       : []),
+    ...(ctx.permissions.has('contacts.read')
+      ? [{ href: `${base}/messaging`, label: 'Messaging' }]
+      : []),
     ...(ctx.permissions.has('audit.read') ? [{ href: `${base}/audit`, label: 'Audit log' }] : []),
     { href: `${base}/modules`, label: 'Modules' },
   ];
