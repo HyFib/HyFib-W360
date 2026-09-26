@@ -80,13 +80,21 @@ verification, app review, Embedded Signup configuration).
   messaging outcomes with denominators; estimated Meta charges from Meta's billable flag and
   published rate cards, with unpriced reasons; inbox queue and reply-turn response times against a
   company first-response target (turns recorded by triggers); member activity; campaign funnels;
-  unavailable metrics shown with reasons; audited formula-safe exports. **Remaining:** business-hours
-  calendars and resolution-time metrics (with P3-06), reconciliation with Meta's
+  unavailable metrics shown with reasons; audited formula-safe exports; business-hours figures,
+  resolution times and CSAT (with P3-06). **Remaining:** reconciliation with Meta's
   `pricing_analytics` (M-078, verify first), materialised daily aggregates if report queries near
   the statement timeout, scheduled report emails, automation/deal/retention reports once those
   modules exist.
-- **P3-06 Inbox advanced**: teams, round-robin/capacity routing, business hours, SLA timers, saved
-  replies, mentions, CSAT.
+- **P3-06 Inbox advanced** — _implemented (2026-09-26); CSAT sends verified against the Graph
+  stand-in only_: teams with members and numbers, keyword and number routing, round robin with
+  explicit availability and per-member limits, a minute sweep, release when members leave;
+  business hours and closed days; reply-due timers and a longest-waiting order; team, number and
+  customer filters; conversation cases and resolution times; business-hours report figures; saved
+  replies; note mentions; a send-time collision warning; CSAT surveys with three reply buttons.
+  **Remaining:** per-team SLA targets and calendars, SLA breach notifications (email or in-app),
+  presence and typing indicators, conversation tags (W-035), private team queues (would change
+  visibility, ADR-029), mention emails, CSAT by template outside the window (needs a consent
+  decision), CSAT with a real WABA, transcript download (W-042), phone-number masking (W-044).
 
 ## Phase 4 — automation, Flows, CRM, commerce
 

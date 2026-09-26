@@ -265,7 +265,8 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   this idempotent under concurrency); a member's outbound message closes it as replied; resolving
   the conversation closes it as resolved (crediting the acting member). Turns hold ids and
   timestamps only, so erasure leaves them. First-response times are measured from HyFib's receipt of
-  the customer message to the member's send, in absolute time.
+  the customer message to the member's send, in absolute time and, when business hours are on, in
+  business hours (§6D).
 - **Cost estimates:** delivered messages (Meta charges per delivered message) that Meta's status
   webhook marked billable, priced with the published rate card for the company's billing currency in
   force when each message was recorded, by the market of the number Meta delivered to and Meta's
@@ -278,6 +279,57 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 - **Live inbox updates** (§6): pages read the event-log position before loading their data and hand
   it to the browser, which opens the stream from there, so nothing that changes between the render
   and the connection is missed.
+
+## 6D. Inbox teams, routing, business hours and CSAT **[built — CSAT sends verified against a local Graph stand-in only]**
+
+- **Teams and routing** (`packages/domain/src/inbox/routing.ts`, `teams.ts`; migration 0009): a
+  conversation belongs to at most one team. When a conversation starts a new case (created, or
+  reopened after a resolve) routing places it in the first team (by name) whose routing keyword
+  appears in the customer's message, otherwise in the team its number starts conversations in
+  (`channel_accounts.default_team_id`). A round-robin team then assigns it to the next available
+  member (explicit per-member availability, default off) below the team's limit of open
+  conversations; with nobody eligible it waits in the team's queue. Routing never changes an
+  existing assignment, so a reopened conversation stays with its assignee. All routing in a company
+  runs under one transaction-scoped advisory lock (taken after the conversation row locks, at the
+  end of a webhook batch), so rotation and limits hold under concurrent arrivals. A minute sweep
+  (`ops.conversations_to_route`, SECURITY DEFINER, ids only) assigns waiting conversations when a
+  member becomes available or a place frees up; becoming available and saving a team route at once.
+  Suspending, removing or demoting a member returns their conversations to the queue.
+  **Teams never change visibility**: `inbox.read_assigned` still sees assigned-to-me plus the
+  unassigned queue (ADR-029).
+- **Business hours** (`inbox/business-hours.ts`): weekly intervals (ISO weekdays, `24:00` closes at
+  midnight) and closed days in the company's time zone, turned into real instants with the same
+  daylight-saving rules as campaign schedules; pure functions add business minutes, measure business
+  time and find the next opening.
+- **Reply-due timers** (`inbox/sla.ts`): the open reply turn's start plus the first-response target,
+  counted in business hours when business hours are on (the timer pauses while closed), else absolute
+  time. The inbox list and thread show waiting time, due time, overdue and paused states; a
+  longest-waiting order pages on `date_trunc('milliseconds', started_at)` so keyset cursors
+  round-trip exactly.
+- **Cases** (`app.conversation_cases`): opened by a trigger when a conversation is created or
+  reopened and closed when it is resolved (resolver and assignee recorded); guarded like reply turns
+  (a resolved case never changes). Resolution times are measured on cases.
+- **Reports** (§6C): business-hours reply times are the overlap of each turn with the company's
+  opening periods, computed in SQL against an `unnest` of periods generated in TypeScript for the
+  report's range; new versioned definitions (ADR-030).
+- **Saved replies** (`inbox/saved-replies.ts`): shared answers with `{{name}}`, `{{agent}}` and
+  `{{company}}` placeholders, filled server-side for the conversation; the composer inserts the text
+  and the member sends it as an ordinary reply.
+- **Mentions** (`app.note_mentions`): a note can name members who can see the conversation at that
+  moment; Inbox → Mentions lists a member's mentions in conversations they can still see, with an
+  unread count cleared when they open the conversation.
+- **Collision warning** (`queueTextMessage` `afterMessageId`): under the conversation row lock, a
+  reply is refused once when another member's reply is newer than the newest message the sender had
+  seen; the composer refreshes the thread and keeps the draft (ADR-033).
+- **CSAT** (`inbox/csat.ts`, ADR-032): inside the resolve transaction, if CSAT is on, a survey is
+  recorded: either an interactive message with three reply buttons (ids `w360csat:<survey>:<score>`,
+  limits from Meta's OpenAPI spec, research M-157) queued through the ordinary send pipeline, or a
+  skip reason (window closed, opted out, suppressed, erased, no phone number, number inactive, asked
+  in the last 24 hours). The send worker re-checks the contact's consent before dispatch. Ingestion
+  records the customer's first tap when its button id and `context.id` (the survey message's WAMID,
+  M-158) match the conversation's survey; a tap never reopens the conversation, counts as unread,
+  starts a reply turn (trigger, migration 0009), matches a consent keyword or counts as a campaign
+  reply.
 
 ## 7. Commercial model and billing **[built: wallet, top-ups, auto-recharge — verified against a local Razorpay stand-in only; subscriptions planned]**
 

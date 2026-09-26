@@ -245,3 +245,55 @@ cannot be priced are counted by reason, never estimated. Volume tiers are not ap
 estimate can exceed the invoice for utility and authentication; Meta's invoice is authoritative.
 Reconciling with Meta's `pricing_analytics` (M-078, SDK-sourced, not verified) is backlog. A
 campaign's estimate currency is fixed the first time it prices a message.
+
+## ADR-029 Teams route conversations but do not change who can read them (2026-09-26)
+
+Decision: teams are routing groups. A conversation's team decides who receives it (number team,
+keyword team, round robin with availability and limits); visibility stays with the permission
+matrix (`inbox.read_all`, or `inbox.read_assigned` for assigned-to-me plus the unassigned queue).
+Making team queues private would change live-update routing (events carry only the assignee) and
+every visibility check at once; it is a separate, reviewed change if customers need it. Routing
+runs under one advisory lock per company taken after conversation row locks (end of a webhook batch;
+the sweep uses one transaction per conversation), so limits and rotation hold under concurrency.
+Availability is an explicit switch that defaults to off: automatic assignment to someone who is not
+working is worse than a waiting queue that the sweep drains when they start. A reopened conversation
+keeps its assignee; members who leave, are suspended or lose inbox access have their conversations
+returned to the queue.
+
+## ADR-030 Business hours apply to the target; absolute times stay reported (2026-09-26)
+
+Decision: when business hours are on, the first-response target (inbox timers, "answered within
+target" v2, "overdue") counts opening hours only; first response is reported both in absolute time
+and in business hours (new definition), and resolution time in absolute time. Reports apply the
+company's current calendar to the whole period, stated in the definitions, instead of versioning
+calendars; the calendar is company-wide (per-team calendars and targets are backlog). Definitions
+whose text said business hours were not supported got new versions (v2) rather than edits.
+
+## ADR-031 Conversation cases maintained by triggers (2026-09-26)
+
+Decision: resolution time is measured on cases (open → resolve) recorded in
+`app.conversation_cases` by triggers on `app.conversations`, for the same reason as reply turns
+(ADR-027): every write path is covered and the rows are immutable once resolved. Conversations that
+were already open when migration 0009 ran get their first case when they are next reopened; no
+cases are reconstructed.
+
+## ADR-032 CSAT through interactive reply buttons inside the service window (2026-09-26)
+
+Decision: a resolve by a member sends one question with three reply buttons (research M-157:
+1 to 3 buttons, titles up to 20 characters, ids up to 256), only inside the 24-hour customer service
+window, only to contacts who have not opted out of non-marketing messages (the utility consent
+check used for templates), at most once per conversation per 24 hours, re-checked at send time.
+Outside the window nothing is sent (a template-based survey would be a business-initiated charge
+and needs its own consent decision). Every resolve records a survey row, sent or skipped with the
+reason, so coverage is reportable. The answer is the first tap whose button id and `context.id`
+(M-158) match the conversation's survey; later taps are stored as messages but do not change it.
+Taps never reopen a conversation or start a reply turn. The score is the share of best ratings among
+answers; the response rate uses delivered surveys as the denominator.
+
+## ADR-033 Collision warning at send time instead of presence (2026-09-26)
+
+Decision: collisions are caught where they cause harm, when a reply is queued: under the
+conversation's row lock, a reply is refused once if another member's reply is newer than the
+newest message the sender had seen; the sender reads it and sends again. This needs no presence
+heartbeats and cannot be missed by a disconnected browser. Live "someone is typing" presence is
+backlog.

@@ -1,5 +1,69 @@
 # Progress
 
+## 2026-09-26 — Phase 3: inbox teams, routing, business hours, CSAT (P3-06)
+
+Status: **implementation complete for the advanced inbox, production blocked** (routing, timers,
+saved replies and mentions work on HyFib's own data; CSAT surveys are WhatsApp interactive messages
+verified only against the test-only Graph stand-in, which checks them against the limits in Meta's
+OpenAPI spec; a real tap from a sandbox number is a release item).
+
+### Completed
+
+- **Schema (migrations 0009, 0010):** teams, team members and member availability;
+  `conversations.team_id` and a number's default team (`channel_accounts.default_team_id`);
+  business hours and closed days; `app.conversation_cases` (open → resolve, maintained by triggers,
+  immutable once resolved); saved replies; note mentions (deleted with their note); CSAT surveys
+  (sent or skipped with a reason, first answer only, guarded by a trigger); the reply-turn trigger
+  ignores CSAT taps; `ops.conversations_to_route` (definer, ids only) for the routing sweep; eleven
+  metric definition rows (four new versions whose text said business hours were not supported, and
+  business-hours first response, overdue, resolution time, CSAT surveys, response rate, score and
+  CSAT per member). The team index is built concurrently in its own migration.
+- **Routing:** keyword teams (whole words, any script) before the number's team; round robin to
+  the next available member below the team's limit; one advisory lock per company; a minute sweep;
+  immediate routing when a member becomes available or a team is saved; release of a member's
+  conversations when they are suspended, removed, leave or lose inbox access; routing decisions in
+  the audit log. Teams never change visibility (ADR-029).
+- **Business hours and timers:** weekly ranges and closed days in the company time zone
+  (daylight-saving aware); reply-due timers in the inbox list and thread, paused outside business
+  hours; a longest-waiting order; team, number and customer filters.
+- **Reports:** first response in business hours, overdue now, answered within target counted in
+  business hours when business hours are on, resolution times from cases, a CSAT section with
+  delivered and answered denominators and skip reasons, CSAT per member, new CSV columns and a CSAT
+  export.
+- **Saved replies, mentions, collisions:** supervisors manage saved replies with `{{name}}`,
+  `{{agent}}` and `{{company}}` placeholders filled for the conversation; notes mention members who
+  can see the conversation (Inbox → Mentions with an unread count); a reply is refused once when
+  another member replied after the sender's last seen message.
+- **CSAT:** on resolve, one question with three reply buttons inside the service window for contacts
+  who have not opted out, at most once a day per conversation, re-checked at send time; the first
+  tap matching the survey's button id and message context is recorded; taps never reopen the
+  conversation, start a reply turn or count as keywords or campaign replies. Research rows M-157
+  and M-158 record the reply-button limits and webhook shape from Meta's OpenAPI spec, fetched
+  directly from GitHub (developers.facebook.com is blocked here).
+- **Web:** Settings → Inbox (target, business hours, closed days, CSAT), Settings → Teams (teams,
+  routing, who is taking conversations), Settings → Saved replies; inbox availability switch, filters,
+  mentions view, timers, team control, saved-reply picker, mention picker, CSAT status and messages;
+  reports sections. The response target moved from Settings → Messaging to Settings → Inbox.
+- **Found while testing:** paging through the longest-waiting order repeated the first row on the
+  next page, because turn start times carry microseconds and cursors milliseconds; the order and
+  cursor now use millisecond-truncated times. Drizzle writes `FOR UPDATE OF` with a schema-qualified
+  table name, which PostgreSQL rejects; the CSAT answer lock uses a plain row lock instead.
+
+### Test commands and results (local, 2026-09-26, fresh database)
+
+| Command                                                      | Result                                                                                                                                                                                                                                                                                                                                                                                       |
+| ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`         | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                               |
+| `pnpm test` (unit)                                           | 104 passed (adds business-time arithmetic across closing times, weekends, closed days and 23/25-hour days, open/closed status, paused timers, range parsing, keyword matching and rotation)                                                                                                                                                                                                  |
+| `pnpm test:integration` (PostgreSQL 18.x)                    | 190 passed: inbox advanced 14 (teams, number and keyword routing, rotation, limits with six simultaneous customers, the sweep, release on suspension, team moves, cases, list filters and timers, saved replies, mentions, collisions), CSAT 6, reports 16 (adds business-hours figures, resolution times and CSAT against hand-computed values with a fixed clock), plus the earlier suites |
+| `pnpm test:e2e --project=chromium --project=mobile-chromium` | 30 passed (15 tests × 2), including settings for business hours, closed days, CSAT, a round-robin team and a saved reply, routing to the available owner, the team filter, a saved reply sent, the CSAT question and a tap, the CSAT report, and no horizontal overflow on the new pages                                                                                                     |
+
+### Known gaps (tracked in BACKLOG.md)
+
+Per-team SLA targets and calendars, breach notifications, presence and typing indicators,
+conversation tags, private team queues, mention emails, CSAT outside the service window, a CSAT run
+with a real WABA.
+
 ## 2026-09-26 — Phase 3: reports (P3-05)
 
 Status: **implementation complete for reports, production blocked** (every number is computed from

@@ -35,8 +35,11 @@ made. This checklist records the evidence required per gate; unchecked items blo
 - [ ] Report numbers compared with WhatsApp Manager and Meta's invoice for a sandbox period
       (delivery counts, billable flags, estimated charges); differences explained in the
       definitions
-- [ ] Migration 0008 (`CREATE INDEX CONCURRENTLY`) applied on production-sized data and the index
-      confirmed valid
+- [ ] Migrations 0008 and 0010 (`CREATE INDEX CONCURRENTLY`) applied on production-sized data and
+      the indexes confirmed valid
+- [ ] A CSAT survey sent to a test recipient on an approved sandbox number: the reply-button message
+      is accepted and delivered, and a real tap arrives with `button_reply` and `context.id` as in
+      research M-158
 - [ ] Tenant-isolation and security gates passing in CI on the release commit
 - [ ] Measured load behaviour against the test envelope (k6 results)
 - [ ] Backup restoration drill performed and timings recorded (RPO/RTO)

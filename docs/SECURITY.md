@@ -112,6 +112,17 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   inbox or contact access, such as analysts and marketers, can read them); CSV exports need
   `reports.export` and are audited (`report.exported`). The inbox response target needs
   `tenant.settings.manage`; resolving and reopening conversations is audited.
+- Inbox teams (P3-06): creating, editing and deleting teams (members, numbers, routing keywords,
+  round robin, limits) and saved replies need `inbox.supervise` (audited); moving a conversation
+  between teams needs `inbox.assign` (audited, version-checked); members set their own
+  availability with `inbox.reply`, and `inbox.assign` may set anyone's (audited). Business hours,
+  closed days and CSAT settings need `tenant.settings.manage` (audited). Teams never widen
+  visibility. Mentions: only active members who can see the conversation at that moment can be
+  mentioned, and a member's mentions are listed only for conversations they can still see.
+  Automatic assignment only reaches active members whose role can read and answer conversations.
+- CSAT taps: a tap is recorded only when its button id names a survey of the same conversation and
+  its `context.id` is that survey's message; nothing in the tap is trusted beyond selecting one of
+  the three scores, and a tap can never reopen a conversation.
 
 Platform roles (`ops.platform_admins`): `platform_owner` and `platform_operator`. Both require MFA;
 all actions are audited; neither can read customer content without a support grant.

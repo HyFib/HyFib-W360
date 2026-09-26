@@ -204,7 +204,9 @@ the card in force when each message is queued.
 number names its definition (key and version), denominator, window and time-zone rule. Common causes:
 delivery statuses or pricing not received yet (Meta webhooks; check webhook ingestion, section 4),
 a period that includes today, or the company's time zone (Settings → Company) differing from the
-viewer's. Response times start when HyFib received the customer's message and count absolute time.
+viewer's. Response times start when HyFib received the customer's message; the target and the
+business-hours figures count opening hours only when business hours are on (section 10C), other
+times are absolute.
 
 **Response times missing for older conversations.** Reply turns are recorded from the release that
 added reports (migration 0007); earlier conversations have none. Nothing to repair.
@@ -218,6 +220,31 @@ Estimates never replace Meta's invoice.
 period (the page allows at most 92 days); check that migration 0008's
 `app.messages_tenant_created_idx` exists and is valid (`\d app.messages`); record the company and
 period for the materialised-aggregate follow-up (ADR-026).
+
+## 10C. Inbox routing, business hours and CSAT
+
+**New conversations are not being assigned.** Check, in order: the conversation's team (inbox
+filter or thread) and that the team assigns round robin (Settings → Teams); that at least one team
+member is available (Settings → Teams shows who is taking conversations) and below the team's limit
+of open conversations; that the member is active and has a role that can answer (owner,
+administrator, supervisor, agent). Waiting conversations are picked up within a minute by the
+messaging sweep (worker log "waiting conversations assigned") or immediately when a member becomes
+available. The audit log records each decision as `conversation.routed` (rule `keyword` or
+`number`). A conversation that already has an assignee is never re-routed.
+
+**A reply timer or "overdue" looks wrong.** Timers use the company time zone (Settings → General)
+and, when business hours are on, only the opening hours and closed days in Settings → Inbox. A timer
+shown as paused resumes at the next opening. Reports apply the current calendar to past periods.
+
+**CSAT surveys are not sent.** Each resolve records a survey with a reason when nothing was sent
+(Reports → CSAT lists the reasons): the 24-hour window had closed, the customer opted out or the
+number is suppressed, the contact was erased or has no phone number, the WhatsApp number is inactive,
+or the customer was asked in the last 24 hours. A survey that was queued but failed shows Meta's
+error on the message in the thread (for example a consent change before dispatch: `opted_out`).
+
+**Migration 0010 failed.** It builds `app.conversations_team_idx` concurrently. If it failed, an
+INVALID index can remain: run `DROP INDEX CONCURRENTLY app.conversations_team_idx;` and run the
+migrations again.
 
 ## 11. Compromised company (tenant) or account
 
