@@ -3,14 +3,17 @@ import {
   Keyring,
   createLogger,
   loadWorkerConfig,
+  metaConfigFrom,
   smtpConfigFrom,
   systemClock,
   type Clock,
   type Logger,
+  type MetaConfig,
   type WorkerConfig,
 } from '@w360/core';
 import { assertRuntimeRoleSafety, createDatabase, createPool, type Database } from '@w360/db';
 import {
+  GraphClient,
   JobSigner,
   PgBossJobQueue,
   SmtpEmailSender,
@@ -28,6 +31,10 @@ export interface WorkerRuntime {
   jobs: JobQueue;
   signer: JobSigner;
   email: EmailSender | null;
+  /** Null until the Meta app is configured; WhatsApp jobs then wait (retry) instead of failing. */
+  meta: MetaConfig | null;
+  graph: GraphClient | null;
+  sendRate: { capacity: number; refillPerSecond: number };
   close(): Promise<void>;
 }
 
@@ -69,6 +76,8 @@ export async function createWorkerRuntime(): Promise<WorkerRuntime> {
 
   const smtp = smtpConfigFrom(config);
   if (!smtp) logger.warn('SMTP is not configured: email jobs stay queued until it is.');
+  const meta = metaConfigFrom(config);
+  if (!meta) logger.warn('Meta is not configured: WhatsApp jobs stay queued until it is.');
 
   return {
     config,
@@ -80,6 +89,14 @@ export async function createWorkerRuntime(): Promise<WorkerRuntime> {
     jobs: new PgBossJobQueue(boss),
     signer: new JobSigner(config.W360_JOB_SIGNING_KEY),
     email: smtp ? new SmtpEmailSender(smtp) : null,
+    meta,
+    graph: meta
+      ? new GraphClient({ baseUrl: meta.graphBaseUrl, version: meta.graphApiVersion })
+      : null,
+    sendRate: {
+      capacity: config.META_SEND_RATE_PER_SECOND,
+      refillPerSecond: config.META_SEND_RATE_PER_SECOND,
+    },
     async close() {
       await pool.end();
     },

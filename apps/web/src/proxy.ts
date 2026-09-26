@@ -10,15 +10,22 @@ export function proxy(request: NextRequest) {
   const requestId = crypto.randomUUID();
   const isDev = process.env.NODE_ENV === 'development';
   const httpsOrigin = (process.env.APP_BASE_URL ?? '').startsWith('https://');
+  // Meta Embedded Signup runs Facebook's SDK and login popup on the channels settings page only.
+  const facebook = /^\/c\/[^/]+\/settings\/channels\/?$/.test(request.nextUrl.pathname);
   const csp = [
     "default-src 'self'",
-    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${isDev ? " 'unsafe-eval'" : ''}`,
+    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${facebook ? ' https://connect.facebook.net' : ''}${isDev ? " 'unsafe-eval'" : ''}`,
     `style-src 'self'${isDev ? " 'unsafe-inline'" : ` 'nonce-${nonce}'`}`,
     // Inline style attributes (used by accessible popover positioning) cannot execute script.
     "style-src-attr 'unsafe-inline'",
-    "img-src 'self' blob: data:",
+    `img-src 'self' blob: data:${facebook ? ' https://*.facebook.com https://*.fbcdn.net' : ''}`,
     "font-src 'self'",
-    "connect-src 'self'",
+    `connect-src 'self'${facebook ? ' https://*.facebook.com https://connect.facebook.net' : ''}`,
+    ...(facebook
+      ? [
+          'frame-src https://www.facebook.com https://web.facebook.com https://staticxx.facebook.com',
+        ]
+      : []),
     "object-src 'none'",
     "base-uri 'self'",
     "form-action 'self'",

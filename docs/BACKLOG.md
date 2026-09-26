@@ -3,56 +3,50 @@
 Dependency-ordered. Each item lists acceptance criteria (AC), tests (T) and prerequisites (PR).
 Status values follow the feature matrix. Last updated 2026-09-26.
 
-## Phase 1 — foundation (done, locally verified)
+## Phase 1 — foundation (done; CI green on PR #1)
 
 Workspace, DB roles/RLS, identity, companies, memberships, invitations, RBAC, MFA policy, audit,
 platform administration, support grants, worker/jobs, email outbox, CSP/security headers, Docker
-images, CI workflow, e2e flows. Remaining to close the gate formally:
-
-- **P1-01 CI evidence.** AC: all CI jobs green on the PR (quality, integration PG17/18, build, e2e ×4
-  projects, security, containers). T: CI. PR: none.
-- **P1-02 Firefox/WebKit e2e.** AC: the existing e2e suite passes on Firefox and WebKit in CI. T: CI.
+images, CI workflow, e2e flows. CI evidence: all jobs green on commit `e01bc26` (quality,
+integration PG17/18, build, e2e on Chromium/Firefox/WebKit/mobile, security scan, container scans).
 
 ## Phase 2 — WhatsApp connection, ingestion, outbound, live inbox
 
-- **P2-01 Channel schema.** `app.channel_accounts` (WABA, phone numbers, status, quality, limits),
-  `app.channel_credentials` (encrypted BISU token, key id, rotation metadata),
-  `ops.provider_asset_bindings` (unique `(provider, external_id)` → tenant), resolver function.
-  AC: an external asset can bind to exactly one company; RLS + definer resolver. T: isolation tests
-  for bindings; uniqueness race test.
-- **P2-02 Graph API client.** Typed `fetch` client with version pinning, timeouts, retry
-  classification (429/130429/131056 retryable; 131047/131026/368 permanent; 5xx retryable),
-  `x-business-use-case-usage` parsing, error normalisation. AC: no token in logs/URLs. T: unit tests
-  with recorded fixtures (test-only).
-- **P2-03 Embedded Signup.** Onboarding session with CSRF `state`, JS SDK launch, code exchange
-  within 30 s, ownership verification, binding, resumable onboarding job (subscribe app, register
-  number with encrypted PIN, health check, payment-method check), reconnect, disconnect. AC: steps in
-  META-SETUP §3; failures visible and retryable. T: integration tests with a provider mock
-  (deterministic failures) + sandbox verification. PR: Meta app, config id, app review.
-- **P2-04 Webhook endpoint.** Challenge verification, raw-body HMAC check (constant time), 4 MB limit,
-  durable `ops.webhook_receipts` before 200, security events on invalid signatures, processing job.
-  AC: persistence failure returns 500. T: tampered signature, oversized body, replay, DB outage.
-- **P2-05 Webhook processor.** Routing via bindings, quarantine for unknown assets, idempotent upserts
-  (contacts by BSUID, conversations, messages by WAMID, immutable status events with monotonic state),
-  template/account/quality updates, media download to private storage (7-day window). AC: duplicate,
-  delayed, batched, out-of-order, malformed and unknown-version payloads handled. T: property-style
-  replay tests; worker kill mid-processing.
-- **P2-06 Contacts & conversations core schema** (subset needed for inbox): contacts, channel
-  identities, conversations (per company/number/contact), messages, message_status_events, media.
-  Composite FKs everywhere. T: isolation suite additions.
-- **P2-07 Outbound pipeline.** Send intents with client idempotency keys, per-number group concurrency
-  - token bucket, send-time policy re-checks, retry/backoff with jitter, dead letters, unknown-outcome
-    state and correlation, cancellation. AC: no duplicate send from retries; timeouts never blindly
-    retried. T: worker death before/after provider call, 429 storms, expired token, company suspended
-    mid-queue.
-- **P2-08 Tenant event log + SSE.** `app.tenant_events` with xid8 cursor, LISTEN/NOTIFY hint
-  connection, SSE route with replay and membership re-validation, polling fallback. AC: no missed
-  events across reconnects; revoked member's stream closes. T: concurrency tests for cursor gaps.
-- **P2-09 Inbox UI.** Conversation list (virtualised), thread view, composer with per-company drafts
-  (memory/sessionStorage keyed by user+company), service-window indicator, template picker (phase 3
-  templates), assignment, notes, collision warnings. AC: keyboard accessible; responsive. T: e2e with
-  mock provider in CI + sandbox manual check.
-- **P2-10 Channel settings UI.** Connection status, quality, limits, permissions granted, health.
+Built and tested against a local Graph API stand-in (commit following `e01bc26`); every item that
+talks to Meta still needs sandbox verification, which is externally blocked (Meta app, business
+verification, app review, Embedded Signup configuration).
+
+- **P2-01 Channel schema** — done. `app.whatsapp_accounts` (encrypted token in the row, AAD-bound),
+  `app.channel_accounts`, `ops.provider_asset_bindings` (one active binding per external asset),
+  definer resolver/bind/release functions. T: cross-company binding refused (integration).
+- **P2-02 Graph API client** — done (without usage-header parsing). Pinned version, timeouts, no
+  redirects, classified results (`retryable`/`permanent`/`auth`/`unknown`), tokens in headers only.
+  Remaining: parse `x-business-use-case-usage` to pace management calls.
+- **P2-03 Embedded Signup** — done except payment-method check and Meta-side deregistration. T:
+  integration tests with the stand-in (success and six refusal paths). PR for verification: Meta app,
+  config id, app review.
+- **P2-04 Webhook endpoint** — done. T: e2e (bad signature → 401), smoke (oversized → 413), integration
+  (dedupe, storage before processing).
+- **P2-05 Webhook processor** — done for `messages` (inbound, statuses, identity changes);
+  remaining: template/account/quality update fields, media download to private storage within
+  Meta's retention window.
+- **P2-06 Contacts & conversations core schema** — done (contacts, identities, conversations, notes,
+  messages, status history, send intents, media metadata, event log) with composite FKs and FORCE RLS
+  (structural tests cover the new tables).
+- **P2-07 Outbound pipeline** — done for text replies inside the 24-hour window. T: success,
+  idempotent resubmit, rate limit, permanent error, revoked token, dropped connection, timeout, worker
+  loss before/after dispatch, company suspended, manual resolution of unknown outcomes.
+- **P2-08 Tenant event log + SSE** — done. T: commit-order cursors per company (integration), live
+  delivery in e2e.
+- **P2-09 Inbox UI** — done: views, thread, composer with per-member-and-company drafts and
+  idempotency keys, window indicator, assignment, resolve/reopen, notes, unknown-outcome decisions,
+  live updates. Remaining: list virtualisation, collision warnings (phase 3 with presence), template
+  picker (phase 3).
+- **P2-10 Channel settings UI** — done: connect (Embedded Signup), setup progress and errors, retry,
+  disconnect, quality and health time. Remaining: messaging limits and granted permissions display.
+- **P2-11 Platform quarantine view** — new: list and resolve quarantined webhooks in the platform area
+  (today the platform role can read and resolve them in the database only).
+- **P2-12 Token health** — new: periodic `debug_token` checks and reconnect prompts before sends fail.
 
 ## Phase 3 — contacts, consent, templates, campaigns, reports
 

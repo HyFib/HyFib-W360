@@ -296,6 +296,9 @@ importers:
       '@types/pg':
         specifier: 8.23.1
         version: 8.23.1
+      '@w360/core':
+        specifier: workspace:*
+        version: link:../../packages/core
       pg:
         specifier: 8.23.0
         version: 8.23.0

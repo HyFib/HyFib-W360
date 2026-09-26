@@ -5,24 +5,33 @@ import {
   Keyring,
   createLogger,
   loadWebConfig,
+  metaConfigFrom,
   parseTrustedProxies,
   systemClock,
   type Clock,
   type Logger,
+  type MetaConfig,
   type WebConfig,
 } from '@w360/core';
 import { assertRuntimeRoleSafety, createDatabase, createPool, type Database } from '@w360/db';
 import { createPlatformDatabase } from '@w360/db/platform';
 import {
+  GraphClient,
   JobSigner,
   PgBossJobQueue,
+  createInboxService,
+  createOnboardingService,
   createPlatformService,
   createTenancyService,
+  type InboxService,
   type JobQueue,
+  type OnboardingService,
+  type OutboundDeps,
   type PlatformService,
   type TenancyService,
 } from '@w360/domain';
 import { createAuth, type Auth } from './auth';
+import { createTenantEventHub, type TenantEventHub } from './event-hub';
 
 /**
  * Process-wide dependencies for the web tier, created lazily on first use so that `next build`
@@ -42,6 +51,12 @@ export interface Runtime {
   auth: Auth;
   tenancy: TenancyService;
   platform: PlatformService;
+  inbox: InboxService;
+  outbound: OutboundDeps;
+  /** Null until the Meta app is configured (WhatsApp connection is then reported unavailable). */
+  meta: MetaConfig | null;
+  onboarding: OnboardingService | null;
+  events: TenantEventHub;
   shutdown(): Promise<void>;
 }
 
@@ -106,6 +121,21 @@ async function init(): Promise<Runtime> {
     invitationTtlHours: config.INVITATION_TTL_HOURS,
   });
   const platform = createPlatformService({ db, platformDb, clock: systemClock });
+  const inbox = createInboxService({ db, clock: systemClock });
+  const outbound: OutboundDeps = { db, jobs, signer, clock: systemClock };
+  const meta = metaConfigFrom(config);
+  const onboarding = meta
+    ? createOnboardingService({
+        db,
+        keyring,
+        jobs,
+        signer,
+        clock: systemClock,
+        graph: new GraphClient({ baseUrl: meta.graphBaseUrl, version: meta.graphApiVersion }),
+        meta,
+      })
+    : null;
+  const events = createTenantEventHub({ connectionString: config.DATABASE_URL_APP, logger });
 
   logger.info({ env: config.APP_ENV }, 'web runtime initialised');
 
@@ -121,7 +151,13 @@ async function init(): Promise<Runtime> {
     auth,
     tenancy,
     platform,
+    inbox,
+    outbound,
+    meta,
+    onboarding,
+    events,
     async shutdown() {
+      await events.close();
       await boss.stop({ graceful: true, timeout: 10_000 });
       await Promise.allSettled([appPool.end(), authPool.end(), platformPool.end()]);
     },

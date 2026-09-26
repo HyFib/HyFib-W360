@@ -13,6 +13,7 @@ const chromiumLaunch = chromiumExecutable
 
 export default defineConfig({
   testDir: '.',
+  globalSetup: './global-setup.ts',
   testMatch: /.*\.spec\.ts/,
   fullyParallel: false,
   workers: 1,

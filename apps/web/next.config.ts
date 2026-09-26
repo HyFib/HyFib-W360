@@ -35,6 +35,11 @@ const config: NextConfig = {
         source: '/((?!_next/static|_next/image|favicon.ico).*)',
         headers: [{ key: 'Cache-Control', value: 'private, no-store' }],
       },
+      {
+        // Meta Embedded Signup's popup must be able to message this page back (later rules win).
+        source: '/c/:slug/settings/channels',
+        headers: [{ key: 'Cross-Origin-Opener-Policy', value: 'same-origin-allow-popups' }],
+      },
     ];
   },
 };

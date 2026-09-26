@@ -23,11 +23,20 @@ import type { JobSigner } from './envelope';
  */
 export type JobAuthorization =
   | { outcome: 'authorized'; envelope: JobEnvelope; scope: TenantScope | null }
+  | { outcome: 'rejected'; reason: 'invalid_signature' | 'unexpected_kind' | 'tenant_missing' }
   | {
       outcome: 'rejected';
-      reason: 'invalid_signature' | 'unexpected_kind' | 'tenant_missing' | 'actor_not_member';
+      reason: 'actor_not_member';
+      envelope: JobEnvelope;
+      /** Company scope without the actor, only for cancelling the referenced durable row. */
+      cleanupScope: TenantScope;
     }
-  | { outcome: 'deferred'; reason: 'tenant_suspended' };
+  | {
+      outcome: 'deferred';
+      reason: 'tenant_suspended';
+      envelope: JobEnvelope;
+      cleanupScope: TenantScope;
+    };
 
 export interface AuthorizeJobOptions {
   expectedKind: string;
@@ -66,8 +75,14 @@ export async function authorizeJob(
   );
   if (status === null || status === 'deleted')
     return { outcome: 'rejected', reason: 'tenant_missing' };
-  if (options.requireActiveTenant && status !== 'active')
-    return { outcome: 'deferred', reason: 'tenant_suspended' };
+  if (options.requireActiveTenant && status !== 'active') {
+    return {
+      outcome: 'deferred',
+      reason: 'tenant_suspended',
+      envelope,
+      cleanupScope: authorizedTenantScope(tenantId, null),
+    };
+  }
 
   const scope = authorizedTenantScope(tenantId, envelope.actorUserId);
   if (options.requireActiveActor && envelope.actorUserId) {
@@ -89,7 +104,14 @@ export async function authorizeJob(
       },
       { accessMode: 'read only' },
     );
-    if (!active) return { outcome: 'rejected', reason: 'actor_not_member' };
+    if (!active) {
+      return {
+        outcome: 'rejected',
+        reason: 'actor_not_member',
+        envelope,
+        cleanupScope: authorizedTenantScope(tenantId, null),
+      };
+    }
   }
   return { outcome: 'authorized', envelope, scope };
 }

@@ -146,9 +146,10 @@ describe('worker job authorization', () => {
         sql`update app.tenants set status = 'suspended' where id = ${fx.tenantB.id}::uuid`,
       ),
     );
-    expect((await runInvitationJob(env)).auth).toEqual({
+    expect((await runInvitationJob(env)).auth).toMatchObject({
       outcome: 'deferred',
       reason: 'tenant_suspended',
+      cleanupScope: { kind: 'tenant', tenantId: fx.tenantB.id, userId: null },
     });
     await dbs.platform.run(admin, (tx) =>
       tx.execute(sql`update app.tenants set status = 'active' where id = ${fx.tenantB.id}::uuid`),
@@ -169,9 +170,10 @@ describe('worker job authorization', () => {
         sql`update app.memberships set status = 'suspended' where user_id = ${fx.agentA.id} and tenant_id = ${fx.tenantA.id}::uuid`,
       ),
     );
-    expect((await runInvitationJob(env)).auth).toEqual({
+    expect((await runInvitationJob(env)).auth).toMatchObject({
       outcome: 'rejected',
       reason: 'actor_not_member',
+      cleanupScope: { kind: 'tenant', tenantId: fx.tenantA.id, userId: null },
     });
     await dbs.app.run(authorizedTenantScope(fx.tenantA.id, fx.ownerA.id), (tx) =>
       tx.execute(

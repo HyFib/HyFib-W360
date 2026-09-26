@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ConfigError, loadWebConfig } from './config';
+import { ConfigError, loadWebConfig, metaConfigFrom } from './config';
 
 const base = {
   DATABASE_URL_APP: 'postgres://app@localhost/w360',
@@ -61,5 +61,44 @@ describe('web configuration safety', () => {
         APP_BASE_URL: 'https://w360.example.net',
       }),
     ).toThrow(/APP_ENV=local/);
+  });
+});
+
+describe('empty values and Meta configuration', () => {
+  const local = { ...base, APP_ENV: 'local', APP_BASE_URL: 'http://localhost:3000' };
+  const meta = {
+    META_APP_ID: '1234567890',
+    META_APP_SECRET: 's'.repeat(32),
+    META_GRAPH_API_VERSION: 'v26.0',
+    META_WEBHOOK_VERIFY_TOKEN: 'verify-token',
+  };
+
+  it('treats empty variables as unset', () => {
+    const config = loadWebConfig({ ...local, META_APP_ID: '', META_GRAPH_BASE_URL: '' });
+    expect(config.META_APP_ID).toBeUndefined();
+    expect(metaConfigFrom(config)).toBeNull();
+  });
+
+  it('accepts both secrets during rotation and defaults to the official Graph origin', () => {
+    const config = metaConfigFrom(
+      loadWebConfig({ ...local, ...meta, META_APP_SECRET_PREVIOUS: 'p'.repeat(32) }),
+    );
+    expect(config?.webhookSecrets).toEqual(['s'.repeat(32), 'p'.repeat(32)]);
+    expect(config?.graphBaseUrl).toBe('https://graph.facebook.com');
+  });
+
+  it('allows a Graph stand-in only for local and test environments', () => {
+    const graph = { META_GRAPH_BASE_URL: 'http://127.0.0.1:4010/' };
+    expect(metaConfigFrom(loadWebConfig({ ...local, ...meta, ...graph }))?.graphBaseUrl).toBe(
+      'http://127.0.0.1:4010',
+    );
+    const staging = loadWebConfig({
+      ...base,
+      ...meta,
+      ...graph,
+      APP_ENV: 'staging',
+      APP_BASE_URL: 'https://staging.w360.example.net',
+    });
+    expect(() => metaConfigFrom(staging)).toThrow(/META_GRAPH_BASE_URL/);
   });
 });

@@ -28,6 +28,12 @@ python3 scripts/feature-matrix/build.py       # regenerate docs/FEATURE-MATRIX.m
   sensitive columns). The isolation suite checks FORCE RLS on every table with `tenant_id`.
 - **Migrations** are forward-only reviewed SQL in `packages/db/migrations`; never edit an applied
   file (checksums are enforced). Use expand/contract for breaking changes.
+- **Functions:** nothing is executable by PUBLIC (tested). For a SECURITY DEFINER function, pin
+  `search_path`, `GRANT EXECUTE` to the calling role **before** `ALTER FUNCTION … OWNER TO
+w360_definer` (the migration role cannot grant afterwards), and give w360_definer only the table
+  privileges and policies it needs.
+- **Provider traffic in tests** comes from `tests/support/graph-stand-in.ts` only; production config
+  refuses non-Meta Graph origins outside `APP_ENV=local|test`. Never add a fake provider to app code.
 - **Money** is integer minor units (`bigint`), never floats. Ledgers are append-only.
 - **No mock production integrations, no placeholder features, no swallowed errors, no arbitrary
   sleeps.** Fakes live only in tests. Unavailable capabilities are reported as unavailable.

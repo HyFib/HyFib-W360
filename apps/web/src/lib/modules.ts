@@ -25,9 +25,7 @@ export const MODULES: ModuleDefinition[] = [
     label: 'Inbox',
     path: '/inbox',
     permission: 'inbox.read_assigned',
-    status: 'planned',
-    reason:
-      'Needs a connected WhatsApp Business number. The messaging pipeline is being built in phase 2.',
+    status: 'available',
   },
   {
     key: 'contacts',

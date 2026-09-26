@@ -15,36 +15,60 @@ Partner (credit lines, billing Meta charges) is a separate commercial programme 
 
 ## 2. One-time platform prerequisites (HyFib)
 
-| Step | What                                                                                                                                                                                                                                                                                          | Evidence                                                               | Status                      |
-| ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- | --------------------------- |
-| 1    | Meta Business portfolio for HyFib with **business verification** (legal name, address, phone, email, website; documents may be requested).                                                                                                                                                    | M-021                                                                  | External — not started      |
-| 2    | Meta app (type Business) with the WhatsApp product, legal URLs: privacy policy, terms of service, data deletion instructions/URL, support contact.                                                                                                                                            | M-021, M-133 (deletion callback requirements for WhatsApp unconfirmed) | External                    |
-| 3    | **App Review** for advanced access to `whatsapp_business_messaging` (send on behalf of customers) and `whatsapp_business_management` (manage WABAs, numbers, templates). Whether `business_management` is needed for our flow is unconfirmed (only needed for credit-line sharing per M-147). | M-021, M-147                                                           | External                    |
-| 4    | **Facebook Login for Business configuration** (produces the `config_id` used by Embedded Signup; replaces `scope`).                                                                                                                                                                           | M-013                                                                  | External                    |
-| 5    | App in **live mode**, webhook callback URL `https://<host>/api/webhooks/meta` with verify token, subscribed fields at least `messages`, `message_template_status_update`, `account_update`, `phone_number_quality_update` (verify the current field list).                                    | M-018, M-030s                                                          | Endpoint designed (phase 2) |
-| 6    | Onboarding capacity: default cap of **10 new customers per rolling 7 days**; raising it (reported as 200) is tied to verification/app review; whether "access verification" is still required conflicts across sources.                                                                       | M-022, M-023                                                           | Unconfirmed                 |
+| Step | What                                                                                                                                                                                                                                                                                          | Evidence                                                               | Status                   |
+| ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- | ------------------------ |
+| 1    | Meta Business portfolio for HyFib with **business verification** (legal name, address, phone, email, website; documents may be requested).                                                                                                                                                    | M-021                                                                  | External — not started   |
+| 2    | Meta app (type Business) with the WhatsApp product, legal URLs: privacy policy, terms of service, data deletion instructions/URL, support contact.                                                                                                                                            | M-021, M-133 (deletion callback requirements for WhatsApp unconfirmed) | External                 |
+| 3    | **App Review** for advanced access to `whatsapp_business_messaging` (send on behalf of customers) and `whatsapp_business_management` (manage WABAs, numbers, templates). Whether `business_management` is needed for our flow is unconfirmed (only needed for credit-line sharing per M-147). | M-021, M-147                                                           | External                 |
+| 4    | **Facebook Login for Business configuration** (produces the `config_id` used by Embedded Signup; replaces `scope`).                                                                                                                                                                           | M-013                                                                  | External                 |
+| 5    | App in **live mode**, webhook callback URL `https://<host>/api/webhooks/meta` with verify token, subscribed fields at least `messages`, `message_template_status_update`, `account_update`, `phone_number_quality_update` (verify the current field list).                                    | M-018, M-030s                                                          | Endpoint built (phase 2) |
+| 6    | Onboarding capacity: default cap of **10 new customers per rolling 7 days**; raising it (reported as 200) is tied to verification/app review; whether "access verification" is still required conflicts across sources.                                                                       | M-022, M-023                                                           | Unconfirmed              |
 
-## 3. Customer onboarding flow (to implement in phase 2)
+## 3. Customer onboarding flow (built in phase 2; sandbox verification pending)
 
-1. An owner/administrator with `channels.manage` clicks **Connect WhatsApp** inside their company.
-   The server creates an onboarding session bound to (user, session, company) with a random `state`.
-2. The browser runs Embedded Signup **v4** (`FB.login` with `config_id`, `response_type: 'code'`,
-   `override_default_response_type: true`, `extras` per current docs). v2 is deprecated on
-   **2026-10-15** (M-010, M-011, M-013).
-3. The session-info message event provides `waba_id`, `phone_number_id` and `business_id`; FINISH
-   and closing on the final screen are both treated as completion; cancellations are recorded.
-4. The browser posts the authorization **code** and `state` to our server, which exchanges the code
-   **server-side within 30 seconds** (M-143) for a BISU token. The token is encrypted with the
-   keyring (AAD = company + credential id) and never sent to the browser.
-5. Ownership check: before binding, the server confirms (with the new token) that the WABA and phone
-   number are accessible to it; the (provider, external id) binding is globally unique, so an asset
-   already bound to another company is refused (confused-deputy protection).
-6. A resumable, idempotent onboarding job then: subscribes our app to the WABA
-   (`POST /{WABA_ID}/subscribed_apps`), registers the number (`POST /{PHONE_NUMBER_ID}/register`
-   with a PIN we generate and store encrypted; within **14 days** of signup; limited attempts),
-   checks number health and the customer's payment method, and marks the channel live (M-017).
-7. Every step is audited; failures are visible in the company's channel settings and in the
-   platform onboarding-failures screen with retry.
+1. An owner/administrator with `channels.manage` opens **Settings → Channels** and clicks **Connect
+   WhatsApp number**. The server creates an onboarding session bound to (member, auth session,
+   company) with a random 32-byte `state` (stored as a SHA-256 hash, 15-minute expiry, single use).
+2. The browser loads Facebook's SDK (allowed by CSP on that page only; COOP there is
+   `same-origin-allow-popups` so the popup can message the page) and runs Embedded Signup
+   (`FB.login` with `config_id`, `response_type: 'code'`, `override_default_response_type: true`,
+   `extras.sessionInfoVersion: '3'`). v2 is deprecated on **2026-10-15** (M-010, M-011, M-013).
+3. The `WA_EMBEDDED_SIGNUP` `FINISH` message (accepted only from `facebook.com` origins) provides
+   `waba_id`, `phone_number_id` and `business_id`; cancellations are shown to the member.
+4. The browser posts `state`, the authorization **code** and the ids to a server action. The server
+   claims the session atomically, exchanges the code **server-side within 30 seconds** (M-015) and
+   calls `debug_token`: the token must belong to our app id, be valid, include
+   `whatsapp_business_management` and `whatsapp_business_messaging`, and, when Meta returns target
+   ids for the management permission, include the WABA.
+5. Ownership check: the new token must be able to list the WABA's phone numbers and the chosen number
+   must be among them. Only then are the WABA and number bound (globally unique active binding; an
+   asset bound to another company is refused) and the token stored encrypted (AAD = company +
+   WhatsApp account id). The token never reaches the browser or logs.
+6. A resumable `channel.onboard` job subscribes our app to the WABA
+   (`POST /{WABA_ID}/subscribed_apps`), registers the number (`POST /{PHONE_NUMBER_ID}/register` with a
+   six-digit PIN we generate and store encrypted; within **14 days** of signup; error `133016` means
+   Meta blocked registration for 72 hours) and reads number health, then marks the number active.
+   Completed steps are persisted, so retries resume where they stopped. Not yet built: the payment
+   method check and the platform onboarding-failures screen.
+7. Every step is audited; failures and the current step are visible in Settings → Channels with
+   **Retry setup**. **Disconnect** releases the bindings immediately (routing stops) and erases the
+   token when no number of that WABA remains; the number stays registered with Meta.
+
+### Platform configuration checklist
+
+| Variable                         | Where it comes from                                                           |
+| -------------------------------- | ----------------------------------------------------------------------------- |
+| `META_APP_ID`                    | Meta app dashboard (numeric).                                                 |
+| `META_APP_SECRET`                | Meta app dashboard → App settings. Secret manager only.                       |
+| `META_APP_SECRET_PREVIOUS`       | Set only during a secret rotation (webhooks signed with either are accepted). |
+| `META_GRAPH_API_VERSION`         | `v26.0` today (M-001).                                                        |
+| `META_WEBHOOK_VERIFY_TOKEN`      | Random string entered in the app's webhook settings with the callback URL.    |
+| `META_EMBEDDED_SIGNUP_CONFIG_ID` | Facebook Login for Business configuration id (step 4 of §2).                  |
+| `META_SEND_RATE_PER_SECOND`      | Worker only; per-number send rate (default 20, below Meta's default 80).      |
+| `META_GRAPH_BASE_URL`            | Never set in staging/production (only a test stand-in may use it).            |
+
+App-secret rotation: set the new secret as `META_APP_SECRET` and the old one as
+`META_APP_SECRET_PREVIOUS`, deploy, rotate in Meta, then remove the previous value.
 
 ## 4. Runtime obligations
 

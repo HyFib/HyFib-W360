@@ -125,31 +125,52 @@ payload bound (AAD) to the row id. The worker claims a row with a short lease (`
 the payload. Transient failures return the row to `pending` and pg-boss retries with backoff;
 permanent SMTP 5xx or exhausted attempts mark `failed`. Delivery is at-least-once.
 
-## 6. Messaging pipeline **[designed — phase 2]**
+## 6. Messaging pipeline **[built — verified against a local Graph stand-in; no live Meta traffic yet]**
 
-- **Ingestion:** `POST /api/webhooks/meta` reads the raw body (limit 4 MB; Meta payloads can reach
-  ~3 MB), verifies `X-Hub-Signature-256` (HMAC-SHA256 with the app secret, constant-time), inserts
-  `ops.webhook_receipts` (body hash for dedupe) and only then returns 200. Persistence failure → 500
-  so Meta retries (for up to 7 days). A job processes the receipt.
-- **Routing:** `ops.resolve_channel_asset(provider, waba_id, phone_number_id)` (SECURITY DEFINER,
-  ids only) maps verified bindings to a company. Unknown assets go to `ops.webhook_quarantine`
-  (platform-visible only, redacted, bounded retention).
+- **Ingestion:** `POST /api/webhooks/meta` reads the raw body with a hard 4 MB cap (Meta payloads can
+  reach ~3 MB), verifies `X-Hub-Signature-256` (HMAC-SHA256 of the raw body, constant-time, current
+  and previous app secret during rotation), stores an encrypted `ops.webhook_receipts` row
+  (deduplicated by body hash, AAD = receipt id) and only then returns 200. Persistence failure → 500
+  so Meta retries (for up to 7 days). Invalid signatures → 401 plus a rate-limited security event.
+  A signed `webhook.process` job (same transaction) processes the receipt; a sweeper re-signals
+  receipts whose signal was lost, up to 12 attempts, then leaves them for operators.
+- **Routing:** `ops.resolve_provider_asset(provider, asset_type, external_id)` (SECURITY DEFINER,
+  ids only) maps a phone number id to its company; the binding's WABA must equal the entry id.
+  Unknown or mismatched assets go to `ops.webhook_quarantine` (platform-visible only, one row per
+  receipt and reason). The company is never taken from the request.
 - **Idempotency:** messages unique on `(tenant_id, channel_account_id, external_message_id)`;
-  status events immutable and unique on `(external_message_id, status, timestamp)`; current message
-  state only moves forward by rank (failed may follow sent/delivered as Meta documents).
-- **Identity:** contacts keyed by business-scoped user id (BSUID), phone optional (ADR-013).
-- **Outbound:** `app.send_intents` created with a client idempotency key in the same transaction as
-  the message row; job keyed by intent id; worker re-checks consent, suppression, service window,
-  template approval, company status and funds at send time; per-number fairness via pg-boss group
-  concurrency plus a PostgreSQL token bucket (default 80 msg/s per number; ~1 msg/6 s per recipient
-  pair limit). Outcomes: `queued → sending → accepted → sent → delivered → read`, or `failed`,
-  `canceled`, `unknown_outcome`. Meta documents no idempotency key for `/messages`, so a timeout
-  after the request left becomes `unknown_outcome` — never blindly retried. It is resolved by a
-  later status webhook correlated via our message id (`biz_opaque_callback_data` where supported;
-  to be verified) or surfaced for an explicit tenant decision.
+  status events immutable and unique on `(…, external_message_id, status, provider_timestamp)`;
+  current state only moves forward by rank (`failed` outranks `sent` but not `delivered`, as Meta
+  documents both for one message). Statuses that arrive before the WAMID is recorded are stored and
+  applied when the send is accepted.
+- **Identity:** contacts keyed per WABA by business-scoped user id (BSUID), phone optional
+  (ADR-013); sending to BSUID-only contacts is refused as unsupported until verified.
+- **Outbound:** the message row, a durable `app.send_intents` row (client idempotency key per
+  composer submit) and a signed job are written in one transaction. The worker re-checks company
+  status, sender membership, channel state and the 24-hour window at send time, takes a token from a
+  per-number PostgreSQL bucket (`META_SEND_RATE_PER_SECOND`, default 20) and runs in a pg-boss
+  fairness group per number. Dispatch is recorded before the request leaves. Outcomes: `queued →
+sending → accepted → sent → delivered → read/played`, or `failed`, `canceled`, `unknown_outcome`.
+  Meta documents no idempotency key for `/messages`, so a timeout, reset or lost worker after
+  dispatch becomes `unknown_outcome` and is never resent automatically; a member marks it as arrived
+  or chooses to send again, accepting a possible duplicate. `biz_opaque_callback_data` is not used
+  (unconfirmed for status correlation). Retryable rejections (429/5xx/rate codes) back off with
+  jitter; revoked tokens mark the number `needs_reconnect`.
+- **Onboarding:** Embedded Signup with a single-use state bound to member, auth session and company;
+  server-side code exchange, `debug_token` checks and an independent WABA/number ownership check with
+  the new token; encrypted token; definer-function bindings; then `channel.onboard` jobs subscribe
+  the app, register the number (generated six-digit PIN, encrypted) and read its health, resuming
+  from the last completed step. Facebook's SDK is allowed by CSP (and COOP relaxed to
+  `same-origin-allow-popups`) on the channels settings page only.
 - **Live inbox:** `app.tenant_events` (xid8 + id cursor; readers only see transactions below the
-  snapshot xmin, so no event is skipped), `NOTIFY` as a wake-up hint on a dedicated connection, SSE
-  endpoint with `Last-Event-ID` replay and periodic membership re-validation; short-polling fallback.
+  snapshot xmin, so no event is skipped), events record the conversation's assignee so streams only
+  carry ids a member may see, `NOTIFY` wakes one `LISTEN` connection per web process, the SSE endpoint
+  replays from `Last-Event-ID`, re-validates session and membership every 30 s and ends after 10
+  minutes; clients fall back to polling with the same cursor and resynchronise after reconnects.
+- **Retention:** raw webhook bodies erased after 7 days, receipt rows deleted after 90, live events
+  pruned after 7 (definer functions run by the messaging sweep).
+- **Not built yet:** media download to private object storage, templates and template sends,
+  message search, token health checks via `debug_token`, Meta-side deregistration on disconnect.
 
 ## 7. Commercial model and billing **[designed — phase 5]**
 

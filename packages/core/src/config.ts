@@ -26,8 +26,18 @@ const baseSchema = z.object({
   SMTP_SECURE: bool.optional(),
   SMTP_USER: z.string().optional(),
   SMTP_PASSWORD: z.string().optional(),
-  META_APP_ID: z.string().optional(),
+  META_APP_ID: z
+    .string()
+    .regex(/^[0-9]{1,32}$/, 'expected a numeric Meta app id')
+    .optional(),
   META_APP_SECRET: z.string().optional(),
+  /** Previous app secret, accepted for webhook signatures only while a rotation is in progress. */
+  META_APP_SECRET_PREVIOUS: z.string().optional(),
+  /**
+   * Graph API origin. Defaults to Meta's; overriding is allowed only for APP_ENV=local|test so that
+   * automated tests can point at a local stand-in (never a production code path).
+   */
+  META_GRAPH_BASE_URL: z.url().optional(),
   META_GRAPH_API_VERSION: z
     .string()
     .regex(/^v\d+\.\d+$/, 'expected a Graph API version such as v23.0')
@@ -74,6 +84,11 @@ const workerSchema = baseSchema.extend({
   DATABASE_URL_PLATFORM: z.string().min(1),
   WORKER_HEALTH_PORT: z.coerce.number().int().min(1).max(65535).default(9464),
   WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(64).default(4),
+  /**
+   * Outbound messages per second per business number, enforced across all workers. Meta's default
+   * Cloud API throughput is higher (docs/research/meta-whatsapp.md); stay below it.
+   */
+  META_SEND_RATE_PER_SECOND: z.coerce.number().int().min(1).max(1000).default(20),
 });
 
 export type BaseConfig = z.infer<typeof baseSchema>;
@@ -88,7 +103,9 @@ export class ConfigError extends Error {
 }
 
 function parse<T extends z.ZodType>(schema: T, env: NodeJS.ProcessEnv): z.infer<T> {
-  const result = schema.safeParse(env);
+  // An empty value (`KEY=` in an env file) means "not set".
+  const present = Object.fromEntries(Object.entries(env).filter(([, v]) => v !== ''));
+  const result = schema.safeParse(present);
   if (!result.success) {
     const lines = result.error.issues.map(
       (i) => `  - ${i.path.join('.') || '(root)'}: ${i.message}`,
@@ -155,10 +172,15 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
 export interface MetaConfig {
   appId: string;
   appSecret: string;
+  /** Secrets accepted for webhook signatures: current first, then the previous during rotation. */
+  webhookSecrets: string[];
   graphApiVersion: string;
+  graphBaseUrl: string;
   webhookVerifyToken: string;
   embeddedSignupConfigId: string | null;
 }
+
+export const META_GRAPH_ORIGIN = 'https://graph.facebook.com';
 
 /** Returns Meta configuration only when all mandatory values are present. */
 export function metaConfigFrom(config: BaseConfig): MetaConfig | null {
@@ -166,10 +188,22 @@ export function metaConfigFrom(config: BaseConfig): MetaConfig | null {
     config;
   if (!META_APP_ID || !META_APP_SECRET || !META_GRAPH_API_VERSION || !META_WEBHOOK_VERIFY_TOKEN)
     return null;
+  const graphBaseUrl = (config.META_GRAPH_BASE_URL ?? META_GRAPH_ORIGIN).replace(/\/$/, '');
+  if (
+    graphBaseUrl !== META_GRAPH_ORIGIN &&
+    config.APP_ENV !== 'local' &&
+    config.APP_ENV !== 'test'
+  ) {
+    throw new ConfigError(`META_GRAPH_BASE_URL must be ${META_GRAPH_ORIGIN} in ${config.APP_ENV}`);
+  }
   return {
     appId: META_APP_ID,
     appSecret: META_APP_SECRET,
+    webhookSecrets: [META_APP_SECRET, config.META_APP_SECRET_PREVIOUS].filter((v): v is string =>
+      Boolean(v),
+    ),
     graphApiVersion: META_GRAPH_API_VERSION,
+    graphBaseUrl,
     webhookVerifyToken: META_WEBHOOK_VERIFY_TOKEN,
     embeddedSignupConfigId: config.META_EMBEDDED_SIGNUP_CONFIG_ID ?? null,
   };

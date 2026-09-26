@@ -1,5 +1,61 @@
 # Progress
 
+## 2026-09-26 — Phase 2 messaging slice
+
+Status: **implementation complete for the phase 2 slice, production blocked** (Meta app, business
+verification, app review and Embedded Signup configuration are external prerequisites; no message
+has been exchanged with the real WhatsApp Cloud API).
+
+### Completed
+
+- **Schema (migration 0003):** WhatsApp accounts and numbers, onboarding sessions, contacts with
+  per-WABA identities (BSUID first, phone optional), conversations (optimistic versions), notes,
+  messages, immutable status history, send intents, media metadata, company event log (xid8
+  cursors, NOTIFY hint), provider asset bindings, encrypted webhook receipts, quarantine, token
+  buckets, retention functions. FORCE RLS and composite FKs on every tenant table; definer functions
+  granted before ownership transfer.
+- **Hardening (migration 0002, from review):** membership directories behind `members.read` support
+  grants; platform seat counts and owner lookup through narrow definer functions; PUBLIC execute
+  removed from every function (it had been granted by PostgreSQL's global default), with a
+  structural test.
+- **Domain:** webhook signature verification (current + previous secret), durable receipts,
+  idempotent ingestion with quarantine and monotonic statuses, outbound send state machine
+  (retries with jitter, per-number token bucket and fairness groups, unknown outcomes never resent
+  automatically, manual resolution, cancellation on suspension or sender removal), Embedded Signup
+  onboarding with server-side verification, resumable setup jobs, inbox service (visibility,
+  assignment and status with row locks and versions, notes, read state), live-update event log with
+  visibility filtering, retention.
+- **Worker:** `webhook.process`, `message.send` (re-signals at `retryAt` in the number's group),
+  `channel.onboard`, and a per-minute messaging sweep (lost signals, dead workers, retention).
+- **Web:** `/api/webhooks/meta` (handshake, streaming 4 MB cap, signature, receipt before 200),
+  `/api/c/{slug}/events` (SSE with replay, 30 s re-validation, polling mode), Inbox (views, thread,
+  composer with per-member-and-company drafts and idempotency keys, window indicator, assignment,
+  resolve/reopen, notes, unknown-outcome decisions, live updates), Settings → Channels (Embedded
+  Signup, setup status, retry, disconnect) with Facebook CSP/COOP scoped to that page.
+- **CI fixes:** WebKit dropped `Secure` cookies on loopback http (cookie security now follows the
+  https origin; staging/production refuse non-https in any build mode); runtime images no longer
+  ship npm/corepack/yarn (HIGH CVEs in npm's bundled dependencies); reviewed gitleaks false positive
+  recorded. All 8 CI checks green on `e01bc26`.
+
+### Test commands and results (local, 2026-09-26, fresh database)
+
+| Command                                                      | Result                                                                                         |
+| ------------------------------------------------------------ | ---------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check`                            | 0 problems / all files formatted                                                               |
+| `pnpm typecheck`                                             | all 9 workspace packages pass                                                                  |
+| `pnpm test` (unit)                                           | 39 passed (adds config safety, IP parsing)                                                     |
+| `pnpm test:integration` (PostgreSQL 18.x)                    | 81 passed: isolation 44, messaging 21, jobs/email 14 (+2 service tests)                        |
+| `pnpm test:e2e --project=chromium --project=mobile-chromium` | 14 passed (7 tests × 2), including live inbox: signed webhook → SSE → reply → delivery receipt |
+| Webhook smoke (`curl`)                                       | handshake 200 with challenge; wrong verify token 403; unsigned 401; 5 MB body 413              |
+
+Meta traffic in these tests comes from a test-only Graph API stand-in (`tests/support/`), which the
+configuration refuses outside `APP_ENV=local|test`. Firefox and WebKit run in CI.
+
+### Known gaps (tracked in BACKLOG.md)
+
+Media download and storage, templates and template sends, message search, token health checks,
+platform quarantine screen, messaging-limit display, collision warnings, Meta-side deregistration.
+
 ## 2026-09-26 — Phase 0 and Phase 1 vertical slice
 
 ### Completed
@@ -83,6 +139,11 @@ pnpm db:migrate && pnpm build
 E2E_DATABASE_URL_AUTH=$DATABASE_URL_AUTH pnpm test:e2e --project=chromium
 ```
 
+The inbox e2e test needs the test-only Meta settings in `.env` (web and worker):
+`META_APP_ID`, `META_APP_SECRET` (any random value), `META_GRAPH_API_VERSION=v26.0`,
+`META_WEBHOOK_VERIFY_TOKEN`, `META_GRAPH_BASE_URL=http://127.0.0.1:4010` and `E2E_GRAPH_PORT=4010`;
+Playwright's global setup starts the Graph stand-in on that port. Without them the test is skipped.
+
 ### Blockers (external)
 
 - Network policy of this build environment blocked `wati.io`, `developers.facebook.com`,
@@ -94,7 +155,7 @@ E2E_DATABASE_URL_AUTH=$DATABASE_URL_AUTH pnpm test:e2e --project=chromium
 
 ### Next task
 
-Phase 2, starting with P2-01 (channel schema and asset bindings), P2-04 (webhook endpoint with raw-body
-signature verification and durable receipts) and P2-05/P2-06 (idempotent processing into contacts,
-conversations and messages), tested with deterministic provider fixtures while Meta approvals are
-pending.
+Phase 5 financial core (mandatory section 8A): double-entry ledger, INR service-credit wallet,
+manual card top-ups through Razorpay Orders with verified capture, opt-in auto-recharge state
+machine, and the mandatory financial tests — built against Razorpay test mode fixtures while
+merchant activation is pending. In parallel, phase 2 follow-ups P2-11/P2-12 and media storage.

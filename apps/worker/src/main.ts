@@ -2,6 +2,12 @@ import { QUEUES } from '@w360/contracts';
 import { toError } from '@w360/core';
 import { startHealthServer } from './health';
 import { emailSendHandler, outboxSweepHandler } from './handlers/email';
+import {
+  channelOnboardHandler,
+  messageSendHandler,
+  messagingSweepHandler,
+  webhookProcessHandler,
+} from './handlers/messaging';
 import { createWorkerRuntime } from './runtime';
 
 /**
@@ -28,6 +34,31 @@ async function main(): Promise<void> {
   );
   await rt.boss.schedule(QUEUES.outboxSweep.name, '* * * * *', null, {
     singletonKey: 'outbox-sweep',
+  });
+  await rt.boss.work(
+    QUEUES.webhookProcess.name,
+    { localConcurrency: concurrency, batchSize: 1 },
+    webhookProcessHandler(rt),
+  );
+  // Per-number fairness: at most two in-flight sends per business number across the cluster
+  // (queued with group = channel id), so one busy number cannot starve the others.
+  await rt.boss.work(
+    QUEUES.messageSend.name,
+    { localConcurrency: concurrency, batchSize: 1, groupConcurrency: 2 },
+    messageSendHandler(rt),
+  );
+  await rt.boss.work(
+    QUEUES.channelOnboard.name,
+    { localConcurrency: 1, batchSize: 1 },
+    channelOnboardHandler(rt),
+  );
+  await rt.boss.work(
+    QUEUES.messagingSweep.name,
+    { localConcurrency: 1, batchSize: 1 },
+    messagingSweepHandler(rt),
+  );
+  await rt.boss.schedule(QUEUES.messagingSweep.name, '* * * * *', null, {
+    singletonKey: 'messaging-sweep',
   });
   rt.logger.info({ concurrency }, 'worker started');
 

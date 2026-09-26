@@ -17,6 +17,9 @@ export default async function SettingsLayout({
     { href: base, label: 'General' },
     { href: `${base}/members`, label: 'Members' },
     { href: `${base}/security`, label: 'Security' },
+    ...(ctx.permissions.has('channels.read')
+      ? [{ href: `${base}/channels`, label: 'Channels' }]
+      : []),
     ...(ctx.permissions.has('audit.read') ? [{ href: `${base}/audit`, label: 'Audit log' }] : []),
     { href: `${base}/modules`, label: 'Modules' },
   ];

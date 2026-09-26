@@ -20,4 +20,5 @@ export {
   desc,
   asc,
   count,
+  type SQL,
 } from 'drizzle-orm';

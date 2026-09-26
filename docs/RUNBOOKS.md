@@ -37,13 +37,22 @@ audited. Never paste tokens, message content or card data into tickets or chat.
 4. Index bloat warnings (`index_bloat`) → run `getReindexCommands()` output as the owner role during
    low traffic (runtime roles cannot reindex).
 
-## 4. Webhook ingestion failure **(phase 2)**
+## 4. Webhook ingestion failure
 
-1. Meta retries for up to 7 days; confirm `/api/webhooks/meta` returns 200 only after persisting.
-2. Signature failures (`ops.security_events` `webhook.invalid_signature`): verify `META_APP_SECRET`
-   matches the app; a spike from unknown sources is an attack — keep rejecting, alert security.
-3. Unknown assets land in `ops.webhook_quarantine`; map them only after verifying ownership (never
-   assign by guess). Replay from receipts once mapped.
+1. Meta retries for up to 7 days; `/api/webhooks/meta` returns 200 only after the encrypted receipt is
+   committed (500 on storage failure, 401 on a bad signature, 413 above 4 MB).
+2. Signature failures (`ops.security_events` `webhook.invalid_signature`, rate-limited to about one
+   per 5 s): verify `META_APP_SECRET` (and `META_APP_SECRET_PREVIOUS` during a rotation) matches
+   the app. A spike from unknown sources is an attack — keep rejecting, alert security.
+3. Backlog: `SELECT status, count(*) FROM ops.webhook_receipts GROUP BY 1`. The messaging sweep
+   re-signals `pending`/`failed` receipts older than 2 minutes and expired `processing` leases, up to
+   12 attempts. Receipts at 12 attempts stay `failed` for you: read `last_error`, fix the cause, then
+   reset with `UPDATE ops.webhook_receipts SET status = 'failed', attempts = 0 WHERE id = …` (owner
+   role); processing is idempotent.
+4. Unknown or mismatched assets land in `ops.webhook_quarantine` (`unknown_asset`,
+   `asset_mismatch`, `malformed`). Map an asset only after verifying ownership with the company
+   (never by guess), then reset the receipt as above. Record the decision in `resolution`.
+5. Raw bodies are erased after 7 days; replay is impossible after that (by design).
 
 ## 5. Provider outage (Meta, Razorpay, SMTP)
 
@@ -51,20 +60,32 @@ audited. Never paste tokens, message content or card data into tickets or chat.
 - Post a status notice in-app (platform banner, backlog) and to affected owners.
 - After recovery, watch for `unknown_outcome` sends (section 7) and reconcile payments (section 9).
 
-## 6. Expired or revoked provider credentials **(phase 2)**
+## 6. Expired or revoked provider credentials
 
-1. Symptoms: Graph error 190, failing `debug_token`, loss of WABA subscription.
-2. Mark the channel `needs_reconnect`; outbound sends stop (not dropped); notify company admins.
-3. The company re-runs Embedded Signup (reconnect) which re-binds the same assets; queued work
-   resumes after re-checks.
+1. Symptoms: Graph error 190/102/10 or HTTP 401 on sends or setup steps; the number shows
+   **Reconnect needed** in Settings → Channels (`channel_accounts.status = 'needs_reconnect'`).
+2. The failing send is marked failed with the provider error; later sends to that number fail fast at
+   the channel check until it is reconnected. Tell company admins.
+3. The company re-runs Embedded Signup (Connect WhatsApp number); the same WABA and number re-bind
+   to the same records, the token is replaced and setup re-runs from the first step.
 
-## 7. Duplicate-send uncertainty **(phase 2)**
+## 7. Duplicate-send uncertainty
 
-1. `unknown_outcome` means the request may have reached Meta but no response was recorded.
-2. Wait for correlated status webhooks (up to the reconciliation window). If one arrives, the intent
-   resolves to accepted/sent.
-3. Otherwise the company's duplicate-risk policy applies (default: never auto-retry). Staff never
-   resend on the company's behalf without the company's decision.
+1. `unknown_outcome` means the request may have reached Meta but no response was recorded (timeout,
+   connection reset, or a worker that died after recording dispatch).
+2. Nothing resends automatically — not workers, not the sweep. A member with reply permission decides
+   in the thread: **It arrived** (marks it sent) or **Send again** (accepting a possible duplicate).
+3. A status webhook for the message cannot be correlated without a WAMID; if the customer confirms
+   receipt, choose **It arrived**. Staff never resend on a company's behalf.
+4. If many sends become unknown at once, check network egress to `graph.facebook.com` and Meta's
+   status before anyone resends.
+
+### Setup failures
+
+- `Meta temporarily blocked registration … (72 hours)`: error 133016 (too many register attempts).
+  Wait, then **Retry setup**.
+- Other setup errors show the step and Meta's message; fix the cause (for example the number's
+  two-step verification PIN set elsewhere) and **Retry setup**.
 
 ## 8. Data restoration
 
