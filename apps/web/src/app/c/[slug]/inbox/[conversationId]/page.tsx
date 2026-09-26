@@ -5,11 +5,12 @@ import { isAppError } from '@w360/core';
 import { can } from '@w360/domain';
 import { Alert, Badge, Card, CardContent, CardHeader, CardTitle } from '@w360/ui';
 import { Composer } from '@/components/inbox/composer';
-import { ConversationControls } from '@/components/inbox/conversation-controls';
+import { ConversationControls, TeamControl } from '@/components/inbox/conversation-controls';
 import { InboxShell, inboxQueryString } from '@/components/inbox/inbox-shell';
 import { MarkRead } from '@/components/inbox/mark-read';
 import { MessageBubble, type ThreadMessage } from '@/components/inbox/message-bubble';
 import { NoteForm } from '@/components/inbox/note-form';
+import { ReplyTimer } from '@/components/inbox/reply-timer';
 import { formatDateTime } from '@/lib/format';
 import { canUseInbox, liveEventCursor, loadInboxList, type SearchParams } from '@/server/inbox';
 import { TemplateSender } from '@/components/templates/template-sender';
@@ -31,7 +32,7 @@ export default async function ConversationPage({
   const sp = await searchParams;
   const ctx = await requireTenant(slug);
   if (!canUseInbox(ctx)) notFound();
-  const { inbox } = await getRuntime();
+  const { inbox, savedReplies } = await getRuntime();
   const since = await liveEventCursor(ctx);
   const before = typeof sp.before === 'string' ? sp.before : undefined;
   let thread: Awaited<ReturnType<typeof inbox.getConversation>>;
@@ -41,16 +42,37 @@ export default async function ConversationPage({
     if (isAppError(error) && error.code === 'not_found') notFound();
     throw error;
   }
-  const [{ query, views, list }, members, templates] = await Promise.all([
+  const canReply = can(ctx, 'inbox.reply');
+  const [
+    { query, views, list, filters, unreadMentions, available },
+    members,
+    templates,
+    mentionable,
+    replies,
+  ] = await Promise.all([
     loadInboxList(ctx, sp),
     can(ctx, 'inbox.assign') && can(ctx, 'members.read')
       ? inbox.assignableMembers(ctx)
       : Promise.resolve([]),
     sendableTemplates(ctx),
+    canReply ? inbox.mentionableMembers(ctx, conversationId) : Promise.resolve([]),
+    canReply ? savedReplies.savedRepliesFor(ctx, conversationId) : Promise.resolve([]),
   ]);
   const conv = thread.conversation;
   const unread = list.items.find((i) => i.id === conv.id)?.unreadCount ?? 0;
-  const canReply = can(ctx, 'inbox.reply');
+  const now = new Date();
+  // The newest message shown, for the composer's collision check (not when paging back).
+  const latestMessageId = before ? undefined : thread.messages.at(-1)?.id;
+  const csat = thread.csat;
+  const CSAT_SKIPS: Record<string, string> = {
+    window_closed: 'not sent: the 24-hour window had closed',
+    opted_out: 'not sent: the customer opted out',
+    suppressed: 'not sent: the number is suppressed',
+    contact_erased: 'not sent: the contact was erased',
+    no_phone: 'not sent: no phone number',
+    channel_inactive: 'not sent: the number is inactive',
+    recently_surveyed: 'not sent: asked in the last 24 hours',
+  };
   const disabledReason = !canReply
     ? 'Your role can read this conversation but not reply.'
     : !conv.channelActive
@@ -73,6 +95,9 @@ export default async function ConversationPage({
       activeId={conv.id}
       timeZone={tz}
       since={since}
+      filters={filters}
+      unreadMentions={unreadMentions}
+      available={available}
     >
       <MarkRead slug={ctx.tenant.slug} conversationId={conv.id} unread={unread} />
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_18rem]">
@@ -101,7 +126,33 @@ export default async function ConversationPage({
             </div>
             <p className="text-sm text-muted-foreground">
               {conv.contactPhone ?? 'No phone number shared'} · via {conv.channelName ?? 'WhatsApp'}
+              {conv.teamName && !can(ctx, 'inbox.assign') ? ` · ${conv.teamName}` : ''}
             </p>
+            {conv.waitingSince ? (
+              <p className="text-sm">
+                <ReplyTimer
+                  waitingSince={conv.waitingSince}
+                  replyDueAt={conv.replyDueAt}
+                  overdue={conv.overdue}
+                  timerPausedUntil={conv.timerPausedUntil}
+                  timeZone={tz}
+                  now={now}
+                />
+              </p>
+            ) : null}
+            {csat ? (
+              <p className="text-sm text-muted-foreground">
+                CSAT survey{' '}
+                {csat.skipReason
+                  ? (CSAT_SKIPS[csat.skipReason] ?? 'not sent')
+                  : csat.score !== null
+                    ? `answered with the ${['worst', 'middle', 'best'][csat.score - 1] ?? ''} rating`
+                    : csat.messageStatus === 'failed' || csat.messageStatus === 'canceled'
+                      ? 'not delivered'
+                      : 'sent, no answer yet'}{' '}
+                ({formatDateTime(csat.createdAt, tz)})
+              </p>
+            ) : null}
             <ConversationControls
               slug={ctx.tenant.slug}
               conversationId={conv.id}
@@ -113,6 +164,15 @@ export default async function ConversationPage({
               canReply={canReply}
               members={members.map((m) => ({ membershipId: m.membershipId, name: m.name }))}
             />
+            {can(ctx, 'inbox.assign') && filters.teams.length > 0 ? (
+              <TeamControl
+                slug={ctx.tenant.slug}
+                conversationId={conv.id}
+                version={conv.version}
+                teamId={conv.teamId}
+                teams={filters.teams}
+              />
+            ) : null}
           </div>
           {thread.olderCursor ? (
             <Link
@@ -143,6 +203,8 @@ export default async function ConversationPage({
             conversationId={conv.id}
             draftKey={`w360:draft:${ctx.user.id}:${ctx.tenant.id}:${conv.id}`}
             disabledReason={disabledReason}
+            savedReplies={replies}
+            {...(latestMessageId ? { latestMessageId } : {})}
           />
           {canReply && conv.channelActive && !conv.windowOpen && can(ctx, 'templates.read') ? (
             <Card>
@@ -178,6 +240,11 @@ export default async function ConversationPage({
                 {thread.notes.map((n) => (
                   <li key={n.id} className="rounded-md border border-border p-2 text-sm">
                     <p className="whitespace-pre-wrap break-words">{n.body}</p>
+                    {n.mentions.length > 0 ? (
+                      <p className="mt-1 text-xs">
+                        Mentioned: {n.mentions.map((m) => m.name).join(', ')}
+                      </p>
+                    ) : null}
                     <p className="mt-1 text-xs text-muted-foreground">
                       {n.authorName} · {formatDateTime(n.createdAt, tz)}
                     </p>
@@ -185,7 +252,14 @@ export default async function ConversationPage({
                 ))}
               </ul>
             )}
-            {canReply ? <NoteForm slug={ctx.tenant.slug} conversationId={conv.id} /> : null}
+            {canReply ? (
+              <NoteForm
+                slug={ctx.tenant.slug}
+                conversationId={conv.id}
+                mentionable={mentionable}
+                myMembershipId={ctx.membership.id}
+              />
+            ) : null}
           </CardContent>
         </Card>
       </div>

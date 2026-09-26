@@ -96,7 +96,7 @@ export default async function ReportsPage({
     <>
       <PageHeader
         title="Reports"
-        description="Messaging outcomes, estimated Meta charges, inbox response times, member activity and campaign funnels, computed from HyFib’s records when the page loads."
+        description="Messaging outcomes, estimated Meta charges, inbox response and resolution times, CSAT, member activity and campaign funnels, computed from HyFib’s records when the page loads."
       />
       <div className="grid grid-cols-1 gap-6">
         <Card>
@@ -148,6 +148,7 @@ export default async function ReportsPage({
         <MessagingSection report={report} label={label} exportHref={exportHref} />
         <CostSection report={report} ctx={ctx} exportHref={exportHref} />
         <InboxSection report={report} label={label} exportHref={exportHref} />
+        <CsatSection report={report} label={label} exportHref={exportHref} />
         <AgentSection report={report} exportHref={exportHref} />
         <CampaignSection report={report} ctx={ctx} exportHref={exportHref} />
         <UnavailableSection definitions={report.definitions} />
@@ -486,7 +487,7 @@ function InboxSection({
     <Card>
       <SectionHeader
         title="Inbox"
-        description="A reply turn starts with the first customer message that has no reply yet and ends when a member replies or the conversation is resolved. Times are absolute (no business hours yet)."
+        description={`A reply turn starts with the first customer message that has no reply yet and ends when a member replies or the conversation is resolved. ${i.businessHours ? 'Business hours are on: the target and the business-hours figures count opening hours only; other times are absolute.' : 'Times are absolute; business hours are off.'}`}
         exportHref={exportHref}
         section="inbox"
       />
@@ -504,9 +505,13 @@ function InboxSection({
               detail={`${n.windowsClosed} waiting with the window already closed`}
             />
             <Stat
-              label="Waiting past the target"
+              label={label('inbox.overdue')}
               value={n.overTarget ?? '—'}
-              detail={i.targetMinutes === null ? 'No target set' : `Target ${i.targetMinutes} min`}
+              detail={
+                i.targetMinutes === null
+                  ? 'No target set'
+                  : `Target ${i.targetMinutes} min${i.businessHours ? ' of business hours' : ''}`
+              }
             />
           </dl>
           {n.byAssignee.length > 0 ? (
@@ -551,6 +556,15 @@ function InboxSection({
               detail={`90th percentile ${formatDuration(t.p90Seconds)}`}
             />
             <Stat
+              label={`${label('inbox.first_response_business_time')} (median)`}
+              value={i.businessHours ? formatDuration(t.businessMedianSeconds) : '—'}
+              detail={
+                i.businessHours
+                  ? `90th percentile ${formatDuration(t.businessP90Seconds)}`
+                  : 'Business hours are off (Settings → Inbox)'
+              }
+            />
+            <Stat
               label={label('inbox.within_target')}
               value={
                 t.withinTarget
@@ -559,9 +573,14 @@ function InboxSection({
               }
               detail={
                 t.withinTarget
-                  ? `${t.withinTarget.numerator} of ${t.withinTarget.denominator} within ${i.targetMinutes} min`
-                  : 'Set one in Settings → Messaging'
+                  ? `${t.withinTarget.numerator} of ${t.withinTarget.denominator} within ${i.targetMinutes} min${i.businessHours ? ' of business hours' : ''}`
+                  : 'Set one in Settings → Inbox'
               }
+            />
+            <Stat
+              label={`${label('inbox.resolution_time')} (median)`}
+              value={formatDuration(i.resolution.medianSeconds)}
+              detail={`${i.resolution.resolved} resolved · 90th percentile ${formatDuration(i.resolution.p90Seconds)}`}
             />
             <Stat
               label="Answered turns by reply time"
@@ -596,6 +615,17 @@ function InboxSection({
                   <TH scope="col" className="text-right">
                     Median first response
                   </TH>
+                  {i.businessHours ? (
+                    <TH scope="col" className="text-right">
+                      Median in business hours
+                    </TH>
+                  ) : null}
+                  <TH scope="col" className="text-right">
+                    Cases resolved
+                  </TH>
+                  <TH scope="col" className="text-right">
+                    Median resolution
+                  </TH>
                 </TR>
               </THead>
               <TBody>
@@ -607,6 +637,11 @@ function InboxSection({
                     <TD className="text-right">{d.resolvedWithoutReply}</TD>
                     <TD className="text-right">{d.waiting}</TD>
                     <TD className="text-right">{formatDuration(d.medianSeconds)}</TD>
+                    {i.businessHours ? (
+                      <TD className="text-right">{formatDuration(d.businessMedianSeconds)}</TD>
+                    ) : null}
+                    <TD className="text-right">{d.casesResolved}</TD>
+                    <TD className="text-right">{formatDuration(d.medianResolutionSeconds)}</TD>
                   </TR>
                 ))}
               </TBody>
@@ -618,12 +653,79 @@ function InboxSection({
   );
 }
 
+const SKIP_LABELS: Record<string, string> = {
+  window_closed: 'Window closed',
+  opted_out: 'Opted out',
+  suppressed: 'Suppressed',
+  contact_erased: 'Contact erased',
+  no_phone: 'No phone number',
+  channel_inactive: 'Number inactive',
+  recently_surveyed: 'Asked in the last 24 hours',
+};
+
+function CsatSection({
+  report,
+  label,
+  exportHref,
+}: {
+  report: Report;
+  label: (key: string) => string;
+  exportHref: ExportHref;
+}) {
+  const c = report.csat;
+  const skipped = Object.entries(c.skipped).filter(([, n]) => n > 0);
+  return (
+    <Card>
+      <SectionHeader
+        title="CSAT"
+        description="Rating questions sent after a member resolved a conversation, by the day they were sent. The customer’s first tap counts; the best of the three ratings counts as satisfied."
+        exportHref={exportHref}
+        section="csat"
+      />
+      <CardContent className="grid grid-cols-1 gap-4">
+        {!c.enabled && c.surveys === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            CSAT surveys are off. An administrator can turn them on in Settings → Inbox.
+          </p>
+        ) : null}
+        <dl className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+          <Stat
+            label={label('csat.score')}
+            value={c.score.denominator > 0 ? percent(c.score.numerator, c.score.denominator) : '—'}
+            detail={`${c.ratings.best} best, ${c.ratings.middle} middle, ${c.ratings.worst} worst of ${c.answered} ${c.answered === 1 ? 'answer' : 'answers'}`}
+          />
+          <Stat
+            label={label('csat.response_rate')}
+            value={
+              c.responseRate.denominator > 0
+                ? percent(c.responseRate.numerator, c.responseRate.denominator)
+                : '—'
+            }
+            detail={`${c.answered} of ${c.delivered} delivered`}
+          />
+          <Stat
+            label={label('csat.surveys')}
+            value={c.sent}
+            detail={`sent · ${c.surveys - c.sent} not sent`}
+          />
+        </dl>
+        {skipped.length > 0 ? (
+          <p className="text-sm text-muted-foreground">
+            Not sent:{' '}
+            {skipped.map(([reason, n]) => `${SKIP_LABELS[reason] ?? reason} ${n}`).join(' · ')}
+          </p>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}
+
 function AgentSection({ report, exportHref }: { report: Report; exportHref: ExportHref }) {
   return (
     <Card>
       <SectionHeader
         title="Member activity"
-        description="Replies sent, reply turns answered first and conversations resolved in the period. Members who can reply are listed even when they were quiet."
+        description="Replies sent, reply turns answered first, conversations resolved and CSAT answers for conversations assigned to the member when resolved. Members who can reply are listed even when they were quiet."
         exportHref={exportHref}
         section="agents"
       />
@@ -647,6 +749,9 @@ function AgentSection({ report, exportHref }: { report: Report; exportHref: Expo
                   </TH>
                   <TH scope="col" className="text-right">
                     Resolved
+                  </TH>
+                  <TH scope="col" className="text-right">
+                    CSAT
                   </TH>
                 </TR>
               </THead>
@@ -672,6 +777,12 @@ function AgentSection({ report, exportHref }: { report: Report; exportHref: Expo
                     <TD className="text-right">{a.turnsAnswered}</TD>
                     <TD className="text-right">{formatDuration(a.medianSeconds)}</TD>
                     <TD className="text-right">{a.resolved}</TD>
+                    <TD className="text-right">
+                      {a.csatAnswered > 0 ? percent(a.csatBest, a.csatAnswered) : '—'}
+                      <span className="block text-xs text-muted-foreground">
+                        {a.csatAnswered} {a.csatAnswered === 1 ? 'answer' : 'answers'}
+                      </span>
+                    </TD>
                   </TR>
                 ))}
               </TBody>
@@ -847,6 +958,7 @@ function UnavailableSection({ definitions }: { definitions: MetricDefinition[] }
 const DEFINITION_GROUPS: [string, string][] = [
   ['messaging.', 'Messaging'],
   ['inbox.', 'Inbox'],
+  ['csat.', 'CSAT'],
   ['agent.', 'Member activity'],
   ['campaign.', 'Campaigns'],
 ];

@@ -8,7 +8,7 @@ import { tenantForAction } from '@/server/tenant-action';
 
 export async function sendReplyAction(
   slug: string,
-  input: { conversationId: string; text: string; clientKey: string },
+  input: { conversationId: string; text: string; clientKey: string; afterMessageId?: string },
 ): Promise<ActionResult<{ messageId: string }>> {
   return runAction(async () => {
     const ctx = await tenantForAction(slug);
@@ -47,7 +47,7 @@ export async function setConversationStatusAction(
 
 export async function addNoteAction(
   slug: string,
-  input: { conversationId: string; body: string },
+  input: { conversationId: string; body: string; mentionIds?: string[] },
 ): Promise<ActionResult> {
   return runAction(async () => {
     const ctx = await tenantForAction(slug);
@@ -96,5 +96,18 @@ export async function updateResponseTargetAction(
     await inbox.updateResponseTarget(ctx, input, await requestMeta());
     refresh();
     return null;
+  });
+}
+
+export async function setConversationTeamAction(
+  slug: string,
+  input: { conversationId: string; teamId: string | null; expectedVersion: number },
+): Promise<ActionResult<{ assignedMembershipId: string | null }>> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { inbox } = await getRuntime();
+    const result = await inbox.setTeam(ctx, input, await requestMeta());
+    refresh();
+    return result;
   });
 }

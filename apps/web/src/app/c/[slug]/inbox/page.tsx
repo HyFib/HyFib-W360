@@ -24,7 +24,10 @@ export default async function InboxPage({
     );
   }
   const since = await liveEventCursor(ctx);
-  const { query, views, list } = await loadInboxList(ctx, await searchParams);
+  const { query, views, list, filters, unreadMentions, available } = await loadInboxList(
+    ctx,
+    await searchParams,
+  );
   return (
     <InboxShell
       slug={ctx.tenant.slug}
@@ -34,6 +37,9 @@ export default async function InboxPage({
       items={list.items}
       nextCursor={list.nextCursor}
       timeZone={ctx.tenant.timezone}
+      filters={filters}
+      unreadMentions={unreadMentions}
+      available={available}
     >
       <div className="hidden lg:block">
         <EmptyState

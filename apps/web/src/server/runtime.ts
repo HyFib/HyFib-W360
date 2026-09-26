@@ -23,7 +23,9 @@ import {
   PgBossJobQueue,
   RazorpayClient,
   createBillingService,
+  createBusinessHoursService,
   createCampaignsService,
+  createCsatService,
   createReportsService,
   createConsentService,
   createContactsService,
@@ -31,11 +33,15 @@ import {
   createOnboardingService,
   createPlatformService,
   createRateCardsService,
+  createSavedRepliesService,
   createSegmentsService,
+  createTeamsService,
   createTemplatesService,
   createTenancyService,
   type BillingService,
+  type BusinessHoursService,
   type CampaignsService,
+  type CsatService,
   type ReportsService,
   type ConsentService,
   type ContactsService,
@@ -45,7 +51,9 @@ import {
   type OutboundDeps,
   type PlatformService,
   type RateCardsService,
+  type SavedRepliesService,
   type SegmentsService,
+  type TeamsService,
   type TemplatesService,
   type TenancyService,
 } from '@w360/domain';
@@ -71,6 +79,10 @@ export interface Runtime {
   tenancy: TenancyService;
   platform: PlatformService;
   inbox: InboxService;
+  teams: TeamsService;
+  businessHours: BusinessHoursService;
+  savedReplies: SavedRepliesService;
+  csat: CsatService;
   outbound: OutboundDeps;
   contacts: ContactsService;
   consent: ConsentService;
@@ -150,7 +162,11 @@ async function init(): Promise<Runtime> {
     invitationTtlHours: config.INVITATION_TTL_HOURS,
   });
   const platform = createPlatformService({ db, platformDb, clock: systemClock });
-  const inbox = createInboxService({ db, clock: systemClock });
+  const inbox = createInboxService({ db, clock: systemClock, jobs, signer });
+  const teams = createTeamsService({ db, clock: systemClock });
+  const businessHours = createBusinessHoursService({ db, clock: systemClock });
+  const savedReplies = createSavedRepliesService({ db, clock: systemClock });
+  const csat = createCsatService({ db, clock: systemClock });
   const outbound: OutboundDeps = { db, jobs, signer, clock: systemClock };
   const contacts = createContactsService({ db, clock: systemClock });
   const consent = createConsentService({ db, clock: systemClock });
@@ -202,6 +218,10 @@ async function init(): Promise<Runtime> {
     tenancy,
     platform,
     inbox,
+    teams,
+    businessHours,
+    savedReplies,
+    csat,
     outbound,
     contacts,
     consent,

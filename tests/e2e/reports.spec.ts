@@ -36,7 +36,7 @@ test('reports show response times against the target, member activity and a CSV 
   const { wabaId, phoneNumberId } = await connectTestChannel({ ownerEmail: email, slug });
 
   // A 30-minute first-response target.
-  await page.goto(`/c/${slug}/settings/messaging`);
+  await page.goto(`/c/${slug}/settings/inbox`);
   await page.getByLabel('Set a first-response target').check();
   await page.getByLabel('Target (minutes)').fill('30');
   await page.getByRole('button', { name: 'Save response target' }).click();

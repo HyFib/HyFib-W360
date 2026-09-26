@@ -45,8 +45,9 @@ export function ResponseTargetForm({
           <span>
             Set a first-response target
             <span className="block text-muted-foreground">
-              Reports show how many waiting customers got a first reply within it. Measured in
-              absolute time; business hours are not supported yet.
+              The inbox shows when each reply is due and reports show how many waiting customers got
+              a first reply within it. Counted in business hours when business hours are on (below),
+              otherwise in absolute time.
             </span>
           </span>
         </label>
