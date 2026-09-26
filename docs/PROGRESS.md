@@ -1,5 +1,66 @@
 # Progress
 
+## 2026-09-26 — Phase 3: campaigns and saved segments (P3-04)
+
+Status: **implementation complete for campaigns and segments, production blocked** (campaign
+sends are verified only against the test-only Graph stand-in; a real Meta app, app review and a
+sandbox WABA with test recipients are external prerequisites; cost estimates need platform staff to
+copy Meta's current rate cards, none ship with HyFib; the 10,000-recipient run happened locally, not
+in staging). Reports (P3-05) are not built yet.
+
+### Completed
+
+- **Schema (migration 0006):** segments; campaigns (template, number, variable mapping, audience,
+  wall-clock schedule, window, pacing, caps, approval, lifecycle, counters); campaign recipients (ids
+  and outcomes only) and campaign history (append-only); `messages.campaign_id`; company campaign
+  settings (approval, marketing frequency cap, estimate currency); platform rate cards (immutable
+  once published, guarded by triggers); `ops.campaigns_due` (definer, app role only). **Found by the
+  10,000-recipient test:** with statistics stale after a bulk import, the planner used the
+  `(tenant_id, purpose, status)` consent index and the `(tenant_id, whatsapp_account_id, wa_id)`
+  identity index for per-contact lookups, making the snapshot quadratic (6.4 s and 1.7 M buffer hits
+  for 10,000 contacts, a statement timeout in the test). The migration drops that consent index and
+  adds a per-contact identity index; the same query now takes about 0.1 s.
+- **Segments:** tags, consent, typed custom fields, creation date (company time zone), source, recent
+  inbound messages, calling code and campaign responses (retargeting), all/any, parameterised SQL,
+  preview, version-checked edits, archive.
+- **Campaigns:** draft editor with a live preview and a review panel; submission freezes the
+  audience; optional four-eyes approval; scheduling in IANA time zones (gaps move forward, repeated
+  times use the first occurrence); sending window; deadline; pacing; marketing frequency cap; message
+  and estimated spending caps; pause/resume (resumer takes over); idempotent cancel; test sends to
+  existing contacts through the normal consent checks; per-recipient outcomes, last-touch reply and
+  opt-out attribution within 72 hours, results with explicit denominators, failure codes explained,
+  formula-safe audited CSV export.
+- **Runner:** `campaign.run` ticks under the campaign's row lock and a per-company advisory lock,
+  re-check each recipient with fresh data and queue ordinary messages through the Phase 2 pipeline
+  (batch insert of messages, intents and jobs); the send worker refuses messages of paused or
+  cancelled campaigns; the messaging sweep re-signals lost ticks. **Found by tests:** automatic pauses
+  for a spending or message cap first released the sends queued in the same tick; only authority,
+  template and number problems release queued sends now.
+- **Platform:** rate-card console (CSV in Meta's layout, publish, withdraw with a reason; platform
+  audit log).
+- **Web:** Campaigns (list, new, draft/review, approval, controls, results, history, recipients,
+  export), Contacts → Segments, Settings → Messaging → Campaigns, Platform → Meta rate cards. The
+  Campaigns module is now available.
+
+### Test commands and results (local, 2026-09-26, fresh database)
+
+| Command                                                      | Result                                                                                                                                                                                                                                                                                             |
+| ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`         | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                     |
+| `pnpm test` (unit)                                           | 90 passed (adds time zones and daylight saving, sending windows, variable mapping, cost arithmetic and prefixes, rate-card CSV)                                                                                                                                                                    |
+| `pnpm test:integration` (PostgreSQL 18.x)                    | 153 passed: campaigns 16 (segments, lifecycle and attribution, live re-checks, test sends, cancel races, approval, pause/resume, launcher losing permission, schedules and windows, frequency cap, spending and message caps, isolation, 10,000 recipients), isolation 45, plus the earlier suites |
+| `pnpm test:e2e --project=chromium --project=mobile-chromium` | 26 passed (13 tests × 2), including a campaign drafted, reviewed, started, queued by the worker, sent to the Graph stand-in, delivery counted, recipients and export                                                                                                                               |
+
+10,000-recipient run (local, one machine, PostgreSQL 18 in Docker): snapshot 629 ms; 21 runner ticks
+queued all 10,000 messages in 7.0 s. Real sending is paced by the per-number rate (default 20 per
+second, about 8.5 minutes for 10,000) and by Meta's limits; that part was not measured.
+
+### Known gaps (tracked in BACKLOG.md)
+
+Reports (P3-05); the 10,000-recipient run in staging with real dispatch; per-recipient time zones;
+A/B variants; reading the number's messaging tier from Meta; campaign sends through the public API;
+media-header templates.
+
 ## 2026-09-26 — Phase 3: contacts, consent and templates
 
 Status: **implementation complete for contacts, consent and templates, production blocked**

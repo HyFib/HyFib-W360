@@ -33,15 +33,15 @@ export const MODULES: ModuleDefinition[] = [
     path: '/contacts',
     permission: 'contacts.read',
     status: 'available',
-    reason: 'Saved segments arrive with campaigns.',
   },
   {
     key: 'campaigns',
     label: 'Campaigns',
     path: '/campaigns',
     permission: 'campaigns.read',
-    status: 'planned',
-    reason: 'Phase 3: campaigns with consent and suppression checks at send time.',
+    status: 'available',
+    reason:
+      'Template campaigns to saved segments with approval, scheduling, pacing and caps. Per-recipient time zones and A/B tests are not supported yet.',
   },
   {
     key: 'templates',

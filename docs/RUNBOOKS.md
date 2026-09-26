@@ -169,6 +169,34 @@ and requests a sync. Improve the template (quality) or use another one; do not r
 **Import rejected.** Row errors name the row and the problem, never the row's contents. Files must
 be under the upload limit and 5,000 rows; split larger files.
 
+## 10A. Campaigns
+
+**A campaign seems stuck ("Sending" with no progress).** The detail page shows why a campaign waits:
+a sending window that has not opened, pacing, or a pause reason. Check the worker logs for
+`campaign tick` with the campaign id (`outcome` progress, waiting, busy, paused, completed) and the
+`campaign.run` queue depth. The per-minute messaging sweep re-signals a running campaign whose next
+tick is more than 30 seconds late (`campaign ticks signalled`). Sends then follow the send runbooks
+above (message.send queue, unknown outcomes).
+
+**Stop a campaign now (wrong audience or content).** Cancel it from the detail page (members with
+`campaigns.send`): pending recipients and queued sends that no worker has claimed are cancelled in
+one transaction; sends already handed to Meta cannot be recalled. Pausing instead keeps the
+remaining recipients for later.
+
+**Paused by HyFib.** The reason is on the page: template no longer approved (fix or replace the
+template, then resume), number inactive (reconnect, then resume), spending or message cap reached
+(raise it, then resume), the sending member left or lost permission (another member with
+`campaigns.send` resumes it under their name), or no rate card for the cap's currency (platform
+staff publish one, or remove the cap).
+
+**Many failures with 131049.** Meta's per-user marketing limit: those customers received too many
+marketing messages from businesses. Do not resend; wait at least 24 hours (M-062) and consider the
+company's frequency cap.
+
+**Rate card mistake.** Platform staff withdraw the card (with a reason; audited) and publish a
+corrected one. Estimates recorded on recipients already queued keep the old price; new estimates use
+the card in force when each message is queued.
+
 ## 11. Compromised company (tenant) or account
 
 1. Suspend the company in `/platform` with a reason (stops outbound activity; ingestion continues).

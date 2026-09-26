@@ -23,14 +23,18 @@ import {
   PgBossJobQueue,
   RazorpayClient,
   createBillingService,
+  createCampaignsService,
   createConsentService,
   createContactsService,
   createInboxService,
   createOnboardingService,
   createPlatformService,
+  createRateCardsService,
+  createSegmentsService,
   createTemplatesService,
   createTenancyService,
   type BillingService,
+  type CampaignsService,
   type ConsentService,
   type ContactsService,
   type InboxService,
@@ -38,6 +42,8 @@ import {
   type OnboardingService,
   type OutboundDeps,
   type PlatformService,
+  type RateCardsService,
+  type SegmentsService,
   type TemplatesService,
   type TenancyService,
 } from '@w360/domain';
@@ -67,6 +73,9 @@ export interface Runtime {
   contacts: ContactsService;
   consent: ConsentService;
   templates: TemplatesService;
+  segments: SegmentsService;
+  campaigns: CampaignsService;
+  rateCards: RateCardsService;
   /** Null until the Meta app is configured (WhatsApp connection is then reported unavailable). */
   meta: MetaConfig | null;
   onboarding: OnboardingService | null;
@@ -143,6 +152,9 @@ async function init(): Promise<Runtime> {
   const contacts = createContactsService({ db, clock: systemClock });
   const consent = createConsentService({ db, clock: systemClock });
   const templates = createTemplatesService({ db, jobs, signer, clock: systemClock });
+  const segments = createSegmentsService({ db, clock: systemClock });
+  const campaigns = createCampaignsService({ db, jobs, signer, clock: systemClock });
+  const rateCards = createRateCardsService({ platformDb, clock: systemClock });
   const meta = metaConfigFrom(config);
   const onboarding = meta
     ? createOnboardingService({
@@ -190,6 +202,9 @@ async function init(): Promise<Runtime> {
     contacts,
     consent,
     templates,
+    segments,
+    campaigns,
+    rateCards,
     meta,
     onboarding,
     razorpay,

@@ -156,3 +156,55 @@ Decision: an in-house RFC 4180 reader/writer (quoted fields, doubled quotes, emb
 CRLF/LF/CR, BOM, delimiter detection; hard limits on bytes, rows, columns and field length) and a
 formula-safe writer. Import runs through a server action, so files are limited to just under the
 1 MB action body limit; larger imports would need a streaming upload endpoint.
+
+## ADR-021 Campaign audiences: frozen snapshot, live checks (2026-09-26)
+
+Decision: submitting a campaign inserts one `campaign_recipients` row per matching contact (the
+snapshot), classified with the same SQL the review screen shows (pending, or skipped with a
+reason). Recipients hold ids and outcomes only; phone numbers and variable values are read live
+when the runner queues them, so erasure and later edits apply. Every recipient is checked again
+when queued (erasure, number, suppression, consent, variables, frequency cap, spending cap) and by
+the send worker right before dispatch (consent, suppression, template approval, campaign status).
+Alternatives: snapshotting phones and values (stale data, erasure would have to rewrite campaign
+rows) or evaluating the segment at send time (the audience a member approved could silently
+change). Limit: 50,000 recipients per campaign until load tests (phase 7) justify more.
+
+## ADR-022 Campaign runner on the existing send pipeline (2026-09-26)
+
+Decision: a `campaign.run` job ticks every 10 seconds per running campaign (self-rescheduled; the
+per-minute sweep re-signals lost ticks through `ops.campaigns_due`). A tick holds the campaign's
+row lock and a per-company advisory lock, so two campaigns of one company never race on the
+frequency cap, and queues at most `rate_per_minute`-worth (or the number's rate) of recipients,
+bounded by 500 per tick and by sends still waiting in the queue. Each recipient becomes an ordinary
+message + send intent + `message.send` job, so pacing per number, unknown-outcome handling and
+send-time policy checks are the Phase 2 ones. Campaign threads are created resolved, so they do
+not flood the open inbox; a reply reopens them. Pause and cancel cancel unclaimed send intents in
+the same transaction as the status change (row locks make "claimed or cancelled" exclusive); a send
+that returns to the queue after a retryable error meets a claim-time campaign check.
+
+## ADR-023 Rate cards entered by platform staff; estimates, not charges (2026-09-26)
+
+Decision: Meta prices are not shipped with HyFib. Platform administrators copy Meta's published
+rate card for a currency into `ops.rate_cards` (market, calling codes, price per category, source
+URL, effective time); cards are immutable once published (triggers) and corrected by withdrawal
+plus a new card. Prices are integer millionths of the major unit because per-message prices are
+fractions of a minor unit. Estimates use the card in force when a message is queued, the list price
+(tier 0) and assume every message is charged: an upper bound, since Meta charges delivered messages
+and free windows and volume tiers are not applied. Spending caps compare these estimates; Meta bills
+the company directly (ADR-011), so no wallet funds are reserved for campaign sends.
+
+## ADR-024 Approval and sending authority (2026-09-26)
+
+Decision: companies can require approval; the approver must hold `campaigns.approve` and differ
+from the member who submitted. Sends run under the submitter's authority (the member who resumes a
+paused campaign takes over). The runner pauses the campaign when that member leaves the company or
+loses `campaigns.send`, so revoking a member stops their campaigns, like their other queued work.
+
+## ADR-025 Campaign attribution: last touch within 72 hours (2026-09-26)
+
+Decision: a reply (any inbound message except reactions and system notices, on the same number) or
+a marketing opt-out is attributed to the most recent campaign message queued to that contact in the
+72 hours before it, once, and recorded on the recipient row when it arrives. Clicks and conversions
+are reported as not measured: Meta does not report website-button taps, HyFib does not rewrite
+links, and no conversion source is connected. Metric definitions are versioned (ADR-026 when
+reports persist them).

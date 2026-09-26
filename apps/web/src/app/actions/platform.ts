@@ -51,3 +51,30 @@ export async function resetUserMfaAction(input: unknown): Promise<ActionResult> 
     return null;
   });
 }
+
+export async function createRateCardAction(input: unknown): Promise<ActionResult<{ id: string }>> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    const result = await runtime.rateCards.createRateCard(actor, input);
+    refresh();
+    return result;
+  });
+}
+
+export async function publishRateCardAction(id: string): Promise<ActionResult> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    await runtime.rateCards.publishRateCard(actor, String(id));
+    refresh();
+    return null;
+  });
+}
+
+export async function withdrawRateCardAction(id: string, input: unknown): Promise<ActionResult> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    await runtime.rateCards.withdrawRateCard(actor, String(id), input);
+    refresh();
+    return null;
+  });
+}

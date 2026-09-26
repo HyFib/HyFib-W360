@@ -199,6 +199,48 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   worker skips the 24-hour window check for templates but re-checks template approval, consent and
   the suppression list inside the claim transaction before any request leaves.
 
+## 6B. Segments and campaigns **[built — sends verified against a local Graph stand-in only]**
+
+- **Segments** (`packages/domain/src/campaigns/segments.ts`): saved, dynamic lists of conditions
+  (tags, consent, typed custom fields, creation date in the company's time zone, source, last
+  inbound message, calling code, response to an earlier campaign) combined with all/any. They
+  compile to parameterised SQL over `app.contacts`; erased contacts never match.
+- **Campaign lifecycle** (`campaigns/service.ts`): draft → (pending_approval →) scheduled → running
+  → completed, with paused and canceled. Submitting runs the readiness checks, freezes the audience
+  (`campaign_recipients`, one row per contact, pending or skipped with a reason, no personal data)
+  and records the submitter. With approval required, a different member with `campaigns.approve`
+  approves. Sends run under the submitter's (or the resuming member's) authority.
+- **Scheduling** (`campaigns/schedule.ts`): a wall-clock time in an IANA zone resolved with Node's
+  ICU data; a time inside a daylight-saving gap moves forward by the jump, a repeated time means its
+  first occurrence, and the adjustment is stored and shown. An optional daily sending window (which
+  may wrap midnight) delays ticks until it opens. `stop_after_hours` bounds the sending period;
+  recipients not reached by then are recorded as expired, so a campaign held up by a suspension is
+  never replayed days later.
+- **Runner** (`campaigns/runner.ts`, queue `campaign.run`): one tick about every 10 seconds per
+  running campaign under the campaign row lock and a per-company advisory lock. It pauses when the
+  template is no longer sendable, the number is inactive, the sending member lost authority, a cap
+  is reached or rates are missing; otherwise it takes the next pending recipients (pacing by
+  `rate_per_minute` or the number's rate, at most 500 per tick, bounded by sends still queued),
+  re-checks each with fresh data and queues ordinary messages + send intents + `message.send` jobs
+  (batch insert). Campaign threads are created resolved; a reply reopens them. The per-minute
+  messaging sweep re-signals ticks through `ops.campaigns_due` (active companies only).
+- **Guardrails:** marketing frequency cap per contact (company setting; counts marketing templates
+  from campaigns and the inbox), message cap, estimated spending cap (rate cards, ADR-023), pacing,
+  approval, sending window, deadline. Meta's own limits (per-user marketing limit 131049, messaging
+  tiers) still apply and show as failures with Meta's code.
+- **Pause and cancel:** both cancel unclaimed send intents in the transaction that changes the
+  status; pausing returns those recipients to pending, cancelling cancels them and every pending
+  recipient. Cancelling is idempotent. The send worker also refuses a campaign message whose
+  campaign is paused or cancelled (a send that returned to the queue after a retryable error).
+- **Outcomes and attribution:** delivery progress is read from the linked message; replies and
+  marketing opt-outs are attributed last-touch within 72 hours by ingestion and consent recording
+  (ADR-025). Analytics compute rates with explicit denominators from `METRIC_DEFINITIONS`
+  (`packages/domain/src/reports/definitions.ts`); clicks and conversions are reported as not
+  measured. Per-recipient CSV export is formula-safe and audited.
+- **Rate cards** (`ops.rate_cards`, `rate_card_prefixes`, `rate_card_prices`): entered by platform
+  staff from Meta's published cards (platform console), immutable once published; companies read
+  published cards only.
+
 ## 7. Commercial model and billing **[built: wallet, top-ups, auto-recharge — verified against a local Razorpay stand-in only; subscriptions planned]**
 
 - **Who pays Meta:** as a Meta Tech Provider HyFib has no credit line; each customer adds its own

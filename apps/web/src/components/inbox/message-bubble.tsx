@@ -84,13 +84,15 @@ function Body({ type, content }: { type: string; content: unknown }) {
       if (c.redacted === true) return <p className="italic">Content removed</p>;
       const rendered = (c.rendered ?? {}) as Record<string, unknown>;
       const template = (c.template ?? {}) as Record<string, unknown>;
+      const campaign = (c.campaign ?? {}) as Record<string, unknown>;
       const buttons = Array.isArray(rendered.buttons)
         ? (rendered.buttons as { text?: unknown }[]).map((b) => text(b.text)).filter(Boolean)
         : [];
       return (
         <div className="grid gap-1">
           <p className="text-xs font-medium uppercase tracking-wide opacity-70">
-            Template · {text(template.name) ?? 'unknown'}
+            {text(campaign.name) ? `Campaign “${text(campaign.name)}” · ` : ''}Template ·{' '}
+            {text(template.name) ?? 'unknown'}
           </p>
           {text(rendered.header) ? <p className="font-semibold">{text(rendered.header)}</p> : null}
           <p className="whitespace-pre-wrap break-words">{text(rendered.body) ?? ''}</p>
@@ -130,7 +132,12 @@ export function MessageBubble({
         )}
       >
         <span className="sr-only">
-          {outbound ? `${message.senderName ?? 'Your team'} replied` : 'Customer wrote'}:{' '}
+          {outbound
+            ? message.senderType === 'campaign'
+              ? 'Campaign message'
+              : `${message.senderName ?? 'Your team'} replied`
+            : 'Customer wrote'}
+          :{' '}
         </span>
         <Body type={message.type} content={message.content} />
         <p className="mt-1 flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">

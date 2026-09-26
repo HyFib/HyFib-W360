@@ -87,6 +87,11 @@ export default async function ContactsPage({
                 </a>
               </Button>
             ) : null}
+            {can(ctx, 'campaigns.read') ? (
+              <Button asChild variant="outline">
+                <Link href={`${base}/segments`}>Segments</Link>
+              </Button>
+            ) : null}
             {can(ctx, 'contacts.import') ? (
               <Button asChild variant="outline">
                 <Link href={`${base}/import`}>Import</Link>
