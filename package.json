@@ -1,0 +1,43 @@
+{
+  "name": "hyfib-w360",
+  "version": "0.1.0",
+  "private": true,
+  "description": "HyFib W360 - multi-company customer engagement SaaS on the official WhatsApp Business Platform",
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "pnpm@11.28.0",
+  "engines": {
+    "node": ">=24.21.0 <25"
+  },
+  "scripts": {
+    "dev:web": "pnpm --filter @w360/web dev",
+    "dev:worker": "pnpm --filter @w360/worker dev",
+    "build": "pnpm -r --workspace-concurrency=1 build",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "eslint . --max-warnings=0",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run --project unit",
+    "test:integration": "vitest run --project integration",
+    "test:all": "vitest run",
+    "test:e2e": "playwright test -c tests/e2e/playwright.config.ts",
+    "db:migrate": "tsx packages/db/src/cli/migrate.ts",
+    "db:status": "tsx packages/db/src/cli/migrate.ts --status",
+    "db:local:up": "bash scripts/local-db.sh up",
+    "db:local:down": "bash scripts/local-db.sh down",
+    "db:local:reset": "bash scripts/local-db.sh reset"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "24.19.0",
+    "@vitest/coverage-v8": "5.0.2",
+    "@playwright/test": "1.63.0",
+    "eslint": "10.11.0",
+    "globals": "17.12.0",
+    "prettier": "3.9.9",
+    "tsx": "4.23.15",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.70.1",
+    "vitest": "5.0.2"
+  }
+}

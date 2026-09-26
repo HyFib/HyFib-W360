@@ -1,0 +1,38 @@
+{
+  "name": "@w360/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev --port 3000",
+    "build": "next build",
+    "start": "next start --port 3000",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@hookform/resolvers": "5.9.1",
+    "@w360/contracts": "workspace:*",
+    "@w360/core": "workspace:*",
+    "@w360/db": "workspace:*",
+    "@w360/domain": "workspace:*",
+    "@w360/ui": "workspace:*",
+    "better-auth": "1.7.6",
+    "class-variance-authority": "0.7.1",
+    "clsx": "2.1.1",
+    "lucide-react": "1.48.0",
+    "next": "16.3.6",
+    "radix-ui": "1.6.7",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "react-hook-form": "7.89.0",
+    "tailwind-merge": "3.7.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "4.3.3",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "eslint-config-next": "16.3.6",
+    "tailwindcss": "4.3.3"
+  }
+}

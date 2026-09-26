@@ -1,0 +1,22 @@
+{
+  "name": "@w360/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "start": "node dist/main.js",
+    "build": "node build.mjs",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@w360/contracts": "workspace:*",
+    "@w360/core": "workspace:*",
+    "@w360/db": "workspace:*",
+    "@w360/domain": "workspace:*",
+    "pg-boss": "12.34.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}
