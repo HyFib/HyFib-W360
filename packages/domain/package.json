@@ -1,0 +1,26 @@
+{
+  "name": "@w360/domain",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./template-definition": "./src/templates/definition.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@w360/contracts": "workspace:*",
+    "@w360/core": "workspace:*",
+    "@w360/db": "workspace:*",
+    "drizzle-orm": "0.45.3",
+    "nodemailer": "10.0.10",
+    "pg-boss": "12.34.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/nodemailer": "8.0.2",
+    "vitest": "5.0.2"
+  }
+}

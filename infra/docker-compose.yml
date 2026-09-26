@@ -1,0 +1,102 @@
+# Local development stack. NOT a production topology (single instances, dev credentials, no TLS).
+#   docker compose -f infra/docker-compose.yml up -d postgres mailpit     # dependencies only
+#   docker compose -f infra/docker-compose.yml --profile app up --build   # full stack in containers
+name: w360
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: w360
+    ports:
+      - '127.0.0.1:54329:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  bootstrap:
+    image: postgres:18-alpine
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./db/bootstrap-roles.sql:/bootstrap-roles.sql:ro
+    entrypoint:
+      [
+        'psql',
+        'postgres://postgres:postgres@postgres:5432/w360',
+        '-v',
+        'ON_ERROR_STOP=1',
+        '-v',
+        'db_name=w360',
+        '-v',
+        'owner_password=dev-only-owner',
+        '-v',
+        'app_password=dev-only-app',
+        '-v',
+        'auth_password=dev-only-auth',
+        '-v',
+        'platform_password=dev-only-platform',
+        '-f',
+        '/bootstrap-roles.sql',
+      ]
+    restart: 'no'
+
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      - '127.0.0.1:1025:1025'
+      - '127.0.0.1:8025:8025'
+
+  migrate:
+    profiles: ['app']
+    build:
+      context: ..
+      dockerfile: infra/docker/worker.Dockerfile
+    command: ['node', 'dist/migrate.js']
+    environment:
+      DATABASE_URL_MIGRATE: postgres://w360_owner:dev-only-owner@postgres:5432/w360
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    restart: 'no'
+
+  web:
+    profiles: ['app']
+    build:
+      context: ..
+      dockerfile: infra/docker/web.Dockerfile
+    env_file: ../.env
+    environment:
+      APP_ENV: test
+      DATABASE_URL_APP: postgres://w360_app:dev-only-app@postgres:5432/w360
+      DATABASE_URL_AUTH: postgres://w360_auth:dev-only-auth@postgres:5432/w360
+      DATABASE_URL_PLATFORM: postgres://w360_platform:dev-only-platform@postgres:5432/w360
+      SMTP_HOST: mailpit
+    ports:
+      - '127.0.0.1:3000:3000'
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    profiles: ['app']
+    build:
+      context: ..
+      dockerfile: infra/docker/worker.Dockerfile
+    env_file: ../.env
+    environment:
+      APP_ENV: test
+      DATABASE_URL_APP: postgres://w360_app:dev-only-app@postgres:5432/w360
+      DATABASE_URL_PLATFORM: postgres://w360_platform:dev-only-platform@postgres:5432/w360
+      SMTP_HOST: mailpit
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:

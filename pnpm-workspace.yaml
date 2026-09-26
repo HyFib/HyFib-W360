@@ -1,0 +1,10 @@
+packages:
+  - apps/*
+  - packages/*
+  - tests/*
+allowBuilds:
+  esbuild: true
+  unrs-resolver: true
+minimumReleaseAgeExclude:
+  - '@types/node@24.19.0'
+  - react-hook-form@7.89.0

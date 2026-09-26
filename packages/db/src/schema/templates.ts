@@ -1,0 +1,68 @@
+import { integer, jsonb, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { appSchema } from './tenancy';
+
+/** WhatsApp message templates and their review history (migration 0005). */
+const tz = (name: string) => timestamp(name, { withTimezone: true, mode: 'date' });
+
+export const TEMPLATE_CATEGORIES = ['MARKETING', 'UTILITY', 'AUTHENTICATION'] as const;
+export type TemplateCategory = (typeof TEMPLATE_CATEGORIES)[number];
+
+/**
+ * `draft`, `submitting` and `submit_failed` are local states before Meta has the template; the
+ * rest mirror Meta's review states (`unknown` holds a value we do not recognise).
+ */
+export const TEMPLATE_STATUSES = [
+  'draft',
+  'submitting',
+  'submit_failed',
+  'pending',
+  'approved',
+  'rejected',
+  'paused',
+  'disabled',
+  'in_appeal',
+  'flagged',
+  'archived',
+  'pending_deletion',
+  'deleted',
+  'limit_exceeded',
+  'locked',
+  'unknown',
+] as const;
+export type TemplateStatus = (typeof TEMPLATE_STATUSES)[number];
+
+export const messageTemplates = appSchema.table('message_templates', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  whatsappAccountId: uuid('whatsapp_account_id').notNull(),
+  name: text('name').notNull(),
+  language: text('language').notNull(),
+  category: text('category', { enum: TEMPLATE_CATEGORIES }).notNull(),
+  components: jsonb('components').notNull().$type<unknown[]>(),
+  status: text('status', { enum: TEMPLATE_STATUSES }).notNull().default('draft'),
+  providerTemplateId: text('provider_template_id'),
+  providerStatus: text('provider_status'),
+  rejectionReason: text('rejection_reason'),
+  qualityScore: text('quality_score'),
+  submitError: text('submit_error'),
+  origin: text('origin', { enum: ['local', 'synced'] })
+    .notNull()
+    .default('local'),
+  version: integer('version').notNull().default(0),
+  createdByUserId: text('created_by_user_id'),
+  submittedAt: tz('submitted_at'),
+  lastSyncedAt: tz('last_synced_at'),
+  createdAt: tz('created_at').notNull().defaultNow(),
+  updatedAt: tz('updated_at').notNull().defaultNow(),
+});
+
+export const templateStatusEvents = appSchema.table('template_status_events', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  templateId: uuid('template_id').notNull(),
+  status: text('status').notNull(),
+  reason: text('reason'),
+  source: text('source', { enum: ['submit', 'sync', 'send', 'delete'] }).notNull(),
+  actorUserId: text('actor_user_id'),
+  occurredAt: tz('occurred_at').notNull().defaultNow(),
+});
