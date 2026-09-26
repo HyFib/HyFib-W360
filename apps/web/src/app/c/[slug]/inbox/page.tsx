@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 import { Alert, EmptyState } from '@w360/ui';
 import { InboxShell } from '@/components/inbox/inbox-shell';
-import { canUseInbox, loadInboxList, type SearchParams } from '@/server/inbox';
+import { canUseInbox, liveEventCursor, loadInboxList, type SearchParams } from '@/server/inbox';
 import { requireTenant } from '@/server/session';
 
 export const metadata: Metadata = { title: 'Inbox' };
@@ -23,10 +23,12 @@ export default async function InboxPage({
       </Alert>
     );
   }
+  const since = await liveEventCursor(ctx);
   const { query, views, list } = await loadInboxList(ctx, await searchParams);
   return (
     <InboxShell
       slug={ctx.tenant.slug}
+      since={since}
       query={query}
       views={views}
       items={list.items}

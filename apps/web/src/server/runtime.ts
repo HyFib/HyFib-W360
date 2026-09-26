@@ -24,6 +24,7 @@ import {
   RazorpayClient,
   createBillingService,
   createCampaignsService,
+  createReportsService,
   createConsentService,
   createContactsService,
   createInboxService,
@@ -35,6 +36,7 @@ import {
   createTenancyService,
   type BillingService,
   type CampaignsService,
+  type ReportsService,
   type ConsentService,
   type ContactsService,
   type InboxService,
@@ -76,6 +78,7 @@ export interface Runtime {
   segments: SegmentsService;
   campaigns: CampaignsService;
   rateCards: RateCardsService;
+  reports: ReportsService;
   /** Null until the Meta app is configured (WhatsApp connection is then reported unavailable). */
   meta: MetaConfig | null;
   onboarding: OnboardingService | null;
@@ -155,6 +158,7 @@ async function init(): Promise<Runtime> {
   const segments = createSegmentsService({ db, clock: systemClock });
   const campaigns = createCampaignsService({ db, jobs, signer, clock: systemClock });
   const rateCards = createRateCardsService({ platformDb, clock: systemClock });
+  const reports = createReportsService({ db, clock: systemClock });
   const meta = metaConfigFrom(config);
   const onboarding = meta
     ? createOnboardingService({
@@ -205,6 +209,7 @@ async function init(): Promise<Runtime> {
     segments,
     campaigns,
     rateCards,
+    reports,
     meta,
     onboarding,
     razorpay,

@@ -44,7 +44,7 @@ export default async function MembersPage({ params }: { params: Promise<{ slug: 
   const pending = invitations.filter((i) => i.status === 'pending');
 
   return (
-    <div className="grid gap-6">
+    <div className="grid grid-cols-1 gap-6">
       {can(ctx, 'members.invite') ? (
         <InviteForm slug={ctx.tenant.slug} roleOptions={roleOptions} />
       ) : null}

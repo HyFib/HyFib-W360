@@ -1,5 +1,5 @@
 import { expect, test } from './fixtures';
-import { signUpAndVerify, uniqueEmail } from './support';
+import { expectNoHorizontalOverflow, signUpAndVerify, uniqueEmail } from './support';
 
 const PASSWORD = 'correct horse battery staple 42';
 
@@ -58,6 +58,11 @@ test('an owner adds a contact, records consent and tags, imports a CSV and expor
   await expect(
     page.getByRole('cell', { name: /Not imported: Phone numbers can contain only digits/ }),
   ).toBeVisible();
+
+  // The contact list (a wide table) scrolls inside its card, not the page.
+  await page.goto(`/c/${slug}/contacts`);
+  await expect(page.getByRole('cell', { name: 'Bina' })).toBeVisible();
+  await expectNoHorizontalOverflow(page);
 
   // Export neutralises the formula so a spreadsheet shows it as text.
   const response = await page.request.get(`/c/${slug}/contacts/export`);

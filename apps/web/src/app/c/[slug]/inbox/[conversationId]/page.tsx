@@ -11,7 +11,7 @@ import { MarkRead } from '@/components/inbox/mark-read';
 import { MessageBubble, type ThreadMessage } from '@/components/inbox/message-bubble';
 import { NoteForm } from '@/components/inbox/note-form';
 import { formatDateTime } from '@/lib/format';
-import { canUseInbox, loadInboxList, type SearchParams } from '@/server/inbox';
+import { canUseInbox, liveEventCursor, loadInboxList, type SearchParams } from '@/server/inbox';
 import { TemplateSender } from '@/components/templates/template-sender';
 import { getRuntime } from '@/server/runtime';
 import { requireTenant } from '@/server/session';
@@ -32,6 +32,7 @@ export default async function ConversationPage({
   const ctx = await requireTenant(slug);
   if (!canUseInbox(ctx)) notFound();
   const { inbox } = await getRuntime();
+  const since = await liveEventCursor(ctx);
   const before = typeof sp.before === 'string' ? sp.before : undefined;
   let thread: Awaited<ReturnType<typeof inbox.getConversation>>;
   try {
@@ -71,6 +72,7 @@ export default async function ConversationPage({
       nextCursor={list.nextCursor}
       activeId={conv.id}
       timeZone={tz}
+      since={since}
     >
       <MarkRead slug={ctx.tenant.slug} conversationId={conv.id} unread={unread} />
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_18rem]">

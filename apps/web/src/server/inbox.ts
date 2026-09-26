@@ -1,5 +1,5 @@
 import 'server-only';
-import { can, type TenantContext } from '@w360/domain';
+import { can, currentEventCursor, type TenantContext } from '@w360/domain';
 import type { InboxQuery } from '@/components/inbox/inbox-shell';
 import { getRuntime } from './runtime';
 
@@ -7,6 +7,16 @@ export type SearchParams = Record<string, string | string[] | undefined>;
 
 export function canUseInbox(ctx: TenantContext): boolean {
   return can(ctx, 'inbox.read_all') || can(ctx, 'inbox.read_assigned');
+}
+
+/**
+ * The company event-log position before a page reads its data. The page hands it to LiveEvents so
+ * the live stream replays anything that changed after the render, instead of starting "now" and
+ * missing events that arrive before the browser connects.
+ */
+export async function liveEventCursor(ctx: TenantContext): Promise<string> {
+  const { db } = await getRuntime();
+  return currentEventCursor(db, ctx.scope);
 }
 
 /** Parses the list filters from the URL (untrusted) and loads one page of conversations. */

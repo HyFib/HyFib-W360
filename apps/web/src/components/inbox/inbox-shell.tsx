@@ -22,6 +22,7 @@ export function InboxShell({
   nextCursor,
   activeId,
   timeZone,
+  since,
   children,
 }: {
   slug: string;
@@ -31,6 +32,8 @@ export function InboxShell({
   nextCursor: string | null;
   activeId?: string;
   timeZone: string;
+  /** Event-log cursor read before the page loaded its data (see liveEventCursor). */
+  since: string;
   children: ReactNode;
 }) {
   const viewLabels = { mine: 'Mine', unassigned: 'Unassigned', all: 'All' } as const;
@@ -47,7 +50,11 @@ export function InboxShell({
       >
         <div className="flex items-center justify-between gap-2">
           <h1 className="text-xl font-semibold tracking-tight">Inbox</h1>
-          <LiveEvents slug={slug} {...(activeId ? { conversationId: activeId } : {})} />
+          <LiveEvents
+            slug={slug}
+            since={since}
+            {...(activeId ? { conversationId: activeId } : {})}
+          />
         </div>
         <nav aria-label="Inbox views" className="flex flex-wrap gap-1">
           {views.map((v) => (

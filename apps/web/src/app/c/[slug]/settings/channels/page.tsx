@@ -21,6 +21,7 @@ import { ChannelActions } from '@/components/settings/channel-actions';
 import { RequireOwnDocument } from '@/components/require-own-document';
 import { WhatsAppConnect } from '@/components/settings/whatsapp-connect';
 import { formatDateTime } from '@/lib/format';
+import { liveEventCursor } from '@/server/inbox';
 import { getRuntime } from '@/server/runtime';
 import { requireTenant } from '@/server/session';
 
@@ -50,6 +51,7 @@ export default async function ChannelsPage({ params }: { params: Promise<{ slug:
   const ctx = await requireTenant(slug);
   assertCan(ctx, 'channels.read');
   const { onboarding, meta } = await getRuntime();
+  const since = await liveEventCursor(ctx);
   const channels = onboarding ? await onboarding.listChannels(ctx) : [];
   const canManage = can(ctx, 'channels.manage');
   const signupReady = Boolean(meta?.embeddedSignupConfigId);
@@ -61,7 +63,7 @@ export default async function ChannelsPage({ params }: { params: Promise<{ slug:
         <CardHeader>
           <div className="flex flex-wrap items-center justify-between gap-2">
             <CardTitle>WhatsApp numbers</CardTitle>
-            <LiveEvents slug={ctx.tenant.slug} />
+            <LiveEvents slug={ctx.tenant.slug} since={since} />
           </div>
           <CardDescription>
             Connect your own WhatsApp Business Account through Meta’s signup. Meta bills your

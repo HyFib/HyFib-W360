@@ -3,6 +3,7 @@ import { refresh } from 'next/cache';
 import { queueTextMessage, resolveUnknownOutcome } from '@w360/domain';
 import { getRuntime } from '@/server/runtime';
 import { runAction, type ActionResult } from '@/server/action';
+import { requestMeta } from '@/server/session';
 import { tenantForAction } from '@/server/tenant-action';
 
 export async function sendReplyAction(
@@ -80,6 +81,19 @@ export async function resolveUnknownOutcomeAction(
       throw new TypeError('Unknown decision');
     }
     await resolveUnknownOutcome(outbound, ctx, input);
+    refresh();
+    return null;
+  });
+}
+
+export async function updateResponseTargetAction(
+  slug: string,
+  input: { minutes: number | null },
+): Promise<ActionResult> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { inbox } = await getRuntime();
+    await inbox.updateResponseTarget(ctx, input, await requestMeta());
     refresh();
     return null;
   });

@@ -401,7 +401,7 @@ async function LiveView({
   const tz = ctx.tenant.timezone;
   const slug = ctx.tenant.slug;
   const base = `/c/${slug}/campaigns/${c.id}`;
-  const currency = c.budgetCurrency ?? settings.costCurrency;
+  const currency = c.estimateCurrency ?? c.budgetCurrency ?? settings.costCurrency;
   const inProgress = c.status === 'scheduled' || c.status === 'running';
   return (
     <div className="grid gap-6">

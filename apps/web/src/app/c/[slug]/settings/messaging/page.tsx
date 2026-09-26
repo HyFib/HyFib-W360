@@ -3,6 +3,7 @@ import { notFound } from 'next/navigation';
 import { can } from '@w360/domain';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
 import { CampaignSettingsForm } from '@/components/settings/campaign-settings';
+import { ResponseTargetForm } from '@/components/settings/response-target';
 import {
   ConsentKeywordsForm,
   ContactFieldsManager,
@@ -23,12 +24,13 @@ export default async function MessagingSettingsPage({
   const { slug } = await params;
   const ctx = await requireTenant(slug);
   if (!can(ctx, 'contacts.read')) notFound();
-  const { consent, contacts, campaigns } = await getRuntime();
-  const [settings, fields, suppressions, campaignSettings] = await Promise.all([
+  const { consent, contacts, campaigns, inbox } = await getRuntime();
+  const [settings, fields, suppressions, campaignSettings, responseTarget] = await Promise.all([
     consent.getSettings(ctx),
     contacts.listFields(ctx),
     consent.listSuppressions(ctx, { limit: 200 }),
     can(ctx, 'campaigns.read') ? campaigns.getSettings(ctx) : Promise.resolve(null),
+    inbox.getResponseTarget(ctx),
   ]);
   const manage = can(ctx, 'tenant.settings.manage');
   const tz = ctx.tenant.timezone;
@@ -44,6 +46,17 @@ export default async function MessagingSettingsPage({
         </CardHeader>
         <CardContent>
           <ConsentKeywordsForm slug={ctx.tenant.slug} initial={settings} canEdit={manage} />
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle>Inbox response target</CardTitle>
+          <CardDescription>
+            How quickly the team aims to answer a waiting customer, for the inbox report.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <ResponseTargetForm slug={ctx.tenant.slug} initial={responseTarget} canEdit={manage} />
         </CardContent>
       </Card>
       {campaignSettings ? (

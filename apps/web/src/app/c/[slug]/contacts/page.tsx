@@ -105,7 +105,7 @@ export default async function ContactsPage({
           </>
         }
       />
-      <div className="grid gap-4">
+      <div className="grid grid-cols-1 gap-4">
         <form
           method="get"
           className="flex flex-wrap items-end gap-3"

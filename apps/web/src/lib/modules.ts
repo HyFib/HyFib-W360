@@ -97,8 +97,9 @@ export const MODULES: ModuleDefinition[] = [
     label: 'Reports',
     path: '/reports',
     permission: 'reports.read',
-    status: 'planned',
-    reason: 'Phase 3: messaging, inbox and campaign reports.',
+    status: 'available',
+    reason:
+      'Messaging outcomes, estimated Meta charges, inbox response times, member activity and campaign funnels. Automation, deal and retention reports need modules that are not available yet.',
   },
   {
     key: 'integrations',
