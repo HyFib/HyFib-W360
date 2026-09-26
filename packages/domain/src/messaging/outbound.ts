@@ -3,6 +3,8 @@ import { AppError, forbidden, notFound, uuidv7, type Clock, type Keyring } from 
 import { QUEUES } from '@w360/contracts';
 import {
   and,
+  campaignRecipients,
+  campaigns,
   channelAccounts,
   contactIdentities,
   contacts,
@@ -537,6 +539,7 @@ export async function processSendIntent(
         contactId: conversations.contactId,
         messageType: messages.type,
         templateId: messages.templateId,
+        campaignId: messages.campaignId,
       })
       .from(messages)
       .innerJoin(
@@ -562,6 +565,67 @@ export async function processSendIntent(
       )
       .where(and(eq(messages.tenantId, scope.tenantId), eq(messages.id, current.messageId)));
     if (!ctx) throw new Error('Send intent refers to a missing message');
+    // A campaign message waits for its campaign: once the campaign is paused or cancelled (for
+    // example a send that went back to the queue after a retryable error), it is not sent.
+    if (ctx.campaignId) {
+      const [campaign] = await tx
+        .select({ status: campaigns.status })
+        .from(campaigns)
+        .where(and(eq(campaigns.tenantId, scope.tenantId), eq(campaigns.id, ctx.campaignId)));
+      if (campaign?.status === 'paused' || campaign?.status === 'canceled') {
+        const paused = campaign.status === 'paused';
+        const code = paused ? 'campaign_paused' : 'campaign_canceled';
+        const reason = paused
+          ? 'Not sent: the campaign was paused.'
+          : 'Not sent: the campaign was cancelled.';
+        await tx
+          .update(sendIntents)
+          .set({
+            state: 'canceled',
+            leaseUntil: null,
+            resolvedAt: now,
+            lastErrorCode: code,
+            lastError: reason,
+          })
+          .where(and(eq(sendIntents.tenantId, scope.tenantId), eq(sendIntents.id, intentId)));
+        await tx
+          .update(messages)
+          .set({
+            status: 'canceled',
+            statusRank: STATUS_RANK.canceled,
+            statusAt: now,
+            errorCode: code,
+            errorTitle: reason,
+          })
+          .where(and(eq(messages.tenantId, scope.tenantId), eq(messages.id, current.messageId)));
+        // A paused campaign sends this recipient again when resumed (counters are recomputed then).
+        await tx
+          .update(campaignRecipients)
+          .set(
+            paused
+              ? {
+                  state: 'pending',
+                  messageId: null,
+                  queuedAt: null,
+                  market: null,
+                  estimatedCostMicros: null,
+                }
+              : { state: 'canceled' },
+          )
+          .where(
+            and(
+              eq(campaignRecipients.tenantId, scope.tenantId),
+              eq(campaignRecipients.messageId, current.messageId),
+            ),
+          );
+        await emitTenantEvent(tx, scope.tenantId, {
+          type: 'message.status',
+          conversationId: ctx.conversationId,
+          payload: { messageId: current.messageId },
+        });
+        return { kind: 'campaign_stopped' as const };
+      }
+    }
     // Business-initiated templates: re-check the template and the contact's consent now, under
     // the intent's row lock, so an opt-out recorded after queueing still stops the send.
     let blocked: { code: string; message: string } | null = null;
@@ -601,6 +665,7 @@ export async function processSendIntent(
       channelAccountId: outcome.channelAccountId,
     };
   }
+  if (outcome.kind === 'campaign_stopped') return { outcome: 'canceled' };
   if (outcome.kind !== 'claimed') return { outcome: 'not_claimable' };
   const claimed = outcome;
   const { intent } = claimed;

@@ -1,4 +1,4 @@
-import { boolean, integer, jsonb, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { boolean, integer, jsonb, smallint, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 import { appSchema } from './tenancy';
 
@@ -115,6 +115,10 @@ export const messagingSettings = appSchema.table('messaging_settings', {
   marketingOptOutKeywords: text('marketing_opt_out_keywords').array().notNull(),
   optInKeywords: text('opt_in_keywords').array().notNull(),
   requireMarketingOptIn: boolean('require_marketing_opt_in').notNull().default(true),
+  campaignApprovalRequired: boolean('campaign_approval_required').notNull().default(false),
+  marketingCapCount: smallint('marketing_cap_count'),
+  marketingCapDays: smallint('marketing_cap_days'),
+  costCurrency: text('cost_currency'),
   updatedByUserId: text('updated_by_user_id'),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),

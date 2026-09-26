@@ -117,8 +117,12 @@ describe('database roles', () => {
     expect(await can('w360_platform', resetMfa)).toBe(true);
     expect(await can('w360_app', resetMfa)).toBe(false);
     expect(await can('w360_auth', resetMfa)).toBe(false);
-    // Contact erasure and the template sweep: runtime app role only.
-    for (const fn of ['app.erase_contact(uuid,boolean)', 'ops.template_sync_due(integer)']) {
+    // Contact erasure and the template and campaign sweeps: runtime app role only.
+    for (const fn of [
+      'app.erase_contact(uuid,boolean)',
+      'ops.template_sync_due(integer)',
+      'ops.campaigns_due(integer)',
+    ]) {
       expect(await can('w360_app', fn), fn).toBe(true);
       expect(await can('w360_auth', fn), fn).toBe(false);
       expect(await can('w360_platform', fn), fn).toBe(false);
@@ -128,6 +132,47 @@ describe('database roles', () => {
         `SELECT ops.platform_reset_user_mfa('usr_x', 'Verified identity by phone')`,
       ),
     ).rejects.toThrow(/permission denied/);
+  });
+
+  it('rate cards: the platform role drafts and publishes them, companies read published ones only', async () => {
+    const [admin] = (await dbs.adminPool.query<{ id: string }>(`SELECT id FROM auth.users LIMIT 1`))
+      .rows;
+    const draft = await dbs.platformPool.query<{ id: string }>(
+      `INSERT INTO ops.rate_cards (id, currency, effective_from, source_url, created_by_user_id)
+       VALUES (gen_random_uuid(), 'EUR', now(), 'https://example.test/eur', $1) RETURNING id`,
+      [admin!.id],
+    );
+    const id = draft.rows[0]!.id;
+    const visible = async () =>
+      (await dbs.appPool.query(`SELECT id FROM ops.rate_cards WHERE id = $1`, [id])).rows.length;
+    expect(await visible()).toBe(0);
+    await dbs.platformPool.query(
+      `INSERT INTO ops.rate_card_prefixes (rate_card_id, prefix, market) VALUES ($1, '49', 'Germany')`,
+      [id],
+    );
+    await dbs.platformPool.query(
+      `INSERT INTO ops.rate_card_prices (rate_card_id, market, category, price_micros) VALUES ($1, 'Germany', 'marketing', 1)`,
+      [id],
+    );
+    await dbs.platformPool.query(`UPDATE ops.rate_cards SET status = 'published' WHERE id = $1`, [
+      id,
+    ]);
+    expect(await visible()).toBe(1);
+    await expect(
+      dbs.appPool.query(
+        `INSERT INTO ops.rate_card_prices (rate_card_id, market, category, price_micros) VALUES ($1, 'Germany', 'utility', 1)`,
+        [id],
+      ),
+    ).rejects.toThrow(/permission denied/);
+    await expect(
+      dbs.platformPool.query(`DELETE FROM ops.rate_card_prices WHERE rate_card_id = $1`, [id]),
+    ).rejects.toThrow(/permission denied/);
+    await dbs.platformPool.query(`UPDATE ops.rate_cards SET status = 'withdrawn' WHERE id = $1`, [
+      id,
+    ]);
+    await expect(
+      dbs.platformPool.query(`UPDATE ops.rate_cards SET status = 'published' WHERE id = $1`, [id]),
+    ).rejects.toThrow(/invalid rate card status change/);
   });
 
   it('the auth role cannot read company data and the app role cannot read credentials', async () => {

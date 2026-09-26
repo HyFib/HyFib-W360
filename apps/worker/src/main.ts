@@ -6,6 +6,7 @@ import {
   billingEventProcessHandler,
   billingSweepHandler,
 } from './handlers/billing';
+import { campaignRunHandler } from './handlers/campaigns';
 import { emailSendHandler, outboxSweepHandler } from './handlers/email';
 import {
   channelOnboardHandler,
@@ -84,6 +85,11 @@ async function main(): Promise<void> {
     QUEUES.templateSync.name,
     { localConcurrency: 2, batchSize: 1 },
     templateSyncHandler(rt),
+  );
+  await rt.boss.work(
+    QUEUES.campaignRun.name,
+    { localConcurrency: 2, batchSize: 1 },
+    campaignRunHandler(rt),
   );
   await rt.boss.work(
     QUEUES.billingEventProcess.name,

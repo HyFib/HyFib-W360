@@ -13,6 +13,7 @@ import {
   recoverExpiredSend,
 } from '@w360/domain';
 import type { WorkerRuntime } from '../runtime';
+import { signalDueCampaigns } from './campaigns';
 import { RetryableJobError } from './email';
 import { signalDueTemplateSyncs } from './templates';
 
@@ -162,6 +163,8 @@ export function messagingSweepHandler(rt: WorkerRuntime) {
     }
     const templateSyncs = await signalDueTemplateSyncs(rt);
     if (templateSyncs > 0) rt.logger.info({ templateSyncs }, 'template syncs signalled');
+    const campaignTicks = await signalDueCampaigns(rt);
+    if (campaignTicks > 0) rt.logger.info({ campaignTicks }, 'campaign ticks signalled');
     const retention = await applyMessagingRetention(rt.db);
     if (retention.bodiesErased + retention.receiptsDeleted + retention.eventsPruned > 0) {
       rt.logger.info(retention, 'messaging retention applied');

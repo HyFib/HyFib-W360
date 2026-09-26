@@ -24,6 +24,12 @@ export interface JobQueue {
     envelope: JobEnvelope,
     options?: EnqueueOptions,
   ): Promise<string | null>;
+  /** Enqueues several jobs of one queue in a single statement (same transaction semantics). */
+  enqueueMany(
+    tx: Tx | null,
+    queue: QueueName,
+    jobs: { envelope: JobEnvelope; options?: EnqueueOptions }[],
+  ): Promise<void>;
 }
 
 /** Adapts a drizzle transaction to pg-boss's minimal database interface. */
@@ -64,6 +70,25 @@ export class PgBossJobQueue implements JobQueue {
       ...(tx ? { db: transactionExecutor(tx) } : {}),
     });
   }
+
+  async enqueueMany(
+    tx: Tx | null,
+    queue: QueueName,
+    jobs: { envelope: JobEnvelope; options?: EnqueueOptions }[],
+  ) {
+    if (jobs.length === 0) return;
+    await this.boss.insert(
+      queue,
+      jobs.map(({ envelope, options = {} }) => ({
+        data: envelope,
+        ...(options.singletonKey ? { singletonKey: options.singletonKey } : {}),
+        ...(options.startAfter ? { startAfter: options.startAfter } : {}),
+        ...(options.group ? { group: options.group } : {}),
+        ...(options.priority !== undefined ? { priority: options.priority } : {}),
+      })),
+      { returnId: false, ...(tx ? { db: transactionExecutor(tx) } : {}) },
+    );
+  }
 }
 
 /** Collects enqueued jobs in memory; for unit tests of services only. */
@@ -78,5 +103,14 @@ export class RecordingJobQueue implements JobQueue {
   ) {
     this.jobs.push({ queue, envelope, options });
     return `job-${this.jobs.length}`;
+  }
+
+  async enqueueMany(
+    _tx: Tx | null,
+    queue: QueueName,
+    jobs: { envelope: JobEnvelope; options?: EnqueueOptions }[],
+  ) {
+    for (const job of jobs)
+      this.jobs.push({ queue, envelope: job.envelope, options: job.options ?? {} });
   }
 }

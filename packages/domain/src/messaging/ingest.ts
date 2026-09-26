@@ -19,6 +19,7 @@ import {
   type Database,
   type Tx,
 } from '@w360/db';
+import { attributeCampaignReply } from '../campaigns/attribution';
 import { contactForPhone } from '../contacts/service';
 import { phoneFromWaId } from '../contacts/phone';
 import {
@@ -410,6 +411,15 @@ async function ingestMessagesChange(tx: Tx, ctx: ChangeContext): Promise<void> {
         settings,
       });
       if (matched) ctx.summary.consentKeywords += 1;
+    }
+
+    if (type !== 'system' && type !== 'reaction') {
+      await attributeCampaignReply(tx, {
+        tenantId: ctx.tenantId,
+        contactId,
+        channelAccountId: channel.id,
+        at: providerAt,
+      });
     }
 
     const newer = !conversation.lastMessageAt || providerAt >= conversation.lastMessageAt;

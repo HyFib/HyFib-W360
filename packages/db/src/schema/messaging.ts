@@ -213,6 +213,7 @@ export const messages = appSchema.table('messages', {
   pricing: jsonb('pricing').$type<Record<string, unknown>>(),
   providerTimestamp: tz('provider_timestamp'),
   templateId: uuid('template_id'),
+  campaignId: uuid('campaign_id'),
   createdAt: tz('created_at').notNull().defaultNow(),
 });
 
