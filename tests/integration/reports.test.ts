@@ -3,7 +3,9 @@ import { isAppError, systemClock, uuidv7 } from '@w360/core';
 import { sql } from '@w360/db';
 import {
   METRIC_DEFINITIONS,
+  createBusinessHoursService,
   createCampaignsService,
+  currentMetricDefinitions,
   createInboxService,
   createReportsService,
   dayOf,
@@ -692,8 +694,9 @@ describe('company report', () => {
     });
   });
 
-  it('includes every definition, with unavailable metrics marked', () => {
-    expect(report.definitions.map((d) => d.key)).toEqual(METRIC_DEFINITIONS.map((d) => d.key));
+  it('includes the current version of every definition, with unavailable metrics marked', () => {
+    expect(report.definitions).toEqual(currentMetricDefinitions());
+    expect(report.definitions.find((d) => d.key === 'inbox.within_target')?.version).toBe(2);
     const unavailable = report.definitions.filter((d) => !d.available).map((d) => d.key);
     expect(unavailable).toEqual([
       'campaign.clicked',
@@ -759,5 +762,199 @@ describe('company report', () => {
     expect(r.inbox.turns.started).toBe(0);
     expect(r.campaigns.rows).toEqual([]);
     expect(r.costs.delivered).toBe(0);
+  });
+});
+
+describe('business hours, resolution time and CSAT', () => {
+  // Saturday 2026-09-26 11:30 in Asia/Kolkata (the company's time zone, UTC+05:30).
+  const clock = { now: () => new Date('2026-09-26T06:00:00Z') };
+  const period = { preset: 'custom', from: '2026-09-14', to: '2026-09-20' };
+  let c: Company;
+  let agentMembershipId: string;
+  let r: Report;
+
+  async function seededConversation(createdAt: string): Promise<string> {
+    const contactId = uuidv7();
+    const conversationId = uuidv7();
+    await fx.query(
+      `INSERT INTO app.contacts (id, tenant_id, display_name, source) VALUES ($1, $2, 'Seeded', 'manual')`,
+      [contactId, c.tenant.id],
+    );
+    await fx.query(
+      `INSERT INTO app.conversations (id, tenant_id, channel_account_id, contact_id, created_at)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [conversationId, c.tenant.id, c.channelAccountId, contactId, createdAt],
+    );
+    return conversationId;
+  }
+
+  async function seededMessage(
+    conversationId: string,
+    direction: 'inbound' | 'outbound',
+    at: string,
+    extra: { sender?: string; status?: string; type?: string } = {},
+  ): Promise<string> {
+    const id = uuidv7();
+    await fx.query(
+      `INSERT INTO app.messages (id, tenant_id, conversation_id, channel_account_id, direction, type,
+         content, status, sender_type, sender_membership_id, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, '{}'::jsonb, $7, $8, $9, $10)`,
+      [
+        id,
+        c.tenant.id,
+        conversationId,
+        c.channelAccountId,
+        direction,
+        extra.type ?? 'text',
+        extra.status ?? (direction === 'inbound' ? 'received' : 'delivered'),
+        extra.sender ?? (direction === 'inbound' ? 'contact' : 'agent'),
+        direction === 'outbound' && (extra.sender ?? 'agent') === 'agent'
+          ? agentMembershipId
+          : null,
+        at,
+      ],
+    );
+    return id;
+  }
+
+  const resolve = (conversationId: string, at: string) =>
+    fx.query(`UPDATE app.conversations SET status = 'resolved', resolved_at = $2 WHERE id = $1`, [
+      conversationId,
+      at,
+    ]);
+
+  async function survey(
+    conversationId: string,
+    createdAt: string,
+    s: { status?: string; score?: number; skip?: string },
+  ) {
+    const messageId = s.skip
+      ? null
+      : await seededMessage(conversationId, 'outbound', createdAt, {
+          sender: 'system',
+          type: 'interactive',
+          status: s.status ?? 'delivered',
+        });
+    await fx.query(
+      `INSERT INTO app.csat_surveys (id, tenant_id, conversation_id, message_id, skip_reason,
+         assigned_membership_id, score, answered_at, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [
+        uuidv7(),
+        c.tenant.id,
+        conversationId,
+        messageId,
+        s.skip ?? null,
+        agentMembershipId,
+        s.score ?? null,
+        s.score ? createdAt : null,
+        createdAt,
+      ],
+    );
+  }
+
+  beforeAll(async () => {
+    c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    agentMembershipId = (await fx.ctx(c, c.agent)).membership.id;
+    await createInboxService({ db: fx.dbs.app, clock }).updateResponseTarget(owner, {
+      minutes: 60,
+    });
+    await createBusinessHoursService({ db: fx.dbs.app, clock }).updateBusinessHours(owner, {
+      enabled: true,
+      days: ['09:00-17:00', '09:00-17:00', '09:00-17:00', '09:00-17:00', '09:00-17:00', '', ''],
+    });
+    await fx.query(`UPDATE app.messaging_settings SET csat_enabled = true WHERE tenant_id = $1`, [
+      c.tenant.id,
+    ]);
+
+    // A: Monday 16:30 → Tuesday 09:30 (17 h, 1 business hour); Tuesday 10:00 → 12:30 (2.5 h).
+    const a = await seededConversation('2026-09-14T10:00:00Z');
+    await seededMessage(a, 'inbound', '2026-09-14T11:00:00Z');
+    await seededMessage(a, 'outbound', '2026-09-15T04:00:00Z');
+    await seededMessage(a, 'inbound', '2026-09-15T04:30:00Z');
+    await seededMessage(a, 'outbound', '2026-09-15T07:00:00Z');
+    await resolve(a, '2026-09-15T07:30:00Z');
+    // B: Saturday 10:00 → Monday 09:10 (47 h 10 min, 10 business minutes); resolved after the period.
+    const b = await seededConversation('2026-09-19T04:00:00Z');
+    await seededMessage(b, 'inbound', '2026-09-19T04:30:00Z');
+    await seededMessage(b, 'outbound', '2026-09-21T03:40:00Z');
+    await resolve(b, '2026-09-21T04:00:00Z');
+    // E: opened Wednesday 10:00 and resolved an hour later without messages.
+    const e = await seededConversation('2026-09-16T04:30:00Z');
+    await resolve(e, '2026-09-16T05:30:00Z');
+    // Waiting now: C since Friday 16:50 (10 business minutes), D since Thursday 09:00 (16 hours).
+    const cc = await seededConversation('2026-09-25T11:00:00Z');
+    await seededMessage(cc, 'inbound', '2026-09-25T11:20:00Z');
+    const d = await seededConversation('2026-09-24T03:00:00Z');
+    await seededMessage(d, 'inbound', '2026-09-24T03:30:00Z');
+
+    await survey(a, '2026-09-15T07:31:00Z', { status: 'read', score: 3 });
+    await survey(e, '2026-09-16T05:31:00Z', { status: 'delivered' });
+    await survey(e, '2026-09-17T05:31:00Z', { skip: 'window_closed' });
+    await survey(a, '2026-09-17T06:00:00Z', { status: 'failed' });
+    await survey(e, '2026-09-18T05:31:00Z', { status: 'delivered', score: 1 });
+
+    r = await createReportsService({ db: fx.dbs.app, clock }).getReport(owner, period);
+  });
+
+  it('measures reply times and the target in business hours when business hours are on', () => {
+    expect(r.inbox.businessHours).toBe(true);
+    expect(r.inbox.turns).toMatchObject({
+      started: 3,
+      answered: 3,
+      medianSeconds: 61_200,
+      businessMedianSeconds: 3_600,
+      businessP90Seconds: 7_920,
+      withinTarget: { numerator: 2, denominator: 3 },
+    });
+    // Waiting now: D is past the target in business hours; C has waited 10 business minutes.
+    expect(r.inbox.now.waiting).toBe(2);
+    expect(r.inbox.now.overTarget).toBe(1);
+    const day = (d: string) => r.inbox.days.find((x) => x.day === d);
+    expect(day('2026-09-14')).toMatchObject({ started: 1, businessMedianSeconds: 3_600 });
+    expect(day('2026-09-19')).toMatchObject({ started: 1, businessMedianSeconds: 600 });
+  });
+
+  it('reports resolution times of cases resolved in the period', () => {
+    expect(r.inbox.resolution).toEqual({
+      resolved: 2,
+      medianSeconds: 40_500,
+      p90Seconds: 70_020,
+    });
+    expect(r.inbox.days.find((x) => x.day === '2026-09-16')).toMatchObject({
+      casesResolved: 1,
+      medianResolutionSeconds: 3_600,
+    });
+  });
+
+  it('reports CSAT with delivered and answered denominators, credited to the assignee', () => {
+    expect(r.csat).toMatchObject({
+      enabled: true,
+      surveys: 5,
+      sent: 4,
+      delivered: 3,
+      answered: 2,
+      ratings: { best: 1, middle: 0, worst: 1 },
+      responseRate: { numerator: 2, denominator: 3 },
+      score: { numerator: 1, denominator: 2 },
+    });
+    expect(r.csat.skipped.window_closed).toBe(1);
+    const agent = r.agents.find((x) => x.membershipId === agentMembershipId);
+    expect(agent).toMatchObject({ csatAnswered: 2, csatBest: 1 });
+  });
+
+  it('measures the target in absolute time when business hours are off', async () => {
+    const owner = await fx.ctx(c, c.owner);
+    await createBusinessHoursService({ db: fx.dbs.app, clock }).updateBusinessHours(owner, {
+      enabled: false,
+      days: ['09:00-17:00', '09:00-17:00', '09:00-17:00', '09:00-17:00', '09:00-17:00', '', ''],
+    });
+    const off = await createReportsService({ db: fx.dbs.app, clock }).getReport(owner, period);
+    expect(off.inbox.businessHours).toBe(false);
+    expect(off.inbox.turns.businessMedianSeconds).toBeNull();
+    // 17 h, 2.5 h and 47 h are all over an hour.
+    expect(off.inbox.turns.withinTarget).toEqual({ numerator: 0, denominator: 3 });
+    expect(off.inbox.now.overTarget).toBe(2);
   });
 });

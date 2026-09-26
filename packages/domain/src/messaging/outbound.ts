@@ -33,6 +33,7 @@ import {
   recordProviderMarketingOptOut,
 } from '../consent/service';
 import { phoneFromWaId, waRecipientFromPhone } from '../contacts/phone';
+import { csatSendBlock } from '../inbox/csat';
 import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
 import { buildTemplateSend, sendSpecFor, templateParamsSchema } from '../templates/definition';
@@ -57,6 +58,11 @@ export const sendTextSchema = z.object({
     .min(1, 'Type a message')
     .max(4096, 'Messages are limited to 4096 characters'),
   clientKey: z.string().regex(/^[A-Za-z0-9_-]{8,100}$/),
+  /**
+   * The newest message the member had seen when writing. If another member replied after it, the
+   * send is refused once so the member can read that reply first (collision warning).
+   */
+  afterMessageId: z.uuid().optional(),
 });
 
 export { credentialAad } from './credentials';
@@ -115,6 +121,30 @@ export async function queueTextMessage(deps: OutboundDeps, ctx: TenantContext, i
       .for('update');
     if (!locked || !canSeeConversation(ctx, locked.assignedMembershipId))
       throw notFound('Conversation');
+    if (data.afterMessageId) {
+      // Under the conversation lock, so two members replying at once cannot both miss the other.
+      const collision = await tx.execute<{ name: string | null }>(sql`
+        select u.name
+          from app.messages m
+          join app.messages seen on seen.tenant_id = m.tenant_id and seen.id = ${data.afterMessageId}::uuid
+                                and seen.conversation_id = m.conversation_id
+          left join app.memberships ms on ms.tenant_id = m.tenant_id and ms.id = m.sender_membership_id
+          left join auth.users u on u.id = ms.user_id
+         where m.tenant_id = ${ctx.tenant.id}::uuid and m.conversation_id = ${locked.id}::uuid
+           and m.direction = 'outbound' and m.sender_type = 'agent'
+           and m.sender_membership_id is distinct from ${ctx.membership.id}::uuid
+           and (m.created_at, m.id) > (seen.created_at, seen.id)
+         order by m.created_at desc
+         limit 1`);
+      const other = collision.rows[0];
+      if (other) {
+        throw new AppError(
+          'conflict',
+          `${other.name ?? 'Another member'} replied after you opened this conversation. Read the latest messages, then send again.`,
+          { details: { collision: true } },
+        );
+      }
+    }
     const [channel] = await tx
       .select({
         status: channelAccounts.status,
@@ -656,6 +686,17 @@ export async function processSendIntent(
         });
         if (!eligibility.ok) blocked = { code: eligibility.code, message: eligibility.message };
       }
+    }
+    // A CSAT survey (interactive message) is sent only while the contact still accepts
+    // non-marketing messages; an opt-out after the resolve stops it here.
+    if (!blocked && ctx.messageType === 'interactive') {
+      const to = (current.request as { to?: unknown }).to;
+      blocked = await csatSendBlock(tx, {
+        tenantId: scope.tenantId,
+        messageId: current.messageId,
+        contactId: ctx.contactId,
+        recipient: typeof to === 'string' ? phoneFromWaId(to) : null,
+      });
     }
     return { kind: 'claimed' as const, intent: current, ...ctx, blocked };
   });

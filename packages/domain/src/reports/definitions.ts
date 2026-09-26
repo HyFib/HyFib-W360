@@ -1,7 +1,7 @@
 /**
  * Metric definitions: what each reported number counts, its denominator, its time window, how
  * days are cut in time zones and how missing data is treated. These rows are persisted in
- * `ops.metric_definitions` (migration 0007) so a report can say which version of a definition
+ * `ops.metric_definitions` (migrations 0007 and 0009) so a report can say which version of a definition
  * produced it; a test keeps this registry and the table identical. Changing a definition means a
  * new version (a new migration row), never an edited one.
  */
@@ -34,6 +34,10 @@ const DAYS =
 const TURNS =
   'A reply turn starts with the first customer message that has no reply from a member yet and ends when a member replies or the conversation is resolved. Turns are counted by the time they started, in calendar days of the company’s time zone.';
 const NOT_AVAILABLE = 'Not available.';
+const TARGET_CLOCK =
+  'The target, counted in business hours when business hours are on (Settings → Messaging → Business hours), otherwise in absolute time.';
+const SURVEY_DAYS =
+  'Counted by the time the survey was created (when the conversation was resolved), in calendar days of the company’s time zone.';
 
 export const METRIC_DEFINITIONS: readonly MetricDefinition[] = [
   {
@@ -377,6 +381,36 @@ export const METRIC_DEFINITIONS: readonly MetricDefinition[] = [
     available: true,
   },
   {
+    key: 'inbox.oldest_wait',
+    version: 2,
+    label: 'Longest wait',
+    unit: 'duration',
+    description: 'How long the longest-waiting customer has been waiting for a reply.',
+    numerator: 'Time since the start of the oldest open reply turn.',
+    denominator: null,
+    window: null,
+    timezoneRule: null,
+    missingData: 'Measured in absolute time, including hours outside business hours.',
+    freshness: NOW,
+    available: true,
+  },
+  {
+    key: 'inbox.overdue',
+    version: 1,
+    label: 'Overdue',
+    unit: 'count',
+    description:
+      'Waiting conversations whose customer has waited longer than the company’s first-response target.',
+    numerator: 'Open reply turns that have waited longer than the target.',
+    denominator: null,
+    window: TARGET_CLOCK,
+    timezoneRule: null,
+    missingData:
+      'Shown only when a target is set. Reply turns are recorded from the release of reports onwards.',
+    freshness: NOW,
+    available: true,
+  },
+  {
     key: 'inbox.windows_closing',
     version: 1,
     label: 'Reply windows closing',
@@ -409,6 +443,40 @@ export const METRIC_DEFINITIONS: readonly MetricDefinition[] = [
     available: true,
   },
   {
+    key: 'inbox.first_response_time',
+    version: 2,
+    label: 'First response time',
+    unit: 'duration',
+    description:
+      'Time from the start of a reply turn to the first reply by a member, reported as the median and the 90th percentile.',
+    numerator: 'Reply times of answered turns.',
+    denominator: 'Turns that started in the period and were answered.',
+    window:
+      'From when HyFib received the customer’s first waiting message to when the member sent the reply, in absolute time, including hours outside business hours (see First response in business hours).',
+    timezoneRule: TURNS,
+    missingData:
+      'Turns still waiting are not in the median; see Waiting. A reply counts when the member sends it, even if WhatsApp later rejects it (see Failed). Reply turns are recorded from the release of reports onwards.',
+    freshness: LIVE,
+    available: true,
+  },
+  {
+    key: 'inbox.first_response_business_time',
+    version: 1,
+    label: 'First response in business hours',
+    unit: 'duration',
+    description:
+      'Time from the start of a reply turn to the first reply by a member, counting business hours only, reported as the median and the 90th percentile.',
+    numerator: 'Business-hours reply times of answered turns.',
+    denominator: 'Turns that started in the period and were answered.',
+    window:
+      'Only time inside the company’s business hours counts (Settings → Messaging → Business hours); closed days and hours outside the weekly schedule are skipped, in the company’s time zone.',
+    timezoneRule: TURNS,
+    missingData:
+      'Shown only when business hours are on. The current schedule and closed days are applied to the whole period, including turns from before a change.',
+    freshness: LIVE,
+    available: true,
+  },
+  {
     key: 'inbox.within_target',
     version: 1,
     label: 'Answered within target',
@@ -425,6 +493,23 @@ export const METRIC_DEFINITIONS: readonly MetricDefinition[] = [
     available: true,
   },
   {
+    key: 'inbox.within_target',
+    version: 2,
+    label: 'Answered within target',
+    unit: 'rate',
+    description:
+      'Share of reply turns answered within the company’s first-response target (Settings → Messaging).',
+    numerator: 'Turns answered within the target.',
+    denominator:
+      'Turns that started in the period and were answered or have waited longer than the target. Turns resolved without a reply and turns still within the target are left out.',
+    window: TARGET_CLOCK,
+    timezoneRule: TURNS,
+    missingData:
+      'Shown only when a target is set. With business hours on, the current schedule and closed days are applied to the whole period.',
+    freshness: LIVE,
+    available: true,
+  },
+  {
     key: 'inbox.resolved_without_reply',
     version: 1,
     label: 'Resolved without a reply',
@@ -436,6 +521,70 @@ export const METRIC_DEFINITIONS: readonly MetricDefinition[] = [
     window: null,
     timezoneRule: TURNS,
     missingData: 'None.',
+    freshness: LIVE,
+    available: true,
+  },
+  {
+    key: 'inbox.resolution_time',
+    version: 1,
+    label: 'Resolution time',
+    unit: 'duration',
+    description:
+      'Time from when a conversation opened, or reopened after being resolved, to when it was resolved, reported as the median and the 90th percentile.',
+    numerator: 'Durations of cases resolved in the period.',
+    denominator: 'Cases resolved in the period.',
+    window: 'Absolute time, including hours outside business hours.',
+    timezoneRule:
+      'Counted by the time the case was resolved, in calendar days of the company’s time zone.',
+    missingData:
+      'Cases are recorded from the release of inbox teams onwards; a conversation that was already open then is counted from its next reopening.',
+    freshness: LIVE,
+    available: true,
+  },
+  {
+    key: 'csat.surveys',
+    version: 1,
+    label: 'CSAT surveys',
+    unit: 'count',
+    description:
+      'Rating questions sent after a member resolved a conversation, and resolves that sent none, by reason: the 24-hour window had closed, the customer opted out, the number is suppressed, the contact was erased, the contact has no phone number, the WhatsApp number is inactive, or the customer was asked in the last 24 hours.',
+    numerator: 'Surveys created in the period, by outcome.',
+    denominator: null,
+    window: null,
+    timezoneRule: SURVEY_DAYS,
+    missingData: 'None: every survey that was not sent records its reason.',
+    freshness: LIVE,
+    available: true,
+  },
+  {
+    key: 'csat.response_rate',
+    version: 1,
+    label: 'CSAT response rate',
+    unit: 'rate',
+    description: 'Share of delivered rating questions that the customer answered.',
+    numerator: 'Surveys with an answer.',
+    denominator:
+      'Surveys created in the period whose message WhatsApp delivered (delivered, read or answered).',
+    window: 'Answers count whenever they arrive; only the first tap on the question counts.',
+    timezoneRule: SURVEY_DAYS,
+    missingData:
+      'Delivery statuses come from Meta’s webhooks and can arrive late; a late status moves a survey into the denominator.',
+    freshness: LIVE,
+    available: true,
+  },
+  {
+    key: 'csat.score',
+    version: 1,
+    label: 'CSAT',
+    unit: 'rate',
+    description:
+      'Share of answers that chose the best of the three ratings; the other answers are shown next to it.',
+    numerator: 'Answers with the best rating.',
+    denominator: 'Answered surveys created in the period.',
+    window: null,
+    timezoneRule: SURVEY_DAYS,
+    missingData:
+      'With few answers the share is unstable, so the number of answers is shown with it.',
     freshness: LIVE,
     available: true,
   },
@@ -484,6 +633,21 @@ export const METRIC_DEFINITIONS: readonly MetricDefinition[] = [
     available: true,
   },
   {
+    key: 'agent.first_response_time',
+    version: 2,
+    label: 'Median first response',
+    unit: 'duration',
+    description: 'Median reply time of the turns the member answered.',
+    numerator: 'Reply times of the turns the member answered.',
+    denominator: 'Turns the member answered in the period.',
+    window: 'Absolute time, including hours outside business hours.',
+    timezoneRule:
+      'Counted by the time the turn was answered, in calendar days of the company’s time zone.',
+    missingData: 'Reply turns are recorded from the release of reports onwards.',
+    freshness: LIVE,
+    available: true,
+  },
+  {
     key: 'agent.resolved',
     version: 1,
     label: 'Resolved',
@@ -495,6 +659,22 @@ export const METRIC_DEFINITIONS: readonly MetricDefinition[] = [
     timezoneRule: DAYS,
     missingData:
       'Counted from the release of reports; earlier resolutions were not recorded per member.',
+    freshness: LIVE,
+    available: true,
+  },
+  {
+    key: 'agent.csat',
+    version: 1,
+    label: 'CSAT',
+    unit: 'rate',
+    description:
+      'Share of best ratings among the answers to rating questions sent after the member’s conversations were resolved.',
+    numerator: 'Best-rated answers credited to the member.',
+    denominator:
+      'Answered surveys credited to the member: the conversation was assigned to them when it was resolved.',
+    window: null,
+    timezoneRule: SURVEY_DAYS,
+    missingData: 'Surveys of conversations resolved while unassigned are credited to nobody.',
     freshness: LIVE,
     available: true,
   },
@@ -543,13 +723,23 @@ export const METRIC_DEFINITIONS: readonly MetricDefinition[] = [
   },
 ];
 
-/** Definitions whose key starts with `prefix` (for example `inbox.`), in registry order. */
+/** The current version of every metric, in registry order (older versions stay in the registry). */
+export function currentMetricDefinitions(): MetricDefinition[] {
+  const latest = new Map<string, MetricDefinition>();
+  for (const m of METRIC_DEFINITIONS) {
+    const seen = latest.get(m.key);
+    if (!seen || seen.version < m.version) latest.set(m.key, m);
+  }
+  return [...latest.values()];
+}
+
+/** Current definitions whose key starts with `prefix` (for example `inbox.`), in registry order. */
 export function metricDefinitions(prefix: string): MetricDefinition[] {
-  return METRIC_DEFINITIONS.filter((m) => m.key.startsWith(prefix));
+  return currentMetricDefinitions().filter((m) => m.key.startsWith(prefix));
 }
 
 export function metricDefinition(key: string): MetricDefinition {
-  const found = METRIC_DEFINITIONS.find((m) => m.key === key);
+  const found = currentMetricDefinitions().find((m) => m.key === key);
   if (!found) throw new Error(`Unknown metric ${key}`);
   return found;
 }

@@ -8,38 +8,59 @@ import {
   contacts,
   conversationNotes,
   conversations,
+  conversationTurns,
   desc,
   eq,
+  inArray,
   isNull,
   lt,
   memberships,
   messages,
   messagingSettings,
+  noteMentions,
   or,
   sql,
+  teams,
   users,
   type Database,
   type SQL,
+  type TenantRole,
   type Tx,
 } from '@w360/db';
 import { assertCan, can, type TenantContext } from '../authz/context';
+import { ROLE_PERMISSIONS, type Permission } from '../authz/permissions';
 import { recordAudit, type RequestMeta } from '../audit';
 import { DEFAULT_MESSAGING_SETTINGS } from '../consent/service';
+import { latestCsatSurvey, queueCsatSurvey } from '../inbox/csat';
+import { routeConversation } from '../inbox/routing';
+import type { JobSigner } from '../jobs/envelope';
+import type { JobQueue } from '../jobs/queue';
+import { loadReplyTarget, replyTimer, type ReplyTarget } from '../inbox/sla';
+import { likePattern } from '../validation';
 import { emitTenantEvent } from './events';
 import { SERVICE_WINDOW_MS, canSeeConversation } from './outbound';
 
 /**
  * Shared inbox queries and commands. Visibility: `inbox.read_all` sees every conversation;
  * `inbox.read_assigned` sees conversations assigned to the member plus the unassigned queue.
- * Assignment and status changes use optimistic concurrency (conversation `version`) so two agents
- * can never silently overwrite each other.
+ * Teams and routing decide who receives conversations, never who may read them.
+ * Assignment, team and status changes use optimistic concurrency (conversation `version`) so two
+ * agents can never silently overwrite each other.
  */
 export const listConversationsSchema = z.object({
   view: z.enum(['mine', 'unassigned', 'all']).default('all'),
   status: z.enum(['open', 'resolved']).default('open'),
+  /** A team id, or 'none' for conversations without a team. */
+  team: z.union([z.uuid(), z.literal('none')]).optional(),
+  channel: z.uuid().optional(),
+  /** Contact name, or at least three digits of the phone number. */
+  q: z.string().trim().max(100).optional(),
+  /** 'waiting': conversations whose customer awaits a reply, longest wait first. */
+  order: z.enum(['recent', 'waiting']).default('recent'),
   cursor: z.string().max(200).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(30),
 });
+export type ListConversationsInput = z.input<typeof listConversationsSchema>;
 
 export const assignSchema = z.object({
   conversationId: z.uuid(),
@@ -50,6 +71,12 @@ export const assignSchema = z.object({
 export const statusSchema = z.object({
   conversationId: z.uuid(),
   status: z.enum(['open', 'resolved']),
+  expectedVersion: z.number().int().min(0),
+});
+
+export const conversationTeamSchema = z.object({
+  conversationId: z.uuid(),
+  teamId: z.uuid().nullable(),
   expectedVersion: z.number().int().min(0),
 });
 
@@ -66,6 +93,8 @@ export const responseTargetSchema = z.object({
 export const noteSchema = z.object({
   conversationId: z.uuid(),
   body: z.string().trim().min(1, 'Write a note').max(4000),
+  /** Members to notify; each must be able to see the conversation. */
+  mentionIds: z.array(z.uuid()).max(20).default([]),
 });
 
 export interface ConversationSummary {
@@ -79,9 +108,26 @@ export interface ConversationSummary {
   unreadCount: number;
   assignedMembershipId: string | null;
   assignedName: string | null;
+  teamId: string | null;
+  teamName: string | null;
   windowOpen: boolean;
+  /** Start of the open reply turn (the customer is waiting), if any. */
+  waitingSince: string | null;
+  /** When the reply is due under the first-response target (null: no target or not waiting). */
+  replyDueAt: string | null;
+  overdue: boolean;
+  /** Business hours are on and the business is closed: when the reply timer resumes. */
+  timerPausedUntil: string | null;
   version: number;
 }
+
+function rolesWith(permission: Permission): TenantRole[] {
+  return (Object.keys(ROLE_PERMISSIONS) as TenantRole[]).filter((r) =>
+    ROLE_PERMISSIONS[r].has(permission),
+  );
+}
+const READ_ALL_ROLES = rolesWith('inbox.read_all');
+const READ_ASSIGNED_ROLES = rolesWith('inbox.read_assigned');
 
 function parse<T extends z.ZodType>(schema: T, input: unknown): z.infer<T> {
   const result = schema.safeParse(input);
@@ -108,8 +154,41 @@ function decodeCursor(value: string | undefined): { at: Date | null; id: string 
   return { at: date, id };
 }
 
-export function createInboxService(deps: { db: Database; clock: Clock }) {
+function timerFields(target: ReplyTarget, waitingSince: Date | null, now: Date) {
+  if (!waitingSince) {
+    return { waitingSince: null, replyDueAt: null, overdue: false, timerPausedUntil: null };
+  }
+  const timer = replyTimer(target, waitingSince, now);
+  return {
+    waitingSince: waitingSince.toISOString(),
+    replyDueAt: timer.dueAt?.toISOString() ?? null,
+    overdue: timer.overdue,
+    timerPausedUntil: timer.pausedUntil?.toISOString() ?? null,
+  };
+}
+
+/**
+ * SQL condition: the member `membershipId` (with `rolesColumn`) can see the conversation whose
+ * assignee is `assigneeColumn`. Mirrors canSeeConversation for another member.
+ */
+function memberCanSee(rolesColumn: SQL, membershipIdColumn: SQL, assigneeColumn: SQL): SQL {
+  return sql`(${rolesColumn} && ${sql.param(READ_ALL_ROLES)}::text[]
+    or (${rolesColumn} && ${sql.param(READ_ASSIGNED_ROLES)}::text[]
+        and (${assigneeColumn} is null or ${assigneeColumn} = ${membershipIdColumn})))`;
+}
+
+export interface InboxDeps {
+  db: Database;
+  clock: Clock;
+  /** Needed to send CSAT surveys when a company turns them on. */
+  jobs?: JobQueue;
+  signer?: JobSigner;
+}
+
+export function createInboxService(deps: InboxDeps) {
   const { db, clock } = deps;
+  const csatDeps =
+    deps.jobs && deps.signer ? { jobs: deps.jobs, signer: deps.signer, clock } : null;
 
   function visibilityFilter(ctx: TenantContext): SQL | undefined {
     if (can(ctx, 'inbox.read_all')) return undefined;
@@ -128,7 +207,13 @@ export function createInboxService(deps: { db: Database; clock: Clock }) {
     conversationId: string,
     fn: (
       tx: Tx,
-      current: { id: string; version: number; assignedMembershipId: string | null; status: string },
+      current: {
+        id: string;
+        version: number;
+        assignedMembershipId: string | null;
+        status: string;
+        teamId: string | null;
+      },
     ) => Promise<T>,
   ): Promise<T> {
     if (!z.uuid().safeParse(conversationId).success) throw notFound('Conversation');
@@ -139,6 +224,7 @@ export function createInboxService(deps: { db: Database; clock: Clock }) {
           version: conversations.version,
           assignedMembershipId: conversations.assignedMembershipId,
           status: conversations.status,
+          teamId: conversations.teamId,
         })
         .from(conversations)
         .where(and(eq(conversations.tenantId, ctx.tenant.id), eq(conversations.id, conversationId)))
@@ -161,11 +247,38 @@ export function createInboxService(deps: { db: Database; clock: Clock }) {
         assertCan(ctx, 'inbox.read_assigned');
       const q = parse(listConversationsSchema, input ?? {});
       const cursor = decodeCursor(q.cursor);
+      const waitingOrder = q.order === 'waiting' && q.status === 'open';
       const now = clock.now();
-      const rows = await db.run(
+      const search = q.q?.trim();
+      const digits = search?.replace(/[\s()+\-.]/g, '') ?? '';
+      const searchCondition = search
+        ? /^[0-9]{3,15}$/.test(digits)
+          ? sql`${contacts.phoneE164} like ${likePattern(digits)}`
+          : sql`${contacts.displayName} ilike ${likePattern(search)}`
+        : undefined;
+      // Turn start times carry microseconds but cursors carry milliseconds: order and page the
+      // waiting view on the millisecond so a page boundary never repeats or skips a row.
+      const waitingSince = sql<Date>`date_trunc('milliseconds', ${conversationTurns.startedAt})`;
+      let cursorCondition: SQL | undefined;
+      if (cursor && waitingOrder) {
+        if (!cursor.at) throw new AppError('validation_failed', 'Invalid cursor.');
+        const at = cursor.at.toISOString();
+        cursorCondition = sql`(${waitingSince} > ${at}::timestamptz
+          or (${waitingSince} = ${at}::timestamptz and ${conversations.id} > ${cursor.id}::uuid))`;
+      } else if (cursor) {
+        cursorCondition = cursor.at
+          ? or(
+              lt(conversations.lastMessageAt, cursor.at),
+              and(eq(conversations.lastMessageAt, cursor.at), lt(conversations.id, cursor.id)),
+              isNull(conversations.lastMessageAt),
+            )
+          : and(isNull(conversations.lastMessageAt), lt(conversations.id, cursor.id));
+      }
+      const { rows, target } = await db.run(
         ctx.scope,
-        async (tx) =>
-          tx
+        async (tx) => {
+          const target = await loadReplyTarget(tx, ctx.tenant.id, ctx.tenant.timezone);
+          const rows = await tx
             .select({
               id: conversations.id,
               status: conversations.status,
@@ -177,7 +290,10 @@ export function createInboxService(deps: { db: Database; clock: Clock }) {
               unreadCount: conversations.unreadCount,
               assignedMembershipId: conversations.assignedMembershipId,
               assignedName: users.name,
+              teamId: conversations.teamId,
+              teamName: teams.name,
               lastInboundAt: conversations.lastInboundAt,
+              waitingSince: conversationTurns.startedAt,
               version: conversations.version,
             })
             .from(conversations)
@@ -203,6 +319,19 @@ export function createInboxService(deps: { db: Database; clock: Clock }) {
               ),
             )
             .leftJoin(users, eq(users.id, memberships.userId))
+            .leftJoin(
+              teams,
+              and(eq(teams.tenantId, conversations.tenantId), eq(teams.id, conversations.teamId)),
+            )
+            // At most one open turn per conversation (unique partial index), so no duplicates.
+            .leftJoin(
+              conversationTurns,
+              and(
+                eq(conversationTurns.tenantId, conversations.tenantId),
+                eq(conversationTurns.conversationId, conversations.id),
+                isNull(conversationTurns.endedAt),
+              ),
+            )
             .where(
               and(
                 eq(conversations.tenantId, ctx.tenant.id),
@@ -213,23 +342,26 @@ export function createInboxService(deps: { db: Database; clock: Clock }) {
                   ? eq(conversations.assignedMembershipId, ctx.membership.id)
                   : undefined,
                 q.view === 'unassigned' ? isNull(conversations.assignedMembershipId) : undefined,
+                q.team === 'none'
+                  ? isNull(conversations.teamId)
+                  : q.team
+                    ? eq(conversations.teamId, q.team)
+                    : undefined,
+                q.channel ? eq(conversations.channelAccountId, q.channel) : undefined,
+                searchCondition,
+                waitingOrder ? sql`${conversationTurns.id} is not null` : undefined,
                 visibilityFilter(ctx),
-                cursor
-                  ? cursor.at
-                    ? or(
-                        lt(conversations.lastMessageAt, cursor.at),
-                        and(
-                          eq(conversations.lastMessageAt, cursor.at),
-                          lt(conversations.id, cursor.id),
-                        ),
-                        isNull(conversations.lastMessageAt),
-                      )
-                    : and(isNull(conversations.lastMessageAt), lt(conversations.id, cursor.id))
-                  : undefined,
+                cursorCondition,
               ),
             )
-            .orderBy(sql`${conversations.lastMessageAt} desc nulls last`, desc(conversations.id))
-            .limit(q.limit + 1),
+            .orderBy(
+              ...(waitingOrder
+                ? [asc(waitingSince), asc(conversations.id)]
+                : [sql`${conversations.lastMessageAt} desc nulls last`, desc(conversations.id)]),
+            )
+            .limit(q.limit + 1);
+          return { rows, target };
+        },
         { accessMode: 'read only' },
       );
       const page = rows.slice(0, q.limit);
@@ -245,15 +377,22 @@ export function createInboxService(deps: { db: Database; clock: Clock }) {
         unreadCount: r.unreadCount,
         assignedMembershipId: r.assignedMembershipId,
         assignedName: r.assignedName,
+        teamId: r.teamId,
+        teamName: r.teamName,
         windowOpen: Boolean(
           r.lastInboundAt && now.getTime() - r.lastInboundAt.getTime() <= SERVICE_WINDOW_MS,
         ),
+        ...timerFields(target, r.status === 'resolved' ? null : r.waitingSince, now),
         version: r.version,
       }));
       return {
         items,
         nextCursor:
-          rows.length > q.limit && last ? encodeCursor(last.lastMessageAt, last.id) : null,
+          rows.length > q.limit && last
+            ? waitingOrder
+              ? encodeCursor(last.waitingSince, last.id)
+              : encodeCursor(last.lastMessageAt, last.id)
+            : null,
       };
     },
 
@@ -270,6 +409,8 @@ export function createInboxService(deps: { db: Database; clock: Clock }) {
               status: conversations.status,
               version: conversations.version,
               assignedMembershipId: conversations.assignedMembershipId,
+              teamId: conversations.teamId,
+              teamName: teams.name,
               lastInboundAt: conversations.lastInboundAt,
               channelAccountId: conversations.channelAccountId,
               contactId: contacts.id,
@@ -293,6 +434,10 @@ export function createInboxService(deps: { db: Database; clock: Clock }) {
                 eq(channelAccounts.tenantId, conversations.tenantId),
                 eq(channelAccounts.id, conversations.channelAccountId),
               ),
+            )
+            .leftJoin(
+              teams,
+              and(eq(teams.tenantId, conversations.tenantId), eq(teams.id, conversations.teamId)),
             )
             .where(
               and(eq(conversations.tenantId, ctx.tenant.id), eq(conversations.id, conversationId)),
@@ -325,6 +470,7 @@ export function createInboxService(deps: { db: Database; clock: Clock }) {
               errorCode: messages.errorCode,
               errorTitle: messages.errorTitle,
               senderType: messages.senderType,
+              senderMembershipId: messages.senderMembershipId,
               senderName: users.name,
               createdAt: messages.createdAt,
               providerTimestamp: messages.providerTimestamp,
@@ -379,6 +525,49 @@ export function createInboxService(deps: { db: Database; clock: Clock }) {
             )
             .orderBy(asc(conversationNotes.createdAt))
             .limit(200);
+          const mentioned =
+            notes.length === 0
+              ? []
+              : await tx
+                  .select({
+                    noteId: noteMentions.noteId,
+                    membershipId: noteMentions.membershipId,
+                    name: users.name,
+                  })
+                  .from(noteMentions)
+                  .innerJoin(
+                    memberships,
+                    and(
+                      eq(memberships.tenantId, noteMentions.tenantId),
+                      eq(memberships.id, noteMentions.membershipId),
+                    ),
+                  )
+                  .innerJoin(users, eq(users.id, memberships.userId))
+                  .where(
+                    and(
+                      eq(noteMentions.tenantId, ctx.tenant.id),
+                      inArray(
+                        noteMentions.noteId,
+                        notes.map((n) => n.id),
+                      ),
+                    ),
+                  )
+                  .orderBy(asc(users.name));
+          const [turn] =
+            conv.status === 'resolved'
+              ? []
+              : await tx
+                  .select({ startedAt: conversationTurns.startedAt })
+                  .from(conversationTurns)
+                  .where(
+                    and(
+                      eq(conversationTurns.tenantId, ctx.tenant.id),
+                      eq(conversationTurns.conversationId, conv.id),
+                      isNull(conversationTurns.endedAt),
+                    ),
+                  );
+          const target = await loadReplyTarget(tx, ctx.tenant.id, ctx.tenant.timezone);
+          const survey = await latestCsatSurvey(tx, ctx.tenant.id, conv.id);
           const page = rows.slice(0, pageSize);
           const oldest = page[page.length - 1];
           return {
@@ -387,6 +576,8 @@ export function createInboxService(deps: { db: Database; clock: Clock }) {
               status: conv.status,
               version: conv.version,
               assignedMembershipId: conv.assignedMembershipId,
+              teamId: conv.teamId,
+              teamName: conv.teamName,
               contactId: conv.contactId,
               channelAccountId: conv.channelAccountId,
               whatsappAccountId: conv.whatsappAccountId,
@@ -402,6 +593,7 @@ export function createInboxService(deps: { db: Database; clock: Clock }) {
                 conv.lastInboundAt &&
                 now.getTime() - conv.lastInboundAt.getTime() <= SERVICE_WINDOW_MS,
               ),
+              ...timerFields(target, turn?.startedAt ?? null, now),
             },
             messages: page.reverse().map((m) => ({
               ...m,
@@ -410,7 +602,22 @@ export function createInboxService(deps: { db: Database; clock: Clock }) {
             })),
             olderCursor:
               rows.length > pageSize && oldest ? encodeCursor(oldest.createdAt, oldest.id) : null,
-            notes: notes.map((n) => ({ ...n, createdAt: n.createdAt.toISOString() })),
+            csat: survey
+              ? {
+                  skipReason: survey.skipReason,
+                  score: survey.score,
+                  answeredAt: survey.answeredAt?.toISOString() ?? null,
+                  createdAt: survey.createdAt.toISOString(),
+                  messageStatus: survey.messageStatus,
+                }
+              : null,
+            notes: notes.map((n) => ({
+              ...n,
+              createdAt: n.createdAt.toISOString(),
+              mentions: mentioned
+                .filter((m) => m.noteId === n.id)
+                .map((m) => ({ membershipId: m.membershipId, name: m.name })),
+            })),
           };
         },
         { accessMode: 'read only' },
@@ -462,6 +669,55 @@ export function createInboxService(deps: { db: Database; clock: Clock }) {
       });
     },
 
+    /**
+     * Moves a conversation to another team (or none). An unassigned conversation moved to a
+     * round-robin team is routed straight away.
+     */
+    async setTeam(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
+      assertCan(ctx, 'inbox.assign');
+      const data = parse(conversationTeamSchema, input);
+      return withConversation(ctx, data.conversationId, async (tx, current) => {
+        if (current.version !== data.expectedVersion) throw staleVersion();
+        if (data.teamId) {
+          const [team] = await tx
+            .select({ id: teams.id })
+            .from(teams)
+            .where(and(eq(teams.tenantId, ctx.tenant.id), eq(teams.id, data.teamId)));
+          if (!team) throw new AppError('validation_failed', 'Choose a team of this company.');
+        }
+        if (current.teamId === data.teamId) return { assignedMembershipId: null };
+        await tx
+          .update(conversations)
+          .set({ teamId: data.teamId, version: sql`${conversations.version} + 1` })
+          .where(and(eq(conversations.tenantId, ctx.tenant.id), eq(conversations.id, current.id)));
+        await emitTenantEvent(tx, ctx.tenant.id, {
+          type: 'conversation.team',
+          conversationId: current.id,
+          assignedMembershipId: current.assignedMembershipId,
+          payload: { teamId: data.teamId },
+        });
+        await recordAudit(
+          tx,
+          ctx,
+          {
+            action: 'conversation.team_changed',
+            subjectType: 'conversation',
+            subjectId: current.id,
+            metadata: { from: current.teamId, to: data.teamId },
+          },
+          meta,
+        );
+        if (current.assignedMembershipId || current.status === 'resolved' || !data.teamId) {
+          return { assignedMembershipId: null };
+        }
+        const routed = await routeConversation(tx, ctx.tenant.id, current.id, {
+          newCase: false,
+          text: null,
+        });
+        return { assignedMembershipId: routed.assignedMembershipId };
+      });
+    },
+
     async setStatus(ctx: TenantContext, input: unknown) {
       assertCan(ctx, 'inbox.reply');
       const data = parse(statusSchema, input);
@@ -490,29 +746,209 @@ export function createInboxService(deps: { db: Database; clock: Clock }) {
             subjectId: current.id,
             metadata: { from: current.status, to: data.status },
           });
+          if (data.status === 'resolved') await queueCsatSurvey(tx, csatDeps, ctx, current.id);
         }
       });
     },
 
+    /** Adds an internal note; mentioned members are notified and must be able to see the thread. */
     async addNote(ctx: TenantContext, input: unknown) {
       assertCan(ctx, 'inbox.reply');
       const data = parse(noteSchema, input);
+      const mentionIds = [...new Set(data.mentionIds)];
       await withConversation(ctx, data.conversationId, async (tx, current) => {
+        if (mentionIds.length) {
+          const allowed = await tx
+            .select({ id: memberships.id })
+            .from(memberships)
+            .where(
+              and(
+                eq(memberships.tenantId, ctx.tenant.id),
+                inArray(memberships.id, mentionIds),
+                eq(memberships.status, 'active'),
+                memberCanSee(
+                  sql`${memberships.roles}`,
+                  sql`${memberships.id}`,
+                  sql`${current.assignedMembershipId}::uuid`,
+                ),
+              ),
+            );
+          if (allowed.length !== mentionIds.length) {
+            throw new AppError(
+              'validation_failed',
+              'You can only mention active members who can see this conversation.',
+            );
+          }
+        }
+        const noteId = uuidv7();
         await tx.insert(conversationNotes).values({
-          id: uuidv7(),
+          id: noteId,
           tenantId: ctx.tenant.id,
           conversationId: current.id,
           authorMembershipId: ctx.membership.id,
           body: data.body,
         });
+        if (mentionIds.length) {
+          await tx.insert(noteMentions).values(
+            mentionIds.map((membershipId) => ({
+              id: uuidv7(),
+              tenantId: ctx.tenant.id,
+              noteId,
+              membershipId,
+              // Mentioning yourself needs no notification.
+              readAt: membershipId === ctx.membership.id ? clock.now() : null,
+            })),
+          );
+        }
         await emitTenantEvent(tx, ctx.tenant.id, {
-          type: 'conversation.note',
+          type: mentionIds.length ? 'conversation.mention' : 'conversation.note',
           conversationId: current.id,
           assignedMembershipId: current.assignedMembershipId,
+          ...(mentionIds.length ? { payload: { mentioned: mentionIds } } : {}),
         });
       });
     },
 
+    /** Active members who can see a conversation (for the mention picker). */
+    async mentionableMembers(ctx: TenantContext, conversationId: string) {
+      assertCan(ctx, 'inbox.reply');
+      if (!z.uuid().safeParse(conversationId).success) throw notFound('Conversation');
+      return db.run(
+        ctx.scope,
+        async (tx) => {
+          const [conv] = await tx
+            .select({ assignedMembershipId: conversations.assignedMembershipId })
+            .from(conversations)
+            .where(
+              and(eq(conversations.tenantId, ctx.tenant.id), eq(conversations.id, conversationId)),
+            );
+          if (!conv || !canSeeConversation(ctx, conv.assignedMembershipId))
+            throw notFound('Conversation');
+          return tx
+            .select({ membershipId: memberships.id, name: users.name })
+            .from(memberships)
+            .innerJoin(users, eq(users.id, memberships.userId))
+            .where(
+              and(
+                eq(memberships.tenantId, ctx.tenant.id),
+                eq(memberships.status, 'active'),
+                memberCanSee(
+                  sql`${memberships.roles}`,
+                  sql`${memberships.id}`,
+                  sql`${conv.assignedMembershipId}::uuid`,
+                ),
+              ),
+            )
+            .orderBy(asc(users.name));
+        },
+        { accessMode: 'read only' },
+      );
+    },
+
+    /** The current member's mentions in conversations they can still see, newest first. */
+    async listMentions(ctx: TenantContext, input: { unreadOnly?: boolean } = {}) {
+      if (!can(ctx, 'inbox.read_all') && !can(ctx, 'inbox.read_assigned'))
+        assertCan(ctx, 'inbox.read_assigned');
+      const rows = await db.run(
+        ctx.scope,
+        (tx) =>
+          tx
+            .select({
+              id: noteMentions.id,
+              readAt: noteMentions.readAt,
+              createdAt: noteMentions.createdAt,
+              conversationId: conversationNotes.conversationId,
+              body: conversationNotes.body,
+              authorName: users.name,
+              contactName: contacts.displayName,
+              contactPhone: contacts.phoneE164,
+            })
+            .from(noteMentions)
+            .innerJoin(
+              conversationNotes,
+              and(
+                eq(conversationNotes.tenantId, noteMentions.tenantId),
+                eq(conversationNotes.id, noteMentions.noteId),
+              ),
+            )
+            .innerJoin(
+              conversations,
+              and(
+                eq(conversations.tenantId, conversationNotes.tenantId),
+                eq(conversations.id, conversationNotes.conversationId),
+              ),
+            )
+            .innerJoin(
+              contacts,
+              and(
+                eq(contacts.tenantId, conversations.tenantId),
+                eq(contacts.id, conversations.contactId),
+              ),
+            )
+            .innerJoin(
+              memberships,
+              and(
+                eq(memberships.tenantId, conversationNotes.tenantId),
+                eq(memberships.id, conversationNotes.authorMembershipId),
+              ),
+            )
+            .innerJoin(users, eq(users.id, memberships.userId))
+            .where(
+              and(
+                eq(noteMentions.tenantId, ctx.tenant.id),
+                eq(noteMentions.membershipId, ctx.membership.id),
+                input.unreadOnly ? isNull(noteMentions.readAt) : undefined,
+                visibilityFilter(ctx),
+              ),
+            )
+            .orderBy(desc(noteMentions.createdAt), desc(noteMentions.id))
+            .limit(50),
+        { accessMode: 'read only' },
+      );
+      return rows.map((r) => ({
+        ...r,
+        readAt: r.readAt?.toISOString() ?? null,
+        createdAt: r.createdAt.toISOString(),
+      }));
+    },
+
+    /** Unread mentions of the current member in conversations they can see. */
+    async unreadMentionCount(ctx: TenantContext): Promise<number> {
+      if (!can(ctx, 'inbox.read_all') && !can(ctx, 'inbox.read_assigned')) return 0;
+      const [row] = await db.run(
+        ctx.scope,
+        (tx) =>
+          tx
+            .select({ count: sql<number>`count(*)::int` })
+            .from(noteMentions)
+            .innerJoin(
+              conversationNotes,
+              and(
+                eq(conversationNotes.tenantId, noteMentions.tenantId),
+                eq(conversationNotes.id, noteMentions.noteId),
+              ),
+            )
+            .innerJoin(
+              conversations,
+              and(
+                eq(conversations.tenantId, conversationNotes.tenantId),
+                eq(conversations.id, conversationNotes.conversationId),
+              ),
+            )
+            .where(
+              and(
+                eq(noteMentions.tenantId, ctx.tenant.id),
+                eq(noteMentions.membershipId, ctx.membership.id),
+                isNull(noteMentions.readAt),
+                visibilityFilter(ctx),
+              ),
+            ),
+        { accessMode: 'read only' },
+      );
+      return row?.count ?? 0;
+    },
+
+    /** Marks the conversation read for the team and the member's mentions in it as seen. */
     async markRead(ctx: TenantContext, conversationId: string) {
       await withConversation(ctx, conversationId, async (tx, current) => {
         const updated = await tx
@@ -526,7 +962,20 @@ export function createInboxService(deps: { db: Database; clock: Clock }) {
             ),
           )
           .returning({ id: conversations.id });
-        if (updated.length > 0) {
+        const seen = await tx
+          .update(noteMentions)
+          .set({ readAt: clock.now() })
+          .where(
+            and(
+              eq(noteMentions.tenantId, ctx.tenant.id),
+              eq(noteMentions.membershipId, ctx.membership.id),
+              isNull(noteMentions.readAt),
+              sql`${noteMentions.noteId} in (select n.id from app.conversation_notes n
+                    where n.tenant_id = ${ctx.tenant.id}::uuid and n.conversation_id = ${current.id}::uuid)`,
+            ),
+          )
+          .returning({ id: noteMentions.id });
+        if (updated.length > 0 || seen.length > 0) {
           await emitTenantEvent(tx, ctx.tenant.id, {
             type: 'conversation.read',
             conversationId: current.id,

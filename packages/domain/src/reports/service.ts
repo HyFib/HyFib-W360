@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { Clock } from '@w360/core';
 import {
+  CSAT_SKIP_REASONS,
   RATE_CATEGORIES,
   desc,
   eq,
@@ -9,6 +10,7 @@ import {
   metricDefinitions,
   sql,
   users,
+  type CsatSkipReason,
   type Database,
   type RateCategory,
   type SQL,
@@ -26,6 +28,8 @@ import {
   priceFor,
 } from '../campaigns/costs';
 import { CSV_BOM, csvLine } from '../contacts/csv';
+import { openPeriods } from '../inbox/business-hours';
+import { loadReplyTarget, type ReplyTarget } from '../inbox/sla';
 import { parseInput } from '../validation';
 import { METRIC_DEFINITIONS, type MetricDefinition } from './definitions';
 import { resolvePeriod, type ReportPeriod } from './period';
@@ -106,6 +110,8 @@ export interface CostReport {
 
 export interface InboxReport {
   targetMinutes: number | null;
+  /** Business hours are on: the target and the business-hours figures count opening hours only. */
+  businessHours: boolean;
   now: {
     open: number;
     unassigned: number;
@@ -113,6 +119,7 @@ export interface InboxReport {
     oldestWaitSeconds: number | null;
     windowsClosing: number;
     windowsClosed: number;
+    /** Waiting turns past the target (null without a target). */
     overTarget: number | null;
     byAssignee: {
       membershipId: string | null;
@@ -128,8 +135,16 @@ export interface InboxReport {
     waiting: number;
     medianSeconds: number | null;
     p90Seconds: number | null;
+    /** Reply times counting business hours only (null when business hours are off). */
+    businessMedianSeconds: number | null;
+    businessP90Seconds: number | null;
     buckets: { upTo5m: number; upTo1h: number; upTo24h: number; over24h: number };
     withinTarget: Ratio | null;
+  };
+  resolution: {
+    resolved: number;
+    medianSeconds: number | null;
+    p90Seconds: number | null;
   };
   days: {
     day: string;
@@ -138,6 +153,32 @@ export interface InboxReport {
     resolvedWithoutReply: number;
     waiting: number;
     medianSeconds: number | null;
+    businessMedianSeconds: number | null;
+    casesResolved: number;
+    medianResolutionSeconds: number | null;
+  }[];
+}
+
+export interface CsatReport {
+  enabled: boolean;
+  surveys: number;
+  sent: number;
+  skipped: Record<CsatSkipReason, number>;
+  delivered: number;
+  answered: number;
+  ratings: { best: number; middle: number; worst: number };
+  responseRate: Ratio;
+  score: Ratio;
+  days: {
+    day: string;
+    surveys: number;
+    sent: number;
+    skipped: number;
+    delivered: number;
+    answered: number;
+    best: number;
+    middle: number;
+    worst: number;
   }[];
 }
 
@@ -151,6 +192,9 @@ export interface AgentRow {
   turnsAnswered: number;
   medianSeconds: number | null;
   resolved: number;
+  /** CSAT answers credited to the member (assignee at resolution) and how many were the best. */
+  csatAnswered: number;
+  csatBest: number;
 }
 
 export interface CampaignFunnelRow {
@@ -185,13 +229,21 @@ export interface Report {
   messaging: MessagingReport;
   costs: CostReport;
   inbox: InboxReport;
+  csat: CsatReport;
   agents: AgentRow[];
   campaigns: CampaignFunnel;
   /** Latest version of every persisted definition, in registry order. */
   definitions: MetricDefinition[];
 }
 
-export const REPORT_SECTIONS = ['messaging', 'costs', 'inbox', 'agents', 'campaigns'] as const;
+export const REPORT_SECTIONS = [
+  'messaging',
+  'costs',
+  'inbox',
+  'csat',
+  'agents',
+  'campaigns',
+] as const;
 export type ReportSection = (typeof REPORT_SECTIONS)[number];
 
 export const MAX_FUNNEL_CAMPAIGNS = 100;
@@ -398,36 +450,75 @@ async function costReport(
 }
 
 const DURATION = sql`extract(epoch from t.ended_at - t.started_at)`;
+const DELIVERED = sql`('delivered', 'read', 'played')`;
+
+/**
+ * Business time of [from, to) in seconds, as the overlap with the company's opening periods held
+ * in the `iv(lo, hi)` CTE (see openingPeriodsCte).
+ */
+const businessSeconds = (from: SQL, to: SQL) =>
+  sql`(select coalesce(sum(extract(epoch from least(${to}, iv.hi) - greatest(${from}, iv.lo))), 0)::float8
+         from iv where iv.lo < ${to} and iv.hi > ${from})`;
+
+async function openingPeriodsCte(
+  tx: Tx,
+  tenantId: string,
+  target: ReplyTarget,
+  period: ReportPeriod,
+  now: Date,
+): Promise<SQL | null> {
+  if (!target.calendar) return null;
+  // From the oldest turn the report measures (the period start, or an older waiting turn) to now.
+  const oldest = await tx.execute<{ started_ms: number | null }>(sql`
+    select (extract(epoch from min(t.started_at)) * 1000)::float8 as started_ms
+      from app.conversation_turns t where t.tenant_id = ${tenantId} and t.ended_at is null`);
+  const oldestMs = oldest.rows[0]?.started_ms;
+  const from =
+    oldestMs !== null && oldestMs !== undefined && oldestMs < period.start.getTime()
+      ? new Date(oldestMs)
+      : period.start;
+  const periods = openPeriods(target.calendar, from, now);
+  return sql`iv(lo, hi) as (select * from unnest(
+    ${sql.param(periods.map((p) => p.start.toISOString()))}::timestamptz[],
+    ${sql.param(periods.map((p) => p.end.toISOString()))}::timestamptz[]))`;
+}
 
 async function inboxReport(
   tx: Tx,
   tenantId: string,
   period: ReportPeriod,
   now: Date,
-  targetMinutes: number | null,
+  target: ReplyTarget,
 ): Promise<InboxReport> {
-  const target = targetMinutes === null ? null : sql`make_interval(mins => ${targetMinutes}::int)`;
+  const targetMinutes = target.minutes;
+  const targetSeconds = targetMinutes === null ? null : targetMinutes * 60;
+  const iv = await openingPeriodsCte(tx, tenantId, target, period, now);
+  const withIv = iv ? sql`with ${iv}` : sql``;
   const live = await tx.execute<Record<string, number | null>>(sql`
+    ${withIv}
     select
       (select count(*)::int from app.conversations c
         where c.tenant_id = ${tenantId} and c.status in ('open', 'pending')) as open,
       (select count(*)::int from app.conversations c
         where c.tenant_id = ${tenantId} and c.status in ('open', 'pending')
           and c.assigned_membership_id is null) as unassigned,
-      count(t.id)::int as waiting,
-      extract(epoch from ${ts(now)} - min(t.started_at))::float8 as oldest_wait,
-      (count(t.id) filter (where c.last_inbound_at > ${ts(now)} - interval '24 hours'
-                             and c.last_inbound_at <= ${ts(now)} - interval '22 hours'))::int as closing,
-      (count(t.id) filter (where c.last_inbound_at is null
-                             or c.last_inbound_at <= ${ts(now)} - interval '24 hours'))::int as closed,
+      count(w.started_at)::int as waiting,
+      extract(epoch from ${ts(now)} - min(w.started_at))::float8 as oldest_wait,
+      (count(*) filter (where w.last_inbound_at > ${ts(now)} - interval '24 hours'
+                          and w.last_inbound_at <= ${ts(now)} - interval '22 hours'))::int as closing,
+      (count(*) filter (where w.last_inbound_at is null
+                          or w.last_inbound_at <= ${ts(now)} - interval '24 hours'))::int as closed,
       ${
-        target
-          ? sql`(count(t.id) filter (where t.started_at <= ${ts(now)} - ${target}))::int`
-          : sql`null::int`
+        targetSeconds === null
+          ? sql`null::int`
+          : sql`(count(*) filter (where w.waited >= ${targetSeconds}::float8))::int`
       } as over_target
-    from app.conversation_turns t
-    join app.conversations c on c.tenant_id = t.tenant_id and c.id = t.conversation_id
-    where t.tenant_id = ${tenantId} and t.ended_at is null`);
+    from (
+      select t.started_at, c.last_inbound_at,
+             ${iv ? businessSeconds(sql`t.started_at`, ts(now)) : sql`extract(epoch from ${ts(now)} - t.started_at)::float8`} as waited
+        from app.conversation_turns t
+        join app.conversations c on c.tenant_id = t.tenant_id and c.id = t.conversation_id
+       where t.tenant_id = ${tenantId} and t.ended_at is null) w`);
   const l = live.rows[0] ?? {};
   const assignees = await tx.execute<{
     membership_id: string | null;
@@ -443,53 +534,83 @@ async function inboxReport(
       left join auth.users u on u.id = ms.user_id
      where t.tenant_id = ${tenantId} and t.ended_at is null
      group by 1, 2 order by 3 desc, 2 nulls first`);
+  // Turns that started in the period, with absolute and (when business hours are on) business
+  // reply times, and business waiting time for turns still open.
+  const periodTurns = sql`
+    select t.started_at, t.ended_at, t.end_reason, ${DURATION}::float8 as dur,
+           ${iv ? sql`case when t.end_reason = 'replied' then ${businessSeconds(sql`t.started_at`, sql`t.ended_at`)} end` : sql`null::float8`} as biz_dur,
+           ${
+             iv
+               ? sql`case when t.ended_at is null then ${businessSeconds(sql`t.started_at`, ts(now))} end`
+               : sql`case when t.ended_at is null then extract(epoch from ${ts(now)} - t.started_at)::float8 end`
+           } as waited
+      from app.conversation_turns t
+     where t.tenant_id = ${tenantId} and t.started_at >= ${ts(period.start)}
+       and t.started_at < ${ts(period.end)}`;
+  // The target is met by a reply within it; turns still waiting count once they pass it.
+  const replyTime = iv ? sql`pt.biz_dur` : sql`pt.dur`;
   const turns = await tx.execute<Record<string, number | null>>(sql`
+    ${withIv}
     select count(*)::int as started,
-      (count(*) filter (where t.end_reason = 'replied'))::int as answered,
-      (count(*) filter (where t.end_reason = 'resolved'))::int as resolved,
-      (count(*) filter (where t.ended_at is null))::int as waiting,
-      (percentile_cont(0.5) within group (order by ${DURATION})
-         filter (where t.end_reason = 'replied'))::float8 as median,
-      (percentile_cont(0.9) within group (order by ${DURATION})
-         filter (where t.end_reason = 'replied'))::float8 as p90,
-      (count(*) filter (where t.end_reason = 'replied'
-                          and t.ended_at - t.started_at <= interval '5 minutes'))::int as upto_5m,
-      (count(*) filter (where t.end_reason = 'replied'
-                          and t.ended_at - t.started_at <= interval '1 hour'))::int as upto_1h,
-      (count(*) filter (where t.end_reason = 'replied'
-                          and t.ended_at - t.started_at <= interval '24 hours'))::int as upto_24h,
+      (count(*) filter (where pt.end_reason = 'replied'))::int as answered,
+      (count(*) filter (where pt.end_reason = 'resolved'))::int as resolved,
+      (count(*) filter (where pt.ended_at is null))::int as waiting,
+      (percentile_cont(0.5) within group (order by pt.dur)
+         filter (where pt.end_reason = 'replied'))::float8 as median,
+      (percentile_cont(0.9) within group (order by pt.dur)
+         filter (where pt.end_reason = 'replied'))::float8 as p90,
+      (percentile_cont(0.5) within group (order by pt.biz_dur)
+         filter (where pt.end_reason = 'replied'))::float8 as biz_median,
+      (percentile_cont(0.9) within group (order by pt.biz_dur)
+         filter (where pt.end_reason = 'replied'))::float8 as biz_p90,
+      (count(*) filter (where pt.end_reason = 'replied' and pt.dur <= 300))::int as upto_5m,
+      (count(*) filter (where pt.end_reason = 'replied' and pt.dur <= 3600))::int as upto_1h,
+      (count(*) filter (where pt.end_reason = 'replied' and pt.dur <= 86400))::int as upto_24h,
       ${
-        target
-          ? sql`(count(*) filter (where t.end_reason = 'replied'
-                                    and t.ended_at - t.started_at <= ${target}))::int as within_target,
-                (count(*) filter (where t.end_reason = 'replied'
-                                    or (t.ended_at is null and t.started_at <= ${ts(now)} - ${target})))::int
+        targetSeconds === null
+          ? sql`null::int as within_target, null::int as target_denominator`
+          : sql`(count(*) filter (where pt.end_reason = 'replied'
+                                    and ${replyTime} <= ${targetSeconds}::float8))::int as within_target,
+                (count(*) filter (where pt.end_reason = 'replied'
+                                    or (pt.ended_at is null and pt.waited >= ${targetSeconds}::float8)))::int
                   as target_denominator`
-          : sql`null::int as within_target, null::int as target_denominator`
       }
-    from app.conversation_turns t
-    where t.tenant_id = ${tenantId} and t.started_at >= ${ts(period.start)}
-      and t.started_at < ${ts(period.end)}`);
+    from (${periodTurns}) pt`);
   const p = turns.rows[0] ?? {};
   const daily = await tx.execute<Record<string, string | number | null>>(sql`
-    select to_char(t.started_at at time zone ${period.timezone}, 'YYYY-MM-DD') as day,
+    ${withIv}
+    select to_char(pt.started_at at time zone ${period.timezone}, 'YYYY-MM-DD') as day,
       count(*)::int as started,
-      (count(*) filter (where t.end_reason = 'replied'))::int as answered,
-      (count(*) filter (where t.end_reason = 'resolved'))::int as resolved,
-      (count(*) filter (where t.ended_at is null))::int as waiting,
-      (percentile_cont(0.5) within group (order by ${DURATION})
-         filter (where t.end_reason = 'replied'))::float8 as median
-    from app.conversation_turns t
-    where t.tenant_id = ${tenantId} and t.started_at >= ${ts(period.start)}
-      and t.started_at < ${ts(period.end)}
+      (count(*) filter (where pt.end_reason = 'replied'))::int as answered,
+      (count(*) filter (where pt.end_reason = 'resolved'))::int as resolved,
+      (count(*) filter (where pt.ended_at is null))::int as waiting,
+      (percentile_cont(0.5) within group (order by pt.dur)
+         filter (where pt.end_reason = 'replied'))::float8 as median,
+      (percentile_cont(0.5) within group (order by pt.biz_dur)
+         filter (where pt.end_reason = 'replied'))::float8 as biz_median
+    from (${periodTurns}) pt
     group by 1`);
   const byDay = new Map(daily.rows.map((r) => [String(r.day), r]));
+  const resolution = await tx.execute<Record<string, string | number | null>>(sql`
+    select to_char(c.resolved_at at time zone ${period.timezone}, 'YYYY-MM-DD') as day,
+      count(*)::int as resolved,
+      (percentile_cont(0.5) within group (order by extract(epoch from c.resolved_at - c.opened_at)))::float8 as median,
+      (percentile_cont(0.9) within group (order by extract(epoch from c.resolved_at - c.opened_at)))::float8 as p90
+    from app.conversation_cases c
+    where c.tenant_id = ${tenantId} and c.resolved_at >= ${ts(period.start)}
+      and c.resolved_at < ${ts(period.end)}
+    group by grouping sets ((1), ())`);
+  const resolutionTotal = resolution.rows.find((r) => r.day === null);
+  const resolutionByDay = new Map(
+    resolution.rows.filter((r) => r.day !== null).map((r) => [String(r.day), r]),
+  );
   const answered = num(p.answered);
   const upTo5m = num(p.upto_5m);
   const upTo1h = num(p.upto_1h);
   const upTo24h = num(p.upto_24h);
   return {
     targetMinutes,
+    businessHours: iv !== null,
     now: {
       open: num(l.open),
       unassigned: num(l.unassigned),
@@ -497,7 +618,7 @@ async function inboxReport(
       oldestWaitSeconds: seconds(l.oldest_wait),
       windowsClosing: num(l.closing),
       windowsClosed: num(l.closed),
-      overTarget: target ? num(l.over_target) : null,
+      overTarget: targetSeconds === null ? null : num(l.over_target),
       byAssignee: assignees.rows.map((r) => ({
         membershipId: r.membership_id,
         name: r.name,
@@ -512,18 +633,27 @@ async function inboxReport(
       waiting: num(p.waiting),
       medianSeconds: seconds(p.median),
       p90Seconds: seconds(p.p90),
+      businessMedianSeconds: iv ? seconds(p.biz_median) : null,
+      businessP90Seconds: iv ? seconds(p.biz_p90) : null,
       buckets: {
         upTo5m,
         upTo1h: upTo1h - upTo5m,
         upTo24h: upTo24h - upTo1h,
         over24h: answered - upTo24h,
       },
-      withinTarget: target
-        ? { numerator: num(p.within_target), denominator: num(p.target_denominator) }
-        : null,
+      withinTarget:
+        targetSeconds === null
+          ? null
+          : { numerator: num(p.within_target), denominator: num(p.target_denominator) },
+    },
+    resolution: {
+      resolved: num(resolutionTotal?.resolved),
+      medianSeconds: seconds(resolutionTotal?.median),
+      p90Seconds: seconds(resolutionTotal?.p90),
     },
     days: period.days.map((day) => {
       const r = byDay.get(day);
+      const res = resolutionByDay.get(day);
       return {
         day,
         started: num(r?.started),
@@ -531,6 +661,70 @@ async function inboxReport(
         resolvedWithoutReply: num(r?.resolved),
         waiting: num(r?.waiting),
         medianSeconds: seconds(r?.median),
+        businessMedianSeconds: iv ? seconds(r?.biz_median) : null,
+        casesResolved: num(res?.resolved),
+        medianResolutionSeconds: seconds(res?.median),
+      };
+    }),
+  };
+}
+
+async function csatReport(
+  tx: Tx,
+  tenantId: string,
+  period: ReportPeriod,
+  enabled: boolean,
+): Promise<CsatReport> {
+  const res = await tx.execute<Record<string, string | number | null>>(sql`
+    select to_char(s.created_at at time zone ${period.timezone}, 'YYYY-MM-DD') as day,
+      count(*)::int as surveys,
+      (count(*) filter (where s.skip_reason is null))::int as sent,
+      ${sql.join(
+        CSAT_SKIP_REASONS.map(
+          (reason) =>
+            sql`(count(*) filter (where s.skip_reason = ${reason}))::int as ${sql.identifier(`skip_${reason}`)}`,
+        ),
+        sql`, `,
+      )},
+      (count(*) filter (where s.skip_reason is null
+                          and (s.answered_at is not null or m.status in ${DELIVERED})))::int as delivered,
+      (count(*) filter (where s.answered_at is not null))::int as answered,
+      (count(*) filter (where s.score = 3))::int as best,
+      (count(*) filter (where s.score = 2))::int as middle,
+      (count(*) filter (where s.score = 1))::int as worst
+    from app.csat_surveys s
+    left join app.messages m on m.tenant_id = s.tenant_id and m.id = s.message_id
+    where s.tenant_id = ${tenantId} and s.created_at >= ${ts(period.start)}
+      and s.created_at < ${ts(period.end)}
+    group by grouping sets ((1), ())`);
+  const total = res.rows.find((r) => r.day === null) ?? {};
+  const byDay = new Map(res.rows.filter((r) => r.day !== null).map((r) => [String(r.day), r]));
+  const skipped = Object.fromEntries(
+    CSAT_SKIP_REASONS.map((reason) => [reason, num(total[`skip_${reason}`])]),
+  ) as Record<CsatSkipReason, number>;
+  const answered = num(total.answered);
+  return {
+    enabled,
+    surveys: num(total.surveys),
+    sent: num(total.sent),
+    skipped,
+    delivered: num(total.delivered),
+    answered,
+    ratings: { best: num(total.best), middle: num(total.middle), worst: num(total.worst) },
+    responseRate: { numerator: answered, denominator: num(total.delivered) },
+    score: { numerator: num(total.best), denominator: answered },
+    days: period.days.map((day) => {
+      const r = byDay.get(day);
+      return {
+        day,
+        surveys: num(r?.surveys),
+        sent: num(r?.sent),
+        skipped: num(r?.surveys) - num(r?.sent),
+        delivered: num(r?.delivered),
+        answered: num(r?.answered),
+        best: num(r?.best),
+        middle: num(r?.middle),
+        worst: num(r?.worst),
       };
     }),
   };
@@ -565,6 +759,14 @@ async function agentReport(tx: Tx, tenantId: string, period: ReportPeriod): Prom
        and a.metadata ->> 'to' = 'resolved'
        and a.occurred_at >= ${ts(period.start)} and a.occurred_at < ${ts(period.end)}
      group by 1`);
+  const csat = await tx.execute<{ membership_id: string; answered: number; best: number }>(sql`
+    select s.assigned_membership_id as membership_id,
+           (count(*) filter (where s.answered_at is not null))::int as answered,
+           (count(*) filter (where s.score = 3))::int as best
+      from app.csat_surveys s
+     where s.tenant_id = ${tenantId} and s.assigned_membership_id is not null
+       and s.created_at >= ${ts(period.start)} and s.created_at < ${ts(period.end)}
+     group by 1`);
   const members = await tx
     .select({
       membershipId: memberships.id,
@@ -579,12 +781,14 @@ async function agentReport(tx: Tx, tenantId: string, period: ReportPeriod): Prom
   const repliesBy = new Map(replies.rows.map((r) => [r.membership_id, r]));
   const answeredBy = new Map(answered.rows.map((r) => [r.membership_id, r]));
   const resolvedBy = new Map(resolved.rows.map((r) => [r.user_id, r.resolved]));
+  const csatBy = new Map(csat.rows.map((r) => [r.membership_id, r]));
   const rows: AgentRow[] = [];
   for (const m of members) {
     const rep = repliesBy.get(m.membershipId);
     const ans = answeredBy.get(m.membershipId);
     const res = resolvedBy.get(m.userId) ?? 0;
-    const active = rep || ans || res > 0;
+    const rated = csatBy.get(m.membershipId);
+    const active = rep || ans || res > 0 || (rated && rated.answered > 0);
     // Members who can reply are listed even without activity, so a quiet period is visible.
     const canReply =
       m.status === 'active' && permissionsForRoles(m.roles as TenantRole[]).has('inbox.reply');
@@ -599,6 +803,8 @@ async function agentReport(tx: Tx, tenantId: string, period: ReportPeriod): Prom
       turnsAnswered: ans?.answered ?? 0,
       medianSeconds: ans ? Number(ans.median) : null,
       resolved: res,
+      csatAnswered: rated?.answered ?? 0,
+      csatBest: rated?.best ?? 0,
     });
   }
   return rows.sort(
@@ -693,15 +899,20 @@ async function loadDefinitions(tx: Tx): Promise<MetricDefinition[]> {
   );
 }
 
-async function loadReportSettings(tx: Tx, tenantId: string) {
+async function loadReportSettings(tx: Tx, tenantId: string, timezone: string) {
   const [row] = await tx
     .select({
       costCurrency: messagingSettings.costCurrency,
-      targetMinutes: messagingSettings.firstResponseTargetMinutes,
+      csatEnabled: messagingSettings.csatEnabled,
     })
     .from(messagingSettings)
     .where(eq(messagingSettings.tenantId, tenantId));
-  return row ?? { costCurrency: null, targetMinutes: null };
+  const target = await loadReplyTarget(tx, tenantId, timezone);
+  return {
+    costCurrency: row?.costCurrency ?? null,
+    csatEnabled: row?.csatEnabled === true,
+    target,
+  };
 }
 
 /** Exact decimal amount in major units for exports (no floating point). */
@@ -797,7 +1008,8 @@ function sectionCsv(section: ReportSection, report: Report): string {
       }
       break;
     }
-    case 'inbox':
+    case 'inbox': {
+      const secondsOrEmpty = (v: number | null) => (v === null ? '' : Math.round(v));
       lines.push(
         csvLine([
           'day',
@@ -807,6 +1019,9 @@ function sectionCsv(section: ReportSection, report: Report): string {
           'resolved_without_reply',
           'still_waiting',
           'median_first_response_seconds',
+          'median_first_response_business_seconds',
+          'cases_resolved',
+          'median_resolution_seconds',
         ]),
       );
       for (const d of report.inbox.days) {
@@ -818,7 +1033,43 @@ function sectionCsv(section: ReportSection, report: Report): string {
             d.answered,
             d.resolvedWithoutReply,
             d.waiting,
-            d.medianSeconds === null ? '' : Math.round(d.medianSeconds),
+            secondsOrEmpty(d.medianSeconds),
+            secondsOrEmpty(d.businessMedianSeconds),
+            d.casesResolved,
+            secondsOrEmpty(d.medianResolutionSeconds),
+          ]),
+        );
+      }
+      break;
+    }
+    case 'csat':
+      lines.push(
+        csvLine([
+          'day',
+          'time_zone',
+          'surveys',
+          'sent',
+          'not_sent',
+          'delivered',
+          'answered',
+          'best_rating',
+          'middle_rating',
+          'worst_rating',
+        ]),
+      );
+      for (const d of report.csat.days) {
+        lines.push(
+          csvLine([
+            d.day,
+            tz,
+            d.surveys,
+            d.sent,
+            d.skipped,
+            d.delivered,
+            d.answered,
+            d.best,
+            d.middle,
+            d.worst,
           ]),
         );
       }
@@ -834,6 +1085,8 @@ function sectionCsv(section: ReportSection, report: Report): string {
           'turns_answered',
           'median_first_response_seconds',
           'resolved',
+          'csat_answers',
+          'csat_best_ratings',
         ]),
       );
       for (const a of report.agents) {
@@ -847,6 +1100,8 @@ function sectionCsv(section: ReportSection, report: Report): string {
             a.turnsAnswered,
             a.medianSeconds === null ? '' : Math.round(a.medianSeconds),
             a.resolved,
+            a.csatAnswered,
+            a.csatBest,
           ]),
         );
       }
@@ -916,10 +1171,11 @@ export function createReportsService(deps: ReportsDeps) {
     return db.run(
       ctx.scope,
       async (tx) => {
-        const settings = await loadReportSettings(tx, ctx.tenant.id);
+        const settings = await loadReportSettings(tx, ctx.tenant.id, ctx.tenant.timezone);
         const messaging = await messagingReport(tx, ctx.tenant.id, period);
         const costs = await costReport(tx, ctx.tenant.id, period, settings.costCurrency);
-        const inbox = await inboxReport(tx, ctx.tenant.id, period, now, settings.targetMinutes);
+        const inbox = await inboxReport(tx, ctx.tenant.id, period, now, settings.target);
+        const csat = await csatReport(tx, ctx.tenant.id, period, settings.csatEnabled);
         const agents = await agentReport(tx, ctx.tenant.id, period);
         const campaigns = await campaignFunnel(tx, ctx.tenant.id, period, settings.costCurrency);
         const definitions = await loadDefinitions(tx);
@@ -929,6 +1185,7 @@ export function createReportsService(deps: ReportsDeps) {
           messaging,
           costs,
           inbox,
+          csat,
           agents,
           campaigns,
           definitions,

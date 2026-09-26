@@ -71,6 +71,8 @@ export const channelAccounts = appSchema.table('channel_accounts', {
   codeVerificationStatus: text('code_verification_status'),
   registrationPinCiphertext: text('registration_pin_ciphertext'),
   healthCheckedAt: tz('health_checked_at'),
+  /** Team new conversations on this number start in (migration 0009). */
+  defaultTeamId: uuid('default_team_id'),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });
@@ -133,6 +135,7 @@ export const conversations = appSchema.table('conversations', {
   contactId: uuid('contact_id').notNull(),
   status: text('status', { enum: CONVERSATION_STATUSES }).notNull().default('open'),
   assignedMembershipId: uuid('assigned_membership_id'),
+  teamId: uuid('team_id'),
   lastMessageAt: tz('last_message_at'),
   lastMessagePreview: text('last_message_preview'),
   lastInboundAt: tz('last_inbound_at'),

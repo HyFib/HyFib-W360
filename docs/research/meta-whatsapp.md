@@ -251,6 +251,15 @@ Doc-site note: official WhatsApp docs now live under `developers.facebook.com/do
 | M-147 | Permissions | `whatsapp_business_messaging` is needed to send; `whatsapp_business_management` to manage WABAs, templates and numbers. Solution Partners need `business_management` for credit-line sharing. Whether a Tech Provider's Embedded Signup configuration needs `business_management` was not confirmed. | as named | Tech Provider and App Review pages ; Solution Partner onboarding page ; spec error messages | OFF-DOC-SNIP + OFF-GH-SPEC | High for the first two |
 | M-148 | WABA user tasks | Tasks assignable to WABA users: `DEVELOP`, `MANAGE`, `MANAGE_EXTENSIONS`, `MANAGE_PHONE`, `MANAGE_PHONE_ASSETS`, `MANAGE_TEMPLATES`, `MESSAGING`, `VIEW_COST`, `VIEW_PHONE_ASSETS`, `VIEW_TEMPLATES`. | `assigned_users` tasks | SDK | OFF-GH-SDK | High |
 
+## 13. Addendum: interactive reply buttons (fetched 2026-09-26 for CSAT surveys)
+
+Both rows come from the official OpenAPI spec (`facebook/openapi`, `business-messaging-api_v23.0.yaml`), downloaded directly from raw.githubusercontent.com on 2026-09-26: schemas `InteractiveObject`, `ActionObject`, `BodyObject`, `HeaderObject`, `FooterObject`, `InteractiveMessageReply` and `InteractiveButtonReplyContent`. developers.facebook.com was still blocked, so the prose pages were not read.
+
+| ID | Topic | Claim (paraphrased) | Exact identifiers (if shown) | Source URL | Evidence type | Confidence |
+|---|---|---|---|---|---|---|
+| M-157 | Reply buttons (send) | An `interactive` message of `type: "button"` needs `body.text` (at most 1024 characters, emojis and markdown allowed) and `action.buttons`: 1 to 3 objects `{ "type": "reply", "reply": { "id", "title" } }`. `id`: at most 256 characters, no leading or trailing spaces. `title`: not empty, unique, at most 20 characters, emojis but no markdown. Optional `header` (text at most 60) and `footer` (at most 60). Like other non-template messages it is sent inside the customer service window (M-041, window rules). | `interactive.type`, `action.buttons[].reply.id`, `action.buttons[].reply.title`, `body.text` | https://github.com/facebook/openapi/blob/main/business-messaging-api_v23.0.yaml | OFF-GH-SPEC | High |
+| M-158 | Reply buttons (webhook) | A tap arrives as a `messages` webhook with `type: "interactive"`, `interactive.type: "button_reply"`, `interactive.button_reply.id` and `.title` (the button's id and label), and a required `context` whose `id` is the WAMID of the message that carried the buttons (`context.from` is the business number). List taps use `list_reply` (`id`, `title`, `description`). | `button_reply.id`, `button_reply.title`, `context.id` | same spec | OFF-GH-SPEC | High |
+
 ---
 
 ## Unconfirmed / conflicting

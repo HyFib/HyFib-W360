@@ -11,6 +11,7 @@ import {
   processMetaWebhookReceipt,
   processSendIntent,
   recoverExpiredSend,
+  routeDueConversations,
 } from '@w360/domain';
 import type { WorkerRuntime } from '../runtime';
 import { signalDueCampaigns } from './campaigns';
@@ -124,9 +125,9 @@ export function channelOnboardHandler(rt: WorkerRuntime) {
 }
 
 /**
- * Every minute: re-signal webhook receipts and send intents whose signal was lost, and settle send
+ * Every minute: re-signal webhook receipts and send intents whose signal was lost, settle send
  * intents whose worker died (before dispatch: re-queued; after dispatch: unknown outcome, never an
- * automatic resend).
+ * automatic resend), and route waiting conversations of round-robin teams.
  */
 export function messagingSweepHandler(rt: WorkerRuntime) {
   return async (): Promise<void> => {
@@ -165,6 +166,8 @@ export function messagingSweepHandler(rt: WorkerRuntime) {
     if (templateSyncs > 0) rt.logger.info({ templateSyncs }, 'template syncs signalled');
     const campaignTicks = await signalDueCampaigns(rt);
     if (campaignTicks > 0) rt.logger.info({ campaignTicks }, 'campaign ticks signalled');
+    const routed = await routeDueConversations(rt.db);
+    if (routed > 0) rt.logger.info({ routed }, 'waiting conversations assigned');
     const retention = await applyMessagingRetention(rt.db);
     if (retention.bodiesErased + retention.receiptsDeleted + retention.eventsPruned > 0) {
       rt.logger.info(retention, 'messaging retention applied');
