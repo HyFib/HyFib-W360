@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomInt } from 'node:crypto';
 import { inject } from 'vitest';
 import { PgBoss } from 'pg-boss';
 import { Keyring, systemClock, uuidv7, type Clock } from '@w360/core';
@@ -73,9 +73,12 @@ export interface WhatsAppFixture {
   close(): Promise<void>;
 }
 
-let seq = 0;
-export const nextExternalId = () =>
-  String(8_000_000_000 + ++seq * 7919 + Math.floor(Math.random() * 1000));
+/**
+ * Meta-style numeric ids. Every test file shares one database and the asset bindings are unique
+ * across companies, so ids must not repeat between files: a per-file counter cannot guarantee
+ * that, 47 random bits do.
+ */
+export const nextExternalId = () => '8' + String(randomInt(0, 2 ** 47)).padStart(15, '0');
 
 export async function startWhatsAppFixture(): Promise<WhatsAppFixture> {
   const dbs = connectTestDatabases({ appPoolMax: 10 });
