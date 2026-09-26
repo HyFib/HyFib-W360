@@ -1,6 +1,11 @@
 import { QUEUES } from '@w360/contracts';
 import { toError } from '@w360/core';
 import { startHealthServer } from './health';
+import {
+  autoRechargeHandler,
+  billingEventProcessHandler,
+  billingSweepHandler,
+} from './handlers/billing';
 import { emailSendHandler, outboxSweepHandler } from './handlers/email';
 import {
   channelOnboardHandler,
@@ -59,6 +64,24 @@ async function main(): Promise<void> {
   );
   await rt.boss.schedule(QUEUES.messagingSweep.name, '* * * * *', null, {
     singletonKey: 'messaging-sweep',
+  });
+  await rt.boss.work(
+    QUEUES.billingEventProcess.name,
+    { localConcurrency: concurrency, batchSize: 1 },
+    billingEventProcessHandler(rt),
+  );
+  await rt.boss.work(
+    QUEUES.autoRecharge.name,
+    { localConcurrency: 2, batchSize: 1 },
+    autoRechargeHandler(rt),
+  );
+  await rt.boss.work(
+    QUEUES.billingSweep.name,
+    { localConcurrency: 1, batchSize: 1 },
+    billingSweepHandler(rt),
+  );
+  await rt.boss.schedule(QUEUES.billingSweep.name, '* * * * *', null, {
+    singletonKey: 'billing-sweep',
   });
   rt.logger.info({ concurrency }, 'worker started');
 

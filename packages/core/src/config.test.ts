@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ConfigError, loadWebConfig, metaConfigFrom } from './config';
+import { ConfigError, loadWebConfig, metaConfigFrom, razorpayConfigFrom } from './config';
 
 const base = {
   DATABASE_URL_APP: 'postgres://app@localhost/w360',
@@ -100,5 +100,47 @@ describe('empty values and Meta configuration', () => {
       APP_BASE_URL: 'https://staging.w360.example.net',
     });
     expect(() => metaConfigFrom(staging)).toThrow(/META_GRAPH_BASE_URL/);
+  });
+});
+
+describe('Razorpay configuration', () => {
+  const local = { ...base, APP_ENV: 'local', APP_BASE_URL: 'http://localhost:3000' };
+  const razorpay = {
+    RAZORPAY_KEY_ID: 'rzp_test_Abc123',
+    RAZORPAY_KEY_SECRET: 'k'.repeat(24),
+    RAZORPAY_WEBHOOK_SECRET: 'w'.repeat(24),
+  };
+  const production = { ...base, APP_ENV: 'production', APP_BASE_URL: 'https://w360.example.net' };
+
+  it('is optional, and recurring card mandates stay off unless enabled', () => {
+    expect(razorpayConfigFrom(loadWebConfig(local))).toBeNull();
+    const config = razorpayConfigFrom(
+      loadWebConfig({ ...local, ...razorpay, RAZORPAY_WEBHOOK_SECRET_PREVIOUS: 'o'.repeat(24) }),
+    );
+    expect(config).toMatchObject({
+      mode: 'test',
+      recurringCardsEnabled: false,
+      apiBaseUrl: 'https://api.razorpay.com',
+      webhookSecrets: ['w'.repeat(24), 'o'.repeat(24)],
+    });
+  });
+
+  it('rejects malformed key ids and allows live keys only in production', () => {
+    expect(() => loadWebConfig({ ...local, ...razorpay, RAZORPAY_KEY_ID: 'key_123' })).toThrow(
+      ConfigError,
+    );
+    const live = { ...razorpay, RAZORPAY_KEY_ID: 'rzp_live_Abc123' };
+    expect(() => razorpayConfigFrom(loadWebConfig({ ...local, ...live }))).toThrow(/live keys/);
+    expect(razorpayConfigFrom(loadWebConfig({ ...production, ...live }))?.mode).toBe('live');
+  });
+
+  it('allows a Razorpay stand-in only for local and test environments', () => {
+    const standIn = { RAZORPAY_API_BASE_URL: 'http://127.0.0.1:4020/' };
+    expect(
+      razorpayConfigFrom(loadWebConfig({ ...local, ...razorpay, ...standIn }))?.apiBaseUrl,
+    ).toBe('http://127.0.0.1:4020');
+    expect(() =>
+      razorpayConfigFrom(loadWebConfig({ ...production, ...razorpay, ...standIn })),
+    ).toThrow(/RAZORPAY_API_BASE_URL/);
   });
 });

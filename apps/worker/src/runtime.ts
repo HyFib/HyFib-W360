@@ -4,11 +4,13 @@ import {
   createLogger,
   loadWorkerConfig,
   metaConfigFrom,
+  razorpayConfigFrom,
   smtpConfigFrom,
   systemClock,
   type Clock,
   type Logger,
   type MetaConfig,
+  type RazorpayConfig,
   type WorkerConfig,
 } from '@w360/core';
 import { assertRuntimeRoleSafety, createDatabase, createPool, type Database } from '@w360/db';
@@ -16,7 +18,9 @@ import {
   GraphClient,
   JobSigner,
   PgBossJobQueue,
+  RazorpayClient,
   SmtpEmailSender,
+  type BillingNoticeDeps,
   type EmailSender,
   type JobQueue,
 } from '@w360/domain';
@@ -35,6 +39,10 @@ export interface WorkerRuntime {
   meta: MetaConfig | null;
   graph: GraphClient | null;
   sendRate: { capacity: number; refillPerSecond: number };
+  /** Null until Razorpay is configured; billing jobs then wait (retry) instead of failing. */
+  razorpayConfig: RazorpayConfig | null;
+  razorpay: RazorpayClient | null;
+  notices: BillingNoticeDeps;
   close(): Promise<void>;
 }
 
@@ -78,6 +86,11 @@ export async function createWorkerRuntime(): Promise<WorkerRuntime> {
   if (!smtp) logger.warn('SMTP is not configured: email jobs stay queued until it is.');
   const meta = metaConfigFrom(config);
   if (!meta) logger.warn('Meta is not configured: WhatsApp jobs stay queued until it is.');
+  const razorpayConfig = razorpayConfigFrom(config);
+  if (!razorpayConfig)
+    logger.warn('Razorpay is not configured: billing jobs stay queued until it is.');
+  const jobs = new PgBossJobQueue(boss);
+  const signer = new JobSigner(config.W360_JOB_SIGNING_KEY);
 
   return {
     config,
@@ -86,8 +99,8 @@ export async function createWorkerRuntime(): Promise<WorkerRuntime> {
     keyring,
     db,
     boss,
-    jobs: new PgBossJobQueue(boss),
-    signer: new JobSigner(config.W360_JOB_SIGNING_KEY),
+    jobs,
+    signer,
     email: smtp ? new SmtpEmailSender(smtp) : null,
     meta,
     graph: meta
@@ -97,6 +110,15 @@ export async function createWorkerRuntime(): Promise<WorkerRuntime> {
       capacity: config.META_SEND_RATE_PER_SECOND,
       refillPerSecond: config.META_SEND_RATE_PER_SECOND,
     },
+    razorpayConfig,
+    razorpay: razorpayConfig
+      ? new RazorpayClient({
+          baseUrl: razorpayConfig.apiBaseUrl,
+          keyId: razorpayConfig.keyId,
+          keySecret: razorpayConfig.keySecret,
+        })
+      : null,
+    notices: { outbox: { keyring, jobs, signer }, appBaseUrl: config.APP_BASE_URL },
     async close() {
       await pool.end();
     },

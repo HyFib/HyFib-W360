@@ -109,6 +109,15 @@ export const QUEUES = {
     deadLetter: 'dead-letter',
     deleteAfterHours: 168,
   },
+  billingSweep: {
+    name: 'ops.billing-sweep',
+    policy: 'exclusive',
+    retryLimit: 1,
+    retryDelaySeconds: 30,
+    retryBackoff: false,
+    expireInSeconds: 240,
+    deleteAfterHours: 24,
+  },
   deadLetter: {
     name: 'dead-letter',
     policy: 'standard',

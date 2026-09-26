@@ -83,6 +83,7 @@ export const MAX_RECEIPT_ATTEMPTS = 12;
 export async function findStaleReceipts(
   deps: { db: Database; clock: Clock },
   limit = 500,
+  provider: 'meta_whatsapp' | 'razorpay' = 'meta_whatsapp',
 ): Promise<string[]> {
   const now = deps.clock.now();
   const staleBefore = new Date(now.getTime() - 2 * 60_000);
@@ -94,7 +95,7 @@ export async function findStaleReceipts(
         .from(webhookReceipts)
         .where(
           and(
-            eq(webhookReceipts.provider, 'meta_whatsapp'),
+            eq(webhookReceipts.provider, provider),
             lt(webhookReceipts.attempts, MAX_RECEIPT_ATTEMPTS),
             or(
               and(

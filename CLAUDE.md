@@ -32,9 +32,12 @@ python3 scripts/feature-matrix/build.py       # regenerate docs/FEATURE-MATRIX.m
   `search_path`, `GRANT EXECUTE` to the calling role **before** `ALTER FUNCTION … OWNER TO
 w360_definer` (the migration role cannot grant afterwards), and give w360_definer only the table
   privileges and policies it needs.
-- **Provider traffic in tests** comes from `tests/support/graph-stand-in.ts` only; production config
-  refuses non-Meta Graph origins outside `APP_ENV=local|test`. Never add a fake provider to app code.
-- **Money** is integer minor units (`bigint`), never floats. Ledgers are append-only.
+- **Provider traffic in tests** comes from the test-only stand-ins in `tests/support/` (Graph,
+  Razorpay) only; production config refuses non-official Graph/Razorpay origins outside
+  `APP_ENV=local|test`. Never add a fake provider to app code.
+- **Money** is integer minor units (`bigint`), never floats. Ledgers are append-only; every posting
+  goes through a SECURITY DEFINER function (0004_billing), and credit comes only from a captured
+  payment fetched from Razorpay.
 - **No mock production integrations, no placeholder features, no swallowed errors, no arbitrary
   sleeps.** Fakes live only in tests. Unavailable capabilities are reported as unavailable.
 - **Statuses are honest** (`docs/FEATURE-MATRIX.md` legend). Never claim verification that did not run.

@@ -44,10 +44,21 @@ const baseSchema = z.object({
     .optional(),
   META_WEBHOOK_VERIFY_TOKEN: z.string().optional(),
   META_EMBEDDED_SIGNUP_CONFIG_ID: z.string().optional(),
-  RAZORPAY_KEY_ID: z.string().optional(),
+  RAZORPAY_KEY_ID: z
+    .string()
+    .regex(
+      /^rzp_(test|live)_[A-Za-z0-9]{1,40}$/,
+      'expected a Razorpay key id (rzp_test_… or rzp_live_…)',
+    )
+    .optional(),
   RAZORPAY_KEY_SECRET: z.string().optional(),
   RAZORPAY_WEBHOOK_SECRET: z.string().optional(),
+  /** Previous webhook secret, accepted while a rotation is in progress. */
+  RAZORPAY_WEBHOOK_SECRET_PREVIOUS: z.string().optional(),
+  /** Only after Razorpay confirms Recurring Payments (card mandates) for this merchant. */
   RAZORPAY_RECURRING_CARDS_ENABLED: bool.optional(),
+  /** API origin override, allowed only for APP_ENV=local|test (a test stand-in). */
+  RAZORPAY_API_BASE_URL: z.url().optional(),
   S3_ENDPOINT: z.string().optional(),
   S3_REGION: z.string().optional(),
   S3_BUCKET: z.string().optional(),
@@ -212,18 +223,42 @@ export function metaConfigFrom(config: BaseConfig): MetaConfig | null {
 export interface RazorpayConfig {
   keyId: string;
   keySecret: string;
-  webhookSecret: string;
+  /** Webhook secrets accepted for signatures: current first, then the previous during rotation. */
+  webhookSecrets: string[];
   recurringCardsEnabled: boolean;
+  apiBaseUrl: string;
+  /** Live keys move real money; test keys only simulate payments. */
+  mode: 'test' | 'live';
 }
+
+export const RAZORPAY_API_ORIGIN = 'https://api.razorpay.com';
 
 export function razorpayConfigFrom(config: BaseConfig): RazorpayConfig | null {
   const { RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET, RAZORPAY_WEBHOOK_SECRET } = config;
   if (!RAZORPAY_KEY_ID || !RAZORPAY_KEY_SECRET || !RAZORPAY_WEBHOOK_SECRET) return null;
+  const apiBaseUrl = (config.RAZORPAY_API_BASE_URL ?? RAZORPAY_API_ORIGIN).replace(/\/$/, '');
+  if (
+    apiBaseUrl !== RAZORPAY_API_ORIGIN &&
+    config.APP_ENV !== 'local' &&
+    config.APP_ENV !== 'test'
+  ) {
+    throw new ConfigError(
+      `RAZORPAY_API_BASE_URL must be ${RAZORPAY_API_ORIGIN} in ${config.APP_ENV}`,
+    );
+  }
+  const mode = RAZORPAY_KEY_ID.startsWith('rzp_live_') ? 'live' : 'test';
+  if (mode === 'live' && config.APP_ENV !== 'production') {
+    throw new ConfigError('Razorpay live keys are allowed only with APP_ENV=production');
+  }
   return {
     keyId: RAZORPAY_KEY_ID,
     keySecret: RAZORPAY_KEY_SECRET,
-    webhookSecret: RAZORPAY_WEBHOOK_SECRET,
+    webhookSecrets: [RAZORPAY_WEBHOOK_SECRET, config.RAZORPAY_WEBHOOK_SECRET_PREVIOUS].filter(
+      (v): v is string => Boolean(v),
+    ),
     recurringCardsEnabled: config.RAZORPAY_RECURRING_CARDS_ENABLED ?? false,
+    apiBaseUrl,
+    mode,
   };
 }
 

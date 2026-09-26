@@ -18,6 +18,7 @@ import {
 } from '@w360/ui';
 import { LiveEvents } from '@/components/inbox/live-events';
 import { ChannelActions } from '@/components/settings/channel-actions';
+import { RequireOwnDocument } from '@/components/require-own-document';
 import { WhatsAppConnect } from '@/components/settings/whatsapp-connect';
 import { formatDateTime } from '@/lib/format';
 import { getRuntime } from '@/server/runtime';
@@ -55,6 +56,7 @@ export default async function ChannelsPage({ params }: { params: Promise<{ slug:
 
   return (
     <div className="grid gap-6">
+      <RequireOwnDocument />
       <Card>
         <CardHeader>
           <div className="flex flex-wrap items-center justify-between gap-2">

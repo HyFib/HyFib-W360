@@ -40,6 +40,18 @@ const config: NextConfig = {
         source: '/c/:slug/settings/channels',
         headers: [{ key: 'Cross-Origin-Opener-Policy', value: 'same-origin-allow-popups' }],
       },
+      {
+        // Razorpay Checkout may open bank authentication popups and uses its own payment frame.
+        source: '/c/:slug/billing',
+        headers: [
+          { key: 'Cross-Origin-Opener-Policy', value: 'same-origin-allow-popups' },
+          {
+            key: 'Permissions-Policy',
+            value:
+              'camera=(), microphone=(), geolocation=(), payment=(self "https://api.razorpay.com"), usb=(), interest-cohort=()',
+          },
+        ],
+      },
     ];
   },
 };

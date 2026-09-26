@@ -58,7 +58,8 @@ audited. Never paste tokens, message content or card data into tickets or chat.
 
 - Sends/charges stay queued with bounded retries and backoff; do not bulk-retry manually.
 - Post a status notice in-app (platform banner, backlog) and to affected owners.
-- After recovery, watch for `unknown_outcome` sends (section 7) and reconcile payments (section 9).
+- After recovery, watch for `unknown_outcome` sends (section 7); open top-ups and auto-recharge
+  attempts reconcile themselves through the billing sweep (section 9).
 
 ## 6. Expired or revoked provider credentials
 
@@ -97,10 +98,46 @@ audited. Never paste tokens, message content or card data into tickets or chat.
 5. Switch connection strings (secret manager) and roll web/worker. Record timings (RPO/RTO achieved)
    in the release evidence. **A restore drill has not been performed yet.**
 
-## 9. Payment reconciliation **(phase 5)**
+## 9. Payments, credit and auto-recharge
 
-Run the reconciliation job for the window; compare provider payments/refunds/disputes with ledger
-entries; resolve mismatches with compensating entries only (never edit history); record the run.
+Credit exists only as ledger postings made by SQL functions; never insert or edit ledger rows,
+balances or top-up states by hand. Corrections are compensating postings made through a reviewed
+migration or function, recorded in the incident log.
+
+1. **Razorpay webhooks.** `/api/webhooks/razorpay` answers 200 only after the encrypted receipt is
+   committed (401 bad signature, 413 above 1 MB, 404 when Razorpay is not configured). Razorpay
+   disables a webhook after 24 h of failures: re-enable it in the Dashboard, then let the
+   reconciliation sweep catch up. Backlog and failures:
+   `SELECT status, count(*) FROM ops.webhook_receipts WHERE provider = 'razorpay' GROUP BY 1`.
+   The billing sweep re-signals stale receipts up to 12 attempts (reset as in section 4).
+   Signature failures: check `RAZORPAY_WEBHOOK_SECRET` (and `…_PREVIOUS` during rotation).
+2. **Quarantined payments** (`ops.webhook_quarantine`, provider `razorpay`, `unknown_asset`): a
+   payment for an order we did not create (another integration on the same account, or a test).
+   Confirm in the Razorpay Dashboard; never attach it to a company by guess. If a customer paid
+   outside our checkout, refund it from the Dashboard.
+3. **A customer says they paid but has no credit.** Find the top-up (`app.topups` by
+   `provider_order_id` or `receipt`). `awaiting_payment` with a captured payment in the Dashboard:
+   the next sweep credits it (checks back off from 15 min to 4 h); to hurry, redeliver the
+   `payment.captured` webhook from the Dashboard. Authorised but not captured: credit waits for
+   capture (auto-capture) — never credit manually.
+4. **Auto-recharge attempts.** `SELECT status, unknown_step, last_error, next_check_at FROM
+app.auto_recharge_attempts WHERE tenant_id = … ORDER BY created_at DESC`. `unknown` resolves
+   itself: orders are looked up by receipt `ar_<attempt id>` and debit requests by the order's
+   payments before anything is repeated. `payment_requested` for up to 72 h is normal (bank
+   pre-debit notice). A debit still `created` after a week blocks new attempts on purpose; check
+   the payment in the Dashboard and, if it is dead, ask Razorpay support before failing anything.
+   `last_error` starting `internal:` is our fault (the attempt retries hourly): fix and redeploy.
+5. **Repeated declines.** Three consecutive failed attempts turn auto-recharge off and email the
+   owners and billing members; the company turns it back on after fixing the card.
+6. **Refunds and chargebacks.** Refunds made in the Razorpay Dashboard are recorded from
+   `refund.processed`; lost disputes from `payment.dispute.lost`. Both reduce available credit and
+   may make it negative, which blocks billable services until credit is added.
+7. **Enabling card mandates.** Only after Razorpay confirms Recurring Payments (card) for the
+   merchant: set `RAZORPAY_RECURRING_CARDS_ENABLED=true` on web and worker. Turning it off again
+   stops new mandates and new auto-recharge settings; attempts already requested still complete.
+8. **Integrity check** (read-only, any time):
+   `SELECT tenant_id FROM app.ledger_accounts GROUP BY tenant_id HAVING sum(CASE WHEN normal_side =
+'debit' THEN balance_minor ELSE -balance_minor END) <> 0` must return no rows.
 
 ## 10. Compromised company (tenant) or account
 

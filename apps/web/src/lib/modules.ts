@@ -112,8 +112,7 @@ export const MODULES: ModuleDefinition[] = [
     label: 'Billing',
     path: '/billing',
     permission: 'billing.read',
-    status: 'planned',
-    reason: 'Phase 5: subscriptions, prepaid wallet and recharge.',
+    status: 'available',
   },
   {
     key: 'settings',

@@ -81,23 +81,29 @@ verification, app review, Embedded Signup configuration).
 
 - **P5-01 Plans & entitlements**: platform-admin configurable plans (no hard-coded prices), trials,
   seats, quotas, add-ons; entitlement checks in services and workers.
-- **P5-02 Ledger**: accounts, journal transactions/entries (sum zero), balance triggers, reservations,
-  releases, settlements, adjustments; INR minor units. T: property tests for balance invariants.
-- **P5-03 Manual top-up**: top-up intents, Razorpay orders (unique receipt), hosted checkout, webhook
-  processing (signature, event-id dedupe, out-of-order), authoritative fetch, credit exactly once;
-  states pending/succeeded/failed/expired/disputed/partially refunded/refunded.
-- **P5-04 Auto-recharge**: settings with caps, mandate lifecycle, state machine
-  (disabled/armed/pending/requires-customer-action/succeeded/failed/suspended/canceled), single
-  active attempt, headroom reservation incl. pending, persisted intent before provider call,
-  reconciliation before retry, cooldown and failure suspension, notifications. Feature flag off until
-  Razorpay activation (ADR-012).
-- **P5-05 Refunds, disputes, reconciliation runs, statements, receipts vs invoices.**
-- **P5-06 Mandatory financial tests** (all from the specification): concurrent spends on last funds;
-  many low-balance triggers → one recharge; repeated/out-of-order events; timeout after capture;
-  delayed success after UI timeout; decline; authentication required; mandate revocation; cap
-  exhaustion incl. in-flight; settings change during pending charge; refund vs usage race; partial
-  refunds; chargeback after spend; cancelled subscription with credit; restart recovery; cross-company
-  wallet access.
+- **P5-02 Ledger** **[built, locally verified]**: accounts, append-only journal balanced at commit,
+  balances by trigger, holds, settlements, releases (expiry sweep), refunds and chargebacks as
+  compensating postings; INR paise. Remaining: manual adjustments with dual approval, statements.
+- **P5-03 Manual top-up** **[built; Razorpay traffic simulated by a test-only stand-in]**: top-ups,
+  Razorpay orders (unique receipt), Standard Checkout, webhook processing (signature, event-id and
+  body dedupe, out-of-order), authoritative fetch, credit exactly once, reconciliation sweep, expiry,
+  refunds, lost disputes. Remaining: Razorpay sandbox verification; payment receipts (PDF/email).
+- **P5-04 Auto-recharge** **[built; externally blocked on Razorpay Recurring Payments]**: settings
+  with caps, card mandate lifecycle (₹1 authorisation refunded, token status, removal), state machine
+  with write-ahead unknown states, one active attempt, caps including pending attempts,
+  reconciliation before retry, cooldown, suspension after three failures, owner notices, feature
+  flag `RAZORPAY_RECURRING_CARDS_ENABLED`. Remaining: step-up re-authentication for payment
+  settings; "requires customer action" state if Razorpay reports AFA for a debit.
+- **P5-05 Refunds, disputes, reconciliation runs, statements, receipts vs invoices.** Refunds and
+  lost disputes are recorded from webhooks; initiating refunds from the platform console, daily
+  reconciliation reports, statements and GST invoices remain (GST treatment needs tax review).
+- **P5-06 Mandatory financial tests** **[29 integration tests + 2 e2e]**: concurrent spends on last
+  funds; many low-balance triggers → one attempt; repeated and out-of-order events; timeout after
+  capture (reconciliation); delayed success after UI timeout; decline; mandate revocation; cap
+  exhaustion incl. in-flight; settings change during a pending charge; refund vs usage race;
+  partial refunds; chargeback after spend; restart recovery; cross-company wallet access. Remaining:
+  cancelled subscription with credit (needs P5-01) and AFA-required debits (not reachable while
+  mandates are capped at ₹15,000).
 - **P5-07 Billing screens**: overview, plans, wallet & recharge, auto-recharge, payment methods,
   usage & rate card, transactions & receipts, invoices; step-up auth for sensitive changes.
 - **P5-08 Public API**: versioned REST, hashed scoped keys, rotation, quotas, idempotency keys,

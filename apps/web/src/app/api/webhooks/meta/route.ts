@@ -9,6 +9,7 @@ import {
   verifyMetaSignature,
 } from '@w360/domain';
 import { getRuntime } from '@/server/runtime';
+import { readLimitedBody } from '@/server/webhook-body';
 
 /**
  * Meta WhatsApp webhook endpoint.
@@ -20,26 +21,6 @@ import { getRuntime } from '@/server/runtime';
  * bindings only.
  */
 export const dynamic = 'force-dynamic';
-
-async function readLimited(request: Request, limit: number): Promise<Buffer | null> {
-  const declared = Number(request.headers.get('content-length') ?? '0');
-  if (Number.isFinite(declared) && declared > limit) return null;
-  if (!request.body) return Buffer.alloc(0);
-  const reader = request.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > limit) {
-      await reader.cancel();
-      return null;
-    }
-    chunks.push(value);
-  }
-  return Buffer.concat(chunks);
-}
 
 export async function GET(request: NextRequest) {
   const runtime = await getRuntime();
@@ -58,7 +39,7 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   const runtime = await getRuntime();
   if (!runtime.meta) return new Response(null, { status: 404 });
-  const body = await readLimited(request, RAW_WEBHOOK_LIMIT_BYTES);
+  const body = await readLimitedBody(request, RAW_WEBHOOK_LIMIT_BYTES);
   if (!body) return new Response(null, { status: 413 });
 
   const signature = request.headers.get('x-hub-signature-256');

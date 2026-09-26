@@ -172,27 +172,60 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 - **Not built yet:** media download to private object storage, templates and template sends,
   message search, token health checks via `debug_token`, Meta-side deregistration on disconnect.
 
-## 7. Commercial model and billing **[designed — phase 5]**
+## 7. Commercial model and billing **[built: wallet, top-ups, auto-recharge — verified against a local Razorpay stand-in only; subscriptions planned]**
 
 - **Who pays Meta:** as a Meta Tech Provider HyFib has no credit line; each customer adds its own
   payment method and Meta bills them directly (`tenants.billing_mode = 'direct_meta'`, the default).
-  The HyFib wallet funds only disclosed HyFib services (e.g. AI and automation usage).
-  `partner_billed` requires a verified partner agreement and is blocked (ADR-011).
-- **Subscriptions:** Razorpay Subscriptions for plan fees (card mandate for the plan only).
-- **Wallet:** one prepaid INR service-credit wallet per company on an append-only balanced journal
-  (`ledger_transactions`, `ledger_entries` summing to zero per transaction; balances maintained by
-  trigger; runtime roles cannot edit balances). Reservations before billable work; settlement at
-  the verified charge basis; releases; refunds and chargebacks as compensating entries.
-- **Manual top-up:** server-side top-up intent → Razorpay order (unique receipt) → hosted checkout
-  → credit exactly once on a verified `captured` payment (webhook + authoritative fetch). Browser
-  redirects never create credit.
-- **Auto-recharge:** opt-in, disabled by default, separate Razorpay Recurring Payments card mandate
-  (`max_amount ≤ ₹15,000`). Indian card mandates require an issuer pre-debit notification: a debit
-  cannot complete sooner than ~36 h after it and may take 36–72 h to authorise, so thresholds must
-  cover several days of usage and the state machine tolerates long `pending` states. One active
-  attempt per wallet (partial unique index + row lock), limit headroom reserved including pending
-  attempts, attempt persisted before the provider call, reconciliation by receipt before any retry.
-  Shown as unavailable until Razorpay confirms activation.
+  The HyFib wallet funds only disclosed HyFib services (e.g. AI and automation usage), so a Meta
+  charge can never be taken twice. `partner_billed` requires a verified partner agreement and is
+  blocked (ADR-011).
+- **Subscriptions [planned]:** Razorpay Subscriptions for plan fees (separate from the wallet).
+- **Ledger (0004_billing):** one INR wallet per company with five accounts (`wallet_available`,
+  `wallet_held`, `payment_clearing`, `service_revenue`, `dispute_losses`). `ledger_transactions` and
+  `ledger_entries` are append-only (trigger), balances are maintained by trigger from the entries,
+  and a deferred constraint trigger rejects any transaction whose debits and credits differ at
+  commit. Runtime roles have no write access to any of these tables: every posting goes through a
+  SECURITY DEFINER function (`billing_credit_topup`, `billing_record_refund`,
+  `billing_record_dispute_loss`, `billing_hold`, `billing_settle_hold`, `billing_release_hold`)
+  that enforces its business rule and is idempotent by key (`topup:<id>`, `refund:<rfnd_…>`, …).
+  Holds reserve available credit (row lock on the account, so concurrent spends cannot overdraw),
+  settle at the verified amount and release the rest; the sweeper releases expired holds. Refunds
+  and lost disputes may take available credit below zero (money owed), which blocks new holds.
+- **Manual top-up:** `topups` row (`creating`) → Razorpay order with our receipt `tu_<id>` →
+  Standard Checkout in the browser (card data stays in Razorpay's frame) → the handler's signature
+  is checked against OUR stored order id → the payment is fetched from Razorpay → only a `captured`
+  payment credits, exactly once (`billing_credit_topup` locks the top-up, checks order, amount and
+  currency). Webhooks (`payment.*`, `order.paid`) and the reconciliation sweep (backing off from 15
+  minutes to 4 hours, expiring after 24 h without a payment) reach the same function, so duplicates,
+  reordering, `failed` → `captured` and a browser that gave up all end in one credit. A top-up whose
+  order id was never stored is failed immediately: no browser can pay it.
+- **Webhooks:** `POST /api/webhooks/razorpay` verifies `X-Razorpay-Signature` over the raw body
+  (current and previous secret), stores the encrypted body keyed by `x-razorpay-event-id` and body
+  hash before answering 200, and signals `billing.event-process`. Workers resolve the company from
+  our own records (`ops.billing_resolve_order`, `ops.billing_resolve_token`), never from payload
+  ids, fetch the entity from Razorpay before acting, and quarantine unknown orders.
+- **Card mandate:** customer (`fail_existing: 0`) → mandate row → ₹1 authorisation order with
+  `token{max_amount ≤ ₹15,000, frequency: as_presented}` → Checkout with `recurring` → token fetched
+  and mapped to the mandate status; the ₹1 is refunded with an idempotency key once the mandate is
+  active. Only network, issuer, last four digits and expiry are stored. Removing the card deletes
+  the token at Razorpay.
+- **Auto-recharge:** opt-in, disabled by default, and refused unless the platform sets
+  `RAZORPAY_RECURRING_CARDS_ENABLED=true` after Razorpay activates Recurring Payments.
+  `app.billing_begin_auto_recharge` decides under a per-company advisory lock: enabled, company
+  active, mandate active, amount within the mandate, available credit below threshold, no attempt in
+  flight (also a partial unique index), no failure in the last 24 h, and daily/monthly caps counting
+  succeeded AND in-flight attempts. The attempt then moves `scheduled → order_created →
+payment_requested → succeeded`; before each provider call it is written as `unknown`
+  (`create_order` / `request_payment`), so a crash or lost response is reconciled first — orders by
+  receipt `ar_<attempt>`, debit requests by the order's payments — and a request is repeated only
+  when Razorpay shows nothing. An order accepts one captured payment and a top-up is credited once,
+  so reconciliation cannot double-charge or double-credit. Card debits complete 36–72 h after the
+  request (pre-debit notice), so the UI asks for thresholds with headroom. Declines fail the attempt
+  (audit + email to owners and billing members), three consecutive failures turn auto-recharge off,
+  and turning it off or removing the card cancels attempts that have not requested a debit.
+- **Browser security:** the billing and WhatsApp-channels pages get their own CSP allowing only
+  that provider's script and frame. Because a CSP belongs to the loaded document, links to these
+  pages are full page loads and the pages reload once if reached by client-side navigation.
 
 ## 8. Observability
 

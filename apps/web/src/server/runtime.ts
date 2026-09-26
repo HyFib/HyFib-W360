@@ -7,10 +7,12 @@ import {
   loadWebConfig,
   metaConfigFrom,
   parseTrustedProxies,
+  razorpayConfigFrom,
   systemClock,
   type Clock,
   type Logger,
   type MetaConfig,
+  type RazorpayConfig,
   type WebConfig,
 } from '@w360/core';
 import { assertRuntimeRoleSafety, createDatabase, createPool, type Database } from '@w360/db';
@@ -19,10 +21,13 @@ import {
   GraphClient,
   JobSigner,
   PgBossJobQueue,
+  RazorpayClient,
+  createBillingService,
   createInboxService,
   createOnboardingService,
   createPlatformService,
   createTenancyService,
+  type BillingService,
   type InboxService,
   type JobQueue,
   type OnboardingService,
@@ -56,6 +61,9 @@ export interface Runtime {
   /** Null until the Meta app is configured (WhatsApp connection is then reported unavailable). */
   meta: MetaConfig | null;
   onboarding: OnboardingService | null;
+  /** Null until Razorpay is configured (card payments are then reported unavailable). */
+  razorpay: RazorpayConfig | null;
+  billing: BillingService;
   events: TenantEventHub;
   shutdown(): Promise<void>;
 }
@@ -135,6 +143,20 @@ async function init(): Promise<Runtime> {
         meta,
       })
     : null;
+  const razorpay = razorpayConfigFrom(config);
+  const billing = createBillingService({
+    db,
+    clock: systemClock,
+    razorpay: razorpay
+      ? new RazorpayClient({
+          baseUrl: razorpay.apiBaseUrl,
+          keyId: razorpay.keyId,
+          keySecret: razorpay.keySecret,
+        })
+      : null,
+    razorpayConfig: razorpay,
+    notices: { outbox, appBaseUrl: config.APP_BASE_URL },
+  });
   const events = createTenantEventHub({ connectionString: config.DATABASE_URL_APP, logger });
 
   logger.info({ env: config.APP_ENV }, 'web runtime initialised');
@@ -155,6 +177,8 @@ async function init(): Promise<Runtime> {
     outbound,
     meta,
     onboarding,
+    razorpay,
+    billing,
     events,
     async shutdown() {
       await events.close();

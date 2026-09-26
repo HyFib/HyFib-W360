@@ -88,6 +88,25 @@ operate. Resolution reads hops from the right, skips trusted proxies, and stores
 address only if it is a valid IP; malformed values are dropped rather than stored. A malformed
 `TRUSTED_PROXIES` entry stops start-up.
 
+## Razorpay
+
+1. In the Razorpay Dashboard (test mode first, then live), create API keys and set
+   `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET` on web and worker. Live keys (`rzp_live_…`) are refused
+   unless `APP_ENV=production`; `RAZORPAY_API_BASE_URL` is refused outside `APP_ENV=local|test`.
+2. Add a webhook to `https://<app host>/api/webhooks/razorpay` with a random secret
+   (`RAZORPAY_WEBHOOK_SECRET`) and the events `payment.authorized`, `payment.captured`,
+   `payment.failed`, `order.paid`, `refund.processed`, `payment.dispute.lost`, `token.confirmed`,
+   `token.rejected`, `token.cancelled`, `token.paused`.
+3. Rotate the webhook secret by setting the old value as `RAZORPAY_WEBHOOK_SECRET_PREVIOUS`, the new
+   one as `RAZORPAY_WEBHOOK_SECRET`, deploying, changing it in the Dashboard, and removing the
+   previous value after 24 h (Razorpay's retry window).
+4. Auto-recharge stays unavailable until Razorpay enables Recurring Payments (card mandates) for
+   the merchant; then set `RAZORPAY_RECURRING_CARDS_ENABLED=true`.
+5. Not yet verified against the Razorpay sandbox from this build environment (razorpay.com was
+   unreachable): before launch, run a test-mode top-up, a failed payment, a refund and a card
+   mandate end to end, and confirm the Checkout CSP (script `checkout.razorpay.com`, frame and
+   connect `api.razorpay.com` / `checkout.razorpay.com`) is sufficient in all supported browsers.
+
 ## Health and probes
 
 | Probe     | Web                                     | Worker                                                |

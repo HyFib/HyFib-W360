@@ -1,5 +1,61 @@
 # Progress
 
+## 2026-09-26 — Phase 5 financial core (section 8A)
+
+Status: **implementation complete for the wallet, top-up and auto-recharge slice, production
+blocked** (Razorpay merchant activation, Recurring Payments for card mandates and a sandbox run are
+external prerequisites; no request has reached the real Razorpay API; GST treatment of service
+credit needs tax review; subscriptions are not built).
+
+### Completed
+
+- **Schema (migration 0004):** wallets, five ledger accounts per wallet, append-only ledger
+  transactions and entries (balances by trigger, deferred balance check at commit), holds, Razorpay
+  customers, card mandates (provider references and safe card metadata only), auto-recharge
+  settings and attempts (one active attempt per wallet by partial unique index), top-ups. FORCE RLS
+  everywhere, restrictive policies so runtime code can never mark a top-up paid or an attempt
+  succeeded, support reads behind `billing.read` grants, and SECURITY DEFINER functions for every
+  posting (credit, refund, dispute loss, hold/settle/release, auto-recharge decision) plus sweep
+  and provider-id resolution functions.
+- **Domain:** Razorpay client with classified results (retryable / permanent / auth / unknown) and
+  constant-time signature checks; payment application from authoritative fetches only (payments,
+  refunds, disputes, tokens); webhook receipt processing with quarantine; top-up reconciliation
+  with backoff and expiry; the auto-recharge state machine with write-ahead unknown states and
+  reconciliation by receipt / order payments; card mandate setup with the ₹1 authorisation refunded
+  by idempotency key and abandoned tokens deleted; billing service for the web; owner/billing-role
+  email notices; holds API for billable services.
+- **Worker:** `billing.event-process`, `billing.auto-recharge` (check or advance), and a per-minute
+  `ops.billing-sweep` (stale receipts, reconciliation, candidates, expired holds).
+- **Web:** `/api/webhooks/razorpay`; Billing page (balance, add credit through Standard Checkout,
+  card mandate, auto-recharge settings and attempts, payments, credit history) with the Razorpay
+  CSP, COOP and Permissions-Policy scoped to that page. Found by the new e2e test: a CSP belongs to
+  the loaded document, so provider pages (Billing, Channels) are now full page loads and reload
+  once if reached by client-side navigation.
+- **CI fix (0366b00):** WebKit e2e failed because input typed before hydration was reset by
+  react-hook-form (and a pre-hydration click would have submitted the form natively). Client forms
+  and click-handler buttons are disabled until hydration; regression test added. All 8 CI checks
+  green on `0366b00`.
+
+### Test commands and results (local, 2026-09-26, fresh database)
+
+| Command                                                      | Result                                                                                                     |
+| ------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`         | 0 problems / all files formatted / all 9 workspace packages pass                                           |
+| `pnpm test` (unit)                                           | 49 passed (adds Razorpay signatures, client classification, Razorpay config)                               |
+| `pnpm test:integration` (PostgreSQL 18.x)                    | 111 passed: billing 30, isolation 44, messaging 21, jobs/email 14, services 2                              |
+| `pnpm test:e2e --project=chromium --project=mobile-chromium` | 20 passed (10 tests × 2), including a card top-up through the billing page and the signed Razorpay webhook |
+
+Razorpay traffic in these tests comes from a test-only stand-in (`tests/support/razorpay-stand-in.ts`);
+in the e2e run Playwright replaces `checkout.js` inside the test browser only. The configuration
+refuses a non-official Razorpay origin outside `APP_ENV=local|test` and live keys outside
+production.
+
+### Known gaps (tracked in BACKLOG.md)
+
+Plans and subscriptions (P5-01), statements, receipts and GST invoices, refunds initiated from the
+platform console, step-up re-authentication for payment settings, Razorpay sandbox verification of
+every flow and of the Checkout CSP, billable services that use holds (phase 6).
+
 ## 2026-09-26 — Phase 2 messaging slice
 
 Status: **implementation complete for the phase 2 slice, production blocked** (Meta app, business
@@ -144,6 +200,9 @@ The inbox e2e test needs the test-only Meta settings in `.env` (web and worker):
 `META_APP_ID`, `META_APP_SECRET` (any random value), `META_GRAPH_API_VERSION=v26.0`,
 `META_WEBHOOK_VERIFY_TOKEN`, `META_GRAPH_BASE_URL=http://127.0.0.1:4010` and `E2E_GRAPH_PORT=4010`;
 Playwright's global setup starts the Graph stand-in on that port. Without them the test is skipped.
+The billing e2e test similarly needs `RAZORPAY_KEY_ID=rzp_test_…`, `RAZORPAY_KEY_SECRET` and
+`RAZORPAY_WEBHOOK_SECRET` (random values), `RAZORPAY_API_BASE_URL=http://127.0.0.1:4020` and
+`E2E_RAZORPAY_PORT=4020`.
 
 ### Blockers (external)
 
@@ -156,7 +215,7 @@ Playwright's global setup starts the Graph stand-in on that port. Without them t
 
 ### Next task
 
-Phase 5 financial core (mandatory section 8A): double-entry ledger, INR service-credit wallet,
-manual card top-ups through Razorpay Orders with verified capture, opt-in auto-recharge state
-machine, and the mandatory financial tests — built against Razorpay test mode fixtures while
-merchant activation is pending. In parallel, phase 2 follow-ups P2-11/P2-12 and media storage.
+Phase 3 foundations that unblock real usage: contacts with consent provenance and suppression,
+message templates (drafts, Meta submission, approval sync) and template sends, then campaigns with
+send-time consent checks. In parallel: phase 2 follow-ups (media storage, token health, quarantine
+screen) and P5-01 plans and subscriptions.
