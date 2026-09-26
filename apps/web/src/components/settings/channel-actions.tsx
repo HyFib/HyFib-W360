@@ -1,8 +1,8 @@
 'use client';
 import { useState } from 'react';
-import { Button } from '@w360/ui';
 import { ConfirmDialog } from '@w360/ui/client';
 import { disconnectChannelAction, retryChannelSetupAction } from '@/app/actions/channels';
+import { ClientButton } from '@/components/client-form';
 
 export function ChannelActions({
   slug,
@@ -29,14 +29,14 @@ export function ChannelActions({
     <div className="grid justify-items-end gap-1">
       <div className="flex flex-wrap justify-end gap-2">
         {status === 'failed' || status === 'onboarding' ? (
-          <Button
+          <ClientButton
             size="sm"
             variant="outline"
             disabled={busy}
             onClick={() => void run(() => retryChannelSetupAction(slug, channelAccountId))}
           >
             Retry setup
-          </Button>
+          </ClientButton>
         ) : null}
         <ConfirmDialog
           title={`Disconnect ${label}?`}
@@ -45,9 +45,9 @@ export function ChannelActions({
           destructive
           onConfirm={() => void run(() => disconnectChannelAction(slug, channelAccountId))}
           trigger={
-            <Button size="sm" variant="outline" disabled={busy}>
+            <ClientButton size="sm" variant="outline" disabled={busy}>
               Disconnect
-            </Button>
+            </ClientButton>
           }
         />
       </div>

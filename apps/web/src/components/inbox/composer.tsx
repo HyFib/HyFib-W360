@@ -3,6 +3,7 @@ import { useId, useRef, useState, useSyncExternalStore } from 'react';
 import { Button, Textarea } from '@w360/ui';
 import { sendReplyAction } from '@/app/actions/inbox';
 import { FormError } from '@/components/form-status';
+import { ClientForm } from '@/components/client-form';
 
 const MAX_LENGTH = 4096;
 
@@ -97,7 +98,7 @@ export function Composer({
   }
 
   return (
-    <form
+    <ClientForm
       className="grid gap-2"
       onSubmit={(event) => {
         event.preventDefault();
@@ -131,6 +132,6 @@ export function Composer({
           {busy ? 'Sending…' : 'Send'}
         </Button>
       </div>
-    </form>
+    </ClientForm>
   );
 }

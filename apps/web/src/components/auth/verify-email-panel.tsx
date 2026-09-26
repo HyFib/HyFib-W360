@@ -1,8 +1,9 @@
 'use client';
 import { useState } from 'react';
-import { Button, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
 import { authClient } from '@/lib/auth-client';
 import { FormError, FormSuccess } from '@/components/form-status';
+import { ClientButton } from '@/components/client-form';
 
 export function VerifyEmailPanel({ email }: { email: string | null }) {
   const [message, setMessage] = useState<string | null>(null);
@@ -39,9 +40,9 @@ export function VerifyEmailPanel({ email }: { email: string | null }) {
         <FormSuccess message={message} />
         <FormError message={error} />
         {email ? (
-          <Button variant="outline" onClick={resend} disabled={busy}>
+          <ClientButton variant="outline" onClick={resend} disabled={busy}>
             {busy ? 'Sending…' : 'Send a new link'}
-          </Button>
+          </ClientButton>
         ) : null}
       </CardContent>
     </Card>

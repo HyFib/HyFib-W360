@@ -1,9 +1,10 @@
 'use client';
 import { useRouter } from 'next/navigation';
 import { useId, useState } from 'react';
-import { Button, Select } from '@w360/ui';
+import { Select } from '@w360/ui';
 import { assignConversationAction, setConversationStatusAction } from '@/app/actions/inbox';
 import { FormError } from '@/components/form-status';
+import { ClientButton } from '@/components/client-form';
 
 export interface AssignableMember {
   membershipId: string;
@@ -79,22 +80,27 @@ export function ConversationControls({
             </Select>
           </>
         ) : assignedMembershipId === null ? (
-          <Button
+          <ClientButton
             size="sm"
             variant="outline"
             disabled={busy}
             onClick={() => void assign(myMembershipId)}
           >
             Assign to me
-          </Button>
+          </ClientButton>
         ) : assignedMembershipId === myMembershipId ? (
-          <Button size="sm" variant="outline" disabled={busy} onClick={() => void assign(null)}>
+          <ClientButton
+            size="sm"
+            variant="outline"
+            disabled={busy}
+            onClick={() => void assign(null)}
+          >
             Release
-          </Button>
+          </ClientButton>
         ) : null}
         {canReply ? (
           status === 'resolved' ? (
-            <Button
+            <ClientButton
               size="sm"
               variant="outline"
               disabled={busy}
@@ -109,9 +115,9 @@ export function ConversationControls({
               }
             >
               Reopen
-            </Button>
+            </ClientButton>
           ) : (
-            <Button
+            <ClientButton
               size="sm"
               disabled={busy}
               onClick={() =>
@@ -125,7 +131,7 @@ export function ConversationControls({
               }
             >
               Resolve
-            </Button>
+            </ClientButton>
           )
         ) : null}
       </div>

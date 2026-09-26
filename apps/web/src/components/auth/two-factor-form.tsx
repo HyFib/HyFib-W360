@@ -14,6 +14,7 @@ import {
 } from '@w360/ui';
 import { authClient, safeNextPath } from '@/lib/auth-client';
 import { FormError } from '@/components/form-status';
+import { ClientButton, ClientForm } from '@/components/client-form';
 
 export function TwoFactorForm({ next }: { next: string | null }) {
   const [mode, setMode] = useState<'totp' | 'backup'>('totp');
@@ -56,7 +57,7 @@ export function TwoFactorForm({ next }: { next: string | null }) {
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <form onSubmit={submit} className="grid gap-4" noValidate>
+        <ClientForm onSubmit={submit} className="grid gap-4">
           <FormError message={error} />
           <Field id="code" label={mode === 'totp' ? 'Authentication code' : 'Backup code'}>
             {(aria) => (
@@ -84,7 +85,7 @@ export function TwoFactorForm({ next }: { next: string | null }) {
           <Button type="submit" disabled={busy || code.length < 6}>
             {busy ? 'Verifying…' : 'Verify'}
           </Button>
-          <Button
+          <ClientButton
             variant="link"
             onClick={() => {
               setMode(mode === 'totp' ? 'backup' : 'totp');
@@ -93,8 +94,8 @@ export function TwoFactorForm({ next }: { next: string | null }) {
             }}
           >
             {mode === 'totp' ? 'Use a backup code instead' : 'Use an authenticator code instead'}
-          </Button>
-        </form>
+          </ClientButton>
+        </ClientForm>
       </CardContent>
     </Card>
   );

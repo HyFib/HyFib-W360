@@ -17,6 +17,7 @@ import {
 } from '@w360/ui';
 import { createCompanyAction } from '@/app/actions/tenancy';
 import { FormError } from '@/components/form-status';
+import { ClientForm } from '@/components/client-form';
 
 type Values = z.input<typeof createCompanySchema>;
 
@@ -71,7 +72,7 @@ export function CreateCompanyForm({
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <form onSubmit={onSubmit} className="grid gap-4" noValidate>
+        <ClientForm onSubmit={onSubmit} className="grid gap-4">
           <FormError message={error?.message} reference={error?.reference} />
           <Field id="name" label="Company name" error={form.formState.errors.name?.message}>
             {(aria) => <Input autoComplete="organization" {...aria} {...nameField} />}
@@ -105,7 +106,7 @@ export function CreateCompanyForm({
           <Button type="submit" disabled={form.formState.isSubmitting}>
             {form.formState.isSubmitting ? 'Creating…' : 'Create company'}
           </Button>
-        </form>
+        </ClientForm>
       </CardContent>
     </Card>
   );

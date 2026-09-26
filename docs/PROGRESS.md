@@ -39,14 +39,15 @@ has been exchanged with the real WhatsApp Cloud API).
 
 ### Test commands and results (local, 2026-09-26, fresh database)
 
-| Command                                                      | Result                                                                                         |
-| ------------------------------------------------------------ | ---------------------------------------------------------------------------------------------- |
-| `pnpm lint` / `pnpm format:check`                            | 0 problems / all files formatted                                                               |
-| `pnpm typecheck`                                             | all 9 workspace packages pass                                                                  |
-| `pnpm test` (unit)                                           | 39 passed (adds config safety, IP parsing)                                                     |
-| `pnpm test:integration` (PostgreSQL 18.x)                    | 81 passed: isolation 44, messaging 21, jobs/email 14 (+2 service tests)                        |
-| `pnpm test:e2e --project=chromium --project=mobile-chromium` | 14 passed (7 tests × 2), including live inbox: signed webhook → SSE → reply → delivery receipt |
-| Webhook smoke (`curl`)                                       | handshake 200 with challenge; wrong verify token 403; unsigned 401; 5 MB body 413              |
+| Command                                                                 | Result                                                                                                               |
+| ----------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check`                                       | 0 problems / all files formatted                                                                                     |
+| `pnpm typecheck`                                                        | all 9 workspace packages pass                                                                                        |
+| `pnpm test` (unit)                                                      | 39 passed (adds config safety, IP parsing)                                                                           |
+| `pnpm test:integration` (PostgreSQL 18.x)                               | 81 passed: isolation 44, messaging 21, jobs/email 14 (+2 service tests)                                              |
+| `pnpm test:e2e --project=chromium --project=mobile-chromium`            | 16 passed (8 tests × 2): live inbox (signed webhook → SSE → reply → delivery receipt), forms disabled until hydrated |
+| Webhook smoke (`curl`)                                                  | handshake 200 with challenge; wrong verify token 403; unsigned 401; 5 MB body 413                                    |
+| `docker build` web and worker; Trivy 0.74.0 (HIGH/CRITICAL, fixed only) | both images build; no findings                                                                                       |
 
 Meta traffic in these tests comes from a test-only Graph API stand-in (`tests/support/`), which the
 configuration refuses outside `APP_ENV=local|test`. Firefox and WebKit run in CI.

@@ -1,9 +1,10 @@
 'use client';
 import { useState } from 'react';
 import QRCode from 'qrcode';
-import { Alert, Button, Field, Input } from '@w360/ui';
+import { Alert, Field, Input } from '@w360/ui';
 import { authClient } from '@/lib/auth-client';
 import { FormError, FormSuccess } from '@/components/form-status';
+import { ClientButton } from '@/components/client-form';
 
 type Step =
   | { kind: 'idle' }
@@ -105,12 +106,12 @@ export function TwoFactorSettings({ enabled }: { enabled: boolean }) {
             )}
           </Field>
           <div>
-            <Button
+            <ClientButton
               onClick={() => void confirmEnrolment(step.backupCodes)}
               disabled={busy || code.length < 6}
             >
               Turn on two-factor
-            </Button>
+            </ClientButton>
           </div>
         </div>
       ) : step.kind === 'codes' ? (
@@ -126,9 +127,9 @@ export function TwoFactorSettings({ enabled }: { enabled: boolean }) {
             ))}
           </ul>
           <div>
-            <Button variant="outline" onClick={() => window.location.reload()}>
+            <ClientButton variant="outline" onClick={() => window.location.reload()}>
               Done
-            </Button>
+            </ClientButton>
           </div>
         </div>
       ) : (
@@ -153,25 +154,25 @@ export function TwoFactorSettings({ enabled }: { enabled: boolean }) {
           <div className="flex flex-wrap gap-2">
             {enabled ? (
               <>
-                <Button
+                <ClientButton
                   variant="outline"
                   onClick={() => void regenerate()}
                   disabled={busy || !password}
                 >
                   New backup codes
-                </Button>
-                <Button
+                </ClientButton>
+                <ClientButton
                   variant="destructive"
                   onClick={() => void disable()}
                   disabled={busy || !password}
                 >
                   Turn off
-                </Button>
+                </ClientButton>
               </>
             ) : (
-              <Button onClick={() => void startEnrolment()} disabled={busy || !password}>
+              <ClientButton onClick={() => void startEnrolment()} disabled={busy || !password}>
                 Set up two-factor
-              </Button>
+              </ClientButton>
             )}
           </div>
         </div>

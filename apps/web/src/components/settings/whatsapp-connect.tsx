@@ -1,8 +1,8 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
-import { Button } from '@w360/ui';
 import { completeWhatsAppSignupAction, startWhatsAppSignupAction } from '@/app/actions/channels';
 import { FormError, FormSuccess } from '@/components/form-status';
+import { ClientButton } from '@/components/client-form';
 
 interface FacebookSdk {
   init(options: {
@@ -204,7 +204,10 @@ export function WhatsAppConnect({
   return (
     <div className="grid gap-3">
       <div>
-        <Button onClick={() => void connect()} disabled={phase !== 'idle' && phase !== 'done'}>
+        <ClientButton
+          onClick={() => void connect()}
+          disabled={phase !== 'idle' && phase !== 'done'}
+        >
           {phase === 'starting'
             ? 'Preparing…'
             : phase === 'waiting'
@@ -212,7 +215,7 @@ export function WhatsAppConnect({
               : phase === 'completing'
                 ? 'Verifying…'
                 : label}
-        </Button>
+        </ClientButton>
       </div>
       <div aria-live="polite" className="grid gap-2">
         <FormError message={error} />

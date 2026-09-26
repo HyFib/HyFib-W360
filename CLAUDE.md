@@ -41,6 +41,8 @@ w360_definer` (the migration role cannot grant afterwards), and give w360_define
 - **Next.js 16 differs from older versions:** read `apps/web/node_modules/next/dist/docs/` before
   using an API. Pages re-check authorization themselves (layouts are not re-run on navigation).
 - Pages/actions must call domain services; business logic stays out of React components.
+- Forms submitted by a browser handler use `ClientForm`, and click-handler buttons use
+  `ClientButton` (`apps/web/src/components/client-form.tsx`): both stay disabled until hydration.
 - Update `docs/PROGRESS.md` (and the matrix/backlog when status changes) at the end of each slice.
 
 ## Where things live

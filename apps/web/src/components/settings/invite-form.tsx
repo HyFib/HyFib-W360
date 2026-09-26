@@ -13,6 +13,7 @@ import {
 import { inviteMemberAction } from '@/app/actions/tenancy';
 import { FormError, FormSuccess } from '@/components/form-status';
 import { RolePicker, type RoleOption } from './role-picker';
+import { ClientForm } from '@/components/client-form';
 
 export function InviteForm({ slug, roleOptions }: { slug: string; roleOptions: RoleOption[] }) {
   const [email, setEmail] = useState('');
@@ -49,7 +50,7 @@ export function InviteForm({ slug, roleOptions }: { slug: string; roleOptions: R
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <form onSubmit={submit} className="grid gap-4 sm:max-w-lg" noValidate>
+        <ClientForm onSubmit={submit} className="grid gap-4 sm:max-w-lg">
           <FormError message={error} />
           <FormSuccess message={sent} />
           <Field id="invite-email" label="Email address" error={fieldErrors.email}>
@@ -80,7 +81,7 @@ export function InviteForm({ slug, roleOptions }: { slug: string; roleOptions: R
               {busy ? 'Sending…' : 'Send invitation'}
             </Button>
           </div>
-        </form>
+        </ClientForm>
       </CardContent>
     </Card>
   );

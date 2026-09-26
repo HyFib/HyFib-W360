@@ -3,6 +3,7 @@ import { useId, useState } from 'react';
 import { Button, Textarea } from '@w360/ui';
 import { addNoteAction } from '@/app/actions/inbox';
 import { FormError } from '@/components/form-status';
+import { ClientForm } from '@/components/client-form';
 
 /** Internal notes are visible to the team only; they are never sent to the customer. */
 export function NoteForm({ slug, conversationId }: { slug: string; conversationId: string }) {
@@ -11,7 +12,7 @@ export function NoteForm({ slug, conversationId }: { slug: string; conversationI
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   return (
-    <form
+    <ClientForm
       className="grid gap-2"
       onSubmit={async (event) => {
         event.preventDefault();
@@ -41,6 +42,6 @@ export function NoteForm({ slug, conversationId }: { slug: string; conversationI
           Add note
         </Button>
       </div>
-    </form>
+    </ClientForm>
   );
 }

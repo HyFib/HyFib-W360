@@ -17,6 +17,7 @@ import {
 } from '@w360/ui';
 import { authClient, safeNextPath } from '@/lib/auth-client';
 import { FormError, FormSuccess } from '@/components/form-status';
+import { ClientForm } from '@/components/client-form';
 
 type Values = z.input<typeof signInSchema>;
 
@@ -59,7 +60,7 @@ export function SignInForm({ next }: { next: string | null }) {
         <CardDescription>Welcome back. Sign in to your HyFib W360 workspace.</CardDescription>
       </CardHeader>
       <CardContent>
-        <form onSubmit={onSubmit} className="grid gap-4" noValidate>
+        <ClientForm onSubmit={onSubmit} className="grid gap-4">
           <FormError message={error} />
           <FormSuccess message={notice} />
           <Field id="email" label="Email" error={form.formState.errors.email?.message}>
@@ -94,7 +95,7 @@ export function SignInForm({ next }: { next: string | null }) {
               Create account
             </Link>
           </div>
-        </form>
+        </ClientForm>
       </CardContent>
     </Card>
   );

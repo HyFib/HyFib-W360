@@ -17,6 +17,7 @@ import {
 } from '@w360/ui';
 import { updateCompanySettingsAction } from '@/app/actions/tenancy';
 import { FormError, FormSuccess } from '@/components/form-status';
+import { ClientForm } from '@/components/client-form';
 
 type Values = z.input<typeof updateCompanySettingsSchema>;
 
@@ -54,7 +55,7 @@ export function GeneralSettingsForm({
 
   return (
     <Card>
-      <form onSubmit={onSubmit} noValidate>
+      <ClientForm onSubmit={onSubmit}>
         <CardHeader>
           <CardTitle>Company profile</CardTitle>
         </CardHeader>
@@ -100,7 +101,7 @@ export function GeneralSettingsForm({
             </Button>
           </CardFooter>
         ) : null}
-      </form>
+      </ClientForm>
     </Card>
   );
 }

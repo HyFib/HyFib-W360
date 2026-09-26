@@ -1,8 +1,8 @@
 'use client';
 import { useState } from 'react';
-import { Button } from '@w360/ui';
 import { acceptInvitationAction } from '@/app/actions/tenancy';
 import { FormError } from '@/components/form-status';
+import { ClientButton } from '@/components/client-form';
 
 export function AcceptInvitationButton({ token }: { token: string }) {
   const [error, setError] = useState<string | null>(null);
@@ -22,9 +22,9 @@ export function AcceptInvitationButton({ token }: { token: string }) {
   return (
     <div className="grid gap-3">
       <FormError message={error} />
-      <Button onClick={accept} disabled={busy}>
+      <ClientButton onClick={accept} disabled={busy}>
         {busy ? 'Joining…' : 'Accept invitation'}
-      </Button>
+      </ClientButton>
     </div>
   );
 }

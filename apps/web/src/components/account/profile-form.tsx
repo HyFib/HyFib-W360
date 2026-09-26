@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { Button, Field, Input } from '@w360/ui';
 import { authClient } from '@/lib/auth-client';
 import { FormError, FormSuccess } from '@/components/form-status';
+import { ClientForm } from '@/components/client-form';
 
 export function ProfileForm({ name }: { name: string }) {
   const [value, setValue] = useState(name);
@@ -22,7 +23,7 @@ export function ProfileForm({ name }: { name: string }) {
     else setSaved(true);
   }
   return (
-    <form onSubmit={save} className="grid gap-3 sm:max-w-sm" noValidate>
+    <ClientForm onSubmit={save} className="grid gap-3 sm:max-w-sm">
       <FormError message={error} />
       <FormSuccess message={saved ? 'Name updated.' : null} />
       <Field id="profile-name" label="Name">
@@ -40,7 +41,7 @@ export function ProfileForm({ name }: { name: string }) {
           Save
         </Button>
       </div>
-    </form>
+    </ClientForm>
   );
 }
 
@@ -70,7 +71,7 @@ export function ChangePasswordForm() {
     }
   }
   return (
-    <form onSubmit={save} className="grid gap-3 sm:max-w-sm" noValidate>
+    <ClientForm onSubmit={save} className="grid gap-3 sm:max-w-sm">
       <FormError message={error} />
       <FormSuccess message={saved ? 'Password changed. Other sessions were signed out.' : null} />
       <Field id="current-password" label="Current password">
@@ -100,6 +101,6 @@ export function ChangePasswordForm() {
           Change password
         </Button>
       </div>
-    </form>
+    </ClientForm>
   );
 }

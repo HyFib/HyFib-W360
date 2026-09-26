@@ -17,6 +17,7 @@ import {
 } from '@w360/ui';
 import { authClient } from '@/lib/auth-client';
 import { FormError, FormSuccess } from '@/components/form-status';
+import { ClientForm } from '@/components/client-form';
 
 const schema = z
   .object({ password: passwordSchema, confirm: z.string() })
@@ -63,7 +64,7 @@ export function ResetPasswordForm({ token, invalid }: { token: string | null; in
             </Link>
           </>
         ) : (
-          <form onSubmit={onSubmit} className="grid gap-4" noValidate>
+          <ClientForm onSubmit={onSubmit} className="grid gap-4">
             <FormError message={error} />
             <Field
               id="password"
@@ -97,7 +98,7 @@ export function ResetPasswordForm({ token, invalid }: { token: string | null; in
             <Button type="submit" disabled={form.formState.isSubmitting}>
               Update password
             </Button>
-          </form>
+          </ClientForm>
         )}
       </CardContent>
     </Card>

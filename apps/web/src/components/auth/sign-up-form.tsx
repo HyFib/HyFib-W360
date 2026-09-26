@@ -17,6 +17,7 @@ import {
 } from '@w360/ui';
 import { authClient, safeNextPath } from '@/lib/auth-client';
 import { FormError, FormSuccess } from '@/components/form-status';
+import { ClientForm } from '@/components/client-form';
 
 type Values = z.input<typeof signUpSchema>;
 
@@ -73,7 +74,7 @@ export function SignUpForm({ next }: { next: string | null }) {
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <form onSubmit={onSubmit} className="grid gap-4" noValidate>
+        <ClientForm onSubmit={onSubmit} className="grid gap-4">
           <FormError message={error} />
           <Field id="name" label="Your name" error={form.formState.errors.name?.message}>
             {(aria) => <Input autoComplete="name" {...aria} {...form.register('name')} />}
@@ -110,7 +111,7 @@ export function SignUpForm({ next }: { next: string | null }) {
               Sign in
             </Link>
           </p>
-        </form>
+        </ClientForm>
       </CardContent>
     </Card>
   );

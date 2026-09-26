@@ -1,6 +1,5 @@
 'use client';
 import { useState } from 'react';
-import { Button } from '@w360/ui';
 import { ConfirmDialog } from '@w360/ui/client';
 import {
   changeMemberRolesAction,
@@ -9,6 +8,7 @@ import {
   setMemberStatusAction,
 } from '@/app/actions/tenancy';
 import { RolePicker, type RoleOption } from './role-picker';
+import { ClientButton } from '@/components/client-form';
 
 function useActionState() {
   const [error, setError] = useState<string | null>(null);
@@ -61,7 +61,7 @@ export function MemberActions({
             onChange={setDraft}
           />
           <div className="flex justify-end gap-2">
-            <Button
+            <ClientButton
               size="sm"
               variant="outline"
               onClick={() => {
@@ -70,8 +70,8 @@ export function MemberActions({
               }}
             >
               Cancel
-            </Button>
-            <Button
+            </ClientButton>
+            <ClientButton
               size="sm"
               disabled={busy || draft.length === 0}
               onClick={async () => {
@@ -80,22 +80,22 @@ export function MemberActions({
               }}
             >
               Save roles
-            </Button>
+            </ClientButton>
           </div>
         </div>
       ) : (
         <div className="flex flex-wrap justify-end gap-2">
           {!isSelf || roles.includes('owner') ? (
-            <Button size="sm" variant="outline" onClick={() => setEditing(true)}>
+            <ClientButton size="sm" variant="outline" onClick={() => setEditing(true)}>
               Edit roles
-            </Button>
+            </ClientButton>
           ) : null}
           {!isSelf && status === 'active' ? (
             <ConfirmDialog
               trigger={
-                <Button size="sm" variant="outline">
+                <ClientButton size="sm" variant="outline">
                   Suspend
-                </Button>
+                </ClientButton>
               }
               title={`Suspend ${name}?`}
               description="They lose access immediately, including open sessions for this company. You can restore access later."
@@ -107,7 +107,7 @@ export function MemberActions({
             />
           ) : null}
           {!isSelf && status === 'suspended' ? (
-            <Button
+            <ClientButton
               size="sm"
               variant="outline"
               disabled={busy}
@@ -116,14 +116,14 @@ export function MemberActions({
               }
             >
               Restore
-            </Button>
+            </ClientButton>
           ) : null}
           {!isSelf ? (
             <ConfirmDialog
               trigger={
-                <Button size="sm" variant="ghost" className="text-destructive">
+                <ClientButton size="sm" variant="ghost" className="text-destructive">
                   Remove
-                </Button>
+                </ClientButton>
               }
               title={`Remove ${name}?`}
               description="They lose access to this company. To add them back you will need to send a new invitation."
@@ -158,19 +158,19 @@ export function InvitationActions({
   return (
     <div className="grid justify-items-end gap-1">
       <div className="flex gap-2">
-        <Button
+        <ClientButton
           size="sm"
           variant="outline"
           disabled={busy}
           onClick={() => void run(() => resendInvitationAction(slug, invitationId))}
         >
           Resend
-        </Button>
+        </ClientButton>
         <ConfirmDialog
           trigger={
-            <Button size="sm" variant="ghost" className="text-destructive">
+            <ClientButton size="sm" variant="ghost" className="text-destructive">
               Revoke
-            </Button>
+            </ClientButton>
           }
           title={`Revoke invitation for ${email}?`}
           description="The invitation link stops working immediately."

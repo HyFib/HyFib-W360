@@ -16,6 +16,7 @@ import {
 } from '@w360/ui';
 import { authClient } from '@/lib/auth-client';
 import { FormError, FormSuccess } from '@/components/form-status';
+import { ClientForm } from '@/components/client-form';
 
 const schema = z.object({ email: emailSchema });
 
@@ -52,7 +53,7 @@ export function ForgotPasswordForm() {
         {sent ? (
           <FormSuccess message="If an account exists for that address, a reset link is on its way. It expires in 1 hour." />
         ) : (
-          <form onSubmit={onSubmit} className="grid gap-4" noValidate>
+          <ClientForm onSubmit={onSubmit} className="grid gap-4">
             <FormError message={error} />
             <Field id="email" label="Email" error={form.formState.errors.email?.message}>
               {(aria) => (
@@ -62,7 +63,7 @@ export function ForgotPasswordForm() {
             <Button type="submit" disabled={form.formState.isSubmitting}>
               Send reset link
             </Button>
-          </form>
+          </ClientForm>
         )}
       </CardContent>
     </Card>

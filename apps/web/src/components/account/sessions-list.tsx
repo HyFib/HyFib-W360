@@ -1,9 +1,10 @@
 'use client';
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
-import { Badge, Button } from '@w360/ui';
+import { Badge } from '@w360/ui';
 import { authClient } from '@/lib/auth-client';
 import { FormError } from '@/components/form-status';
+import { ClientButton } from '@/components/client-form';
 
 export interface SessionRow {
   id: string;
@@ -56,18 +57,18 @@ export function SessionsList({
             {s.id === currentSessionId ? (
               <Badge tone="info">This device</Badge>
             ) : (
-              <Button size="sm" variant="outline" onClick={() => void revoke(s.token)}>
+              <ClientButton size="sm" variant="outline" onClick={() => void revoke(s.token)}>
                 Sign out
-              </Button>
+              </ClientButton>
             )}
           </li>
         ))}
       </ul>
       {sessions.length > 1 ? (
         <div>
-          <Button variant="outline" onClick={() => void revokeOthers()}>
+          <ClientButton variant="outline" onClick={() => void revokeOthers()}>
             Sign out all other sessions
-          </Button>
+          </ClientButton>
         </div>
       ) : null}
     </div>

@@ -8,6 +8,7 @@ import {
   setTenantStatusAction,
 } from '@/app/actions/platform';
 import { FormError, FormSuccess } from '@/components/form-status';
+import { ClientButton, ClientForm } from '@/components/client-form';
 
 const SCOPES = [
   { value: 'tenant.read', label: 'Company profile' },
@@ -38,7 +39,7 @@ export function TenantStatusForm({ tenantId, status }: { tenantId: string; statu
       </p>
     );
   return (
-    <form onSubmit={submit} className="grid gap-3" noValidate>
+    <ClientForm onSubmit={submit} className="grid gap-3">
       <FormError message={error} />
       <Field
         id="status-reason"
@@ -68,7 +69,7 @@ export function TenantStatusForm({ tenantId, status }: { tenantId: string; statu
           {target === 'suspended' ? 'Suspend company' : 'Reactivate company'}
         </Button>
       </div>
-    </form>
+    </ClientForm>
   );
 }
 
@@ -92,7 +93,7 @@ export function SupportGrantForm({ tenantId }: { tenantId: string }) {
     else setDone(`Access granted until ${new Date(result.data.expiresAt).toUTCString()}.`);
   }
   return (
-    <form onSubmit={submit} className="grid gap-3" noValidate>
+    <ClientForm onSubmit={submit} className="grid gap-3">
       <FormError message={error} />
       <FormSuccess message={done} />
       <Field id="grant-reason" label="Reason (ticket reference and purpose; shown to the company)">
@@ -139,7 +140,7 @@ export function SupportGrantForm({ tenantId }: { tenantId: string }) {
           Grant time-boxed access
         </Button>
       </div>
-    </form>
+    </ClientForm>
   );
 }
 
@@ -147,7 +148,7 @@ export function RevokeGrantButton({ grantId }: { grantId: string }) {
   const [error, setError] = useState<string | null>(null);
   return (
     <span className="inline-grid gap-1">
-      <Button
+      <ClientButton
         size="sm"
         variant="outline"
         onClick={async () => {
@@ -156,7 +157,7 @@ export function RevokeGrantButton({ grantId }: { grantId: string }) {
         }}
       >
         Revoke
-      </Button>
+      </ClientButton>
       {error ? (
         <span role="alert" className="text-xs text-destructive">
           {error}
@@ -184,7 +185,7 @@ export function MfaResetForm({ userId, name }: { userId: string; name: string })
       />
     );
   return (
-    <form onSubmit={submit} className="grid gap-2" noValidate>
+    <ClientForm onSubmit={submit} className="grid gap-2">
       <FormError message={error} />
       <Field
         id={`mfa-${userId}`}
@@ -204,6 +205,6 @@ export function MfaResetForm({ userId, name }: { userId: string; name: string })
           Reset two-factor
         </Button>
       </div>
-    </form>
+    </ClientForm>
   );
 }

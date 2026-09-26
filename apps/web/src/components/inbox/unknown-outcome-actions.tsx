@@ -1,8 +1,8 @@
 'use client';
 import { useState } from 'react';
-import { Button } from '@w360/ui';
 import { ConfirmDialog } from '@w360/ui/client';
 import { resolveUnknownOutcomeAction } from '@/app/actions/inbox';
+import { ClientButton } from '@/components/client-form';
 
 /**
  * For a send whose outcome is unknown (the request may have reached WhatsApp, but no answer came
@@ -22,23 +22,23 @@ export function UnknownOutcomeActions({ slug, messageId }: { slug: string; messa
     <div className="mt-2 grid gap-1 text-xs">
       <p>We could not confirm whether WhatsApp received this message.</p>
       <div className="flex flex-wrap gap-2">
-        <Button
+        <ClientButton
           size="sm"
           variant="outline"
           disabled={busy}
           onClick={() => void decide('mark_sent')}
         >
           It arrived
-        </Button>
+        </ClientButton>
         <ConfirmDialog
           title="Send this message again?"
           description="If the first attempt did reach WhatsApp, the customer will receive the message twice."
           confirmLabel="Send again"
           onConfirm={() => void decide('resend')}
           trigger={
-            <Button size="sm" variant="outline" disabled={busy}>
+            <ClientButton size="sm" variant="outline" disabled={busy}>
               Send again
-            </Button>
+            </ClientButton>
           }
         />
       </div>

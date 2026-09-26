@@ -1,8 +1,9 @@
 'use client';
 import { useState } from 'react';
-import { Button, Checkbox, Label } from '@w360/ui';
+import { Checkbox, Label } from '@w360/ui';
 import { updateCompanySecurityAction } from '@/app/actions/tenancy';
 import { FormError, FormSuccess } from '@/components/form-status';
+import { ClientButton } from '@/components/client-form';
 
 export function CompanySecurityForm({
   slug,
@@ -50,9 +51,9 @@ export function CompanySecurityForm({
       </div>
       {canEdit ? (
         <div>
-          <Button onClick={save} disabled={busy || value === requireMfaAllMembers}>
+          <ClientButton onClick={save} disabled={busy || value === requireMfaAllMembers}>
             Save
-          </Button>
+          </ClientButton>
         </div>
       ) : null}
     </div>
