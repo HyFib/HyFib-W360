@@ -1,9 +1,11 @@
 import 'server-only';
+import type { BlockList } from 'node:net';
 import { PgBoss } from 'pg-boss';
 import {
   Keyring,
   createLogger,
   loadWebConfig,
+  parseTrustedProxies,
   systemClock,
   type Clock,
   type Logger,
@@ -31,6 +33,8 @@ export interface Runtime {
   config: WebConfig;
   logger: Logger;
   clock: Clock;
+  /** Our own load balancers (TRUSTED_PROXIES), used to resolve client addresses for audit. */
+  trustedProxies: BlockList | null;
   keyring: Keyring;
   db: Database;
   jobs: JobQueue;
@@ -44,6 +48,7 @@ export interface Runtime {
 async function init(): Promise<Runtime> {
   const config = loadWebConfig();
   const logger = createLogger({ name: 'w360-web', level: config.LOG_LEVEL });
+  const trustedProxies = parseTrustedProxies(config.TRUSTED_PROXIES);
   const keyring = Keyring.fromEnv(
     config.W360_ENCRYPTION_KEYS,
     config.W360_ENCRYPTION_PRIMARY_KEY_ID,
@@ -108,6 +113,7 @@ async function init(): Promise<Runtime> {
     config,
     logger,
     clock: systemClock,
+    trustedProxies,
     keyring,
     db,
     jobs,

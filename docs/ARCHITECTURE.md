@@ -52,13 +52,13 @@ Business logic never lives in React components.
 
 ### 3.2 Database roles
 
-| Role            | Purpose                                     | Key properties                                                                                          |
-| --------------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `w360_owner`    | Migrations only                             | Owns schemas/tables. Not used by web/worker. Subject to FORCE RLS (no owner policies).                  |
-| `w360_app`      | Web + worker tenant work                    | NOSUPERUSER, NOBYPASSRLS, owns nothing, column-level grants on sensitive columns.                       |
-| `w360_auth`     | Authentication library                      | Identity tables only; no access to `app`.                                                               |
-| `w360_platform` | Platform administration                     | NOBYPASSRLS; explicit `TO w360_platform` policies; customer content only through active support grants. |
-| `w360_definer`  | NOLOGIN owner of SECURITY DEFINER functions | Specific policies for company creation, invitation acceptance, last-owner guard, account recovery.      |
+| Role            | Purpose                                     | Key properties                                                                                                                                                                       |
+| --------------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `w360_owner`    | Migrations only                             | Owns schemas/tables. Not used by web/worker. Subject to FORCE RLS (no owner policies).                                                                                               |
+| `w360_app`      | Web + worker tenant work                    | NOSUPERUSER, NOBYPASSRLS, owns nothing, column-level grants on sensitive columns.                                                                                                    |
+| `w360_auth`     | Authentication library                      | Identity tables only; no access to `app`.                                                                                                                                            |
+| `w360_platform` | Platform administration                     | NOBYPASSRLS; explicit `TO w360_platform` policies; customer data (incl. member directories) only through active support grants; seat counts and owners via narrow definer functions. |
+| `w360_definer`  | NOLOGIN owner of SECURITY DEFINER functions | Specific policies for company creation, invitation acceptance, last-owner guard, account recovery.                                                                                   |
 
 Web and worker run `checkRuntimeRoleSafety()` at start-up and refuse to start in production if the
 role is a superuser, has BYPASSRLS or owns protected tables.
@@ -94,8 +94,13 @@ companies (ADR-006).
 ### 3.5 Structural rules enforced by tests
 
 `tests/integration/tenant-isolation.test.ts` fails if any `app` table with `tenant_id` lacks FORCE RLS
-or a NOT NULL tenant id, if any SECURITY DEFINER function lacks a pinned `search_path`, or if runtime
-roles gain dangerous attributes.
+or a NOT NULL tenant id, if any SECURITY DEFINER function lacks a pinned `search_path`, if any `app`
+or `ops` function is executable by PUBLIC, or if runtime roles gain dangerous attributes.
+
+Function privileges: the migration role's global default revokes EXECUTE from PUBLIC (a per-schema
+default cannot). Definer functions are granted to their callers **before** ownership moves to
+`w360_definer`; the migration role can `SET ROLE w360_definer` but does not inherit its privileges,
+so grants issued after the transfer would silently grant nothing (migration 0002 repaired 0001).
 
 ## 4. Durable jobs **[built]**
 

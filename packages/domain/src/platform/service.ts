@@ -7,7 +7,6 @@ import {
   eq,
   gt,
   isNull,
-  memberships,
   platformAdmins,
   platformAuditEvents,
   sql,
@@ -17,6 +16,7 @@ import {
   auditEvents,
   SUPPORT_SCOPES,
   type Database,
+  type Tx,
 } from '@w360/db';
 import type { PlatformDatabase } from '@w360/db/platform';
 
@@ -66,6 +66,31 @@ function parse<T extends z.ZodType>(schema: T, input: unknown): z.infer<T> {
   return result.data;
 }
 
+const tenantSummaryColumns = {
+  id: tenants.id,
+  slug: tenants.slug,
+  name: tenants.name,
+  status: tenants.status,
+  statusReason: tenants.statusReason,
+  billingMode: tenants.billingMode,
+  createdAt: tenants.createdAt,
+};
+
+/** Adds active seat counts through the platform's aggregate-only definer function. */
+async function withActiveMemberCounts<T extends { id: string }>(
+  tx: Tx,
+  rows: T[],
+): Promise<(T & { activeMembers: number })[]> {
+  if (rows.length === 0) return [];
+  const ids = rows.map((r) => r.id);
+  const counts = await tx.execute<{ tenant_id: string; active_members: number }>(
+    // sql.param keeps the array a single bound parameter (a plain array would expand to a list).
+    sql`select tenant_id, active_members from ops.platform_active_member_counts(${sql.param(ids)}::uuid[])`,
+  );
+  const byTenant = new Map(counts.rows.map((c) => [c.tenant_id, Number(c.active_members)]));
+  return rows.map((r) => ({ ...r, activeMembers: byTenant.get(r.id) ?? 0 }));
+}
+
 export function createPlatformService(deps: PlatformDeps) {
   const { db, platformDb, clock } = deps;
 
@@ -91,18 +116,9 @@ export function createPlatformService(deps: PlatformDeps) {
     async listTenants(actor: PlatformActor, options: { search?: string; limit?: number } = {}) {
       const limit = Math.min(Math.max(options.limit ?? 50, 1), 200);
       const search = options.search?.trim().toLowerCase();
-      return platformDb.run(actor.userId, async (tx) =>
-        tx
-          .select({
-            id: tenants.id,
-            slug: tenants.slug,
-            name: tenants.name,
-            status: tenants.status,
-            statusReason: tenants.statusReason,
-            billingMode: tenants.billingMode,
-            createdAt: tenants.createdAt,
-            activeMembers: sql<number>`(select count(*)::int from app.memberships m where m.tenant_id = ${tenants.id} and m.status = 'active')`,
-          })
+      return platformDb.run(actor.userId, async (tx) => {
+        const rows = await tx
+          .select(tenantSummaryColumns)
           .from(tenants)
           .where(
             search
@@ -110,8 +126,22 @@ export function createPlatformService(deps: PlatformDeps) {
               : undefined,
           )
           .orderBy(desc(tenants.createdAt))
-          .limit(limit),
-      );
+          .limit(limit);
+        return withActiveMemberCounts(tx, rows);
+      });
+    },
+
+    /** One company by id (not limited to the newest companies shown in the list). */
+    async getTenant(actor: PlatformActor, tenantId: string) {
+      if (!z.uuid().safeParse(tenantId).success) return null;
+      return platformDb.run(actor.userId, async (tx) => {
+        const rows = await tx
+          .select(tenantSummaryColumns)
+          .from(tenants)
+          .where(eq(tenants.id, tenantId));
+        const [company] = await withActiveMemberCounts(tx, rows);
+        return company ?? null;
+      });
     },
 
     async setTenantStatus(actor: PlatformActor, input: unknown): Promise<void> {
@@ -230,6 +260,19 @@ export function createPlatformService(deps: PlatformDeps) {
           correlationId: actor.correlationId,
           metadata: { grantId },
         });
+        // The company sees when platform access to its data ended, not only when it began.
+        await tx.insert(auditEvents).values({
+          id: uuidv7(),
+          tenantId: row.tenantId,
+          actorType: 'platform_admin',
+          actorId: actor.userId,
+          action: 'platform.support_access_revoked',
+          subjectType: 'support_grant',
+          subjectId: grantId,
+          result: 'success',
+          correlationId: actor.correlationId,
+          metadata: {},
+        });
       });
     },
 
@@ -267,20 +310,26 @@ export function createPlatformService(deps: PlatformDeps) {
       );
     },
 
+    /**
+     * Owners of one company for account recovery. Uses a narrow definer function: the full membership
+     * directory is customer data and needs a members.read support grant.
+     */
     async tenantOwners(actor: PlatformActor, tenantId: string) {
       if (!z.uuid().safeParse(tenantId).success) throw notFound('Company');
-      return platformDb.run(actor.userId, async (tx) =>
-        tx
-          .select({
-            userId: memberships.userId,
-            name: users.name,
-            roles: memberships.roles,
-            status: memberships.status,
-          })
-          .from(memberships)
-          .innerJoin(users, eq(users.id, memberships.userId))
-          .where(and(eq(memberships.tenantId, tenantId), sql`'owner' = any(${memberships.roles})`)),
-      );
+      return platformDb.run(actor.userId, async (tx) => {
+        const result = await tx.execute<{
+          user_id: string;
+          name: string;
+          membership_status: string;
+          two_factor_enabled: boolean;
+        }>(sql`select * from ops.platform_tenant_owners(${tenantId}::uuid)`);
+        return result.rows.map((r) => ({
+          userId: r.user_id,
+          name: r.name,
+          status: r.membership_status,
+          twoFactorEnabled: r.two_factor_enabled,
+        }));
+      });
     },
 
     async resetUserMfa(actor: PlatformActor, input: unknown): Promise<void> {

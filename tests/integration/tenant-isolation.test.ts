@@ -94,6 +94,36 @@ describe('database roles', () => {
     }
   });
 
+  it('no function is executable by PUBLIC; each runtime role reaches only its granted functions', async () => {
+    const open = await dbs.adminPool.query(`
+      SELECT p.oid::regprocedure::text AS fn FROM pg_proc p
+       WHERE p.pronamespace IN ('app'::regnamespace, 'ops'::regnamespace)
+         AND has_function_privilege('public', p.oid, 'EXECUTE')`);
+    expect(open.rows).toEqual([]);
+    const can = async (role: string, fn: string) =>
+      (
+        await dbs.adminPool.query<{ ok: boolean }>(
+          `SELECT has_function_privilege($1, $2, 'EXECUTE') AS ok`,
+          [role, fn],
+        )
+      ).rows[0]!.ok;
+    const createTenant = 'app.create_tenant(uuid,uuid,text,text,text,text)';
+    const resetMfa = 'ops.platform_reset_user_mfa(text,text)';
+    expect(await can('w360_app', createTenant)).toBe(true);
+    expect(await can('w360_app', 'app.accept_invitation(text,uuid)')).toBe(true);
+    expect(await can('w360_app', 'app.tenant_status(uuid)')).toBe(true);
+    expect(await can('w360_auth', createTenant)).toBe(false);
+    expect(await can('w360_platform', createTenant)).toBe(false);
+    expect(await can('w360_platform', resetMfa)).toBe(true);
+    expect(await can('w360_app', resetMfa)).toBe(false);
+    expect(await can('w360_auth', resetMfa)).toBe(false);
+    await expect(
+      dbs.appPool.query(
+        `SELECT ops.platform_reset_user_mfa('usr_x', 'Verified identity by phone')`,
+      ),
+    ).rejects.toThrow(/permission denied/);
+  });
+
   it('the auth role cannot read company data and the app role cannot read credentials', async () => {
     await expect(dbs.authPool.query('SELECT * FROM app.tenants')).rejects.toThrow(
       /permission denied/,
@@ -618,6 +648,80 @@ describe('support access is reasoned, scoped and time-boxed', () => {
       ),
     );
     expect(await visible()).toBe(0);
+  });
+
+  it('membership directories also require a members.read grant', async () => {
+    const operator = await createUser(dbs, { name: 'Directory Probe' });
+    const members = () =>
+      dbs.platform.run(
+        operator.id,
+        async (tx) =>
+          (
+            await tx.execute(
+              sql`select user_id from app.memberships where tenant_id = ${fx.tenantA.id}::uuid`,
+            )
+          ).rows.length,
+      );
+    expect(await members()).toBe(0);
+    await dbs.platform.run(operator.id, (tx) =>
+      tx.execute(sql`insert into ops.support_access_grants (id, tenant_id, platform_user_id, reason, scopes, expires_at)
+                      values (${uuidv7()}::uuid, ${fx.tenantA.id}::uuid, ${operator.id}, 'Customer asked why an agent cannot sign in',
+                              '{members.read}', now() + interval '30 minutes')`),
+    );
+    expect(await members()).toBeGreaterThan(0);
+  });
+
+  it('seat counts and owner lookup are limited to platform administrators and to those facts', async () => {
+    const outsider = await createUser(dbs);
+    await expect(
+      dbs.platform.run(outsider.id, (tx) =>
+        tx.execute(sql`select * from ops.platform_tenant_owners(${fx.tenantA.id}::uuid)`),
+      ),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+    await expect(
+      dbs.platform.run(outsider.id, (tx) =>
+        tx.execute(
+          sql`select * from ops.platform_active_member_counts(array[${fx.tenantA.id}]::uuid[])`,
+        ),
+      ),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+    // Tenant code cannot call them at all.
+    await expect(
+      dbs.app.run(scopeA(), (tx) =>
+        tx.execute(sql`select * from ops.platform_tenant_owners(${fx.tenantA.id}::uuid)`),
+      ),
+    ).rejects.toThrow(/permission denied|not permitted/);
+
+    const admin = await createUser(dbs);
+    await dbs.ownerPool.query(
+      `INSERT INTO ops.platform_admins (user_id, role) VALUES ($1, 'platform_operator')`,
+      [admin.id],
+    );
+    const owners = await dbs.platform.run(
+      admin.id,
+      async (tx) =>
+        (
+          await tx.execute<{ user_id: string; membership_status: string }>(
+            sql`select * from ops.platform_tenant_owners(${fx.tenantA.id}::uuid)`,
+          )
+        ).rows,
+    );
+    expect(owners.map((o) => o.user_id)).toEqual([fx.ownerA.id]);
+    expect(Object.keys(owners[0]!).sort()).toEqual(
+      ['membership_status', 'name', 'two_factor_enabled', 'user_id'].sort(),
+    );
+    const counts = await dbs.platform.run(
+      admin.id,
+      async (tx) =>
+        (
+          await tx.execute<{ tenant_id: string; active_members: number }>(
+            sql`select * from ops.platform_active_member_counts(array[${fx.tenantA.id}, ${fx.tenantB.id}]::uuid[])`,
+          )
+        ).rows,
+    );
+    const byTenant = Object.fromEntries(counts.map((c) => [c.tenant_id, c.active_members]));
+    expect(byTenant[fx.tenantA.id]).toBeGreaterThanOrEqual(2);
+    expect(byTenant[fx.tenantB.id]).toBeGreaterThanOrEqual(1);
   });
 
   it('grants longer than 8 hours or without a real reason are rejected', async () => {

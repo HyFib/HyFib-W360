@@ -75,10 +75,18 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
 
 ## Required configuration
 
-See `.env.example` (every variable documented). Production start-up refuses: `APP_ENV=local`,
-non-HTTPS `APP_BASE_URL` (except `APP_ENV=test` on loopback), placeholder-looking secrets, missing
-SMTP host, and unsafe database roles. Set `TRUSTED_PROXIES` to the load balancer ranges and share
+See `.env.example` (every variable documented). Start-up refuses a non-HTTPS `APP_BASE_URL` for
+`APP_ENV=staging|production` in any build mode; production builds also refuse `APP_ENV=local`,
+`APP_ENV=test` off loopback, placeholder-looking secrets, a missing SMTP host, and unsafe database
+roles. Auth cookies are `Secure` whenever the origin is https. Share
 `NEXT_SERVER_ACTIONS_ENCRYPTION_KEY` across web replicas.
+
+Client addresses (audit, security events, rate limits) come from `X-Forwarded-For`. The edge load
+balancer must overwrite or append that header (never pass a client-supplied value through
+unchanged), and `TRUSTED_PROXIES` must list the addresses or CIDR ranges of every proxy hop we
+operate. Resolution reads hops from the right, skips trusted proxies, and stores the first other
+address only if it is a valid IP; malformed values are dropped rather than stored. A malformed
+`TRUSTED_PROXIES` entry stops start-up.
 
 ## Health and probes
 

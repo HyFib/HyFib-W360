@@ -10,7 +10,9 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 wait_ready() {
   for _ in $(seq 1 60); do
-    if docker exec "$NAME" pg_isready -U postgres >/dev/null 2>&1; then return 0; fi
+    # Probe over TCP: during first-run initialisation the image starts a temporary server that
+    # listens only on the Unix socket, so a socket probe reports ready before the real server is up.
+    if docker exec "$NAME" pg_isready -U postgres -h 127.0.0.1 >/dev/null 2>&1; then return 0; fi
     sleep 1
   done
   echo "PostgreSQL did not become ready" >&2

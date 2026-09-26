@@ -57,6 +57,22 @@ WebKit; both container scans and the secret scan failed. Root causes and fixes:
   next line (false positive; no value was committed). The fingerprint is recorded in
   `.gitleaksignore` and the variables are now separated by a comment.
 
+Review round 1 (Codex on `d9687b7`), fixed in the following commit:
+
+- Platform staff read company membership directories only through a `members.read` support grant;
+  the console uses aggregate seat counts and an owners-only lookup (definer functions, platform
+  administrators only). The company page loads by id instead of searching the newest 200.
+- Support-access revocation is mirrored into the company audit log.
+- Invitation issuance takes a per-company transaction lock, so the daily quota holds under
+  concurrency (integration test: six concurrent requests at 99/100 yield exactly one invitation).
+- Client IPs are resolved from `X-Forwarded-For` right-to-left past `TRUSTED_PROXIES` and validated
+  with Node's IP parser; malformed values are dropped instead of failing the audited transaction.
+- Found while testing: every `app`/`ops` function was executable by PUBLIC (a per-schema default
+  cannot revoke the global default), and grants issued after transferring functions to
+  `w360_definer` were no-ops. Migration `0002_platform_access_hardening` revokes PUBLIC, sets the
+  global default for the migration role and re-grants as the owner; a structural test now fails if
+  any function is executable by PUBLIC.
+
 ### Running end-to-end tests locally
 
 ```bash

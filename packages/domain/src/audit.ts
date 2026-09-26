@@ -1,4 +1,4 @@
-import { uuidv7 } from '@w360/core';
+import { normalizeIpAddress, uuidv7 } from '@w360/core';
 import {
   auditEvents,
   securityEvents,
@@ -44,7 +44,7 @@ export async function recordAudit(
     subjectId: entry.subjectId ?? null,
     result: entry.result ?? 'success',
     correlationId: ctx.correlationId,
-    ipAddress: normalizeIp(meta.ipAddress),
+    ipAddress: normalizeIpAddress(meta.ipAddress),
     userAgent: meta.userAgent?.slice(0, 512) ?? null,
     metadata: entry.metadata ?? {},
   });
@@ -93,22 +93,10 @@ export async function recordSecurityEvent(
       severity: event.severity,
       userId: event.userId ?? null,
       tenantId: event.tenantId ?? null,
-      ipAddress: normalizeIp(meta.ipAddress),
+      ipAddress: normalizeIpAddress(meta.ipAddress),
       userAgent: meta.userAgent?.slice(0, 512) ?? null,
       correlationId: event.correlationId ?? null,
       details: event.details ?? {},
     });
   });
-}
-
-const IPV4 = /^(\d{1,3}\.){3}\d{1,3}$/;
-const IPV6 = /^[0-9a-f:]+$/i;
-
-function normalizeIp(ip: string | null | undefined): string | null {
-  if (!ip) return null;
-  const first = (ip.split(',')[0] ?? '').trim();
-  const unwrapped = first.startsWith('::ffff:') ? first.slice(7) : first;
-  return IPV4.test(unwrapped) || (IPV6.test(unwrapped) && unwrapped.includes(':'))
-    ? unwrapped
-    : null;
 }

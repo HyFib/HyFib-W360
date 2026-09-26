@@ -2,7 +2,7 @@ import 'server-only';
 import { cache } from 'react';
 import { headers } from 'next/headers';
 import { notFound, redirect } from 'next/navigation';
-import { AppError, isAppError, uuidv7 } from '@w360/core';
+import { AppError, isAppError, resolveClientIp, uuidv7 } from '@w360/core';
 import {
   resolveTenantContext,
   type PlatformActor,
@@ -34,8 +34,9 @@ export async function correlationId(): Promise<string> {
 
 export async function requestMeta(): Promise<RequestMeta> {
   const h = await headers();
+  const { trustedProxies } = await getRuntime();
   return {
-    ipAddress: h.get('x-forwarded-for') ?? h.get('x-real-ip'),
+    ipAddress: resolveClientIp(h.get('x-forwarded-for'), h.get('x-real-ip'), trustedProxies),
     userAgent: h.get('user-agent'),
   };
 }

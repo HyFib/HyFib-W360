@@ -17,8 +17,7 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
   const { id } = await params;
   const actor = await requirePlatformActor();
   const { platform } = await getRuntime();
-  const companies = await platform.listTenants(actor, { limit: 200 });
-  const company = companies.find((c) => c.id === id);
+  const company = await platform.getTenant(actor, id);
   if (!company) notFound();
   const owners = await platform.tenantOwners(actor, id);
   return (
@@ -68,6 +67,9 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="font-medium">{o.name}</span>
                   <Badge>{o.status}</Badge>
+                  <Badge tone={o.twoFactorEnabled ? 'success' : 'warning'}>
+                    {o.twoFactorEnabled ? 'Two-factor on' : 'No two-factor'}
+                  </Badge>
                 </div>
                 {o.userId !== actor.userId ? (
                   <MfaResetForm userId={o.userId} name={o.name} />

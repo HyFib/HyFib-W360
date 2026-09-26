@@ -448,6 +448,11 @@ export function createTenancyService(deps: TenancyDeps) {
       const now = clock.now();
       const expiresAt = new Date(now.getTime() + deps.invitationTtlHours * 3600_000);
       await db.run(ctx.scope, async (tx) => {
+        // Serialise issuance per company: otherwise concurrent requests could all count the same
+        // number of recent invitations, below the daily quota, before any of their inserts commit.
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${`w360:invitations:${ctx.tenant.id}`}, 0))`,
+        );
         const existingMember = await tx
           .select({ id: memberships.id, status: memberships.status })
           .from(memberships)
