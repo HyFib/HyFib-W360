@@ -26,6 +26,7 @@ import {
   type Tx,
 } from '@w360/db';
 import { assertCan, can, type TenantContext } from '../authz/context';
+import { recountedCounters } from '../campaigns/counters';
 import {
   PROVIDER_MARKETING_OPT_OUT_CODE,
   checkTemplateEligibility,
@@ -1103,8 +1104,9 @@ export async function findStaleSendIntents(
 }
 
 /**
- * Stops an intent that must not be sent any more (company suspended, sender removed). The message
- * is marked failed with a reason the agent can see; nothing is sent.
+ * Stops an intent that must not be sent any more (company suspended, sender removed); nothing is
+ * sent. A member's message is marked failed with a reason the agent can see; a campaign message is
+ * cancelled and its recipient returned to the campaign (see below).
  */
 export async function cancelSendIntent(
   db: Database,
@@ -1114,12 +1116,31 @@ export async function cancelSendIntent(
   clock: Clock,
 ): Promise<boolean> {
   return db.run(scope, async (tx) => {
+    const [target] = await tx
+      .select({ messageId: sendIntents.messageId, campaignId: messages.campaignId })
+      .from(sendIntents)
+      .innerJoin(
+        messages,
+        and(eq(messages.tenantId, sendIntents.tenantId), eq(messages.id, sendIntents.messageId)),
+      )
+      .where(and(eq(sendIntents.tenantId, scope.tenantId), eq(sendIntents.id, intentId)));
+    if (!target) return false;
+    // A campaign send locks its campaign first, in the runner's order, so a concurrent tick or
+    // pause cannot deadlock with this cancellation.
+    const [campaign] = target.campaignId
+      ? await tx
+          .select({ status: campaigns.status })
+          .from(campaigns)
+          .where(and(eq(campaigns.tenantId, scope.tenantId), eq(campaigns.id, target.campaignId)))
+          .for('update')
+      : [];
+    const now = clock.now();
     const [intent] = await tx
       .update(sendIntents)
       .set({
         state: 'canceled',
         leaseUntil: null,
-        resolvedAt: clock.now(),
+        resolvedAt: now,
         lastErrorCode: reason.code,
         lastError: reason.message,
       })
@@ -1135,14 +1156,45 @@ export async function cancelSendIntent(
     const [message] = await tx
       .update(messages)
       .set({
-        status: 'failed',
-        statusRank: STATUS_RANK.failed,
-        statusAt: clock.now(),
+        // A campaign message never left, so it is cancelled and its recipient sent again later; a
+        // member's message is shown as failed with the reason.
+        status: campaign ? 'canceled' : 'failed',
+        statusRank: campaign ? STATUS_RANK.canceled : STATUS_RANK.failed,
+        statusAt: now,
         errorCode: reason.code,
         errorTitle: reason.message,
       })
       .where(and(eq(messages.tenantId, scope.tenantId), eq(messages.id, intent.messageId)))
       .returning({ conversationId: messages.conversationId });
+    if (campaign && target.campaignId) {
+      // The recipient goes back to pending, so the campaign sends it when it runs again (another
+      // member resumes it, or the company is reactivated) unless its deadline expires it first. A
+      // finished or cancelled campaign will not run again, so the recipient is cancelled.
+      const ended = campaign.status === 'completed' || campaign.status === 'canceled';
+      await tx
+        .update(campaignRecipients)
+        .set(
+          ended
+            ? { state: 'canceled' }
+            : {
+                state: 'pending',
+                messageId: null,
+                queuedAt: null,
+                market: null,
+                estimatedCostMicros: null,
+              },
+        )
+        .where(
+          and(
+            eq(campaignRecipients.tenantId, scope.tenantId),
+            eq(campaignRecipients.messageId, intent.messageId),
+          ),
+        );
+      await tx
+        .update(campaigns)
+        .set(recountedCounters(scope.tenantId, target.campaignId))
+        .where(and(eq(campaigns.tenantId, scope.tenantId), eq(campaigns.id, target.campaignId)));
+    }
     await emitTenantEvent(tx, scope.tenantId, {
       type: 'message.status',
       conversationId: message?.conversationId ?? null,

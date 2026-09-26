@@ -51,6 +51,7 @@ import {
   type AudienceRules,
 } from './audience';
 import { loadRateTable, marketFor, parseAmountToMicros, priceFor, rateCategoryFor } from './costs';
+import { recountedCounters } from './counters';
 import {
   formatTimeOfDay,
   isValidTimeZone,
@@ -87,6 +88,8 @@ import {
  * claimed are cancelled with their messages, and a second cancel changes nothing. Sends a worker
  * already claimed cannot be recalled and are reported as they end.
  */
+
+export { recountedCounters };
 export const CAMPAIGN_TICK_MS = 10_000;
 export const MAX_SCHEDULE_AHEAD_DAYS = 90;
 export const MAX_TEST_RECIPIENTS = 5;
@@ -315,22 +318,6 @@ export async function requeueReleased(
         inArray(campaignRecipients.messageId, messageIds),
       ),
     );
-}
-
-/**
- * Counter values recomputed from the recipients (used when sends are released, and on resume,
- * so the counters used by the caps cannot drift).
- */
-export function recountedCounters(tenantId: string, campaignId: string) {
-  return {
-    queuedCount: sql`(select count(*)::int from app.campaign_recipients r
-      where r.tenant_id = ${tenantId} and r.campaign_id = ${campaignId} and r.state = 'queued')`,
-    skippedCount: sql`(select count(*)::int from app.campaign_recipients r
-      where r.tenant_id = ${tenantId} and r.campaign_id = ${campaignId} and r.state = 'skipped')`,
-    spentEstimateMicros: sql`(select coalesce(sum(r.estimated_cost_micros), 0)::bigint
-      from app.campaign_recipients r
-      where r.tenant_id = ${tenantId} and r.campaign_id = ${campaignId} and r.state = 'queued')`,
-  };
 }
 
 interface TemplateInfo {
@@ -592,8 +579,10 @@ export async function campaignAnalytics(
       (count(*) filter (where r.state = 'queued' and m.status = 'failed'))::int as failed,
       (count(*) filter (where r.state = 'queued' and m.status = 'unknown_outcome'))::int as unknown,
       (count(*) filter (where m.status = 'canceled'))::int as message_canceled,
-      (count(*) filter (where r.replied_at is not null))::int as replied,
-      (count(*) filter (where r.opted_out_at is not null))::int as opted_out,
+      (count(*) filter (where r.replied_at is not null
+                          and m.status in ('delivered', 'read', 'played')))::int as replied,
+      (count(*) filter (where r.opted_out_at is not null
+                          and m.status in ('delivered', 'read', 'played')))::int as opted_out,
       coalesce(sum(r.estimated_cost_micros) filter (where r.state = 'queued'), 0)::bigint as estimate_micros,
       (count(*) filter (where r.state = 'queued' and r.estimated_cost_micros is null))::int as estimate_missing
     from app.campaign_recipients r

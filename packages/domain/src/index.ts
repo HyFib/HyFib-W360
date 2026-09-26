@@ -47,3 +47,5 @@ export * from './campaigns/service';
 export * from './campaigns/runner';
 export * from './platform/rate-cards';
 export * from './reports/definitions';
+export * from './reports/period';
+export * from './reports/service';

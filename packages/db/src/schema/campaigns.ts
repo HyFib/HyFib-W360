@@ -82,6 +82,7 @@ export const campaigns = appSchema.table('campaigns', {
   maxMessages: integer('max_messages'),
   budgetMicros: micros('budget_micros'),
   budgetCurrency: text('budget_currency'),
+  estimateCurrency: text('estimate_currency'),
   stopAfterHours: smallint('stop_after_hours').notNull().default(24),
   submittedByUserId: text('submitted_by_user_id'),
   submittedAt: tz('submitted_at'),

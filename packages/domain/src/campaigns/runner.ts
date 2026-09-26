@@ -280,7 +280,10 @@ export async function runCampaignTick(
     }
 
     const settings = await loadCampaignSettings(tx, tenantId);
-    const currency = c.budgetCurrency ?? settings.costCurrency;
+    // The estimate currency is fixed once known, so a later change of the company's billing
+    // currency cannot mix currencies within this campaign's estimates.
+    const currency = c.estimateCurrency ?? c.budgetCurrency ?? settings.costCurrency;
+    if (currency && c.estimateCurrency === null) await update({ estimateCurrency: currency });
     const table = currency ? await loadRateTable(tx, currency, now) : null;
     if (c.budgetMicros !== null && !table) return pause('rate_card_missing');
     if (c.maxMessages !== null && c.queuedCount >= c.maxMessages) {
@@ -650,8 +653,10 @@ export async function runCampaignTick(
 }
 
 /**
- * The job's acting member is no longer a member: pause the campaign (its queued sends are being
- * cancelled by the send worker for the same reason) so another member can resume it.
+ * The job's acting member is no longer a member: pause the campaign so another member can resume
+ * it, releasing the sends no worker has claimed (their recipients return to pending, like any
+ * pause for lost authority). Sends the worker rejects for the same reason return their recipients
+ * too (cancelSendIntent), so a resumed campaign reaches everyone it had not reached.
  */
 export async function pauseCampaignForRemovedLauncher(
   deps: Pick<CampaignRunnerDeps, 'db' | 'clock'>,
@@ -682,6 +687,18 @@ export async function pauseCampaignForRemovedLauncher(
       )
       .returning({ id: campaigns.id });
     if (!row) return false;
+    const released = await releaseQueuedSends(
+      tx,
+      scope.tenantId,
+      campaignId,
+      { code: 'campaign_paused', message: 'Not sent: the campaign was paused.' },
+      now,
+    );
+    await requeueReleased(tx, scope.tenantId, campaignId, released);
+    await tx
+      .update(campaigns)
+      .set(recountedCounters(scope.tenantId, campaignId))
+      .where(and(eq(campaigns.tenantId, scope.tenantId), eq(campaigns.id, campaignId)));
     await recordCampaignEvent(tx, scope.tenantId, campaignId, 'paused', null, {
       reason: 'launcher_removed',
     });

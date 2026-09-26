@@ -2,6 +2,7 @@ import {
   and,
   desc,
   eq,
+  lt,
   lte,
   rateCardPrefixes,
   rateCardPrices,
@@ -62,7 +63,48 @@ export async function loadRateTable(tx: Tx, currency: string, at: Date): Promise
     )
     .orderBy(desc(rateCards.effectiveFrom))
     .limit(1);
-  if (!card) return null;
+  return card ? rateTableFor(tx, card) : null;
+}
+
+/**
+ * The published cards for `currency` in force at some point in [start, end), newest first: every
+ * card taking effect inside the range plus the one in force at `start`.
+ */
+export async function loadRateTables(
+  tx: Tx,
+  currency: string,
+  start: Date,
+  end: Date,
+): Promise<RateTable[]> {
+  const cards = await tx
+    .select({
+      id: rateCards.id,
+      currency: rateCards.currency,
+      effectiveFrom: rateCards.effectiveFrom,
+    })
+    .from(rateCards)
+    .where(
+      and(
+        eq(rateCards.status, 'published'),
+        eq(rateCards.currency, currency),
+        lt(rateCards.effectiveFrom, end),
+      ),
+    )
+    .orderBy(desc(rateCards.effectiveFrom));
+  const inRange: typeof cards = [];
+  for (const card of cards) {
+    inRange.push(card);
+    if (card.effectiveFrom <= start) break;
+  }
+  const tables: RateTable[] = [];
+  for (const card of inRange) tables.push(await rateTableFor(tx, card));
+  return tables;
+}
+
+async function rateTableFor(
+  tx: Tx,
+  card: { id: string; currency: string; effectiveFrom: Date },
+): Promise<RateTable> {
   const prefixes = await tx
     .select({ prefix: rateCardPrefixes.prefix, market: rateCardPrefixes.market })
     .from(rateCardPrefixes)

@@ -14,6 +14,7 @@ import {
   lt,
   memberships,
   messages,
+  messagingSettings,
   or,
   sql,
   users,
@@ -22,7 +23,8 @@ import {
   type Tx,
 } from '@w360/db';
 import { assertCan, can, type TenantContext } from '../authz/context';
-import { recordAudit } from '../audit';
+import { recordAudit, type RequestMeta } from '../audit';
+import { DEFAULT_MESSAGING_SETTINGS } from '../consent/service';
 import { emitTenantEvent } from './events';
 import { SERVICE_WINDOW_MS, canSeeConversation } from './outbound';
 
@@ -49,6 +51,16 @@ export const statusSchema = z.object({
   conversationId: z.uuid(),
   status: z.enum(['open', 'resolved']),
   expectedVersion: z.number().int().min(0),
+});
+
+/** Minutes within which the company aims to answer a waiting customer; null clears it. */
+export const responseTargetSchema = z.object({
+  minutes: z.coerce
+    .number()
+    .int('Enter whole minutes.')
+    .min(1, 'Enter at least 1 minute.')
+    .max(1440, 'Enter at most 1440 minutes (24 hours).')
+    .nullable(),
 });
 
 export const noteSchema = z.object({
@@ -470,6 +482,15 @@ export function createInboxService(deps: { db: Database; clock: Clock }) {
           assignedMembershipId: current.assignedMembershipId,
           payload: { status: data.status },
         });
+        // Reports count resolutions per member from these entries (agent.resolved).
+        if (current.status !== data.status) {
+          await recordAudit(tx, ctx, {
+            action: 'conversation.status_changed',
+            subjectType: 'conversation',
+            subjectId: current.id,
+            metadata: { from: current.status, to: data.status },
+          });
+        }
       });
     },
 
@@ -512,6 +533,55 @@ export function createInboxService(deps: { db: Database; clock: Clock }) {
             assignedMembershipId: current.assignedMembershipId,
           });
         }
+      });
+    },
+
+    /** The first-response target in minutes (reports compare reply times with it). */
+    async getResponseTarget(ctx: TenantContext): Promise<number | null> {
+      assertCan(ctx, 'tenant.read');
+      const [row] = await db.run(
+        ctx.scope,
+        (tx) =>
+          tx
+            .select({ minutes: messagingSettings.firstResponseTargetMinutes })
+            .from(messagingSettings)
+            .where(eq(messagingSettings.tenantId, ctx.tenant.id)),
+        { accessMode: 'read only' },
+      );
+      return row?.minutes ?? null;
+    },
+
+    async updateResponseTarget(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
+      assertCan(ctx, 'tenant.settings.manage');
+      const data = parse(responseTargetSchema, input);
+      await db.run(ctx.scope, async (tx) => {
+        const values = {
+          firstResponseTargetMinutes: data.minutes,
+          updatedByUserId: ctx.user.id,
+          updatedAt: clock.now(),
+        };
+        await tx
+          .insert(messagingSettings)
+          .values({
+            tenantId: ctx.tenant.id,
+            optOutKeywords: [...DEFAULT_MESSAGING_SETTINGS.optOutKeywords],
+            marketingOptOutKeywords: [...DEFAULT_MESSAGING_SETTINGS.marketingOptOutKeywords],
+            optInKeywords: [...DEFAULT_MESSAGING_SETTINGS.optInKeywords],
+            requireMarketingOptIn: DEFAULT_MESSAGING_SETTINGS.requireMarketingOptIn,
+            ...values,
+          })
+          .onConflictDoUpdate({ target: messagingSettings.tenantId, set: values });
+        await recordAudit(
+          tx,
+          ctx,
+          {
+            action: 'inbox.response_target_updated',
+            subjectType: 'tenant',
+            subjectId: ctx.tenant.id,
+            metadata: { minutes: data.minutes },
+          },
+          meta,
+        );
       });
     },
 

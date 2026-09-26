@@ -2,12 +2,15 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { isAppError, systemClock, uuidv7, type Clock } from '@w360/core';
 import { authorizedTenantScope, sql, type TenantScope } from '@w360/db';
 import {
+  attributeCampaignOptOut,
+  cancelSendIntent,
   createCampaignsService,
   createConsentService,
   createContactsService,
   createSegmentsService,
   createTemplatesService,
   findDueCampaigns,
+  pauseCampaignForRemovedLauncher,
   processSendIntent,
   processTemplateSubmit,
   runCampaignTick,
@@ -450,6 +453,16 @@ describe('campaign lifecycle', () => {
       fx.messagesBody(s.c, { messages: [{ waId: '919820000001', text: 'Interested!' }] }),
     );
     await fx.deliver(fx.messagesBody(s.c, { messages: [{ waId: '919820000002', text: 'STOP' }] }));
+    // Chitra's message failed, so a marketing opt-out of hers is not credited to the campaign.
+    await fx.dbs.app.run(scopeOf(s.c), (tx) =>
+      attributeCampaignOptOut(tx, {
+        tenantId: s.c.tenant.id,
+        contactId: ids.chitra!,
+        at: new Date(),
+      }),
+    );
+    const chitra = (await recipients(id)).find((r) => r.contact_id === ids.chitra)!;
+    expect(chitra.opted_out_at).toBeNull();
     const view = await s.campaigns.getCampaign(ctx, id);
     expect(view.analytics).toMatchObject({
       audience: 6,
@@ -774,6 +787,76 @@ describe('approval, pause and resume', () => {
       `UPDATE app.memberships SET roles = '{marketer}' WHERE tenant_id = $1 AND user_id = $2`,
       [s.c.tenant.id, s.c.marketer.id],
     );
+  });
+
+  it('returns the sends of a member who left to the campaign, so a resuming member reaches everyone', async () => {
+    const owner = await fx.ctx(s.c, s.c.owner);
+    const marketer = await fx.ctx(s.c, s.c.marketer);
+    const { id } = await s.draft('Launcher removed');
+    await s.campaigns.submitCampaign(marketer, id, { expectedVersion: 1 }, {});
+    expect(await s.tick(id)).toMatchObject({ queued: 4 });
+    const intents = await fx.query<{ id: string }>(
+      `SELECT s.id FROM app.send_intents s JOIN app.messages m ON m.id = s.message_id
+        WHERE m.campaign_id = $1 ORDER BY s.id`,
+      [id],
+    );
+    await fx.query(
+      `UPDATE app.memberships SET status = 'removed' WHERE tenant_id = $1 AND user_id = $2`,
+      [s.c.tenant.id, s.c.marketer.id],
+    );
+    try {
+      // The send worker rejects the member's jobs one by one (no longer a member)...
+      const cleanup = authorizedTenantScope(s.c.tenant.id, null);
+      const reason = {
+        code: 'sender_removed' as const,
+        message: 'Not sent: the sender is no longer a member.',
+      };
+      for (const intent of intents.slice(0, 2)) {
+        expect(await cancelSendIntent(fx.dbs.app, cleanup, intent.id, reason, systemClock)).toBe(
+          true,
+        );
+      }
+      // ...and the runner's job pauses the campaign, releasing the sends not rejected yet.
+      expect(
+        await pauseCampaignForRemovedLauncher(
+          { db: fx.dbs.app, clock: systemClock },
+          cleanup,
+          id,
+          s.c.marketer.id,
+        ),
+      ).toBe(true);
+      expect(await cancelSendIntent(fx.dbs.app, cleanup, intents[2]!.id, reason, systemClock)).toBe(
+        false,
+      );
+      expect((await recipients(id)).map((r) => [r.state, r.message_id])).toEqual(
+        Array.from({ length: 4 }, () => ['pending', null]),
+      );
+      expect(await campaignRow(id)).toMatchObject({
+        status: 'paused',
+        pause_reason: 'launcher_removed',
+        queued_count: 0,
+      });
+      const messages = await fx.query<{ status: string; error_code: string }>(
+        `SELECT status, error_code FROM app.messages WHERE campaign_id = $1 ORDER BY id`,
+        [id],
+      );
+      expect(messages.map((m) => m.status)).toEqual([
+        'canceled',
+        'canceled',
+        'canceled',
+        'canceled',
+      ]);
+      expect(messages.filter((m) => m.error_code === 'sender_removed')).toHaveLength(2);
+
+      await s.campaigns.resumeCampaign(owner, id, {});
+      expect(await s.tick(id)).toMatchObject({ queued: 4 });
+      expect(await s.dispatchAll(id)).toEqual(['accepted', 'accepted', 'accepted', 'accepted']);
+    } finally {
+      await fx.query(
+        `UPDATE app.memberships SET status = 'active' WHERE tenant_id = $1 AND user_id = $2`,
+        [s.c.tenant.id, s.c.marketer.id],
+      );
+    }
   });
 });
 

@@ -119,6 +119,7 @@ export const messagingSettings = appSchema.table('messaging_settings', {
   marketingCapCount: smallint('marketing_cap_count'),
   marketingCapDays: smallint('marketing_cap_days'),
   costCurrency: text('cost_currency'),
+  firstResponseTargetMinutes: smallint('first_response_target_minutes'),
   updatedByUserId: text('updated_by_user_id'),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),

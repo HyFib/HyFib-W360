@@ -499,31 +499,6 @@ async function ingestMessagesChange(tx: Tx, ctx: ChangeContext): Promise<void> {
       ctx.summary.orphanStatuses += 1;
       continue;
     }
-    if (
-      s.status === 'failed' &&
-      s.errors?.some((e) => Number(e.code) === PROVIDER_MARKETING_OPT_OUT_CODE)
-    ) {
-      const [thread] = await tx
-        .select({ contactId: conversations.contactId })
-        .from(conversations)
-        .where(
-          and(
-            eq(conversations.tenantId, ctx.tenantId),
-            eq(conversations.id, message.conversationId),
-          ),
-        );
-      if (thread) {
-        await recordProviderMarketingOptOut(tx, {
-          tenantId: ctx.tenantId,
-          contactId: thread.contactId,
-          channelAccountId: channel.id,
-          externalMessageId: s.id,
-          occurredAt: providerAt,
-          providerTime: true,
-        });
-        ctx.summary.providerOptOuts += 1;
-      }
-    }
     const next = providerStatusToMessageStatus(s.status);
     if (next && shouldAdvance(message.status, next)) {
       await tx
@@ -548,6 +523,33 @@ async function ingestMessagesChange(tx: Tx, ctx: ChangeContext): Promise<void> {
         conversationId: message.conversationId,
         payload: { messageId: message.id, status: next },
       });
+    }
+    // After the status update, so attribution never credits the failing message itself: 131050
+    // means the customer had already stopped marketing messages before this one.
+    if (
+      s.status === 'failed' &&
+      s.errors?.some((e) => Number(e.code) === PROVIDER_MARKETING_OPT_OUT_CODE)
+    ) {
+      const [thread] = await tx
+        .select({ contactId: conversations.contactId })
+        .from(conversations)
+        .where(
+          and(
+            eq(conversations.tenantId, ctx.tenantId),
+            eq(conversations.id, message.conversationId),
+          ),
+        );
+      if (thread) {
+        await recordProviderMarketingOptOut(tx, {
+          tenantId: ctx.tenantId,
+          contactId: thread.contactId,
+          channelAccountId: channel.id,
+          externalMessageId: s.id,
+          occurredAt: providerAt,
+          providerTime: true,
+        });
+        ctx.summary.providerOptOuts += 1;
+      }
     }
   }
 }
