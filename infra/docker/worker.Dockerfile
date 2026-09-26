@@ -35,6 +35,10 @@ RUN --mount=type=cache,id=pnpm,target=/pnpm/store --mount=type=secret,id=extra_c
  && cp -r packages/db/migrations /out/migrations
 
 FROM ${NODE_IMAGE} AS runtime
+# The runtime only needs `node`: drop the package managers bundled with the base image so their
+# dependency trees (and any CVEs in them) are not shipped.
+RUN rm -rf /usr/local/lib/node_modules /opt/yarn-* \
+    /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack /usr/local/bin/yarn /usr/local/bin/yarnpkg
 ENV NODE_ENV=production W360_MIGRATIONS_DIR=/app/migrations
 WORKDIR /app
 COPY --from=build --chown=node:node /out ./

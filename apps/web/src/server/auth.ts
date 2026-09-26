@@ -22,7 +22,10 @@ export function createAuth(deps: {
   logger: Logger;
 }) {
   const { config, db, outbox, logger } = deps;
-  const production = config.NODE_ENV === 'production';
+  // Secure cookies follow the public origin, not NODE_ENV: staging and production configs must use
+  // https (enforced in loadWebConfig), while loopback test stacks run `next start` over plain http,
+  // where some browsers (WebKit) drop Secure cookies entirely.
+  const secureCookies = new URL(config.APP_BASE_URL).protocol === 'https:';
   const trustedOrigins = [
     config.APP_BASE_URL,
     ...(config.TRUSTED_ORIGINS ?? '')
@@ -108,9 +111,14 @@ export function createAuth(deps: {
       },
     },
     advanced: {
-      useSecureCookies: production,
+      useSecureCookies: secureCookies,
       cookiePrefix: 'w360',
-      defaultCookieAttributes: { httpOnly: true, sameSite: 'lax', secure: production, path: '/' },
+      defaultCookieAttributes: {
+        httpOnly: true,
+        sameSite: 'lax',
+        secure: secureCookies,
+        path: '/',
+      },
       ipAddress: {
         ...(config.TRUSTED_PROXIES
           ? {

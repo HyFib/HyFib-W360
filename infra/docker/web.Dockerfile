@@ -28,6 +28,10 @@ COPY . .
 RUN pnpm --filter @w360/web build
 
 FROM ${NODE_IMAGE} AS runtime
+# The runtime only needs `node`: drop the package managers bundled with the base image so their
+# dependency trees (and any CVEs in them) are not shipped.
+RUN rm -rf /usr/local/lib/node_modules /opt/yarn-* \
+    /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack /usr/local/bin/yarn /usr/local/bin/yarnpkg
 ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 PORT=3000 HOSTNAME=0.0.0.0
 WORKDIR /app
 COPY --from=build --chown=node:node /repo/apps/web/.next/standalone ./

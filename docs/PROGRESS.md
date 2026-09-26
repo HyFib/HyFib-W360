@@ -41,8 +41,21 @@
 | `pnpm audit --audit-level=high`                                                                                       | no known vulnerabilities                                                        |
 | `docker build` web and worker images; run against local DB                                                            | both start; readiness OK; headers verified                                      |
 
-Firefox and WebKit e2e runs happen in CI (browsers are not installed in this sandbox). CI results
-will be recorded here once the workflow has run on the pull request.
+Firefox and WebKit e2e runs happen in CI (browsers are not installed in this sandbox).
+
+First CI run on PR #1 (commit `d9687b7`, 2026-09-26): lint/types/unit, integration on PostgreSQL 17
+and 18, and the web/worker build passed; e2e passed on Chromium, Firefox and mobile but failed on
+WebKit; both container scans and the secret scan failed. Root causes and fixes:
+
+- WebKit drops `Secure` cookies on `http://localhost`, and the auth cookies were marked secure
+  whenever `NODE_ENV=production` (CI runs `next start` over loopback http). Cookie security now
+  follows the https origin, and staging/production refuse non-https origins in any build mode.
+- Trivy flagged HIGH CVEs in the npm copy bundled with the Node base image (`brace-expansion`,
+  `ip-address`, `tar`). The runtime images no longer ship npm, npx, corepack or yarn; local Trivy
+  0.74.0 scans of both images report no HIGH/CRITICAL fixed vulnerabilities.
+- gitleaks matched an empty `NEXT_SERVER_ACTIONS_ENCRYPTION_KEY=` in `.env.example` together with the
+  next line (false positive; no value was committed). The fingerprint is recorded in
+  `.gitleaksignore` and the variables are now separated by a comment.
 
 ### Running end-to-end tests locally
 

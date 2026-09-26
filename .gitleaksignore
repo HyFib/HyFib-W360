@@ -1,0 +1,6 @@
+# Reviewed gitleaks findings that are not secrets. Each entry is a fingerprint
+# (commit:file:rule:line) printed by `gitleaks detect -v`; add new entries only after review.
+#
+# .env.example had an empty NEXT_SERVER_ACTIONS_ENCRYPTION_KEY= directly followed by the next
+# variable name; the generic-api-key rule matched across the line break. No value was committed.
+2dc37dcce8a3f48f4cb7472a3933126ac41c5aeb:.env.example:generic-api-key:40

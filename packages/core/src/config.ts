@@ -105,6 +105,16 @@ function isLoopbackUrl(value: string): boolean {
 }
 
 function assertProductionSafety(config: BaseConfig & { BETTER_AUTH_SECRET?: string }): void {
+  // Real environments always serve over https, whatever the build mode: cookie security and
+  // provider callbacks are derived from this origin.
+  if (
+    (config.APP_ENV === 'staging' || config.APP_ENV === 'production') &&
+    !config.APP_BASE_URL.startsWith('https://')
+  ) {
+    throw new ConfigError(
+      `Unsafe configuration:\n  - APP_BASE_URL must use https in ${config.APP_ENV}`,
+    );
+  }
   if (config.NODE_ENV !== 'production') return;
   const problems: string[] = [];
   if (config.APP_ENV === 'local')
