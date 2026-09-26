@@ -186,8 +186,9 @@ remaining recipients for later.
 **Paused by HyFib.** The reason is on the page: template no longer approved (fix or replace the
 template, then resume), number inactive (reconnect, then resume), spending or message cap reached
 (raise it, then resume), the sending member left or lost permission (another member with
-`campaigns.send` resumes it under their name), or no rate card for the cap's currency (platform
-staff publish one, or remove the cap).
+`campaigns.send` resumes it under their name; sends not yet handed to Meta went back to the
+campaign and are sent then), or no rate card for the cap's currency (platform staff publish one,
+or remove the cap).
 
 **Many failures with 131049.** Meta's per-user marketing limit: those customers received too many
 marketing messages from businesses. Do not resend; wait at least 24 hours (M-062) and consider the
@@ -196,6 +197,27 @@ company's frequency cap.
 **Rate card mistake.** Platform staff withdraw the card (with a reason; audited) and publish a
 corrected one. Estimates recorded on recipients already queued keep the old price; new estimates use
 the card in force when each message is queued.
+
+## 10B. Reports
+
+**A report number looks wrong.** Open "How these numbers are counted" on the Reports page: each
+number names its definition (key and version), denominator, window and time-zone rule. Common causes:
+delivery statuses or pricing not received yet (Meta webhooks; check webhook ingestion, section 4),
+a period that includes today, or the company's time zone (Settings → Company) differing from the
+viewer's. Response times start when HyFib received the customer's message and count absolute time.
+
+**Response times missing for older conversations.** Reply turns are recorded from the release that
+added reports (migration 0007); earlier conversations have none. Nothing to repair.
+
+**Estimated charges show unpriced messages.** The report lists why: no billing currency (Settings →
+Messaging), no published rate card for the currency and period (platform staff publish one), a
+pricing category the card has no rate for, a market missing from the card or an erased recipient.
+Estimates never replace Meta's invoice.
+
+**A report is slow or times out.** Reports run under the normal statement timeout. Try a shorter
+period (the page allows at most 92 days); check that migration 0008's
+`app.messages_tenant_created_idx` exists and is valid (`\d app.messages`); record the company and
+period for the materialised-aggregate follow-up (ADR-026).
 
 ## 11. Compromised company (tenant) or account
 
@@ -209,7 +231,10 @@ the card in force when each message is queued.
 
 ## 12. Migration failure
 
-1. The runner applies each file in a transaction; a failure rolls back that file and stops.
+1. The runner applies each file in a transaction; a failure rolls back that file and stops. Files
+   starting with `-- migrate:no-transaction` (a single `CREATE INDEX CONCURRENTLY`, such as 0008)
+   are not transactional: a failure can leave an INVALID index. Drop it
+   (`DROP INDEX CONCURRENTLY app.messages_tenant_created_idx;`) and run the migrations again.
 2. Fix forward: write a new migration that repairs state; never edit an applied file (checksums).
 3. If an app release depends on the failed migration, keep the previous release running (migrations
    are backward compatible by policy).

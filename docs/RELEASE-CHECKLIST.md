@@ -32,6 +32,11 @@ made. This checklist records the evidence required per gate; unchecked items blo
       cancel, delivery statuses, reply attribution) and the 10,000-recipient run in staging
 - [ ] Meta rate cards for each launch currency entered and published by platform staff from
       Meta's current published cards (none ship with HyFib)
+- [ ] Report numbers compared with WhatsApp Manager and Meta's invoice for a sandbox period
+      (delivery counts, billable flags, estimated charges); differences explained in the
+      definitions
+- [ ] Migration 0008 (`CREATE INDEX CONCURRENTLY`) applied on production-sized data and the index
+      confirmed valid
 - [ ] Tenant-isolation and security gates passing in CI on the release commit
 - [ ] Measured load behaviour against the test envelope (k6 results)
 - [ ] Backup restoration drill performed and timings recorded (RPO/RTO)

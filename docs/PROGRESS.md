@@ -1,5 +1,82 @@
 # Progress
 
+## 2026-09-26 — Phase 3: reports (P3-05)
+
+Status: **implementation complete for reports, production blocked** (every number is computed from
+HyFib's own records, so reports are only as real as the messaging behind them: delivery statuses
+and pricing come from Meta's webhooks, verified here only with the test-only Graph stand-in; cost
+estimates need platform staff to publish Meta's current rate cards, none ship with HyFib).
+
+### Completed
+
+- **Schema (migrations 0007, 0008):** `ops.metric_definitions` (what each number counts,
+  denominator, window, time-zone rule, missing-data semantics, freshness; immutable, versioned, and
+  kept identical to the registry in `packages/domain/src/reports/definitions.ts` by a test);
+  `app.conversation_turns` (reply turns: start at the first customer message without a member reply,
+  end on a member reply or when the conversation is resolved) maintained by triggers on
+  `app.messages` and `app.conversations`, so every write path is covered; the company's
+  first-response target; `campaigns.estimate_currency`; a `(tenant_id, created_at)` index on
+  messages built concurrently in its own migration.
+- **Reports service:** one repeatable-read, read-only snapshot per report, periods of whole days in
+  the company's time zone (daylight-saving days have their real length; a skipped midnight starts
+  the day at its first real instant; at most 92 days):
+  - messaging outcomes by day and sender with explicit denominators, and Meta's failure codes;
+  - estimated Meta charges: delivered messages Meta marked billable, priced at the list price of the
+    published rate card in force when each message was recorded, by the recipient's market and
+    Meta's pricing category; free and not-yet-priced messages, and each reason a billable message
+    could not be priced, are listed instead of guessed;
+  - inbox queue now (open, unassigned, waiting, longest wait, reply windows closing, waiting past the
+    target, by assignee) and reply turns of the period (median and 90th-percentile first response,
+    share within the target, resolved without a reply, reply-time spread, per day);
+  - member activity (replies and templates sent, turns answered first with their median, resolves
+    from the audit log; members who can reply are listed even when quiet);
+  - campaign funnels for campaigns started in the period;
+  - automation outcomes, deal outcomes and retention cohorts reported as not available, with the
+    reason.
+- **Exports:** one CSV per section, formula-safe, `reports.export` only, audited before any data is
+  returned (`report.exported` with the period).
+- **Inbox:** resolving or reopening a conversation is audited (`conversation.status_changed`);
+  Settings → Messaging → Inbox response target.
+- **Web:** Reports page (period presets and custom dates, the sections above, definitions of every
+  number) and export route; the Reports module is now available.
+- **Found while building and testing:**
+  - a campaign's estimates used the company's current billing currency on every tick, so changing
+    the currency during a run would have mixed currencies; the currency is now fixed per campaign
+    the first time it is known;
+  - the inbox live stream started "now", so a message arriving between the page render and the
+    browser connecting stayed hidden until the next event; pages now pass the event-log position
+    read before loading their data and the stream replays from there;
+  - several pages scrolled sideways on phones (grids let wide tables stretch the page, header
+    buttons did not wrap); 17 company pages (lists, forms and settings) were measured at 412 px
+    and now fit, and e2e tests assert no horizontal overflow on the reports and contacts pages
+    (detail pages were not measured);
+  - the integration fixture minted WhatsApp ids from a per-file counter, so two test files could
+    collide (seen once on PostgreSQL 17 in CI); ids are now random.
+- **Review findings on the campaigns slice (PR #4), fixed with regression tests:**
+  - when the member whose authority a campaign used left, sends the worker rejected stayed
+    "queued" with failed messages and the pause did not release the rest, so a resumed campaign
+    never reached those recipients; rejected and unclaimed sends now return their recipients to
+    pending (also after a company suspension) and the counters are recomputed;
+  - opt-outs were credited to the last campaign message even when it had failed, and reply and
+    opt-out rates could exceed their delivered denominator; only messages WhatsApp accepted are
+    credited now, rates count delivered recipients only, and a 131050 failure is recorded before
+    its opt-out so the failing message itself is never credited.
+
+### Test commands and results (local, 2026-09-26, fresh database)
+
+| Command                                                      | Result                                                                                                                                                                                                                                                                                                                             |
+| ------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`         | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                     |
+| `pnpm test` (unit)                                           | 96 passed (adds report periods: presets, company date, 23- and 25-hour days, skipped midnights, validation; exact export amounts)                                                                                                                                                                                                  |
+| `pnpm test:integration` (PostgreSQL 18.x)                    | 166 passed: reports 12 (definitions persisted = registry and immutable, turns through real ingest/reply/resolve paths and immutable, report numbers against hand-computed values, exports and permissions, isolation), campaigns 17 (adds the launcher-removed regression and failed-message attribution), plus the earlier suites |
+| `pnpm test:e2e --project=chromium --project=mobile-chromium` | 28 passed (14 tests × 2), including a response target set, two customers writing, one answered, the report's numbers, a CSV export and a rejected over-long period                                                                                                                                                                 |
+
+### Known gaps (tracked in BACKLOG.md)
+
+Business-hours calendars for response times; reconciling estimates with Meta's
+`pricing_analytics` (research M-078, not verified); automation, deal and retention reports (their
+modules are not built); scheduled report emails.
+
 ## 2026-09-26 — Phase 3: campaigns and saved segments (P3-04)
 
 Status: **implementation complete for campaigns and segments, production blocked** (campaign

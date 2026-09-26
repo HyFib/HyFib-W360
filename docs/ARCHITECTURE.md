@@ -231,15 +231,53 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 - **Pause and cancel:** both cancel unclaimed send intents in the transaction that changes the
   status; pausing returns those recipients to pending, cancelling cancels them and every pending
   recipient. Cancelling is idempotent. The send worker also refuses a campaign message whose
-  campaign is paused or cancelled (a send that returned to the queue after a retryable error).
+  campaign is paused or cancelled (a send that returned to the queue after a retryable error). A
+  send the worker rejects because its sending member left or the company is suspended returns its
+  recipient to pending (cancelled if the campaign has ended), so a resumed or reactivated
+  campaign still reaches them, subject to its deadline.
 - **Outcomes and attribution:** delivery progress is read from the linked message; replies and
-  marketing opt-outs are attributed last-touch within 72 hours by ingestion and consent recording
-  (ADR-025). Analytics compute rates with explicit denominators from `METRIC_DEFINITIONS`
+  marketing opt-outs are attributed last-touch within 72 hours to a message WhatsApp accepted, by
+  ingestion and consent recording (ADR-025); the reply and opt-out rates count delivered
+  recipients only. Analytics compute rates with explicit denominators from `METRIC_DEFINITIONS`
   (`packages/domain/src/reports/definitions.ts`); clicks and conversions are reported as not
   measured. Per-recipient CSV export is formula-safe and audited.
 - **Rate cards** (`ops.rate_cards`, `rate_card_prefixes`, `rate_card_prices`): entered by platform
   staff from Meta's published cards (platform console), immutable once published; companies read
   published cards only.
+
+## 6C. Reports **[built — numbers come from HyFib's own records; provider data verified against a local Graph stand-in only]**
+
+- **Computed on request, never stored** (`packages/domain/src/reports/service.ts`): one
+  repeatable-read, read-only transaction per report inside the company's RLS scope, so every number
+  on a page comes from the same snapshot; statement timeouts still apply. There are no
+  pre-aggregated tables to drift from the source rows (ADR-026). Reports show aggregates and member
+  names only, never message content or contact details.
+- **Definitions** (`ops.metric_definitions`, registry in `reports/definitions.ts`): each number's
+  numerator, denominator, window, time-zone rule, missing-data semantics and freshness, versioned
+  and immutable; a test keeps the table equal to the registry. Metrics HyFib cannot measure
+  (clicks, conversions, automation outcomes, deal outcomes, retention cohorts) are rows with
+  `available = false` and a reason, shown instead of numbers.
+- **Periods** (`reports/period.ts`): whole calendar days in the company's time zone, from local
+  midnight to local midnight (daylight-saving days last 23 or 25 hours; a skipped midnight starts the
+  day at its first real instant), at most 92 days; days are bucketed with `AT TIME ZONE` in SQL.
+- **Reply turns** (`app.conversation_turns`): written only by triggers. An inbound customer message
+  (not a reaction or system notice) opens a turn if none is open (the partial unique index makes
+  this idempotent under concurrency); a member's outbound message closes it as replied; resolving
+  the conversation closes it as resolved (crediting the acting member). Turns hold ids and
+  timestamps only, so erasure leaves them. First-response times are measured from HyFib's receipt of
+  the customer message to the member's send, in absolute time.
+- **Cost estimates:** delivered messages (Meta charges per delivered message) that Meta's status
+  webhook marked billable, priced with the published rate card for the company's billing currency in
+  force when each message was recorded, by the market of the number Meta delivered to and Meta's
+  pricing category. Messages Meta marked free, messages without pricing yet, and billable messages
+  that could not be priced (no currency, no card, category without a rate, unknown market or erased
+  recipient, no price) are counted separately rather than estimated. Campaign estimates keep the
+  currency fixed when the campaign first priced a message (`campaigns.estimate_currency`).
+- **Exports:** one formula-safe CSV per section, `reports.export` only; the export is audited
+  (`report.exported`) before data is returned.
+- **Live inbox updates** (§6): pages read the event-log position before loading their data and hand
+  it to the browser, which opens the stream from there, so nothing that changes between the render
+  and the connection is missed.
 
 ## 7. Commercial model and billing **[built: wallet, top-ups, auto-recharge — verified against a local Razorpay stand-in only; subscriptions planned]**
 

@@ -207,4 +207,41 @@ a marketing opt-out is attributed to the most recent campaign message queued to 
 72 hours before it, once, and recorded on the recipient row when it arrives. Clicks and conversions
 are reported as not measured: Meta does not report website-button taps, HyFib does not rewrite
 links, and no conversion source is connected. Metric definitions are versioned (ADR-026 when
-reports persist them).
+reports persist them). Only a message WhatsApp accepted can be credited (a failed or unsent message
+cannot have caused a reply or an opt-out; Meta's 131050 failure means the customer had already
+stopped marketing messages), and the reply and opt-out rates count delivered recipients only, so
+they never exceed their denominator.
+
+## ADR-026 Reports: computed on request under persisted definitions (2026-09-26)
+
+Decision: reports are computed when requested from the operational tables, in one repeatable-read
+read-only transaction under the company's RLS scope, rather than from pre-aggregated tables. Each
+reported number follows a row in `ops.metric_definitions` (numerator, denominator, window, time-zone
+rule, missing-data semantics, freshness); rows are immutable and a change is a new version in a new
+migration, kept equal to the code registry by a test. Periods are whole days in the company's time
+zone, at most 92 days. Metrics HyFib cannot measure are persisted as unavailable with the reason and
+shown instead of a number. Reconsider materialised daily aggregates when a company's report queries
+approach the statement timeout (the `(tenant_id, created_at)` message index and the turn indexes
+bound today's queries); the definitions stay the contract either way.
+
+## ADR-027 Reply turns maintained by database triggers (2026-09-26)
+
+Decision: response times are measured on reply turns (first customer message without a member reply
+→ member reply or resolve) recorded in `app.conversation_turns` by triggers on `app.messages` and
+`app.conversations` instead of by each caller, so inbox replies, template sends, ingestion and any
+future write path are covered identically; a partial unique index keeps one open turn per
+conversation under concurrent inbound messages. A reply counts when the member sends it (a later
+WhatsApp failure shows in the messaging report, not as an unanswered turn). Times are absolute;
+business-hours calendars are a later extension (H-011). Turns started before the release are not
+reconstructed.
+
+## ADR-028 Estimated Meta charges from Meta's pricing object (2026-09-26)
+
+Decision: the messaging report estimates charges only for delivered messages that Meta's status
+webhook marked `billable` (research M-065, M-076), at the list price of the published rate card in
+force when each message was recorded, by the market of the number Meta delivered to and Meta's
+pricing category. Messages Meta marked free, messages without pricing yet and billable messages that
+cannot be priced are counted by reason, never estimated. Volume tiers are not applied, so the
+estimate can exceed the invoice for utility and authentication; Meta's invoice is authoritative.
+Reconciling with Meta's `pricing_analytics` (M-078, SDK-sourced, not verified) is backlog. A
+campaign's estimate currency is fixed the first time it prices a message.

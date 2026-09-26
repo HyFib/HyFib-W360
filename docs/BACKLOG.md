@@ -75,8 +75,16 @@ verification, app review, Embedded Signup configuration).
   queued in 21 ticks. **Remaining:** the 10k run in staging with real dispatch, per-recipient time
   zones, A/B variants, messaging-tier awareness (read the number's limit from Meta), campaign
   sends through the public API (P5-08), media-header templates.
-- **P3-05 Reports**: messaging outcomes and cost estimates (versioned rate tables), inbox SLA, agent
-  activity, campaign funnels; metric definitions persisted.
+- **P3-05 Reports** — _implemented (2026-09-26); provider data verified against the Graph stand-in
+  only_: persisted, versioned metric definitions; periods of whole days in the company time zone;
+  messaging outcomes with denominators; estimated Meta charges from Meta's billable flag and
+  published rate cards, with unpriced reasons; inbox queue and reply-turn response times against a
+  company first-response target (turns recorded by triggers); member activity; campaign funnels;
+  unavailable metrics shown with reasons; audited formula-safe exports. **Remaining:** business-hours
+  calendars and resolution-time metrics (with P3-06), reconciliation with Meta's
+  `pricing_analytics` (M-078, verify first), materialised daily aggregates if report queries near
+  the statement timeout, scheduled report emails, automation/deal/retention reports once those
+  modules exist.
 - **P3-06 Inbox advanced**: teams, round-robin/capacity routing, business hours, SLA timers, saved
   replies, mentions, CSAT.
 
