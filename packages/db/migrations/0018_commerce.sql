@@ -197,6 +197,8 @@ CREATE TABLE app.commerce_payment_links (
   cancel_requested_at timestamptz,
   error text CHECK (char_length(error) <= 500),
   message_id uuid,
+  -- Why the link was not sent in the chat (kept until it is; error is for Razorpay problems).
+  send_error text CHECK (char_length(send_error) <= 300),
   next_check_at timestamptz,
   checked_at timestamptz,
   paid_at timestamptz,
@@ -462,6 +464,6 @@ GRANT UPDATE (key_id, key_secret_ciphertext, webhook_secret_ciphertext, status, 
   checked_at, version, updated_by_membership_id, updated_at) ON app.commerce_payment_accounts TO w360_app;
 GRANT SELECT, INSERT ON app.commerce_payment_links TO w360_app;
 GRANT UPDATE (status, provider_link_id, short_url, amount_paid_minor, attempts, lease_until,
-  cancel_requested_at, error, message_id, next_check_at, checked_at, paid_at, version, updated_at)
-  ON app.commerce_payment_links TO w360_app;
+  cancel_requested_at, error, message_id, send_error, next_check_at, checked_at, paid_at, version,
+  updated_at) ON app.commerce_payment_links TO w360_app;
 GRANT SELECT, INSERT ON app.commerce_payment_events TO w360_app;

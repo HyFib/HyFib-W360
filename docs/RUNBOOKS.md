@@ -463,6 +463,58 @@ grants for `w360_definer` on the flow tables and `app.channel_accounts`; a failu
 means the bootstrap roles are missing (`infra/db/bootstrap-roles.sql`). The `flow.sync` and
 `flow.keys` queues are created by `pnpm db:migrate` with the other pg-boss queues.
 
+## 10H. Commerce
+
+**A catalog read failed or shows no products.** Commerce → Catalogs shows the read state and the
+error. "Meta refused access to the catalog" (Graph errors #10 and #200–#299) usually means HyFib's
+Meta app lacks catalog access for the account (`catalog_management` is expected but not confirmed,
+research M-173): check the app's permissions and the account's Login for Business grant, then use
+"Read from Meta". "Meta reported no catalog connected" means no catalog is connected to the
+WhatsApp account in Commerce Manager. A read that waits more than five minutes is signalled again
+by the minute sweep and fails after 30 minutes; the worker log has `commerce job` lines with the
+account id and outcome. Catalogs are read again every day. Only the first 5,000 products of a
+catalog are read (the page says so).
+
+**An order shows "Product not in your catalog copy" or no total.** Names come from HyFib's copy of
+the catalog: read it again. The total is unknown when a price in the webhook had more decimals than
+its currency or the items were in different currencies; payment cannot be requested for such an
+order (the amounts WhatsApp sent are shown per item).
+
+**"Your Razorpay account has not been checked successfully".** Commerce → Payments shows the check.
+"Razorpay rejected the key id or secret" means the keys are wrong, revoked or from the other mode:
+the company saves them again. Checks that could not reach Razorpay are retried three times; saving
+the keys again starts a new check.
+
+**A Payment Link stays "Being created".** The `commerce.link` worker creates it with the company's
+keys and retries while Razorpay cannot be reached (five attempts over about 15 minutes); the sweep
+signals due links every minute. A create whose answer was lost is found again by its reference, so
+it never creates a second link. "Not created" shows Razorpay's reason (for example keys rejected).
+
+**The customer paid but the order is still waiting.** HyFib records a payment only from the link as
+Razorpay reports it: every 15 minutes on the link's first day, then every six hours, and at once
+when the company's Razorpay account notifies HyFib. Check the link at Razorpay (Dashboard →
+Payment Links): partly paid links do not mark the order paid (HyFib asks for the full amount). If
+notifications do not arrive, the web log shows `payment link webhook` lines with the outcome:
+`bad_signature` (the webhook secret in Razorpay differs from the one saved in HyFib; the company
+saves the same secret in both), `unknown_account` (the address is wrong), `no_open_link` (the link
+is already settled) or `duplicate` (a redelivery). Payments are still recorded by the scheduled
+checks.
+
+**"The link was created but not sent".** The customer service window had closed, the number was not
+active or the contact has no phone number: the order page shows the link's address to copy and send
+another way (a template, or a reply after the customer writes again).
+
+**Cancelling did not cancel.** Razorpay refuses to cancel paid or partly paid links (research R-109);
+HyFib then records what Razorpay reports (the order becomes paid when the link is paid in full).
+Refunds are made in the company's Razorpay Dashboard; HyFib does not change the order for them.
+
+**Migration 0018 failed.** It runs in one transaction, so a failure applies nothing. It replaces
+`app.erase_contact` through `SET ROLE w360_definer` (ADR-039) like 0011 and 0015–0017 and adds two
+definer functions (`ops.commerce_payment_webhook_target`, `ops.commerce_work_due`) with column
+grants for `w360_definer`; a failure there usually means the bootstrap roles are missing
+(`infra/db/bootstrap-roles.sql`). The `commerce.sync`, `commerce.link` and `commerce.account` queues
+are created by `pnpm db:migrate`.
+
 ## 11. Compromised company (tenant) or account
 
 1. Suspend the company in `/platform` with a reason (stops outbound activity; ingestion continues).

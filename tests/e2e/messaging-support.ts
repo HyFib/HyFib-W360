@@ -195,6 +195,40 @@ export function flowCompletion(
   });
 }
 
+/** A cart sent from the catalog: an `order` message with prices in major units (M-170). */
+export function orderMessage(
+  wabaId: string,
+  phoneNumberId: string,
+  waId: string,
+  order: {
+    catalogId: string;
+    text?: string;
+    items: { retailerId: string; quantity: number; price: number }[];
+  },
+) {
+  return envelope(wabaId, phoneNumberId, {
+    contacts: [{ profile: { name: 'Priya Customer' }, wa_id: waId }],
+    messages: [
+      {
+        from: waId,
+        id: `wamid.e2e.${randomUUID()}`,
+        timestamp: String(Math.floor(Date.now() / 1000)),
+        type: 'order',
+        order: {
+          catalog_id: order.catalogId,
+          text: order.text ?? '',
+          product_items: order.items.map((i) => ({
+            product_retailer_id: i.retailerId,
+            quantity: i.quantity,
+            item_price: i.price,
+            currency: 'INR',
+          })),
+        },
+      },
+    ],
+  });
+}
+
 export function statusUpdate(
   wabaId: string,
   phoneNumberId: string,

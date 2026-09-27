@@ -574,3 +574,71 @@ anyone other than the contact the form was sent to is kept but not applied. Comp
 never consent, and completions do not start automations. Answers are shown only to members who can
 read contacts, logs carry codes and ids only, and contact erasure deletes the answers and ends the
 contact's tokens.
+
+## ADR-046 Commerce: catalogs read from Meta, orders from the webhook, Payment Links in the company's own Razorpay account (2026-09-27)
+
+Decision: the first commerce slice (P4-06a) connects WhatsApp's own commerce features to HyFib and
+takes payment through the company's own Razorpay account. Store connectors (Shopify, WooCommerce)
+are a separate slice (P4-06b): catalogs stay managed in Meta Commerce Manager.
+
+Catalogs are read, never written. The `commerce.sync` worker lists the catalogs connected to a
+WhatsApp account (`/{WABA}/product_catalogs`) and their products (`/{catalog}/products`, research
+M-172), at most 10 catalogs and 5,000 products each, and upserts them in batches of 200. A product
+Meta no longer lists is marked removed only after a complete read (never after a truncated one), a
+catalog no longer connected is marked disconnected, and both stay for the orders that name them.
+The read is one row per account (queued → running → idle or failed), requested by members with
+`commerce.manage` or by the daily re-read; the sweep re-signals reads waiting over five minutes and
+fails those older than 30 minutes. Which permission Meta requires for these edges is not confirmed
+from Meta's pages (M-173); Graph permission errors (#10, #200–#299) are reported as missing catalog
+access (`catalog_management`) rather than as a bad credential. The price text is shown as Meta
+returns it (its format is not documented, M-172) and is never used for money.
+
+Product messages (M-169) are replies: `inbox.reply` and `commerce.read`, in a conversation the
+member can see, while the customer service window is open. One message names products from one
+catalog connected to the conversation's WhatsApp account: a single product, a list (1–10 sections,
+at most 30 products, section titles when there are several) or the whole catalog with a thumbnail
+product. They go through the normal send pipeline (send intent, message row, `message.send`).
+
+Orders come from the webhook (`type` = `order`, M-170). The prices there are JSON numbers in major
+units; each is converted to minor units exactly through its shortest decimal text, and refused
+(null) when it has more decimals than its currency, is negative or uses an exponent. The order's
+subtotal is kept only when every item has a readable price in one currency; otherwise it is unknown
+and payment cannot be requested. Items are matched to HyFib's copy of the catalog by retailer id for
+their names; unknown products are kept by retailer id. An order has an 8-character reference and is
+visible only to members who can see its conversation. Members move orders along: received →
+confirmed or cancelled, confirmed → fulfilled or cancelled, paid → fulfilled. "Waiting for payment"
+and "paid" are set only by Payment Links.
+
+Payment Links are created in the company's own Razorpay account; no money passes through HyFib and
+nothing is posted to HyFib's ledger. The company saves its key id, key secret and a webhook secret
+(`commerce.manage`); the secrets are keyring ciphertexts bound to the account row
+(`commerce-payments:<company>:<account>:<key|webhook>`), are never shown again, and live keys are
+accepted only in production. The worker checks the keys by listing links for a reference that
+cannot exist (R-107): an answer proves the keys, a 401 marks them failed.
+
+Requesting payment (`inbox.reply`) writes a link ahead in the member's transaction: the order's
+subtotal in rupees (at least ₹1; other currencies are refused), a single-use `reference_id`
+(`w360_` plus 20 random characters, R-106), 7 days to expire. One link can be open per order. The
+`commerce.link` worker takes a two-minute lease on the row and creates the link once: after an
+attempt whose response was lost it first looks the link up by its reference, and if Razorpay
+answers that the reference was already used it adopts the link found (never a second create).
+Links ask for the whole amount (`accept_partial` false) and Razorpay's SMS, email and reminders are
+turned off, because HyFib sends the link in the chat, and only while the service window is open; if
+it cannot, the link is kept with the reason (`send_error`) for the member to copy it.
+
+A payment is recorded only from the link as HyFib fetches it from Razorpay with the company's keys:
+never from a browser, a chat or a webhook body. The link is fetched every 15 minutes on its first
+day, then every six hours until a day after it expires, and at once when the company's Razorpay
+account notifies `/api/webhooks/razorpay-links/<16 random characters>`. That route finds the
+company by the address, verifies the signature with that company's webhook secret, records the
+event id (a redelivery does nothing) and only signals a fetch; the body is not stored. The order
+becomes paid when Razorpay reports the link paid in full; an expired, cancelled or failed link
+returns the order to confirmed. Cancelling asks Razorpay to cancel the link; Razorpay refuses paid
+links (R-109), and then the fetched status is applied instead. A job that finds the row leased is
+retried, so a notification is never lost to a check already in flight. Links, orders and
+conversations are locked in the order conversation → order → link, the order used by replies and
+erasure.
+
+Erasure keeps an order and its amounts as a business record, clears the customer's note and asks
+Razorpay to cancel the contact's open links; the message that carried the order is redacted with the
+rest of the conversation.

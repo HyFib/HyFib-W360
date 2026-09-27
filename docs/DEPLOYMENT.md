@@ -35,8 +35,9 @@ PostgreSQL 18; CI workflow authored).
   collector/hosted backend.
 - Region: India (`ap-south-1` or equivalent) for the initial launch; `tenants.data_region` records
   the region; other regions are separate deployments.
-- Outbound network for the worker: Meta Graph, Razorpay and SMTP, plus HTTPS (443 or ports from 1024)
-  to the domains companies allow for automation web requests. The egress guard already refuses
+- Outbound network for the worker: Meta Graph, Razorpay (HyFib's billing account and, for
+  commerce, companies' own accounts, both at `api.razorpay.com`) and SMTP, plus HTTPS (443 or ports
+  from 1024) to the domains companies allow for automation web requests. The egress guard already refuses
   private, loopback, link-local and metadata addresses and pins DNS (ADR-042); as a second layer,
   route that traffic through an egress proxy or firewall that denies private ranges and the cloud
   metadata endpoint.
@@ -158,6 +159,21 @@ authenticated by Meta's signature and the flow's encryption key, not by a sessio
    unreachable): before launch, run a test-mode top-up, a failed payment, a refund and a card
    mandate end to end, and confirm the Checkout CSP (script `checkout.razorpay.com`, frame and
    connect `api.razorpay.com` / `checkout.razorpay.com`) is sufficient in all supported browsers.
+
+## Commerce (companies' own Razorpay accounts)
+
+1. Nothing is configured per deployment: each company saves its own key id, key secret and webhook
+   secret in Commerce → Payments. Live keys are accepted only with `APP_ENV=production`.
+2. Companies' Razorpay accounts send notifications to
+   `https://<app host>/api/webhooks/razorpay-links/<address id>` (shown to the company). The route
+   must be reachable from Razorpay like `/api/webhooks/razorpay`; it verifies each company's own
+   secret and only makes the worker fetch the link, so it needs no allow-list beyond TLS.
+3. Payment status reaches orders only through the worker's fetches (every 15 minutes on a link's
+   first day, then every six hours), so the worker and its sweep must run for payments to be
+   recorded; notifications only make it sooner.
+4. Not yet verified against Razorpay's sandbox from this build environment: before launch, create,
+   pay, cancel and expire a Payment Link with a company's test keys, and confirm the list response
+   shape for `GET /v1/payment_links?reference_id=` (research R-107).
 
 ## Health and probes
 

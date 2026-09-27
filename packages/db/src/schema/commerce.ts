@@ -164,6 +164,8 @@ export const commercePaymentLinks = appSchema.table('commerce_payment_links', {
   cancelRequestedAt: tz('cancel_requested_at'),
   error: text('error'),
   messageId: uuid('message_id'),
+  /** Why the link was not sent in the chat (the window had closed, the number is inactive…). */
+  sendError: text('send_error'),
   nextCheckAt: tz('next_check_at'),
   checkedAt: tz('checked_at'),
   paidAt: tz('paid_at'),

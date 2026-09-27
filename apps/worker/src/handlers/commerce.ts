@@ -54,7 +54,7 @@ function commerceHandler(
     if (outcome === 'no_meta') throw new RetryableJobError('Meta is not configured');
     rt.logger.info({ jobId: job.id, kind, ref: auth.envelope.ref, outcome }, 'commerce job');
     if (outcome === 'retry') {
-      throw new RetryableJobError(`${kind}: provider temporarily unavailable`);
+      throw new RetryableJobError(`${kind}: provider unavailable or the row is busy`);
     }
   };
 }

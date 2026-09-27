@@ -491,6 +491,31 @@ export async function startRazorpayStandIn(options: {
           razorpay_signature: signature,
         });
       }
+      // TEST-ONLY: a company's own Razorpay account (its key id and secret).
+      if (req.method === 'POST' && url.pathname === '/__stand-in/merchant') {
+        const keyId = String(body?.key_id ?? '');
+        const keySecret = String(body?.key_secret ?? '');
+        if (!keyId || !keySecret) return rzpError(res, 400, 'BAD_REQUEST_ERROR', 'keys missing');
+        state.merchants.set(keyId, keySecret);
+        return json(res, 200, { ok: true });
+      }
+      // TEST-ONLY: the Payment Links created with a company's key id, newest first.
+      if (req.method === 'GET' && url.pathname === '/__stand-in/payment-links') {
+        const keyId = url.searchParams.get('key_id') ?? '';
+        const links = [...state.paymentLinks.values()]
+          .filter((l) => l.merchantKeyId === keyId)
+          .reverse()
+          .map(linkJson);
+        return json(res, 200, { payment_links: links });
+      }
+      // TEST-ONLY: what the hosted payment page does when the customer pays the link in full.
+      if (req.method === 'POST' && url.pathname === '/__stand-in/pay-link') {
+        const link = state.paymentLinks.get(String(body?.id ?? ''));
+        if (!link) return rzpError(res, 400, 'BAD_REQUEST_ERROR', 'payment link not found');
+        link.status = 'paid';
+        link.amountPaid = link.amount;
+        return json(res, 200, linkJson(link));
+      }
       const seg = url.pathname.split('/').filter(Boolean);
       const method = req.method ?? 'GET';
       // Companies' accounts: Payment Links only, each account seeing its own links.

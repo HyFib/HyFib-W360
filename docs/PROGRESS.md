@@ -1,5 +1,89 @@
 # Progress
 
+## 2026-09-27 — Phase 4: commerce on WhatsApp (P4-06a)
+
+Status: **Commerce on WhatsApp implemented and locally verified; production blocked on checks with an
+approved sandbox number, a connected catalog and a company's Razorpay test keys.** Companies read
+the catalogs connected to their WhatsApp accounts, send products in conversations, receive the
+orders customers send from their cart, and ask for payment with Payment Links from their own
+Razorpay account. No request reached Meta or Razorpay: both were the local stand-ins, and webhooks
+were signed by the tests the way Meta and Razorpay do. Store connectors (Shopify, WooCommerce) are
+the next slice (P4-06b).
+
+### Completed
+
+- **Research (M-169 to M-174, R-106 to R-109):** product, multi-product and catalog messages, the
+  order webhook, product enquiries, the catalog edges and product fields (official OpenAPI
+  description and Meta's Python SDK, high confidence); which permission reading catalogs needs
+  (M-173, low to medium confidence: partner documentation); payments inside WhatsApp (M-174, not
+  used). Payment Links: single-use reference ids, finding a link by reference (the list's response
+  envelope unconfirmed, R-107), the webhook payload and cancelling (Razorpay's documentation and
+  Node SDK).
+- **Schema (migration 0018, ADR-046):** catalog reads, catalogs, products, orders and items, the
+  company's Razorpay account (keyring-encrypted secrets), written-ahead Payment Links and webhook
+  event ids, with composite foreign keys, FORCE RLS and column grants; definer functions
+  `ops.commerce_payment_webhook_target` and `ops.commerce_work_due`; `app.erase_contact` replaced to
+  clear order notes and cancel open links.
+- **Worker (`commerce.sync`, `commerce.link`, `commerce.account`):** catalogs and products read from
+  Meta (up to 10 catalogs and 5,000 products each, removed products and disconnected catalogs
+  marked after complete reads only, a daily re-read, Meta's permission refusals explained); each
+  Payment Link created once with a single-use reference (after a lost response it is looked up,
+  never created again), cancelled on request, fetched every 15 minutes on its first day and every
+  six hours after that, and at once on a signed notification; a payment recorded only when Razorpay
+  reports the link paid in full; the link sent in the chat while the service window is open; the
+  company's keys checked. Locks follow the conversation → order → link order used by replies and
+  erasure.
+- **Orders and the merchant webhook:** orders captured from the Meta webhook in the message's
+  transaction, with prices converted to minor units exactly and product names from HyFib's catalog
+  copy; `/api/webhooks/razorpay-links/<address id>` verifies the company's own secret, records the
+  event id and only signals a fetch.
+- **Pages (`commerce.read`; catalog reads and keys need `commerce.manage`; sending, statuses and
+  payment requests are replies):** Commerce → Orders with status filters and paging, an order page
+  (items, total, note, status buttons, Payment Links with their address and not-sent reason, request
+  and cancel), Catalogs with the read state and "Read from Meta", products with search, and Payments
+  (write-only keys, the webhook address and events). The inbox has a "Send products" card (one
+  product, several products or the whole catalog), an Orders panel, and message bubbles for orders,
+  product messages and payment requests. The Commerce module is now listed as available.
+- **Found while building:**
+  - Correlated count subqueries in single-table selects bound to the subquery's own columns
+    (drizzle drops table names there), so Settings → Pipelines always showed 0 open deals per stage.
+    A new `outerColumn()` helper names the outer column; the CRM test now checks the counts, and the
+    platform rate card list (which happened to work) uses it too.
+  - Payment Link work locked the link before the order, the opposite of erasure and the order pages;
+    the worker now locks conversation, order, then link.
+  - A check that found the link busy was dropped, so a payment notified during a scheduled check
+    waited up to 15 minutes; it is now retried.
+  - Why a link was not sent in the chat was overwritten by the next check; it is now kept in its own
+    column (`send_error`).
+  - The order page's "creating" and "cancelling" notes lived in buttons that disappear once the link
+    exists, so they vanished; they are now shown on the link itself.
+  - Mutation checks: of 15 deliberate regressions (signature, paid status, float prices, order
+    visibility in the list and the page, erasure of notes and links, unchecked keys, the service
+    window, deduplication, live keys, lookup and recovery after a lost response, the busy lease, the
+    not-sent reason), one survived (the lookup before creating again was covered only by the
+    duplicate-reference recovery); a test now requires a single create request, and all 15 fail the
+    tests.
+
+### Test commands and results (local, 2026-09-27, fresh database)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `pnpm test` (unit)                                                          | 172 passed. New: 13 commerce model tests (webhook prices to minor units, order parsing with dropped items, limits, unknown totals and notes; product, list and catalog message shapes and limits; member order transitions; references; the payment message) and 4 Payment Link client tests (create request without partial payments or Razorpay notifications, response checks, lookup by reference in either list shape, cancel refusal)                                                                                                                                                                                                                                                                                                                                         |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 251 passed, including `commerce.test.ts` 5: catalogs read with paging, removals, Meta's permission refusal and disconnection, the daily re-read; product messages (single, list, catalog) in the window with refusals; orders with exact amounts, redelivery, unknown totals, member statuses, stale versions, visibility by assignment and payment preconditions; Payment Links end to end (keys checked, test keys only, a lost create response looked up with a single create request, the chat message, a busy lease retried, forged, foreign and duplicate notifications, payment only from Razorpay, cancel, cancel racing payment, expiry with the not-sent reason kept, revoked keys); erasure and isolation. Also the CRM open-deal counts and the platform rate card list |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 46 passed (23 tests × 2), including `commerce.spec.ts`: a catalog read from Meta through the worker and searched, one product and a product list sent from a conversation (the requests WhatsApp received checked), a signed order webhook shown in the chat with its exact total, the order confirmed, the company's test keys saved and checked, payment requested (the link created once and sent in the chat), a forged notification refused, the payment recorded only after the link was paid at Razorpay and a signed notification arrived (a redelivery ignored), and the order fulfilled. After the last small page changes, `commerce.spec.ts` passed again on both projects; earlier it also passed 3 times in a row per project                          |
+
+### Known gaps
+
+- Not built: store connectors (P4-06b), product enquiries (`referred_product`), payments inside
+  WhatsApp (`order_details`), writing to catalogs and stock, refunds from HyFib, order reports and
+  exports, sending products from automations.
+- Verified against the Graph and Razorpay stand-ins only. The catalog permission (M-173), the price
+  text format (M-172), the list envelope for finding a link by reference (R-107) and Firefox and
+  WebKit locally (they run in CI) are release checklist items.
+- Keyring rotation of existing ciphertexts, now including companies' Razorpay secrets, needs the
+  re-encryption job (SEC-10).
+
 ## 2026-09-27 — Phase 4: WhatsApp Flows (P4-03)
 
 Status: **WhatsApp Flows implemented and locally verified; production blocked on checks with an

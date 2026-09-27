@@ -108,7 +108,7 @@ verification, app review, Embedded Signup configuration).
   runs of the draft on a real conversation; the bot/human hand-off lock with Take over; step logs,
   captured answers with retention; an automation report section; a builder with a generated diagram
   and an in-browser simulator. T: restart and lost signals resume from the stored position; bot and
-  person never answer at once. **Remaining:** Flow and catalog steps (sending a WhatsApp Flow from a run, P4-06), starting runs from the public API or campaigns, template follow-ups outside the service
+  person never answer at once. **Remaining:** Flow and catalog steps (sending a WhatsApp Flow or products from a run), starting runs from the public API or campaigns, template follow-ups outside the service
   window, fuzzy keyword matching, a drag-and-drop canvas (ADR-034), run export, usage billing for
   automation steps, a real sandbox run (release checklist).
 - **P4-02 HTTP node + egress guard** — _implemented and locally verified (2026-09-27) against a
@@ -173,9 +173,28 @@ verification, app review, Embedded Signup configuration).
   approved sandbox number (release checklist), connecting ad accounts (ad sync, spend, cost per
   conversation) and conversion reporting to Meta (W-072), campaign parameters on links, a free
   public link generator for people without an account.
-- **P4-06 Commerce**: catalog connection, product messages, order capture, payment links with verified
-  status; Shopify and WooCommerce connectors (authenticated setup, webhook verification, dedupe, sync
-  recovery, uninstall).
+- **P4-06a Commerce on WhatsApp** — _implemented and locally verified (2026-09-27) against the Graph
+  and Razorpay stand-ins and signed test webhooks; no live Meta or Razorpay traffic yet_: catalogs
+  connected to each WhatsApp account read from Meta by the worker (up to 10 catalogs and 5,000
+  products each, removed and disconnected marked, daily re-read, Meta's permission refusals shown in
+  plain words); products with search; single-product, multi-product and catalog messages from a
+  conversation in the service window; orders captured from the webhook with exact minor-unit
+  prices, product names from the catalog copy, member statuses and visibility with the
+  conversation; Payment Links in the company's own Razorpay account (write-only keys, live keys only
+  in production, keys checked), written ahead and created once per single-use reference (a lost
+  response looked up, never repeated), sent in the chat, checked on a schedule and on signed
+  notifications, paid only from Razorpay's own report, cancelled on request, expiry returning the
+  order; erasure of order notes and cancellation of open links. T: `commerce.test.ts` (catalog reads
+  and refusals, product messages, orders and amounts, visibility, Payment Links end to end, busy
+  lease, not-sent reason, erasure, isolation; 15 deliberate regressions caught), unit tests (prices,
+  order parsing, message shapes, limits, references, the Payment Link client), e2e
+  `commerce.spec.ts` (catalog read, products sent, order, keys, payment request, forged and signed
+  notifications, paid and fulfilled). **Remaining:** checks on an approved sandbox number and with a
+  company's Razorpay test keys (release checklist), product enquiries (`referred_product`), payments
+  inside WhatsApp (`order_details`, needs Meta payment configuration), writing to catalogs and stock,
+  refunds from HyFib, order reports and exports, sending products from automations.
+- **P4-06b Store connectors**: Shopify and WooCommerce (authenticated setup, webhook verification,
+  dedupe, sync recovery, uninstall), with orders and products kept in step with the store.
 
 ## Phase 5 — billing, wallet, platform, public API
 

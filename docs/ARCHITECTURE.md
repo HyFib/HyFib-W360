@@ -546,6 +546,49 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 - **Not built yet:** a visual form builder, sending flows from automations, campaigns or templates,
   flows that start with `data_exchange`, Meta's flow metrics, and `flow_token_signature`.
 
+## 6I. Commerce **[built — verified against the local Graph and Razorpay stand-ins and signed test webhooks only; no live Meta or Razorpay traffic]**
+
+- **Model** (migration 0018, ADR-046): `commerce_syncs` (one catalog read per WhatsApp account:
+  state, error, times, version); `commerce_catalogs` (the catalogs Meta reported: Meta id, name,
+  product count, whether the read was truncated, disconnected); `commerce_products` (retailer id,
+  Meta id, name, description, price text, currency, availability, review status, removed);
+  `commerce_orders` (reference, conversation, contact, message, Meta catalog id, currency, subtotal
+  in minor units, item count, customer note, status, version) and `commerce_order_items` (retailer
+  id, name when matched, quantity, unit price in minor units); `commerce_payment_accounts` (one per
+  company: key id, key and webhook secrets as keyring ciphertexts, webhook address id, check
+  status); `commerce_payment_links` (written ahead: order, amount, single-use reference, Razorpay id
+  and address, status, amount paid, lease, cancel request, errors, the chat message, next check);
+  `commerce_payment_events` (event ids of notifications, for deduplication). Composite foreign keys
+  keep every reference inside the company; `ops.commerce_payment_webhook_target` and
+  `ops.commerce_work_due` are the only cross-company lookups.
+- **Service** (`packages/domain/src/commerce`): catalogs and products with search and paging;
+  catalog read requests (`commerce.manage`); products a member can send in a conversation and
+  sending them (`inbox.reply`); orders and an order's items, links and allowed actions (`commerce.read`,
+  limited to conversations the member can see); order statuses, payment requests and cancelling a
+  link (`inbox.reply`); the payment account (`commerce.manage` to see the key id and webhook address,
+  save or remove keys). All changes are version-checked where members edit and audited.
+- **Worker** (`commerce/worker.ts`, queues `commerce.sync`, `commerce.link`, `commerce.account`):
+  reads catalogs and products (M-172); creates each Payment Link once (lookup by reference after a
+  lost response, R-106, R-107), cancels on request, fetches status on schedule or when signalled,
+  applies paid, expired and cancelled links to orders, and queues the chat message with the link;
+  checks the company's keys. The messaging sweep calls `sweepCommerceWork`, which re-signals reads
+  and links that are due and queues the daily catalog re-read.
+- **Webhooks**: orders arrive with the Meta webhook (`messaging/meta-webhook.ts` → `ingest.ts` →
+  `commerce/orders.ts`) in the same transaction as their message. Companies' Razorpay accounts
+  notify `/api/webhooks/razorpay-links/<address id>` (256 KB limit) → `commerce/webhook.ts`, which
+  verifies the company's signature, records the event id and signals a fetch of the link.
+- **Web** (`/c/{slug}/commerce`): orders with status filters and paging; an order page with items,
+  total, note, status buttons, Payment Links (status, address, not-sent reason) and the request and
+  cancel actions; catalogs per WhatsApp account with the read state and a "Read from Meta" button;
+  products with search; payment settings (write-only secrets, webhook address, events to select).
+  The inbox conversation page has a "Send products" card while the window is open, an Orders panel,
+  and message bubbles for orders, product messages and payment requests.
+- **Erasure** (`app.erase_contact`, replaced in 0018): clears the customer's note on their orders
+  and requests cancellation of their open links; orders and amounts stay as business records.
+- **Not built yet:** Shopify and WooCommerce connectors (P4-06b), writing to catalogs, stock
+  updates, product enquiries (`referred_product`, M-171), payments inside WhatsApp
+  (`order_details`, M-174), refunds from HyFib, and order reports.
+
 ## 7. Commercial model and billing **[built: wallet, top-ups, auto-recharge — verified against a local Razorpay stand-in only; subscriptions planned]**
 
 - **Who pays Meta:** as a Meta Tech Provider HyFib has no credit line; each customer adds its own

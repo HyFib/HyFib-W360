@@ -547,6 +547,21 @@ describe('orders', () => {
       subtotal_minor: null,
       currency: null,
     });
+    // Payment needs the company's own Razorpay account, and a total HyFib could work out.
+    await expectAppError(
+      svc.requestPayment(agent, { id: order.id, expectedVersion: order.version as number }),
+      'precondition_failed',
+      /Add your Razorpay account/,
+    );
+    const unknownTotal = await orderOf((await conversationOf(c, ravi)).id);
+    await expectAppError(
+      svc.requestPayment(agent, {
+        id: unknownTotal.id,
+        expectedVersion: unknownTotal.version as number,
+      }),
+      'precondition_failed',
+      /total could not be worked out/,
+    );
 
     // Statuses: members move orders along; payment statuses are not theirs to set.
     let version = order.version as number;
@@ -690,6 +705,14 @@ describe('payment links', () => {
       (l) => l.referenceId === link.reference,
     );
     expect(atRazorpay).toHaveLength(1);
+    // The retry looked the link up instead of sending the create request again.
+    const creates = rzp.state.calls.filter(
+      (call) =>
+        call.method === 'POST' &&
+        call.path === '/v1/payment_links' &&
+        (call.body as { reference_id?: unknown } | undefined)?.reference_id === link.reference,
+    );
+    expect(creates).toHaveLength(1);
     expect(atRazorpay[0]).toMatchObject({
       amount: 28998,
       currency: 'INR',
@@ -710,6 +733,15 @@ describe('payment links', () => {
       `Pay ₹289.98 for order ${order.reference as string}: ${atRazorpay[0]!.shortUrl}`,
     );
     expect(await sendQueued(c, conv.id)).toEqual(['accepted']);
+    // A check while another job holds the link's lease is tried again later, not dropped.
+    await fx.query(
+      `UPDATE app.commerce_payment_links SET lease_until = now() + interval '1 minute' WHERE id = $1`,
+      [link.id],
+    );
+    expect(await processPaymentLink(workerDeps(), scopeOf(c), link.id as string)).toBe('retry');
+    await fx.query(`UPDATE app.commerce_payment_links SET lease_until = NULL WHERE id = $1`, [
+      link.id,
+    ]);
 
     // A signed webhook claiming payment only makes HyFib ask Razorpay, which says it is not paid.
     const deps = webhookDeps();
@@ -775,6 +807,8 @@ describe('payment links', () => {
       status: 'paid',
       amount_paid_minor: '28998',
     });
+    // A paid link is final: later jobs for it do nothing.
+    expect(await processPaymentLink(workerDeps(), scopeOf(c), link.id as string)).toBe('skipped');
     await svc.setOrderStatus(agent, {
       id: order.id,
       expectedVersion: order.version,
@@ -826,13 +860,28 @@ describe('payment links', () => {
     const fourthLink = await linkRow(fourth.id as string);
     const due = await findDueCommerceWork(fx.dbs.app, 500);
     expect(due).toContainEqual({ tenantId: c.tenant.id, kind: 'link', ref: fourthLink.id });
+    // The customer service window closed before the link existed: it is created but not sent, and
+    // the reason stays on the link after later checks.
+    await fx.query(
+      `UPDATE app.conversations SET last_inbound_at = now() - interval '25 hours' WHERE id = $1`,
+      [convMeera.id],
+    );
     expect(await processPaymentLink(workerDeps(), scopeOf(c), fourthLink.id as string)).toBe(
       'done',
     );
     const created = await linkRow(fourth.id as string);
+    expect(created).toMatchObject({
+      status: 'created',
+      message_id: null,
+      send_error: expect.stringMatching(/window had closed/),
+    });
     rzp.setLinkStatus(created.provider_link_id as string, 'expired');
     expect(await processPaymentLink(workerDeps(), scopeOf(c), created.id as string)).toBe('done');
-    expect(await linkRow(fourth.id as string)).toMatchObject({ status: 'expired' });
+    expect(await linkRow(fourth.id as string)).toMatchObject({
+      status: 'expired',
+      error: null,
+      send_error: expect.stringMatching(/window had closed/),
+    });
     expect((await orderOf(convMeera.id)).status).toBe('confirmed');
 
     // Keys revoked at Razorpay: a new link fails with a clear message and the account shows it.
@@ -847,6 +896,16 @@ describe('payment links', () => {
     });
     expect((await orderOf(convMeera.id)).status).toBe('confirmed');
     expect((await svc.paymentAccount(owner)).account!.status).toBe('failed');
+    // Until the keys are checked successfully again, payment cannot be requested.
+    const afterRevoked = await orderOf(convMeera.id);
+    await expectAppError(
+      svc.requestPayment(agent, {
+        id: afterRevoked.id,
+        expectedVersion: afterRevoked.version as number,
+      }),
+      'precondition_failed',
+      /not been checked successfully/,
+    );
     const audit = await fx.query<{ action: string }>(
       `SELECT action FROM app.audit_events WHERE tenant_id = $1 AND action LIKE 'commerce.pay%' ORDER BY occurred_at, id`,
       [c.tenant.id],

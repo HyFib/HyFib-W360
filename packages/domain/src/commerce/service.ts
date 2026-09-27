@@ -791,6 +791,7 @@ export function createCommerceService(deps: CommerceDeps) {
               currency: commercePaymentLinks.currency,
               shortUrl: commercePaymentLinks.shortUrl,
               error: commercePaymentLinks.error,
+              sendError: commercePaymentLinks.sendError,
               cancelRequestedAt: commercePaymentLinks.cancelRequestedAt,
               expiresAt: commercePaymentLinks.expiresAt,
               paidAt: commercePaymentLinks.paidAt,

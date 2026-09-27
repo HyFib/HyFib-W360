@@ -387,7 +387,8 @@ type LinkRow = typeof commercePaymentLinks.$inferSelect;
 
 /**
  * Advances one Payment Link: creates it (once), cancels it when asked, or fetches its status.
- * Returns 'retry' when Razorpay could not be reached; the link keeps its state for the next attempt.
+ * Returns 'retry' when Razorpay could not be reached or another job holds the link's lease; the link
+ * keeps its state for the next attempt.
  */
 export async function processPaymentLink(
   deps: CommerceWorkerDeps,
@@ -403,8 +404,11 @@ export async function processPaymentLink(
         and(eq(commercePaymentLinks.tenantId, scope.tenantId), eq(commercePaymentLinks.id, linkId)),
       )
       .for('update');
-    if (!link || !['creating', 'created', 'partially_paid'].includes(link.status)) return null;
-    if (link.leaseUntil && link.leaseUntil > now) return null;
+    if (!link || !['creating', 'created', 'partially_paid'].includes(link.status)) {
+      return 'gone' as const;
+    }
+    // Another job is working on the link: try again shortly (a webhook's check must not be lost).
+    if (link.leaseUntil && link.leaseUntil > now) return 'busy' as const;
     const attempts = link.status === 'creating' ? link.attempts + 1 : link.attempts;
     await tx
       .update(commercePaymentLinks)
@@ -418,7 +422,8 @@ export async function processPaymentLink(
     const merchant = await merchantClient(deps, tx, scope.tenantId);
     return { link: { ...link, attempts }, merchant };
   });
-  if (!claimed) return 'skipped';
+  if (claimed === 'gone') return 'skipped';
+  if (claimed === 'busy') return 'retry';
   const { link, merchant } = claimed;
 
   const release = (set: Partial<typeof commercePaymentLinks.$inferInsert> = {}) =>
@@ -668,13 +673,13 @@ async function adoptRemote(
     // A link that already ended (paid, expired, cancelled, failed) never changes again.
     if (!current || !OPEN_PAYMENT_LINK_STATUSES.includes(current.status)) return;
     let messageId = current.messageId;
-    let error: string | null = null;
+    let sendError: string | undefined;
     if (sendUrl && !messageId) {
       const sent = conversation
         ? await queueLinkMessage(tx, deps, scope.tenantId, link, conversation, sendUrl)
         : { messageId: null, error: LINK_NOT_SENT('the conversation was not found.') };
       messageId = sent.messageId;
-      error = sent.error;
+      sendError = sent.error ?? undefined;
     }
     await tx
       .update(commercePaymentLinks)
@@ -684,7 +689,8 @@ async function adoptRemote(
         shortUrl: remote.shortUrl,
         amountPaidMinor: remote.amountPaid,
         messageId,
-        error,
+        ...(sendError ? { sendError } : {}),
+        error: null,
         leaseUntil: null,
         checkedAt: now,
         nextCheckAt: open ? nextCheck(now, link.createdAt, link.expiresAt) : null,

@@ -342,6 +342,20 @@ export async function startGraphStandIn(options: {
       if (req.method === 'GET' && url.pathname === '/__stand-in/requests') {
         return json(res, 200, state.requests);
       }
+      // Test control: the catalog connected to a WhatsApp account and its products, as Commerce
+      // Manager would hold them.
+      if (req.method === 'POST' && url.pathname === '/__stand-in/catalog') {
+        const b = (body ?? {}) as {
+          wabaId?: string;
+          catalog?: { id: string; name: string; product_count: number };
+          products?: Record<string, unknown>[];
+        };
+        if (!b.wabaId || !b.catalog || !Array.isArray(b.products))
+          return json(res, 400, { ok: false });
+        state.catalogs.set(String(b.wabaId), [b.catalog]);
+        state.catalogProducts.set(b.catalog.id, b.products);
+        return json(res, 200, { ok: true });
+      }
       // Test control: set a template's review status, as Meta's review would.
       if (req.method === 'POST' && url.pathname === '/__stand-in/template-status') {
         const b = (body ?? {}) as { wabaId?: string; name?: string; status?: string };

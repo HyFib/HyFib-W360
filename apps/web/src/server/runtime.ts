@@ -23,6 +23,7 @@ import {
   PgBossJobQueue,
   RazorpayClient,
   createAutomationService,
+  createCommerceService,
   createCrmService,
   createBillingService,
   createBusinessHoursService,
@@ -44,6 +45,7 @@ import {
   createTenancyService,
   createWebRequestService,
   type AutomationService,
+  type CommerceService,
   type CrmService,
   type BillingService,
   type BusinessHoursService,
@@ -67,6 +69,7 @@ import {
   type WebRequestService,
   type FlowsService,
   type FlowEndpointDeps,
+  type PaymentWebhookDeps,
 } from '@w360/domain';
 import { DEFAULT_EGRESS_POLICY, createEgressClient } from '@w360/core/egress';
 import { createAuth, type Auth } from './auth';
@@ -113,6 +116,10 @@ export interface Runtime {
   /** The Flows data endpoint (null until the Meta app is configured: requests cannot be verified). */
   flowEndpoint: FlowEndpointDeps | null;
   crm: CrmService;
+  /** Catalogs, product messages, orders and Payment Links in the company's own Razorpay account. */
+  commerce: CommerceService;
+  /** Webhooks from companies' own Razorpay accounts (only signal a fetch of the link). */
+  paymentWebhook: PaymentWebhookDeps;
   /** Null until the Meta app is configured (WhatsApp connection is then reported unavailable). */
   meta: MetaConfig | null;
   onboarding: OnboardingService | null;
@@ -222,6 +229,17 @@ async function init(): Promise<Runtime> {
     allowInsecureHttp: config.W360_EGRESS_ALLOW_LOOPBACK ?? false,
   });
   const crm = createCrmService({ db, clock: systemClock, jobs, signer });
+  const commerce = createCommerceService({
+    db,
+    clock: systemClock,
+    jobs,
+    signer,
+    keyring,
+    appBaseUrl: config.APP_BASE_URL,
+    // Live keys move real money: only in production (like HyFib's own Razorpay keys).
+    allowLiveKeys: config.APP_ENV === 'production',
+  });
+  const paymentWebhook: PaymentWebhookDeps = { db, keyring, clock: systemClock, jobs, signer };
   const meta = metaConfigFrom(config);
   // The Flows data endpoint forwards to companies' endpoints while WhatsApp waits, so it has its
   // own egress client with a shorter time limit (the only addresses chosen by companies that the
@@ -299,6 +317,8 @@ async function init(): Promise<Runtime> {
     flows,
     flowEndpoint,
     crm,
+    commerce,
+    paymentWebhook,
     meta,
     onboarding,
     razorpay,
