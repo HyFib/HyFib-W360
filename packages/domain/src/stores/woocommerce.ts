@@ -6,6 +6,7 @@ import {
   STORE_LIMITS,
   clip,
   httpsUrl,
+  paymentNameList,
   statusWord,
   storeAmountToMinor,
   storeDate,
@@ -307,10 +308,11 @@ export function parseWooOrder(raw: unknown, storeCurrency: string | null): Store
     });
   }
   const number = clip(order.number, 90) ?? externalId;
+  const status = statusWord(order.status) ?? 'unknown';
   return {
     externalId,
     name: `#${number}`,
-    status: statusWord(order.status) ?? 'unknown',
+    status,
     financialStatus: null,
     fulfillmentStatus: null,
     test: false,
@@ -324,6 +326,16 @@ export function parseWooOrder(raw: unknown, storeCurrency: string | null): Store
     customerPhone: clip(billing?.phone, 40) ?? clip(shipping?.phone, 40),
     customerEmail: storeEmail(billing?.email),
     statusUrl: null,
+    paymentNames: paymentNameList([order.payment_method_title]),
+    // The core gateway's id (WC-021); a shop can rename its title, not its id.
+    cashOnDelivery: order.payment_method === 'cod',
+    // WooCommerce has no shipped or delivered status (WC-022): completion counts as shipped.
+    shippedAt:
+      status === 'completed' ? (storeDate(order.date_completed_gmt) ?? remoteUpdatedAt) : null,
+    deliveredAt: null,
+    trackingCompany: null,
+    trackingNumber: null,
+    trackingUrl: null,
     items,
   };
 }

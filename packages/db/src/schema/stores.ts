@@ -1,4 +1,13 @@
-import { bigint, boolean, integer, smallint, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import {
+  bigint,
+  boolean,
+  integer,
+  jsonb,
+  smallint,
+  text,
+  timestamp,
+  uuid,
+} from 'drizzle-orm/pg-core';
 import { appSchema } from './tenancy';
 
 /**
@@ -58,6 +67,12 @@ export const commerceStores = appSchema.table('commerce_stores', {
   syncError: text('sync_error'),
   leaseUntil: tz('lease_until'),
   uninstalledAt: tz('uninstalled_at'),
+  /** Order messages (0020): who confirmed the customers' opt-in, the sending window, test orders. */
+  messagesOptInAt: tz('messages_opt_in_at'),
+  messagesOptInMembershipId: uuid('messages_opt_in_membership_id'),
+  sendWindowStart: smallint('send_window_start'),
+  sendWindowEnd: smallint('send_window_end'),
+  messageTestOrders: boolean('message_test_orders').notNull().default(false),
   version: integer('version').notNull().default(1),
   createdByMembershipId: uuid('created_by_membership_id').notNull(),
   createdAt: tz('created_at').notNull().defaultNow(),
@@ -105,6 +120,15 @@ export const commerceStoreOrders = appSchema.table('commerce_store_orders', {
   customerPhone: text('customer_phone'),
   customerEmail: text('customer_email'),
   statusUrl: text('status_url'),
+  /** Milestones and payment (0020): what order messages are about. */
+  paymentNames: text('payment_names').array().notNull().default([]),
+  cashOnDelivery: boolean('cash_on_delivery').notNull().default(false),
+  shippedAt: tz('shipped_at'),
+  deliveredAt: tz('delivered_at'),
+  trackingCompany: text('tracking_company'),
+  trackingNumber: text('tracking_number'),
+  trackingUrl: text('tracking_url'),
+  trackedAt: tz('tracked_at'),
   redactedAt: tz('redacted_at'),
   deletedAt: tz('deleted_at'),
   syncedAt: tz('synced_at').notNull(),
@@ -159,4 +183,60 @@ export const commerceStorePrivacyRequests = appSchema.table('commerce_store_priv
   receivedAt: tz('received_at').notNull().defaultNow(),
   answeredAt: tz('answered_at'),
   answeredByMembershipId: uuid('answered_by_membership_id'),
+});
+
+/**
+ * Order messages (migration 0020): the template a store sends when one of its orders reaches an
+ * event, and the messages themselves (at most one per order and event).
+ */
+export const STORE_MESSAGE_EVENTS = [
+  'order_placed',
+  'cod_confirmation',
+  'order_shipped',
+  'order_delivered',
+  'order_cancelled',
+] as const;
+export type StoreMessageEvent = (typeof STORE_MESSAGE_EVENTS)[number];
+
+export const commerceStoreMessageRules = appSchema.table('commerce_store_message_rules', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  storeId: uuid('store_id').notNull(),
+  event: text('event', { enum: STORE_MESSAGE_EVENTS }).notNull(),
+  enabled: boolean('enabled').notNull().default(false),
+  enabledAt: tz('enabled_at'),
+  channelAccountId: uuid('channel_account_id'),
+  templateId: uuid('template_id'),
+  variables: jsonb('variables').notNull().default({ header: [], body: [] }),
+  delayMinutes: integer('delay_minutes').notNull().default(0),
+  confirmButton: smallint('confirm_button'),
+  cancelButton: smallint('cancel_button'),
+  version: integer('version').notNull().default(1),
+  updatedByMembershipId: uuid('updated_by_membership_id').notNull(),
+  createdAt: tz('created_at').notNull().defaultNow(),
+  updatedAt: tz('updated_at').notNull().defaultNow(),
+});
+
+export const STORE_MESSAGE_STATES = ['pending', 'queued', 'skipped'] as const;
+export type StoreMessageState = (typeof STORE_MESSAGE_STATES)[number];
+export const STORE_MESSAGE_ANSWERS = ['confirmed', 'cancelled'] as const;
+export type StoreMessageAnswer = (typeof STORE_MESSAGE_ANSWERS)[number];
+
+export const commerceStoreMessages = appSchema.table('commerce_store_messages', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  storeId: uuid('store_id').notNull(),
+  orderId: uuid('order_id').notNull(),
+  event: text('event', { enum: STORE_MESSAGE_EVENTS }).notNull(),
+  state: text('state', { enum: STORE_MESSAGE_STATES }).notNull().default('pending'),
+  skipReason: text('skip_reason'),
+  occurredAt: tz('occurred_at').notNull(),
+  sendAt: tz('send_at').notNull(),
+  contactId: uuid('contact_id'),
+  messageId: uuid('message_id'),
+  answer: text('answer', { enum: STORE_MESSAGE_ANSWERS }),
+  answeredAt: tz('answered_at'),
+  answerMessageId: uuid('answer_message_id'),
+  createdAt: tz('created_at').notNull().defaultNow(),
+  updatedAt: tz('updated_at').notNull().defaultNow(),
 });

@@ -274,6 +274,22 @@ export const QUEUES = {
     deadLetter: 'dead-letter',
     deleteAfterHours: 72,
   },
+  /**
+   * One order message at its send time: checks the rule, the order, the template and the
+   * customer's consent, then queues the chat message (order messages). The row is the source of
+   * truth; the minute sweep signals any message whose job was lost.
+   */
+  commerceStoreMessage: {
+    name: 'commerce.store-message',
+    policy: 'exclusive',
+    retryLimit: 5,
+    retryDelaySeconds: 30,
+    retryBackoff: true,
+    retryDelayMaxSeconds: 900,
+    expireInSeconds: 120,
+    deadLetter: 'dead-letter',
+    deleteAfterHours: 72,
+  },
   deadLetter: {
     name: 'dead-letter',
     policy: 'standard',

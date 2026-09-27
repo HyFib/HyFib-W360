@@ -6,16 +6,29 @@ import { isAppError, systemClock, type Clock } from '@w360/core';
 import { createEgressClient, DEFAULT_EGRESS_POLICY } from '@w360/core/egress';
 import { authorizedTenantScope } from '@w360/db';
 import {
+  codPayload,
+  createConsentService,
   createContactsService,
+  createSegmentsService,
+  createStoreMessagesService,
   createStoreService,
+  createTemplatesService,
+  findDueStoreMessages,
   findDueStoreWork,
   handleShopifyWebhook,
   handleWooWebhook,
+  processSendIntent,
   processStoreJob,
+  processStoreMessage,
+  processTemplateSubmit,
   saveStoreOrders,
   saveStoreProducts,
   STORE_LIMITS,
+  syncTemplates,
+  type StoreMessageEvent,
+  type StoreVariables,
   type StoreWorkerDeps,
+  type TemplateDefinition,
   type TenantContext,
 } from '@w360/domain';
 import { startShopifyStandIn, type ShopifyStandIn } from '../support/shopify-stand-in';
@@ -530,6 +543,13 @@ describe('Shopify stores', () => {
             customerPhone: null,
             customerEmail: null,
             statusUrl: null,
+            paymentNames: [],
+            cashOnDelivery: false,
+            shippedAt: null,
+            deliveredAt: null,
+            trackingCompany: null,
+            trackingNumber: null,
+            trackingUrl: null,
             items: [],
           },
         ],
@@ -1100,5 +1120,1087 @@ describe('store data and people', () => {
     );
     expect(counts).toEqual({ n: STORE_LIMITS.productsPerStore, updated: 1 });
     expect(await storeRow(storeId)).toMatchObject({ products_truncated: true });
+  });
+});
+
+// Order messages (P4-06c) ---------------------------------------------------------------------------
+
+const storeMessages = (clock: Clock = systemClock) =>
+  createStoreMessagesService({ db: fx.dbs.app, clock });
+const messageDeps = (clock: Clock = systemClock) => ({
+  db: fx.dbs.app,
+  clock,
+  jobs: fx.jobs(),
+  signer: fx.signer,
+});
+const sendRate = { capacity: 1000, refillPerSecond: 1000 };
+let templateCounter = 0;
+
+const orderUpdate: TemplateDefinition = {
+  category: 'UTILITY',
+  header: { type: 'none' },
+  body: {
+    text: 'Hi {{1}}, an update on your order {{2}}: {{3}}.',
+    examples: ['Asha', '#1001', 'it is on its way'],
+  },
+  footer: null,
+  buttons: [],
+};
+const codConfirm: TemplateDefinition = {
+  category: 'UTILITY',
+  header: { type: 'none' },
+  body: {
+    text: 'Please confirm your cash on delivery order {{1}} of {{2}}.',
+    examples: ['#1001', '₹1,499.00'],
+  },
+  footer: null,
+  buttons: [
+    { type: 'QUICK_REPLY', text: 'Confirm order' },
+    { type: 'QUICK_REPLY', text: 'Cancel order' },
+  ],
+};
+
+/** A template created, submitted and approved through the Graph stand-in, then synced. */
+async function approvedTemplate(c: Company, owner: TenantContext, definition: TemplateDefinition) {
+  templateCounter += 1;
+  const name = `order_msg_${templateCounter}_${Date.now().toString(36)}`;
+  const deps = { db: fx.dbs.app, jobs: fx.jobs(), signer: fx.signer, clock: systemClock };
+  const templates = createTemplatesService(deps);
+  const { id } = await templates.createDraft(owner, {
+    whatsappAccountId: c.whatsappAccountId,
+    name,
+    language: 'en',
+    definition,
+  });
+  await templates.submitTemplate(owner, id);
+  const graphDeps = { ...deps, keyring: fx.keyring, graph: fx.graph };
+  expect(await processTemplateSubmit(graphDeps, scopeOf(c), id)).toBe('done');
+  const t = fx.standIn.state.templates.get(c.wabaId)?.find((x) => x.name === name);
+  if (!t) throw new Error('template not at the stand-in');
+  t.status = 'APPROVED';
+  await syncTemplates(graphDeps, scopeOf(c), c.whatsappAccountId);
+  return { id, name };
+}
+
+/** The template's three body variables: the customer, the order and something about the event. */
+const update = (third: StoreVariables['body'][number]): StoreVariables => ({
+  header: [],
+  body: [
+    { source: 'order', field: 'customer_name', fallback: 'there' },
+    { source: 'order', field: 'order_name' },
+    third,
+  ],
+});
+
+async function saveRule(
+  owner: TenantContext,
+  c: Company,
+  storeId: string,
+  event: StoreMessageEvent,
+  input: {
+    templateId: string;
+    variables: StoreVariables;
+    enabled?: boolean;
+    delayMinutes?: number;
+    confirmButton?: number | null;
+    cancelButton?: number | null;
+  },
+) {
+  const view = await storeMessages().storeMessages(owner, storeId);
+  const rule = view.rules.find((r) => r.event === event);
+  return storeMessages().saveMessageRule(owner, {
+    storeId,
+    event,
+    enabled: input.enabled ?? true,
+    channelAccountId: c.channelAccountId,
+    templateId: input.templateId,
+    variables: input.variables,
+    delayMinutes: input.delayMinutes ?? 0,
+    confirmButton: input.confirmButton ?? null,
+    cancelButton: input.cancelButton ?? null,
+    version: rule?.version ?? 0,
+  });
+}
+
+const optIn = (owner: TenantContext, storeId: string, extra: Record<string, unknown> = {}) =>
+  storeMessages().saveMessageSettings(owner, {
+    storeId,
+    optIn: true,
+    windowStart: '',
+    windowEnd: '',
+    testOrders: false,
+    ...extra,
+  });
+
+async function messageRows(storeId: string) {
+  return fx.query<Record<string, unknown> & { id: string; event: string; message_id: string }>(
+    `SELECT sm.*, o.external_id FROM app.commerce_store_messages sm
+       JOIN app.commerce_store_orders o ON o.id = sm.order_id
+      WHERE sm.store_id = $1 ORDER BY sm.created_at, sm.event`,
+    [storeId],
+  );
+}
+
+/** Handles every waiting store message of the store, as its job would (bounded, in order). */
+async function runMessages(c: Company, storeId: string, clock: Clock = systemClock) {
+  const rows = await fx.query<{ id: string }>(
+    `SELECT id FROM app.commerce_store_messages WHERE store_id = $1 AND state = 'pending'
+      ORDER BY created_at`,
+    [storeId],
+  );
+  const outcomes = [];
+  for (const row of rows) {
+    outcomes.push(await processStoreMessage(messageDeps(clock), scopeOf(c), row.id));
+  }
+  return outcomes;
+}
+
+/** Hands every queued send of the company to the Graph stand-in. */
+async function sendAll(c: Company) {
+  const intents = await fx.query<{ id: string; actor_user_id: string | null }>(
+    `SELECT id, actor_user_id FROM app.send_intents WHERE tenant_id = $1 AND state = 'queued'
+      ORDER BY created_at`,
+    [c.tenant.id],
+  );
+  const outcomes = [];
+  for (const intent of intents) {
+    const result = await processSendIntent(
+      {
+        db: fx.dbs.app,
+        keyring: fx.keyring,
+        graph: fx.graph,
+        clock: systemClock,
+        rate: sendRate,
+        jobs: fx.jobs(),
+        signer: fx.signer,
+      },
+      authorizedTenantScope(c.tenant.id, intent.actor_user_id),
+      intent.id,
+    );
+    outcomes.push(result.outcome);
+  }
+  return outcomes;
+}
+
+/** The template messages WhatsApp received for a number, oldest first. */
+const templatesTo = (to: string) =>
+  fx.standIn.state.requests
+    .filter((r) => r.path.endsWith('/messages') && (r.body as { to?: string }).to === to)
+    .map((r) => (r.body as { template: { name: string; components: unknown[] } }).template);
+
+const bodyTexts = (template: { components: unknown[] } | undefined) =>
+  (
+    (template?.components ?? []).find((c) => (c as { type: string }).type === 'body') as
+      { parameters: { text: string }[] } | undefined
+  )?.parameters.map((p) => p.text);
+
+/** A connected Shopify store whose customers' opt-in a manager confirmed. */
+async function shopifyStoreForMessages(c: Company, owner: TenantContext, name = 'Tara Tea') {
+  const shop = newShop();
+  shopify.addShop(shop, { name, currency: 'INR' });
+  const { storeId } = await connectShopify(c, owner, shop);
+  expect(await drain(c, storeId)).toEqual(['connected', 'synced']);
+  return { shop, storeId };
+}
+
+const orderSignal = (shop: string, id: string, topic = 'orders/updated') =>
+  shopify.deliver(shop, topic, {
+    id: Number(id),
+    admin_graphql_api_id: `gid://shopify/Order/${id}`,
+    updated_at: iso(),
+  });
+
+describe('Order messages', () => {
+  it('sends the chosen templates when Shopify orders are placed, shipped, delivered and cancelled', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const shop = newShop();
+    shopify.addShop(shop, { name: 'Tara Tea', currency: 'INR' });
+    // An order from yesterday: the first read brings it, and nothing is ever sent about it.
+    shopify.upsertOrder(shop, {
+      id: '5000',
+      phone: '+919812300000',
+      createdAt: iso(-86_400_000),
+      processedAt: iso(-86_400_000),
+      updatedAt: iso(-86_400_000),
+    });
+    const template = await approvedTemplate(c, owner, orderUpdate);
+    const { storeId } = await connectShopify(c, owner, shop);
+    await drain(c, storeId);
+
+    // No message can be switched on before a manager confirms the customers' opt-in (M-175).
+    const placedVars = update({ source: 'static', value: 'we received it' });
+    await expectAppError(
+      saveRule(owner, c, storeId, 'order_placed', {
+        templateId: template.id,
+        variables: placedVars,
+      }),
+      'validation_failed',
+      /agreed to receive/,
+    );
+    await optIn(owner, storeId);
+    await saveRule(owner, c, storeId, 'order_placed', {
+      templateId: template.id,
+      variables: placedVars,
+    });
+    await fx.query('UPDATE app.commerce_stores SET next_sync_at = now() WHERE id = $1', [storeId]);
+    await drain(c, storeId);
+    expect(await messageRows(storeId)).toEqual([]);
+
+    // A new order: the webhook makes HyFib read it, and the confirmation goes out.
+    shopify.upsertOrder(shop, {
+      id: '5001',
+      name: '#1001',
+      phone: '+919812345678',
+      shippingAddress: { name: 'Asha K', phone: null },
+      total: { amount: '1499.00', currencyCode: 'INR' },
+      lineItems: [
+        {
+          name: 'Assam tea',
+          sku: 'T',
+          quantity: 3,
+          total: { amount: '1499.00', currencyCode: 'INR' },
+        },
+      ],
+    });
+    expect((await orderSignal(shop, '5001', 'orders/create'))[0]?.status).toBe(200);
+    await drain(c, storeId);
+    const [placed] = await messageRows(storeId);
+    expect(placed).toMatchObject({ event: 'order_placed', state: 'pending', external_id: '5001' });
+    // Its job waits for its send time (the sweep would find it too).
+    const jobs = await fx.query(
+      `SELECT 1 FROM pgboss.job WHERE name = 'commerce.store-message' AND singleton_key LIKE $1`,
+      [`store-message:${placed?.id}:%`],
+    );
+    expect(jobs).toHaveLength(1);
+    expect(await runMessages(c, storeId)).toMatchObject([{ outcome: 'queued' }]);
+    expect(await sendAll(c)).toEqual(['accepted']);
+    expect(templatesTo('919812345678').map((t) => t.name)).toEqual([template.name]);
+    expect(bodyTexts(templatesTo('919812345678')[0])).toEqual([
+      'Asha K',
+      '#1001',
+      'we received it',
+    ]);
+    // In the chat it is an automatic message from the store, in a thread that stays resolved; the
+    // customer became a contact from the order.
+    const [placedRow] = await messageRows(storeId);
+    const [chat] = await fx.query<{
+      sender_type: string;
+      content: { store: unknown };
+      status: string;
+    }>(
+      `SELECT m.sender_type, m.content, cv.status FROM app.messages m
+         JOIN app.conversations cv ON cv.id = m.conversation_id WHERE m.id = $1`,
+      [placedRow?.message_id],
+    );
+    expect(chat).toMatchObject({ sender_type: 'system', status: 'resolved' });
+    expect(chat?.content.store).toMatchObject({
+      event: 'order_placed',
+      orderName: '#1001',
+      name: 'Tara Tea',
+    });
+    expect(
+      await fx.query(
+        `SELECT source, display_name FROM app.contacts WHERE tenant_id = $1 AND phone_e164 = $2`,
+        [c.tenant.id, '+919812345678'],
+      ),
+    ).toEqual([{ source: 'store', display_name: 'Asha K' }]);
+    // Contacts made from store orders can be picked in segments.
+    const segments = createSegmentsService({ db: fx.dbs.app, clock: systemClock });
+    expect(
+      (
+        await segments.previewDefinition(owner, {
+          match: 'all',
+          conditions: [{ type: 'source', source: 'store' }],
+        })
+      ).sample.map((p) => p.phoneE164),
+    ).toEqual(['+919812345678']);
+
+    // Repeated deliveries and a full read again never send a second confirmation.
+    await orderSignal(shop, '5001');
+    await drain(c, storeId);
+    await fx.query(
+      `UPDATE app.commerce_stores SET next_sync_at = now(), orders_cursor = now() - interval '2 days'
+        WHERE id = $1`,
+      [storeId],
+    );
+    await drain(c, storeId);
+    expect(await messageRows(storeId)).toHaveLength(1);
+
+    // Shipped: the shipment's tracking fills the message.
+    await saveRule(owner, c, storeId, 'order_shipped', {
+      templateId: template.id,
+      variables: update({ source: 'order', field: 'tracking_number' }),
+    });
+    shopify.upsertOrder(shop, {
+      id: '5001',
+      displayFulfillmentStatus: 'FULFILLED',
+      fulfillments: [
+        {
+          status: 'SUCCESS',
+          displayStatus: 'IN_TRANSIT',
+          createdAt: iso(),
+          updatedAt: iso(),
+          deliveredAt: null,
+          trackingInfo: [
+            { company: 'Delhivery', number: 'AWB123', url: 'https://track.example/AWB123' },
+          ],
+        },
+      ],
+    });
+    await orderSignal(shop, '5001');
+    await drain(c, storeId);
+    expect(await runMessages(c, storeId)).toMatchObject([{ outcome: 'queued' }]);
+    expect(await sendAll(c)).toEqual(['accepted']);
+    expect(bodyTexts(templatesTo('919812345678')[1])).toEqual(['Asha K', '#1001', 'AWB123']);
+    expect((await orderRows(storeId)).find((o) => o.external_id === '5001')).toMatchObject({
+      tracking_company: 'Delhivery',
+      tracking_number: 'AWB123',
+      tracking_url: 'https://track.example/AWB123',
+    });
+
+    // Delivered: the order itself does not change when the parcel arrives (SH-034), so no webhook
+    // comes; HyFib reads orders in transit again once they were last read three hours ago.
+    await saveRule(owner, c, storeId, 'order_delivered', {
+      templateId: template.id,
+      variables: update({ source: 'static', value: 'it was delivered' }),
+    });
+    const stored = shopify.shops.get(shop)?.orders.get('5001');
+    const shipment = stored?.fulfillments[0];
+    if (!stored || !shipment) throw new Error('no shipment');
+    stored.fulfillments = [
+      { ...shipment, displayStatus: 'DELIVERED', deliveredAt: iso(), updatedAt: iso() },
+    ];
+    await processStoreJob(workerDeps(), scopeOf(c), storeId);
+    expect(await messageRows(storeId)).toHaveLength(2);
+    const threeHours = later(3 * 3_600_000 + 60_000);
+    await processStoreJob(workerDeps(threeHours), scopeOf(c), storeId);
+    expect((await messageRows(storeId)).map((r) => [r.event, r.state])).toEqual([
+      ['order_placed', 'queued'],
+      ['order_shipped', 'queued'],
+      ['order_delivered', 'pending'],
+    ]);
+    expect(await runMessages(c, storeId, threeHours)).toMatchObject([{ outcome: 'queued' }]);
+    expect(await sendAll(c)).toEqual(['accepted']);
+    expect(bodyTexts(templatesTo('919812345678')[2])?.[2]).toBe('it was delivered');
+
+    // Cancelled (Shopify says when).
+    await saveRule(owner, c, storeId, 'order_cancelled', {
+      templateId: template.id,
+      variables: update({ source: 'static', value: 'it was cancelled' }),
+    });
+    shopify.upsertOrder(shop, { id: '5001', cancelledAt: iso() });
+    await orderSignal(shop, '5001');
+    await drain(c, storeId);
+    expect(await runMessages(c, storeId)).toMatchObject([{ outcome: 'queued' }]);
+    expect(await sendAll(c)).toEqual(['accepted']);
+    expect(templatesTo('919812345678')).toHaveLength(4);
+
+    // The report and the order's own list.
+    const view = await storeMessages().storeMessages(owner, storeId);
+    expect(view.rules.filter((r) => r.enabled).map((r) => r.event)).toEqual([
+      'order_placed',
+      'order_shipped',
+      'order_delivered',
+      'order_cancelled',
+    ]);
+    expect(view.recent).toHaveLength(4);
+    expect(view.counts.sent).toBe(4);
+    const orderId = String(placedRow?.order_id);
+    expect((await storeMessages().orderMessages(owner, orderId)).map((m) => m.event)).toEqual([
+      'order_placed',
+      'order_shipped',
+      'order_delivered',
+      'order_cancelled',
+    ]);
+  });
+
+  it('asks cash on delivery customers to confirm, and records taps only from that message', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { shop, storeId } = await shopifyStoreForMessages(c, owner);
+    const confirmation = await approvedTemplate(c, owner, orderUpdate);
+    const cod = await approvedTemplate(c, owner, codConfirm);
+    await optIn(owner, storeId);
+    await saveRule(owner, c, storeId, 'order_placed', {
+      templateId: confirmation.id,
+      variables: update({ source: 'static', value: 'we received it' }),
+    });
+    const codVars: StoreVariables = {
+      header: [],
+      body: [
+        { source: 'order', field: 'order_name' },
+        { source: 'order', field: 'order_total' },
+      ],
+    };
+    // The same button for both answers, or a template without two quick replies, is refused.
+    await expectAppError(
+      saveRule(owner, c, storeId, 'cod_confirmation', {
+        templateId: cod.id,
+        variables: codVars,
+        confirmButton: 0,
+        cancelButton: 0,
+      }),
+      'validation_failed',
+      /quick reply/,
+    );
+    await expectAppError(
+      saveRule(owner, c, storeId, 'cod_confirmation', {
+        templateId: confirmation.id,
+        variables: update({ source: 'static', value: 'x' }),
+        confirmButton: 0,
+        cancelButton: 1,
+      }),
+      'validation_failed',
+      /quick reply/,
+    );
+    await saveRule(owner, c, storeId, 'cod_confirmation', {
+      templateId: cod.id,
+      variables: codVars,
+      confirmButton: 0,
+      cancelButton: 1,
+    });
+
+    shopify.upsertOrder(shop, {
+      id: '5101',
+      name: '#2001',
+      phone: '+919812399999',
+      paymentGatewayNames: ['Cash on Delivery (COD)'],
+      displayFinancialStatus: 'PENDING',
+      total: { amount: '1499.00', currencyCode: 'INR' },
+    });
+    await orderSignal(shop, '5101', 'orders/create');
+    await drain(c, storeId);
+    // The plain confirmation gives way to the cash on delivery message.
+    expect((await messageRows(storeId)).map((r) => [r.event, r.state, r.skip_reason])).toEqual([
+      ['cod_confirmation', 'pending', null],
+      ['order_placed', 'skipped', 'cash_on_delivery'],
+    ]);
+    expect(await runMessages(c, storeId)).toMatchObject([{ outcome: 'queued' }]);
+    expect(await sendAll(c)).toEqual(['accepted']);
+    const codRow = (await messageRows(storeId)).find((r) => r.event === 'cod_confirmation');
+    if (!codRow) throw new Error('no cod message');
+    const [sent] = templatesTo('919812399999');
+    expect(sent?.name).toBe(cod.name);
+    expect(sent?.components).toEqual([
+      {
+        type: 'body',
+        parameters: [
+          { type: 'text', text: '#2001' },
+          { type: 'text', text: '₹1,499.00' },
+        ],
+      },
+      {
+        type: 'button',
+        sub_type: 'quick_reply',
+        index: '0',
+        parameters: [{ type: 'payload', payload: codPayload(codRow.id, 'confirm') }],
+      },
+      {
+        type: 'button',
+        sub_type: 'quick_reply',
+        index: '1',
+        parameters: [{ type: 'payload', payload: codPayload(codRow.id, 'cancel') }],
+      },
+    ]);
+    const [out] = await fx.query<{ external_message_id: string; conversation_id: string }>(
+      'SELECT external_message_id, conversation_id FROM app.messages WHERE id = $1',
+      [codRow.message_id],
+    );
+    if (!out) throw new Error('no chat message');
+
+    // "Cancel order" is even one of the company's opt-out keywords: a tap is an answer, not one.
+    await createConsentService({ db: fx.dbs.app, clock: systemClock }).updateSettings(owner, {
+      optOutKeywords: 'STOP\nCancel order',
+      marketingOptOutKeywords: '',
+      optInKeywords: '',
+      requireMarketingOptIn: false,
+    });
+    const now = Math.floor(Date.now() / 1000);
+    const tap = (
+      answer: 'confirm' | 'cancel',
+      opts: { waId?: string; context?: string; at?: number; id?: string } = {},
+    ) =>
+      fx.deliver(
+        fx.messagesBody(c, {
+          messages: [
+            {
+              waId: opts.waId ?? '919812399999',
+              type: 'button',
+              timestamp: opts.at ?? now,
+              extra: {
+                button: {
+                  payload: codPayload(opts.id ?? codRow.id, answer),
+                  text: answer === 'confirm' ? 'Confirm order' : 'Cancel order',
+                },
+                context: { from: '919000000000', id: opts.context ?? out.external_message_id },
+              },
+            },
+          ],
+        }),
+      );
+    await tap('cancel');
+    const answered = async () =>
+      (
+        await fx.query<{ answer: string | null; answered_at: Date | null }>(
+          'SELECT answer, answered_at FROM app.commerce_store_messages WHERE id = $1',
+          [codRow.id],
+        )
+      )[0];
+    expect((await answered())?.answer).toBe('cancelled');
+    // A cancellation reopens the conversation for the team; nobody was opted out.
+    const thread = async () =>
+      (
+        await fx.query<{ status: string; unread_count: number }>(
+          'SELECT status, unread_count FROM app.conversations WHERE id = $1',
+          [out.conversation_id],
+        )
+      )[0];
+    expect(await thread()).toMatchObject({ status: 'open', unread_count: 1 });
+    expect(
+      await fx.query(
+        `SELECT 1 FROM app.contact_consents cc JOIN app.contacts ct ON ct.id = cc.contact_id
+          WHERE ct.phone_e164 = '+919812399999' AND cc.status = 'opted_out'`,
+      ),
+    ).toEqual([]);
+
+    // A later confirmation replaces it quietly; an older tap arriving late does not.
+    await tap('confirm', { at: now + 5 });
+    expect((await answered())?.answer).toBe('confirmed');
+    expect((await thread())?.unread_count).toBe(1);
+    await tap('cancel', { at: now - 60 });
+    expect((await answered())?.answer).toBe('confirmed');
+
+    // Another customer cannot answer it, nor can a tap that replies to another message.
+    await tap('cancel', { waId: '919812300001', at: now + 10 });
+    await tap('cancel', { context: 'wamid.someone-else', at: now + 11 });
+    expect((await answered())?.answer).toBe('confirmed');
+
+    expect(
+      (await storeMessages().orderMessages(owner, String(codRow.order_id))).find(
+        (m) => m.event === 'cod_confirmation',
+      ),
+    ).toMatchObject({ answer: 'confirmed' });
+  });
+
+  it('sends nothing about the past, and skips test orders, late events and customers who cannot be messaged', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { shop, storeId } = await shopifyStoreForMessages(c, owner);
+    const template = await approvedTemplate(c, owner, orderUpdate);
+    await optIn(owner, storeId);
+    const vars = update({ source: 'static', value: 'we received it' });
+    await saveRule(owner, c, storeId, 'order_placed', { templateId: template.id, variables: vars });
+
+    const contacts = createContactsService({ db: fx.dbs.app, clock: systemClock });
+    const consent = createConsentService({ db: fx.dbs.app, clock: systemClock });
+    const optedOut = await contacts.createContact(owner, {
+      displayName: 'No',
+      phone: '+919811100001',
+    });
+    await consent.recordConsent(owner, {
+      contactId: optedOut.id,
+      purpose: 'utility',
+      action: 'opt_out',
+    });
+    await consent.addSuppression(owner, { phone: '+919811100002', reason: 'manual' });
+    const place = async (id: string, extra: Record<string, unknown> = {}) => {
+      shopify.upsertOrder(shop, { id, name: `#${id}`, ...extra });
+      await orderSignal(shop, id, 'orders/create');
+    };
+    await place('6001', { phone: '+919811100000', test: true });
+    await place('6002', { phone: '+919811100001' });
+    await place('6003', { phone: '+919811100002' });
+    await place('6004', { phone: null, shippingAddress: null });
+    await place('6005', {
+      phone: '+919811100005',
+      displayFulfillmentStatus: 'FULFILLED',
+      fulfillments: [
+        {
+          status: 'SUCCESS',
+          displayStatus: 'IN_TRANSIT',
+          createdAt: iso(),
+          updatedAt: iso(),
+          deliveredAt: null,
+          trackingInfo: [{ company: 'Delhivery', number: 'AWB605', url: 'https://t.example/605' }],
+        },
+      ],
+    });
+    await drain(c, storeId);
+    expect(
+      (await messageRows(storeId)).map((r) => [r.external_id, r.state, r.skip_reason]),
+    ).toEqual([
+      ['6001', 'skipped', 'test_order'],
+      ['6002', 'pending', null],
+      ['6003', 'pending', null],
+      ['6004', 'pending', null],
+      ['6005', 'pending', null],
+    ]);
+
+    // The customer's details go before the send (contact erasure also clears tracking).
+    const erasable = await contacts.createContact(owner, {
+      displayName: 'Gone',
+      phone: '+919811100005',
+    });
+    await contacts.eraseContact(owner, { contactId: erasable.id, suppress: false });
+    // The tracking goes with the customer, and a read from the store (which still has it, and the
+    // number is not suppressed) keeps it out.
+    await fx.query(
+      `UPDATE app.commerce_stores SET next_sync_at = now(), orders_cursor = now() - interval '1 day'
+        WHERE id = $1`,
+      [storeId],
+    );
+    await drain(c, storeId);
+    expect((await orderRows(storeId)).find((o) => o.external_id === '6005')).toMatchObject({
+      customer_phone: null,
+      tracking_company: 'Delhivery',
+      tracking_number: null,
+      tracking_url: null,
+    });
+    const outcomes = await runMessages(c, storeId);
+    expect(outcomes).toEqual([
+      { outcome: 'skipped', reason: 'opted_out' },
+      { outcome: 'skipped', reason: 'suppressed' },
+      { outcome: 'skipped', reason: 'no_phone' },
+      { outcome: 'skipped', reason: 'customer_erased' },
+    ]);
+    // A suppressed number never becomes a contact.
+    expect(
+      await fx.query('SELECT 1 FROM app.contacts WHERE tenant_id = $1 AND phone_e164 = $2', [
+        c.tenant.id,
+        '+919811100002',
+      ]),
+    ).toEqual([]);
+    expect(await sendAll(c)).toEqual([]);
+
+    // Test orders go out once the store allows them (to try the messages on a development store).
+    await optIn(owner, storeId, { testOrders: true });
+    await place('6006', { phone: '+919811100006', test: true });
+    await drain(c, storeId);
+    expect(await runMessages(c, storeId)).toMatchObject([{ outcome: 'queued' }]);
+
+    // An event HyFib first sees two days late is recorded, not sent.
+    await fx.query(
+      `UPDATE app.commerce_store_message_rules SET enabled_at = now() - interval '5 days'
+        WHERE store_id = $1`,
+      [storeId],
+    );
+    await place('6007', {
+      phone: '+919811100007',
+      createdAt: iso(-49 * 3_600_000),
+      processedAt: iso(-49 * 3_600_000),
+    });
+    await drain(c, storeId);
+    expect((await messageRows(storeId)).find((r) => r.external_id === '6007')).toMatchObject({
+      state: 'skipped',
+      skip_reason: 'too_late',
+    });
+  });
+
+  it('waits for the sending hours, and stops messages whose rule, template or number changed', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { shop, storeId } = await shopifyStoreForMessages(c, owner);
+    const template = await approvedTemplate(c, owner, orderUpdate);
+    // Sending hours that begin in an hour (company time, Asia/Kolkata by default).
+    const kolkata = new Date(Date.now() + 5.5 * 3_600_000);
+    const minute = kolkata.getUTCHours() * 60 + kolkata.getUTCMinutes();
+    const hhmm = (m: number) =>
+      `${String(Math.floor((m % 1440) / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+    await optIn(owner, storeId, { windowStart: hhmm(minute + 60), windowEnd: hhmm(minute + 180) });
+    const vars = update({ source: 'static', value: 'we received it' });
+    await saveRule(owner, c, storeId, 'order_placed', { templateId: template.id, variables: vars });
+    shopify.upsertOrder(shop, { id: '7001', phone: '+919822200001' });
+    await orderSignal(shop, '7001', 'orders/create');
+    await drain(c, storeId);
+    const [waiting] = await messageRows(storeId);
+    const opens = new Date(String(waiting?.send_at));
+    expect(opens.getTime() - Date.now()).toBeGreaterThan(55 * 60_000);
+    expect(opens.getTime() - Date.now()).toBeLessThan(62 * 60_000);
+    expect(await runMessages(c, storeId)).toEqual([{ outcome: 'not_due' }]);
+    const atOpening: Clock = { now: () => new Date(opens.getTime() + 1_000) };
+    expect(await runMessages(c, storeId, atOpening)).toMatchObject([{ outcome: 'queued' }]);
+    // The minute sweep finds due messages only.
+    await optIn(owner, storeId);
+    shopify.upsertOrder(shop, { id: '7002', phone: '+919822200002' });
+    await orderSignal(shop, '7002', 'orders/create');
+    await drain(c, storeId);
+    const due = await findDueStoreMessages(fx.dbs.app, 1000);
+    const pending = (await messageRows(storeId)).find((r) => r.external_id === '7002');
+    expect(due.map((d) => d.storeMessageId)).toContain(pending?.id);
+    expect(due.find((d) => d.storeMessageId === pending?.id)?.tenantId).toBe(c.tenant.id);
+
+    // Switched off before the send.
+    await saveRule(owner, c, storeId, 'order_placed', {
+      templateId: template.id,
+      variables: vars,
+      enabled: false,
+    });
+    expect(await runMessages(c, storeId)).toEqual([
+      { outcome: 'skipped', reason: 'rule_disabled' },
+    ]);
+    expect(
+      (await findDueStoreMessages(fx.dbs.app, 1000)).map((d) => d.storeMessageId),
+    ).not.toContain(pending?.id);
+
+    // Switched off and on again: what happened in between is not messaged afterwards.
+    shopify.upsertOrder(shop, { id: '7003', phone: '+919822200003' });
+    await orderSignal(shop, '7003', 'orders/create');
+    await drain(c, storeId);
+    expect((await messageRows(storeId)).find((r) => r.external_id === '7003')).toBeUndefined();
+
+    // The template stops being approved, or the number stops being active, before the send.
+    await saveRule(owner, c, storeId, 'order_placed', { templateId: template.id, variables: vars });
+    shopify.upsertOrder(shop, {
+      id: '7004',
+      phone: '+919822200004',
+      createdAt: iso(),
+      processedAt: iso(),
+    });
+    await orderSignal(shop, '7004', 'orders/create');
+    shopify.upsertOrder(shop, {
+      id: '7005',
+      phone: '+919822200005',
+      createdAt: iso(),
+      processedAt: iso(),
+    });
+    await orderSignal(shop, '7005', 'orders/create');
+    await drain(c, storeId);
+    const byOrder = async (externalId: string) => {
+      const row = (await messageRows(storeId)).find((r) => r.external_id === externalId);
+      if (!row) throw new Error(`no message for ${externalId}`);
+      return processStoreMessage(messageDeps(), scopeOf(c), row.id);
+    };
+    await fx.query("UPDATE app.message_templates SET status = 'paused' WHERE id = $1", [
+      template.id,
+    ]);
+    expect(await byOrder('7004')).toEqual({
+      outcome: 'skipped',
+      reason: 'template_unavailable',
+    });
+    await fx.query("UPDATE app.message_templates SET status = 'approved' WHERE id = $1", [
+      template.id,
+    ]);
+    await fx.query("UPDATE app.channel_accounts SET status = 'needs_reconnect' WHERE id = $1", [
+      c.channelAccountId,
+    ]);
+    expect(await byOrder('7005')).toEqual({ outcome: 'skipped', reason: 'channel_unavailable' });
+    // A rule cannot be switched on with a number that is not active.
+    await expectAppError(
+      saveRule(owner, c, storeId, 'order_shipped', { templateId: template.id, variables: vars }),
+      'validation_failed',
+      /not active/,
+    );
+    await fx.query("UPDATE app.channel_accounts SET status = 'active' WHERE id = $1", [
+      c.channelAccountId,
+    ]);
+
+    // Withdrawing the opt-in confirmation switches every message off.
+    await storeMessages().saveMessageSettings(owner, {
+      storeId,
+      optIn: false,
+      windowStart: '',
+      windowEnd: '',
+      testOrders: false,
+    });
+    expect((await storeMessages().storeMessages(owner, storeId)).rules.some((r) => r.enabled)).toBe(
+      false,
+    );
+  });
+
+  it('checks everything again at send time, and keeps a rule’s start when it is edited', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { shop, storeId } = await shopifyStoreForMessages(c, owner);
+    const template = await approvedTemplate(c, owner, orderUpdate);
+    await optIn(owner, storeId);
+    const vars = update({ source: 'static', value: 'we received it' });
+    // Ten minutes' delay: the messages wait, and what changes meanwhile counts.
+    const rule = (input: Partial<Parameters<typeof saveRule>[4]> = {}) =>
+      saveRule(owner, c, storeId, 'order_placed', {
+        templateId: template.id,
+        variables: vars,
+        delayMinutes: 10,
+        ...input,
+      });
+    await rule();
+    // The rule has been on for an hour and these orders came a minute ago, so switching it off
+    // and on again later clearly comes after them.
+    await fx.query(
+      `UPDATE app.commerce_store_message_rules SET enabled_at = now() - interval '1 hour'
+        WHERE store_id = $1`,
+      [storeId],
+    );
+    const place = async (id: string, at = iso()) => {
+      shopify.upsertOrder(shop, {
+        id,
+        name: `#${id}`,
+        phone: `+9198233${id}`,
+        createdAt: at,
+        processedAt: at,
+      });
+      await orderSignal(shop, id, 'orders/create');
+    };
+    for (const id of ['8001', '8002', '8003', '8004', '8005', '8006']) {
+      await place(id, iso(-60_000));
+    }
+    await drain(c, storeId);
+    const tenMinutes = later(9 * 60_000 + 5_000);
+    const byOrder = async (externalId: string, clock: Clock = tenMinutes) => {
+      const row = (await messageRows(storeId)).find((r) => r.external_id === externalId);
+      if (!row) throw new Error(`no message for ${externalId}`);
+      return processStoreMessage(messageDeps(clock), scopeOf(c), row.id);
+    };
+    expect(await byOrder('8001', systemClock)).toEqual({ outcome: 'not_due' });
+
+    // Editing the enabled rule keeps when it was switched on: waiting messages still go.
+    await rule();
+    expect(await byOrder('8001')).toMatchObject({ outcome: 'queued' });
+    // The order was cancelled in the store before its confirmation went out.
+    shopify.upsertOrder(shop, { id: '8002', cancelledAt: iso() });
+    await orderSignal(shop, '8002');
+    await drain(c, storeId);
+    expect(await byOrder('8002')).toEqual({ outcome: 'skipped', reason: 'order_cancelled' });
+    // A variable the order has no value for, without a fallback.
+    await rule({ variables: update({ source: 'order', field: 'tracking_number' }) });
+    expect(await byOrder('8003')).toEqual({ outcome: 'skipped', reason: 'missing_variable' });
+    await rule();
+    // The template's variables changed after the message was set up.
+    const [saved] = await fx.query<{ components: unknown }>(
+      'SELECT components FROM app.message_templates WHERE id = $1',
+      [template.id],
+    );
+    await fx.query('UPDATE app.message_templates SET components = $2 WHERE id = $1', [
+      template.id,
+      JSON.stringify([{ type: 'BODY', text: 'Only {{1}}', example: { body_text: [['x']] } }]),
+    ]);
+    expect(await byOrder('8004')).toEqual({ outcome: 'skipped', reason: 'template_changed' });
+    await fx.query('UPDATE app.message_templates SET components = $2 WHERE id = $1', [
+      template.id,
+      JSON.stringify(saved?.components),
+    ]);
+    // Sending hours set after the message was scheduled: it waits for them.
+    const local = new Date(tenMinutes.now().getTime() + 5.5 * 3_600_000);
+    const minute = local.getUTCHours() * 60 + local.getUTCMinutes();
+    const hhmm = (m: number) =>
+      `${String(Math.floor((m % 1440) / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+    await optIn(owner, storeId, { windowStart: hhmm(minute + 60), windowEnd: hhmm(minute + 120) });
+    const moved = await byOrder('8005');
+    expect(moved.outcome).toBe('rescheduled');
+    const opensIn =
+      moved.outcome === 'rescheduled' ? moved.sendAt.getTime() - tenMinutes.now().getTime() : 0;
+    expect(opensIn).toBeGreaterThan(55 * 60_000);
+    expect(opensIn).toBeLessThan(61 * 60_000);
+    await optIn(owner, storeId);
+    // Switched off and on again: what was waiting from before is not sent.
+    await rule({ enabled: false });
+    await rule();
+    expect(await byOrder('8006')).toEqual({ outcome: 'skipped', reason: 'rule_disabled' });
+
+    // The opt-in confirmation withdrawn, or the store disconnected, before the send.
+    await place('8007');
+    await place('8008');
+    await drain(c, storeId);
+    await storeMessages().saveMessageSettings(owner, {
+      storeId,
+      optIn: false,
+      windowStart: '',
+      windowEnd: '',
+      testOrders: false,
+    });
+    const afterDelay = later(10 * 60_000 + 5_000);
+    expect(await byOrder('8007', afterDelay)).toEqual({ outcome: 'skipped', reason: 'no_opt_in' });
+    await fx.query("UPDATE app.commerce_stores SET state = 'uninstalled' WHERE id = $1", [storeId]);
+    expect(await byOrder('8008', afterDelay)).toEqual({
+      outcome: 'skipped',
+      reason: 'store_disconnected',
+    });
+    // Each message was handled once: a second job finds nothing waiting.
+    expect(await byOrder('8001')).toEqual({ outcome: 'not_pending' });
+  });
+
+  it('messages WooCommerce orders on completion and cancellation, and reads cash on delivery by gateway', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const site = `msg-${Date.now().toString(36)}`;
+    woo.addSite(site);
+    const keys = woo.addKeys(site);
+    woo.upsertOrder(site, {
+      id: 60,
+      status: 'processing',
+      total: '10.00',
+      billing: { first_name: 'Old', last_name: '', email: '', phone: '+919833300060' },
+    });
+    const { storeId } = await service().saveWooKeys(owner, { url: woo.siteUrl(site), ...keys });
+    await drain(c, storeId);
+    const template = await approvedTemplate(c, owner, orderUpdate);
+    const cod = await approvedTemplate(c, owner, codConfirm);
+    await optIn(owner, storeId);
+    const vars = (text: string) => update({ source: 'static', value: text });
+    // WooCommerce has no delivered status (WC-022).
+    await expectAppError(
+      saveRule(owner, c, storeId, 'order_delivered', {
+        templateId: template.id,
+        variables: vars('x'),
+      }),
+      'validation_failed',
+      /not available/,
+    );
+    await saveRule(owner, c, storeId, 'order_shipped', {
+      templateId: template.id,
+      variables: vars('it is on its way'),
+    });
+    await saveRule(owner, c, storeId, 'order_cancelled', {
+      templateId: template.id,
+      variables: vars('it was cancelled'),
+    });
+    await saveRule(owner, c, storeId, 'cod_confirmation', {
+      templateId: cod.id,
+      variables: {
+        header: [],
+        body: [
+          { source: 'order', field: 'order_name' },
+          { source: 'order', field: 'order_total' },
+        ],
+      },
+      confirmButton: 0,
+      cancelButton: 1,
+    });
+
+    woo.upsertOrder(site, {
+      id: 61,
+      status: 'processing',
+      total: '850.00',
+      payment_method: 'cod',
+      payment_method_title: 'Pay when it arrives',
+      billing: { first_name: 'Ravi', last_name: 'S', email: '', phone: '+919833300061' },
+    });
+    expect((await woo.deliver(site, 'order.created', 61))[0]?.status).toBe(200);
+    await drain(c, storeId);
+    woo.upsertOrder(site, {
+      id: 61,
+      status: 'completed',
+      date_completed_gmt: new Date().toISOString().replace(/\.\d{3}Z$/, ''),
+    });
+    await woo.deliver(site, 'order.updated', 61);
+    await drain(c, storeId);
+    woo.upsertOrder(site, { id: 60, status: 'cancelled' });
+    await woo.deliver(site, 'order.updated', 60);
+    await drain(c, storeId);
+    expect((await messageRows(storeId)).map((r) => [r.external_id, r.event, r.state])).toEqual([
+      ['61', 'cod_confirmation', 'pending'],
+      ['61', 'order_shipped', 'pending'],
+      ['60', 'order_cancelled', 'pending'],
+    ]);
+    expect(await runMessages(c, storeId)).toMatchObject([
+      { outcome: 'queued' },
+      { outcome: 'queued' },
+      { outcome: 'queued' },
+    ]);
+    expect(await sendAll(c)).toEqual(['accepted', 'accepted', 'accepted']);
+    expect(bodyTexts(templatesTo('919833300061')[0])).toEqual(['#61', '₹850.00']);
+    expect(bodyTexts(templatesTo('919833300060')[0])).toEqual(['Old', '#60', 'it was cancelled']);
+
+    // Completed, back to processing, completed again: still one shipped message.
+    woo.upsertOrder(site, { id: 61, status: 'processing', date_completed_gmt: null });
+    await woo.deliver(site, 'order.updated', 61);
+    await drain(c, storeId);
+    woo.upsertOrder(site, {
+      id: 61,
+      status: 'completed',
+      date_completed_gmt: new Date().toISOString().replace(/\.\d{3}Z$/, ''),
+    });
+    await woo.deliver(site, 'order.updated', 61);
+    await drain(c, storeId);
+    expect(
+      (await messageRows(storeId)).filter((r) => r.event === 'order_shipped').map((r) => r.state),
+    ).toEqual(['queued']);
+  });
+
+  it('lets managers change order messages, others only read them, and keeps companies apart', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { storeId } = await shopifyStoreForMessages(c, owner);
+    const template = await approvedTemplate(c, owner, orderUpdate);
+    await optIn(owner, storeId);
+    const vars = update({ source: 'static', value: 'x' });
+    const agent = await fx.ctx(c, c.agent);
+    const marketer = await fx.ctx(c, c.marketer);
+    expect((await storeMessages().storeMessages(agent, storeId)).canManage).toBe(false);
+    await expectAppError(
+      saveRule(agent, c, storeId, 'order_placed', { templateId: template.id, variables: vars }),
+      'forbidden',
+    );
+    await expectAppError(
+      storeMessages().saveMessageSettings(marketer, {
+        storeId,
+        optIn: false,
+        windowStart: '',
+        windowEnd: '',
+        testOrders: false,
+      }),
+      'forbidden',
+    );
+    // Every variable must be filled, and a stale form is refused.
+    await expectAppError(
+      saveRule(owner, c, storeId, 'order_placed', {
+        templateId: template.id,
+        variables: { header: [], body: [{ source: 'order', field: 'order_name' }] },
+      }),
+      'validation_failed',
+      /every template variable/,
+    );
+    await saveRule(owner, c, storeId, 'order_placed', { templateId: template.id, variables: vars });
+    await expectAppError(
+      storeMessages().saveMessageRule(owner, {
+        storeId,
+        event: 'order_placed',
+        enabled: false,
+        channelAccountId: c.channelAccountId,
+        templateId: template.id,
+        variables: vars,
+        delayMinutes: 0,
+        confirmButton: null,
+        cancelButton: null,
+        version: 0,
+      }),
+      'conflict',
+    );
+    // Half a sending window is refused.
+    await expectAppError(
+      optIn(owner, storeId, { windowStart: '09:00' }),
+      'validation_failed',
+      /both times/,
+    );
+    const audit = await fx.query<{ action: string }>(
+      `SELECT action FROM app.audit_events WHERE tenant_id = $1 AND action LIKE 'commerce.store_message%'
+        ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(audit.map((a) => a.action)).toEqual([
+      'commerce.store_message_settings_saved',
+      'commerce.store_message_rule_saved',
+    ]);
+
+    const other = await fx.company();
+    const otherOwner = await fx.ctx(other, other.owner);
+    await expectAppError(storeMessages().storeMessages(otherOwner, storeId), 'not_found');
+    await expectAppError(
+      storeMessages().saveMessageSettings(otherOwner, {
+        storeId,
+        optIn: true,
+        windowStart: '',
+        windowEnd: '',
+        testOrders: false,
+      }),
+      'not_found',
+    );
+    await expectAppError(
+      saveRule(otherOwner, other, storeId, 'order_placed', {
+        templateId: template.id,
+        variables: vars,
+      }),
+      'not_found',
+    );
   });
 });

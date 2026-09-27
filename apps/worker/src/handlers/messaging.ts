@@ -20,7 +20,7 @@ import { signalDueCampaigns } from './campaigns';
 import { RetryableJobError } from './email';
 import { signalDueTemplateSyncs } from './templates';
 import { sweepCommerceWork } from './commerce';
-import { sweepStoreWork } from './stores';
+import { sweepStoreMessages, sweepStoreWork } from './stores';
 import { sweepFlowWork } from './flows';
 
 /** Processes one stored Meta webhook receipt (idempotent; see processMetaWebhookReceipt). */
@@ -184,6 +184,8 @@ export function messagingSweepHandler(rt: WorkerRuntime) {
     if (commerceWork > 0) rt.logger.info({ commerceWork }, 'commerce work signalled');
     const storeWork = await sweepStoreWork(rt);
     if (storeWork > 0) rt.logger.info({ storeWork }, 'store work signalled');
+    const storeMessages = await sweepStoreMessages(rt);
+    if (storeMessages > 0) rt.logger.info({ storeMessages }, 'store messages signalled');
     const campaignTicks = await signalDueCampaigns(rt);
     if (campaignTicks > 0) rt.logger.info({ campaignTicks }, 'campaign ticks signalled');
     const automations = await sweepAutomationRuns(rt);

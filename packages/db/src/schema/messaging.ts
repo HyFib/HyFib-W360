@@ -93,7 +93,7 @@ export const channelOnboardingSessions = appSchema.table('channel_onboarding_ses
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });
 
-export const CONTACT_SOURCES = ['whatsapp', 'manual', 'import', 'api'] as const;
+export const CONTACT_SOURCES = ['whatsapp', 'manual', 'import', 'api', 'store'] as const;
 export type ContactSource = (typeof CONTACT_SOURCES)[number];
 
 export const contacts = appSchema.table('contacts', {

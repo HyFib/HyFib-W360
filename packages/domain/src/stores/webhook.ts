@@ -437,6 +437,8 @@ async function customerRedact(
           customerPhone: null,
           customerEmail: null,
           statusUrl: null,
+          trackingNumber: null,
+          trackingUrl: null,
           redactedAt: sql`coalesce(${commerceStoreOrders.redactedAt}, now())`,
         })
         .where(

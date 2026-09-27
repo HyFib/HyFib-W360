@@ -23,6 +23,11 @@ export interface StandInWooOrder {
   total: string;
   date_created_gmt: string;
   date_modified_gmt: string;
+  /** Set when the order is completed (WC-022). */
+  date_completed_gmt?: string | null;
+  /** The gateway id, `cod` for the core cash on delivery gateway (WC-021), and its title. */
+  payment_method?: string;
+  payment_method_title?: string;
   billing: { first_name: string; last_name: string; email: string; phone: string };
   line_items: {
     id: number;

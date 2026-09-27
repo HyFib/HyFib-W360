@@ -26,6 +26,8 @@ import { recordSystemAudit } from '../audit';
 import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
 import { StoreApiError } from './http';
+import type { OrderMilestones, SavedOrderChange } from './messages-model';
+import { markOrdersTracked, recordOrderEvents, transitOrdersToCheck } from './order-messages';
 import {
   STORE_LIMITS,
   SHOPIFY_SCOPES,
@@ -520,6 +522,7 @@ class StoreJob {
         );
       }
       const fetched = await this.processFetches(client);
+      await this.checkDeliveries(client);
       const update: StoreUpdate = { syncError: null };
       let waitSeconds: number | null = null;
       let continuing = fetched.remaining;
@@ -621,7 +624,7 @@ class StoreJob {
     for (const ids of chunks(productIds, client.batch))
       products.push(...(await client.productsById(ids)).values());
     await deps.db.run(scope, async (tx) => {
-      await saveStoreOrders(tx, store, orders, this.now);
+      await this.saveOrders(tx, orders);
       await saveStoreProducts(tx, store, products, this.now);
       // A signal that arrived during the read has a newer time and stays for the next job.
       for (const row of rows) {
@@ -653,11 +656,10 @@ class StoreJob {
         kind === 'orders'
           ? await client.ordersPage(cursor, page)
           : await client.productsPage(cursor, page);
-      await deps.db.run(scope, (tx) =>
-        kind === 'orders'
-          ? saveStoreOrders(tx, store, result.items as StoreOrderRecord[], this.now)
-          : saveStoreProducts(tx, store, result.items as StoreProductRecord[], this.now),
-      );
+      await deps.db.run(scope, async (tx) => {
+        if (kind === 'orders') await this.saveOrders(tx, result.items as StoreOrderRecord[]);
+        else await saveStoreProducts(tx, store, result.items as StoreProductRecord[], this.now);
+      });
       const last = result.items.at(-1)?.remoteUpdatedAt ?? null;
       const lastSecond = last ? new Date(Math.floor(last.getTime() / 1000) * 1000) : null;
       if (!result.next) {
@@ -679,6 +681,31 @@ class StoreJob {
       }
     }
     return { complete: false, cursor, page, waitSeconds: null };
+  }
+
+  /** Saves orders read from the store and records the order messages their changes call for. */
+  private async saveOrders(tx: Tx, records: StoreOrderRecord[]) {
+    const changes = await saveStoreOrders(tx, this.store, records, this.now);
+    await recordOrderEvents(tx, this.deps, this.store, changes, this.now);
+  }
+
+  /**
+   * Reads Shopify orders in transit again while the delivered message is on (SH-034: whether a
+   * delivery changes the order is unconfirmed, so its webhooks cannot be relied on).
+   */
+  private async checkDeliveries(client: StoreClient) {
+    const { deps, scope, store } = this;
+    const ids = await deps.db.run(scope, (tx) => transitOrdersToCheck(tx, store, this.now), {
+      accessMode: 'read only',
+    });
+    if (ids.length === 0) return;
+    const orders: StoreOrderRecord[] = [];
+    for (const batch of chunks(ids, client.batch))
+      orders.push(...(await client.ordersById(batch)).values());
+    await deps.db.run(scope, async (tx) => {
+      await this.saveOrders(tx, orders);
+      await markOrdersTracked(tx, store, ids, this.now);
+    });
   }
 
   private async pruneEvents() {
@@ -954,18 +981,37 @@ function* chunks<T>(items: T[], size: number): Generator<T[]> {
 
 // Saving -------------------------------------------------------------------------------------------
 
+const milestonesOf = (row: {
+  placedAt: Date;
+  status: string;
+  cancelledAt: Date | null;
+  shippedAt: Date | null;
+  deliveredAt: Date | null;
+  cashOnDelivery: boolean;
+  test: boolean;
+}): OrderMilestones => ({
+  placedAt: row.placedAt,
+  cancelled: row.status === 'cancelled',
+  cancelledAt: row.cancelledAt,
+  shippedAt: row.shippedAt,
+  deliveredAt: row.deliveredAt,
+  cashOnDelivery: row.cashOnDelivery,
+  test: row.test,
+});
+
 /**
  * Upserts orders read from the store. A copy never moves backwards (older `updated_at` is ignored);
- * redacted orders keep their customer details empty, and so do orders of numbers suppressed because
- * their contact was erased. Lines are replaced with the order.
+ * redacted orders keep their customer details and tracking empty, and so do orders of numbers
+ * suppressed because their contact was erased. Lines are replaced with the order. Returns the orders
+ * whose copy changed, with their milestones before and after, for order messages.
  */
 export async function saveStoreOrders(
   tx: Tx,
   store: Pick<StoreRow, 'id' | 'tenantId' | 'phoneCallingCode'>,
   records: StoreOrderRecord[],
   now: Date,
-): Promise<void> {
-  if (records.length === 0) return;
+): Promise<SavedOrderChange[]> {
+  if (records.length === 0) return [];
   const phones = records.map((r) => storeCustomerPhone(r.customerPhone, store.phoneCallingCode));
   const distinct = [...new Set(phones.filter((p): p is string => p !== null))];
   const erased = new Set(
@@ -984,6 +1030,34 @@ export async function saveStoreOrders(
             )
         ).map((r) => r.phone),
   );
+  // The copy before this read (the store's lease keeps other writers of orders away).
+  const before = new Map(
+    (
+      await tx
+        .select({
+          externalId: commerceStoreOrders.externalId,
+          placedAt: commerceStoreOrders.placedAt,
+          status: commerceStoreOrders.status,
+          cancelledAt: commerceStoreOrders.cancelledAt,
+          shippedAt: commerceStoreOrders.shippedAt,
+          deliveredAt: commerceStoreOrders.deliveredAt,
+          cashOnDelivery: commerceStoreOrders.cashOnDelivery,
+          test: commerceStoreOrders.test,
+        })
+        .from(commerceStoreOrders)
+        .where(
+          and(
+            eq(commerceStoreOrders.tenantId, store.tenantId),
+            eq(commerceStoreOrders.storeId, store.id),
+            inArray(
+              commerceStoreOrders.externalId,
+              records.map((r) => r.externalId),
+            ),
+          ),
+        )
+    ).map((row) => [row.externalId, row]),
+  );
+  const changes: SavedOrderChange[] = [];
   for (const [index, record] of records.entries()) {
     const phone = phones[index] ?? null;
     const redact = phone !== null && erased.has(phone);
@@ -1009,6 +1083,14 @@ export async function saveStoreOrders(
         customerPhone: redact ? null : phone,
         customerEmail: redact ? null : record.customerEmail,
         statusUrl: redact ? null : record.statusUrl,
+        paymentNames: record.paymentNames,
+        cashOnDelivery: record.cashOnDelivery,
+        shippedAt: record.shippedAt,
+        deliveredAt: record.deliveredAt,
+        trackingCompany: record.trackingCompany,
+        trackingNumber: redact ? null : record.trackingNumber,
+        trackingUrl: redact ? null : record.trackingUrl,
+        trackedAt: now,
         redactedAt: redact ? now : null,
         syncedAt: now,
       })
@@ -1034,6 +1116,14 @@ export async function saveStoreOrders(
           customerPhone: sql`case when ${commerceStoreOrders.redactedAt} is null then excluded.customer_phone end`,
           customerEmail: sql`case when ${commerceStoreOrders.redactedAt} is null then excluded.customer_email end`,
           statusUrl: sql`case when ${commerceStoreOrders.redactedAt} is null then excluded.status_url end`,
+          paymentNames: sql`excluded.payment_names`,
+          cashOnDelivery: sql`excluded.cash_on_delivery`,
+          shippedAt: sql`excluded.shipped_at`,
+          deliveredAt: sql`excluded.delivered_at`,
+          trackingCompany: sql`excluded.tracking_company`,
+          trackingNumber: sql`case when ${commerceStoreOrders.redactedAt} is null then excluded.tracking_number end`,
+          trackingUrl: sql`case when ${commerceStoreOrders.redactedAt} is null then excluded.tracking_url end`,
+          trackedAt: now,
           redactedAt: sql`coalesce(${commerceStoreOrders.redactedAt}, excluded.redacted_at)`,
           deletedAt: null,
           syncedAt: now,
@@ -1042,6 +1132,13 @@ export async function saveStoreOrders(
       })
       .returning({ id: commerceStoreOrders.id });
     if (!row) continue;
+    const previous = before.get(record.externalId);
+    changes.push({
+      orderId: row.id,
+      // An order the store deleted and brought back is not new again.
+      previous: previous ? milestonesOf(previous) : null,
+      current: milestonesOf(record),
+    });
     await tx
       .delete(commerceStoreOrderItems)
       .where(
@@ -1065,6 +1162,7 @@ export async function saveStoreOrders(
       );
     }
   }
+  return changes;
 }
 
 /**

@@ -31,12 +31,25 @@ export interface StandInShopifyOrder {
   shippingAddress: { name: string | null; phone: string | null } | null;
   billingAddress: { name: string | null; phone: string | null } | null;
   statusPageUrl: string;
+  /** Payment gateway names (SH-031), for example "Cash on Delivery (COD)". */
+  paymentGatewayNames: string[];
+  /** Shipments (SH-030); a delivery need not change the order's updatedAt (SH-034). */
+  fulfillments: StandInFulfillment[];
   lineItems: {
     name: string;
     sku: string | null;
     quantity: number;
     total: { amount: string; currencyCode: string };
   }[];
+}
+
+export interface StandInFulfillment {
+  status: 'SUCCESS' | 'CANCELLED' | 'ERROR' | 'FAILURE';
+  displayStatus: string | null;
+  createdAt: string;
+  updatedAt: string;
+  deliveredAt: string | null;
+  trackingInfo: { company: string | null; number: string | null; url: string | null }[];
 }
 
 export interface StandInShopifyProduct {
@@ -234,6 +247,8 @@ export async function startShopifyStandIn(options: {
       shippingAddress: null,
       billingAddress: null,
       statusPageUrl: `https://${domain}/orders/status/${order.id}`,
+      paymentGatewayNames: ['Shopify Payments'],
+      fulfillments: [],
       lineItems: [],
       ...existing,
       ...order,
@@ -385,6 +400,15 @@ export async function startShopifyStandIn(options: {
       shippingAddress: hide ? null : o.shippingAddress,
       billingAddress: hide ? null : o.billingAddress,
       statusPageUrl: o.statusPageUrl,
+      paymentGatewayNames: o.paymentGatewayNames,
+      fulfillments: o.fulfillments.slice(0, 10).map((f) => ({
+        status: f.status,
+        displayStatus: f.displayStatus,
+        createdAt: f.createdAt,
+        updatedAt: f.updatedAt,
+        deliveredAt: f.deliveredAt,
+        trackingInfo: f.trackingInfo.slice(0, 1),
+      })),
       lineItems: {
         nodes: o.lineItems.slice(0, 25).map((l) => ({
           name: l.name,

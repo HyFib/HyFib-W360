@@ -6,6 +6,8 @@ import {
   STORE_LIMITS,
   clip,
   httpsUrl,
+  isCashOnDeliveryName,
+  paymentNameList,
   statusWord,
   storeAmountToMinor,
   storeDate,
@@ -121,6 +123,15 @@ fragment W360Order on Order {
   shippingAddress { name phone }
   billingAddress { name phone }
   statusPageUrl
+  paymentGatewayNames
+  fulfillments(first: ${STORE_LIMITS.shopifyFulfillments}) {
+    status
+    displayStatus
+    createdAt
+    updatedAt
+    deliveredAt
+    trackingInfo(first: 1) { company number url }
+  }
   lineItems(first: ${STORE_LIMITS.shopifyLineItems}) {
     nodes { name sku quantity discountedTotalSet { shopMoney { amount currencyCode } } }
     pageInfo { hasNextPage }
@@ -457,6 +468,61 @@ const moneyOf = (set: unknown): { amount: unknown; currency: string | null } => 
   return { amount: money?.amount, currency };
 };
 
+// Shipments that did not happen (SH-030): `status` uses CANCELLED, `displayStatus` CANCELED.
+const FAILED_FULFILLMENT_STATUS = new Set(['CANCELLED', 'ERROR', 'FAILURE']);
+const FAILED_FULFILLMENT_DISPLAY = new Set(['CANCELED', 'FAILURE']);
+
+type ShipmentFacts = Pick<
+  StoreOrderRecord,
+  'shippedAt' | 'deliveredAt' | 'trackingCompany' | 'trackingNumber' | 'trackingUrl'
+>;
+
+/**
+ * What an order's shipments say (SH-030): shipped at the first shipment that was not cancelled or
+ * failed; delivered once the order is fully shipped and every such shipment is delivered (at the
+ * last delivery); the tracking of the latest shipment that has any.
+ */
+export function shopifyShipments(order: Record<string, unknown>): ShipmentFacts {
+  const list = Array.isArray(order.fulfillments) ? order.fulfillments : [];
+  const shipments = list
+    .map((raw) => asRecord(raw))
+    .filter(
+      (f): f is Record<string, unknown> =>
+        f !== null &&
+        !FAILED_FULFILLMENT_STATUS.has(String(f.status)) &&
+        !FAILED_FULFILLMENT_DISPLAY.has(String(f.displayStatus)),
+    )
+    .map((f) => {
+      const tracking = asRecord(Array.isArray(f.trackingInfo) ? f.trackingInfo[0] : null);
+      const deliveredAt = storeDate(f.deliveredAt);
+      return {
+        createdAt: storeDate(f.createdAt),
+        deliveredAt:
+          deliveredAt ?? (f.displayStatus === 'DELIVERED' ? storeDate(f.updatedAt) : null),
+        company: clip(tracking?.company, 100),
+        number: clip(tracking?.number, 100),
+        url: httpsUrl(tracking?.url),
+      };
+    })
+    .filter((f): f is typeof f & { createdAt: Date } => f.createdAt !== null)
+    .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+  const first = shipments[0];
+  const delivered =
+    order.displayFulfillmentStatus === 'FULFILLED' &&
+    shipments.length > 0 &&
+    shipments.every((f) => f.deliveredAt !== null);
+  const tracked = [...shipments].reverse().find((f) => f.number !== null || f.url !== null);
+  return {
+    shippedAt: first ? first.createdAt : null,
+    deliveredAt: delivered
+      ? new Date(Math.max(...shipments.map((f) => (f.deliveredAt as Date).getTime())))
+      : null,
+    trackingCompany: tracked?.company ?? null,
+    trackingNumber: tracked?.number ?? null,
+    trackingUrl: tracked?.url ?? null,
+  };
+}
+
 /** A GraphQL Order node as the record HyFib keeps (SH-013, SH-014), or null when unusable. */
 export function parseShopifyOrder(node: unknown): StoreOrderRecord | null {
   const order = asRecord(node);
@@ -490,6 +556,9 @@ export function parseShopifyOrder(node: unknown): StoreOrderRecord | null {
     });
   }
   const phone = clip(order.phone, 40) ?? clip(shipping?.phone, 40) ?? clip(billing?.phone, 40);
+  const paymentNames = paymentNameList(
+    Array.isArray(order.paymentGatewayNames) ? order.paymentGatewayNames : [],
+  );
   return {
     externalId,
     name: clip(order.name, 100) ?? `#${externalId}`,
@@ -508,6 +577,9 @@ export function parseShopifyOrder(node: unknown): StoreOrderRecord | null {
     customerPhone: phone,
     customerEmail: storeEmail(order.email),
     statusUrl: httpsUrl(order.statusPageUrl),
+    paymentNames,
+    cashOnDelivery: paymentNames.some(isCashOnDeliveryName),
+    ...shopifyShipments(order),
     items,
   };
 }

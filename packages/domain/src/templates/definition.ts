@@ -412,10 +412,18 @@ export function buildTemplateSend(
   template: { name: string; language: string },
   spec: Extract<SendSpec, { supported: true }>,
   params: TemplateParams,
+  options: {
+    /**
+     * Payloads for quick-reply buttons by their zero-based position among the template's buttons
+     * (research M-177); a tap returns the payload in the reply (M-178).
+     */
+    quickReplyPayloads?: ReadonlyMap<number, string>;
+  } = {},
 ): { template: Record<string, unknown>; rendered: RenderedTemplate } {
   if (params.header.length !== spec.headerParams || params.body.length !== spec.bodyParams) {
     throw new Error('Template parameter count mismatch');
   }
+  const def = spec.definition;
   const components: Record<string, unknown>[] = [];
   if (spec.headerParams === 1) {
     components.push({ type: 'header', parameters: [{ type: 'text', text: params.header[0] }] });
@@ -426,7 +434,19 @@ export function buildTemplateSend(
       parameters: params.body.map((text) => ({ type: 'text', text })),
     });
   }
-  const def = spec.definition;
+  for (const [index, payload] of [...(options.quickReplyPayloads ?? new Map())].sort(
+    ([a], [b]) => a - b,
+  )) {
+    if (def.buttons[index]?.type !== 'QUICK_REPLY') {
+      throw new Error(`Button ${index} of the template is not a quick reply`);
+    }
+    components.push({
+      type: 'button',
+      sub_type: 'quick_reply',
+      index: String(index),
+      parameters: [{ type: 'payload', payload }],
+    });
+  }
   return {
     template: {
       name: template.name,

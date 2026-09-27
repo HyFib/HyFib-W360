@@ -26,6 +26,9 @@ export const STORE_LIMITS = {
   backfillDays: 60,
   productsPerStore: 20_000,
   orderItems: 100,
+  /** Shipments read per Shopify order (SH-030) and payment names kept per order. */
+  shopifyFulfillments: 10,
+  paymentNames: 5,
   /** Page sizes keep a Shopify query well under its cost limit (SH-011). */
   shopifyOrdersPage: 20,
   shopifyLineItems: 25,
@@ -272,6 +275,17 @@ export interface StoreOrderRecord {
   customerPhone: string | null;
   customerEmail: string | null;
   statusUrl: string | null;
+  /** Payment method names as the store gives them (Shopify gateways, SH-031; the WooCommerce title). */
+  paymentNames: string[];
+  cashOnDelivery: boolean;
+  /** The first shipment that was not cancelled (Shopify) or the completion (WooCommerce, WC-022). */
+  shippedAt: Date | null;
+  /** When every shipment of a fully shipped order was delivered (Shopify only, SH-030). */
+  deliveredAt: Date | null;
+  /** The latest shipment's tracking (Shopify only). */
+  trackingCompany: string | null;
+  trackingNumber: string | null;
+  trackingUrl: string | null;
   items: StoreOrderItemRecord[];
 }
 
@@ -361,6 +375,26 @@ export function storeEmail(value: unknown): string | null {
   if (!text) return null;
   const lower = text.toLowerCase();
   return /^[^\s@]+@[^\s@]+$/.test(lower) ? lower : null;
+}
+
+/**
+ * Whether a payment method name means cash on delivery. Shopify's own example of a gateway name is
+ * "Cash on Delivery (COD)" (SH-031); a name containing "cash on delivery" counts, other manual
+ * payment names do not. WooCommerce orders are read by the gateway id instead (WC-021).
+ */
+export function isCashOnDeliveryName(name: string): boolean {
+  return /cash\s+on\s+delivery/i.test(name);
+}
+
+/** Payment method names as stored: clipped, without duplicates, at most STORE_LIMITS.paymentNames. */
+export function paymentNameList(values: unknown[]): string[] {
+  const names: string[] = [];
+  for (const value of values) {
+    const name = clip(value, 100);
+    if (name && !names.includes(name)) names.push(name);
+    if (names.length === STORE_LIMITS.paymentNames) break;
+  }
+  return names;
 }
 
 /** An https URL as stored (other schemes are dropped). */
