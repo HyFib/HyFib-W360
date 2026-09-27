@@ -57,8 +57,8 @@ locally for the HTTP step; commerce (P4-06) is still open.
   - The call record stored the rendered path, so a customer's value placed in the address outlived
     an erasure; it now keeps the step's path as written (placeholders not filled in).
   - A call left in flight by a worker that died stayed "in progress", with its encrypted request,
-    when the run ended before its deadline; ending a run (and erasing its contact) now settles such
-    calls as unknown and erases the request.
+    when the run ended before its deadline; ending a run (and erasing its contact, migration 0015)
+    now settles such calls as unknown and erases the request.
   - Name resolution now counts against the 10-second deadline, and at most two system lookups run
     at once per worker (they cannot be cancelled), so a slow name cannot hold the thread pool.
   - Every checked address is tried in turn, so one unreachable address (an AAAA record on an

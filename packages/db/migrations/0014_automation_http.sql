@@ -53,10 +53,8 @@ CREATE TRIGGER http_secrets_touch BEFORE UPDATE ON app.http_secrets
 
 -- HTTP calls made by automation runs -----------------------------------------------------------------
 -- One call per visit of a step. The request (URL, headers without secret values, body) is encrypted
--- and erased once the call has an outcome. The host and the step's path as written (placeholders not
--- filled in, no query) stay for the run page, so the row never holds a customer's values in plain
--- text. Values saved from the response are personal data like captured answers and are cleared
--- with them.
+-- and erased once the call has an outcome; host and path (without the query) stay for the run page.
+-- Values saved from the response are personal data like captured answers and are cleared with them.
 CREATE TABLE app.automation_http_calls (
   id uuid PRIMARY KEY,
   tenant_id uuid NOT NULL,
@@ -215,7 +213,7 @@ $$;
 CREATE POLICY definer_access ON app.automation_http_calls TO w360_definer USING (true) WITH CHECK (true);
 GRANT SELECT (tenant_id, id, run_id, state, created_at, saved_values, request_ciphertext)
   ON app.automation_http_calls TO w360_definer;
-GRANT UPDATE (saved_values, request_ciphertext, state, error_code, finished_at, lease_until)
+GRANT UPDATE (saved_values, request_ciphertext, state, error_code, finished_at)
   ON app.automation_http_calls TO w360_definer;
 GRANT EXECUTE ON FUNCTION ops.automation_http_calls_due(integer) TO w360_app;
 ALTER FUNCTION ops.automation_http_calls_due(integer) OWNER TO w360_definer;
@@ -313,9 +311,8 @@ BEGIN
          waiting_for = NULL, wait_until = NULL, input_message_id = NULL, next_step_at = NULL
    WHERE r.tenant_id = v_tenant AND r.contact_id = p_contact_id AND r.status IN ('running', 'waiting');
 
-  -- Automation HTTP calls: values saved from responses are cleared, calls not yet made are
-  -- cancelled, and calls in flight become unknown (a call already sent cannot be recalled, and the
-  -- result the worker records later is not kept).
+  -- Automation HTTP calls: values saved from responses are cleared, and calls not yet made are
+  -- cancelled (a call already sent cannot be recalled; its outcome is not stored for a stopped run).
   UPDATE app.automation_http_calls h SET saved_values = '{}'::jsonb, request_ciphertext = NULL
    WHERE h.tenant_id = v_tenant
      AND (h.saved_values <> '{}'::jsonb OR h.request_ciphertext IS NOT NULL)
@@ -324,11 +321,6 @@ BEGIN
   UPDATE app.automation_http_calls h
      SET state = 'canceled', error_code = 'contact_erased', finished_at = now()
    WHERE h.tenant_id = v_tenant AND h.state = 'queued'
-     AND h.run_id IN (SELECT r.id FROM app.automation_runs r
-                       WHERE r.tenant_id = v_tenant AND r.contact_id = p_contact_id);
-  UPDATE app.automation_http_calls h
-     SET state = 'unknown', error_code = 'contact_erased', finished_at = now(), lease_until = NULL
-   WHERE h.tenant_id = v_tenant AND h.state = 'in_flight'
      AND h.run_id IN (SELECT r.id FROM app.automation_runs r
                        WHERE r.tenant_id = v_tenant AND r.contact_id = p_contact_id);
 

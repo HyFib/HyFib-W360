@@ -327,8 +327,9 @@ run tester removed") or no longer holds `automations.write` and `inbox.reply` (t
 **Retention.** The minute sweep clears captured answers 30 days after runs end and deletes runs
 (with their step logs) 180 days after they end ("automation retention applied").
 
-**Migration 0014 failed.** Like 0011, it replaces `app.erase_contact` and
-`ops.apply_automation_retention` through `SET ROLE w360_definer` and applies nothing on failure.
+**Migration 0014 or 0015 failed.** Like 0011, they replace definer functions through
+`SET ROLE w360_definer` (0014: `app.erase_contact` and `ops.apply_automation_retention`; 0015:
+`app.erase_contact` again) and apply nothing on failure.
 
 **Migration 0011 failed.** It runs in one transaction, so a failure applies nothing. It drops and
 recreates the definer functions `app.erase_contact` and `ops.conversations_to_route` through

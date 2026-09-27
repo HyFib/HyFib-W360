@@ -388,7 +388,7 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 - **Builder** (`/c/{slug}/automations`, ADR-034): a structured step list with a generated diagram,
   live checks, an in-browser simulator (sends nothing and checks neither the window nor consent),
   publish, pause, archive and restore, test runs, versions and run pages.
-- **HTTP step** (migration 0014, ADR-042, ADR-043): "Call a web address" calls a company's own API
+- **HTTP step** (migrations 0014 and 0015, ADR-042, ADR-043): "Call a web address" calls a company's own API
   (GET, POST, PUT, PATCH, DELETE; JSON body; up to 10 headers; values saved from a JSON response by
   path) and branches on success (2xx) or failure. Only domains on the company's list
   (`http_allowed_domains`) can be called, over https through the egress guard
