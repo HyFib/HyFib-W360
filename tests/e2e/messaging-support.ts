@@ -166,6 +166,35 @@ export function buttonReply(
   });
 }
 
+/**
+ * A completed WhatsApp Flow: an interactive `nfm_reply` whose `response_json` string holds the flow
+ * token and the answers, in reply to the flow message `contextId` (research M-166).
+ */
+export function flowCompletion(
+  wabaId: string,
+  phoneNumberId: string,
+  waId: string,
+  response: Record<string, unknown>,
+  contextId: string,
+) {
+  return envelope(wabaId, phoneNumberId, {
+    contacts: [{ profile: { name: 'Priya Customer' }, wa_id: waId }],
+    messages: [
+      {
+        from: waId,
+        id: `wamid.e2e.${randomUUID()}`,
+        timestamp: String(Math.floor(Date.now() / 1000)),
+        type: 'interactive',
+        interactive: {
+          type: 'nfm_reply',
+          nfm_reply: { name: 'flow', body: 'Sent', response_json: JSON.stringify(response) },
+        },
+        context: { from: '919000012345', id: contextId },
+      },
+    ],
+  });
+}
+
 export function statusUpdate(
   wabaId: string,
   phoneNumberId: string,

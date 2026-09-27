@@ -11,3 +11,4 @@ export * from './inbox';
 export * from './automations';
 export * from './crm';
 export * from './growth';
+export * from './flows';

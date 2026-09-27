@@ -1,5 +1,79 @@
 # Progress
 
+## 2026-09-27 — Phase 4: WhatsApp Flows (P4-03)
+
+Status: **WhatsApp Flows implemented and locally verified; production blocked on checks with an
+approved sandbox number and a real account's keys.** Companies write forms as Flow JSON, send them
+to Meta as drafts, publish them, send them in conversations and save the answers on the contact.
+Forms that fetch data use HyFib's encrypted endpoint, which forwards requests to the company's own
+endpoint. No request reached Meta and no WhatsApp client opened a form: Meta was the local Graph
+stand-in, and endpoint requests were encrypted and signed by the tests the way WhatsApp does.
+
+### Completed
+
+- **Research (M-161 to M-168):** flow creation, JSON upload with validation errors, publish,
+  deprecate, delete and read (official OpenAPI description, high confidence); the business public
+  key per phone number (M-164); the flow message (M-165); the completion webhook `nfm_reply`
+  (M-166, medium confidence: third-party sources); endpoint status codes and encryption (Meta's
+  sample endpoint, M-167); `flow_token_signature` (M-168, low confidence, not used). M-163 now also
+  records the `health_status` fields (with M-107).
+- **Schema (migration 0017, ADR-045):** `flows`, `flow_keys`, `flow_key_uploads`, `flow_sends` and
+  `flow_responses`, with composite foreign keys, FORCE RLS and column grants; definer functions
+  `ops.flow_endpoint_target` (the endpoint's lookup by public id) and `ops.flow_work_due` (the
+  sweep); `app.erase_contact` replaced to delete answers and end tokens.
+- **Worker (`flow.sync`, `flow.keys`):** every operation at Meta is written ahead on the flow row and
+  performed once; a lost create response is recovered by adopting the flow whose name carries the
+  flow's reference; publish, deprecate and delete read Meta's status first; operations waiting over
+  two minutes are signalled again and those over 30 minutes fail with a message. Keys: one RSA-2048
+  key per WhatsApp account, uploaded to every active number and read back, replaced with a 24-hour
+  overlap, private keys deleted when retired.
+- **Endpoint (`/api/flows/endpoint/<public id>`):** signature (432), decryption with the current or
+  previous key (421), health checks and error notices answered by HyFib, HyFib's flow tokens only
+  (427 with a message), suspended companies refused, forwarding through the egress guard to the
+  company's endpoint on an allowed domain with its secret only for that host, the company's own 427
+  passed on, and codes-only logging.
+- **Pages (`flows.read`; drafts and settings need `flows.write`, publishing and key replacement
+  `flows.publish`):** Flows list with archived view, New flow with the example form and live checks,
+  and a flow page with status, Meta's validation errors with line and column, health, preview,
+  lifecycle buttons (irreversible actions confirmed), the draft editor or the published JSON,
+  answer and endpoint settings, the endpoint address and key state per number, and completed forms.
+  The inbox has a "Send a form" card while the window is open, and shows sent and completed forms
+  in the thread. The Flows module is now listed as available.
+- **Found while building:**
+  - Saving an unchanged draft said the changes were being sent to Meta; it now says nothing changed,
+    and saving a restored draft (or one whose upload failed) sends it to Meta again. Unchanged saves
+    are no longer audited.
+  - Operations that ran out of time said Meta did not answer, also when the company had been
+    suspended and nothing was sent; the message now names both causes.
+  - The published Flow JSON widened the flow page on phones; the page grid now keeps it scrolling
+    inside its card.
+  - Mutation checks found two untested rules (a secret re-pointed to another domain, a completion by
+    someone other than the form's contact); both now have integration tests, and all seven
+    deliberate regressions tried (signature, expiry, secret domain, contact match, lost create
+    response, draft sending, erasure) fail the tests.
+  - PR #7's Firefox e2e run failed with `NS_BINDING_ABORTED` when the automations test left an inbox
+    page with `page.goto` while a live refresh was in flight (Next.js answers a cancelled refresh by
+    loading the current page again). The test now leaves inbox pages through the app navigation.
+
+### Test commands and results (local, 2026-09-27, fresh database)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `pnpm test` (unit)                                                          | 155 passed. New: 7 Flows tests (request decryption with the previous key during rotation and the inverted IV in answers; refusals of wrong keys, tampered data and malformed fields; Flow JSON checks on the starter form, errors and data flows; the flow message; health status)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 245 passed, including `flows.test.ts` 7: the lifecycle with permissions, validation errors, one operation at a time, publishing, new drafts, deprecation, deletion, restoring and re-sending a draft, and audit; a lost create response adopted without a second flow, refusals and the 30-minute limit; keys uploaded to every number, a mismatch, rotation and retirement; sending in the window (drafts to testers only), completion with answer outcomes, a completion by another contact, unknown tokens and answer visibility by role; erasure; the endpoint (signature, unknown flow, wrong key, health check, error notice, unknown and expired tokens, forwarding with the secret, the company's 427, failures, a removed domain, a secret moved to another domain, suspension, rotation); isolation |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 44 passed (22 tests × 2), including `flows.spec.ts`: a form created with live checks, sent to Meta, mapped, published after confirmation, sent in a conversation, completed by a signed `nfm_reply` with its answers shown in the chat, the contact renamed and the flow page listing the answers; and a data flow whose key is uploaded, answering an encrypted health check through the route, refusing a bad signature (432) and a token HyFib did not issue (427), and forwarding a data exchange from a test send to a local company endpoint with its secret                                                                                                                                                                                                                             |
+
+### Known gaps
+
+- Not built: a visual form builder, sending flows from automations, campaigns or templates, flows
+  that open with `data_exchange`, Meta's flow metrics and `flow_token_signature`.
+- Verified against the Graph stand-in only. Whether one key per account is accepted on every
+  number, the `nfm_reply` shape (third-party sources) and Meta's wait for the endpoint are release
+  checklist items, as are Firefox and WebKit locally (they run in CI).
+- Keyring rotation of existing ciphertexts, now including flow private keys, needs the
+  re-encryption job (SEC-10).
+
 ## 2026-09-27 — Phase 4: growth tools (P4-05)
 
 Status: **Growth tools implemented and locally verified; production blocked on checks with real

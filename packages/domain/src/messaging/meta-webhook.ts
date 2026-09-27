@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { parseFlowCompletion } from '../flows/responses';
 
 /**
  * Lenient schemas for Meta WhatsApp webhook payloads (object `whatsapp_business_account`).
@@ -178,6 +179,23 @@ export function normaliseInboundContent(message: MetaMessage): {
       };
     case 'interactive': {
       const i = (body ?? {}) as Record<string, unknown>;
+      // A completed WhatsApp Flow (research M-166): the answers, without the flow token.
+      const completion = parseFlowCompletion(i);
+      if (completion) {
+        return {
+          type,
+          content: {
+            interactiveType: 'nfm_reply',
+            reply: null,
+            flow: {
+              body: completion.body,
+              answers: completion.answers,
+              tooLarge: completion.tooLarge,
+            },
+          },
+          preview: '[Form submitted]',
+        };
+      }
       const reply = (i.button_reply ?? i.list_reply ?? i.nfm_reply) as
         Record<string, unknown> | undefined;
       const title = typeof reply?.title === 'string' ? reply.title : '';

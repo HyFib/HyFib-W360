@@ -68,15 +68,16 @@ export const MODULES: ModuleDefinition[] = [
     permission: 'automations.read',
     status: 'available',
     reason:
-      'Keyword, new-conversation and any-message automations with messages, reply buttons, questions, conditions, contact updates, waits, hand-off and web requests to allowed domains; immutable versions, test runs and a simulator. WhatsApp Flows and drag-and-drop editing are not available yet.',
+      'Keyword, new-conversation and any-message automations with messages, reply buttons, questions, conditions, contact updates, waits, hand-off and web requests to allowed domains; immutable versions, test runs and a simulator. Sending WhatsApp Flows from an automation and drag-and-drop editing are not available yet.',
   },
   {
     key: 'flows',
     label: 'Flows',
     path: '/flows',
     permission: 'flows.read',
-    status: 'planned',
-    reason: 'Phase 4: WhatsApp Flows lifecycle and encrypted data endpoint.',
+    status: 'available',
+    reason:
+      'WhatsApp Flows written as Flow JSON: drafts checked by Meta, publishing and deprecation, sending from a conversation (drafts to testers), answers saved on the contact, and an encrypted data endpoint forwarded to an allowed domain. A visual form builder and sending flows from automations or campaigns are not available yet.',
   },
   {
     key: 'crm',

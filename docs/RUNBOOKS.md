@@ -410,6 +410,59 @@ see that section. It adds policies and column grants for `w360_definer` on `app.
 and `app.messages`; a failure there usually means the bootstrap roles are missing
 (`infra/db/bootstrap-roles.sql`).
 
+## 10G. WhatsApp Flows
+
+**A flow stays on "Sending to Meta…" (or another operation).** The flow page shows the operation and
+when it was requested. The `flow.sync` worker retries Meta's temporary failures five times over
+about 15 minutes; the minute sweep signals operations waiting for more than two minutes again and
+marks those older than 30 minutes failed ("did not finish within 30 minutes"), which the member can
+try again. Check the worker log for `flow job` lines with the flow id and outcome, and that Meta is
+configured (without it the worker does nothing and says "Meta is not configured"). Jobs of a
+suspended company are dropped and picked up by the sweep after reactivation.
+
+**"Meta did not accept the change".** The message is Meta's own (title or detail, trimmed). A
+credential problem says to reconnect the WhatsApp account. Validation problems in the Flow JSON are
+not failures: they are listed on the flow page with line and column, and publishing waits until
+Meta reports none. A failed delete that says Meta could not read the flow usually means it was
+already deleted in WhatsApp Manager: archive it in HyFib.
+
+**Two flows appeared at Meta for one draft.** It should not happen: the name at Meta ends with
+"(w360 " and the first eight characters of the flow's public id, and the worker adopts a flow with
+its reference instead of creating another after a lost response. A copy made by hand in WhatsApp
+Manager keeps the reference in its name; rename or delete it there.
+
+**The encryption key is not valid on a number.** The flow page lists each number with the key's
+state. "Uploading…" clears within minutes (the sweep retries uploads pending for more than two
+minutes). "Failed" shows the reason: the account is not connected (reconnect it), the number is not
+active, or Meta reports a signature mismatch or a different key for the number (another system may
+have uploaded its own key: use "Upload the key again", and stop the other system from replacing it).
+New numbers of the account get the key automatically. Replacing the key keeps the previous one
+working for 24 hours.
+
+**Customers see "This form is no longer available".** The token of that message was not issued by
+HyFib for this flow, is older than 30 days, or belongs to an erased contact: send the form again.
+"This form is not available right now" means the company is suspended. Other failures answer 500
+(what WhatsApp then shows the customer is not documented in our research); the web log has a
+`flow endpoint request` line with the outcome: `endpoint_not_set`, `endpoint_domain_not_allowed` (add the domain in Settings → Web
+requests), `endpoint_secret_missing`, `endpoint_secret_domain_mismatch` (the secret now belongs to
+another domain), `endpoint_failed` with the company's status or the egress code, `endpoint_answer_not_json`
+or `endpoint_answer_too_large` (over 64 KB). `decrypt_failed` (421) makes WhatsApp fetch the key
+again; if it persists, check the number's key state. `bad_signature` (432) means the request was not
+signed with the current or previous app secret.
+
+**Answers were not saved on the contact.** Each completed form lists what happened to every answer:
+saved, not answered, not saved (with the reason, for example an invalid email or a value that does
+not fit the field's type) or skipped (the answers could not be read or were too large, or the form
+was completed by someone other than the contact it was sent to). Answers are always kept with the
+completed form, and saving them never changes consent.
+
+**Migration 0017 failed.** It runs in one transaction, so a failure applies nothing. It replaces the
+definer function `app.erase_contact` through `SET ROLE w360_definer` (ADR-039) like 0011, 0015 and
+0016, and adds two definer functions (`ops.flow_endpoint_target`, `ops.flow_work_due`) with column
+grants for `w360_definer` on the flow tables and `app.channel_accounts`; a failure there usually
+means the bootstrap roles are missing (`infra/db/bootstrap-roles.sql`). The `flow.sync` and
+`flow.keys` queues are created by `pnpm db:migrate` with the other pg-boss queues.
+
 ## 11. Compromised company (tenant) or account
 
 1. Suspend the company in `/platform` with a reason (stops outbound activity; ingestion continues).

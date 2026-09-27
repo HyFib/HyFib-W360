@@ -47,6 +47,7 @@ import {
 } from './meta-webhook';
 import { receiptAad } from './receipts';
 import { recordConversationSource } from '../growth/sources';
+import { parseFlowCompletion, recordFlowCompletion } from '../flows/responses';
 import { STATUS_RANK, providerStatusToMessageStatus, shouldAdvance } from './status';
 
 /**
@@ -432,6 +433,22 @@ async function ingestMessagesChange(
       });
     }
 
+    // A completed flow: its answers are stored and applied to the contact (flows/responses.ts).
+    const flowCompletion =
+      type === 'interactive' && content.interactiveType === 'nfm_reply'
+        ? parseFlowCompletion((m as Record<string, unknown>).interactive)
+        : null;
+    if (flowCompletion) {
+      await recordFlowCompletion(tx, {
+        tenantId: ctx.tenantId,
+        conversationId: conversation.id,
+        contactId,
+        messageId,
+        completion: flowCompletion,
+        receivedAt: providerAt,
+      });
+    }
+
     // A tap on a CSAT button answers the survey: it is not a new question, so it neither reopens
     // the conversation nor counts as unread, a keyword, a campaign reply or a routing trigger.
     const csatTap = isCsatTap(type, content);
@@ -498,20 +515,23 @@ async function ingestMessagesChange(
     if (type !== 'system' && type !== 'reaction' && !csatTap) {
       const newCase = conversation.created || reopened;
       // Automations first: a waiting run receives the reply, or a matching automation starts.
-      // Routing (below) leaves a conversation alone while a run is active.
-      const dispatched = await dispatchInboundToAutomation(tx, deps, {
-        tenantId: ctx.tenantId,
-        conversationId: conversation.id,
-        channelAccountId: channel.id,
-        contactId,
-        assignedMembershipId: conversation.assignedMembershipId,
-        messageId,
-        text: keywordText,
-        newCase,
-        consent,
-      });
-      if (dispatched === 'delivered') ctx.summary.automationReplies += 1;
-      if (dispatched === 'started') ctx.summary.automationStarts += 1;
+      // Routing (below) leaves a conversation alone while a run is active. A completed form is
+      // not an answer to a bot question and starts no automation.
+      if (!flowCompletion) {
+        const dispatched = await dispatchInboundToAutomation(tx, deps, {
+          tenantId: ctx.tenantId,
+          conversationId: conversation.id,
+          channelAccountId: channel.id,
+          contactId,
+          assignedMembershipId: conversation.assignedMembershipId,
+          messageId,
+          text: keywordText,
+          newCase,
+          consent,
+        });
+        if (dispatched === 'delivered') ctx.summary.automationReplies += 1;
+        if (dispatched === 'started') ctx.summary.automationStarts += 1;
+      }
       const queued = toRoute.get(conversation.id);
       if (!queued || (newCase && !queued.newCase)) {
         toRoute.set(conversation.id, { newCase, text: newCase ? keywordText : null });

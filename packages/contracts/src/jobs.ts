@@ -199,6 +199,30 @@ export const QUEUES = {
     deadLetter: 'dead-letter',
     deleteAfterHours: 72,
   },
+  /** One operation on a WhatsApp flow at Meta (create, upload, publish, deprecate, delete, refresh). */
+  flowSync: {
+    name: 'flow.sync',
+    policy: 'exclusive',
+    retryLimit: 5,
+    retryDelaySeconds: 30,
+    retryBackoff: true,
+    retryDelayMaxSeconds: 900,
+    expireInSeconds: 120,
+    deadLetter: 'dead-letter',
+    deleteAfterHours: 168,
+  },
+  /** Generates, uploads and checks a WhatsApp account's flow encryption key. */
+  flowKeys: {
+    name: 'flow.keys',
+    policy: 'exclusive',
+    retryLimit: 5,
+    retryDelaySeconds: 30,
+    retryBackoff: true,
+    retryDelayMaxSeconds: 900,
+    expireInSeconds: 120,
+    deadLetter: 'dead-letter',
+    deleteAfterHours: 168,
+  },
   deadLetter: {
     name: 'dead-letter',
     policy: 'standard',

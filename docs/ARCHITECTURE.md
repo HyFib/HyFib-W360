@@ -18,11 +18,14 @@ specified here but not yet implemented.
                      SMTP provider  Object storage  Razorpay (designed)
 ```
 
-- **web** serves the UI, server actions, auth endpoints, provider webhooks, health probes and two
+- **web** serves the UI, server actions, auth endpoints, provider webhooks, health probes, two
   public routes for growth tools (chat links `/l/*` and the website button script `/widget/*`,
-  section 6G). Node.js runtime only. **[built]**
+  section 6G) and the WhatsApp Flows data endpoint (`/api/flows/endpoint/*`, which calls companies'
+  endpoints through the egress guard while WhatsApp waits, section 6H). Node.js runtime only.
+  **[built]**
 - **worker** processes durable jobs: email delivery, webhook processing, outbound sends, campaign
-  ticks, automation runs, billing events, auto-recharge and the minute sweepers. **[built]**
+  ticks, automation runs, flow operations at Meta and flow keys, billing events, auto-recharge and
+  the minute sweepers. **[built]**
 - **PostgreSQL** is the system of record, the job queue (pg-boss) and the durable event log. There is
   no Redis, Kafka or search cluster (ADR-015).
 
@@ -499,6 +502,49 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 - **Not built yet:** connecting ad accounts (ad sync, spend, cost per conversation), conversion
   reporting to Meta (W-072), a link or button per team or with routing rules, UTM-style campaign
   parameters, and a public link generator for people without an account.
+
+## 6H. WhatsApp Flows **[built — verified against the local Graph stand-in and signed, encrypted test requests only; no live WhatsApp traffic]**
+
+- **Model** (migration 0017, ADR-045): `flows` (a WhatsApp account, name, categories, the Flow JSON
+  as written, its version, data API version, first screen and answer keys, where answers go, the
+  company endpoint and secret name, a public id, the Meta flow id, status, validation errors,
+  health and preview, the written-ahead operation and its state, archived, version); `flow_keys`
+  (one active and at most one previous key per account: public key, fingerprint, the private key
+  as a keyring ciphertext, deleted when retired); `flow_key_uploads` (the key's state on each
+  number: pending, uploaded or failed, and Meta's signature status); `flow_sends` (the token sent
+  with each flow message, its mode, expiry and completion); `flow_responses` (answers without the
+  token and what was applied). Composite foreign keys keep every reference inside the company.
+- **Service** (`packages/domain/src/flows`): Flow JSON checks shared with the browser
+  (`flow-json.ts`), drafts, settings (answer mapping; endpoint on an allowed domain; secret bound to
+  that domain), publish, deprecate, delete, refresh, try again, new draft from a flow, archive and
+  restore, all version-checked and audited; key status, set-up and replacement; the forms a member
+  may send in a conversation; sending; completed forms. `flows.read` to read, `flows.write` to
+  change and test drafts, `flows.publish` to publish, deprecate and replace keys, `inbox.reply` to
+  send, `contacts.read` to see answers.
+- **Worker** (`flows/worker.ts`, queues `flow.sync` and `flow.keys`): performs the written-ahead
+  operation against the Graph API (multipart create, asset upload, publish, deprecate, delete, read;
+  research M-161 to M-163), adopting its own flow after a lost create response; generates keys,
+  uploads them to every active number and reads them back (M-164), and retires previous keys after
+  24 hours. `ops.flow_work_due` feeds the messaging sweep with operations and uploads waiting for
+  more than two minutes and keys due to retire.
+- **Endpoint** (`/api/flows/endpoint/<public id>` → `flows/endpoint.ts`): 1 MB request limit;
+  signature (432), lookup, decryption with the current or previous key (421), health checks and
+  error notices, token and company checks (427), forwarding through the egress guard (seven
+  seconds, 64 KB answer limit), encrypted answer with the inverted IV (M-100, M-167). The web tier
+  has its own egress client for it.
+- **Ingestion** (`messaging/meta-webhook.ts`, `messaging/ingest.ts` → `flows/responses.ts`): an
+  `nfm_reply` becomes an interactive message with the answers (no token) and the preview
+  "[Form submitted]"; the token is matched to its send, the answers stored and applied to the
+  contact; automations are not started by it.
+- **Web** (`/c/{slug}/flows`): list with archived view; new flow from the example form with checks
+  while typing; a flow page with status, Meta's validation errors (line and column), health and
+  preview, lifecycle buttons with confirmation, the draft editor or the published JSON, answer and
+  endpoint settings, the data endpoint address and key status per number, and completed forms with
+  paging. The inbox conversation page has a "Send a form" card while the window is open.
+- **Erasure** (`app.erase_contact`, replaced in 0017): deletes the contact's flow responses and
+  ends their tokens (expiry set to now).
+- **Not built yet:** a visual form builder, sending flows from automations, campaigns or templates,
+  flows that start with `data_exchange`, Meta's flow metrics, and `flow_token_signature`.
 
 ## 7. Commercial model and billing **[built: wallet, top-ups, auto-recharge — verified against a local Razorpay stand-in only; subscriptions planned]**
 
