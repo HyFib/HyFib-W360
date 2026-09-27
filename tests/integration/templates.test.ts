@@ -50,6 +50,8 @@ const workerDeps = (clock: Clock = systemClock) => ({
   keyring: fx.keyring,
   graph: fx.graph,
   clock,
+  jobs: fx.jobs(),
+  signer: fx.signer,
 });
 const scopeOf = (c: Company): TenantScope => authorizedTenantScope(c.tenant.id, null);
 

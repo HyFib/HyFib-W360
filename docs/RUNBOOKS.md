@@ -279,9 +279,15 @@ once: Archive (runs in progress stop and their conversations go to people). Each
 **Budgets and failed sends.** A run fails, and hands the conversation to people, when it exceeds
 200 steps, enters one step 20 times, sends 50 messages or runs longer than 7 days, or when a
 message cannot be queued (number not active, 24-hour window closed, no WhatsApp id for the contact).
-A bot message that was queued but rejected by Meta shows Meta's error on the message in the thread;
-the run does not wait for send results, so a question whose message failed ends at its reply
-deadline.
+After queuing a message the run waits for Meta to accept it before its next step (the run page and
+the inbox banner say "sending"); the send worker signals the run as soon as the send is settled. A
+message Meta rejects, one that is cancelled, one whose outcome is unknown (the send worker never
+resends those), one not accepted within 10 minutes (it is then cancelled if no send worker has
+claimed it), or a failure Meta reports later for a message of an active run ends the run as "a
+message did not reach the customer" (`send_failed`, with Meta's error code or the reason in the
+detail) and passes the conversation to people. Meta's error is also shown on the message in the
+thread. A failure Meta reports after a run has already ended (for example after a completed run's
+last message was accepted) is shown on the message only; the run's recorded outcome does not change.
 
 **Worker restarts and deploys.** Runs are rows, so a restart delays steps but never loses or repeats
 one: queued `automation.run` jobs continue, and runs whose signal was lost are picked up by the sweep

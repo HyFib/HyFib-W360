@@ -163,6 +163,8 @@ export interface RunSummary {
 export interface RunDetail extends RunSummary {
   currentNodeId: string | null;
   waitingFor: 'reply' | 'timer' | null;
+  /** A message the run queued is waiting for Meta's acceptance (the run holds until then). */
+  sending: boolean;
   waitUntil: string | null;
   endDetail: string | null;
   endedByName: string | null;
@@ -190,6 +192,8 @@ export interface ConversationAutomationState {
   status: 'running' | 'waiting';
   waitingFor: 'reply' | 'timer' | null;
   waitUntil: string | null;
+  /** A message the run queued is waiting for Meta's acceptance. */
+  sending: boolean;
   startedAt: string;
 }
 
@@ -231,6 +235,7 @@ export async function automationStateForConversation(
       status: automationRuns.status,
       waitingFor: automationRuns.waitingFor,
       waitUntil: automationRuns.waitUntil,
+      pendingMessageId: automationRuns.pendingMessageId,
       startedAt: automationRuns.startedAt,
     })
     .from(automationRuns)
@@ -257,6 +262,7 @@ export async function automationStateForConversation(
     status: row.status as 'running' | 'waiting',
     waitingFor: row.waitingFor,
     waitUntil: row.waitUntil?.toISOString() ?? null,
+    sending: row.pendingMessageId !== null,
     startedAt: row.startedAt.toISOString(),
   };
 }
@@ -1218,6 +1224,7 @@ export function createAutomationService(deps: AutomationServiceDeps) {
             conversationId: visible ? r.run.conversationId : null,
             currentNodeId: r.run.currentNodeId,
             waitingFor: r.run.waitingFor,
+            sending: r.run.pendingMessageId !== null,
             waitUntil: r.run.waitUntil?.toISOString() ?? null,
             endDetail: r.run.endDetail,
             endedByName: nameOf(r.run.endedByMembershipId),

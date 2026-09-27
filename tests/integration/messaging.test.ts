@@ -211,7 +211,15 @@ async function adminQuery<T extends Record<string, unknown>>(text: string, param
 }
 
 function sendDeps() {
-  return { db: dbs.app, keyring, graph, clock: systemClock, rate };
+  return {
+    db: dbs.app,
+    keyring,
+    graph,
+    clock: systemClock,
+    rate,
+    jobs: new PgBossJobQueue(boss),
+    signer,
+  };
 }
 function outboundDeps() {
   return { db: dbs.app, jobs: new PgBossJobQueue(boss), signer, clock: systemClock };
@@ -705,11 +713,11 @@ describe('outbound sends', () => {
       ]),
     );
     expect(
-      await recoverExpiredSend(dbs.app, scope, (await intentFor(before.messageId)).id, systemClock),
+      await recoverExpiredSend(sendDeps(), scope, (await intentFor(before.messageId)).id),
     ).toBe('requeued');
-    expect(
-      await recoverExpiredSend(dbs.app, scope, (await intentFor(after.messageId)).id, systemClock),
-    ).toBe('unknown_outcome');
+    expect(await recoverExpiredSend(sendDeps(), scope, (await intentFor(after.messageId)).id)).toBe(
+      'unknown_outcome',
+    );
     expect((await messageRow(after.messageId)).status).toBe('unknown_outcome');
   });
 

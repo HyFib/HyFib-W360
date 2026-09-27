@@ -65,7 +65,8 @@ export async function dispatchInboundToAutomation(
   const optOut = input.consent === 'opt_out_all' || input.consent === 'opt_out_marketing';
   const active = await lockActiveRun(tx, input.tenantId, input.conversationId);
   if (active) {
-    if (input.consent === 'opt_out_all') {
+    // Any opt-out (all messages or marketing only) is a request to stop, never an answer.
+    if (optOut) {
       await appendRunStep(tx, input.tenantId, active.id, {
         nodeId: active.currentNodeId,
         nodeType: null,

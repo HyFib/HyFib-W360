@@ -73,7 +73,15 @@ export function messageSendHandler(rt: WorkerRuntime) {
     if (!rt.graph) throw new RetryableJobError('Meta is not configured');
     const intentId = auth.envelope.ref;
     const result = await processSendIntent(
-      { db: rt.db, keyring: rt.keyring, graph: rt.graph, clock: rt.clock, rate: rt.sendRate },
+      {
+        db: rt.db,
+        keyring: rt.keyring,
+        graph: rt.graph,
+        clock: rt.clock,
+        rate: rt.sendRate,
+        jobs: rt.jobs,
+        signer: rt.signer,
+      },
       auth.scope,
       intentId,
     );
@@ -147,7 +155,7 @@ export function messagingSweepHandler(rt: WorkerRuntime) {
     for (const intent of intents) {
       // Tenant ids here come from the database (SECURITY DEFINER sweep query), not from a payload.
       const scope = authorizedTenantScope(intent.tenantId, null);
-      const recovery = await recoverExpiredSend(rt.db, scope, intent.id, rt.clock);
+      const recovery = await recoverExpiredSend(rt, scope, intent.id);
       if (recovery === 'unknown_outcome') {
         recovered += 1;
         continue;

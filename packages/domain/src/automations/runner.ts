@@ -2,6 +2,7 @@ import { uuidv7, type Clock } from '@w360/core';
 import { QUEUES } from '@w360/contracts';
 import {
   and,
+  asc,
   automationRuns,
   automationVersions,
   channelAccounts,
@@ -11,6 +12,8 @@ import {
   contacts,
   conversations,
   eq,
+  gte,
+  inArray,
   memberships,
   messages,
   sendIntents,
@@ -38,6 +41,7 @@ import {
 } from './interpreter';
 import {
   appendRunStep,
+  cancelQueuedBotMessages,
   endRun,
   signalAutomationRun,
   type AutomationRun,
@@ -54,6 +58,10 @@ import {
  *    and `message.send` job in this transaction; the send worker re-checks policy before any
  *    request leaves), contact updates, hand-off routing;
  * 6. append the step log row and store the new position, or end the run.
+ * A step that queues a bot message leaves the run holding that message (`pending_message_id`): the
+ * run takes no further step, and does not complete, until the send worker records Meta's
+ * acceptance and signals it. A message that fails (at the send or later), is cancelled or has an
+ * unknown outcome fails the run with `send_failed`, as does waiting longer than `SEND_WAIT_MS`.
  * A crash before commit leaves nothing behind and the step runs again; after commit the next step
  * starts from the stored position. Nothing about a step is ever applied twice. A step that keeps
  * raising an error fails the run after `MAX_STEP_FAILURES` attempts, so the conversation goes to
@@ -68,6 +76,10 @@ export interface AutomationRunnerDeps extends RunSignalDeps {
 export const STEPS_PER_JOB = 25;
 /** Failed attempts at a step (errors, not outcomes) before the run fails with `step_error`. */
 export const MAX_STEP_FAILURES = 5;
+/** How long a run waits for Meta to accept a bot message before passing the conversation on. */
+export const SEND_WAIT_MS = 10 * 60_000;
+/** While a message is in flight the sweep re-checks the run this often (a lost signal). */
+const PENDING_RECHECK_MS = 60_000;
 const SERVICE_WINDOW_MS = 24 * 3600_000;
 
 /** Versions never change, so parsed graphs are cached by version id. */
@@ -364,9 +376,40 @@ async function applyContactEffect(
 type StepOutcome =
   | { kind: 'progress' }
   | { kind: 'waiting' }
+  | { kind: 'sending' }
   | { kind: 'ended' }
   | { kind: 'not_due' }
   | { kind: 'idle' };
+
+/**
+ * The first message of the run that will never reach the customer: failed (at the send, or
+ * reported by Meta later), cancelled, or sent with an unknown outcome. Returns the step-log code.
+ */
+async function undeliveredBotMessage(
+  tx: Tx,
+  tenantId: string,
+  run: AutomationRun,
+): Promise<string | null> {
+  const [row] = await tx
+    .select({ status: messages.status, errorCode: messages.errorCode })
+    .from(messages)
+    .where(
+      and(
+        eq(messages.tenantId, tenantId),
+        eq(messages.conversationId, run.conversationId),
+        eq(messages.senderType, 'bot'),
+        // Bounds the scan to the run's lifetime (with a margin for clock differences).
+        gte(messages.createdAt, new Date(run.startedAt.getTime() - 5 * 60_000)),
+        sql`${messages.content}->>'automationRunId' = ${run.id}`,
+        inArray(messages.status, ['failed', 'canceled', 'unknown_outcome']),
+      ),
+    )
+    .orderBy(asc(messages.createdAt))
+    .limit(1);
+  if (!row) return null;
+  if (row.status === 'failed') return row.errorCode ? `failed:${row.errorCode}` : 'failed';
+  return row.status;
+}
 
 async function runStep(
   deps: AutomationRunnerDeps,
@@ -403,7 +446,7 @@ async function runStep(
 
     const end = async (
       status: 'failed' | 'stopped' | 'taken_over',
-      reason: 'expired' | 'error' | 'conversation_resolved' | 'assigned',
+      reason: 'expired' | 'error' | 'send_failed' | 'conversation_resolved' | 'assigned',
       detail: string | null,
     ) => {
       await appendRunStep(tx, tenantId, run.id, {
@@ -426,6 +469,51 @@ async function runStep(
     // (the job's actor check already stops it when they leave the company).
     if (run.mode === 'test' && !(await testerMayContinue(tx, tenantId, run.startedByMembershipId)))
       return end('failed', 'error', 'tester_not_permitted');
+
+    // Sends. A message of this run the customer will not get ends the run (the conversation goes
+    // to people); a message still in flight holds the run until Meta accepts it.
+    const undelivered = await undeliveredBotMessage(tx, tenantId, run);
+    if (undelivered) return end('failed', 'send_failed', undelivered);
+    if (run.pendingMessageId) {
+      const [pending] = await tx
+        .select({ status: messages.status, createdAt: messages.createdAt })
+        .from(messages)
+        .where(and(eq(messages.tenantId, tenantId), eq(messages.id, run.pendingMessageId)));
+      if (pending && (pending.status === 'queued' || pending.status === 'sending')) {
+        if (now.getTime() - pending.createdAt.getTime() >= SEND_WAIT_MS) {
+          // Not sent in time: it is cancelled if no send worker has claimed it yet.
+          await cancelQueuedBotMessages(tx, tenantId, run.conversationId, now);
+          return end('failed', 'send_failed', 'send_timeout');
+        }
+        await tx
+          .update(automationRuns)
+          .set({ nextStepAt: new Date(now.getTime() + PENDING_RECHECK_MS) })
+          .where(and(eq(automationRuns.tenantId, tenantId), eq(automationRuns.id, run.id)));
+        return { kind: 'not_due' };
+      }
+      // Accepted by Meta: the run continues from its stored position.
+      const nextStepAt =
+        run.status === 'waiting' && !run.inputMessageId ? (run.waitUntil ?? now) : now;
+      await tx
+        .update(automationRuns)
+        .set({ pendingMessageId: null, nextStepAt })
+        .where(and(eq(automationRuns.tenantId, tenantId), eq(automationRuns.id, run.id)));
+      run.pendingMessageId = null;
+      run.nextStepAt = nextStepAt;
+      if (run.status === 'waiting') {
+        // Live views showed the run as sending; it now waits for the customer or its timer.
+        await emitTenantEvent(tx, tenantId, {
+          type: 'automation.waiting',
+          conversationId: conv.id,
+          payload: { runId: run.id },
+        });
+      }
+      if (run.status === 'running' && run.currentNodeId === null) {
+        // The last step sent a message; now that it is accepted the run is complete.
+        await endRun(tx, run, { status: 'completed', reason: 'no_next', now });
+        return { kind: 'ended' };
+      }
+    }
 
     let event: RunEvent;
     if (run.status === 'waiting') {
@@ -526,6 +614,26 @@ async function runStep(
       detail: [result.log.detail, ...notes].filter(Boolean).join(', ') || null,
     });
 
+    // A queued message holds the run until Meta accepts it (see the send checks above).
+    const holdUntil = new Date(now.getTime() + PENDING_RECHECK_MS);
+    if (messageId && result.status === 'completed') {
+      // The last step sent a message: the run completes once Meta accepts it.
+      await tx
+        .update(automationRuns)
+        .set({
+          ...stored,
+          currentNodeId: null,
+          status: 'running',
+          waitingFor: null,
+          waitUntil: null,
+          inputMessageId: null,
+          pendingMessageId: messageId,
+          nextStepAt: holdUntil,
+          failures: 0,
+        })
+        .where(and(eq(automationRuns.tenantId, tenantId), eq(automationRuns.id, run.id)));
+      return { kind: 'sending' };
+    }
     if (result.status === 'running' || result.status === 'waiting') {
       const waiting = result.status === 'waiting' ? state.waiting : null;
       await tx
@@ -536,7 +644,8 @@ async function runStep(
           waitingFor: waiting?.for ?? null,
           waitUntil: waiting?.until ?? null,
           inputMessageId: null,
-          nextStepAt: waiting?.until ?? now,
+          pendingMessageId: messageId,
+          nextStepAt: messageId ? holdUntil : (waiting?.until ?? now),
           failures: 0,
         })
         .where(and(eq(automationRuns.tenantId, tenantId), eq(automationRuns.id, run.id)));
@@ -555,7 +664,7 @@ async function runStep(
         });
         return { kind: 'waiting' };
       }
-      return { kind: 'progress' };
+      return { kind: messageId ? 'sending' : 'progress' };
     }
     const reason = result.endReason ?? 'error';
     const status = result.status;
@@ -578,7 +687,8 @@ async function runStep(
   });
 }
 
-export type RunTickOutcome = 'ended' | 'waiting' | 'yielded' | 'not_due' | 'idle';
+/** `sending`: a message was queued and the run continues once Meta accepts it. */
+export type RunTickOutcome = 'ended' | 'waiting' | 'sending' | 'yielded' | 'not_due' | 'idle';
 
 /**
  * Advances a run until it waits, ends, or has taken `STEPS_PER_JOB` steps (then a new job takes

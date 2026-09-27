@@ -72,7 +72,15 @@ export const AUTOMATION_END_REASONS = {
     'contact_erased',
     'automation_archived',
   ],
-  failed: ['budget_steps', 'budget_loop', 'budget_messages', 'expired', 'send_blocked', 'error'],
+  failed: [
+    'budget_steps',
+    'budget_loop',
+    'budget_messages',
+    'expired',
+    'send_blocked',
+    'send_failed',
+    'error',
+  ],
 } as const;
 export type AutomationEndStatus = keyof typeof AUTOMATION_END_REASONS;
 export type AutomationEndReason = (typeof AUTOMATION_END_REASONS)[AutomationEndStatus][number];
@@ -106,6 +114,8 @@ export const automationRuns = appSchema.table('automation_runs', {
   waitingFor: text('waiting_for', { enum: ['reply', 'timer'] }),
   waitUntil: tz('wait_until'),
   inputMessageId: uuid('input_message_id'),
+  /** A bot message the run queued and Meta has not accepted yet; the run waits for it. */
+  pendingMessageId: uuid('pending_message_id'),
   retries: smallint('retries').notNull().default(0),
   failures: smallint('failures').notNull().default(0),
   stepCount: integer('step_count').notNull().default(0),

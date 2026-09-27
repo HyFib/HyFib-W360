@@ -60,6 +60,46 @@ export async function signalAutomationRun(
   );
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Signals the run that sent a bot message once the message's send is settled (accepted, failed,
+ * cancelled or unknown) or Meta reports it failed later, so the run continues, or passes the
+ * conversation to people, without waiting for the sweep. Other messages and ended runs are left
+ * alone.
+ */
+export async function signalRunOfBotMessage(
+  deps: RunSignalDeps,
+  tx: Tx,
+  input: { tenantId: string; messageId: string; key: string },
+): Promise<void> {
+  const [message] = await tx
+    .select({
+      senderType: messages.senderType,
+      runId: sql<string | null>`${messages.content}->>'automationRunId'`,
+    })
+    .from(messages)
+    .where(and(eq(messages.tenantId, input.tenantId), eq(messages.id, input.messageId)));
+  if (message?.senderType !== 'bot' || !message.runId || !UUID_RE.test(message.runId)) return;
+  const [run] = await tx
+    .select({ id: automationRuns.id, actorUserId: automationRuns.startedByUserId })
+    .from(automationRuns)
+    .where(
+      and(
+        eq(automationRuns.tenantId, input.tenantId),
+        eq(automationRuns.id, message.runId),
+        inArray(automationRuns.status, ['running', 'waiting']),
+      ),
+    );
+  if (!run) return;
+  await signalAutomationRun(deps, tx, {
+    tenantId: input.tenantId,
+    runId: run.id,
+    actorUserId: run.actorUserId,
+    key: input.key,
+  });
+}
+
 /** The conversation's active run, locked. The caller already holds the conversation row lock. */
 export async function lockActiveRun(
   tx: Tx,
@@ -208,6 +248,7 @@ export async function endRun(tx: Tx, run: AutomationRun, input: EndRunInput): Pr
       waitingFor: null,
       waitUntil: null,
       inputMessageId: null,
+      pendingMessageId: null,
       nextStepAt: null,
     })
     .where(and(eq(automationRuns.tenantId, run.tenantId), eq(automationRuns.id, run.id)));

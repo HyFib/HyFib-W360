@@ -729,6 +729,7 @@ const FAILURE_LABELS: Record<string, string> = {
   budget_messages: 'message limit',
   expired: 'older than 7 days',
   send_blocked: 'message could not be sent',
+  send_failed: 'message did not reach the customer',
   error: 'could not continue',
 };
 

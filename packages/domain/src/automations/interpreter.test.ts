@@ -129,6 +129,87 @@ describe('automation graph checks', () => {
     expect(checkGraph(support).filter((i) => i.level === 'error')).toEqual([]);
   });
 
+  it('checks that answers are saved on the way to the steps that use them', () => {
+    const ask = (id: string, next: string | null, timeoutNext: string | null) => ({
+      id,
+      type: 'ask_text',
+      text: 'Your email?',
+      saveAs: 'email',
+      format: 'email',
+      retryText: null,
+      retries: 0,
+      invalidNext: 'late',
+      timeoutMinutes: 30,
+      timeoutNext,
+      next,
+    });
+    // The first message uses an answer only a later question saves; the timeout and invalid-answer
+    // paths reach steps without it; one step is reached both ways.
+    const graph = graphOf({
+      version: 1,
+      start: 'hello',
+      nodes: [
+        { id: 'hello', type: 'send_text', text: 'Hi {{answer.email}}', next: 'q' },
+        ask('q', 'thanks', 'late'),
+        { id: 'thanks', type: 'send_text', text: 'Saved {{answer.email}}.', next: 'check' },
+        { id: 'late', type: 'send_text', text: 'No email from {{answer.email}}', next: 'check' },
+        {
+          id: 'check',
+          type: 'condition',
+          rules: [{ kind: 'answer', variable: 'email', op: 'contains', value: '@' }],
+          match: 'all',
+          then: 'known',
+          else: 'maybe',
+        },
+        { id: 'known', type: 'send_text', text: 'We will write to {{answer.email}}.', next: null },
+        {
+          id: 'maybe',
+          type: 'condition',
+          rules: [{ kind: 'answer', variable: 'email', op: 'is_set', value: null }],
+          match: 'all',
+          then: 'bye',
+          else: 'bye',
+        },
+        { id: 'bye', type: 'end' },
+      ],
+    });
+    const issues = checkGraph(graph).map((i) => [i.level, i.nodeId, i.message]);
+    expect(issues).toContainEqual([
+      'error',
+      'hello',
+      '{{answer.email}} is used before any question saves it.',
+    ]);
+    expect(issues).toContainEqual([
+      'error',
+      'late',
+      '{{answer.email}} is used before any question saves it.',
+    ]);
+    expect(issues).toContainEqual([
+      'warning',
+      'check',
+      'The answer “email” can be unset here: some paths reach this step without saving it.',
+    ]);
+    expect(issues).toContainEqual([
+      'warning',
+      'known',
+      '{{answer.email}} can be empty here: some paths reach this step without saving it.',
+    ]);
+    // After the answered edge the answer is always there; “is set” may test a skipped answer.
+    expect(issues.filter(([, nodeId]) => nodeId === 'thanks' || nodeId === 'maybe')).toEqual([]);
+
+    // A loop back to the question keeps the answer available only where every path saved it.
+    const loop = graphOf({
+      version: 1,
+      start: 'q',
+      nodes: [
+        ask('q', 'thanks', 'q'),
+        { id: 'thanks', type: 'send_text', text: 'Saved {{answer.email}}.', next: null },
+        { id: 'late', type: 'end' },
+      ],
+    });
+    expect(checkGraph(loop).filter((i) => i.message.includes('answer'))).toEqual([]);
+  });
+
   it('rejects loops that never wait and accepts loops through a question', () => {
     const busy = graphOf({
       version: 1,

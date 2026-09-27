@@ -525,6 +525,8 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
     if ((node.type === 'ask_buttons' || node.type === 'ask_text') && node.saveAs)
       saved.add(node.saveAs);
   }
+  const reachable = reachableFrom(graph.start, byId);
+  const available = answerAvailability(graph.start, byId, reachable, saved);
   if (saved.size > AUTOMATION_LIMITS.variables) {
     issues.push({
       level: 'error',
@@ -553,11 +555,24 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
         });
       }
       for (const a of found.answers) {
+        const at = available.get(node.id);
         if (!saved.has(a)) {
           issues.push({
             level: 'error',
             nodeId: node.id,
             message: `{{answer.${a}}} is not saved by any question.`,
+          });
+        } else if (at && !at.may.has(a)) {
+          issues.push({
+            level: 'error',
+            nodeId: node.id,
+            message: `{{answer.${a}}} is used before any question saves it.`,
+          });
+        } else if (at && !at.must.has(a)) {
+          issues.push({
+            level: 'warning',
+            nodeId: node.id,
+            message: `{{answer.${a}}} can be empty here: some paths reach this step without saving it.`,
           });
         }
       }
@@ -570,12 +585,31 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
       }
     }
     if (node.type === 'condition') {
+      const at = available.get(node.id);
       for (const rule of node.rules) {
         if (rule.kind === 'answer' && !saved.has(rule.variable)) {
           issues.push({
             level: 'error',
             nodeId: node.id,
             message: `The answer “${rule.variable}” is not saved by any question.`,
+          });
+        } else if (rule.kind === 'answer' && at && !at.may.has(rule.variable)) {
+          issues.push({
+            level: 'error',
+            nodeId: node.id,
+            message: `The answer “${rule.variable}” is checked before any question saves it.`,
+          });
+        } else if (
+          rule.kind === 'answer' &&
+          at &&
+          !at.must.has(rule.variable) &&
+          !VALUELESS.has(rule.op)
+        ) {
+          // “is set” / “is not set” exist precisely for answers that some paths skip.
+          issues.push({
+            level: 'warning',
+            nodeId: node.id,
+            message: `The answer “${rule.variable}” can be unset here: some paths reach this step without saving it.`,
           });
         }
         if (
@@ -622,18 +656,6 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
     }
   }
 
-  // Reachability from the first step.
-  const reachable = new Set<string>();
-  const stack = byId.has(graph.start) ? [graph.start] : [];
-  while (stack.length > 0) {
-    const id = stack.pop() as string;
-    if (reachable.has(id)) continue;
-    reachable.add(id);
-    const node = byId.get(id);
-    if (!node) continue;
-    for (const edge of edgesOf(node))
-      if (edge.target && byId.has(edge.target)) stack.push(edge.target);
-  }
   for (const node of graph.nodes) {
     if (!reachable.has(node.id)) {
       issues.push({ level: 'warning', nodeId: node.id, message: 'No step leads here.' });
@@ -649,6 +671,83 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
     });
   }
   return issues;
+}
+
+/** Steps the first step leads to, directly or not (the first step included). */
+function reachableFrom(start: string, byId: ReadonlyMap<string, AutomationNode>): Set<string> {
+  const reachable = new Set<string>();
+  const stack = byId.has(start) ? [start] : [];
+  while (stack.length > 0) {
+    const id = stack.pop() as string;
+    if (reachable.has(id)) continue;
+    reachable.add(id);
+    const node = byId.get(id);
+    if (!node) continue;
+    for (const edge of edgesOf(node))
+      if (edge.target && byId.has(edge.target)) stack.push(edge.target);
+  }
+  return reachable;
+}
+
+/**
+ * The answer a question saves when the run leaves it by the edge at `index` of `edgesOf`: only its
+ * answered edges (a button, or a valid typed answer) save it; other replies, invalid answers and
+ * timeouts do not.
+ */
+function answerSavedOnEdge(node: AutomationNode, index: number): string | null {
+  if (node.type === 'ask_buttons') return index < node.buttons.length ? node.saveAs : null;
+  if (node.type === 'ask_text') return index === 0 ? node.saveAs : null;
+  return null;
+}
+
+/**
+ * For each reachable step, the answers saved before it runs: `may` on at least one path from the
+ * first step, `must` on every path (forward data flow over the edges, iterated to a fixed point so
+ * loops are covered).
+ */
+function answerAvailability(
+  start: string,
+  byId: ReadonlyMap<string, AutomationNode>,
+  reachable: ReadonlySet<string>,
+  all: ReadonlySet<string>,
+): Map<string, { may: Set<string>; must: Set<string> }> {
+  const flow = new Map<string, { may: Set<string>; must: Set<string> }>();
+  for (const id of reachable) {
+    flow.set(id, { may: new Set(), must: id === start ? new Set() : new Set(all) });
+  }
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const id of reachable) {
+      const node = byId.get(id);
+      const from = flow.get(id);
+      if (!node || !from) continue;
+      edgesOf(node).forEach((edge, index) => {
+        const to = edge.target === null ? undefined : flow.get(edge.target);
+        if (!to) return;
+        const answer = answerSavedOnEdge(node, index);
+        for (const a of from.may) {
+          if (!to.may.has(a)) {
+            to.may.add(a);
+            changed = true;
+          }
+        }
+        if (answer && !to.may.has(answer)) {
+          to.may.add(answer);
+          changed = true;
+        }
+        // The first step is also entered with nothing saved, so its `must` stays empty.
+        if (edge.target === start) return;
+        for (const a of [...to.must]) {
+          if (a !== answer && !from.must.has(a)) {
+            to.must.delete(a);
+            changed = true;
+          }
+        }
+      });
+    }
+  }
+  return flow;
 }
 
 /** Strongly connected groups of non-waiting nodes that contain a cycle (Tarjan). */

@@ -108,7 +108,14 @@ async function setup(): Promise<Setup> {
     definition: promo,
   });
   await templates.submitTemplate(owner, templateId);
-  const workerDeps = { db: fx.dbs.app, keyring: fx.keyring, graph: fx.graph, clock: systemClock };
+  const workerDeps = {
+    db: fx.dbs.app,
+    keyring: fx.keyring,
+    graph: fx.graph,
+    clock: systemClock,
+    jobs: fx.jobs(),
+    signer: fx.signer,
+  };
   expect(await processTemplateSubmit(workerDeps, scopeOf(c), templateId)).toBe('done');
   const t = fx.standIn.state.templates.get(c.wabaId)!.find((x) => x.name === 'festive_sale')!;
   t.status = 'APPROVED';
@@ -582,6 +589,8 @@ describe('cancellation', () => {
           graph: fx.graph,
           clock: systemClock,
           rate: { capacity: 100, refillPerSecond: 100 },
+          jobs: fx.jobs(),
+          signer: fx.signer,
         },
         scopeOf(s.c),
         intent.id,

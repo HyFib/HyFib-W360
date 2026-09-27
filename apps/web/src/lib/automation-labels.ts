@@ -35,6 +35,7 @@ export const END_REASONS: Record<string, string> = {
   budget_messages: 'The run reached its message limit.',
   expired: 'The run was older than 7 days.',
   send_blocked: 'A message could not be sent.',
+  send_failed: 'A message did not reach the customer.',
   error: 'The run could not continue.',
 };
 
@@ -73,6 +74,10 @@ export const STEP_DETAILS: Record<string, string> = {
   tester_not_permitted: 'the member running the test may no longer run tests',
   version_unreadable: 'the version could not be read',
   step_error: 'a step failed repeatedly because of an internal error',
+  canceled: 'the message was cancelled before it was sent',
+  unknown_outcome: 'it is not known whether WhatsApp received the message',
+  send_timeout: 'WhatsApp did not accept the message within 10 minutes',
+  failed: 'WhatsApp did not accept or deliver the message',
   missing_node: 'the step no longer exists',
 };
 
@@ -82,3 +87,12 @@ export const TRIGGER_TYPE_LABELS: Record<string, string> = {
   any_message: 'Any message',
   test: 'Test',
 };
+
+/** Text for a step-log or end detail code, including send failures (`failed:<code>`). */
+export function describeDetail(detail: string): string {
+  if (detail.startsWith('failed:')) {
+    const code = detail.slice('failed:'.length);
+    return STEP_DETAILS[code] ?? `WhatsApp did not accept or deliver the message (error ${code})`;
+  }
+  return STEP_DETAILS[detail] ?? END_REASONS[detail] ?? detail;
+}

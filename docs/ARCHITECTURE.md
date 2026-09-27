@@ -369,7 +369,11 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   pinned version's graph (cached: versions never change) and the contact facts; applies effects —
   bot messages through the send pipeline (active number, open window and a WhatsApp id checked
   first; a blocked send fails the run), contact updates as single statements, hand-off routing —
-  appends the step log row and stores the position. Up to 25 steps per job; waits enqueue a delayed
+  appends the step log row and stores the position. A queued bot message holds the run
+  (`pending_message_id`) until the send worker records Meta's acceptance and signals the run; a
+  rejected, cancelled, unknown or late (10 minutes) send, or a failure Meta reports later, fails the
+  run (`send_failed`) and hands the conversation to people, so a run never moves on or completes on
+  a message the customer did not get. Up to 25 steps per job; waits enqueue a delayed
   job; the minute sweep (`ops.automation_runs_due`) re-signals runs more than 30 seconds overdue. A
   step that raises an error fails its job (retried by pg-boss) and is counted on the run; five failed
   attempts in a row fail the run (`step_error`) and hand the conversation to people.

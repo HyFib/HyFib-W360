@@ -212,6 +212,27 @@ async function advance(c: Company, runId: string, clock: Clock = systemClock) {
   );
 }
 
+/**
+ * Advances a run the way the worker and the send pipeline do together: each queued bot message is
+ * sent through the send worker (the Graph stand-in accepts it) before the run takes its next step,
+ * until the run waits for the customer or a timer, or ends.
+ */
+async function drive(
+  c: Company,
+  conversationId: string,
+  runId: string,
+  clock: Clock = systemClock,
+) {
+  let steps = 0;
+  for (let i = 0; i < 50; i += 1) {
+    const result = await advance(c, runId, clock);
+    steps += result.steps;
+    if (result.outcome !== 'sending') return { outcome: result.outcome, steps };
+    await sendQueued(c, conversationId);
+  }
+  throw new Error('the run did not settle');
+}
+
 async function stepLog(runId: string) {
   return fx.query<{
     seq: number;
@@ -251,7 +272,15 @@ async function sendQueued(c: Company, conversationId: string) {
   const outcomes = [];
   for (const intent of intents) {
     const result = await processSendIntent(
-      { db: fx.dbs.app, keyring: fx.keyring, graph: fx.graph, clock: systemClock, rate },
+      {
+        db: fx.dbs.app,
+        keyring: fx.keyring,
+        graph: fx.graph,
+        clock: systemClock,
+        rate,
+        jobs: fx.jobs(),
+        signer: fx.signer,
+      },
       authorizedTenantScope(c.tenant.id, intent.actor_user_id),
       intent.id,
     );
@@ -371,7 +400,7 @@ describe('automation versions', () => {
     );
     const talk = buttons.find((b) => b.title === 'Talk to us');
     await tap(c, alice, talk!.id, 'Talk to us', sent!.external_message_id);
-    expect((await advance(c, run1.id)).outcome).toBe('ended');
+    expect((await drive(c, conv1, run1.id)).outcome).toBe('ended');
     const ended = await onlyRun(conv1);
     expect(ended).toMatchObject({
       status: 'handed_off',
@@ -522,9 +551,13 @@ describe('automation runs', () => {
     expect((await onlyRun(conv)).input_message_id).not.toBeNull();
     expect((await advance(c, run.id)).outcome).toBe('waiting');
     await fx.deliver(fx.messagesBody(c, { messages: [{ waId: bob, text: 'soon please' }] }));
+    // The run holds until Meta accepts its question, then handles the reply.
+    expect((await advance(c, run.id)).outcome).toBe('not_due');
+    await sendQueued(c, conv);
     await advance(c, run.id);
     await fx.deliver(fx.messagesBody(c, { messages: [{ waId: bob, text: ' 4512 ' }] }));
-    expect((await advance(c, run.id)).outcome).toBe('ended');
+    await sendQueued(c, conv);
+    expect((await drive(c, conv, run.id)).outcome).toBe('ended');
 
     const done = await onlyRun(conv);
     expect(done).toMatchObject({
@@ -573,7 +606,8 @@ describe('automation runs', () => {
     expect((await conversation(conv2)).assigned_membership_id).toBeNull();
     await advance(c, run2.id);
     await fx.deliver(fx.messagesBody(c, { messages: [{ waId: carol, text: 'talk to us' }] }));
-    expect((await advance(c, run2.id)).outcome).toBe('ended');
+    await sendQueued(c, conv2);
+    expect((await drive(c, conv2, run2.id)).outcome).toBe('ended');
     expect(await onlyRun(conv2)).toMatchObject({
       status: 'handed_off',
       end_reason: 'handoff_node',
@@ -722,7 +756,7 @@ describe('automation runs', () => {
       [first.id],
     );
     expect(started?.name).toBe('Out of office');
-    await advance(c, first.id);
+    expect((await drive(c, conv, first.id)).outcome).toBe('ended');
     // Within the 30-minute cooldown the same automation does not start again.
     await fx.deliver(fx.messagesBody(c, { messages: [{ waId: ann, text: 'anyone there?' }] }));
     expect(await runsOf(conv)).toHaveLength(1);
@@ -736,14 +770,14 @@ describe('automation runs', () => {
       const runs = await runsOf(await conversationOf(c, bea));
       const last = runs.at(-1);
       if (last && (last.status === 'running' || last.status === 'waiting'))
-        await advance(c, last.id);
+        await drive(c, await conversationOf(c, bea), last.id);
     }
     expect(await runsOf(await conversationOf(c, bea))).toHaveLength(10);
 
     // A conversation assigned to a member is theirs: no automation starts.
     const cyd = waId();
     const conv3 = await inbound(c, cyd, 'first message');
-    await Promise.all((await runsOf(conv3)).map((r) => advance(c, r.id)));
+    for (const r of await runsOf(conv3)) await drive(c, conv3, r.id);
     await fx.dbs.adminPool.query(
       `UPDATE app.conversations SET assigned_membership_id = $1 WHERE id = $2`,
       [owner.membership.id, conv3],
@@ -800,7 +834,12 @@ describe('automation runs', () => {
     expect(await botMessages(conv)).toEqual([]);
     expect((await stepLog(run.id)).map((s) => s.outcome)).toEqual(['started']);
 
-    // A real consumer (worker 1) processes the start signal, then stops without warning.
+    // A real consumer (worker 1) processes the start signal, then stops without warning. Signals
+    // left in the queue by earlier tests would only keep this test's consumers busy.
+    await fx.dbs.adminPool.query(`DELETE FROM pgboss.job WHERE name = $1 AND data->>'ref' <> $2`, [
+      QUEUES.automationRun.name,
+      run.id,
+    ]);
     const worker1 = await startConsumer();
     await waitFor(async () => (await onlyRun(conv)).status === 'waiting');
     await worker1.kill();
@@ -836,6 +875,10 @@ describe('automation runs', () => {
         key: 'sweep:test',
       });
     }
+    // The new worker sends the next message and holds the run until Meta accepts it.
+    await waitFor(async () => (await botMessages(conv)).length === 2);
+    expect((await onlyRun(conv)).status).toBe('running');
+    expect(await sendQueued(c, conv)).toEqual(['accepted']);
     await waitFor(async () => (await onlyRun(conv)).status === 'handed_off');
     await worker2.kill();
     expect((await botMessages(conv)).map((m) => m.content.text ?? m.content.body)).toEqual([
@@ -890,7 +933,9 @@ describe('automation runs', () => {
     expect(await advance(c, run.id)).toEqual({ outcome: 'waiting', steps: 1 });
     expect(await state()).toEqual({ status: 'waiting', failures: 0 });
 
-    // The customer answers (that step commits), and sending the next message keeps failing.
+    // Meta accepts the question and the customer answers (that step commits); sending the next
+    // message keeps failing.
+    await sendQueued(c, conv);
     await inbound(c, from, 'Talk to us');
     for (let i = 1; i < MAX_STEP_FAILURES; i += 1) {
       await expect(attempt()).rejects.toThrow('simulated persistent failure');
@@ -916,6 +961,85 @@ describe('automation runs', () => {
     expect((await inbox.getConversation(owner, conv)).automation).toBeNull();
     // Later signals find nothing to do.
     expect(await attempt()).toEqual({ outcome: 'idle', steps: 0 });
+  });
+
+  it('waits for Meta to accept each message, and hands over when one does not reach the customer', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    await publish(owner, 'Hello', keyword('hello'), {
+      version: 1,
+      start: 'hi',
+      nodes: [
+        { id: 'hi', type: 'send_text', text: 'Hi there!', next: 'bye' },
+        { id: 'bye', type: 'end' },
+      ],
+    });
+    await publish(owner, 'Menu', keyword('menu'), menuGraph());
+
+    // After queuing its message the run holds: no further step, and no completion, until Meta
+    // accepts the message.
+    const conv = await inbound(c, waId(), 'hello');
+    const run = await onlyRun(conv);
+    expect(await advance(c, run.id)).toEqual({ outcome: 'sending', steps: 1 });
+    expect(await advance(c, run.id)).toEqual({ outcome: 'not_due', steps: 0 });
+    expect(await onlyRun(conv)).toMatchObject({ status: 'running', current_node_id: 'bye' });
+    // Meta rejects it: the run fails instead of completing, and the conversation goes to people.
+    fx.standIn.state.sendQueue.push({
+      kind: 'error',
+      status: 400,
+      code: 131026,
+      title: 'Message undeliverable',
+    });
+    expect(await sendQueued(c, conv)).toEqual(['failed']);
+    // The send worker signalled the run in the same transaction (no wait for the sweep).
+    const signals = await fx.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM pgboss.job WHERE name = $1 AND singleton_key LIKE $2`,
+      [QUEUES.automationRun.name, `${run.id}:s:%`],
+    );
+    expect(signals[0]!.n).toBe(1);
+    expect((await advance(c, run.id)).outcome).toBe('ended');
+    expect(await onlyRun(conv)).toMatchObject({ status: 'failed', end_reason: 'send_failed' });
+    expect((await stepLog(run.id)).at(-1)).toMatchObject({
+      outcome: 'failed',
+      detail: 'failed:131026',
+    });
+    expect((await turns(conv)).at(-1)).toMatchObject({ start_reason: 'handoff', end_reason: null });
+
+    // A failure Meta reports later ends a run that is waiting for the customer's reply.
+    const zed = waId();
+    const conv2 = await inbound(c, zed, 'menu');
+    const run2 = await onlyRun(conv2);
+    expect((await advance(c, run2.id)).outcome).toBe('waiting');
+    expect(await sendQueued(c, conv2)).toEqual(['accepted']);
+    expect((await advance(c, run2.id)).outcome).toBe('not_due');
+    expect(await onlyRun(conv2)).toMatchObject({ status: 'waiting', waiting_for: 'reply' });
+    const [question] = await botMessages(conv2);
+    await fx.deliver(
+      fx.messagesBody(c, {
+        statuses: [
+          {
+            id: question!.external_message_id,
+            status: 'failed',
+            timestamp: String(Math.floor(Date.now() / 1000)),
+            recipient_id: zed,
+            errors: [{ code: 131026, title: 'Message undeliverable' }],
+          },
+        ],
+      }),
+    );
+    expect((await advance(c, run2.id)).outcome).toBe('ended');
+    expect(await onlyRun(conv2)).toMatchObject({ status: 'failed', end_reason: 'send_failed' });
+
+    // A message Meta has not accepted after 10 minutes fails the run, and is cancelled so it
+    // cannot go out late.
+    const conv3 = await inbound(c, waId(), 'hello');
+    const run3 = await onlyRun(conv3);
+    expect((await advance(c, run3.id)).outcome).toBe('sending');
+    expect((await advance(c, run3.id, later(9 * 60_000))).outcome).toBe('not_due');
+    expect((await advance(c, run3.id, later(11 * 60_000))).outcome).toBe('ended');
+    expect(await onlyRun(conv3)).toMatchObject({ status: 'failed', end_reason: 'send_failed' });
+    expect((await stepLog(run3.id)).at(-1)).toMatchObject({ detail: 'send_timeout' });
+    expect((await botMessages(conv3)).map((m) => m.status)).toEqual(['canceled']);
   });
 
   it('waits on timers and reply deadlines and fails runs that exceed a budget', async () => {
@@ -948,10 +1072,11 @@ describe('automation runs', () => {
     expect((await advance(c, run.id)).outcome).toBe('waiting');
     expect(await onlyRun(conv)).toMatchObject({ waiting_for: 'timer', current_node_id: 'wait' });
     expect((await advance(c, run.id)).outcome).toBe('not_due');
-    expect((await advance(c, run.id, later(6 * 60_000))).outcome).toBe('waiting');
+    expect((await drive(c, conv, run.id, later(6 * 60_000))).outcome).toBe('waiting');
     expect(await onlyRun(conv)).toMatchObject({ waiting_for: 'reply', current_node_id: 'ask' });
+    await sendQueued(c, conv);
     expect((await advance(c, run.id, later(7 * 60_000))).outcome).toBe('not_due');
-    expect((await advance(c, run.id, later(17 * 60_000))).outcome).toBe('ended');
+    expect((await drive(c, conv, run.id, later(17 * 60_000))).outcome).toBe('ended');
     expect((await botMessages(conv)).map((m) => m.content.text)).toEqual([
       'Following up, Priya Customer.',
       'Anything else?',
@@ -978,9 +1103,9 @@ describe('automation runs', () => {
     });
     const conv2 = await inbound(c, waId(), 'ping');
     const run2 = await onlyRun(conv2);
-    let outcome = await advance(c, run2.id);
+    let outcome = await drive(c, conv2, run2.id);
     for (let i = 1; i <= 30 && outcome.outcome !== 'ended'; i += 1) {
-      outcome = await advance(c, run2.id, later(i * 61_000));
+      outcome = await drive(c, conv2, run2.id, later(i * 61_000));
     }
     expect(await onlyRun(conv2)).toMatchObject({
       status: 'failed',
@@ -1011,13 +1136,26 @@ describe('automation runs', () => {
     expect((await botMessages(conv)).map((m) => m.status)).toEqual(['canceled']);
     expect((await turns(conv)).at(-1)).toMatchObject({ start_reason: 'handoff', end_reason: null });
 
+    // A marketing opt-out stops the run too: it is never taken as the answer to a question.
+    const ria = waId();
+    const convM = await inbound(c, ria, 'menu');
+    const runM = await onlyRun(convM);
+    await advance(c, runM.id);
+    await fx.deliver(fx.messagesBody(c, { messages: [{ waId: ria, text: 'Stop promotions' }] }));
+    expect(await onlyRun(convM)).toMatchObject({
+      status: 'stopped',
+      end_reason: 'opted_out',
+      input_message_id: null,
+    });
+
     // Erasure clears captured answers and stops the contact's active run.
     const kim = waId();
     const conv2 = await inbound(c, kim, 'menu');
     const run2 = await onlyRun(conv2);
     await advance(c, run2.id);
     await fx.deliver(fx.messagesBody(c, { messages: [{ waId: kim, text: 'order status' }] }));
-    await advance(c, run2.id);
+    await sendQueued(c, conv2);
+    await drive(c, conv2, run2.id);
     expect((await onlyRun(conv2)).variables).toEqual({ topic: 'Order status' });
     const [contact] = await fx.query<{ contact_id: string }>(
       `SELECT contact_id FROM app.conversations WHERE id = $1`,
@@ -1039,6 +1177,7 @@ describe('automation runs', () => {
     const conv3 = await inbound(c, lee, 'menu');
     const run3 = await onlyRun(conv3);
     await advance(c, run3.id);
+    await sendQueued(c, conv3);
     expect((await advance(c, run3.id, later(25 * 3600_000))).outcome).toBe('ended');
     expect(await onlyRun(conv3)).toMatchObject({ status: 'completed', end_reason: 'end_node' });
     const conv4 = await inbound(c, waId(), 'menu');
@@ -1086,16 +1225,18 @@ describe('automation runs', () => {
       'conflict',
       /already handling/,
     );
-    expect(
-      (
-        await advanceAutomationRun(
-          runnerDeps(),
-          authorizedTenantScope(c.tenant.id, c.owner.id),
-          runId,
-          c.owner.id,
-        )
-      ).outcome,
-    ).toBe('ended');
+    const tick = () =>
+      advanceAutomationRun(
+        runnerDeps(),
+        authorizedTenantScope(c.tenant.id, c.owner.id),
+        runId,
+        c.owner.id,
+      );
+    // The message goes out; the run completes once Meta has accepted it.
+    expect((await tick()).outcome).toBe('sending');
+    expect(await onlyRun(conv)).toMatchObject({ status: 'running', current_node_id: null });
+    expect(await sendQueued(c, conv)).toEqual(['accepted']);
+    expect((await tick()).outcome).toBe('ended');
     expect(await onlyRun(conv)).toMatchObject({
       mode: 'test',
       trigger_type: 'test',
@@ -1164,12 +1305,13 @@ describe('automation runs', () => {
     });
     await publish(owner, 'Menu', keyword('menu'), menuGraph());
     const conv1 = await inbound(c, waId(), 'hello');
-    await advance(c, (await onlyRun(conv1)).id);
+    await drive(c, conv1, (await onlyRun(conv1)).id);
     const pat = waId();
     const conv2 = await inbound(c, pat, 'menu');
     await advance(c, (await onlyRun(conv2)).id);
     await fx.deliver(fx.messagesBody(c, { messages: [{ waId: pat, text: 'talk to us' }] }));
-    await advance(c, (await onlyRun(conv2)).id);
+    await sendQueued(c, conv2);
+    await drive(c, conv2, (await onlyRun(conv2)).id);
     await inbound(c, waId(), 'menu');
     // A test run is not a customer-started run.
     const conv4 = await inbound(c, waId(), 'hi');
@@ -1226,7 +1368,8 @@ describe('automation runs', () => {
     const run = await onlyRun(conv2);
     await advance(c, run.id);
     await fx.deliver(fx.messagesBody(c, { messages: [{ waId: moe, text: 'talk to us' }] }));
-    await advance(c, run.id);
+    await sendQueued(c, conv2);
+    await drive(c, conv2, run.id);
     expect(await onlyRun(conv2)).toMatchObject({
       status: 'handed_off',
       variables: { topic: 'Talk to us' },

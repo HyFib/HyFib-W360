@@ -22,9 +22,9 @@ import { PageHeader } from '@/components/page-header';
 import {
   END_REASONS,
   RUN_STATUS,
-  STEP_DETAILS,
   STEP_OUTCOMES,
   TRIGGER_TYPE_LABELS,
+  describeDetail,
 } from '@/lib/automation-labels';
 import { formatDateTime } from '@/lib/format';
 import { getRuntime } from '@/server/runtime';
@@ -61,7 +61,7 @@ export default async function AutomationRunPage({
     detail
       ? detail
           .split(', ')
-          .map((d) => STEP_DETAILS[d] ?? END_REASONS[d] ?? d)
+          .map((d) => describeDetail(d))
           .join('; ')
       : null;
   const base = `/c/${ctx.tenant.slug}/automations`;
@@ -143,11 +143,13 @@ export default async function AutomationRunPage({
               </CardTitle>
               <CardDescription>
                 {active
-                  ? run.waitingFor === 'reply'
-                    ? `Waiting for the customer’s reply${run.waitUntil ? ` until ${formatDateTime(run.waitUntil, tz)}` : ''}.`
-                    : run.waitingFor === 'timer'
-                      ? `Waiting until ${run.waitUntil ? formatDateTime(run.waitUntil, tz) : 'later'}.`
-                      : 'Running.'
+                  ? run.sending
+                    ? 'Waiting for WhatsApp to accept a message; the run continues once it does.'
+                    : run.waitingFor === 'reply'
+                      ? `Waiting for the customer’s reply${run.waitUntil ? ` until ${formatDateTime(run.waitUntil, tz)}` : ''}.`
+                      : run.waitingFor === 'timer'
+                        ? `Waiting until ${run.waitUntil ? formatDateTime(run.waitUntil, tz) : 'later'}.`
+                        : 'Running.'
                   : `${END_REASONS[run.endReason ?? ''] ?? 'Ended.'}${run.endDetail ? ` (${describe(run.endDetail)})` : ''}${run.endedByName ? ` By ${run.endedByName}.` : ''}`}
               </CardDescription>
             </CardHeader>

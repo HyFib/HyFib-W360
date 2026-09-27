@@ -323,9 +323,15 @@ Budgets (200 steps, 20 entries per step, 50 messages, 7 days, 10 runs per conver
 end runaway runs as failed and return the conversation to people. A step that raises an error fails
 its job as usual (pg-boss retries and keeps the error), and the run counts the attempt; after five
 failed attempts in a row the run fails (`error`, `step_error`) and the conversation goes to people,
-so a bug or a persistent database error cannot hold a customer for the full seven days. External
-calls (the HTTP step, P4-02) will need a write-ahead unknown state like auto-recharge before they
-can join a run.
+so a bug or a persistent database error cannot hold a customer for the full seven days. A run
+waits for Meta to accept each bot message before its next step or its completion (the queued
+message is recorded on the run; the send worker signals the run when the send is settled), and a
+message that is rejected, cancelled, of unknown outcome, not accepted within 10 minutes or reported
+failed later fails the run (`send_failed`) and hands the conversation to people: a run never reports
+"completed", or moves on, on a message the customer did not get. This also keeps a run's messages in
+order. Acceptance, not delivery, is the bar (delivery can take days when a phone is off); a failure
+reported after a run has ended is shown on the message but does not rewrite the run's outcome. External calls (the HTTP step, P4-02) will need a write-ahead unknown state like
+auto-recharge before they can join a run.
 
 ## ADR-036 The bot/human hand-off lock (2026-09-27)
 

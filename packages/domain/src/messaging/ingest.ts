@@ -20,6 +20,7 @@ import {
   type Tx,
 } from '@w360/db';
 import { dispatchInboundToAutomation } from '../automations/dispatch';
+import { signalRunOfBotMessage } from '../automations/runs';
 import { attributeCampaignReply } from '../campaigns/attribution';
 import { contactForPhone } from '../contacts/service';
 import { phoneFromWaId } from '../contacts/phone';
@@ -583,6 +584,14 @@ async function ingestMessagesChange(
         conversationId: message.conversationId,
         payload: { messageId: message.id, status: next },
       });
+      // A bot message that failed after Meta accepted it ends its (still active) run.
+      if (next === 'failed') {
+        await signalRunOfBotMessage(deps, tx, {
+          tenantId: ctx.tenantId,
+          messageId: message.id,
+          key: `f:${message.id}`,
+        });
+      }
     }
     // After the status update, so attribution never credits the failing message itself: 131050
     // means the customer had already stopped marketing messages before this one.

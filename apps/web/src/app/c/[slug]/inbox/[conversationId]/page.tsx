@@ -157,11 +157,13 @@ export default async function ConversationPage({
                       <span className="font-medium">{thread.automation.automationName}</span>
                     )}{' '}
                     is handling this conversation
-                    {thread.automation.waitingFor === 'reply'
-                      ? ' and is waiting for the customer’s reply'
-                      : thread.automation.waitingFor === 'timer'
-                        ? ' and is waiting before its next step'
-                        : ''}
+                    {thread.automation.sending
+                      ? ' and is sending a message'
+                      : thread.automation.waitingFor === 'reply'
+                        ? ' and is waiting for the customer’s reply'
+                        : thread.automation.waitingFor === 'timer'
+                          ? ' and is waiting before its next step'
+                          : ''}
                     . Replying, assigning or taking over stops it.
                   </p>
                   {canReply ? (

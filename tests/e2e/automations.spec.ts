@@ -100,7 +100,16 @@ test('an automation is built, simulated, published, runs on WhatsApp and hands o
   await expect(thread.getByText('Hi Priya Customer, welcome!')).toBeVisible();
   await expect(thread.getByText('Do you want to talk to our team?')).toBeVisible();
   const banner = page.getByText(/is handling this conversation/);
-  await expect(banner).toContainText('waiting for the customer’s reply');
+  // The banner says "sending" until Meta has accepted the question, then shows the wait.
+  await expect
+    .poll(
+      async () => {
+        await page.reload();
+        return banner.textContent();
+      },
+      { timeout: 30_000 },
+    )
+    .toContain('waiting for the customer’s reply');
 
   // The customer types the button's title: the automation hands the conversation to people.
   await sendSignedWebhook(request, inboundMessage(wabaId, phoneNumberId, customer, 'Yes'));
