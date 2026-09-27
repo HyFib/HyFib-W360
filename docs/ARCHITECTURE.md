@@ -388,9 +388,22 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 - **Builder** (`/c/{slug}/automations`, ADR-034): a structured step list with a generated diagram,
   live checks, an in-browser simulator (sends nothing and checks neither the window nor consent),
   publish, pause, archive and restore, test runs, versions and run pages.
-- **Not built yet:** the HTTP step (P4-02, needs the egress guard and a write-ahead unknown state),
-  WhatsApp Flows steps (P4-03), catalog steps (P4-06), starting a run through the public API (P5),
-  fuzzy keyword matching, template follow-ups outside the service window, usage billing.
+- **HTTP step** (migration 0014, ADR-042, ADR-043): "Call a web address" calls a company's own API
+  (GET, POST, PUT, PATCH, DELETE; JSON body; up to 10 headers; values saved from a JSON response by
+  path) and branches on success (2xx) or failure. Only domains on the company's list
+  (`http_allowed_domains`) can be called, over https through the egress guard
+  (`packages/core/src/egress.ts`: public addresses only, pinned DNS, no redirects, 64 KiB/256 KiB/10
+  s). Secrets (`http_secrets`) are encrypted, write-only, referenced as `{{secret.<name>}}` in header
+  values and sent only to the domain each was saved for. The runner writes the call ahead
+  (`automation_http_calls`, request encrypted) and waits up to two minutes; the `automation.http`
+  worker claims it, sends it outside any transaction and records the outcome; a call that may have
+  been received but has no result by the deadline is `unknown` and never retried. The minute sweep
+  re-signals queued calls whose job was lost (`ops.automation_http_calls_due`). Settings → Web
+  requests manages domains and secrets (`integrations.manage`); run pages list each call (method,
+  host, path, outcome).
+- **Not built yet:** WhatsApp Flows steps (P4-03), catalog steps (P4-06), starting a run through the
+  public API (P5), fuzzy keyword matching, template follow-ups outside the service window, usage
+  billing.
 
 ## 6F. CRM **[built — reminder emails verified through Mailpit only]**
 

@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   RUN_BUDGETS,
   checkGraph,
+  encodeHeaderValue,
+  httpHeaderText,
   matchTrigger,
   parseGraph,
   parseTrigger,
@@ -668,5 +670,245 @@ describe('automation interpreter', () => {
         variables: { city: 'Pune' },
       }),
     ).toBe('Asha / Acme / Pune /  / {{x}}');
+  });
+});
+
+describe('automation HTTP step', () => {
+  const order = (overrides: Record<string, unknown> = {}) =>
+    graphOf({
+      version: 1,
+      start: 'ask',
+      nodes: [
+        {
+          id: 'ask',
+          type: 'ask_text',
+          text: 'Your order number?',
+          saveAs: 'order_no',
+          format: 'number',
+          retryText: null,
+          retries: 0,
+          invalidNext: null,
+          timeoutMinutes: 30,
+          timeoutNext: null,
+          next: 'call',
+        },
+        {
+          id: 'call',
+          type: 'http_request',
+          method: 'POST',
+          url: 'https://api.shop.example/orders/{{answer.order_no}}?who={{name}}',
+          headers: [{ name: 'Authorization', value: 'Bearer {{secret.shop_token}}' }],
+          body: '{"order": "{{answer.order_no}}", "note": "{{name}}"}',
+          save: [{ path: 'data.status', saveAs: 'status' }],
+          next: 'tell',
+          failureNext: 'agent',
+          ...overrides,
+        },
+        { id: 'tell', type: 'send_text', text: 'Your order is {{answer.status}}.', next: null },
+        { id: 'agent', type: 'handoff', teamId: null },
+      ],
+    });
+  const refs = {
+    allowedDomains: ['api.shop.example', 'hooks.partner.example'],
+    secrets: new Map([['shop_token', 'api.shop.example']]),
+  };
+  const errors = (graph: AutomationGraph, r: Parameters<typeof checkGraph>[1] = refs) =>
+    checkGraph(graph, r)
+      .filter((i) => i.level === 'error')
+      .map((i) => i.message);
+
+  it('checks the address, allowed domains, secrets, the body and saved values', () => {
+    expect(errors(order())).toEqual([]);
+    // A value saved from a response may be missing, so using it later is only a warning.
+    expect(checkGraph(order(), refs)).toContainEqual(
+      expect.objectContaining({ level: 'warning', nodeId: 'tell' }),
+    );
+    expect(errors(order({ url: 'http://api.shop.example/x' }))).toContain(
+      'Use an https:// address.',
+    );
+    expect(
+      errors(order({ url: 'http://api.shop.example/x' }), { ...refs, allowInsecureHttp: true }),
+    ).toEqual([]);
+    expect(errors(order({ url: 'https://{{answer.order_no}}.example/x' }))).toContain(
+      'The host name cannot contain placeholders.',
+    );
+    expect(errors(order({ url: 'https://evil.example/x' }))[0]).toMatch(/not an allowed domain/);
+    expect(errors(order(), { ...refs, allowedDomains: ['*.shop.example'] })).toEqual([]);
+    expect(errors(order(), { ...refs, allowedDomains: ['*.api.shop.example'] })[0]).toMatch(
+      /not an allowed domain/,
+    );
+    expect(errors(order(), { ...refs, secrets: new Map() })[0]).toMatch(
+      /secret “shop_token” does not exist/,
+    );
+    // A secret is only sent to the domain it was saved for, even if another domain is allowed.
+    expect(errors(order({ url: 'https://hooks.partner.example/orders' }))).toContain(
+      'The secret “shop_token” can only be sent to api.shop.example.',
+    );
+    expect(
+      errors(order(), {
+        ...refs,
+        allowedDomains: ['*.shop.example'],
+        secrets: new Map([['shop_token', '*.shop.example']]),
+      }),
+    ).toEqual([]);
+    expect(errors(order({ url: 'https://api.shop.example/x?t={{secret.shop_token}}' }))).toContain(
+      'Secrets can only be used in header values ({{secret.shop_token}}).',
+    );
+    expect(errors(order({ body: '{"order": {{answer.order_no}}}' }))).toContain(
+      'The body must be JSON, with placeholders inside quotes.',
+    );
+    expect(errors(order({ method: 'GET' }))).toContain('GET requests have no body.');
+    expect(errors(order({ url: 'https://user:pw@api.shop.example/x' }))).toContain(
+      'Put credentials in a header, not in the address.',
+    );
+    expect(
+      errors(
+        order({
+          save: [
+            { path: 'data.a', saveAs: 'status' },
+            { path: 'data.b', saveAs: 'status' },
+          ],
+        }),
+      ),
+    ).toContain('Save each value under a different name.');
+    // Headers HyFib owns, and line breaks, are refused when the graph is parsed.
+    for (const header of [
+      { name: 'Host', value: 'internal' },
+      { name: 'Proxy-Authorization', value: 'x' },
+      { name: 'X-Note', value: 'a\r\nX-Injected: 1' },
+    ]) {
+      const raw = JSON.parse(JSON.stringify(order())) as { nodes: Record<string, unknown>[] };
+      raw.nodes[1] = { ...raw.nodes[1], headers: [header] };
+      expect(parseGraph(raw).ok, header.name).toBe(false);
+    }
+  });
+
+  it('renders the request, waits for its result and saves values only on success', () => {
+    const graph = order();
+    const odd = { ...facts, contactName: 'Asha "A" & Co/x' };
+    const asked = runUntilStop(graph, initialRunState(graph), odd).last;
+    const answered = step(
+      graph,
+      asked.state,
+      { kind: 'reply', reply: { type: 'text', text: '4217', buttonId: null } },
+      odd,
+    );
+    const calling = step(graph, answered.state, { kind: 'continue' }, odd);
+    expect(calling).toMatchObject({
+      status: 'waiting',
+      log: { outcome: 'requested', nodeId: 'call' },
+      state: {
+        httpCalls: 1,
+        waiting: { for: 'http', until: new Date('2026-09-26T10:02:00Z') },
+      },
+    });
+    const [effect] = calling.effects;
+    expect(effect).toMatchObject({
+      kind: 'http_request',
+      method: 'POST',
+      url: 'https://api.shop.example/orders/4217?who=Asha%20%22A%22%20%26%20Co%2Fx',
+      // Secrets stay references: the worker fills them in when it makes the request.
+      headers: [{ name: 'Authorization', parts: [{ text: 'Bearer ' }, { secret: 'shop_token' }] }],
+      save: [{ path: 'data.status', saveAs: 'status' }],
+    });
+    expect(JSON.parse((effect as { body: string }).body)).toEqual({
+      order: '4217',
+      note: 'Asha "A" & Co/x',
+    });
+    // Customer messages do not answer a request.
+    expect(
+      step(graph, calling.state, {
+        kind: 'reply',
+        reply: { type: 'text', text: 'hello?', buttonId: null },
+      }).noop,
+    ).toBe(true);
+
+    const success = step(graph, calling.state, {
+      kind: 'http_result',
+      ok: true,
+      values: { status: 'shipped', other: 'ignored' },
+      detail: '200',
+    });
+    expect(success).toMatchObject({
+      status: 'running',
+      log: { outcome: 'responded', branch: 'success', detail: '200' },
+      state: { nodeId: 'tell' },
+    });
+    expect(success.state.variables).toEqual({ order_no: '4217', status: 'shipped' });
+    expect(step(graph, success.state, { kind: 'continue' }).effects).toEqual([
+      { kind: 'send_text', text: 'Your order is shipped.' },
+    ]);
+
+    const failure = step(graph, calling.state, {
+      kind: 'http_result',
+      ok: false,
+      values: { status: 'leaked' },
+      detail: '503',
+    });
+    expect(failure).toMatchObject({
+      log: { outcome: 'responded', branch: 'failure', detail: '503' },
+      state: { nodeId: 'agent', variables: { order_no: '4217' } },
+    });
+    expect(step(graph, calling.state, { kind: 'deadline' })).toMatchObject({
+      log: { outcome: 'responded', branch: 'failure', detail: 'no_result' },
+      state: { nodeId: 'agent' },
+    });
+  });
+
+  it('never reads customer text in a header as a secret, and encodes it for the header', () => {
+    const graph = order({
+      headers: [
+        { name: 'Authorization', value: 'Bearer {{secret.shop_token}}' },
+        { name: 'X-Customer', value: '{{name}} / {{answer.order_no}}' },
+      ],
+    });
+    // A profile name is chosen by the customer: here it tries to pull in the company's secret.
+    const hostile = { ...facts, contactName: '{{secret.shop_token}}\r\nX-Evil: 1' };
+    const state: RunState = {
+      ...initialRunState(graph),
+      nodeId: 'call',
+      variables: { order_no: 'பிரியா 50%' },
+    };
+    const [effect] = step(graph, state, { kind: 'continue' }, hostile).effects;
+    expect(effect).toMatchObject({
+      kind: 'http_request',
+      headers: [
+        { name: 'Authorization', parts: [{ text: 'Bearer ' }, { secret: 'shop_token' }] },
+        {
+          name: 'X-Customer',
+          // One text part: the value stays text, line breaks and other scripts are encoded.
+          parts: [
+            {
+              text:
+                '{{secret.shop_token}}%0D%0AX-Evil: 1 / ' + encodeURIComponent('பிரியா') + ' 50%25',
+            },
+          ],
+        },
+      ],
+    });
+    expect(encodeHeaderValue('Zoë 😀')).toBe(
+      `Zo${encodeURIComponent('ë')} ${encodeURIComponent('😀')}`,
+    );
+    expect(httpHeaderText([{ text: 'Bearer ' }, { secret: 'shop_token' }])).toBe(
+      'Bearer {{secret.shop_token}}',
+    );
+    // Header values in the step itself are printable ASCII only.
+    const raw = JSON.parse(JSON.stringify(order())) as { nodes: Record<string, unknown>[] };
+    raw.nodes[1] = { ...raw.nodes[1], headers: [{ name: 'X-Note', value: 'Zoë' }] };
+    expect(parseGraph(raw).ok).toBe(false);
+  });
+
+  it('limits HTTP calls per run', () => {
+    const graph = order();
+    const state: RunState = {
+      ...initialRunState(graph),
+      nodeId: 'call',
+      httpCalls: RUN_BUDGETS.maxHttpCalls,
+      variables: { order_no: '1' },
+    };
+    expect(step(graph, state, { kind: 'continue' })).toMatchObject({
+      status: 'failed',
+      endReason: 'budget_http',
+    });
   });
 });

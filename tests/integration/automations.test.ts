@@ -200,7 +200,7 @@ async function onlyRun(conversationId: string) {
 }
 
 function runnerDeps(clock: Clock = systemClock, jobs: JobQueue = fx.jobs(), db = fx.dbs.app) {
-  return { db, jobs, signer: fx.signer, clock };
+  return { db, jobs, signer: fx.signer, clock, keyring: fx.keyring };
 }
 
 async function advance(c: Company, runId: string, clock: Clock = systemClock) {
@@ -462,7 +462,7 @@ describe('automation versions', () => {
     });
     expect(broken.issues.filter((i) => i.level === 'error').map((i) => i.message)).toEqual([
       '“next” goes to a step that does not exist (gone).',
-      '{{answer.city}} is not saved by any question.',
+      '{{answer.city}} is not saved by any question or web request.',
     ]);
     await expectAppError(
       svc.publishAutomation(marketer, { id, expectedVersion: broken.version, note: null }),
@@ -1464,7 +1464,7 @@ async function startConsumer() {
       });
       if (auth.outcome !== 'authorized' || !auth.scope) return;
       await advanceAutomationRun(
-        { db: dbs.app, jobs, signer: fx.signer, clock: systemClock },
+        { db: dbs.app, jobs, signer: fx.signer, clock: systemClock, keyring: fx.keyring },
         auth.scope,
         auth.envelope.ref,
         auth.envelope.actorUserId,

@@ -5,8 +5,12 @@ import {
   ANSWER_FORMATS,
   AUTOMATION_LIMITS,
   COMPARISONS,
+  HTTP_BODY_METHODS,
+  HTTP_METHODS,
+  HTTP_WAIT_MINUTES,
   type AutomationNode,
   type ConditionRule,
+  type HttpMethod,
   type NodeOf,
 } from '@w360/domain/automation-model';
 
@@ -23,8 +27,11 @@ export interface NodeFieldOptions {
   steps: StepChoice[];
   teams: { id: string; name: string }[];
   fields: { key: string; label: string; type: string }[];
-  /** Answer names saved by questions in this automation. */
+  /** Answer names saved by questions and web requests in this automation. */
   answers: string[];
+  /** Domains web request steps may call, and the secrets they may use (names only). */
+  allowedDomains: string[];
+  secrets: { name: string; domain: string }[];
 }
 
 const COMPARISON_LABELS: Record<(typeof COMPARISONS)[number], string> = {
@@ -365,6 +372,8 @@ export function NodeFields({
       );
     case 'ask_buttons':
       return <AskButtonsFields node={node} options={options} onChange={onChange} />;
+    case 'http_request':
+      return <HttpRequestFields node={node} options={options} onChange={onChange} />;
     case 'ask_text':
       return (
         <div className="grid gap-4">
@@ -817,6 +826,270 @@ function AskButtonsFields({
         value={node.timeoutMinutes}
         onChange={(timeoutMinutes) => patch({ timeoutMinutes })}
       />
+    </div>
+  );
+}
+
+function HttpRequestFields({
+  node,
+  options,
+  onChange,
+}: {
+  node: NodeOf<'http_request'>;
+  options: NodeFieldOptions;
+  onChange: (node: AutomationNode) => void;
+}) {
+  const p = `step-${node.id}`;
+  const patch = (values: Partial<NodeOf<'http_request'>>) => onChange({ ...node, ...values });
+  const hasBody = HTTP_BODY_METHODS.has(node.method);
+  return (
+    <div className="grid gap-4">
+      <div className="grid gap-4 sm:grid-cols-[8rem_1fr]">
+        <Field id={`${p}-method`} label="Method">
+          {(aria) => (
+            <Select
+              {...aria}
+              value={node.method}
+              onChange={(e) => {
+                const method = e.target.value as HttpMethod;
+                patch({ method, body: HTTP_BODY_METHODS.has(method) ? node.body : null });
+              }}
+            >
+              {HTTP_METHODS.map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </Select>
+          )}
+        </Field>
+        <Field
+          id={`${p}-url`}
+          label="Address"
+          description={
+            <>
+              An https:// address on an allowed domain
+              {options.allowedDomains.length > 0
+                ? ` (${options.allowedDomains.join(', ')})`
+                : ': none yet, an administrator adds them under Settings → Web requests'}
+              . Placeholders in the path or query are URL-encoded.
+            </>
+          }
+        >
+          {(aria) => (
+            <Input
+              {...aria}
+              value={node.url}
+              maxLength={AUTOMATION_LIMITS.httpUrlLength}
+              spellCheck={false}
+              onChange={(e) => patch({ url: e.target.value })}
+            />
+          )}
+        </Field>
+      </div>
+      <fieldset className="grid gap-3">
+        <legend className="mb-1 text-sm font-medium">
+          Headers (up to {AUTOMATION_LIMITS.httpHeaders})
+        </legend>
+        <p className="text-sm text-muted-foreground">
+          Use {'{{secret.<name>}}'} for keys and tokens
+          {options.secrets.length > 0
+            ? `: ${options.secrets.map((s) => `${s.name} (sent only to ${s.domain})`).join(', ')}`
+            : '; an administrator adds secrets under Settings → Web requests'}
+          . Values are printable ASCII; customer text in them is percent-encoded.
+        </p>
+        {node.headers.map((header, i) => (
+          <div
+            key={i}
+            className="grid gap-3 rounded-md border border-border p-3 sm:grid-cols-[1fr_2fr_auto]"
+          >
+            <Field id={`${p}-header-${i}-name`} label={`Header ${i + 1} name`}>
+              {(aria) => (
+                <Input
+                  {...aria}
+                  value={header.name}
+                  maxLength={60}
+                  spellCheck={false}
+                  onChange={(e) =>
+                    patch({
+                      headers: node.headers.map((h, j) =>
+                        j === i ? { ...h, name: e.target.value } : h,
+                      ),
+                    })
+                  }
+                />
+              )}
+            </Field>
+            <Field id={`${p}-header-${i}-value`} label={`Header ${i + 1} value`}>
+              {(aria) => (
+                <Input
+                  {...aria}
+                  value={header.value}
+                  maxLength={AUTOMATION_LIMITS.httpHeaderValueLength}
+                  spellCheck={false}
+                  onChange={(e) =>
+                    patch({
+                      headers: node.headers.map((h, j) =>
+                        j === i ? { ...h, value: e.target.value } : h,
+                      ),
+                    })
+                  }
+                />
+              )}
+            </Field>
+            <div className="flex items-end">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => patch({ headers: node.headers.filter((_, j) => j !== i) })}
+              >
+                Remove<span className="sr-only"> header {i + 1}</span>
+              </Button>
+            </div>
+          </div>
+        ))}
+        {node.headers.length < AUTOMATION_LIMITS.httpHeaders ? (
+          <div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() =>
+                patch({
+                  headers: [
+                    ...node.headers,
+                    node.headers.length === 0 && options.secrets[0]
+                      ? {
+                          name: 'Authorization',
+                          value: `Bearer {{secret.${options.secrets[0].name}}}`,
+                        }
+                      : { name: 'X-Header', value: '' },
+                  ],
+                })
+              }
+            >
+              Add header
+            </Button>
+          </div>
+        ) : null}
+      </fieldset>
+      {hasBody ? (
+        <Field
+          id={`${p}-body`}
+          label="Body (optional)"
+          description={`JSON, sent as application/json. Put placeholders inside quotes, for example {"order": "{{answer.order_no}}"}; their values are escaped.`}
+        >
+          {(aria) => (
+            <Textarea
+              {...aria}
+              rows={4}
+              spellCheck={false}
+              className="font-mono"
+              value={node.body ?? ''}
+              maxLength={AUTOMATION_LIMITS.httpBodyLength}
+              onChange={(e) => patch({ body: e.target.value || null })}
+            />
+          )}
+        </Field>
+      ) : null}
+      <fieldset className="grid gap-3">
+        <legend className="mb-1 text-sm font-medium">
+          Save from the response (up to {AUTOMATION_LIMITS.httpSaves})
+        </legend>
+        <p className="text-sm text-muted-foreground">
+          Values from a successful JSON response, by path (for example data.order.status). Use them
+          as {'{{answer.<name>}}'}; a value the response lacks stays empty.
+        </p>
+        {node.save.map((item, i) => (
+          <div
+            key={i}
+            className="grid gap-3 rounded-md border border-border p-3 sm:grid-cols-[2fr_1fr_auto]"
+          >
+            <Field id={`${p}-save-${i}-path`} label={`Value ${i + 1} path`}>
+              {(aria) => (
+                <Input
+                  {...aria}
+                  value={item.path}
+                  maxLength={200}
+                  spellCheck={false}
+                  onChange={(e) =>
+                    patch({
+                      save: node.save.map((s, j) => (j === i ? { ...s, path: e.target.value } : s)),
+                    })
+                  }
+                />
+              )}
+            </Field>
+            <Field id={`${p}-save-${i}-as`} label={`Save value ${i + 1} as`}>
+              {(aria) => (
+                <Input
+                  {...aria}
+                  value={item.saveAs}
+                  maxLength={32}
+                  spellCheck={false}
+                  onChange={(e) =>
+                    patch({
+                      save: node.save.map((s, j) =>
+                        j === i ? { ...s, saveAs: e.target.value } : s,
+                      ),
+                    })
+                  }
+                />
+              )}
+            </Field>
+            <div className="flex items-end">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => patch({ save: node.save.filter((_, j) => j !== i) })}
+              >
+                Remove<span className="sr-only"> value {i + 1}</span>
+              </Button>
+            </div>
+          </div>
+        ))}
+        {node.save.length < AUTOMATION_LIMITS.httpSaves ? (
+          <div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() =>
+                patch({
+                  save: [
+                    ...node.save,
+                    { path: 'data.status', saveAs: `result_${node.save.length + 1}` },
+                  ],
+                })
+              }
+            >
+              Add value
+            </Button>
+          </div>
+        ) : null}
+      </fieldset>
+      <div className="grid gap-4 sm:grid-cols-2">
+        <NextSelect
+          id={`${p}-next`}
+          label="After a successful response"
+          value={node.next}
+          self={node.id}
+          options={options}
+          onChange={(next) => patch({ next })}
+          description="A 2xx status."
+        />
+        <NextSelect
+          id={`${p}-failure`}
+          label="If the call fails"
+          value={node.failureNext}
+          self={node.id}
+          options={options}
+          onChange={(failureNext) => patch({ failureNext })}
+          description={`Another status, a refused or failed call, or no result within ${HTTP_WAIT_MINUTES} minutes. A call that may have reached the server is never repeated.`}
+        />
+      </div>
     </div>
   );
 }

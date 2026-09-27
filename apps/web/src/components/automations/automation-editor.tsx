@@ -84,16 +84,31 @@ function triggerInput(form: TriggerForm): unknown {
   };
 }
 
-function uniqueAnswerName(graph: AutomationGraph): string {
-  const used = new Set(
-    graph.nodes.flatMap((n) =>
-      (n.type === 'ask_text' || n.type === 'ask_buttons') && n.saveAs ? [n.saveAs] : [],
+/** Answer names the steps save: questions, and values saved from web requests. */
+function savedAnswers(graph: AutomationGraph): string[] {
+  return [
+    ...new Set(
+      graph.nodes.flatMap((n) =>
+        (n.type === 'ask_text' || n.type === 'ask_buttons') && n.saveAs
+          ? [n.saveAs]
+          : n.type === 'http_request'
+            ? n.save.map((item) => item.saveAs)
+            : [],
+      ),
     ),
-  );
+  ];
+}
+
+function uniqueAnswerName(graph: AutomationGraph): string {
+  const used = new Set(savedAnswers(graph));
   for (let i = 1; ; i += 1) if (!used.has(`answer_${i}`)) return `answer_${i}`;
 }
 
-function defaultNode(type: NodeType, graph: AutomationGraph): AutomationNode {
+function defaultNode(
+  type: NodeType,
+  graph: AutomationGraph,
+  allowedDomains: readonly string[],
+): AutomationNode {
   const id = newNodeId(graph, type);
   switch (type) {
     case 'send_text':
@@ -146,6 +161,21 @@ function defaultNode(type: NodeType, graph: AutomationGraph): AutomationNode {
       return { id, type, label: '', action: { kind: 'add_tag', tag: 'new tag' }, next: null };
     case 'wait':
       return { id, type, label: '', minutes: 60, next: null };
+    case 'http_request': {
+      const host = allowedDomains.find((d) => !d.startsWith('*.'));
+      return {
+        id,
+        type,
+        label: '',
+        method: 'POST',
+        url: host ? `https://${host}/` : 'https://',
+        headers: [],
+        body: null,
+        save: [],
+        next: null,
+        failureNext: null,
+      };
+    }
     case 'handoff':
       return { id, type, label: '', teamId: null };
     case 'end':
@@ -177,6 +207,8 @@ function retarget(node: AutomationNode, target: string, value: string | null): A
       };
     case 'condition':
       return { ...node, then: t(node.then), else: t(node.else) };
+    case 'http_request':
+      return { ...node, next: t(node.next), failureNext: t(node.failureNext) };
     default:
       return node;
   }
@@ -200,6 +232,7 @@ export function AutomationEditor({
   channels,
   teams,
   fields,
+  web,
 }: {
   slug: string;
   companyName: string;
@@ -208,6 +241,12 @@ export function AutomationEditor({
   channels: { id: string; name: string; active: boolean }[];
   teams: { id: string; name: string }[];
   fields: { key: string; label: string; type: string }[];
+  /** What web request steps may use: allowed domains and secrets (names and domains only). */
+  web: {
+    allowedDomains: string[];
+    secrets: { name: string; domain: string }[];
+    allowInsecureHttp: boolean;
+  };
 }) {
   const [name, setName] = useState(automation.name);
   const [description, setDescription] = useState(automation.description ?? '');
@@ -232,8 +271,11 @@ export function AutomationEditor({
     () => ({
       teamIds: new Set(teams.map((t) => t.id)),
       fieldKeys: new Set(fields.map((f) => f.key)),
+      allowedDomains: web.allowedDomains,
+      secrets: new Map(web.secrets.map((s) => [s.name, s.domain])),
+      allowInsecureHttp: web.allowInsecureHttp,
     }),
-    [teams, fields],
+    [teams, fields, web],
   );
   const parsedTrigger = useMemo(() => parseTrigger(triggerInput(trigger)), [trigger]);
   const parsedGraph = useMemo(() => parseGraph(graph), [graph]);
@@ -280,14 +322,15 @@ export function AutomationEditor({
     id: n.id,
     label: n.label ? `${n.label} (${n.id})` : `${NODE_TYPE_LABELS[n.type]} (${n.id})`,
   }));
-  const answers = [
-    ...new Set(
-      graph.nodes.flatMap((n) =>
-        (n.type === 'ask_text' || n.type === 'ask_buttons') && n.saveAs ? [n.saveAs] : [],
-      ),
-    ),
-  ];
-  const options: NodeFieldOptions = { steps: stepChoices, teams, fields, answers };
+  const answers = savedAnswers(graph);
+  const options: NodeFieldOptions = {
+    steps: stepChoices,
+    teams,
+    fields,
+    answers,
+    allowedDomains: web.allowedDomains,
+    secrets: web.secrets,
+  };
 
   const save = () => {
     setSaving(true);
@@ -643,7 +686,10 @@ export function AutomationEditor({
                   variant="outline"
                   onClick={() =>
                     change(() =>
-                      setGraph((g) => ({ ...g, nodes: [...g.nodes, defaultNode(newType, g)] })),
+                      setGraph((g) => ({
+                        ...g,
+                        nodes: [...g.nodes, defaultNode(newType, g, web.allowedDomains)],
+                      })),
                     )
                   }
                 >

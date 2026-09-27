@@ -21,6 +21,7 @@ import { StopRunButton } from '@/components/automations/automation-actions';
 import { PageHeader } from '@/components/page-header';
 import {
   END_REASONS,
+  HTTP_CALL_STATE,
   RUN_STATUS,
   STEP_OUTCOMES,
   TRIGGER_TYPE_LABELS,
@@ -84,57 +85,114 @@ export default async function AutomationRunPage({
         }
       />
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_300px]">
-        <Card className="min-w-0">
-          <CardHeader>
-            <CardTitle>Steps</CardTitle>
-            <CardDescription>
-              The log records steps and branches only; what the customer wrote stays in the
-              conversation.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="p-0">
-            <Table>
-              <THead>
-                <TR>
-                  <TH>#</TH>
-                  <TH>Time</TH>
-                  <TH>Step</TH>
-                  <TH>What happened</TH>
-                </TR>
-              </THead>
-              <TBody>
-                {run.log.map((s) => (
-                  <TR key={s.seq}>
-                    <TD className="text-sm">{s.seq}</TD>
-                    <TD className="whitespace-nowrap text-sm text-muted-foreground">
-                      {formatDateTime(s.createdAt, tz)}
-                    </TD>
-                    <TD className="text-sm">
-                      {nodeName(s.nodeId)}
-                      {s.nodeType ? (
-                        <span className="block text-xs text-muted-foreground">
-                          {NODE_TYPE_LABELS[s.nodeType as NodeType] ?? s.nodeType}
-                        </span>
-                      ) : null}
-                    </TD>
-                    <TD className="text-sm">
-                      {STEP_OUTCOMES[s.outcome] ?? s.outcome}
-                      {s.branch ? (
-                        <span className="text-muted-foreground"> → {s.branch}</span>
-                      ) : null}
-                      {s.detail ? (
-                        <span className="block text-xs text-muted-foreground">
-                          {s.outcome === 'started' ? 'Started by ' : ''}
-                          {describe(s.detail)}
-                        </span>
-                      ) : null}
-                    </TD>
+        <div className="grid min-w-0 content-start gap-6">
+          <Card className="min-w-0">
+            <CardHeader>
+              <CardTitle>Steps</CardTitle>
+              <CardDescription>
+                The log records steps and branches only; what the customer wrote stays in the
+                conversation.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="p-0">
+              <Table>
+                <THead>
+                  <TR>
+                    <TH>#</TH>
+                    <TH>Time</TH>
+                    <TH>Step</TH>
+                    <TH>What happened</TH>
                   </TR>
-                ))}
-              </TBody>
-            </Table>
-          </CardContent>
-        </Card>
+                </THead>
+                <TBody>
+                  {run.log.map((s) => (
+                    <TR key={s.seq}>
+                      <TD className="text-sm">{s.seq}</TD>
+                      <TD className="whitespace-nowrap text-sm text-muted-foreground">
+                        {formatDateTime(s.createdAt, tz)}
+                      </TD>
+                      <TD className="text-sm">
+                        {nodeName(s.nodeId)}
+                        {s.nodeType ? (
+                          <span className="block text-xs text-muted-foreground">
+                            {NODE_TYPE_LABELS[s.nodeType as NodeType] ?? s.nodeType}
+                          </span>
+                        ) : null}
+                      </TD>
+                      <TD className="text-sm">
+                        {STEP_OUTCOMES[s.outcome] ?? s.outcome}
+                        {s.branch ? (
+                          <span className="text-muted-foreground"> → {s.branch}</span>
+                        ) : null}
+                        {s.detail ? (
+                          <span className="block text-xs text-muted-foreground">
+                            {s.outcome === 'started' ? 'Started by ' : ''}
+                            {describe(s.detail)}
+                          </span>
+                        ) : null}
+                      </TD>
+                    </TR>
+                  ))}
+                </TBody>
+              </Table>
+            </CardContent>
+          </Card>
+          {run.httpCalls.length > 0 ? (
+            <Card className="min-w-0">
+              <CardHeader>
+                <CardTitle>Web requests</CardTitle>
+                <CardDescription>
+                  What the run called and how it ended. A request that may have reached the server
+                  is never repeated; its outcome is then unknown.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="p-0">
+                <Table>
+                  <THead>
+                    <TR>
+                      <TH>Time</TH>
+                      <TH>Step</TH>
+                      <TH>Request</TH>
+                      <TH>Outcome</TH>
+                    </TR>
+                  </THead>
+                  <TBody>
+                    {run.httpCalls.map((c) => {
+                      const state = HTTP_CALL_STATE[c.state] ?? {
+                        label: c.state,
+                        tone: 'neutral' as const,
+                      };
+                      const code = c.statusCode !== null ? String(c.statusCode) : c.errorCode;
+                      return (
+                        <TR key={c.id}>
+                          <TD className="whitespace-nowrap text-sm text-muted-foreground">
+                            {formatDateTime(c.createdAt, tz)}
+                          </TD>
+                          <TD className="text-sm">{nodeName(c.nodeId)}</TD>
+                          <TD className="text-sm">
+                            <code className="break-all">
+                              {c.method} {c.host}
+                              {c.path}
+                            </code>
+                          </TD>
+                          <TD className="text-sm">
+                            <Badge tone={state.tone}>{state.label}</Badge>
+                            {code ? (
+                              <span className="block text-xs text-muted-foreground">
+                                {describeDetail(code)}
+                                {c.durationMs !== null ? ` (${c.durationMs} ms)` : ''}
+                              </span>
+                            ) : null}
+                          </TD>
+                        </TR>
+                      );
+                    })}
+                  </TBody>
+                </Table>
+              </CardContent>
+            </Card>
+          ) : null}
+        </div>
         <div className="grid content-start gap-6">
           <Card>
             <CardHeader>
@@ -149,7 +207,9 @@ export default async function AutomationRunPage({
                       ? `Waiting for the customer’s reply${run.waitUntil ? ` until ${formatDateTime(run.waitUntil, tz)}` : ''}.`
                       : run.waitingFor === 'timer'
                         ? `Waiting until ${run.waitUntil ? formatDateTime(run.waitUntil, tz) : 'later'}.`
-                        : 'Running.'
+                        : run.waitingFor === 'http'
+                          ? `Waiting for a web request${run.waitUntil ? ` until ${formatDateTime(run.waitUntil, tz)}` : ''}; without a result by then it takes its failure branch.`
+                          : 'Running.'
                   : `${END_REASONS[run.endReason ?? ''] ?? 'Ended.'}${run.endDetail ? ` (${describe(run.endDetail)})` : ''}${run.endedByName ? ` By ${run.endedByName}.` : ''}`}
               </CardDescription>
             </CardHeader>

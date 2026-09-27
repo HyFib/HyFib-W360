@@ -33,6 +33,7 @@ export const END_REASONS: Record<string, string> = {
   budget_steps: 'Too many steps: the run reached its step limit.',
   budget_loop: 'A step repeated too often: the run reached its loop limit.',
   budget_messages: 'The run reached its message limit.',
+  budget_http: 'The run reached its web request limit.',
   expired: 'The run was older than 7 days.',
   send_blocked: 'A message could not be sent.',
   send_failed: 'A message did not reach the customer.',
@@ -55,6 +56,8 @@ export const STEP_OUTCOMES: Record<string, string> = {
   failed: 'Failed',
   stopped: 'Stopped',
   taken_over: 'Taken over',
+  requested: 'Made a web request',
+  responded: 'Web request finished',
 };
 
 export const STEP_DETAILS: Record<string, string> = {
@@ -79,6 +82,36 @@ export const STEP_DETAILS: Record<string, string> = {
   send_timeout: 'WhatsApp did not accept the message within 10 minutes',
   failed: 'WhatsApp did not accept or deliver the message',
   missing_node: 'the step no longer exists',
+  // Web requests (the step log shows a status code, or one of these).
+  domain_not_allowed: 'the domain is not on the company’s allowed list',
+  secret_missing: 'a secret the request uses no longer exists',
+  secret_domain_mismatch: 'a secret the request uses is saved for another domain',
+  invalid_url: 'the address was not valid after filling in placeholders',
+  not_started: 'the request was not made in time, so it was cancelled',
+  no_result: 'no result in time; the server may have received the request',
+  missing_call: 'the request record was not found',
+  run_ended: 'the run ended before the request was made',
+  address_blocked: 'the address is on a private or reserved network',
+  dns_failed: 'the host name could not be resolved',
+  connect_failed: 'the server could not be reached',
+  timeout: 'no complete response within 10 seconds; the server may have received the request',
+  network_error: 'the connection broke during the request; the server may have received it',
+  response_too_large: 'the response was larger than 256 KB',
+  request_too_large: 'the request body was larger than 64 KB',
+  header_not_allowed: 'a header name or value is not allowed',
+  scheme_not_allowed: 'only https:// addresses can be called',
+  port_not_allowed: 'the port is not allowed (use 443 or 1024 and up)',
+  credentials_in_url: 'the address contained a user name or password',
+};
+
+/** A web request's state on the run page. */
+export const HTTP_CALL_STATE: Record<string, { label: string; tone: Tone }> = {
+  queued: { label: 'Waiting to be made', tone: 'info' },
+  in_flight: { label: 'In progress', tone: 'info' },
+  succeeded: { label: 'Succeeded', tone: 'success' },
+  failed: { label: 'Failed', tone: 'danger' },
+  unknown: { label: 'Outcome unknown', tone: 'warning' },
+  canceled: { label: 'Not made', tone: 'neutral' },
 };
 
 export const TRIGGER_TYPE_LABELS: Record<string, string> = {
@@ -90,6 +123,7 @@ export const TRIGGER_TYPE_LABELS: Record<string, string> = {
 
 /** Text for a step-log or end detail code, including send failures (`failed:<code>`). */
 export function describeDetail(detail: string): string {
+  if (/^[1-5]\d\d$/.test(detail)) return `the server answered with status ${detail}`;
   if (detail.startsWith('failed:')) {
     const code = detail.slice('failed:'.length);
     return STEP_DETAILS[code] ?? `WhatsApp did not accept or deliver the message (error ${code})`;

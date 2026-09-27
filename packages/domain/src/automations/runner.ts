@@ -1,4 +1,4 @@
-import { uuidv7, type Clock } from '@w360/core';
+import { uuidv7, type Clock, type Keyring } from '@w360/core';
 import { QUEUES } from '@w360/contracts';
 import {
   and,
@@ -30,6 +30,13 @@ import { businessStatusAt, loadBusinessCalendar } from '../inbox/business-hours'
 import { emitTenantEvent } from '../messaging/events';
 import { STATUS_RANK } from '../messaging/status';
 import { RUN_BUDGETS, graphSchema, type AutomationGraph, type AutomationNode } from './graph';
+import {
+  FINISHED_HTTP_STATES,
+  httpCallDetail,
+  httpCallOfRun,
+  queueHttpCall,
+  settleOverdueHttpCall,
+} from './http';
 import {
   advance,
   type InboundReply,
@@ -70,6 +77,8 @@ import {
 export interface AutomationRunnerDeps extends RunSignalDeps {
   db: Database;
   clock: Clock;
+  /** Encrypts the requests of HTTP steps (the worker decrypts them when it makes the call). */
+  keyring: Keyring;
 }
 
 /** Steps one job processes before handing the run to a new job (fairness between runs). */
@@ -116,6 +125,7 @@ export function runStateOf(run: AutomationRun): RunState {
     retries: run.retries,
     steps: run.stepCount,
     messages: run.messageCount,
+    httpCalls: run.httpCallCount,
     visits: run.visits,
     variables: run.variables,
   };
@@ -517,7 +527,26 @@ async function runStep(
 
     let event: RunEvent;
     if (run.status === 'waiting') {
-      if (run.inputMessageId) {
+      if (run.waitingFor === 'http') {
+        // The result of the call the run waits for, or its absence at the deadline (the call is
+        // locked, so a result cannot arrive between the two checks).
+        const call = await httpCallOfRun(tx, run);
+        if (call && FINISHED_HTTP_STATES.has(call.state)) {
+          event = {
+            kind: 'http_result',
+            ok: call.state === 'succeeded',
+            values: call.state === 'succeeded' ? call.savedValues : {},
+            detail: httpCallDetail(call),
+          };
+        } else if (run.waitUntil && run.waitUntil <= now) {
+          const detail = call
+            ? await settleOverdueHttpCall(tx, tenantId, call.id, now)
+            : 'missing_call';
+          event = { kind: 'http_result', ok: false, values: {}, detail };
+        } else {
+          return { kind: 'not_due' };
+        }
+      } else if (run.inputMessageId) {
         const [message] = await tx
           .select({ type: messages.type, content: messages.content })
           .from(messages)
@@ -573,6 +602,14 @@ async function runStep(
         messageId = sent.messageId;
       } else if (effect.kind === 'handoff') {
         handoff = { teamId: effect.teamId };
+      } else if (effect.kind === 'http_request') {
+        await queueHttpCall(tx, deps, {
+          run,
+          nodeId: result.log.nodeId ?? run.currentNodeId ?? '',
+          visit: result.state.visit,
+          effect,
+          now,
+        });
       } else {
         const note = await applyContactEffect(tx, run, effect);
         if (note) notes.push(note);
@@ -586,6 +623,7 @@ async function runStep(
       retries: state.retries,
       stepCount: state.steps,
       messageCount: state.messages,
+      httpCallCount: state.httpCalls,
       visits: { ...state.visits },
       variables: { ...state.variables },
     };
@@ -677,7 +715,8 @@ async function runStep(
             : 'no_next'
           : status === 'handed_off'
             ? 'handoff_node'
-            : (reason as 'budget_steps' | 'budget_loop' | 'budget_messages' | 'error'),
+            : (reason as
+                'budget_steps' | 'budget_loop' | 'budget_messages' | 'budget_http' | 'error'),
       detail: result.log.detail,
       now,
       teamId: handoff?.teamId ?? null,

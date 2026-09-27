@@ -6,7 +6,7 @@ import {
   billingEventProcessHandler,
   billingSweepHandler,
 } from './handlers/billing';
-import { automationRunHandler } from './handlers/automations';
+import { automationHttpHandler, automationRunHandler } from './handlers/automations';
 import { campaignRunHandler } from './handlers/campaigns';
 import { crmReminderHandler } from './handlers/crm';
 import { emailSendHandler, outboxSweepHandler } from './handlers/email';
@@ -104,6 +104,11 @@ async function main(): Promise<void> {
     QUEUES.automationRun.name,
     { localConcurrency: concurrency, batchSize: 1, pollingIntervalSeconds: 1 },
     automationRunHandler(rt),
+  );
+  await rt.boss.work(
+    QUEUES.automationHttp.name,
+    { localConcurrency: concurrency, batchSize: 1, pollingIntervalSeconds: 1 },
+    automationHttpHandler(rt),
   );
   await rt.boss.work(
     QUEUES.crmReminder.name,

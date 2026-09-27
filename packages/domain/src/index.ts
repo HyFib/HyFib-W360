@@ -59,6 +59,8 @@ export * from './automations/graph';
 export * from './automations/interpreter';
 export * from './automations/runs';
 export * from './automations/runner';
+export * from './automations/http';
+export * from './automations/web-requests';
 export * from './automations/dispatch';
 export * from './automations/service';
 export * from './crm/common';

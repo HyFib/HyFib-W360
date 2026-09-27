@@ -2,8 +2,10 @@
 import { useState } from 'react';
 import { Button, Checkbox, Field, Input, Textarea } from '@w360/ui';
 import {
+  HTTP_WAIT_MINUTES,
   RUN_BUDGETS,
   advance,
+  httpHeaderText,
   initialRunState,
   type AutomationGraph,
   type RunEffect,
@@ -30,9 +32,10 @@ type Entry =
       buttons: { id: string; title: string }[];
     }
   | { who: 'customer'; text: string }
-  | { who: 'note'; text: string };
+  | { who: 'note'; text: string }
+  | { who: 'request'; method: string; url: string; headers: string[]; body: string | null };
 
-type Status = 'idle' | 'waiting_reply' | 'waiting_timer' | 'ended';
+type Status = 'idle' | 'waiting_reply' | 'waiting_timer' | 'waiting_http' | 'ended';
 
 const END_TEXT: Record<string, string> = {
   end_node: 'The automation ended (End step).',
@@ -40,6 +43,7 @@ const END_TEXT: Record<string, string> = {
   budget_steps: 'The run failed: it reached the step limit.',
   budget_loop: 'The run failed: a step repeated too often.',
   budget_messages: 'The run failed: it reached the message limit.',
+  budget_http: 'The run failed: it reached the web request limit.',
   error: 'The run could not continue.',
 };
 
@@ -90,6 +94,7 @@ export function AutomationSimulator({
   const [status, setStatus] = useState<Status>('idle');
   const [entries, setEntries] = useState<Entry[]>([]);
   const [text, setText] = useState('');
+  const [httpValues, setHttpValues] = useState<Record<string, string>>({});
 
   if (!graph) {
     return (
@@ -98,6 +103,9 @@ export function AutomationSimulator({
       </p>
     );
   }
+
+  const currentNode = state ? graph.nodes.find((n) => n.id === state.nodeId) : undefined;
+  const httpNode = currentNode?.type === 'http_request' ? currentNode : null;
 
   const process = (from: RunState, first: RunEvent, lead: Entry[]) => {
     let current = from;
@@ -138,6 +146,15 @@ export function AutomationSimulator({
           out.push({
             who: 'note',
             text: `Contact field ${effect.field} set to “${effect.value}”.`,
+          });
+          break;
+        case 'http_request':
+          out.push({
+            who: 'request',
+            method: effect.method,
+            url: effect.url,
+            headers: effect.headers.map((h) => `${h.name}: ${httpHeaderText(h.parts)}`),
+            body: effect.body,
           });
           break;
         case 'handoff': {
@@ -183,14 +200,22 @@ export function AutomationSimulator({
             : waitingNode?.type === 'ask_buttons' || waitingNode?.type === 'ask_text'
               ? waitingNode.timeoutMinutes
               : 0;
-        next = current.waiting?.for === 'timer' ? 'waiting_timer' : 'waiting_reply';
+        next =
+          current.waiting?.for === 'timer'
+            ? 'waiting_timer'
+            : current.waiting?.for === 'http'
+              ? 'waiting_http'
+              : 'waiting_reply';
         out.push({
           who: 'note',
           text:
             next === 'waiting_timer'
               ? `Waiting ${minutes} minutes before continuing.`
-              : `Waiting up to ${minutes} minutes for a reply.`,
+              : next === 'waiting_http'
+                ? `Nothing is sent here. Choose the result below (a real run waits up to ${HTTP_WAIT_MINUTES} minutes).`
+                : `Waiting up to ${minutes} minutes for a reply.`,
         });
+        if (next === 'waiting_http') setHttpValues({});
         break;
       }
       next = 'ended';
@@ -227,7 +252,9 @@ export function AutomationSimulator({
           text:
             status === 'ended' || status === 'idle'
               ? 'No run is active. Start again to try from the first step.'
-              : 'The automation is waiting on a timer; the message is kept in the inbox but not used.',
+              : status === 'waiting_http'
+                ? 'The automation is waiting for a web request; the message is kept in the inbox but not used.'
+                : 'The automation is waiting on a timer; the message is kept in the inbox but not used.',
         },
       ]);
       return;
@@ -260,6 +287,28 @@ export function AutomationSimulator({
                 <p key={i} className="text-center text-xs text-muted-foreground">
                   {entry.text}
                 </p>
+              );
+            if (entry.who === 'request')
+              return (
+                <div
+                  key={i}
+                  className="grid gap-1 rounded-md border border-dashed border-border bg-background px-3 py-2 text-xs"
+                >
+                  <span className="font-medium">Web request (not sent in the simulator)</span>
+                  <code className="break-all">
+                    {entry.method} {entry.url}
+                  </code>
+                  {entry.headers.map((h, j) => (
+                    <code key={j} className="break-all text-muted-foreground">
+                      {h}
+                    </code>
+                  ))}
+                  {entry.body ? (
+                    <code className="whitespace-pre-wrap break-all text-muted-foreground">
+                      {entry.body}
+                    </code>
+                  ) : null}
+                </div>
               );
             if (entry.who === 'customer')
               return (
@@ -331,17 +380,78 @@ export function AutomationSimulator({
             Send
           </Button>
         </ClientForm>
+        {status === 'waiting_http' && state && httpNode ? (
+          <fieldset className="grid gap-3 rounded-md border border-border p-3">
+            <legend className="px-1 text-sm font-medium">Result of the web request</legend>
+            {httpNode.save.map((item) => (
+              <Field
+                key={item.saveAs}
+                id={`sim-http-${item.saveAs}`}
+                label={`${item.saveAs} (from ${item.path})`}
+              >
+                {(aria) => (
+                  <Input
+                    {...aria}
+                    value={httpValues[item.saveAs] ?? ''}
+                    onChange={(e) =>
+                      setHttpValues({ ...httpValues, [item.saveAs]: e.target.value })
+                    }
+                  />
+                )}
+              </Field>
+            ))}
+            <div className="flex flex-wrap gap-2">
+              <ClientButton
+                size="sm"
+                onClick={() =>
+                  process(
+                    state,
+                    {
+                      kind: 'http_result',
+                      ok: true,
+                      values: Object.fromEntries(
+                        Object.entries(httpValues).filter(([, v]) => v !== ''),
+                      ),
+                      detail: '200',
+                    },
+                    [{ who: 'note', text: 'The server answers 200 OK.' }],
+                  )
+                }
+              >
+                Success
+              </ClientButton>
+              <ClientButton
+                size="sm"
+                variant="outline"
+                onClick={() =>
+                  process(state, { kind: 'http_result', ok: false, values: {}, detail: '500' }, [
+                    { who: 'note', text: 'The server answers 500.' },
+                  ])
+                }
+              >
+                Failure
+              </ClientButton>
+            </div>
+          </fieldset>
+        ) : null}
         <div className="flex flex-wrap gap-2">
           <ClientButton onClick={start}>{status === 'idle' ? 'Start' : 'Start again'}</ClientButton>
           <ClientButton
             variant="outline"
-            disabled={status !== 'waiting_reply' && status !== 'waiting_timer'}
+            disabled={
+              status !== 'waiting_reply' && status !== 'waiting_timer' && status !== 'waiting_http'
+            }
             onClick={() =>
               state &&
               process(state, { kind: 'deadline' }, [
                 {
                   who: 'note',
-                  text: status === 'waiting_timer' ? 'Time passes…' : 'No reply comes…',
+                  text:
+                    status === 'waiting_timer'
+                      ? 'Time passes…'
+                      : status === 'waiting_http'
+                        ? 'No result comes…'
+                        : 'No reply comes…',
                 },
               ])
             }

@@ -76,6 +76,7 @@ export const AUTOMATION_END_REASONS = {
     'budget_steps',
     'budget_loop',
     'budget_messages',
+    'budget_http',
     'expired',
     'send_blocked',
     'send_failed',
@@ -111,7 +112,7 @@ export const automationRuns = appSchema.table('automation_runs', {
   status: text('status', { enum: AUTOMATION_RUN_STATUSES }).notNull().default('running'),
   currentNodeId: text('current_node_id'),
   nodeVisit: integer('node_visit').notNull().default(0),
-  waitingFor: text('waiting_for', { enum: ['reply', 'timer'] }),
+  waitingFor: text('waiting_for', { enum: ['reply', 'timer', 'http'] }),
   waitUntil: tz('wait_until'),
   inputMessageId: uuid('input_message_id'),
   /** A bot message the run queued and Meta has not accepted yet; the run waits for it. */
@@ -120,6 +121,8 @@ export const automationRuns = appSchema.table('automation_runs', {
   failures: smallint('failures').notNull().default(0),
   stepCount: integer('step_count').notNull().default(0),
   messageCount: integer('message_count').notNull().default(0),
+  /** HTTP calls made by the run (migration 0014; limited per run). */
+  httpCallCount: integer('http_call_count').notNull().default(0),
   visits: jsonb('visits')
     .notNull()
     .default(sql`'{}'::jsonb`)
@@ -153,6 +156,8 @@ export const AUTOMATION_STEP_OUTCOMES = [
   'failed',
   'stopped',
   'taken_over',
+  'requested',
+  'responded',
 ] as const;
 export type AutomationStepOutcome = (typeof AUTOMATION_STEP_OUTCOMES)[number];
 
@@ -167,5 +172,66 @@ export const automationRunSteps = appSchema.table('automation_run_steps', {
   branch: text('branch'),
   messageId: uuid('message_id'),
   detail: text('detail'),
+  createdAt: tz('created_at').notNull().defaultNow(),
+});
+
+/**
+ * The HTTP step (migration 0014): domains a company allows its automations to call, named secrets
+ * for request headers (encrypted, never read back by the web app), and the calls runs make, written
+ * ahead of the request and never retried once they may have been sent.
+ */
+export const httpAllowedDomains = appSchema.table('http_allowed_domains', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  domain: text('domain').notNull(),
+  createdByMembershipId: uuid('created_by_membership_id').notNull(),
+  createdAt: tz('created_at').notNull().defaultNow(),
+});
+
+export const httpSecrets = appSchema.table('http_secrets', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  name: text('name').notNull(),
+  /** The allowed domain (exact or *.pattern) the secret may be sent to. */
+  domain: text('domain').notNull(),
+  valueCiphertext: text('value_ciphertext').notNull(),
+  version: integer('version').notNull().default(1),
+  createdByMembershipId: uuid('created_by_membership_id').notNull(),
+  updatedByMembershipId: uuid('updated_by_membership_id').notNull(),
+  createdAt: tz('created_at').notNull().defaultNow(),
+  updatedAt: tz('updated_at').notNull().defaultNow(),
+});
+
+export const HTTP_CALL_STATES = [
+  'queued',
+  'in_flight',
+  'succeeded',
+  'failed',
+  'unknown',
+  'canceled',
+] as const;
+export type HttpCallState = (typeof HTTP_CALL_STATES)[number];
+
+export const automationHttpCalls = appSchema.table('automation_http_calls', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  runId: uuid('run_id').notNull(),
+  nodeId: text('node_id').notNull(),
+  nodeVisit: integer('node_visit').notNull(),
+  method: text('method', { enum: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] }).notNull(),
+  host: text('host').notNull(),
+  path: text('path').notNull(),
+  requestCiphertext: text('request_ciphertext'),
+  state: text('state', { enum: HTTP_CALL_STATES }).notNull().default('queued'),
+  statusCode: smallint('status_code'),
+  errorCode: text('error_code'),
+  durationMs: integer('duration_ms'),
+  savedValues: jsonb('saved_values')
+    .notNull()
+    .default(sql`'{}'::jsonb`)
+    .$type<Record<string, string>>(),
+  startedAt: tz('started_at'),
+  leaseUntil: tz('lease_until'),
+  finishedAt: tz('finished_at'),
   createdAt: tz('created_at').notNull().defaultNow(),
 });

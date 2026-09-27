@@ -1,11 +1,18 @@
 import { EMAIL_RE, normalizeTag } from '../contacts/fields';
 import {
   AUTOMATION_LIMITS,
+  HTTP_BODY_METHODS,
+  HTTP_WAIT_MINUTES,
   RUN_BUDGETS,
+  encodeJsonString,
+  renderHttpHeader,
+  renderHttpText,
   renderText,
   type AutomationGraph,
   type AutomationNode,
   type ConditionRule,
+  type HttpHeaderPart,
+  type HttpMethod,
   type NodeOf,
 } from './graph';
 import { normalizeRoutingText } from '../inbox/keywords';
@@ -23,11 +30,13 @@ export interface RunState {
   nodeId: string | null;
   /** How many times the current node has been entered. */
   visit: number;
-  waiting: { for: 'reply' | 'timer'; until: Date } | null;
+  waiting: { for: 'reply' | 'timer' | 'http'; until: Date } | null;
   /** Unrecognised replies at the current question. */
   retries: number;
   steps: number;
   messages: number;
+  /** HTTP calls made (budget). */
+  httpCalls: number;
   visits: Readonly<Record<string, number>>;
   variables: Readonly<Record<string, string>>;
 }
@@ -43,8 +52,18 @@ export interface InboundReply {
 export type RunEvent =
   | { kind: 'continue' }
   | { kind: 'reply'; reply: InboundReply }
-  /** The reply deadline or the wait timer is due. */
-  | { kind: 'deadline' };
+  /** The reply deadline, the wait timer or the HTTP result deadline is due. */
+  | { kind: 'deadline' }
+  /**
+   * The result of the HTTP call the run waits for: `ok` for a 2xx response, `values` saved from it
+   * (by answer name), `detail` the status code or error code for the step log.
+   */
+  | {
+      kind: 'http_result';
+      ok: boolean;
+      values: Readonly<Record<string, string>>;
+      detail: string | null;
+    };
 
 export interface RunFacts {
   contactName: string | null;
@@ -67,6 +86,18 @@ export type RunEffect =
   | { kind: 'add_tag'; tag: string }
   | { kind: 'remove_tag'; tag: string }
   | { kind: 'set_field'; field: string; value: string }
+  /**
+   * An HTTP call to make (by the worker, outside the step's transaction). Texts are rendered;
+   * header values keep references to secrets, which only the worker fills in.
+   */
+  | {
+      kind: 'http_request';
+      method: HttpMethod;
+      url: string;
+      headers: { name: string; parts: HttpHeaderPart[] }[];
+      body: string | null;
+      save: { path: string; saveAs: string }[];
+    }
   | { kind: 'handoff'; teamId: string | null };
 
 export type StepStatus = 'running' | 'waiting' | 'completed' | 'handed_off' | 'failed';
@@ -77,6 +108,7 @@ export type InterpreterEndReason =
   | 'budget_steps'
   | 'budget_loop'
   | 'budget_messages'
+  | 'budget_http'
   | 'error';
 
 export type StepLogOutcome =
@@ -91,7 +123,9 @@ export type StepLogOutcome =
   | 'resumed'
   | 'handed_off'
   | 'completed'
-  | 'failed';
+  | 'failed'
+  | 'requested'
+  | 'responded';
 
 export interface StepResult {
   /** True when the event did not apply to the run's position (nothing to record or apply). */
@@ -148,6 +182,7 @@ export function initialRunState(graph: AutomationGraph): RunState {
     retries: 0,
     steps: 0,
     messages: 0,
+    httpCalls: 0,
     visits: {},
     variables: {},
   };
@@ -298,17 +333,18 @@ export function advance(input: AdvanceInput): StepResult {
     effects: RunEffect[],
     outcome: StepLogOutcome,
     branch: string | null,
+    detail: string | null = null,
   ): StepResult => ({
     noop: false,
     state: { ...base, nodeId: target, waiting: null, retries: 0 },
     effects,
     status: target === null ? 'completed' : 'running',
     endReason: target === null ? 'no_next' : null,
-    log: { nodeId: node.id, nodeType: node.type, outcome, branch, detail: null },
+    log: { nodeId: node.id, nodeType: node.type, outcome, branch, detail },
   });
 
   const waitFor = (
-    kind: 'reply' | 'timer',
+    kind: 'reply' | 'timer' | 'http',
     minutes: number,
     base: RunState,
     effects: RunEffect[],
@@ -402,6 +438,32 @@ export function advance(input: AdvanceInput): StepResult {
             : { kind: action.kind, tag: action.tag };
         return moveTo(current.next, base, [effect], 'updated', null);
       }
+      case 'http_request': {
+        if (base.httpCalls + 1 > RUN_BUDGETS.maxHttpCalls)
+          return fail('budget_http', 'budget_http', base);
+        const vals = values(base.variables);
+        const effect: RunEffect = {
+          kind: 'http_request',
+          method: current.method,
+          url: renderHttpText(current.url, vals, encodeURIComponent),
+          headers: current.headers.map((h) => ({
+            name: h.name,
+            parts: renderHttpHeader(h.value, vals),
+          })),
+          body:
+            current.body && HTTP_BODY_METHODS.has(current.method)
+              ? renderHttpText(current.body, vals, encodeJsonString)
+              : null,
+          save: current.save.map((item) => ({ path: item.path, saveAs: item.saveAs })),
+        };
+        return waitFor(
+          'http',
+          HTTP_WAIT_MINUTES,
+          { ...base, httpCalls: base.httpCalls + 1 },
+          [effect],
+          'requested',
+        );
+      }
       case 'wait':
         return waitFor('timer', current.minutes, base, [], 'waiting');
       case 'handoff':
@@ -457,6 +519,39 @@ export function advance(input: AdvanceInput): StepResult {
       };
     }
     const counted: RunState = { ...state, steps: state.steps + 1 };
+    const ignored = (detail: string): StepResult => ({
+      noop: true,
+      state,
+      effects: [],
+      status: 'waiting',
+      endReason: null,
+      log: {
+        nodeId: node.id,
+        nodeType: node.type,
+        outcome: 'waiting',
+        branch: null,
+        detail,
+      },
+    });
+    if (state.waiting.for === 'http' || node.type === 'http_request') {
+      if (node.type !== 'http_request') return fail('error', 'not_a_request', counted);
+      if (event.kind === 'reply') return ignored('ignored_reply');
+      if (event.kind === 'deadline') {
+        return moveTo(node.failureNext, counted, [], 'responded', 'failure', 'no_result');
+      }
+      if (!event.ok) {
+        return moveTo(node.failureNext, counted, [], 'responded', 'failure', event.detail);
+      }
+      const variables: Record<string, string> = { ...counted.variables };
+      for (const item of node.save) {
+        const value = event.values[item.saveAs];
+        if (typeof value === 'string') {
+          variables[item.saveAs] = value.slice(0, AUTOMATION_LIMITS.answerLength);
+        }
+      }
+      return moveTo(node.next, { ...counted, variables }, [], 'responded', 'success', event.detail);
+    }
+    if (event.kind === 'http_result') return ignored('ignored_http_result');
     if (state.waiting.for === 'timer' || node.type === 'wait') {
       if (event.kind !== 'deadline') {
         return {

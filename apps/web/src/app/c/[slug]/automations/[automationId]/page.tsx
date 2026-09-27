@@ -71,6 +71,11 @@ export default async function AutomationPage({
           channels={detail.options.channels}
           teams={detail.options.teams}
           fields={detail.options.fields}
+          web={{
+            allowedDomains: detail.options.allowedDomains,
+            secrets: detail.options.secrets,
+            allowInsecureHttp: detail.options.allowInsecureHttp,
+          }}
         />
         <div className="grid content-start gap-6">
           <Card>

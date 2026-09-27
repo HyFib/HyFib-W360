@@ -5,6 +5,7 @@ import {
   and,
   asc,
   automationRunSteps,
+  automationHttpCalls,
   automationRuns,
   automationVersions,
   automations,
@@ -14,6 +15,8 @@ import {
   desc,
   eq,
   gte,
+  httpAllowedDomains,
+  httpSecrets,
   inArray,
   memberships,
   ne,
@@ -22,6 +25,7 @@ import {
   users,
   type AutomationStatus,
   type Database,
+  type HttpCallState,
   type Tx,
 } from '@w360/db';
 import { assertCan, can, type TenantContext } from '../authz/context';
@@ -42,6 +46,7 @@ import {
   type AutomationGraph,
   type AutomationTrigger,
   type GraphIssue,
+  type GraphReferences,
 } from './graph';
 import { appendRunStep, endRun, endRunForHuman, lockActiveRun, signalAutomationRun } from './runs';
 
@@ -57,6 +62,8 @@ export interface AutomationServiceDeps {
   clock: Clock;
   jobs: JobQueue;
   signer: JobSigner;
+  /** http:// addresses in HTTP steps, for local test targets only (from configuration). */
+  allowInsecureHttp?: boolean;
 }
 
 const nameSchema = z
@@ -140,6 +147,10 @@ export interface AutomationDetail {
     channels: { id: string; name: string; active: boolean }[];
     teams: { id: string; name: string }[];
     fields: { key: string; label: string; type: string }[];
+    /** Domains HTTP steps may call, and the secrets they may use (never their values). */
+    allowedDomains: string[];
+    secrets: { name: string; domain: string }[];
+    allowInsecureHttp: boolean;
   };
 }
 
@@ -162,7 +173,7 @@ export interface RunSummary {
 
 export interface RunDetail extends RunSummary {
   currentNodeId: string | null;
-  waitingFor: 'reply' | 'timer' | null;
+  waitingFor: 'reply' | 'timer' | 'http' | null;
   /** A message the run queued is waiting for Meta's acceptance (the run holds until then). */
   sending: boolean;
   waitUntil: string | null;
@@ -182,6 +193,23 @@ export interface RunDetail extends RunSummary {
     messageId: string | null;
     createdAt: string;
   }[];
+  /**
+   * The run's web requests: what was called (host and path, without the query) and the outcome.
+   * Requests and saved values are not shown (saved values appear among the answers).
+   */
+  httpCalls: {
+    id: string;
+    nodeId: string;
+    method: string;
+    host: string;
+    path: string;
+    state: HttpCallState;
+    statusCode: number | null;
+    errorCode: string | null;
+    durationMs: number | null;
+    createdAt: string;
+    finishedAt: string | null;
+  }[];
 }
 
 export interface ConversationAutomationState {
@@ -190,7 +218,7 @@ export interface ConversationAutomationState {
   automationName: string;
   mode: 'live' | 'test';
   status: 'running' | 'waiting';
-  waitingFor: 'reply' | 'timer' | null;
+  waitingFor: 'reply' | 'timer' | 'http' | null;
   waitUntil: string | null;
   /** A message the run queued is waiting for Meta's acceptance. */
   sending: boolean;
@@ -298,7 +326,33 @@ export function createAutomationService(deps: AutomationServiceDeps) {
       .from(contactFields)
       .where(eq(contactFields.tenantId, tenantId))
       .orderBy(asc(contactFields.label));
-    return { teamRows, fieldRows };
+    const domainRows = await tx
+      .select({ domain: httpAllowedDomains.domain })
+      .from(httpAllowedDomains)
+      .where(eq(httpAllowedDomains.tenantId, tenantId))
+      .orderBy(asc(httpAllowedDomains.domain));
+    const secretRows = await tx
+      .select({ name: httpSecrets.name, domain: httpSecrets.domain })
+      .from(httpSecrets)
+      .where(eq(httpSecrets.tenantId, tenantId))
+      .orderBy(asc(httpSecrets.name));
+    return {
+      teamRows,
+      fieldRows,
+      domains: domainRows.map((d) => d.domain),
+      secrets: secretRows,
+    };
+  }
+
+  /** What a graph may refer to in this company (teams, fields, HTTP domains and secrets). */
+  function graphRefs(refs: Awaited<ReturnType<typeof references>>): GraphReferences {
+    return {
+      teamIds: new Set(refs.teamRows.map((t) => t.id)),
+      fieldKeys: new Set(refs.fieldRows.map((f) => f.key)),
+      allowedDomains: refs.domains,
+      secrets: new Map(refs.secrets.map((r) => [r.name, r.domain])),
+      allowInsecureHttp: deps.allowInsecureHttp ?? false,
+    };
   }
 
   /** Parses and checks a draft; throws when it cannot be run. */
@@ -312,11 +366,9 @@ export function createAutomationService(deps: AutomationServiceDeps) {
         graph.issues[0]?.message ?? 'The steps are not valid.',
       );
     }
-    const { teamRows, fieldRows } = await references(tx, row.tenantId);
-    const errors = checkGraph(graph.graph, {
-      teamIds: new Set(teamRows.map((t) => t.id)),
-      fieldKeys: new Set(fieldRows.map((f) => f.key)),
-    }).filter((i) => i.level === 'error');
+    const errors = checkGraph(graph.graph, graphRefs(await references(tx, row.tenantId))).filter(
+      (i) => i.level === 'error',
+    );
     if (errors.length > 0) {
       throw new AppError(
         'precondition_failed',
@@ -527,18 +579,14 @@ export function createAutomationService(deps: AutomationServiceDeps) {
             .from(channelAccounts)
             .where(eq(channelAccounts.tenantId, ctx.tenant.id))
             .orderBy(asc(channelAccounts.createdAt));
-          const { teamRows, fieldRows } = await references(tx, ctx.tenant.id);
+          const refs = await references(tx, ctx.tenant.id);
+          const { teamRows, fieldRows } = refs;
           const trigger = parseTrigger(a.draftTrigger);
           const graph = parseGraph(a.draftGraph);
           const issues: GraphIssue[] = [];
           if (!trigger.ok) issues.push({ level: 'error', nodeId: null, message: trigger.message });
           if (graph.ok) {
-            issues.push(
-              ...checkGraph(graph.graph, {
-                teamIds: new Set(teamRows.map((t) => t.id)),
-                fieldKeys: new Set(fieldRows.map((f) => f.key)),
-              }),
-            );
+            issues.push(...checkGraph(graph.graph, graphRefs(refs)));
           } else {
             issues.push(...graph.issues.map((i) => ({ level: 'error' as const, ...i })));
           }
@@ -586,6 +634,9 @@ export function createAutomationService(deps: AutomationServiceDeps) {
               })),
               teams: teamRows,
               fields: fieldRows,
+              allowedDomains: refs.domains,
+              secrets: refs.secrets,
+              allowInsecureHttp: deps.allowInsecureHttp ?? false,
             },
           };
         },
@@ -730,13 +781,9 @@ export function createAutomationService(deps: AutomationServiceDeps) {
           { action: 'automation.draft_saved', subjectType: 'automation', subjectId: row.id },
           meta,
         );
-        const { teamRows, fieldRows } = await references(tx, ctx.tenant.id);
         return {
           version: row.version + 1,
-          issues: checkGraph(graph.graph, {
-            teamIds: new Set(teamRows.map((t) => t.id)),
-            fieldKeys: new Set(fieldRows.map((f) => f.key)),
-          }),
+          issues: checkGraph(graph.graph, graphRefs(await references(tx, ctx.tenant.id))),
         };
       });
     },
@@ -1206,6 +1253,28 @@ export function createAutomationService(deps: AutomationServiceDeps) {
               ),
             )
             .orderBy(asc(automationRunSteps.seq));
+          const calls = await tx
+            .select({
+              id: automationHttpCalls.id,
+              nodeId: automationHttpCalls.nodeId,
+              method: automationHttpCalls.method,
+              host: automationHttpCalls.host,
+              path: automationHttpCalls.path,
+              state: automationHttpCalls.state,
+              statusCode: automationHttpCalls.statusCode,
+              errorCode: automationHttpCalls.errorCode,
+              durationMs: automationHttpCalls.durationMs,
+              createdAt: automationHttpCalls.createdAt,
+              finishedAt: automationHttpCalls.finishedAt,
+            })
+            .from(automationHttpCalls)
+            .where(
+              and(
+                eq(automationHttpCalls.tenantId, ctx.tenant.id),
+                eq(automationHttpCalls.runId, r.run.id),
+              ),
+            )
+            .orderBy(asc(automationHttpCalls.createdAt), asc(automationHttpCalls.id));
           const visible = inboxReader && canSeeConversation(ctx, r.assigned);
           const graph = parseGraph(r.graph);
           return {
@@ -1240,6 +1309,11 @@ export function createAutomationService(deps: AutomationServiceDeps) {
               detail: s.detail,
               messageId: visible ? s.messageId : null,
               createdAt: s.createdAt.toISOString(),
+            })),
+            httpCalls: calls.map((c) => ({
+              ...c,
+              createdAt: c.createdAt.toISOString(),
+              finishedAt: c.finishedAt?.toISOString() ?? null,
             })),
           };
         },

@@ -66,6 +66,12 @@ const baseSchema = z.object({
   S3_SECRET_ACCESS_KEY: z.string().optional(),
   S3_FORCE_PATH_STYLE: bool.optional(),
   OTEL_EXPORTER_OTLP_ENDPOINT: z.string().optional(),
+  /**
+   * Lets the automation HTTP step call http:// and loopback addresses, for local test targets (the
+   * web app accepts such steps and the worker's egress client connects to them). Refused outside
+   * APP_ENV=local|test: never a production code path.
+   */
+  W360_EGRESS_ALLOW_LOOPBACK: bool.optional(),
 });
 
 const webSchema = baseSchema.extend({
@@ -133,6 +139,15 @@ function isLoopbackUrl(value: string): boolean {
 }
 
 function assertProductionSafety(config: BaseConfig & { BETTER_AUTH_SECRET?: string }): void {
+  if (
+    config.W360_EGRESS_ALLOW_LOOPBACK &&
+    config.APP_ENV !== 'local' &&
+    config.APP_ENV !== 'test'
+  ) {
+    throw new ConfigError(
+      'Unsafe configuration:\n  - W360_EGRESS_ALLOW_LOOPBACK is only allowed with APP_ENV=local or test',
+    );
+  }
   // Real environments always serve over https, whatever the build mode: cookie security and
   // provider callbacks are derived from this origin.
   if (

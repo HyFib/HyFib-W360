@@ -40,6 +40,7 @@ import {
   createTeamsService,
   createTemplatesService,
   createTenancyService,
+  createWebRequestService,
   type AutomationService,
   type CrmService,
   type BillingService,
@@ -60,6 +61,7 @@ import {
   type TeamsService,
   type TemplatesService,
   type TenancyService,
+  type WebRequestService,
 } from '@w360/domain';
 import { createAuth, type Auth } from './auth';
 import { createTenantEventHub, type TenantEventHub } from './event-hub';
@@ -96,6 +98,8 @@ export interface Runtime {
   rateCards: RateCardsService;
   reports: ReportsService;
   automations: AutomationService;
+  /** Domains and secrets for the automation HTTP step. */
+  webRequests: WebRequestService;
   crm: CrmService;
   /** Null until the Meta app is configured (WhatsApp connection is then reported unavailable). */
   meta: MetaConfig | null;
@@ -181,7 +185,15 @@ async function init(): Promise<Runtime> {
   const campaigns = createCampaignsService({ db, jobs, signer, clock: systemClock });
   const rateCards = createRateCardsService({ platformDb, clock: systemClock });
   const reports = createReportsService({ db, clock: systemClock });
-  const automations = createAutomationService({ db, clock: systemClock, jobs, signer });
+  const automations = createAutomationService({
+    db,
+    clock: systemClock,
+    jobs,
+    signer,
+    // http:// test targets, only where configuration allows loopback egress (local and test).
+    allowInsecureHttp: config.W360_EGRESS_ALLOW_LOOPBACK ?? false,
+  });
+  const webRequests = createWebRequestService({ db, clock: systemClock, keyring });
   const crm = createCrmService({ db, clock: systemClock, jobs, signer });
   const meta = metaConfigFrom(config);
   const onboarding = meta
@@ -239,6 +251,7 @@ async function init(): Promise<Runtime> {
     rateCards,
     reports,
     automations,
+    webRequests,
     crm,
     meta,
     onboarding,
