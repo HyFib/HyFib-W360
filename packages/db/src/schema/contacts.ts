@@ -64,6 +64,7 @@ export const CONSENT_SOURCES = [
   'provider',
   'api',
   'erasure',
+  'store',
 ] as const;
 export type ConsentSource = (typeof CONSENT_SOURCES)[number];
 

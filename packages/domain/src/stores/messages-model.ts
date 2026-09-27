@@ -5,12 +5,14 @@ import { TEMPLATE_LIMITS } from '../templates/definition';
 
 /**
  * Order messages (P4-06c): the WhatsApp template a store sends when one of its orders is placed,
- * paid for on delivery, shipped, delivered or cancelled. Pure rules shared by the store worker, the
- * message worker and the web pages (research docs/research/store-connectors.md §3, ADR-048).
+ * paid for on delivery, shipped, delivered or cancelled, and cart reminders (P4-06d) about checkouts
+ * customers left in a Shopify store. Pure rules shared by the store worker, the message worker and
+ * the web pages (research docs/research/store-connectors.md §3 and §4, ADR-048, ADR-049).
  *
- * Events are found by comparing an order's copy before and after a read from the store. Each order
- * gets at most one message per event, a rule never messages about anything that happened before it
- * was switched on, and an event HyFib first sees long after it happened is recorded, not sent.
+ * Order events are found by comparing an order's copy before and after a read from the store. Each
+ * order or checkout gets at most one message per event, a rule never messages about anything that
+ * happened before it was switched on, and an event HyFib first sees long after it happened is
+ * recorded, not sent.
  */
 
 export const STORE_MESSAGE_EVENTS = [
@@ -19,15 +21,32 @@ export const STORE_MESSAGE_EVENTS = [
   'order_shipped',
   'order_delivered',
   'order_cancelled',
+  'cart_reminder',
+  'cart_second_reminder',
 ] as const;
 export type StoreMessageEvent = (typeof STORE_MESSAGE_EVENTS)[number];
+
+/** The two cart reminders: about a checkout rather than an order, marketing templates only. */
+export const CART_EVENTS = ['cart_reminder', 'cart_second_reminder'] as const;
+export type CartEvent = (typeof CART_EVENTS)[number];
+export const isCartEvent = (event: StoreMessageEvent): event is CartEvent =>
+  event === 'cart_reminder' || event === 'cart_second_reminder';
 
 type Platform = 'shopify' | 'woocommerce';
 
 export const STORE_MESSAGE_LIMITS = {
   /** An event first seen more than this long after it happened is recorded as too late. */
   latenessHours: 48,
-  maxDelayMinutes: 1440,
+  /** The longest delay any rule can have (the second cart reminder); see delayRange per event. */
+  maxDelayMinutes: 4320,
+  /** A cart reminder goes out at most this long after the checkout was left. */
+  cartLatenessHours: 72,
+  /** Checkouts are read this often while a cart reminder is on, this many pages per run. */
+  checkoutReadMinutes: 15,
+  checkoutPagesPerRun: 10,
+  /** The next checkout read starts this long before the last one did (clock differences). */
+  checkoutClockMarginSeconds: 120,
+  checkoutRetentionDays: 30,
   /** Shopify orders in transit are read again this often, for this long after they shipped. */
   transitRereadHours: 3,
   transitDays: 14,
@@ -69,10 +88,34 @@ export const STORE_MESSAGE_EVENT_INFO: Record<
     description: 'When an order is cancelled in the store.',
     platforms: ['shopify', 'woocommerce'],
   },
+  cart_reminder: {
+    label: 'Cart reminder',
+    description:
+      'When a customer leaves a checkout that has a phone number: reminds them with a marketing template, only if they opted in to marketing messages. HyFib reads the store’s checkouts every 15 minutes and sends nothing once the checkout is completed or an order with the same number is placed. Shopify only.',
+    platforms: ['shopify'],
+  },
+  cart_second_reminder: {
+    label: 'Second cart reminder',
+    description:
+      'A later reminder about the same checkout, sent only if the first reminder was sent and the checkout is still open. Shopify only.',
+    platforms: ['shopify'],
+  },
 };
 
 export function eventAvailable(platform: Platform, event: StoreMessageEvent): boolean {
   return STORE_MESSAGE_EVENT_INFO[event].platforms.includes(platform);
+}
+
+/** The delay a rule for `event` may have, in minutes (ADR-049 for the cart reminders). */
+export function delayRange(event: StoreMessageEvent): { min: number; max: number } {
+  switch (event) {
+    case 'cart_reminder':
+      return { min: 30, max: 1440 };
+    case 'cart_second_reminder':
+      return { min: 60, max: 4320 };
+    default:
+      return { min: 0, max: 1440 };
+  }
 }
 
 /** Why a message was not sent (recorded on the store message and shown in the report). */
@@ -96,6 +139,14 @@ export const STORE_MESSAGE_SKIP_REASONS = {
   missing_variable: 'A template variable had no value and no fallback.',
   template_changed:
     'The template’s variables or buttons changed after this message was set up. Set it up again.',
+  checkout_completed: 'The customer completed the checkout.',
+  checkout_deleted: 'The checkout is no longer in HyFib’s copy of the store.',
+  order_placed: 'An order with the same number was placed after the checkout began.',
+  first_reminder_not_sent: 'The first reminder was not sent, so the second one is not either.',
+  cart_too_old: `More than ${STORE_MESSAGE_LIMITS.cartLatenessHours / 24} days passed since the checkout was left.`,
+  not_marketing_template: 'Cart reminders need an approved marketing template.',
+  frequency_capped:
+    'The contact already received as many marketing messages as the company allows in this period.',
 } as const;
 export type StoreMessageSkipReason = keyof typeof STORE_MESSAGE_SKIP_REASONS;
 
@@ -164,6 +215,10 @@ function occurrence(
       // order new to the copy and already cancelled counts only when the store says when.
       if (previous) return previous.cancelled ? null : (current.cancelledAt ?? now);
       return current.cancelledAt;
+    case 'cart_reminder':
+    case 'cart_second_reminder':
+      // About checkouts (checkoutReminders), never about orders.
+      return null;
   }
 }
 
@@ -194,6 +249,49 @@ export function detectOrderEvents(input: {
     events.push({ event: rule.event, occurredAt, skip });
   }
   return events;
+}
+
+/** The parts of a checkout's copy that cart reminders are about. */
+export interface CheckoutState {
+  /** When the checkout was left: its last update at the store. */
+  updatedAt: Date;
+  completed: boolean;
+  hasPhone: boolean;
+  redacted: boolean;
+}
+
+/**
+ * The cart reminders a checkout read by the store job calls for: one per cart rule that is on,
+ * dated when the checkout was left, for an open checkout with a number updated at or after the
+ * rule was switched on. A reminder that is still waiting moves when the checkout is updated again.
+ */
+export function checkoutReminders(input: {
+  checkout: CheckoutState;
+  rules: readonly EnabledRule[];
+}): { event: CartEvent; occurredAt: Date }[] {
+  const { checkout } = input;
+  if (checkout.completed || checkout.redacted || !checkout.hasPhone) return [];
+  const found: { event: CartEvent; occurredAt: Date }[] = [];
+  for (const rule of input.rules) {
+    if (!isCartEvent(rule.event)) continue;
+    if (checkout.updatedAt < rule.enabledAt) continue;
+    found.push({ event: rule.event, occurredAt: checkout.updatedAt });
+  }
+  return found;
+}
+
+/**
+ * The consent event a store's WhatsApp consent state stands for (SH-041): subscribed and
+ * unsubscribed states with an update time; anything else changes nothing.
+ */
+export function storeConsentAction(consent: {
+  state: string | null;
+  updatedAt: Date | null;
+}): 'opt_in' | 'opt_out' | null {
+  if (!consent.updatedAt) return null;
+  if (consent.state === 'SUBSCRIBED') return 'opt_in';
+  if (consent.state === 'UNSUBSCRIBED') return 'opt_out';
+  return null;
 }
 
 // Sending time ------------------------------------------------------------------------------------------
@@ -251,6 +349,24 @@ export const ORDER_VALUE_LABELS: Record<OrderValueField, string> = {
   store_name: 'Store name',
 };
 
+/** What a checkout offers to a cart reminder's template variables. */
+export const CHECKOUT_VALUE_FIELDS = [
+  'customer_name',
+  'cart_total',
+  'cart_items',
+  'checkout_url',
+  'store_name',
+] as const;
+export type CheckoutValueField = (typeof CHECKOUT_VALUE_FIELDS)[number];
+
+export const CHECKOUT_VALUE_LABELS: Record<CheckoutValueField, string> = {
+  customer_name: 'Customer name',
+  cart_total: 'Cart total (for example ₹1,499.00)',
+  cart_items: 'Items (for example "Darjeeling tea and 2 more")',
+  checkout_url: 'Link back to the checkout',
+  store_name: 'Store name',
+};
+
 const fallback = z.string().trim().max(200);
 
 export const storeVariableSourceSchema = z.discriminatedUnion('source', [
@@ -261,6 +377,11 @@ export const storeVariableSourceSchema = z.discriminatedUnion('source', [
   z.object({
     source: z.literal('order'),
     field: z.enum(ORDER_VALUE_FIELDS),
+    fallback: fallback.optional(),
+  }),
+  z.object({
+    source: z.literal('checkout'),
+    field: z.enum(CHECKOUT_VALUE_FIELDS),
     fallback: fallback.optional(),
   }),
 ]);
@@ -280,8 +401,21 @@ export function readStoreVariables(raw: unknown): StoreVariables {
   return parsed.success ? parsed.data : EMPTY_STORE_VARIABLES;
 }
 
+/** The variable sources a rule for `event` may use: its subject's fields, or fixed text. */
+export function variablesFit(event: StoreMessageEvent, variables: StoreVariables): boolean {
+  const kind = isCartEvent(event) ? 'checkout' : 'order';
+  return [...variables.header, ...variables.body].every(
+    (v) => v.source === 'static' || v.source === kind,
+  );
+}
+
 /** The values an order offers to template variables (null where it has none). */
 export type OrderValues = Record<OrderValueField, string | null>;
+export type CheckoutValues = Record<CheckoutValueField, string | null>;
+
+/** The values of a message's subject: an order, or a checkout for the cart reminders. */
+export type StoreValues =
+  { subject: 'order'; values: OrderValues } | { subject: 'checkout'; values: CheckoutValues };
 
 function collapse(text: string | null | undefined): string | null {
   const value = text?.replace(/\s+/g, ' ').trim();
@@ -300,20 +434,11 @@ export function orderValues(input: {
   trackingUrl: string | null;
   storeName: string | null;
 }): OrderValues {
-  const [first, ...rest] = input.items;
-  const firstTitle = collapse(first?.title);
   return {
     order_name: collapse(input.name),
     customer_name: collapse(input.customerName),
-    order_total:
-      input.totalMinor !== null && input.currency && isCurrency(input.currency)
-        ? formatMinor(input.totalMinor, input.currency)
-        : null,
-    items_summary: firstTitle
-      ? rest.length > 0
-        ? `${firstTitle} and ${rest.length} more`
-        : firstTitle
-      : null,
+    order_total: moneyText(input.totalMinor, input.currency),
+    items_summary: itemsSummary(input.items),
     status_url: input.statusUrl,
     tracking_number: collapse(input.trackingNumber),
     tracking_company: collapse(input.trackingCompany),
@@ -322,18 +447,52 @@ export function orderValues(input: {
   };
 }
 
+function moneyText(totalMinor: number | null, currency: string | null): string | null {
+  return totalMinor !== null && currency && isCurrency(currency)
+    ? formatMinor(totalMinor, currency)
+    : null;
+}
+
+/** "Darjeeling tea", or "Darjeeling tea and 2 more". */
+function itemsSummary(items: readonly { title: string }[]): string | null {
+  const [first, ...rest] = items;
+  const firstTitle = collapse(first?.title);
+  if (!firstTitle) return null;
+  return rest.length > 0 ? `${firstTitle} and ${rest.length} more` : firstTitle;
+}
+
+export function checkoutValues(input: {
+  customerName: string | null;
+  currency: string | null;
+  totalMinor: number | null;
+  items: readonly { title: string; quantity: number }[];
+  recoveryUrl: string | null;
+  storeName: string | null;
+}): CheckoutValues {
+  return {
+    customer_name: collapse(input.customerName),
+    cart_total: moneyText(input.totalMinor, input.currency),
+    cart_items: itemsSummary(input.items),
+    checkout_url: input.recoveryUrl,
+    store_name: collapse(input.storeName),
+  };
+}
+
 /**
- * Template parameters for one order, or the first variable that could not be filled (`header.1`,
- * `body.2`, …). Nothing is ever sent with an empty or placeholder value.
+ * Template parameters for one order or checkout, or the first variable that could not be filled
+ * (`header.1`, `body.2`, …). Nothing is ever sent with an empty or placeholder value, and a source
+ * for the other kind of subject counts as unfilled.
  */
 export function resolveStoreVariables(
   variables: StoreVariables,
-  values: OrderValues,
+  subject: StoreValues,
 ): { ok: true; params: { header: string[]; body: string[] } } | { ok: false; missing: string } {
-  const one = (source: StoreVariableSource): string | null =>
-    source.source === 'static'
-      ? collapse(source.value)
-      : (values[source.field] ?? collapse(source.fallback));
+  const one = (source: StoreVariableSource): string | null => {
+    if (source.source === 'static') return collapse(source.value);
+    if (source.source !== subject.subject) return null;
+    const values: Partial<Record<string, string | null>> = subject.values;
+    return values[source.field] ?? collapse(source.fallback);
+  };
   const header: string[] = [];
   for (const [i, source] of variables.header.entries()) {
     const text = one(source);

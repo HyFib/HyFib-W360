@@ -2,7 +2,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { isAppError } from '@w360/core';
-import { STORE_MESSAGE_SKIP_REASONS, can } from '@w360/domain';
+import { STORE_MESSAGE_SKIP_REASONS, can, formatMinor, isCartEvent } from '@w360/domain';
 import {
   Alert,
   Badge,
@@ -18,7 +18,11 @@ import {
   TR,
   Table,
 } from '@w360/ui';
-import { StoreMessageRuleForm, StoreMessageSettingsForm } from '@/components/stores/store-messages';
+import {
+  StoreCartSettings,
+  StoreMessageRuleForm,
+  StoreMessageSettingsForm,
+} from '@/components/stores/store-messages';
 import { COD_ANSWER, STORE_MESSAGE_STATUS } from '@/lib/commerce-labels';
 import { formatDateTime } from '@/lib/format';
 import { getRuntime } from '@/server/runtime';
@@ -45,13 +49,61 @@ export default async function StoreMessagesPage({
     }
     throw error;
   }
-  const { store, rules, channels, templates, counts, recent, canManage, timezone } = data;
+  const {
+    store,
+    rules,
+    channels,
+    templates,
+    counts,
+    recent,
+    canManage,
+    canManageConsent,
+    timezone,
+    cart,
+  } = data;
+  const orderRules = rules.filter((r) => !isCartEvent(r.event));
+  const cartRules = rules.filter((r) => isCartEvent(r.event));
   const tz = ctx.tenant.timezone;
   const base = `/c/${ctx.tenant.slug}/commerce/stores`;
   const optInNote = store.messagesOptInAt
     ? `Confirmed ${store.optInBy ? `by ${store.optInBy} ` : ''}on ${formatDateTime(store.messagesOptInAt, tz)}.`
     : null;
   const hasActiveNumber = channels.some((c) => c.status === 'active');
+  const consentNote = store.storeConsentAt
+    ? `Turned on ${store.storeConsentBy ? `by ${store.storeConsentBy} ` : ''}on ${formatDateTime(store.storeConsentAt, tz)}.`
+    : null;
+
+  const ruleCard = (rule: (typeof rules)[number]) => (
+    <Card key={rule.event} className="min-w-0">
+      <CardHeader>
+        <div className="flex flex-wrap items-center gap-2">
+          <CardTitle>{rule.label}</CardTitle>
+          {rule.available ? (
+            <Badge tone={rule.enabled ? 'success' : 'neutral'}>{rule.enabled ? 'On' : 'Off'}</Badge>
+          ) : null}
+        </div>
+        <CardDescription>{rule.description}</CardDescription>
+      </CardHeader>
+      <CardContent>
+        {canManage ? (
+          <StoreMessageRuleForm
+            slug={ctx.tenant.slug}
+            storeId={store.id}
+            rule={rule}
+            channels={channels}
+            templates={templates}
+          />
+        ) : rule.enabled ? (
+          <p className="text-sm">
+            Sends {templates.find((t) => t.id === rule.templateId)?.name ?? 'a template'}
+            {rule.delayMinutes > 0 ? ` ${rule.delayMinutes} minutes after the event` : ''}.
+          </p>
+        ) : (
+          <p className="text-sm text-muted-foreground">Not sent.</p>
+        )}
+      </CardContent>
+    </Card>
+  );
 
   return (
     <div className="grid grid-cols-1 gap-6">
@@ -115,39 +167,72 @@ export default async function StoreMessagesPage({
         </CardContent>
       </Card>
 
-      {rules.map((rule) => (
-        <Card key={rule.event} className="min-w-0">
-          <CardHeader>
-            <div className="flex flex-wrap items-center gap-2">
-              <CardTitle>{rule.label}</CardTitle>
-              {rule.available ? (
-                <Badge tone={rule.enabled ? 'success' : 'neutral'}>
-                  {rule.enabled ? 'On' : 'Off'}
-                </Badge>
+      {orderRules.map(ruleCard)}
+
+      <Card className="min-w-0">
+        <CardHeader>
+          <CardTitle>Cart reminders</CardTitle>
+          <CardDescription>
+            When a customer leaves a checkout with a phone number, HyFib can remind them with an
+            approved marketing template, once or twice. Only customers who opted in to marketing
+            messages get them, never after the checkout was completed or an order with the same
+            number was placed, and never more than three days after they left it.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-4 text-sm">
+          {store.platform !== 'shopify' ? (
+            <p className="text-muted-foreground">
+              Not available for this store: WooCommerce has no carts HyFib can read.
+            </p>
+          ) : (
+            <>
+              {store.checkoutsError ? <Alert tone="warning">{store.checkoutsError}</Alert> : null}
+              {store.detailsWithheld ? (
+                <Alert tone="info">
+                  Shopify withholds some customer details from HyFib, so checkouts may have no
+                  number.
+                </Alert>
               ) : null}
-            </div>
-            <CardDescription>{rule.description}</CardDescription>
-          </CardHeader>
-          <CardContent>
-            {canManage ? (
-              <StoreMessageRuleForm
+              <StoreCartSettings
                 slug={ctx.tenant.slug}
                 storeId={store.id}
-                rule={rule}
-                channels={channels}
-                templates={templates}
+                customerAccess={store.customerAccess}
+                accessError={store.accessError}
+                consentSupported={store.consentSupported}
+                useStoreConsent={store.storeConsentAt !== null}
+                consentNote={consentNote}
+                canManageConsent={canManageConsent}
               />
-            ) : rule.enabled ? (
-              <p className="text-sm">
-                Sends {templates.find((t) => t.id === rule.templateId)?.name ?? 'a template'}
-                {rule.delayMinutes > 0 ? ` ${rule.delayMinutes} minutes after the event` : ''}.
-              </p>
-            ) : (
-              <p className="text-sm text-muted-foreground">Not sent.</p>
-            )}
-          </CardContent>
-        </Card>
-      ))}
+              {cart ? (
+                <dl className="grid gap-1" aria-label="Cart reminders in the last 30 days">
+                  <div>
+                    <dt className="inline font-medium">Reminders sent (30 days): </dt>
+                    <dd className="inline">{cart.sent}</dd>
+                  </div>
+                  <div>
+                    <dt className="inline font-medium">Checkouts recovered: </dt>
+                    <dd className="inline">{cart.recovered}</dd>
+                  </div>
+                  <div>
+                    <dt className="inline font-medium">Recovered value: </dt>
+                    <dd className="inline">
+                      {cart.value.length === 0
+                        ? '—'
+                        : cart.value.map((v) => formatMinor(v.totalMinor, v.currency)).join(', ')}
+                    </dd>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    A checkout counts as recovered when Shopify reports it completed after one of
+                    its reminders was sent; its value is the checkout’s total. Reminders that
+                    failed, or whose sending could not be confirmed, are left out.
+                  </p>
+                </dl>
+              ) : null}
+            </>
+          )}
+        </CardContent>
+      </Card>
+      {store.platform === 'shopify' ? cartRules.map(ruleCard) : null}
 
       <Card className="min-w-0">
         <CardHeader>
@@ -167,13 +252,13 @@ export default async function StoreMessagesPage({
         </CardHeader>
         <CardContent className="p-0">
           {recent.length === 0 ? (
-            <p className="px-6 pb-6 text-sm text-muted-foreground">No order messages yet.</p>
+            <p className="px-6 pb-6 text-sm text-muted-foreground">No messages yet.</p>
           ) : (
             <Table>
               <THead>
                 <TR>
                   <TH>Event</TH>
-                  <TH>Order</TH>
+                  <TH>Order or checkout</TH>
                   <TH>Status</TH>
                   <TH>When</TH>
                 </TR>
@@ -186,7 +271,9 @@ export default async function StoreMessagesPage({
                     <TR key={m.id}>
                       <TD className="text-sm">{m.label}</TD>
                       <TD className="text-sm">
-                        {can(ctx, 'contacts.read') ? (
+                        {m.orderId === null ? (
+                          m.checkoutName
+                        ) : can(ctx, 'contacts.read') ? (
                           <Link
                             href={`${base}/orders/${m.orderId}`}
                             className="font-medium text-primary underline-offset-4 hover:underline"

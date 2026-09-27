@@ -147,8 +147,38 @@ from raw GitHub). Two Shopify questions were searched on shopify.dev (SH-SNIP ru
 | WC-022 | Completion, shipping, delivery | Orders carry `date_completed_gmt` ("The date the order was completed, as GMT", read-only). The core statuses have `completed` but no shipped or delivered status, and core orders have no tracking fields (tracking comes from extensions).                                                                                                                                                                      | `date_completed_gmt`, `completed`                                                                                   | `_orders.md`; `class-wc-rest-orders-v2-controller.php`                                                                  | WC-DOC, WC-SRC, DERIVED | High (fields) |
 | WC-023 | Abandoned carts                | The REST API v3 documentation has no cart or abandoned-checkout resource; carts become orders only at checkout.                                                                                                                                                                                                                                                                                                    | —                                                                                                                   | `woocommerce-rest-api-docs` index                                                                                       | WC-DOC, DERIVED       | Medium     |
 
+## 4. Addendum: abandoned checkouts and the consent a store records (retrieved 2026-09-27 for P4-06d)
+
+What HyFib needs to remind a Shopify store's customers about a checkout they left, and whether it
+can use the WhatsApp marketing consent the store records. Read from the Admin schema and its
+per-field access notes (`offline_scopes`, `isProtected`, `protectedContent`) in
+`@shopify/dev-mcp` 1.16.0 for 2026-07 and 2025-10, and from `docs/guides/oauth.md` and
+`lib/session/session.ts` of Shopify's library (sources as in the method statement). No shopify.dev
+page was opened.
+
+| ID     | Topic                          | Claim (paraphrased)                                                                                                                                                                                                                                                                                                                                                                                                                                           | Exact identifiers                                                                                         | Source                                                    | Evidence type        | Confidence |
+| ------ | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- | -------------------- | ---------- |
+| SH-037 | Reading checkouts offline      | The access note on `abandonedCheckouts`, `AbandonedCheckout` and its line items reads "`read_orders` access scope. Also: The user must have manage_abandoned_checkouts permission. When called by Shopify POS, the user must have the view_abandoned_checkouts retail permission." The bundle's offline entry for the same query and types lists `offlineScopes: ["read_orders"]` only.                                                                     | `QueryRoot.abandonedCheckouts`, `offline_scopes`                                                          | `admin_2026-07.json.gz` (`requiredAccess`, `offline_scopes`) | SH-SCHEMA            | High       |
+| SH-038 | Finding checkouts              | `abandonedCheckouts(first, after, query, sortKey, reverse, savedSearchId)`. A checkout "is considered abandoned when a customer adds contact information but doesn't complete their purchase", and the list "Includes both abandoned and recovered checkouts". Search filters: `created_at`, `updated_at`, `status` (`open`, `closed`), `recovery_state` (`recovered`, `not_recovered`), `id` ranges, `email_state`. Sort keys: `CHECKOUT_ID`, `CREATED_AT`, `CUSTOMER_NAME`, `ID`, `RELEVANCE`, `TOTAL_PRICE` (none by update time). | `abandonedCheckouts`, `AbandonedCheckoutSortKeys`                                                         | schema `QueryRoot`                                        | SH-SCHEMA            | High       |
+| SH-039 | Checkout fields                | `AbandonedCheckout`: `id`, `name` ("Unique merchant-facing identifier"), `createdAt`, `updatedAt`, `completedAt` ("Null if the checkout hasn't been completed"), `abandonedCheckoutUrl` ("The URL for the buyer to recover their checkout"), `totalPriceSet`, `lineItems` (`title`, `variantTitle`, `quantity`, prices), `shippingAddress` and `billingAddress` ("Null if the user didn't provide"), and `customer` ("May be null if the checkout was created from a draft order or via an app"). It has no phone, email or token of its own. | `AbandonedCheckout`, `AbandonedCheckoutLineItem`                                                          | schema                                                    | SH-SCHEMA            | High       |
+| SH-040 | What checkouts protect         | `MailingAddress.phone` is protected customer data with content `phone`, and `MailingAddress.name` and `firstName` with content `name`; the address object itself, `completedAt` and `abandonedCheckoutUrl` are not protected. `Customer`, `CustomerPhoneNumber` and `CustomerWhatsAppMarketingConsent` need `read_customers` (offline: `read_customers`); `Customer.phone` and `CustomerPhoneNumber.phoneNumber` are protected (`phone`).                    | `isProtected`, `protectedContent`, `requiredAccess`                                                       | schema field metadata                                     | SH-SCHEMA            | High       |
+| SH-041 | WhatsApp consent in Shopify    | New in 2026-07 (absent from 2025-10): `Customer.defaultPhoneNumber` → `CustomerPhoneNumber.whatsAppMarketingConsent` (`CustomerWhatsAppMarketingConsent`): `state` (`NEVER_SUBSCRIBED`, `PENDING`, `REDACTED`, `SUBSCRIBED`, `UNSUBSCRIBED`), `optInLevel` (`SINGLE_OPT_IN`, `CONFIRMED_OPT_IN`, `UNKNOWN`), `collectedFrom` (`SHOPIFY`, `OTHER`), `sourceLocation` and `updatedAt` ("No date is provided if the customer has never updated their marketing consent for this channel"). The topic `CUSTOMERS_WHATS_APP_MARKETING_CONSENT_UPDATE` needs `read_customers`; the mutation `customerWhatsAppMarketingConsentUpdate` writes the consent. | `whatsAppMarketingConsent`, `CustomerMarketingConsentState`, `CustomerMarketingOptInLevel`                | schema 2026-07 and 2025-10                                | SH-SCHEMA            | High       |
+| SH-042 | Asking for more access         | For the authorization code grant flow, "Installations, and access scope changes are managed by the app". The library compares a token's granted scopes with the scopes an app needs (`Session.isScopeChanged`, `isScopeIncluded`) and an app with changed scopes starts authorization again.                                                                                                                                                                | `isScopeChanged`, `isScopeIncluded`                                                                       | `docs/guides/oauth.md`; `lib/session/session.ts`          | SH-LIBDOC, SH-LIB    | High       |
+| SH-043 | Orders and checkouts           | `Order.checkoutToken` and `Order.cartToken` exist, but an `AbandonedCheckout` exposes no token, so an order cannot be joined to the checkout it came from through the API; `completedAt` is what says a checkout was completed.                                                                                                                                                                                                                              | `Order.checkoutToken`, `AbandonedCheckout.completedAt`                                                    | schema                                                    | SH-SCHEMA, DERIVED   | High       |
+
 ## Unconfirmed or conflicting
 
+- **Staff permission for checkouts (SH-037):** the offline entry needs only `read_orders`; whether
+  Shopify also checks the "manage_abandoned_checkouts" staff permission for an offline token is not
+  stated. Reading checkouts on a development store is a release checklist item.
+- **Checkout webhooks:** the payloads of `checkouts/create` and `checkouts/update` were not read, nor
+  whether their ids equal `AbandonedCheckout` ids. HyFib does not use them; it reads checkouts on a
+  schedule.
+- **More access for an installed store (SH-042):** that authorizing again with one more scope
+  keeps the installation and returns a token with all granted scopes follows from the library, not
+  from a Shopify page read directly; it is a release checklist item.
+- **Shopify's WhatsApp consent in practice (SH-041):** which checkouts and regions collect it is
+  not documented in what was read; HyFib uses it only when present, with its update time.
 - **Delivery updates (SH-034):** whether Shopify changes an order, or sends `orders/updated`, when
   a shipment is delivered is unconfirmed. HyFib therefore reads orders in transit again on a
   schedule (see Implications 8) instead of relying on order webhooks.
@@ -233,3 +263,18 @@ from raw GitHub). Two Shopify questions were searched on shopify.dev (SH-SNIP ru
      customer (`read_customers`) or the addresses (protected customer data), WooCommerce has no
      carts to read (WC-023), and a reminder is a marketing message that needs marketing opt-in
      (research M-176).
+9. **Cart reminders (P4-06d):**
+   - **Reading:** checkouts are read with `read_orders` (SH-037): while a reminder is on, every 15
+     minutes, those updated since the last read (`updated_at`), paged through in full because no
+     sort by update time exists (SH-038). Checkout webhooks are not used.
+   - **The number:** the customer's default phone when the store allowed customer access and uses
+     the consent Shopify records, else the shipping address's phone, else the billing address's
+     (protected `phone`, which the store connector already asks for, SH-040).
+   - **Consent:** a cart reminder is marketing (M-176), so it needs an approved marketing template
+     and marketing opt-in. A store can let HyFib read customers (`read_customers`, asked for only
+     then, SH-042; the exchanged token replaces the old one, SH-007) and use the WhatsApp marketing
+     consent Shopify records (SH-041): subscribed and unsubscribed states with an update time
+     become consent events, and the newest event wins.
+   - **Recovery:** a checkout counts as recovered when Shopify reports it completed (SH-043) after a
+     reminder was sent; its total is the recovered value.
+   - **WooCommerce:** not available (WC-023).

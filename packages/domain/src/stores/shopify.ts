@@ -12,6 +12,8 @@ import {
   storeAmountToMinor,
   storeDate,
   storeEmail,
+  type StoreCheckoutConsent,
+  type StoreCheckoutRecord,
   type StoreOrderItemRecord,
   type StoreOrderRecord,
   type StoreProductRecord,
@@ -20,8 +22,8 @@ import {
 /**
  * Shopify: the OAuth code exchange and refresh (SH-006, SH-007) and the Admin GraphQL API (SH-009)
  * with a fixed set of operations, written against the 2026-07 schema (SH-013 to SH-022). HyFib
- * reads orders, products and the shop, manages its own webhook subscriptions and can uninstall
- * itself; it never writes store data.
+ * reads orders, products, checkouts (SH-037 to SH-041) and the shop, manages its own webhook
+ * subscriptions and can uninstall itself; it never writes store data.
  */
 
 export type ShopifyAppConfig = Pick<
@@ -155,6 +157,38 @@ fragment W360Product on Product {
   variants(first: 1) { nodes { sku } }
 }`;
 
+/**
+ * A checkout customers left (SH-039): the number comes from the addresses (protected `phone`,
+ * SH-040), and with customer access from the customer, with the WhatsApp consent Shopify records
+ * for it (SH-041, `read_customers`, 2026-07 and later).
+ */
+const CHECKOUT_FIELDS = `
+fragment W360Checkout on AbandonedCheckout {
+  id
+  name
+  createdAt
+  updatedAt
+  completedAt
+  abandonedCheckoutUrl
+  totalPriceSet { shopMoney { amount currencyCode } }
+  lineItemsQuantity
+  lineItems(first: ${STORE_LIMITS.checkoutItems}) { nodes { title variantTitle quantity } }
+  shippingAddress { name phone }
+  billingAddress { name phone }
+}`;
+
+const CHECKOUT_CUSTOMER_FIELDS = `
+fragment W360CheckoutCustomer on AbandonedCheckout {
+  customer {
+    id
+    displayName
+    defaultPhoneNumber {
+      phoneNumber
+      whatsAppMarketingConsent { state optInLevel collectedFrom updatedAt }
+    }
+  }
+}`;
+
 export const SHOPIFY_OPERATIONS = {
   shop: `query W360Shop { shop { id name myshopifyDomain currencyCode } }`,
   orders: `query W360Orders($query: String!, $after: String) {
@@ -191,6 +225,25 @@ ${PRODUCT_FIELDS}`,
   uninstall: `mutation W360Uninstall {
   appUninstall { app { id } userErrors { field message code } }
 }`,
+  checkouts: `query W360Checkouts($query: String!, $after: String) {
+  abandonedCheckouts(first: ${STORE_LIMITS.shopifyCheckoutsPage}, after: $after, query: $query) {
+    nodes { ...W360Checkout }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+${CHECKOUT_FIELDS}`,
+} as const;
+
+/** Checkouts with their customers: needs customer access and API version 2026-07 or later. */
+export const SHOPIFY_CUSTOMER_OPERATIONS = {
+  checkoutsWithCustomers: `query W360CheckoutsWithCustomers($query: String!, $after: String) {
+  abandonedCheckouts(first: ${STORE_LIMITS.shopifyCheckoutsPage}, after: $after, query: $query) {
+    nodes { ...W360Checkout ...W360CheckoutCustomer }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+${CHECKOUT_FIELDS}
+${CHECKOUT_CUSTOMER_FIELDS}`,
 } as const;
 
 /** The webhook topics HyFib subscribes to (SH-022); compliance topics are set on the app itself. */
@@ -355,6 +408,24 @@ export class ShopifyAdmin {
     return page(result, 'orders', parseShopifyOrder);
   }
 
+  /**
+   * Checkouts updated at or after `since` (SH-038); Shopify cannot sort them by update time, so a
+   * read pages through all of them. `withCustomers` adds the customer's phone and consent.
+   */
+  async checkoutsPage(
+    since: Date,
+    after: string | null,
+    withCustomers: boolean,
+  ): Promise<Page<StoreCheckoutRecord>> {
+    const result = await this.query(
+      withCustomers
+        ? SHOPIFY_CUSTOMER_OPERATIONS.checkoutsWithCustomers
+        : SHOPIFY_OPERATIONS.checkouts,
+      { query: `updated_at:>='${searchTime(since)}'`, after },
+    );
+    return page(result, 'abandonedCheckouts', parseShopifyCheckout);
+  }
+
   async productsPage(since: Date, after: string | null): Promise<Page<StoreProductRecord>> {
     const result = await this.query(SHOPIFY_OPERATIONS.products, {
       query: `updated_at:>='${searchTime(since)}'`,
@@ -426,7 +497,7 @@ export class ShopifyAdmin {
 
 function page<T>(
   result: ShopifyQueryResult,
-  field: 'orders' | 'products',
+  field: 'orders' | 'products' | 'abandonedCheckouts',
   parse: (node: unknown) => T | null,
 ): Page<T> {
   const connection = asRecord(result.data[field]);
@@ -581,6 +652,87 @@ export function parseShopifyOrder(node: unknown): StoreOrderRecord | null {
     cashOnDelivery: paymentNames.some(isCashOnDeliveryName),
     ...shopifyShipments(order),
     items,
+  };
+}
+
+const CONSENT_STATES = new Set([
+  'NEVER_SUBSCRIBED',
+  'PENDING',
+  'REDACTED',
+  'SUBSCRIBED',
+  'UNSUBSCRIBED',
+] as const);
+const OPT_IN_LEVELS = new Set(['SINGLE_OPT_IN', 'CONFIRMED_OPT_IN', 'UNKNOWN'] as const);
+const COLLECTED_FROM = new Set(['SHOPIFY', 'OTHER'] as const);
+
+function oneOf<T extends string>(set: ReadonlySet<T>, value: unknown): T | null {
+  return typeof value === 'string' && (set as ReadonlySet<string>).has(value) ? (value as T) : null;
+}
+
+function parseConsent(value: unknown): StoreCheckoutConsent | null {
+  const consent = asRecord(value);
+  if (!consent) return null;
+  return {
+    state: oneOf(CONSENT_STATES, consent.state),
+    optInLevel: oneOf(OPT_IN_LEVELS, consent.optInLevel),
+    collectedFrom: oneOf(COLLECTED_FROM, consent.collectedFrom),
+    updatedAt: storeDate(consent.updatedAt),
+  };
+}
+
+/**
+ * A GraphQL AbandonedCheckout node as the record HyFib keeps (SH-039), or null when unusable. The
+ * consent is kept only with the customer's own default phone: it says nothing about an address's.
+ */
+export function parseShopifyCheckout(node: unknown): StoreCheckoutRecord | null {
+  const checkout = asRecord(node);
+  const externalId = gidNumber(checkout?.id, 'AbandonedCheckout');
+  const createdAt = storeDate(checkout?.createdAt);
+  const updatedAt = storeDate(checkout?.updatedAt);
+  if (!checkout || !externalId || !createdAt || !updatedAt) return null;
+  const total = moneyOf(checkout.totalPriceSet);
+  const customer = asRecord(checkout.customer);
+  const defaultPhone = asRecord(customer?.defaultPhoneNumber);
+  const customerPhone = clip(defaultPhone?.phoneNumber, 40);
+  const shipping = asRecord(checkout.shippingAddress);
+  const billing = asRecord(checkout.billingAddress);
+  const lineItems = asRecord(checkout.lineItems);
+  const nodes = Array.isArray(lineItems?.nodes) ? lineItems.nodes : [];
+  const items: { title: string; quantity: number }[] = [];
+  for (const raw of nodes.slice(0, STORE_LIMITS.checkoutItems)) {
+    const line = asRecord(raw);
+    if (!line) continue;
+    const title = clip(line.title, 250);
+    const variant = clip(line.variantTitle, 100);
+    const quantity = line.quantity;
+    items.push({
+      title: (title ? (variant ? `${title} (${variant})` : title) : null) ?? 'Item',
+      quantity:
+        typeof quantity === 'number' && Number.isInteger(quantity) && quantity >= 0
+          ? Math.min(quantity, 1_000_000)
+          : 0,
+    });
+  }
+  const count = checkout.lineItemsQuantity;
+  return {
+    externalId,
+    name: clip(checkout.name, 100),
+    createdAt,
+    updatedAt,
+    completedAt: storeDate(checkout.completedAt),
+    customerExternalId: gidNumber(customer?.id, 'Customer'),
+    customerName:
+      clip(customer?.displayName, 200) ?? clip(shipping?.name, 200) ?? clip(billing?.name, 200),
+    phone: customerPhone ?? clip(shipping?.phone, 40) ?? clip(billing?.phone, 40),
+    consent: customerPhone ? parseConsent(defaultPhone?.whatsAppMarketingConsent) : null,
+    currency: total.currency,
+    totalMinor: storeAmountToMinor(total.amount, total.currency),
+    items,
+    itemCount:
+      typeof count === 'number' && Number.isInteger(count) && count >= 0
+        ? Math.min(count, 1_000_000)
+        : null,
+    recoveryUrl: httpsUrl(checkout.abandonedCheckoutUrl, 2000),
   };
 }
 

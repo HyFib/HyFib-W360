@@ -25,16 +25,31 @@ import {
 import { recordSystemAudit } from '../audit';
 import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
+import {
+  cartRemindersOn,
+  importStoreConsent,
+  pruneStoreCheckouts,
+  recordCheckoutReminders,
+  saveStoreCheckouts,
+} from './cart-reminders';
 import { StoreApiError } from './http';
-import type { OrderMilestones, SavedOrderChange } from './messages-model';
+import {
+  STORE_MESSAGE_LIMITS,
+  type OrderMilestones,
+  type SavedOrderChange,
+} from './messages-model';
 import { markOrdersTracked, recordOrderEvents, transitOrdersToCheck } from './order-messages';
 import {
   STORE_LIMITS,
+  SHOPIFY_CUSTOMER_SCOPE,
   SHOPIFY_SCOPES,
+  hasCustomerAccess,
+  storeAccessCodeAad,
   storeCredentialsAad,
   storeCredentialsSchema,
   storeCustomerPhone,
   storeWebhookSecretAad,
+  type StoreCheckoutRecord,
   type StoreCredentials,
   type StoreOrderRecord,
   type StoreProductRecord,
@@ -112,6 +127,24 @@ export function sealStoreCredentials(
   credentials: StoreCredentials,
 ): string {
   return keyring.encrypt(JSON.stringify(credentials), storeCredentialsAad(tenantId, storeId));
+}
+
+/** Seals an authorization code for more access on a connected store (its own binding). */
+export function sealStoreAccessCode(
+  keyring: Keyring,
+  tenantId: string,
+  storeId: string,
+  code: string,
+): string {
+  return keyring.encrypt(code, storeAccessCodeAad(tenantId, storeId));
+}
+
+function readStoreAccessCode(keyring: Keyring, store: StoreRow): string | null {
+  if (!store.accessCodeCiphertext) return null;
+  return keyring.decryptString(
+    store.accessCodeCiphertext,
+    storeAccessCodeAad(store.tenantId, store.id),
+  );
 }
 
 /** The next job for a store (the lease holder queues it when work remains). */
@@ -205,7 +238,9 @@ class StoreJob {
           )
           .limit(1);
         const next = set.nextSyncAt ?? store.nextSyncAt;
-        if (pending || (next && next.getTime() <= this.now.getTime())) {
+        const checkouts = 'checkoutsReadAt' in set ? set.checkoutsReadAt : store.checkoutsReadAt;
+        const due = (at: Date | null | undefined) => !!at && at.getTime() <= this.now.getTime();
+        if (pending || due(next) || due(checkouts)) {
           await enqueueStoreJob(
             deps,
             tx,
@@ -506,8 +541,12 @@ class StoreJob {
   }
 
   private async maintain(): Promise<StoreJobOutcome> {
-    const { store } = this;
     try {
+      if (this.store.accessCodeCiphertext) {
+        const failure = await this.exchangeAccessCode();
+        if (failure) return this.fail(failure, 'connected');
+      }
+      const { store } = this;
       const client = await this.client();
       if (client === 'changed') {
         await this.finish({});
@@ -523,7 +562,7 @@ class StoreJob {
       }
       const fetched = await this.processFetches(client);
       await this.checkDeliveries(client);
-      const update: StoreUpdate = { syncError: null };
+      const update: StoreUpdate = { syncError: null, ...(await this.readCheckouts(client)) };
       let waitSeconds: number | null = null;
       let continuing = fetched.remaining;
       if (store.nextSyncAt === null || store.nextSyncAt.getTime() <= this.now.getTime()) {
@@ -710,8 +749,8 @@ class StoreJob {
 
   private async pruneEvents() {
     const { deps, scope, store } = this;
-    await deps.db.run(scope, (tx) =>
-      tx
+    await deps.db.run(scope, async (tx) => {
+      await tx
         .delete(commerceStoreEvents)
         .where(
           and(
@@ -722,8 +761,170 @@ class StoreJob {
               this.at(-STORE_LIMITS.eventRetentionDays * 24 * 60 * MINUTE),
             ),
           ),
-        ),
+        );
+      await pruneStoreCheckouts(tx, store, this.now);
+    });
+  }
+
+  /**
+   * Reads the checkouts updated since the cursor while a cart reminder is on (ADR-049), up to a
+   * number of pages per run: each page is saved with the reminders and consent it calls for. A read
+   * that needs more pages continues on the next run with Shopify's page cursor; a complete read
+   * moves the cursor to when it started, less a margin, so updates made meanwhile are read next.
+   * Problems with checkouts never fail the store: they are kept on the store and tried again later.
+   */
+  private async readCheckouts(client: StoreClient): Promise<StoreUpdate> {
+    const { deps, scope, store } = this;
+    if (!client.checkoutsPage || !store.checkoutsReadAt) return {};
+    if (store.checkoutsReadAt.getTime() > this.now.getTime()) return {};
+    const on = await deps.db.run(scope, (tx) => cartRemindersOn(tx, store), {
+      accessMode: 'read only',
+    });
+    if (!on) return { checkoutsReadAt: null, checkoutsPage: null, checkoutsError: null };
+    const later = (minutes: number) => this.at(minutes * MINUTE);
+    const since = store.checkoutsCursor ?? store.checkoutsReadAt;
+    // Customers (their phone and consent) only while the store's consent setting is on.
+    const withCustomers = store.storeConsentAt !== null && hasCustomerAccess(store.grantedScopes);
+    let page = store.checkoutsPage;
+    try {
+      for (let i = 0; i < STORE_MESSAGE_LIMITS.checkoutPagesPerRun; i += 1) {
+        const result = await client.checkoutsPage(since, page, withCustomers);
+        await deps.db.run(scope, async (tx) => {
+          const saved = await saveStoreCheckouts(tx, store, result.items, this.now);
+          await recordCheckoutReminders(tx, deps, store, saved, this.now);
+          await importStoreConsent(tx, store, saved);
+        });
+        if (!result.next) {
+          // The read started at `now` at the latest; the margin covers clocks that differ.
+          const cursor = new Date(
+            Math.floor(
+              (this.now.getTime() - STORE_MESSAGE_LIMITS.checkoutClockMarginSeconds * 1000) / 1000,
+            ) * 1000,
+          );
+          return {
+            checkoutsCursor: cursor > since ? cursor : since,
+            checkoutsPage: null,
+            checkoutsError: null,
+            checkoutsReadAt: later(STORE_MESSAGE_LIMITS.checkoutReadMinutes),
+          };
+        }
+        page = result.next;
+        if (result.waitSeconds !== null) {
+          return {
+            checkoutsPage: page,
+            checkoutsError: null,
+            checkoutsReadAt: this.at(result.waitSeconds * 1000),
+          };
+        }
+      }
+      return { checkoutsPage: page, checkoutsError: null, checkoutsReadAt: this.now };
+    } catch (error) {
+      if (!(error instanceof StoreApiError)) throw error;
+      return {
+        checkoutsPage: page,
+        checkoutsError:
+          error.failure === 'throttled'
+            ? null
+            : `Reading checkouts: ${error.message}`.slice(0, 500),
+        checkoutsReadAt:
+          error.failure === 'throttled'
+            ? this.at((error.retryAfterSeconds ?? 60) * 1000)
+            : later(STORE_MESSAGE_LIMITS.checkoutReadMinutes),
+      };
+    }
+  }
+
+  /**
+   * Exchanges the authorization code a manager's approval for more access left on a connected
+   * store (SH-042). Shopify keeps one current token per app and store (SH-007), so the new token
+   * replaces the old one whatever it grants, bound to the credentials version read. Without
+   * `read_customers` the store keeps working and the page says so; without the connector's own
+   * scopes it can no longer sync, and the message returned fails it. A code Shopify refuses leaves
+   * the current token in place.
+   */
+  private async exchangeAccessCode(): Promise<string | null> {
+    const { deps, scope, store } = this;
+    const config = deps.shopify;
+    const ciphertext = store.accessCodeCiphertext;
+    const clear = async (accessError: string | null) => {
+      const [row] = await deps.db.run(scope, (tx) =>
+        tx
+          .update(commerceStores)
+          .set({ accessCodeCiphertext: null, accessError })
+          .where(
+            and(
+              where(scope, store.id),
+              eq(commerceStores.accessCodeCiphertext, ciphertext as string),
+            ),
+          )
+          .returning(),
+      );
+      if (row) this.store = row;
+    };
+    if (!ciphertext) return null;
+    if (!config || !store.shopDomain || store.state !== 'connected') {
+      await clear('Shopify is not set up for HyFib, or the store is not connected.');
+      return null;
+    }
+    let tokens: ShopifyTokens;
+    try {
+      const code = readStoreAccessCode(deps.keyring, store);
+      if (!code) return null;
+      tokens = await exchangeShopifyCode(deps.egress, config, store.shopDomain, code);
+    } catch (error) {
+      if (!(error instanceof StoreApiError)) throw error;
+      await clear(
+        `Shopify did not accept the approval (${error.message.slice(0, 200)}). HyFib kept its current access; allow customer access again.`,
+      );
+      return null;
+    }
+    const missing = SHOPIFY_SCOPES.filter((s) => !tokens.scopes.includes(s));
+    const failure =
+      missing.length > 0
+        ? `Shopify did not grant ${missing.join(' and ')} with the new approval, and HyFib's earlier access ended with it. Connect the store again and approve everything HyFib asks for.`
+        : null;
+    const credentials: StoreCredentials = {
+      kind: 'shopify_token',
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+      refreshExpiresAt: tokens.refreshExpiresInSeconds
+        ? this.at(tokens.refreshExpiresInSeconds * 1000).toISOString()
+        : null,
+    };
+    const [row] = await deps.db.run(scope, (tx) =>
+      tx
+        .update(commerceStores)
+        .set({
+          credentialsCiphertext: sealStoreCredentials(
+            deps.keyring,
+            scope.tenantId,
+            store.id,
+            credentials,
+          ),
+          credentialsVersion: store.credentialsVersion + 1,
+          accessExpiresAt: tokens.expiresInSeconds ? this.at(tokens.expiresInSeconds * 1000) : null,
+          grantedScopes: tokens.scopes.join(',').slice(0, 500),
+          accessCodeCiphertext: null,
+          accessError:
+            failure ??
+            (tokens.scopes.includes(SHOPIFY_CUSTOMER_SCOPE)
+              ? null
+              : 'Shopify did not grant access to customers. The store keeps working without it.'),
+        })
+        .where(
+          and(
+            where(scope, store.id),
+            eq(commerceStores.credentialsVersion, store.credentialsVersion),
+            eq(commerceStores.accessCodeCiphertext, ciphertext),
+            eq(commerceStores.state, 'connected'),
+          ),
+        )
+        .returning(),
     );
+    if (!row) return null;
+    this.store = row;
+    await this.audit('commerce.store_access_updated');
+    return failure;
   }
 
   // Removal ------------------------------------------------------------------------------------------
@@ -826,6 +1027,12 @@ interface StoreClient {
   productsById(ids: string[]): Promise<Map<string, StoreProductRecord>>;
   /** Makes sure HyFib's webhooks exist; returns what is wrong, or null. */
   ensureWebhooks(appBaseUrl: string, store: StoreRow, keyring: Keyring): Promise<string | null>;
+  /** Checkouts updated since `since` (Shopify only, SH-038). */
+  checkoutsPage?(
+    since: Date,
+    page: string | null,
+    withCustomers: boolean,
+  ): Promise<ReadPage<StoreCheckoutRecord>>;
 }
 
 function shopifyStoreClient(admin: ShopifyAdmin): StoreClient {
@@ -853,6 +1060,9 @@ function shopifyStoreClient(admin: ShopifyAdmin): StoreClient {
       return (await admin.productsById(ids)).items;
     },
     ensureWebhooks: (appBaseUrl) => ensureShopifyWebhooks(admin, shopifyWebhookUri(appBaseUrl)),
+    async checkoutsPage(since, page, withCustomers) {
+      return shopifyPage(await admin.checkoutsPage(since, page, withCustomers));
+    },
   };
   return client;
 }

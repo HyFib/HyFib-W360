@@ -3,18 +3,27 @@ import { useId, useMemo, useState } from 'react';
 import { Alert, Badge, Button, Checkbox, Field, Input, Select } from '@w360/ui';
 import type { StoreMessageRuleView, StoreMessageTemplateOption } from '@w360/domain';
 import {
+  CHECKOUT_VALUE_FIELDS,
+  CHECKOUT_VALUE_LABELS,
   ORDER_VALUE_FIELDS,
   ORDER_VALUE_LABELS,
+  delayRange,
+  isCartEvent,
+  type CheckoutValueField,
   type OrderValueField,
   type StoreVariableSource,
   type StoreVariables,
 } from '@w360/domain/store-messages-model';
 import {
+  saveStoreConsentAction,
   saveStoreMessageRuleAction,
   saveStoreMessageSettingsAction,
 } from '@/app/actions/store-messages';
-import { ClientForm } from '@/components/client-form';
+import { startCustomerAccessAction } from '@/app/actions/stores';
+import { ClientButton, ClientForm } from '@/components/client-form';
 import { FormError, FormSuccess } from '@/components/form-status';
+
+type Subject = 'order' | 'checkout';
 
 /** A store's message settings: the customers' opt-in confirmation, the sending window, test orders. */
 export function StoreMessageSettingsForm({
@@ -142,9 +151,19 @@ const channelLabel = (c: ChannelOption) =>
   [c.verifiedName, c.displayPhoneNumber].filter(Boolean).join(' · ') || 'WhatsApp number';
 
 /** Keeps a mapping the size of the template's variables, keeping what was chosen so far. */
-function sized(sources: StoreVariableSource[], count: number): StoreVariableSource[] {
+function sized(
+  sources: StoreVariableSource[],
+  count: number,
+  subject: Subject,
+): StoreVariableSource[] {
   const next = sources.slice(0, count);
-  while (next.length < count) next.push({ source: 'order', field: 'order_name' });
+  while (next.length < count) {
+    next.push(
+      subject === 'checkout'
+        ? { source: 'checkout', field: 'customer_name' }
+        : { source: 'order', field: 'order_name' },
+    );
+  }
   return next;
 }
 
@@ -163,13 +182,22 @@ export function StoreMessageRuleForm({
   templates: StoreMessageTemplateOption[];
 }) {
   const id = useId();
+  const cart = isCartEvent(rule.event);
+  const subject: Subject = cart ? 'checkout' : 'order';
+  const range = delayRange(rule.event);
   const active = channels.filter((c) => c.status === 'active' || c.id === rule.channelAccountId);
   const [enabled, setEnabled] = useState(rule.enabled);
   const [channelId, setChannelId] = useState(rule.channelAccountId ?? active[0]?.id ?? '');
   const channel = channels.find((c) => c.id === channelId);
   const usable = useMemo(
-    () => templates.filter((t) => t.whatsappAccountId === channel?.whatsappAccountId),
-    [templates, channel?.whatsappAccountId],
+    () =>
+      templates.filter(
+        (t) =>
+          t.whatsappAccountId === channel?.whatsappAccountId &&
+          // Cart reminders are marketing (Meta's categories).
+          (!cart || t.category === 'MARKETING'),
+      ),
+    [templates, channel?.whatsappAccountId, cart],
   );
   const [templateId, setTemplateId] = useState(rule.templateId ?? '');
   const template = usable.find((t) => t.id === templateId) ?? null;
@@ -185,13 +213,15 @@ export function StoreMessageRuleForm({
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const cod = rule.event === 'cod_confirmation';
-  const header = template ? sized(variables.header, template.headerParams) : [];
-  const body = template ? sized(variables.body, template.bodyParams) : [];
+  const header = template ? sized(variables.header, template.headerParams, subject) : [];
+  const body = template ? sized(variables.body, template.bodyParams, subject) : [];
 
   if (!rule.available) {
     return (
       <p className="text-sm text-muted-foreground">
-        Not available for this store: WooCommerce has no delivered status.
+        {cart
+          ? 'Not available for this store: WooCommerce has no carts HyFib can read.'
+          : 'Not available for this store: WooCommerce has no delivered status.'}
       </p>
     );
   }
@@ -255,7 +285,11 @@ export function StoreMessageRuleForm({
         <Field
           id={`${id}-template`}
           label="Template"
-          description="Approved utility or marketing templates of this number’s account."
+          description={
+            cart
+              ? 'Approved marketing templates of this number’s account.'
+              : 'Approved utility or marketing templates of this number’s account.'
+          }
         >
           {(aria) => (
             <Select {...aria} value={templateId} onChange={(e) => setTemplateId(e.target.value)}>
@@ -275,7 +309,8 @@ export function StoreMessageRuleForm({
           {template.category === 'MARKETING' ? (
             <Alert tone="info">
               A marketing template is sent only to customers who opted in to marketing messages when
-              the company requires it (Settings → Consent).
+              the company requires it (Settings → Consent), and within the company’s marketing
+              message limit.
             </Alert>
           ) : null}
           {header.map((source, i) => (
@@ -283,6 +318,7 @@ export function StoreMessageRuleForm({
               key={`h${i}`}
               id={`${id}-h${i}`}
               label="Header variable"
+              subject={subject}
               source={source}
               onChange={(next) =>
                 setVariables({ header: header.map((s, j) => (j === i ? next : s)), body })
@@ -294,6 +330,7 @@ export function StoreMessageRuleForm({
               key={`b${i}`}
               id={`${id}-b${i}`}
               label={`Variable {{${i + 1}}}`}
+              subject={subject}
               source={source}
               onChange={(next) =>
                 setVariables({ header, body: body.map((s, j) => (j === i ? next : s)) })
@@ -351,15 +388,21 @@ export function StoreMessageRuleForm({
       ) : null}
       <Field
         id={`${id}-delay`}
-        label="Wait before sending (minutes)"
-        description="Counted from when it happened in the store; 0 sends as soon as HyFib sees it."
+        label={
+          cart ? 'Wait after the checkout was left (minutes)' : 'Wait before sending (minutes)'
+        }
+        description={
+          cart
+            ? `Between ${range.min} and ${range.max} minutes, counted from the checkout’s last change.${rule.event === 'cart_second_reminder' ? ' Longer than the first reminder’s wait.' : ''}`
+            : 'Counted from when it happened in the store; 0 sends as soon as HyFib sees it.'
+        }
       >
         {(aria) => (
           <Input
             {...aria}
             type="number"
-            min={0}
-            max={1440}
+            min={range.min}
+            max={range.max}
             inputMode="numeric"
             value={delay}
             onChange={(e) => setDelay(e.target.value)}
@@ -382,14 +425,27 @@ export function StoreMessageRuleForm({
 function VariableInput({
   id,
   label,
+  subject,
   source,
   onChange,
 }: {
   id: string;
   label: string;
+  subject: Subject;
   source: StoreVariableSource;
   onChange: (next: StoreVariableSource) => void;
 }) {
+  const fields: readonly string[] =
+    subject === 'checkout' ? CHECKOUT_VALUE_FIELDS : ORDER_VALUE_FIELDS;
+  const labelOf = (f: string) =>
+    subject === 'checkout'
+      ? CHECKOUT_VALUE_LABELS[f as CheckoutValueField]
+      : ORDER_VALUE_LABELS[f as OrderValueField];
+  const fromField = (field: string): StoreVariableSource =>
+    subject === 'checkout'
+      ? { source: 'checkout', field: field as CheckoutValueField }
+      : { source: 'order', field: field as OrderValueField };
+  const noun = subject === 'checkout' ? 'checkout' : 'order';
   return (
     <fieldset className="grid gap-2 rounded-md border border-border p-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] sm:items-end">
       <legend className="sr-only">{label}</legend>
@@ -402,16 +458,16 @@ function VariableInput({
               onChange(
                 e.target.value === 'static'
                   ? { source: 'static', value: '' }
-                  : { source: 'order', field: e.target.value as OrderValueField },
+                  : fromField(e.target.value),
               )
             }
           >
-            {ORDER_VALUE_FIELDS.map((f) => (
+            {fields.map((f) => (
               <option key={f} value={f}>
-                {ORDER_VALUE_LABELS[f]}
+                {labelOf(f)}
               </option>
             ))}
-            <option value="static">Same text for every order</option>
+            <option value="static">Same text for every {noun}</option>
           </Select>
         )}
       </Field>
@@ -429,25 +485,132 @@ function VariableInput({
       ) : (
         <Field
           id={`${id}-fallback`}
-          label="If the order has none, use"
-          description="Leave empty to skip orders without a value."
+          label={`If the ${noun} has none, use`}
+          description={`Leave empty to skip ${noun}s without a value.`}
         >
           {(aria) => (
             <Input
               {...aria}
               value={source.fallback ?? ''}
               maxLength={200}
-              onChange={(e) =>
-                onChange({
-                  source: 'order',
-                  field: source.field,
-                  ...(e.target.value ? { fallback: e.target.value } : {}),
-                })
-              }
+              onChange={(e) => {
+                const { fallback: _dropped, ...rest } = source;
+                onChange(e.target.value ? { ...rest, fallback: e.target.value } : rest);
+              }}
             />
           )}
         </Field>
       )}
     </fieldset>
+  );
+}
+
+/**
+ * Cart reminders' store settings (Shopify): customer access, asked for in Shopify only when a
+ * manager allows it, and whether the WhatsApp consent the store records counts as opt-in.
+ */
+export function StoreCartSettings({
+  slug,
+  storeId,
+  customerAccess,
+  accessError,
+  consentSupported,
+  useStoreConsent,
+  consentNote,
+  canManageConsent,
+}: {
+  slug: string;
+  storeId: string;
+  customerAccess: boolean;
+  accessError: string | null;
+  consentSupported: boolean;
+  useStoreConsent: boolean;
+  consentNote: string | null;
+  canManageConsent: boolean;
+}) {
+  const id = useId();
+  const [allowing, setAllowing] = useState(false);
+  const [use, setUse] = useState(useStoreConsent);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+  return (
+    <div className="grid gap-4">
+      <div className="grid gap-2">
+        <p>
+          <span className="font-medium">Customer access in Shopify: </span>
+          {customerAccess ? 'allowed' : 'not allowed'}
+        </p>
+        {accessError ? <Alert tone="warning">{accessError}</Alert> : null}
+        {!customerAccess ? (
+          <div className="flex flex-wrap items-center gap-3">
+            <ClientButton
+              type="button"
+              variant="outline"
+              disabled={allowing}
+              onClick={() => {
+                setAllowing(true);
+                setError(null);
+                void startCustomerAccessAction(slug, storeId).then((r) => {
+                  if (!r.ok) {
+                    setAllowing(false);
+                    setError(r.message);
+                    return;
+                  }
+                  window.location.assign(r.data.url);
+                });
+              }}
+            >
+              {allowing ? 'Opening Shopify…' : 'Allow customer access in Shopify'}
+            </ClientButton>
+            <p className="text-xs text-muted-foreground">
+              Lets HyFib read the store’s customers: their phone and the WhatsApp consent Shopify
+              records for it. The store keeps working with its current access until you approve.
+            </p>
+          </div>
+        ) : null}
+      </div>
+      <ClientForm
+        aria-label="Store consent"
+        className="grid gap-3"
+        onSubmit={(e) => {
+          e.preventDefault();
+          setBusy(true);
+          setError(null);
+          setSaved(false);
+          void saveStoreConsentAction(slug, { storeId, useStoreConsent: use }).then((r) => {
+            setBusy(false);
+            if (!r.ok) setError(r.message);
+            else setSaved(true);
+          });
+        }}
+      >
+        <label htmlFor={`${id}-consent`} className="flex items-start gap-2 text-sm">
+          <Checkbox
+            id={`${id}-consent`}
+            checked={use}
+            disabled={!canManageConsent || (!use && (!customerAccess || !consentSupported))}
+            onChange={(e) => setUse(e.target.checked)}
+          />
+          <span>Use the WhatsApp marketing consent this store records as customers’ opt-in.</span>
+        </label>
+        <p className="text-xs text-muted-foreground">
+          When Shopify reports a customer subscribed or unsubscribed to WhatsApp marketing, HyFib
+          records it as their consent, with the time Shopify gives; the newest choice from any
+          source counts.
+          {!consentSupported ? ' Needs Shopify’s 2026-07 API or later.' : ''}
+          {consentNote ? ` ${consentNote}` : ''}
+        </p>
+        {canManageConsent ? (
+          <div className="flex flex-wrap items-center gap-3">
+            <Button type="submit" disabled={busy}>
+              {busy ? 'Saving…' : 'Save consent setting'}
+            </Button>
+            <FormSuccess message={saved ? 'Consent setting saved.' : null} />
+          </div>
+        ) : null}
+      </ClientForm>
+      <FormError message={error} />
+    </div>
   );
 }

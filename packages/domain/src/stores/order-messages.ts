@@ -4,6 +4,7 @@ import {
   and,
   asc,
   channelAccounts,
+  commerceStoreCheckouts,
   commerceStoreMessageRules,
   commerceStoreMessages,
   commerceStoreOrderItems,
@@ -13,6 +14,7 @@ import {
   conversations,
   eq,
   gt,
+  gte,
   isNotNull,
   isNull,
   lt,
@@ -29,6 +31,7 @@ import {
   type Tx,
 } from '@w360/db';
 import { sendingWindow } from '../campaigns/schedule';
+import { loadCampaignSettings } from '../campaigns/service';
 import { checkTemplateEligibility } from '../consent/service';
 import { phoneFromWaId, waRecipientFromPhone } from '../contacts/phone';
 import { contactForPhone } from '../contacts/service';
@@ -40,8 +43,10 @@ import { buildTemplateSend, sendSpecFor } from '../templates/definition';
 import {
   STORE_MESSAGE_EVENT_INFO,
   STORE_MESSAGE_LIMITS,
+  checkoutValues,
   codPayload,
   detectOrderEvents,
+  isCartEvent,
   orderValues,
   parseCodPayload,
   readStoreVariables,
@@ -50,6 +55,7 @@ import {
   type SavedOrderChange,
   type SendWindow,
   type StoreMessageSkipReason,
+  type StoreValues,
 } from './messages-model';
 
 /**
@@ -281,10 +287,11 @@ export type StoreMessageOutcome =
 /**
  * The `commerce.store-message` job. Under the store message's row lock it checks, in order, that
  * the store, its opt-in confirmation and the rule still stand, that it is inside the sending
- * window, that the order can still be messaged about, that the template and number can be used,
- * that every variable has a value, and that the customer may receive the template (suppression,
- * erasure, opt-out, marketing opt-in). Then it creates the chat message and hands it to the send
- * pipeline. Any failed check skips the message with its reason; nothing is retried later.
+ * window, that the order (or, for cart reminders, the checkout) can still be messaged about, that
+ * the template and number can be used, that every variable has a value, that the customer may
+ * receive the template (suppression, erasure, opt-out, marketing opt-in) and, for a marketing
+ * template, that the company's marketing frequency cap is not reached. Then it creates the chat
+ * message and hands it to the send pipeline. Any failed check skips the message with its reason.
  */
 export async function processStoreMessage(
   deps: StoreMessageWorkerDeps,
@@ -314,6 +321,16 @@ export async function processStoreMessage(
           and(eq(commerceStoreMessages.tenantId, tenantId), eq(commerceStoreMessages.id, row.id)),
         );
       return { outcome: 'skipped', reason };
+    };
+    const reschedule = async (sendAt: Date): Promise<StoreMessageOutcome> => {
+      await tx
+        .update(commerceStoreMessages)
+        .set({ sendAt })
+        .where(
+          and(eq(commerceStoreMessages.tenantId, tenantId), eq(commerceStoreMessages.id, row.id)),
+        );
+      await enqueueStoreMessage(deps, tx, tenantId, row.id, sendAt);
+      return { outcome: 'rescheduled', sendAt };
     };
 
     const [store] = await tx
@@ -350,31 +367,132 @@ export async function processStoreMessage(
         window.start,
         window.end,
       );
-      if (!open.open) {
-        await tx
-          .update(commerceStoreMessages)
-          .set({ sendAt: open.opensAt })
-          .where(
-            and(eq(commerceStoreMessages.tenantId, tenantId), eq(commerceStoreMessages.id, row.id)),
-          );
-        await enqueueStoreMessage(deps, tx, tenantId, row.id, open.opensAt);
-        return { outcome: 'rescheduled', sendAt: open.opensAt };
-      }
+      if (!open.open) return reschedule(open.opensAt);
     }
 
-    const [order] = await tx
-      .select()
-      .from(commerceStoreOrders)
-      .where(
-        and(eq(commerceStoreOrders.tenantId, tenantId), eq(commerceStoreOrders.id, row.orderId)),
-      );
-    if (!order || order.deletedAt) return skip('order_deleted');
-    if (order.redactedAt) return skip('customer_erased');
-    if (row.event !== 'order_cancelled' && order.status === 'cancelled') {
-      return skip('order_cancelled');
+    const storeName = store.name ?? store.shopDomain ?? new URL(store.storeUrl).hostname;
+    let phone: string | null;
+    let customerName: string | null;
+    let values: StoreValues;
+    let subject: Record<string, string | null>;
+    if (isCartEvent(row.event)) {
+      const [checkout] = row.checkoutId
+        ? await tx
+            .select()
+            .from(commerceStoreCheckouts)
+            .where(
+              and(
+                eq(commerceStoreCheckouts.tenantId, tenantId),
+                eq(commerceStoreCheckouts.id, row.checkoutId),
+              ),
+            )
+        : [];
+      if (!checkout) return skip('checkout_deleted');
+      if (checkout.redactedAt) return skip('customer_erased');
+      if (checkout.completedAt) return skip('checkout_completed');
+      if (
+        now.getTime() - row.occurredAt.getTime() >
+        STORE_MESSAGE_LIMITS.cartLatenessHours * 3_600_000
+      ) {
+        return skip('cart_too_old');
+      }
+      if (row.event === 'cart_second_reminder') {
+        const [first] = await tx
+          .select({ state: commerceStoreMessages.state, sendAt: commerceStoreMessages.sendAt })
+          .from(commerceStoreMessages)
+          .where(
+            and(
+              eq(commerceStoreMessages.tenantId, tenantId),
+              eq(commerceStoreMessages.checkoutId, checkout.id),
+              eq(commerceStoreMessages.event, 'cart_reminder'),
+            ),
+          );
+        // The first reminder still waiting (both moved to the same opening of the sending
+        // window): the second waits for it.
+        if (first?.state === 'pending') {
+          return reschedule(new Date(Math.max(now.getTime(), first.sendAt.getTime()) + 5 * 60_000));
+        }
+        if (first?.state !== 'queued') return skip('first_reminder_not_sent');
+      }
+      phone = checkout.customerPhone;
+      if (!phone) return skip('no_phone');
+      // The customer bought after all: an order with the same number since the checkout began.
+      const [ordered] = await tx
+        .select({ id: commerceStoreOrders.id })
+        .from(commerceStoreOrders)
+        .where(
+          and(
+            eq(commerceStoreOrders.tenantId, tenantId),
+            eq(commerceStoreOrders.storeId, store.id),
+            eq(commerceStoreOrders.customerPhone, phone),
+            gte(commerceStoreOrders.placedAt, checkout.remoteCreatedAt),
+          ),
+        )
+        .limit(1);
+      if (ordered) return skip('order_placed');
+      customerName = checkout.customerName;
+      values = {
+        subject: 'checkout',
+        values: checkoutValues({
+          customerName: checkout.customerName,
+          currency: checkout.currency,
+          totalMinor: checkout.totalMinor,
+          items: checkout.items,
+          recoveryUrl: checkout.recoveryUrl,
+          storeName,
+        }),
+      };
+      subject = { checkoutId: checkout.id, checkoutName: checkout.name };
+    } else {
+      const [order] = row.orderId
+        ? await tx
+            .select()
+            .from(commerceStoreOrders)
+            .where(
+              and(
+                eq(commerceStoreOrders.tenantId, tenantId),
+                eq(commerceStoreOrders.id, row.orderId),
+              ),
+            )
+        : [];
+      if (!order || order.deletedAt) return skip('order_deleted');
+      if (order.redactedAt) return skip('customer_erased');
+      if (row.event !== 'order_cancelled' && order.status === 'cancelled') {
+        return skip('order_cancelled');
+      }
+      phone = order.customerPhone;
+      if (!phone) return skip('no_phone');
+      const items = await tx
+        .select({
+          title: commerceStoreOrderItems.title,
+          quantity: commerceStoreOrderItems.quantity,
+        })
+        .from(commerceStoreOrderItems)
+        .where(
+          and(
+            eq(commerceStoreOrderItems.tenantId, tenantId),
+            eq(commerceStoreOrderItems.orderId, order.id),
+          ),
+        )
+        .orderBy(asc(commerceStoreOrderItems.position));
+      customerName = order.customerName;
+      values = {
+        subject: 'order',
+        values: orderValues({
+          name: order.name,
+          customerName: order.customerName,
+          currency: order.currency,
+          totalMinor: order.totalMinor,
+          items,
+          statusUrl: order.statusUrl,
+          trackingNumber: order.trackingNumber,
+          trackingCompany: order.trackingCompany,
+          trackingUrl: order.trackingUrl,
+          storeName,
+        }),
+      };
+      subject = { orderId: order.id, orderName: order.name };
     }
-    const phone = order.customerPhone;
-    if (!phone) return skip('no_phone');
 
     const [template] = await tx
       .select()
@@ -388,6 +506,10 @@ export async function processStoreMessage(
       (template.category !== 'UTILITY' && template.category !== 'MARKETING')
     ) {
       return skip('template_unavailable');
+    }
+    // Cart reminders are marketing (M-176).
+    if (isCartEvent(row.event) && template.category !== 'MARKETING') {
+      return skip('not_marketing_template');
     }
     const spec = sendSpecFor(template.category, template.components);
     if (!spec.supported) return skip('template_unavailable');
@@ -421,32 +543,7 @@ export async function processStoreMessage(
       payloads.set(rule.confirmButton, codPayload(row.id, 'confirm'));
       payloads.set(rule.cancelButton, codPayload(row.id, 'cancel'));
     }
-    const items = await tx
-      .select({ title: commerceStoreOrderItems.title, quantity: commerceStoreOrderItems.quantity })
-      .from(commerceStoreOrderItems)
-      .where(
-        and(
-          eq(commerceStoreOrderItems.tenantId, tenantId),
-          eq(commerceStoreOrderItems.orderId, order.id),
-        ),
-      )
-      .orderBy(asc(commerceStoreOrderItems.position));
-    const storeName = store.name ?? store.shopDomain ?? new URL(store.storeUrl).hostname;
-    const resolved = resolveStoreVariables(
-      readStoreVariables(rule.variables),
-      orderValues({
-        name: order.name,
-        customerName: order.customerName,
-        currency: order.currency,
-        totalMinor: order.totalMinor,
-        items,
-        statusUrl: order.statusUrl,
-        trackingNumber: order.trackingNumber,
-        trackingCompany: order.trackingCompany,
-        trackingUrl: order.trackingUrl,
-        storeName,
-      }),
-    );
+    const resolved = resolveStoreVariables(readStoreVariables(rule.variables), values);
     if (!resolved.ok) return skip('missing_variable');
     if (
       resolved.params.header.length !== spec.headerParams ||
@@ -464,7 +561,7 @@ export async function processStoreMessage(
     if (suppressed) return skip('suppressed');
     const contactId = await contactForPhone(tx, tenantId, {
       phoneE164: phone,
-      displayName: order.customerName,
+      displayName: customerName,
       source: 'store',
     });
     const eligibility = await checkTemplateEligibility(tx, {
@@ -474,6 +571,12 @@ export async function processStoreMessage(
       category: template.category,
     });
     if (!eligibility.ok) return skip(eligibility.code);
+    if (
+      template.category === 'MARKETING' &&
+      (await frequencyCapped(tx, tenantId, contactId, now))
+    ) {
+      return skip('frequency_capped');
+    }
     const [identity] = await tx
       .select({ waId: contactIdentities.waId })
       .from(contactIdentities)
@@ -538,8 +641,7 @@ export async function processStoreMessage(
           name: storeName,
           event: row.event,
           label: STORE_MESSAGE_EVENT_INFO[row.event].label,
-          orderId: order.id,
-          orderName: order.name,
+          ...subject,
         },
       },
       status: 'queued',
@@ -588,6 +690,34 @@ export async function processStoreMessage(
     );
     return { outcome: 'queued', messageId };
   });
+}
+
+/**
+ * Whether the contact already received the company's maximum of marketing templates in its
+ * period (counted like the campaign runner does, and under its company lock so the two never race
+ * past the cap).
+ */
+async function frequencyCapped(
+  tx: Tx,
+  tenantId: string,
+  contactId: string,
+  now: Date,
+): Promise<boolean> {
+  const settings = await loadCampaignSettings(tx, tenantId);
+  if (!settings.capCount || !settings.capDays) return false;
+  await tx.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`campaign-runner:${tenantId}`}, 0))`,
+  );
+  const res = await tx.execute<{ n: number }>(sql`
+    select count(*)::int as n
+      from app.messages m
+      join app.conversations cv on cv.tenant_id = m.tenant_id and cv.id = m.conversation_id
+      join app.message_templates t on t.tenant_id = m.tenant_id and t.id = m.template_id
+     where m.tenant_id = ${tenantId} and cv.contact_id = ${contactId}
+       and m.direction = 'outbound' and t.category = 'MARKETING'
+       and m.status not in ('failed', 'canceled')
+       and m.created_at > ${now.toISOString()}::timestamptz - make_interval(days => ${settings.capDays})`);
+  return (res.rows[0]?.n ?? 0) >= settings.capCount;
 }
 
 /** Store messages whose send time has come, across active companies (the minute sweep). */

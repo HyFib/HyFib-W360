@@ -2,6 +2,7 @@ import { uuidv7, type Clock } from '@w360/core';
 import {
   and,
   authorizedTenantScope,
+  commerceStoreCheckouts,
   commerceStoreEvents,
   commerceStoreFetches,
   commerceStoreOrders,
@@ -450,6 +451,34 @@ async function customerRedact(
         )
         .returning({ id: commerceStoreOrders.id });
       redacted = rows.length;
+    }
+    // Checkouts the customer left (cart reminders, ADR-049): by number or Shopify customer id.
+    const customerId = resourceId(customer ?? {}, null);
+    const checkoutMatches = [
+      phone ? eq(commerceStoreCheckouts.customerPhone, phone) : undefined,
+      customerId ? eq(commerceStoreCheckouts.customerExternalId, customerId) : undefined,
+    ].filter((m) => m !== undefined);
+    if (checkoutMatches.length > 0) {
+      await tx
+        .update(commerceStoreCheckouts)
+        .set({
+          customerExternalId: null,
+          customerName: null,
+          customerPhone: null,
+          recoveryUrl: null,
+          consentState: null,
+          consentUpdatedAt: null,
+          consentOptInLevel: null,
+          consentCollectedFrom: null,
+          redactedAt: sql`coalesce(${commerceStoreCheckouts.redactedAt}, now())`,
+        })
+        .where(
+          and(
+            eq(commerceStoreCheckouts.tenantId, scope.tenantId),
+            eq(commerceStoreCheckouts.storeId, storeId),
+            or(...checkoutMatches),
+          ),
+        );
     }
     // A data request from the same customer no longer keeps who asked.
     const requestMatches = [

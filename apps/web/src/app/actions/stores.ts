@@ -24,6 +24,17 @@ export async function startShopifyConnectAction(
   });
 }
 
+/** Returns Shopify's approval address for customer access; the browser goes there next. */
+export async function startCustomerAccessAction(
+  slug: string,
+  storeId: string,
+): Promise<ActionResult<{ url: string }>> {
+  return runAction(async () => {
+    const { ctx, stores } = await storesFor(slug);
+    return stores.startCustomerAccess(ctx, storeId, await requestMeta());
+  });
+}
+
 /** Returns the WooCommerce store's approval address; the browser goes there next. */
 export async function startWooConnectAction(
   slug: string,

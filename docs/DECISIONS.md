@@ -805,3 +805,66 @@ can cancel the order in the store. HyFib does not change orders in the store.
 Shopify's `customers/redact`) and stay empty on later reads; a constraint ties them to
 `redacted_at`. Store messages hold ids, times, states and the answer; they are deleted with their
 order or store.
+
+## ADR-049 Cart reminders: Shopify checkouts read on a schedule, marketing templates only, consent from HyFib or the store (2026-09-27)
+
+Decision: a connected Shopify store can remind customers about a checkout they left, with up to two
+approved marketing templates a manager chose (P4-06d, research `docs/research/store-connectors.md`
+§4, SH-037 to SH-043, and `docs/research/meta-whatsapp.md` M-176). WooCommerce has no carts to read
+(WC-023), so the reminders are Shopify only. Store events as automation triggers need a template
+step outside the service window and data given to a run when it starts; they are a later slice.
+
+**Reading checkouts.** While a cart reminder is on, the store job reads, every 15 minutes, the
+checkouts updated since its cursor with `read_orders` (SH-037): `abandonedCheckouts` filtered by
+`updated_at`, paged through in full (no sort by update time exists, SH-038; a read that needs more
+than ten pages continues on the next run with Shopify's page cursor). The next cursor is when the
+read started, less two minutes for clock differences, so an update made during a read is read next
+time; checkouts read twice are kept once. Checkout webhooks are not used: their payloads were not
+read, and reminders wait at least 30 minutes. Switching a reminder on starts the cursor at that
+moment, so nothing earlier is read; "Read the store now" also reads the checkouts at once while a
+reminder is on. The copy keeps the number (the customer's default phone when the
+store allowed customer access, else the shipping or billing phone, both protected `phone` data,
+SH-040), the name, the total in minor units, up to ten items, the recovery address (https), when it
+was completed and the consent Shopify records for that number. Copies are deleted 30 days after
+their last update, and redacted for good with the customer (contact erasure, Shopify's
+`customers/redact`).
+
+**Reminders.** A checkout is left at its last update. When a read sees a checkout that is not
+completed, has a number and was updated at or after the rule was switched on, it records a pending
+reminder for each rule that is on (unique per checkout and reminder), due at the time it was left
+plus the rule's delay (first reminder 30 minutes to 24 hours; second 1 hour to 3 days, later than
+the first), inside the store's sending hours. A later update before a reminder goes out moves it
+(the customer came back); once sent, a reminder is never sent again. At send time every order
+message check runs (store, rule and its start, sending hours, number, template, number's account,
+variables, suppression, contact, consent) plus: the checkout still exists, is not redacted and not
+completed; no order with the same number was placed in the store since the checkout was created; the
+template is a marketing template; the second reminder goes only after the first was sent; nothing
+goes out more than three days after the checkout was left; and the company's marketing frequency cap
+(counted like campaigns, under the campaign runner's company lock so the two never race). The cap now
+applies to every store message with a marketing template.
+
+**Consent.** A cart reminder is marketing (M-176): it needs an approved marketing template, a member
+with `campaigns.send` to choose it, and the customer's marketing opt-in unless the company turned the
+opt-in requirement off. Opt-in can come from HyFib's own records or, when a manager allows it, from
+the store: Shopify 2026-07 records WhatsApp marketing consent per phone number (SH-041), readable
+with `read_customers`. HyFib asks for that scope only when a manager allows customer access for the
+store (least privilege; SH-042: the app authorizes again with the extra scope, and the store keeps
+syncing with its old token until the worker exchanges the new code). Shopify keeps one current token
+per app and store (SH-007), so the exchanged token always replaces the old one: without
+`read_customers` the store keeps working without customer access; without the connector's own scopes
+it can no longer sync and fails with a request to connect it again; a code Shopify refuses leaves
+the old token in place. With
+"use the WhatsApp consent the store records" on (`commerce.manage` and `contacts.write`, audited),
+each checkout read records Shopify's `SUBSCRIBED` or `UNSUBSCRIBED` state with its update time as a
+consent event (source `store`, evidence: store, state, opt-in level, where it was collected) for the
+contact with that number, created from the checkout when needed (never for a number on the
+suppression list); the newest consent event wins, as
+for every source, and the same Shopify state is never recorded twice. States without an update time,
+`PENDING`, `NEVER_SUBSCRIBED` and `REDACTED` change nothing. HyFib never writes consent back to
+Shopify.
+
+**Recovered checkouts.** A checkout counts as recovered when a read sees it completed (SH-043) after
+one of its reminders was sent; the recovered value is its total. A reminder counts as sent once it
+was handed to WhatsApp, unless WhatsApp reported it failed, it was cancelled or its outcome is
+unknown. The store's Order messages page shows, for the last 30 days, reminders sent, checkouts
+recovered and their value per currency, with these definitions.

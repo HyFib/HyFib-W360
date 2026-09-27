@@ -31,7 +31,11 @@ import {
   type TemplateDefinition,
   type TenantContext,
 } from '@w360/domain';
-import { startShopifyStandIn, type ShopifyStandIn } from '../support/shopify-stand-in';
+import {
+  startShopifyStandIn,
+  type ShopifyStandIn,
+  type StandInCheckout,
+} from '../support/shopify-stand-in';
 import { startWooStandIn, type WooStandIn } from '../support/woocommerce-stand-in';
 import { acceptInvitation, createUser, invite, type TestUser } from './helpers';
 import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './whatsapp-fixture';
@@ -1125,8 +1129,8 @@ describe('store data and people', () => {
 
 // Order messages (P4-06c) ---------------------------------------------------------------------------
 
-const storeMessages = (clock: Clock = systemClock) =>
-  createStoreMessagesService({ db: fx.dbs.app, clock });
+const storeMessages = (clock: Clock = systemClock, shopifyApiVersion = '2026-07') =>
+  createStoreMessagesService({ db: fx.dbs.app, clock, shopifyApiVersion });
 const messageDeps = (clock: Clock = systemClock) => ({
   db: fx.dbs.app,
   clock,
@@ -2200,6 +2204,1022 @@ describe('Order messages', () => {
         templateId: template.id,
         variables: vars,
       }),
+      'not_found',
+    );
+  });
+});
+
+// Cart reminders (P4-06d) ----------------------------------------------------------------------------
+
+const cartReminder: TemplateDefinition = {
+  category: 'MARKETING',
+  header: { type: 'none' },
+  body: {
+    text: 'Hi {{1}}, your cart is still waiting for you: {{2}}',
+    examples: ['Asha', 'https://tara.example/checkouts/1/recover'],
+  },
+  footer: null,
+  buttons: [],
+};
+const cartVars: StoreVariables = {
+  header: [],
+  body: [
+    { source: 'checkout', field: 'customer_name', fallback: 'there' },
+    { source: 'checkout', field: 'checkout_url' },
+  ],
+};
+const MINUTE_MS = 60_000;
+
+async function cartRows(storeId: string) {
+  return fx.query<
+    Record<string, unknown> & {
+      id: string;
+      event: string;
+      state: string;
+      skip_reason: string | null;
+      external_id: string;
+      occurred_at: Date;
+      send_at: Date;
+    }
+  >(
+    `SELECT sm.*, k.external_id FROM app.commerce_store_messages sm
+       JOIN app.commerce_store_checkouts k ON k.id = sm.checkout_id
+      WHERE sm.store_id = $1 ORDER BY k.external_id::bigint, sm.event`,
+    [storeId],
+  );
+}
+
+async function checkoutRows(storeId: string) {
+  return fx.query<Record<string, unknown> & { external_id: string }>(
+    'SELECT * FROM app.commerce_store_checkouts WHERE store_id = $1 ORDER BY external_id::bigint',
+    [storeId],
+  );
+}
+
+/** A checkout left in the store with one line, the number in its shipping address. */
+function leave(
+  shop: string,
+  id: string,
+  input: {
+    phone?: string | null;
+    name?: string;
+    updatedAt?: string;
+    createdAt?: string;
+    completedAt?: string | null;
+    customer?: StandInCheckout['customer'];
+  } = {},
+) {
+  const updatedAt = input.updatedAt ?? iso(-MINUTE_MS);
+  return shopify.upsertCheckout(shop, {
+    id,
+    createdAt: input.createdAt ?? updatedAt,
+    updatedAt,
+    completedAt: input.completedAt ?? null,
+    total: { amount: '1499.00', currencyCode: 'INR' },
+    lineItems: [{ title: 'Darjeeling tea', variantTitle: '250 g', quantity: 2 }],
+    shippingAddress:
+      input.phone === null ? null : { name: input.name ?? 'Asha K', phone: input.phone ?? null },
+    customer: input.customer ?? null,
+  });
+}
+
+/** A contact for the number with a member-recorded marketing opt-in. */
+async function marketingOptIn(owner: TenantContext, phone: string, name = 'Asha K') {
+  const contact = await createContactsService({ db: fx.dbs.app, clock: systemClock }).createContact(
+    owner,
+    { displayName: name, phone },
+  );
+  await createConsentService({ db: fx.dbs.app, clock: systemClock }).recordConsent(owner, {
+    contactId: contact.id,
+    purpose: 'marketing',
+    action: 'opt_in',
+  });
+  return contact.id;
+}
+
+/** Handles the store's waiting cart reminders by checkout and reminder: [checkout, event, outcome]. */
+async function runCart(c: Company, storeId: string, clock: Clock = systemClock) {
+  const rows = await fx.query<{ id: string; external_id: string; event: string }>(
+    `SELECT sm.id, k.external_id, sm.event FROM app.commerce_store_messages sm
+       JOIN app.commerce_store_checkouts k ON k.id = sm.checkout_id
+      WHERE sm.store_id = $1 AND sm.state = 'pending'
+      ORDER BY k.external_id::bigint, sm.event`,
+    [storeId],
+  );
+  const outcomes: [string, string, string][] = [];
+  for (const row of rows) {
+    const result = await processStoreMessage(messageDeps(clock), scopeOf(c), row.id);
+    outcomes.push([
+      row.external_id,
+      row.event,
+      result.outcome === 'skipped' ? `skipped: ${result.reason}` : result.outcome,
+    ]);
+  }
+  return outcomes;
+}
+
+/** Makes the store's next checkout read due now and runs its jobs. */
+async function readCheckouts(c: Company, storeId: string, clock: Clock = systemClock) {
+  await fx.query(
+    'UPDATE app.commerce_stores SET checkouts_read_at = now() WHERE id = $1 AND checkouts_read_at IS NOT NULL',
+    [storeId],
+  );
+  return drain(c, storeId, clock);
+}
+
+async function cartRule(
+  owner: TenantContext,
+  c: Company,
+  storeId: string,
+  event: 'cart_reminder' | 'cart_second_reminder',
+  input: {
+    templateId: string;
+    delayMinutes: number;
+    enabled?: boolean;
+    variables?: StoreVariables;
+  },
+) {
+  return saveRule(owner, c, storeId, event, {
+    templateId: input.templateId,
+    variables: input.variables ?? cartVars,
+    delayMinutes: input.delayMinutes,
+    enabled: input.enabled,
+  });
+}
+
+/** Walks a member through the approval for customer access (SH-042). */
+async function allowCustomerAccess(owner: TenantContext, storeId: string) {
+  const { url } = await service().startCustomerAccess(owner, storeId);
+  const redirect = await fetch(url, { redirect: 'manual' });
+  expect(redirect.status).toBe(302);
+  const checked = await service().shopifyCallback(
+    new URL(redirect.headers.get('location') ?? '').searchParams,
+  );
+  if (!checked.ok) throw new Error(`callback refused: ${checked.reason}`);
+  return { url, checked };
+}
+
+describe('Cart reminders', () => {
+  it('reminds a customer who left a checkout once, moves the reminder when they come back, and counts the recovery', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { shop, storeId } = await shopifyStoreForMessages(c, owner);
+    const template = await approvedTemplate(c, owner, cartReminder);
+    await optIn(owner, storeId);
+    await marketingOptIn(owner, '+919877700001');
+    await marketingOptIn(owner, '+919877700002', 'Ravi');
+    await marketingOptIn(owner, '+919877700003', 'Mira');
+    await marketingOptIn(owner, '+919877700004', 'Dev');
+    // A checkout left before the rule was switched on is never read, let alone reminded, even one
+    // left within the read's two-minute clock margin.
+    leave(shop, '1', { phone: '+919877700001', updatedAt: iso(-86_400_000) });
+    leave(shop, '7', { phone: '+919877700005', updatedAt: iso(-60_000) });
+
+    // Utility templates are refused: cart reminders are marketing (M-176).
+    const utility = await approvedTemplate(c, owner, orderUpdate);
+    await expectAppError(
+      cartRule(owner, c, storeId, 'cart_reminder', { templateId: utility.id, delayMinutes: 30 }),
+      'validation_failed',
+      /marketing template/,
+    );
+    await expectAppError(
+      cartRule(owner, c, storeId, 'cart_reminder', { templateId: template.id, delayMinutes: 10 }),
+      'validation_failed',
+      /Wait between 30 minutes and 1 day/,
+    );
+    await expectAppError(
+      saveRule(owner, c, storeId, 'cart_reminder', {
+        templateId: template.id,
+        variables: update({ source: 'static', value: 'x' }),
+        delayMinutes: 30,
+      }),
+      'validation_failed',
+      /values this message can fill/,
+    );
+    await cartRule(owner, c, storeId, 'cart_reminder', {
+      templateId: template.id,
+      delayMinutes: 30,
+    });
+    expect(await storeRow(storeId)).toMatchObject({
+      checkouts_page: null,
+      checkouts_error: null,
+    });
+
+    leave(shop, '2', { phone: '+919877700001', updatedAt: iso() });
+    leave(shop, '3', { phone: '+919877700002', updatedAt: iso() });
+    leave(shop, '4', { phone: '+919877700003', updatedAt: iso() });
+    leave(shop, '5', { phone: '+919877700004', updatedAt: iso() });
+    leave(shop, '6', { phone: null, updatedAt: iso() });
+    await readCheckouts(c, storeId);
+    expect((await checkoutRows(storeId)).map((k) => k.external_id)).toEqual([
+      '2',
+      '3',
+      '4',
+      '5',
+      '6',
+    ]);
+    const first = await cartRows(storeId);
+    // No number, no reminder.
+    expect(first.map((r) => [r.external_id, r.event, r.state])).toEqual([
+      ['2', 'cart_reminder', 'pending'],
+      ['3', 'cart_reminder', 'pending'],
+      ['4', 'cart_reminder', 'pending'],
+      ['5', 'cart_reminder', 'pending'],
+    ]);
+    const due = (r: (typeof first)[number]) =>
+      new Date(r.send_at).getTime() - new Date(r.occurred_at).getTime();
+    expect(first.map(due)).toEqual([30, 30, 30, 30].map((m) => m * MINUTE_MS));
+    expect(await storeRow(storeId)).toMatchObject({ checkouts_error: null });
+    // The next read is 15 minutes away; "Read the store now" reads the checkouts at once too.
+    const readAt = async () =>
+      new Date((await storeRow(storeId))?.checkouts_read_at as Date).getTime();
+    expect((await readAt()) - Date.now()).toBeGreaterThan(14 * MINUTE_MS);
+    await service().requestStoreSync(owner, storeId);
+    expect(await readAt()).toBeLessThanOrEqual(Date.now());
+    await drain(c, storeId);
+    expect((await readAt()) - Date.now()).toBeGreaterThan(14 * MINUTE_MS);
+    expect((await checkoutRows(storeId)).map((k) => k.external_id)).toEqual([
+      '2',
+      '3',
+      '4',
+      '5',
+      '6',
+    ]);
+
+    // Not yet due.
+    expect(await runCart(c, storeId)).toEqual([
+      ['2', 'cart_reminder', 'not_due'],
+      ['3', 'cart_reminder', 'not_due'],
+      ['4', 'cart_reminder', 'not_due'],
+      ['5', 'cart_reminder', 'not_due'],
+    ]);
+    // Ravi came back to checkout 3: its reminder counts from then.
+    const moved = iso(5 * 1000);
+    leave(shop, '3', { phone: '+919877700002', updatedAt: moved, createdAt: iso() });
+    // Mira completed checkout 4; Dev placed an order with the same number.
+    leave(shop, '4', { phone: '+919877700003', completedAt: iso(2000), updatedAt: iso(2000) });
+    shopify.upsertOrder(shop, { id: '9005', phone: '+919877700004' });
+    await orderSignal(shop, '9005', 'orders/create');
+    // An order Asha placed a week before checkout 2 began does not stop its reminder.
+    shopify.upsertOrder(shop, {
+      id: '9002',
+      phone: '+919877700001',
+      createdAt: iso(-7 * 86_400_000),
+      processedAt: iso(-7 * 86_400_000),
+    });
+    await orderSignal(shop, '9002', 'orders/create');
+    await readCheckouts(c, storeId);
+    expect((await orderRows(storeId)).map((o) => o.external_id)).toEqual(
+      expect.arrayContaining(['9002', '9005']),
+    );
+    const three = (await cartRows(storeId)).find((r) => r.external_id === '3');
+    expect(new Date(three?.occurred_at as Date).toISOString()).toBe(new Date(moved).toISOString());
+    // Shopify's list can lag: an older copy of checkout 3 never replaces the newer one.
+    shopify.upsertCheckout(shop, {
+      id: '3',
+      updatedAt: iso(-10 * MINUTE_MS),
+      total: { amount: '1.00', currencyCode: 'INR' },
+    });
+    await fx.query(
+      `UPDATE app.commerce_stores SET checkouts_cursor = now() - interval '1 hour' WHERE id = $1`,
+      [storeId],
+    );
+    await readCheckouts(c, storeId);
+    const kept = (await checkoutRows(storeId)).find((k) => k.external_id === '3');
+    expect(String(kept?.total_minor)).toBe('149900');
+    expect(new Date(kept?.remote_updated_at as Date).toISOString()).toBe(
+      new Date(moved).toISOString(),
+    );
+
+    const afterDelay = later(31 * MINUTE_MS);
+    expect(await runCart(c, storeId, afterDelay)).toEqual([
+      ['2', 'cart_reminder', 'queued'],
+      ['3', 'cart_reminder', 'queued'],
+      ['4', 'cart_reminder', 'skipped: checkout_completed'],
+      ['5', 'cart_reminder', 'skipped: order_placed'],
+    ]);
+    expect(await sendAll(c)).toEqual(['accepted', 'accepted']);
+    const sent = templatesTo('919877700001');
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.name).toBe(template.name);
+    expect(bodyTexts(sent[0])).toEqual(['Asha K', `https://${shop}/checkouts/2/recover?key=k2`]);
+    const [chat] = await fx.query<{ sender_type: string; content: { store: unknown } }>(
+      `SELECT m.sender_type, m.content FROM app.messages m
+         JOIN app.commerce_store_messages sm ON sm.message_id = m.id
+         JOIN app.commerce_store_checkouts k ON k.id = sm.checkout_id
+        WHERE k.store_id = $1 AND k.external_id = '2'`,
+      [storeId],
+    );
+    expect(chat).toMatchObject({ sender_type: 'system' });
+    expect(chat?.content.store).toMatchObject({ event: 'cart_reminder', label: 'Cart reminder' });
+
+    // Read again: nothing new and no second reminder. Asha coming back to the checkout after the
+    // reminder was sent changes nothing about the reminder.
+    const [sentTwo] = (await cartRows(storeId)).filter((r) => r.external_id === '2');
+    leave(shop, '2', { phone: '+919877700001', updatedAt: iso(2000) });
+    await readCheckouts(c, storeId);
+    const twos = (await cartRows(storeId)).filter((r) => r.external_id === '2');
+    expect(twos).toHaveLength(1);
+    expect(twos[0]).toMatchObject({
+      state: 'queued',
+      occurred_at: sentTwo?.occurred_at,
+      send_at: sentTwo?.send_at,
+    });
+
+    // Asha completes checkout 2 after the reminder: recovered, with its total. Ravi completed
+    // checkout 3 a minute before his reminder went out (HyFib read it later): not counted.
+    leave(shop, '2', { phone: '+919877700001', completedAt: iso(3000), updatedAt: iso(3000) });
+    leave(shop, '3', { phone: '+919877700002', completedAt: iso(-60_000), updatedAt: iso(10_000) });
+    await readCheckouts(c, storeId);
+    const view = await storeMessages().storeMessages(owner, storeId);
+    expect(view.cart).toEqual({
+      sent: 2,
+      recovered: 1,
+      value: [{ currency: 'INR', totalMinor: 149_900 }],
+    });
+    expect(view.recent.find((m) => m.checkoutId !== null)).toMatchObject({
+      label: 'Cart reminder',
+      checkoutName: expect.stringMatching(/^#C/),
+    });
+    // A reminder WhatsApp reports failed is not counted as sent, nor its checkout as recovered.
+    await fx.query(
+      `UPDATE app.messages SET status = 'failed' WHERE id = (
+         SELECT sm.message_id FROM app.commerce_store_messages sm
+           JOIN app.commerce_store_checkouts k ON k.id = sm.checkout_id
+          WHERE k.store_id = $1 AND k.external_id = '2')`,
+      [storeId],
+    );
+    expect((await storeMessages().storeMessages(owner, storeId)).cart).toEqual({
+      sent: 1,
+      recovered: 0,
+      value: [],
+    });
+  });
+
+  it('sends the second reminder only after the first, to opted-in customers, within three days and the frequency cap', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { shop, storeId } = await shopifyStoreForMessages(c, owner);
+    const template = await approvedTemplate(c, owner, cartReminder);
+    await optIn(owner, storeId);
+    await marketingOptIn(owner, '+919822200001');
+
+    // The second reminder needs the first, and comes later.
+    await expectAppError(
+      cartRule(owner, c, storeId, 'cart_second_reminder', {
+        templateId: template.id,
+        delayMinutes: 120,
+      }),
+      'validation_failed',
+      /first cart reminder on first/,
+    );
+    await cartRule(owner, c, storeId, 'cart_reminder', {
+      templateId: template.id,
+      delayMinutes: 60,
+    });
+    await expectAppError(
+      cartRule(owner, c, storeId, 'cart_second_reminder', {
+        templateId: template.id,
+        delayMinutes: 60,
+      }),
+      'validation_failed',
+      /later than the first/,
+    );
+    await cartRule(owner, c, storeId, 'cart_second_reminder', {
+      templateId: template.id,
+      delayMinutes: 180,
+    });
+    await expectAppError(
+      cartRule(owner, c, storeId, 'cart_reminder', { templateId: template.id, delayMinutes: 240 }),
+      'validation_failed',
+      /before the second/,
+    );
+
+    leave(shop, '10', { phone: '+919822200001', updatedAt: iso() });
+    // No marketing opt-in for this number.
+    leave(shop, '11', { phone: '+919822200002', updatedAt: iso() });
+    await readCheckouts(c, storeId);
+    expect((await cartRows(storeId)).map((r) => [r.external_id, r.event, r.state])).toEqual([
+      ['10', 'cart_reminder', 'pending'],
+      ['10', 'cart_second_reminder', 'pending'],
+      ['11', 'cart_reminder', 'pending'],
+      ['11', 'cart_second_reminder', 'pending'],
+    ]);
+    const byKey = async (externalId: string, event: string) =>
+      (await cartRows(storeId)).find((r) => r.external_id === externalId && r.event === event);
+    const second10 = await byKey('10', 'cart_second_reminder');
+    // The second reminder's time comes while the first still waits: it waits for the first.
+    const early = await processStoreMessage(
+      messageDeps(later(181 * MINUTE_MS)),
+      scopeOf(c),
+      second10?.id as string,
+    );
+    expect(early).toMatchObject({ outcome: 'rescheduled' });
+    expect(await runCart(c, storeId, later(61 * MINUTE_MS))).toEqual([
+      ['10', 'cart_reminder', 'queued'],
+      ['10', 'cart_second_reminder', 'not_due'],
+      ['11', 'cart_reminder', 'skipped: no_marketing_opt_in'],
+      ['11', 'cart_second_reminder', 'not_due'],
+    ]);
+    const atSecond = later(200 * MINUTE_MS);
+    expect(await runCart(c, storeId, atSecond)).toEqual([
+      ['10', 'cart_second_reminder', 'queued'],
+      ['11', 'cart_second_reminder', 'skipped: first_reminder_not_sent'],
+    ]);
+    expect(await sendAll(c)).toEqual(['accepted', 'accepted']);
+    expect(templatesTo('919822200001')).toHaveLength(2);
+
+    // The company's marketing frequency cap: one marketing message a week.
+    await fx.query(
+      `INSERT INTO app.messaging_settings
+         (tenant_id, opt_out_keywords, marketing_opt_out_keywords, opt_in_keywords,
+          marketing_cap_count, marketing_cap_days)
+       VALUES ($1, ARRAY['stop'], ARRAY[]::text[], ARRAY['start'], 2, 7)
+       ON CONFLICT (tenant_id) DO UPDATE SET marketing_cap_count = 2, marketing_cap_days = 7`,
+      [c.tenant.id],
+    );
+    leave(shop, '12', { phone: '+919822200001', updatedAt: iso(1000), createdAt: iso(1000) });
+    await readCheckouts(c, storeId);
+    expect(await runCart(c, storeId, later(61 * MINUTE_MS))).toEqual([
+      ['12', 'cart_reminder', 'skipped: frequency_capped'],
+      ['12', 'cart_second_reminder', 'not_due'],
+    ]);
+
+    // Never more than three days after the checkout was left.
+    await fx.query(
+      `UPDATE app.commerce_store_message_rules SET enabled_at = now() - interval '5 days'
+        WHERE store_id = $1`,
+      [storeId],
+    );
+    await fx.query('UPDATE app.commerce_stores SET checkouts_cursor = $2 WHERE id = $1', [
+      storeId,
+      new Date(Date.now() - 4 * 86_400_000),
+    ]);
+    await marketingOptIn(owner, '+919822200003', 'Old');
+    leave(shop, '13', { phone: '+919822200003', updatedAt: iso(-73 * 3_600_000) });
+    await readCheckouts(c, storeId);
+    const old = await byKey('13', 'cart_reminder');
+    expect(await processStoreMessage(messageDeps(), scopeOf(c), old?.id as string)).toEqual({
+      outcome: 'skipped',
+      reason: 'cart_too_old',
+    });
+
+    // The template became a utility template at Meta after the rule was saved: not sent.
+    await fx.query(`UPDATE app.message_templates SET category = 'UTILITY' WHERE id = $1`, [
+      template.id,
+    ]);
+    leave(shop, '14', { phone: '+919822200003', updatedAt: iso(2000), createdAt: iso(2000) });
+    await readCheckouts(c, storeId);
+    const recategorised = await byKey('14', 'cart_reminder');
+    expect(
+      await processStoreMessage(
+        messageDeps(later(61 * MINUTE_MS)),
+        scopeOf(c),
+        recategorised?.id as string,
+      ),
+    ).toEqual({ outcome: 'skipped', reason: 'not_marketing_template' });
+
+    // Switching the first reminder off switches the second off too; checkouts stop being read.
+    await cartRule(owner, c, storeId, 'cart_reminder', {
+      templateId: template.id,
+      delayMinutes: 60,
+      enabled: false,
+    });
+    const view = await storeMessages().storeMessages(owner, storeId);
+    expect(view.rules.filter((r) => r.event.startsWith('cart')).map((r) => r.enabled)).toEqual([
+      false,
+      false,
+    ]);
+    expect(await storeRow(storeId)).toMatchObject({ checkouts_read_at: null });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1
+          AND action = 'commerce.store_message_rule_saved' ORDER BY occurred_at DESC LIMIT 1`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toMatchObject({
+      event: 'cart_reminder',
+      secondReminderSwitchedOff: true,
+    });
+  });
+
+  it('asks Shopify for customer access only when a manager allows it, and uses the consent the store records', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { shop, storeId } = await shopifyStoreForMessages(c, owner);
+    const template = await approvedTemplate(c, owner, cartReminder);
+    await optIn(owner, storeId);
+    expect(await storeRow(storeId)).toMatchObject({ granted_scopes: 'read_orders,read_products' });
+    await expectAppError(
+      storeMessages().saveStoreConsent(owner, { storeId, useStoreConsent: true }),
+      'validation_failed',
+      /allow HyFib to read the store’s customers/,
+    );
+    // An API version without Shopify's WhatsApp consent refuses the setting too.
+    await expectAppError(
+      storeMessages(systemClock, '2025-10').saveStoreConsent(owner, {
+        storeId,
+        useStoreConsent: true,
+      }),
+      'validation_failed',
+      /2026-07 or later/,
+    );
+
+    // Another manager cannot finish the owner's approval.
+    const admin = await fx.ctx(c, await member(c, 'admin'));
+    const pending = await allowCustomerAccess(owner, storeId);
+    expect(new URL(pending.url).searchParams.get('scope')).toBe(
+      'read_orders,read_products,read_customers',
+    );
+    await expectAppError(service().acceptShopifyApproval(admin, pending.checked), 'forbidden');
+    const credentialsBefore = Number((await storeRow(storeId))?.credentials_version);
+    await service().acceptShopifyApproval(owner, pending.checked);
+    // The store keeps working with its old token until the worker exchanges the code.
+    expect(await storeRow(storeId)).toMatchObject({
+      state: 'connected',
+      access_code_ciphertext: expect.any(String),
+      connect_token_hash: null,
+    });
+    await drain(c, storeId);
+    expect(await storeRow(storeId)).toMatchObject({
+      state: 'connected',
+      access_code_ciphertext: null,
+      access_error: null,
+      granted_scopes: 'read_orders,read_products,read_customers',
+      credentials_version: credentialsBefore + 1,
+    });
+    await expectAppError(service().startCustomerAccess(owner, storeId), 'conflict', /already/);
+
+    // Only members who may change contacts' consent can turn it on: not an agent, nor a member
+    // who manages commerce without contacts.write (no built-in role today; checked all the same).
+    await expectAppError(
+      storeMessages().saveStoreConsent(await fx.ctx(c, await member(c, 'agent')), {
+        storeId,
+        useStoreConsent: true,
+      }),
+      'forbidden',
+    );
+    const withoutContacts = new Set([...owner.permissions].filter((p) => p !== 'contacts.write'));
+    await expectAppError(
+      storeMessages().saveStoreConsent(
+        { ...owner, permissions: withoutContacts, rolePermissions: withoutContacts },
+        { storeId, useStoreConsent: true },
+      ),
+      'forbidden',
+    );
+    await storeMessages().saveStoreConsent(owner, { storeId, useStoreConsent: true });
+    await cartRule(owner, c, storeId, 'cart_reminder', {
+      templateId: template.id,
+      delayMinutes: 30,
+    });
+
+    const subscribedAt = iso(-3_600_000);
+    leave(shop, '20', {
+      phone: '+919833300009',
+      name: 'Address Name',
+      updatedAt: iso(),
+      customer: {
+        id: '7001',
+        displayName: 'Nila C',
+        phone: '+919833300001',
+        consent: {
+          state: 'SUBSCRIBED',
+          optInLevel: 'SINGLE_OPT_IN',
+          collectedFrom: 'SHOPIFY',
+          updatedAt: subscribedAt,
+        },
+      },
+    });
+    // The consent Shopify records for the address's number says nothing: none is imported.
+    leave(shop, '21', { phone: '+919833300002', updatedAt: iso() });
+    // A number on the suppression list never becomes a contact, whatever Shopify records.
+    await createConsentService({ db: fx.dbs.app, clock: systemClock }).addSuppression(owner, {
+      phone: '+919833300005',
+      reason: 'manual',
+    });
+    leave(shop, '24', {
+      phone: null,
+      updatedAt: iso(),
+      customer: {
+        id: '7005',
+        displayName: 'Kept Out',
+        phone: '+919833300005',
+        consent: {
+          state: 'SUBSCRIBED',
+          optInLevel: 'SINGLE_OPT_IN',
+          collectedFrom: 'SHOPIFY',
+          updatedAt: subscribedAt,
+        },
+      },
+    });
+    await readCheckouts(c, storeId);
+    await readCheckouts(c, storeId);
+    expect(
+      await fx.query('SELECT id FROM app.contacts WHERE phone_e164 = $1', ['+919833300005']),
+    ).toEqual([]);
+    const events = await fx.query<{
+      action: string;
+      source: string;
+      actor_type: string;
+      occurred_at: Date;
+      evidence: Record<string, unknown>;
+      phone: string;
+    }>(
+      `SELECT e.action, e.source, e.actor_type, e.occurred_at, e.evidence, ct.phone_e164 AS phone
+         FROM app.consent_events e JOIN app.contacts ct ON ct.id = e.contact_id
+        WHERE e.tenant_id = $1 AND e.source = 'store'`,
+      [c.tenant.id],
+    );
+    // Recorded once, for the customer's own number, with Shopify's time and evidence.
+    expect(events).toEqual([
+      {
+        action: 'opt_in',
+        source: 'store',
+        actor_type: 'provider',
+        occurred_at: new Date(subscribedAt),
+        evidence: expect.objectContaining({
+          storeId,
+          checkout: '20',
+          state: 'SUBSCRIBED',
+          optInLevel: 'SINGLE_OPT_IN',
+          collectedFrom: 'SHOPIFY',
+        }),
+        phone: '+919833300001',
+      },
+    ]);
+    expect(
+      await fx.query('SELECT source, display_name FROM app.contacts WHERE phone_e164 = $1', [
+        '+919833300001',
+      ]),
+    ).toEqual([{ source: 'store', display_name: 'Nila C' }]);
+    expect(await runCart(c, storeId, later(31 * MINUTE_MS))).toEqual([
+      ['20', 'cart_reminder', 'queued'],
+      ['21', 'cart_reminder', 'skipped: no_marketing_opt_in'],
+      ['24', 'cart_reminder', 'skipped: suppressed'],
+    ]);
+    expect(await sendAll(c)).toEqual(['accepted']);
+    expect(bodyTexts(templatesTo('919833300001')[0])?.[0]).toBe('Nila C');
+
+    // A newer opt-out in HyFib wins over the store's older subscription; a newer store
+    // unsubscription wins over an older opt-in.
+    const consent = createConsentService({ db: fx.dbs.app, clock: systemClock });
+    const [nila] = await fx.query<{ id: string }>(
+      'SELECT id FROM app.contacts WHERE tenant_id = $1 AND phone_e164 = $2',
+      [c.tenant.id, '+919833300001'],
+    );
+    await consent.recordConsent(owner, {
+      contactId: nila?.id,
+      purpose: 'marketing',
+      action: 'opt_out',
+    });
+    const zoya = await marketingOptIn(owner, '+919833300003', 'Zoya');
+    leave(shop, '22', {
+      phone: null,
+      updatedAt: iso(2000),
+      customer: {
+        id: '7003',
+        displayName: 'Zoya',
+        phone: '+919833300003',
+        consent: {
+          state: 'UNSUBSCRIBED',
+          optInLevel: null,
+          collectedFrom: 'SHOPIFY',
+          updatedAt: iso(60_000),
+        },
+      },
+    });
+    leave(shop, '20', {
+      phone: '+919833300009',
+      updatedAt: iso(3000),
+      customer: {
+        id: '7001',
+        displayName: 'Nila C',
+        phone: '+919833300001',
+        consent: {
+          state: 'SUBSCRIBED',
+          optInLevel: 'SINGLE_OPT_IN',
+          collectedFrom: 'SHOPIFY',
+          updatedAt: subscribedAt,
+        },
+      },
+    });
+    await readCheckouts(c, storeId);
+    const state = async (contactId: string) =>
+      (
+        await fx.query<{ status: string }>(
+          `SELECT status FROM app.contact_consents WHERE contact_id = $1 AND purpose = 'marketing'`,
+          [contactId],
+        )
+      )[0]?.status;
+    expect(await state(nila?.id as string)).toBe('opted_out');
+    expect(await state(zoya)).toBe('opted_out');
+
+    // Shopify's customers/redact finds checkouts by the customer's id too, whatever number it gives.
+    expect(
+      await shopify.deliverCompliance('customers/redact', {
+        shop_id: Number(shopify.shops.get(shop)?.id),
+        shop_domain: shop,
+        customer: { id: 7001, phone: '+919833300077' },
+        orders_to_redact: [],
+      }),
+    ).toBe(200);
+    expect((await checkoutRows(storeId)).find((k) => k.external_id === '20')).toMatchObject({
+      customer_external_id: null,
+      customer_phone: null,
+      consent_state: null,
+      redacted_at: expect.any(Date),
+    });
+
+    // Turned off during a read: consent read after that is not recorded, and later reads do not
+    // ask Shopify for customers at all.
+    const ira = (updatedAt: string) =>
+      leave(shop, '23', {
+        phone: '+919833300008',
+        updatedAt,
+        customer: {
+          id: '7004',
+          displayName: 'Ira',
+          phone: '+919833300004',
+          consent: {
+            state: 'SUBSCRIBED',
+            optInLevel: 'SINGLE_OPT_IN',
+            collectedFrom: 'SHOPIFY',
+            updatedAt: iso(-60_000),
+          },
+        },
+      });
+    ira(iso(4000));
+    shopify.beforeAnswer = async (request) => {
+      if (request.shop !== shop || request.operation !== 'W360CheckoutsWithCustomers') return;
+      shopify.beforeAnswer = null;
+      await storeMessages().saveStoreConsent(owner, { storeId, useStoreConsent: false });
+    };
+    try {
+      await readCheckouts(c, storeId);
+    } finally {
+      shopify.beforeAnswer = null;
+    }
+    expect(
+      await fx.query(
+        `SELECT e.id FROM app.consent_events e JOIN app.contacts ct ON ct.id = e.contact_id
+          WHERE e.tenant_id = $1 AND e.source = 'store' AND ct.phone_e164 = $2`,
+        [c.tenant.id, '+919833300004'],
+      ),
+    ).toEqual([]);
+    const callsBefore = shopify.calls.length;
+    ira(iso(5000));
+    await readCheckouts(c, storeId);
+    expect(
+      shopify.calls
+        .slice(callsBefore)
+        .map((k) => k.operation)
+        .filter((o) => o?.startsWith('W360Checkouts')),
+    ).toEqual(['W360Checkouts']);
+    expect((await checkoutRows(storeId)).find((k) => k.external_id === '23')).toMatchObject({
+      customer_phone: '+919833300008',
+      consent_state: null,
+    });
+
+    // A refused request for more access keeps the store working with what it has.
+    const other = await shopifyStoreForMessages(c, owner, 'Other Tea');
+    shopify.grantScopes = ['read_orders', 'read_products'];
+    try {
+      const refused = await allowCustomerAccess(owner, other.storeId);
+      await service().acceptShopifyApproval(owner, refused.checked);
+      await drain(c, other.storeId);
+    } finally {
+      shopify.grantScopes = null;
+    }
+    expect(await storeRow(other.storeId)).toMatchObject({
+      state: 'connected',
+      access_code_ciphertext: null,
+      granted_scopes: 'read_orders,read_products',
+      access_error: expect.stringMatching(/did not grant access to customers/),
+    });
+    const audit = await fx.query<{ action: string }>(
+      `SELECT action FROM app.audit_events WHERE tenant_id = $1
+          AND action IN ('commerce.store_customer_access_requested',
+            'commerce.store_customer_access_approved', 'commerce.store_access_updated',
+            'commerce.store_consent_saved')
+        ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(audit.map((a) => a.action)).toEqual([
+      'commerce.store_customer_access_requested',
+      'commerce.store_customer_access_approved',
+      'commerce.store_access_updated',
+      'commerce.store_consent_saved',
+      'commerce.store_consent_saved',
+      'commerce.store_customer_access_requested',
+      'commerce.store_customer_access_approved',
+      'commerce.store_access_updated',
+    ]);
+
+    // Shopify grants customers but not the connector's own scopes. The new token replaced the old
+    // one at Shopify (one current token per store, SH-007), so HyFib keeps it and the store has to
+    // be connected again.
+    const third = await shopifyStoreForMessages(c, owner, 'Third Tea');
+    const thirdBefore = await storeRow(third.storeId);
+    shopify.grantScopes = ['read_customers'];
+    try {
+      const partial = await allowCustomerAccess(owner, third.storeId);
+      await service().acceptShopifyApproval(owner, partial.checked);
+      await drain(c, third.storeId);
+    } finally {
+      shopify.grantScopes = null;
+    }
+    expect(await storeRow(third.storeId)).toMatchObject({
+      state: 'failed',
+      access_code_ciphertext: null,
+      granted_scopes: 'read_customers',
+      credentials_version: Number(thirdBefore?.credentials_version) + 1,
+      status_error: expect.stringMatching(
+        /did not grant read_orders and read_products.*Connect the store again/,
+      ),
+    });
+
+    // The credentials change while Shopify answers the exchange (another writer, such as a
+    // reconnect): the new token is not stored over them.
+    const again = await allowCustomerAccess(owner, other.storeId);
+    await service().acceptShopifyApproval(owner, again.checked);
+    shopify.beforeAnswer = async (request) => {
+      if (request.shop !== other.shop || request.grant !== 'authorization_code') return;
+      shopify.beforeAnswer = null;
+      await fx.query(
+        'UPDATE app.commerce_stores SET credentials_version = credentials_version + 1 WHERE id = $1',
+        [other.storeId],
+      );
+    };
+    try {
+      await drain(c, other.storeId);
+    } finally {
+      shopify.beforeAnswer = null;
+    }
+    expect(await storeRow(other.storeId)).toMatchObject({
+      granted_scopes: 'read_orders,read_products',
+    });
+  });
+
+  it('keeps the store working when checkouts cannot be read, erases customers for good, prunes old checkouts and keeps companies apart', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { shop, storeId } = await shopifyStoreForMessages(c, owner);
+    const template = await approvedTemplate(c, owner, cartReminder);
+    await optIn(owner, storeId);
+    await cartRule(owner, c, storeId, 'cart_reminder', {
+      templateId: template.id,
+      delayMinutes: 30,
+    });
+
+    // Shopify refuses checkouts: the reason stays on the store, which keeps syncing orders.
+    shopify.shops.get(shop)!.denyCheckouts = true;
+    shopify.upsertOrder(shop, { id: '9100', phone: '+919844400000' });
+    await orderSignal(shop, '9100', 'orders/create');
+    await readCheckouts(c, storeId);
+    const refused = await storeRow(storeId);
+    expect(refused).toMatchObject({
+      state: 'connected',
+      checkouts_error: expect.stringMatching(/Reading checkouts/),
+    });
+    expect(new Date(refused?.checkouts_read_at as Date).getTime()).toBeGreaterThan(
+      Date.now() + 10 * MINUTE_MS,
+    );
+    expect((await orderRows(storeId)).map((o) => o.external_id)).toContain('9100');
+    shopify.shops.get(shop)!.denyCheckouts = false;
+
+    await marketingOptIn(owner, '+919844400001', 'Gone');
+    leave(shop, '30', { phone: '+919844400001', updatedAt: iso() });
+    leave(shop, '31', { phone: '+919844400002', updatedAt: iso() });
+    // A cursor from a while ago (the read covers it); afterwards the next read starts from when
+    // this one started, less a margin for clocks.
+    await fx.query(
+      `UPDATE app.commerce_stores SET checkouts_cursor = now() - interval '1 hour' WHERE id = $1`,
+      [storeId],
+    );
+    const startedAt = Date.now();
+    await readCheckouts(c, storeId);
+    const read = await storeRow(storeId);
+    expect(read).toMatchObject({ checkouts_error: null, checkouts_page: null });
+    const cursor = new Date(read?.checkouts_cursor as Date).getTime();
+    expect(cursor).toBeLessThanOrEqual(startedAt - 119_000);
+    expect(cursor).toBeGreaterThanOrEqual(startedAt - 125_000);
+    expect(new Date(read?.checkouts_read_at as Date).getTime()).toBeGreaterThan(
+      startedAt + 14 * MINUTE_MS,
+    );
+
+    // Erasing the contact redacts the checkout for good; its reminder is not sent.
+    const [gone] = await fx.query<{ id: string }>(
+      'SELECT id FROM app.contacts WHERE tenant_id = $1 AND phone_e164 = $2',
+      [c.tenant.id, '+919844400001'],
+    );
+    await createContactsService({ db: fx.dbs.app, clock: systemClock }).eraseContact(owner, {
+      contactId: gone?.id as string,
+      suppress: false,
+    });
+    leave(shop, '30', { phone: '+919844400001', updatedAt: iso(1000) });
+    await readCheckouts(c, storeId);
+    expect((await checkoutRows(storeId)).find((k) => k.external_id === '30')).toMatchObject({
+      customer_phone: null,
+      customer_name: null,
+      recovery_url: null,
+      redacted_at: expect.any(Date),
+    });
+    // Shopify's customers/redact redacts by number too.
+    expect(
+      await shopify.deliverCompliance('customers/redact', {
+        shop_id: Number(shopify.shops.get(shop)?.id),
+        shop_domain: shop,
+        customer: { id: 555, phone: '+919844400002' },
+        orders_to_redact: [],
+      }),
+    ).toBe(200);
+    expect((await checkoutRows(storeId)).find((k) => k.external_id === '31')).toMatchObject({
+      customer_phone: null,
+      redacted_at: expect.any(Date),
+    });
+    expect(await runCart(c, storeId, later(31 * MINUTE_MS))).toEqual([
+      ['30', 'cart_reminder', 'skipped: customer_erased'],
+      ['31', 'cart_reminder', 'skipped: customer_erased'],
+    ]);
+
+    // Checkouts are kept 30 days after their last update.
+    const monthAgo = iso(-31 * 86_400_000);
+    leave(shop, '30', { phone: '+919844400001', updatedAt: monthAgo });
+    await fx.query(
+      `UPDATE app.commerce_store_checkouts SET remote_updated_at = $2
+        WHERE store_id = $1 AND external_id = '30'`,
+      [storeId, monthAgo],
+    );
+    await readCheckouts(c, storeId);
+    expect((await checkoutRows(storeId)).map((k) => k.external_id)).toEqual(['31']);
+
+    // More checkouts than one run reads (ten pages of 50): the next run continues with Shopify's
+    // page cursor, and the read's own cursor moves only when the read is complete.
+    // (The cursor is a second ahead so the read's whole seconds leave out checkout 31.)
+    await fx.query(
+      `UPDATE app.commerce_stores SET checkouts_cursor = now() + interval '1 second',
+         checkouts_read_at = now() WHERE id = $1`,
+      [storeId],
+    );
+    for (let i = 0; i < 520; i += 1) {
+      leave(shop, String(1000 + i), { phone: null, updatedAt: iso(3000) });
+    }
+    const many = async () =>
+      (await checkoutRows(storeId)).filter((k) => Number(k.external_id) >= 1000).length;
+    const cursorBefore = new Date((await storeRow(storeId))?.checkouts_cursor as Date).getTime();
+    await processStoreJob(workerDeps(), scopeOf(c), storeId);
+    const partway = await storeRow(storeId);
+    expect(partway).toMatchObject({ checkouts_page: expect.any(String), checkouts_error: null });
+    expect(new Date(partway?.checkouts_cursor as Date).getTime()).toBe(cursorBefore);
+    expect(await many()).toBe(500);
+    await drain(c, storeId);
+    expect(await storeRow(storeId)).toMatchObject({ checkouts_page: null, checkouts_error: null });
+    expect(await many()).toBe(520);
+
+    // Withdrawing the opt-in switches every rule off: the next read stops reading checkouts.
+    await optIn(owner, storeId, { optIn: false });
+    const callsBefore = shopify.calls.length;
+    await readCheckouts(c, storeId);
+    expect(
+      shopify.calls.slice(callsBefore).some((k) => k.operation?.startsWith('W360Checkouts')),
+    ).toBe(false);
+    expect(await storeRow(storeId)).toMatchObject({ checkouts_read_at: null });
+
+    // Only a connected store can be given more access.
+    const goneStore = await shopifyStoreForMessages(c, owner, 'Gone Tea');
+    await shopify.uninstall(goneStore.shop);
+    expect(await storeRow(goneStore.storeId)).toMatchObject({ state: 'uninstalled' });
+    await expectAppError(
+      service().startCustomerAccess(owner, goneStore.storeId),
+      'conflict',
+      /connected store/,
+    );
+
+    // WooCommerce has no carts; agents cannot change reminders; other companies see nothing.
+    const site = `cart-${Date.now().toString(36)}`;
+    woo.addSite(site);
+    const keys = woo.addKeys(site);
+    const { storeId: wooStore } = await service().saveWooKeys(owner, {
+      url: woo.siteUrl(site),
+      ...keys,
+    });
+    await drain(c, wooStore);
+    await optIn(owner, wooStore);
+    await expectAppError(
+      cartRule(owner, c, wooStore, 'cart_reminder', { templateId: template.id, delayMinutes: 30 }),
+      'validation_failed',
+      /not available/,
+    );
+    const agent = await fx.ctx(c, await member(c, 'agent'));
+    await expectAppError(
+      cartRule(agent, c, storeId, 'cart_reminder', { templateId: template.id, delayMinutes: 45 }),
+      'forbidden',
+    );
+    await expectAppError(service().startCustomerAccess(agent, storeId), 'forbidden');
+    const otherCompany = await fx.company();
+    const otherOwner = await fx.ctx(otherCompany, otherCompany.owner);
+    await expectAppError(service().startCustomerAccess(otherOwner, storeId), 'not_found');
+    await expectAppError(
+      storeMessages().saveStoreConsent(otherOwner, { storeId, useStoreConsent: true }),
       'not_found',
     );
   });

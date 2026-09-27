@@ -4,6 +4,7 @@ import {
   and,
   asc,
   channelAccounts,
+  commerceStoreCheckouts,
   commerceStoreMessageRules,
   commerceStoreMessages,
   commerceStoreOrders,
@@ -26,28 +27,36 @@ import { formatTimeOfDay, parseTimeOfDay } from '../campaigns/schedule';
 import { renderPlaceholders, sendSpecFor } from '../templates/definition';
 import { parseInput } from '../validation';
 import {
+  CART_EVENTS,
   STORE_MESSAGE_EVENTS,
   STORE_MESSAGE_EVENT_INFO,
   STORE_MESSAGE_LIMITS,
+  delayRange,
   eventAvailable,
+  isCartEvent,
   readStoreVariables,
   storeVariablesSchema,
+  variablesFit,
   type StoreMessageEvent,
   type StoreMessageSkipReason,
   type StoreVariables,
 } from './messages-model';
+import { hasCustomerAccess, shopifyConsentSupported } from './model';
 
 /**
- * Order messages for the web (P4-06c): a store's message settings, one rule per event, and what was
- * sent. Seeing them needs `commerce.read` (customer names also `contacts.read`); changing them needs
- * `commerce.manage`, and a rule with a marketing template also `campaigns.send`, as sending one by
- * hand does. No rule can be switched on until a manager confirms the store's customers opted in to
- * WhatsApp messages (research M-175).
+ * Order messages for the web (P4-06c) and cart reminders (P4-06d): a store's message settings, one
+ * rule per event, and what was sent. Seeing them needs `commerce.read` (customer names also
+ * `contacts.read`); changing them needs `commerce.manage`, and a rule with a marketing template
+ * also `campaigns.send`, as sending one by hand does. No rule can be switched on until a manager
+ * confirms the store's customers opted in to WhatsApp messages (research M-175); cart reminders
+ * need each customer's marketing opt-in as well.
  */
 
 export interface StoreMessagesServiceDeps {
   db: Database;
   clock: Clock;
+  /** The Shopify Admin API version HyFib uses (the store's consent needs 2026-07 or later). */
+  shopifyApiVersion?: string | null;
 }
 
 const timeOfDay = z
@@ -77,8 +86,17 @@ const ruleSchema = z.object({
   version: z.number().int().min(0),
 });
 
+const storeConsentSchema = z.object({ storeId: z.uuid(), useStoreConsent: z.boolean() });
+
 const invalid = (path: string, message: string) =>
   new AppError('validation_failed', message, { issues: [{ path, message }] });
+
+/** Minutes as the rule forms say them: "30 minutes", "4 hours", "3 days". */
+function minutesText(minutes: number): string {
+  if (minutes % 1440 === 0) return `${minutes / 1440} day${minutes === 1440 ? '' : 's'}`;
+  if (minutes % 60 === 0) return `${minutes / 60} hour${minutes === 60 ? '' : 's'}`;
+  return `${minutes} minutes`;
+}
 
 export interface StoreMessageTemplateOption {
   id: string;
@@ -239,6 +257,12 @@ export function createStoreMessagesService(deps: StoreMessagesServiceDeps) {
     if (template.category !== 'UTILITY' && template.category !== 'MARKETING') {
       throw invalid('templateId', 'Choose a utility or marketing template.');
     }
+    if (isCartEvent(data.event) && template.category !== 'MARKETING') {
+      throw invalid(
+        'templateId',
+        'Cart reminders are marketing messages: choose an approved marketing template.',
+      );
+    }
     if (template.category === 'MARKETING' && !can(ctx, 'campaigns.send')) {
       throw new AppError(
         'forbidden',
@@ -271,6 +295,52 @@ export function createStoreMessagesService(deps: StoreMessagesServiceDeps) {
     return { category: template.category };
   }
 
+  /**
+   * Cart reminders of the last 30 days (ADR-049): reminders sent (handed to WhatsApp, leaving out
+   * those WhatsApp failed, cancelled or never confirmed), checkouts recovered (completed after one
+   * of those reminders) and their value per currency.
+   */
+  async function cartReport(tx: Tx, ctx: TenantContext, storeId: string, since: Date) {
+    const res = await tx.execute<{
+      sent: number;
+      recovered: number;
+      currency: string | null;
+      value: string | null;
+    }>(sql`
+      with reminders as (
+        select m.checkout_id, msg.created_at
+          from app.commerce_store_messages m
+          join app.messages msg on msg.tenant_id = m.tenant_id and msg.id = m.message_id
+         where m.tenant_id = ${ctx.tenant.id} and m.store_id = ${storeId}
+           and m.checkout_id is not null and m.state = 'queued'
+           and msg.status not in ('failed', 'canceled', 'unknown_outcome')
+           and m.created_at > ${since.toISOString()}::timestamptz
+      ),
+      sent as (
+        select checkout_id, min(created_at) as first_sent from reminders group by checkout_id
+      ),
+      recovered as (
+        select k.id, k.currency, k.total_minor
+          from sent s
+          join app.commerce_store_checkouts k on k.tenant_id = ${ctx.tenant.id} and k.id = s.checkout_id
+         where k.completed_at is not null and k.completed_at > s.first_sent
+      )
+      select (select count(*)::int from reminders) as sent,
+             (select count(*)::int from recovered) as recovered,
+             r.currency, sum(r.total_minor)::text as value
+        from (select 1) one
+        left join recovered r on true
+       group by r.currency`);
+    const rows = res.rows;
+    return {
+      sent: rows[0]?.sent ?? 0,
+      recovered: rows[0]?.recovered ?? 0,
+      value: rows
+        .filter((r) => r.currency !== null && r.value !== null)
+        .map((r) => ({ currency: r.currency as string, totalMinor: Number(r.value) })),
+    };
+  }
+
   return {
     /**
      * A store's Messages page: its settings, one rule per event, the numbers and templates a rule
@@ -296,6 +366,13 @@ export function createStoreMessagesService(deps: StoreMessagesServiceDeps) {
               sendWindowStart: commerceStores.sendWindowStart,
               sendWindowEnd: commerceStores.sendWindowEnd,
               messageTestOrders: commerceStores.messageTestOrders,
+              grantedScopes: commerceStores.grantedScopes,
+              customerAccessRequestedAt: commerceStores.customerAccessRequestedAt,
+              accessError: commerceStores.accessError,
+              storeConsentAt: commerceStores.storeConsentAt,
+              checkoutsReadAt: commerceStores.checkoutsReadAt,
+              checkoutsError: commerceStores.checkoutsError,
+              detailsWithheld: commerceStores.detailsWithheld,
             })
             .from(commerceStores)
             .leftJoin(
@@ -308,6 +385,22 @@ export function createStoreMessagesService(deps: StoreMessagesServiceDeps) {
             .leftJoin(users, eq(users.id, memberships.userId))
             .where(and(eq(commerceStores.tenantId, ctx.tenant.id), eq(commerceStores.id, id)));
           if (!store) throw notFound('Store not found.');
+          const [consentBy] = store.storeConsentAt
+            ? await tx
+                .select({
+                  name: sql<string | null>`coalesce(${memberships.displayName}, ${users.name})`,
+                })
+                .from(commerceStores)
+                .innerJoin(
+                  memberships,
+                  and(
+                    eq(memberships.tenantId, commerceStores.tenantId),
+                    eq(memberships.id, commerceStores.storeConsentMembershipId),
+                  ),
+                )
+                .leftJoin(users, eq(users.id, memberships.userId))
+                .where(and(eq(commerceStores.tenantId, ctx.tenant.id), eq(commerceStores.id, id)))
+            : [];
           const channels = await tx
             .select({
               id: channelAccounts.id,
@@ -352,7 +445,7 @@ export function createStoreMessagesService(deps: StoreMessagesServiceDeps) {
               channelAccountId: rule?.channelAccountId ?? null,
               templateId: rule?.templateId ?? null,
               variables: readStoreVariables(rule?.variables),
-              delayMinutes: rule?.delayMinutes ?? 0,
+              delayMinutes: rule?.delayMinutes ?? delayRange(event).min,
               confirmButton: rule?.confirmButton ?? null,
               cancelButton: rule?.cancelButton ?? null,
               version: rule?.version ?? 0,
@@ -373,17 +466,28 @@ export function createStoreMessagesService(deps: StoreMessagesServiceDeps) {
               createdAt: commerceStoreMessages.createdAt,
               orderId: commerceStoreOrders.id,
               orderName: commerceStoreOrders.name,
-              customerName: commerceStoreOrders.customerName,
+              orderCustomerName: commerceStoreOrders.customerName,
+              checkoutId: commerceStoreCheckouts.id,
+              checkoutName: commerceStoreCheckouts.name,
+              checkoutExternalId: commerceStoreCheckouts.externalId,
+              checkoutCustomerName: commerceStoreCheckouts.customerName,
               messageStatus: messages.status,
               errorTitle: messages.errorTitle,
               conversationId: messages.conversationId,
             })
             .from(commerceStoreMessages)
-            .innerJoin(
+            .leftJoin(
               commerceStoreOrders,
               and(
                 eq(commerceStoreOrders.tenantId, commerceStoreMessages.tenantId),
                 eq(commerceStoreOrders.id, commerceStoreMessages.orderId),
+              ),
+            )
+            .leftJoin(
+              commerceStoreCheckouts,
+              and(
+                eq(commerceStoreCheckouts.tenantId, commerceStoreMessages.tenantId),
+                eq(commerceStoreCheckouts.id, commerceStoreMessages.checkoutId),
               ),
             )
             .leftJoin(
@@ -417,7 +521,10 @@ export function createStoreMessagesService(deps: StoreMessagesServiceDeps) {
             createdAt: r.createdAt,
             orderId: r.orderId,
             orderName: r.orderName,
-            customerName: customers ? r.customerName : null,
+            checkoutId: r.checkoutId,
+            checkoutName:
+              r.checkoutId === null ? null : (r.checkoutName ?? `Checkout ${r.checkoutExternalId}`),
+            customerName: customers ? (r.orderCustomerName ?? r.checkoutCustomerName) : null,
             conversationId: customers ? r.conversationId : null,
           }));
           const counts: Record<StoreMessageStatus, number> = {
@@ -430,14 +537,20 @@ export function createStoreMessagesService(deps: StoreMessagesServiceDeps) {
             skipped: 0,
           };
           for (const r of recent) counts[r.status] += 1;
+          const cart = store.platform === 'shopify' ? await cartReport(tx, ctx, id, since) : null;
+          const { grantedScopes, ...shown } = store;
           return {
             store: {
-              ...store,
+              ...shown,
               sendWindowStart:
                 store.sendWindowStart === null ? '' : formatTimeOfDay(store.sendWindowStart),
               sendWindowEnd:
                 store.sendWindowEnd === null ? '' : formatTimeOfDay(store.sendWindowEnd),
+              customerAccess: hasCustomerAccess(grantedScopes),
+              storeConsentBy: consentBy?.name ?? null,
+              consentSupported: shopifyConsentSupported(deps.shopifyApiVersion),
             },
+            cart,
             timezone: ctx.tenant.timezone,
             rules,
             channels,
@@ -445,10 +558,72 @@ export function createStoreMessagesService(deps: StoreMessagesServiceDeps) {
             counts,
             recent: recent.slice(0, 50),
             canManage: can(ctx, 'commerce.manage'),
+            canManageConsent: can(ctx, 'commerce.manage') && can(ctx, 'contacts.write'),
           };
         },
         { accessMode: 'read only' },
       );
+    },
+
+    /**
+     * Turns the use of the WhatsApp consent the store records on or off (ADR-049). Turning it on
+     * needs customer access in Shopify and an API version that has the consent; while it is on,
+     * checkout reads record that consent as consent events. Consent recorded already stays.
+     */
+    async saveStoreConsent(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
+      assertCan(ctx, 'commerce.manage');
+      // It writes consent records for the company's contacts.
+      assertCan(ctx, 'contacts.write');
+      const data = parseInput(storeConsentSchema, input);
+      const now = deps.clock.now();
+      return db.run(ctx.scope, async (tx) => {
+        const store = await lockStore(tx, ctx, data.storeId);
+        if (store.platform !== 'shopify') {
+          throw invalid('useStoreConsent', 'Only Shopify stores record WhatsApp consent.');
+        }
+        if (data.useStoreConsent) {
+          if (store.state !== 'connected') {
+            throw invalid('useStoreConsent', 'Only a connected store can be read.');
+          }
+          if (!shopifyConsentSupported(deps.shopifyApiVersion)) {
+            throw invalid(
+              'useStoreConsent',
+              'HyFib uses a Shopify API version without WhatsApp consent (2026-07 or later is needed).',
+            );
+          }
+          if (!hasCustomerAccess(store.grantedScopes)) {
+            throw invalid(
+              'useStoreConsent',
+              'First allow HyFib to read the store’s customers in Shopify.',
+            );
+          }
+        }
+        const on = store.storeConsentAt !== null;
+        if (on !== data.useStoreConsent) {
+          await tx
+            .update(commerceStores)
+            .set(
+              data.useStoreConsent
+                ? { storeConsentAt: now, storeConsentMembershipId: ctx.membership.id }
+                : { storeConsentAt: null, storeConsentMembershipId: null },
+            )
+            .where(
+              and(eq(commerceStores.tenantId, ctx.tenant.id), eq(commerceStores.id, store.id)),
+            );
+          await recordAudit(
+            tx,
+            ctx,
+            {
+              action: 'commerce.store_consent_saved',
+              subjectType: 'commerce_store',
+              subjectId: store.id,
+              metadata: { useStoreConsent: data.useStoreConsent },
+            },
+            meta,
+          );
+        }
+        return { ok: true as const };
+      });
     },
 
     /**
@@ -535,6 +710,16 @@ export function createStoreMessagesService(deps: StoreMessagesServiceDeps) {
       ) {
         throw invalid('confirmButton', 'Only the cash on delivery message uses buttons.');
       }
+      const range = delayRange(data.event);
+      if (data.delayMinutes < range.min || data.delayMinutes > range.max) {
+        throw invalid(
+          'delayMinutes',
+          `Wait between ${minutesText(range.min)} and ${minutesText(range.max)}.`,
+        );
+      }
+      if (!variablesFit(data.event, data.variables)) {
+        throw invalid('variables', 'Choose values this message can fill.');
+      }
       const now = deps.clock.now();
       return db.run(ctx.scope, async (tx) => {
         const store = await lockStore(tx, ctx, data.storeId);
@@ -559,6 +744,22 @@ export function createStoreMessagesService(deps: StoreMessagesServiceDeps) {
           );
         }
         let category: string | null = null;
+        // The two cart reminders: the second follows the first, later.
+        const cartRules = isCartEvent(data.event)
+          ? await tx
+              .select()
+              .from(commerceStoreMessageRules)
+              .where(
+                and(
+                  eq(commerceStoreMessageRules.tenantId, ctx.tenant.id),
+                  eq(commerceStoreMessageRules.storeId, store.id),
+                  inArray(commerceStoreMessageRules.event, [...CART_EVENTS]),
+                ),
+              )
+              .for('update')
+          : [];
+        const first = cartRules.find((r) => r.event === 'cart_reminder');
+        const second = cartRules.find((r) => r.event === 'cart_second_reminder');
         if (data.enabled) {
           if (!store.messagesOptInAt) {
             throw invalid(
@@ -568,6 +769,24 @@ export function createStoreMessagesService(deps: StoreMessagesServiceDeps) {
           }
           if (store.state !== 'connected') {
             throw invalid('enabled', 'Only a connected store can send messages.');
+          }
+          if (data.event === 'cart_second_reminder') {
+            if (!first?.enabled) {
+              throw invalid('enabled', 'Switch the first cart reminder on first.');
+            }
+            if (data.delayMinutes <= first.delayMinutes) {
+              throw invalid(
+                'delayMinutes',
+                'The second reminder has to come later than the first one.',
+              );
+            }
+          }
+          if (
+            data.event === 'cart_reminder' &&
+            second?.enabled &&
+            data.delayMinutes >= second.delayMinutes
+          ) {
+            throw invalid('delayMinutes', 'The first reminder has to come before the second one.');
           }
           ({ category } = await checkEnabledRule(tx, ctx, data));
         }
@@ -604,6 +823,52 @@ export function createStoreMessagesService(deps: StoreMessagesServiceDeps) {
             ...values,
           });
         }
+        // Switching the first cart reminder off switches the second off too.
+        const secondOff =
+          data.event === 'cart_reminder' && !data.enabled && second?.enabled === true;
+        if (secondOff && second) {
+          await tx
+            .update(commerceStoreMessageRules)
+            .set({
+              enabled: false,
+              enabledAt: null,
+              version: second.version + 1,
+              updatedByMembershipId: ctx.membership.id,
+            })
+            .where(
+              and(
+                eq(commerceStoreMessageRules.tenantId, ctx.tenant.id),
+                eq(commerceStoreMessageRules.id, second.id),
+              ),
+            );
+        }
+        if (isCartEvent(data.event)) {
+          // Checkouts are read while a cart reminder is on, from the moment the first went on.
+          const wasOn = cartRules.some((r) => r.enabled);
+          const nowOn =
+            data.enabled ||
+            cartRules.some((r) => r.enabled && r.event !== data.event && !secondOff);
+          if (nowOn && !wasOn) {
+            await tx
+              .update(commerceStores)
+              .set({
+                checkoutsCursor: switchedOn,
+                checkoutsPage: null,
+                checkoutsReadAt: now,
+                checkoutsError: null,
+              })
+              .where(
+                and(eq(commerceStores.tenantId, ctx.tenant.id), eq(commerceStores.id, store.id)),
+              );
+          } else if (!nowOn && wasOn) {
+            await tx
+              .update(commerceStores)
+              .set({ checkoutsReadAt: null, checkoutsPage: null, checkoutsError: null })
+              .where(
+                and(eq(commerceStores.tenantId, ctx.tenant.id), eq(commerceStores.id, store.id)),
+              );
+          }
+        }
         await recordAudit(
           tx,
           ctx,
@@ -618,6 +883,7 @@ export function createStoreMessagesService(deps: StoreMessagesServiceDeps) {
               channelAccountId: data.channelAccountId,
               ...(category ? { category } : {}),
               delayMinutes: data.delayMinutes,
+              ...(secondOff ? { secondReminderSwitchedOff: true } : {}),
             },
           },
           meta,

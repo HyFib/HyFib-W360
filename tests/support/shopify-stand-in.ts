@@ -64,6 +64,31 @@ export interface StandInShopifyProduct {
   currencyCode: string;
 }
 
+/** A checkout a customer left (SH-039), with the customer and consent Shopify records (SH-041). */
+export interface StandInCheckout {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+  recoveryUrl: string | null;
+  total: { amount: string; currencyCode: string };
+  lineItems: { title: string; variantTitle: string | null; quantity: number }[];
+  shippingAddress: { name: string | null; phone: string | null } | null;
+  billingAddress: { name: string | null; phone: string | null } | null;
+  customer: {
+    id: string;
+    displayName: string | null;
+    phone: string | null;
+    consent: {
+      state: string;
+      optInLevel: string | null;
+      collectedFrom: string | null;
+      updatedAt: string | null;
+    } | null;
+  } | null;
+}
+
 export interface StandInSubscription {
   id: string;
   topic: string;
@@ -84,8 +109,11 @@ export interface StandInShop {
   subscriptions: StandInSubscription[];
   orders: Map<string, StandInShopifyOrder>;
   products: Map<string, StandInShopifyProduct>;
+  checkouts: Map<string, StandInCheckout>;
   /** Protected customer data not approved: customer fields come back null with ACCESS_DENIED. */
   withhold: boolean;
+  /** Checkouts refused as a whole (for example a staff permission, SH-037). */
+  denyCheckouts: boolean;
   /** Points left in the cost bucket (SH-011); a query needing more is THROTTLED. */
   available: number;
 }
@@ -129,6 +157,10 @@ export interface ShopifyStandIn {
     domain: string,
     product: Partial<StandInShopifyProduct> & { id: string },
   ): StandInShopifyProduct;
+  upsertCheckout(
+    domain: string,
+    checkout: Partial<StandInCheckout> & { id: string },
+  ): StandInCheckout;
   /** Delivers a webhook to the shop's subscriptions for `topic` (e.g. 'orders/updated'). */
   deliver(
     domain: string,
@@ -216,7 +248,9 @@ export async function startShopifyStandIn(options: {
       subscriptions: [],
       orders: new Map(),
       products: new Map(),
+      checkouts: new Map(),
       withhold: false,
+      denyCheckouts: false,
       available: 1000,
     };
     shops.set(domain, shop);
@@ -226,6 +260,28 @@ export async function startShopifyStandIn(options: {
   function shopOf(domain: string): StandInShop {
     const shop = shops.get(domain) ?? addShop(domain);
     return shop;
+  }
+
+  function upsertCheckout(domain: string, checkout: Partial<StandInCheckout> & { id: string }) {
+    const shop = shopOf(domain);
+    const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+    const existing = shop.checkouts.get(checkout.id);
+    const merged: StandInCheckout = {
+      name: `#C${1000 + shop.checkouts.size + 1}`,
+      createdAt: now,
+      completedAt: null,
+      recoveryUrl: `https://${domain}/checkouts/${checkout.id}/recover?key=k${checkout.id}`,
+      total: { amount: '0.00', currencyCode: shop.currency },
+      lineItems: [],
+      shippingAddress: null,
+      billingAddress: null,
+      customer: null,
+      ...existing,
+      ...checkout,
+      updatedAt: checkout.updatedAt ?? now,
+    };
+    shop.checkouts.set(checkout.id, merged);
+    return merged;
   }
 
   function upsertOrder(domain: string, order: Partial<StandInShopifyOrder> & { id: string }) {
@@ -470,6 +526,78 @@ export async function startShopifyStandIn(options: {
     };
   }
 
+  function checkoutNode(shop: StandInShop, c: StandInCheckout, withCustomers: boolean) {
+    const hide = shop.withhold;
+    const customerAccess = shop.scopes.includes('read_customers');
+    return {
+      id: gid('AbandonedCheckout', c.id),
+      name: c.name,
+      createdAt: c.createdAt,
+      updatedAt: c.updatedAt,
+      completedAt: c.completedAt,
+      abandonedCheckoutUrl: c.recoveryUrl,
+      totalPriceSet: money(c.total.amount, c.total.currencyCode),
+      lineItemsQuantity: c.lineItems.reduce((n, l) => n + l.quantity, 0),
+      lineItems: {
+        nodes: c.lineItems
+          .slice(0, 10)
+          .map((l) => ({ title: l.title, variantTitle: l.variantTitle, quantity: l.quantity })),
+      },
+      shippingAddress: c.shippingAddress
+        ? {
+            name: hide ? null : c.shippingAddress.name,
+            phone: hide ? null : c.shippingAddress.phone,
+          }
+        : null,
+      billingAddress: c.billingAddress
+        ? { name: hide ? null : c.billingAddress.name, phone: hide ? null : c.billingAddress.phone }
+        : null,
+      ...(withCustomers
+        ? {
+            customer:
+              customerAccess && c.customer
+                ? {
+                    id: gid('Customer', c.customer.id),
+                    displayName: hide ? null : c.customer.displayName,
+                    defaultPhoneNumber: c.customer.phone
+                      ? {
+                          phoneNumber: hide ? null : c.customer.phone,
+                          whatsAppMarketingConsent: c.customer.consent,
+                        }
+                      : null,
+                  }
+                : null,
+          }
+        : {}),
+    };
+  }
+
+  /** `updated_at:>='…'` (SH-038); no sort by update time exists, so the list is in id order. */
+  function checkoutConnection(
+    shop: StandInShop,
+    query: string,
+    first: number,
+    after: unknown,
+    withCustomers: boolean,
+  ) {
+    const since = /updated_at:>='([^']+)'/.exec(query)?.[1];
+    const sinceMs = since ? Date.parse(since) : 0;
+    const sorted = [...shop.checkouts.values()]
+      .filter((c) => Date.parse(c.updatedAt) >= sinceMs)
+      .sort((a, b) => Number(a.id) - Number(b.id));
+    const start =
+      typeof after === 'string' ? Number(Buffer.from(after, 'base64').toString('utf8')) + 1 : 0;
+    const page = sorted.slice(start, start + first);
+    const end = start + page.length - 1;
+    return {
+      nodes: page.map((c) => checkoutNode(shop, c, withCustomers)),
+      pageInfo: {
+        hasNextPage: start + first < sorted.length,
+        endCursor: page.length ? Buffer.from(String(end)).toString('base64') : null,
+      },
+    };
+  }
+
   function graphql(shop: StandInShop, query: string, variables: Record<string, unknown>) {
     const operation = /(?:query|mutation)\s+(\w+)/.exec(query)?.[1] ?? '';
     const requested = operation === 'W360Orders' || operation === 'W360OrderNodes' ? 200 : 20;
@@ -547,6 +675,46 @@ export async function startShopifyStandIn(options: {
           ...(denied.length ? { errors: denied } : {}),
           extensions: cost,
         };
+      case 'W360Checkouts':
+      case 'W360CheckoutsWithCustomers': {
+        if (shop.denyCheckouts) {
+          return {
+            errors: [
+              {
+                message: 'Access denied for abandonedCheckouts field.',
+                extensions: { code: 'ACCESS_DENIED' },
+              },
+            ],
+            extensions: cost,
+          };
+        }
+        const withCustomers = operation === 'W360CheckoutsWithCustomers';
+        const pageSize = Number(/abandonedCheckouts\(first: (\d+)/.exec(query)?.[1] ?? '50');
+        const errors = [
+          ...denied,
+          ...(withCustomers && !shop.scopes.includes('read_customers')
+            ? [
+                {
+                  message: 'Access denied for customer field. Required access: `read_customers`.',
+                  extensions: { code: 'ACCESS_DENIED' },
+                },
+              ]
+            : []),
+        ];
+        return {
+          data: {
+            abandonedCheckouts: checkoutConnection(
+              shop,
+              String(variables.query ?? ''),
+              pageSize,
+              variables.after,
+              withCustomers,
+            ),
+          },
+          ...(errors.length ? { errors } : {}),
+          extensions: cost,
+        };
+      }
       case 'W360Products':
         return {
           data: {
@@ -639,6 +807,8 @@ export async function startShopifyStandIn(options: {
             return json(res, 200, upsertOrder(domain, body.order as StandInShopifyOrder));
           case '/__stand-in/product':
             return json(res, 200, upsertProduct(domain, body.product as StandInShopifyProduct));
+          case '/__stand-in/checkout':
+            return json(res, 200, upsertCheckout(domain, body.checkout as StandInCheckout));
           case '/__stand-in/deliver':
             return json(
               res,
@@ -770,6 +940,7 @@ export async function startShopifyStandIn(options: {
   standIn.addShop = addShop;
   standIn.upsertOrder = upsertOrder;
   standIn.upsertProduct = upsertProduct;
+  standIn.upsertCheckout = upsertCheckout;
   standIn.deliver = deliver;
   standIn.deliverCompliance = deliverCompliance;
   standIn.uninstall = uninstall;

@@ -34,6 +34,9 @@ export const STORE_LIMITS = {
   shopifyLineItems: 25,
   shopifyProductsPage: 50,
   shopifyNodesPage: 20,
+  /** Checkouts per page (SH-038) and items kept per checkout. */
+  shopifyCheckoutsPage: 50,
+  checkoutItems: 10,
   wooOrdersPage: 25,
   wooProductsPage: 50,
   /** Pages one job reads per resource before handing over to the next job. */
@@ -127,6 +130,9 @@ export const storeCredentialsAad = (tenantId: string, storeId: string) =>
   `commerce-store:${tenantId}:${storeId}:credentials`;
 export const storeWebhookSecretAad = (tenantId: string, storeId: string) =>
   `commerce-store:${tenantId}:${storeId}:webhook`;
+/** An authorization code for more access on a connected store (its own column, its own binding). */
+export const storeAccessCodeAad = (tenantId: string, storeId: string) =>
+  `commerce-store:${tenantId}:${storeId}:access-code`;
 
 /** What the credentials ciphertext holds at each stage. */
 export const storeCredentialsSchema = z.discriminatedUnion('kind', [
@@ -218,14 +224,38 @@ export const WOO_PING_RE = /^webhook_id=[0-9]{1,20}$/;
 
 export const SHOPIFY_SCOPES = ['read_orders', 'read_products'] as const;
 
+/**
+ * Customer access, asked for only when a manager allows it for cart reminders (SH-041, SH-042):
+ * the customer's phone and the WhatsApp consent Shopify records for it.
+ */
+export const SHOPIFY_CUSTOMER_SCOPE = 'read_customers';
+
+/** Shopify records WhatsApp consent from this Admin API version on (SH-041). */
+export const SHOPIFY_CONSENT_API_VERSION = '2026-07';
+export const shopifyConsentSupported = (apiVersion: string | null | undefined) =>
+  typeof apiVersion === 'string' && /^\d{4}-\d{2}$/.test(apiVersion)
+    ? apiVersion >= SHOPIFY_CONSENT_API_VERSION
+    : false;
+
+/** The scopes an authorization of this store asks for. */
+export function shopifyScopesFor(store: { customerAccessRequestedAt: Date | null }): string[] {
+  return store.customerAccessRequestedAt
+    ? [...SHOPIFY_SCOPES, SHOPIFY_CUSTOMER_SCOPE]
+    : [...SHOPIFY_SCOPES];
+}
+
+/** Whether the store's current token was granted customer access. */
+export const hasCustomerAccess = (grantedScopes: string | null) =>
+  (grantedScopes ?? '').split(',').some((scope) => scope.trim() === SHOPIFY_CUSTOMER_SCOPE);
+
 /** The authorize URL for an offline token (SH-003): `grant_options[]` empty, as Shopify's library. */
 export function shopifyAuthorizeUrl(
   shopOrigin: string,
-  input: { clientId: string; redirectUri: string; state: string },
+  input: { clientId: string; redirectUri: string; state: string; scopes?: readonly string[] },
 ): string {
   const query = new URLSearchParams([
     ['client_id', input.clientId],
-    ['scope', SHOPIFY_SCOPES.join(',')],
+    ['scope', (input.scopes ?? SHOPIFY_SCOPES).join(',')],
     ['redirect_uri', input.redirectUri],
     ['state', input.state],
     ['grant_options[]', ''],
@@ -287,6 +317,37 @@ export interface StoreOrderRecord {
   trackingNumber: string | null;
   trackingUrl: string | null;
   items: StoreOrderItemRecord[];
+}
+
+/** Shopify's WhatsApp marketing consent for a checkout's number (SH-041), as read. */
+export interface StoreCheckoutConsent {
+  state: 'NEVER_SUBSCRIBED' | 'PENDING' | 'REDACTED' | 'SUBSCRIBED' | 'UNSUBSCRIBED' | null;
+  optInLevel: 'SINGLE_OPT_IN' | 'CONFIRMED_OPT_IN' | 'UNKNOWN' | null;
+  collectedFrom: 'SHOPIFY' | 'OTHER' | null;
+  updatedAt: Date | null;
+}
+
+/** A checkout a customer left in a Shopify store (SH-039). */
+export interface StoreCheckoutRecord {
+  externalId: string;
+  name: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+  completedAt: Date | null;
+  customerExternalId: string | null;
+  customerName: string | null;
+  /**
+   * As Shopify gives it: the customer's default phone (with customer access), else the shipping or
+   * billing phone. Linked to contacts only once it reads as an E.164 number.
+   */
+  phone: string | null;
+  /** The consent Shopify records for `phone`, only when `phone` is the customer's default phone. */
+  consent: StoreCheckoutConsent | null;
+  currency: string | null;
+  totalMinor: number | null;
+  items: { title: string; quantity: number }[];
+  itemCount: number | null;
+  recoveryUrl: string | null;
 }
 
 export interface StoreProductRecord {

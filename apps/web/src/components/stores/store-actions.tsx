@@ -15,6 +15,7 @@ import { FormError, FormSuccess } from '@/components/form-status';
 /** Asks the worker to read the store again now (and to check HyFib's webhooks there). */
 export function StoreSyncButton({ slug, storeId }: { slug: string; storeId: string }) {
   const [busy, setBusy] = useState(false);
+  const [asked, setAsked] = useState(false);
   const [error, setError] = useState<string | null>(null);
   return (
     <div className="grid gap-2">
@@ -25,16 +26,19 @@ export function StoreSyncButton({ slug, storeId }: { slug: string; storeId: stri
           disabled={busy}
           onClick={() => {
             setBusy(true);
+            setAsked(false);
             setError(null);
             void requestStoreSyncAction(slug, { id: storeId }).then((r) => {
               setBusy(false);
               if (!r.ok) setError(r.message);
+              else setAsked(true);
             });
           }}
         >
           {busy ? 'Asking…' : 'Read the store now'}
         </ClientButton>
       </div>
+      <FormSuccess message={asked ? 'The store will be read in a moment.' : null} />
       <FormError message={error} />
     </div>
   );

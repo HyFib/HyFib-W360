@@ -1,3 +1,4 @@
+export * from './cart-reminders';
 export * from './http';
 export * from './messages-model';
 export * from './messages-service';

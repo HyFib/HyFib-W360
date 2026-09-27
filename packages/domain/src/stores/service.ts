@@ -44,13 +44,15 @@ import {
   newStoreWebhookSecret,
   normalizeShopDomain,
   normalizeStoreUrl,
+  hasCustomerAccess,
   shopifyAuthorizeUrl,
+  shopifyScopesFor,
   storeWebhookSecretAad,
   verifyShopifyCallback,
   wooAuthorizeUrl,
 } from './model';
 import { shopOrigin, type ShopifyAppConfig } from './shopify';
-import { enqueueStoreJob, sealStoreCredentials } from './worker';
+import { enqueueStoreJob, sealStoreAccessCode, sealStoreCredentials } from './worker';
 
 /**
  * Store connectors (P4-06b). Seeing stores, their orders and products needs `commerce.read` (orders
@@ -331,6 +333,7 @@ export function createStoreService(deps: StoreServiceDeps) {
       }
       const { token, hash } = newConnectToken();
       const now = deps.clock.now();
+      let scopes = shopifyScopesFor({ customerAccessRequestedAt: null });
       const connect = {
         state: 'authorizing' as const,
         connectTokenHash: hash,
@@ -355,6 +358,7 @@ export function createStoreService(deps: StoreServiceDeps) {
           if (existing) {
             reconnectable(existing.state);
             id = existing.id;
+            scopes = shopifyScopesFor(existing);
             await tx
               .update(commerceStores)
               .set({
@@ -405,6 +409,64 @@ export function createStoreService(deps: StoreServiceDeps) {
           clientId: config.clientId,
           redirectUri: `${deps.appBaseUrl}/api/stores/shopify/callback`,
           state: token,
+          scopes,
+        }),
+      };
+    },
+
+    /**
+     * Asks Shopify for customer access on a connected store (ADR-049, SH-042): a handshake like
+     * connecting, for the scopes the store has plus `read_customers`. The store keeps syncing with
+     * its current token until the worker exchanges the approval's code (see `exchangeAccessCode`).
+     */
+    async startCustomerAccess(ctx: TenantContext, storeId: string, meta: RequestMeta = {}) {
+      assertCan(ctx, 'commerce.manage');
+      const config = deps.shopify;
+      if (!config) throw new AppError('unsupported', 'Shopify is not set up for HyFib yet.');
+      const { id } = parseInput(z.object({ id: z.uuid() }), { id: storeId });
+      const { token, hash } = newConnectToken();
+      const now = deps.clock.now();
+      const shopDomain = await db.run(ctx.scope, async (tx) => {
+        const store = await lockStore(tx, ctx, id);
+        if (store.platform !== 'shopify' || !store.shopDomain) {
+          throw new AppError('conflict', 'Only Shopify stores have customer access.');
+        }
+        if (store.state !== 'connected') {
+          throw new AppError('conflict', 'Only a connected store can be given more access.');
+        }
+        if (hasCustomerAccess(store.grantedScopes)) {
+          throw new AppError('conflict', 'HyFib can already read this store’s customers.');
+        }
+        await tx
+          .update(commerceStores)
+          .set({
+            connectTokenHash: hash,
+            connectMembershipId: ctx.membership.id,
+            connectExpiresAt: new Date(now.getTime() + STORE_LIMITS.connectMinutes * MINUTE),
+            customerAccessRequestedAt: store.customerAccessRequestedAt ?? now,
+            accessError: null,
+            version: store.version + 1,
+          })
+          .where(storeWhere(ctx, store.id));
+        await recordAudit(
+          tx,
+          ctx,
+          {
+            action: 'commerce.store_customer_access_requested',
+            subjectType: 'commerce_store',
+            subjectId: store.id,
+            metadata: { shop: store.shopDomain },
+          },
+          meta,
+        );
+        return store.shopDomain;
+      });
+      return {
+        url: shopifyAuthorizeUrl(shopOrigin(config, shopDomain), {
+          clientId: config.clientId,
+          redirectUri: `${deps.appBaseUrl}/api/stores/shopify/callback`,
+          state: token,
+          scopes: shopifyScopesFor({ customerAccessRequestedAt: now }),
         }),
       };
     },
@@ -462,7 +524,7 @@ export function createStoreService(deps: StoreServiceDeps) {
       return db.run(ctx.scope, async (tx) => {
         const store = await lockStore(tx, ctx, input.storeId);
         if (
-          store.state !== 'authorizing' ||
+          (store.state !== 'authorizing' && store.state !== 'connected') ||
           store.platform !== 'shopify' ||
           store.connectTokenHash !== input.tokenHash ||
           !store.connectExpiresAt ||
@@ -479,6 +541,41 @@ export function createStoreService(deps: StoreServiceDeps) {
             'forbidden',
             'Only the member who started connecting this store can finish it.',
           );
+        }
+        if (store.state === 'connected') {
+          // More access for a connected store: it keeps syncing with its current token until
+          // the worker has exchanged this code (and keeps it when Shopify refused).
+          await tx
+            .update(commerceStores)
+            .set({
+              accessCodeCiphertext: sealStoreAccessCode(
+                deps.keyring,
+                ctx.tenant.id,
+                store.id,
+                input.code,
+              ),
+              accessError: null,
+              connectTokenHash: null,
+              connectMembershipId: null,
+              connectExpiresAt: null,
+              // The sweep picks the store up within a minute even if the job below is lost.
+              nextSyncAt: now,
+              version: store.version + 1,
+            })
+            .where(storeWhere(ctx, store.id));
+          await enqueue(tx, ctx, store.id);
+          await recordAudit(
+            tx,
+            ctx,
+            {
+              action: 'commerce.store_customer_access_approved',
+              subjectType: 'commerce_store',
+              subjectId: store.id,
+              metadata: { shop: store.shopDomain },
+            },
+            meta,
+          );
+          return { storeId: store.id };
         }
         await tx
           .update(commerceStores)
@@ -733,9 +830,16 @@ export function createStoreService(deps: StoreServiceDeps) {
         if (store.state !== 'connected') {
           throw new AppError('precondition_failed', 'Only a connected store can be read.');
         }
+        const now = deps.clock.now();
         await tx
           .update(commerceStores)
-          .set({ nextSyncAt: deps.clock.now(), webhooksCheckedAt: null, syncError: null })
+          .set({
+            nextSyncAt: now,
+            webhooksCheckedAt: null,
+            syncError: null,
+            // While a cart reminder is on (a checkout read is scheduled), checkouts are read now too.
+            ...(store.checkoutsReadAt ? { checkoutsReadAt: now, checkoutsError: null } : {}),
+          })
           .where(storeWhere(ctx, store.id));
         await enqueue(tx, ctx, store.id);
         await recordAudit(

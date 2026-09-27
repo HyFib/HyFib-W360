@@ -264,7 +264,11 @@ async function init(): Promise<Runtime> {
     // http:// store addresses only where configuration allows loopback egress (local and test).
     allowHttpStores: config.W360_EGRESS_ALLOW_LOOPBACK ?? false,
   });
-  const storeMessages = createStoreMessagesService({ db, clock: systemClock });
+  const storeMessages = createStoreMessagesService({
+    db,
+    clock: systemClock,
+    shopifyApiVersion: shopify?.apiVersion ?? null,
+  });
   const storeWebhook: StoreWebhookDeps = {
     db,
     keyring,

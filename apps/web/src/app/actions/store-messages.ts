@@ -6,7 +6,7 @@ import { runAction, type ActionResult } from '@/server/action';
 import { requestMeta } from '@/server/session';
 import { tenantForAction } from '@/server/tenant-action';
 
-/** Order messages: a store's message settings and the rule for each event. */
+/** Order messages and cart reminders: a store's message settings and the rule for each event. */
 
 async function storeMessagesFor(slug: string) {
   const ctx = await tenantForAction(slug);
@@ -50,6 +50,19 @@ export async function saveStoreMessageRuleAction(
   return runAction(async () => {
     const { ctx, storeMessages } = await storeMessagesFor(slug);
     const result = await storeMessages.saveMessageRule(ctx, input, await requestMeta());
+    refresh();
+    return result;
+  });
+}
+
+/** Uses (or stops using) the WhatsApp consent the store records, for cart reminders. */
+export async function saveStoreConsentAction(
+  slug: string,
+  input: { storeId: string; useStoreConsent: boolean },
+): Promise<ActionResult<{ ok: true }>> {
+  return runAction(async () => {
+    const { ctx, storeMessages } = await storeMessagesFor(slug);
+    const result = await storeMessages.saveStoreConsent(ctx, input, await requestMeta());
     refresh();
     return result;
   });

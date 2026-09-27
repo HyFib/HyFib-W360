@@ -73,6 +73,21 @@ export const commerceStores = appSchema.table('commerce_stores', {
   sendWindowStart: smallint('send_window_start'),
   sendWindowEnd: smallint('send_window_end'),
   messageTestOrders: boolean('message_test_orders').notNull().default(false),
+  /**
+   * Cart reminders (0021): the checkout read (cursor, Shopify's page cursor while a read continues,
+   * when the next read is due), the request for customer access and its sealed authorization code
+   * (keyring ciphertext bound to the row, like the credentials), and who chose to use the WhatsApp
+   * consent Shopify records.
+   */
+  checkoutsCursor: tz('checkouts_cursor'),
+  checkoutsPage: text('checkouts_page'),
+  checkoutsReadAt: tz('checkouts_read_at'),
+  checkoutsError: text('checkouts_error'),
+  customerAccessRequestedAt: tz('customer_access_requested_at'),
+  accessCodeCiphertext: text('access_code_ciphertext'),
+  accessError: text('access_error'),
+  storeConsentAt: tz('store_consent_at'),
+  storeConsentMembershipId: uuid('store_consent_membership_id'),
   version: integer('version').notNull().default(1),
   createdByMembershipId: uuid('created_by_membership_id').notNull(),
   createdAt: tz('created_at').notNull().defaultNow(),
@@ -185,6 +200,53 @@ export const commerceStorePrivacyRequests = appSchema.table('commerce_store_priv
   answeredByMembershipId: uuid('answered_by_membership_id'),
 });
 
+/** Shopify's WhatsApp marketing consent states and details (SH-041). */
+export const STORE_CONSENT_STATES = [
+  'NEVER_SUBSCRIBED',
+  'PENDING',
+  'REDACTED',
+  'SUBSCRIBED',
+  'UNSUBSCRIBED',
+] as const;
+export type StoreConsentState = (typeof STORE_CONSENT_STATES)[number];
+export const STORE_CONSENT_OPT_IN_LEVELS = [
+  'SINGLE_OPT_IN',
+  'CONFIRMED_OPT_IN',
+  'UNKNOWN',
+] as const;
+export const STORE_CONSENT_COLLECTED_FROM = ['SHOPIFY', 'OTHER'] as const;
+
+/**
+ * Checkouts customers left in a Shopify store (migration 0021), read while a cart reminder is on;
+ * redacted for good with the customer and deleted 30 days after their last update.
+ */
+export const commerceStoreCheckouts = appSchema.table('commerce_store_checkouts', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  storeId: uuid('store_id').notNull(),
+  externalId: text('external_id').notNull(),
+  name: text('name'),
+  remoteCreatedAt: tz('remote_created_at').notNull(),
+  remoteUpdatedAt: tz('remote_updated_at').notNull(),
+  completedAt: tz('completed_at'),
+  customerExternalId: text('customer_external_id'),
+  customerName: text('customer_name'),
+  customerPhone: text('customer_phone'),
+  consentState: text('consent_state', { enum: STORE_CONSENT_STATES }),
+  consentUpdatedAt: tz('consent_updated_at'),
+  consentOptInLevel: text('consent_opt_in_level', { enum: STORE_CONSENT_OPT_IN_LEVELS }),
+  consentCollectedFrom: text('consent_collected_from', { enum: STORE_CONSENT_COLLECTED_FROM }),
+  currency: text('currency'),
+  totalMinor: money('total_minor'),
+  items: jsonb('items').$type<{ title: string; quantity: number }[]>().notNull().default([]),
+  itemCount: integer('item_count'),
+  recoveryUrl: text('recovery_url'),
+  redactedAt: tz('redacted_at'),
+  readAt: tz('read_at').notNull(),
+  createdAt: tz('created_at').notNull().defaultNow(),
+  updatedAt: tz('updated_at').notNull().defaultNow(),
+});
+
 /**
  * Order messages (migration 0020): the template a store sends when one of its orders reaches an
  * event, and the messages themselves (at most one per order and event).
@@ -195,6 +257,8 @@ export const STORE_MESSAGE_EVENTS = [
   'order_shipped',
   'order_delivered',
   'order_cancelled',
+  'cart_reminder',
+  'cart_second_reminder',
 ] as const;
 export type StoreMessageEvent = (typeof STORE_MESSAGE_EVENTS)[number];
 
@@ -226,7 +290,9 @@ export const commerceStoreMessages = appSchema.table('commerce_store_messages', 
   id: uuid('id').primaryKey(),
   tenantId: uuid('tenant_id').notNull(),
   storeId: uuid('store_id').notNull(),
-  orderId: uuid('order_id').notNull(),
+  /** The subject: an order, or a checkout for the two cart reminders (0021). */
+  orderId: uuid('order_id'),
+  checkoutId: uuid('checkout_id'),
   event: text('event', { enum: STORE_MESSAGE_EVENTS }).notNull(),
   state: text('state', { enum: STORE_MESSAGE_STATES }).notNull().default('pending'),
   skipReason: text('skip_reason'),

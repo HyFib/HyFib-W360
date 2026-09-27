@@ -1,18 +1,29 @@
 import { describe, expect, it } from 'vitest';
 import { buildTemplateSend, sendSpecFor } from '../templates/definition';
 import {
+  checkoutReminders,
+  checkoutValues,
   codPayload,
+  delayRange,
   detectOrderEvents,
   orderValues,
   parseCodPayload,
   resolveStoreVariables,
+  storeConsentAction,
   storeMessageSendAt,
+  variablesFit,
   type EnabledRule,
   type OrderMilestones,
   type StoreMessageEvent,
 } from './messages-model';
-import { isCashOnDeliveryName } from './model';
-import { parseShopifyOrder } from './shopify';
+import {
+  hasCustomerAccess,
+  isCashOnDeliveryName,
+  shopifyAuthorizeUrl,
+  shopifyConsentSupported,
+  shopifyScopesFor,
+} from './model';
+import { parseShopifyCheckout, parseShopifyOrder } from './shopify';
 import { parseWooOrder } from './woocommerce';
 
 const NOW = new Date('2026-09-27T10:00:00Z');
@@ -218,7 +229,7 @@ describe('template variables', () => {
             { source: 'order', field: 'status_url', fallback: 'our website' },
           ],
         },
-        values,
+        { subject: 'order', values },
       ),
     ).toEqual({
       ok: true,
@@ -233,7 +244,7 @@ describe('template variables', () => {
             { source: 'order', field: 'status_url' },
           ],
         },
-        values,
+        { subject: 'order', values },
       ),
     ).toEqual({ ok: false, missing: 'body.2' });
   });
@@ -434,5 +445,228 @@ describe('order milestones from the stores', () => {
     expect(isCashOnDeliveryName('cash  on delivery')).toBe(true);
     expect(isCashOnDeliveryName('COD')).toBe(false);
     expect(isCashOnDeliveryName('Bank Deposit')).toBe(false);
+  });
+});
+
+describe('cart reminders', () => {
+  const checkout = (over: Partial<Parameters<typeof checkoutReminders>[0]['checkout']> = {}) => ({
+    updatedAt: at('2026-09-27T09:30:00Z'),
+    completed: false,
+    hasPhone: true,
+    redacted: false,
+    ...over,
+  });
+
+  it('reminds about open checkouts with a number, left after the rule was switched on', () => {
+    const on = rules('cart_reminder', 'cart_second_reminder', 'order_placed');
+    expect(checkoutReminders({ checkout: checkout(), rules: on })).toEqual([
+      { event: 'cart_reminder', occurredAt: at('2026-09-27T09:30:00Z') },
+      { event: 'cart_second_reminder', occurredAt: at('2026-09-27T09:30:00Z') },
+    ]);
+    // Left exactly when the rule went on still counts; a second earlier does not.
+    expect(
+      checkoutReminders({ checkout: checkout({ updatedAt: ENABLED }), rules: on }),
+    ).toHaveLength(2);
+    expect(
+      checkoutReminders({
+        checkout: checkout({ updatedAt: new Date(ENABLED.getTime() - 1000) }),
+        rules: on,
+      }),
+    ).toEqual([]);
+    for (const over of [{ completed: true }, { hasPhone: false }, { redacted: true }]) {
+      expect(checkoutReminders({ checkout: checkout(over), rules: on })).toEqual([]);
+    }
+    // Order rules never react to checkouts, and cart rules never to orders.
+    expect(checkoutReminders({ checkout: checkout(), rules: rules('order_placed') })).toEqual([]);
+    expect(detect(null, order(), rules('cart_reminder', 'cart_second_reminder'))).toEqual([]);
+  });
+
+  it('keeps the delays of the reminders apart from the order messages', () => {
+    expect(delayRange('cart_reminder')).toEqual({ min: 30, max: 1440 });
+    expect(delayRange('cart_second_reminder')).toEqual({ min: 60, max: 4320 });
+    expect(delayRange('order_placed')).toEqual({ min: 0, max: 1440 });
+  });
+
+  it('reads the store’s consent: subscribed and unsubscribed with a time, nothing else', () => {
+    const when = at('2026-09-20T10:00:00Z');
+    expect(storeConsentAction({ state: 'SUBSCRIBED', updatedAt: when })).toBe('opt_in');
+    expect(storeConsentAction({ state: 'UNSUBSCRIBED', updatedAt: when })).toBe('opt_out');
+    expect(storeConsentAction({ state: 'SUBSCRIBED', updatedAt: null })).toBeNull();
+    for (const state of ['PENDING', 'NEVER_SUBSCRIBED', 'REDACTED', null]) {
+      expect(storeConsentAction({ state, updatedAt: when })).toBeNull();
+    }
+  });
+
+  it('fills checkout variables and refuses variables of the other kind of subject', () => {
+    const values = checkoutValues({
+      customerName: '  Asha  K ',
+      currency: 'INR',
+      totalMinor: 149_900,
+      items: [
+        { title: 'Darjeeling tea (250 g)', quantity: 2 },
+        { title: 'Kettle', quantity: 1 },
+      ],
+      recoveryUrl: 'https://tara.example/checkouts/1/recover?key=k1',
+      storeName: 'Tara Tea',
+    });
+    expect(values).toEqual({
+      customer_name: 'Asha K',
+      cart_total: '₹1,499.00',
+      cart_items: 'Darjeeling tea (250 g) and 1 more',
+      checkout_url: 'https://tara.example/checkouts/1/recover?key=k1',
+      store_name: 'Tara Tea',
+    });
+    const cart = {
+      header: [],
+      body: [
+        { source: 'checkout' as const, field: 'customer_name' as const },
+        { source: 'checkout' as const, field: 'checkout_url' as const },
+      ],
+    };
+    expect(resolveStoreVariables(cart, { subject: 'checkout', values })).toEqual({
+      ok: true,
+      params: {
+        header: [],
+        body: ['Asha K', 'https://tara.example/checkouts/1/recover?key=k1'],
+      },
+    });
+    const orderValuesOf = orderValues({
+      name: '#1',
+      customerName: 'Asha',
+      currency: null,
+      totalMinor: null,
+      items: [],
+      statusUrl: null,
+      trackingNumber: null,
+      trackingCompany: null,
+      trackingUrl: null,
+      storeName: null,
+    });
+    expect(resolveStoreVariables(cart, { subject: 'order', values: orderValuesOf })).toEqual({
+      ok: false,
+      missing: 'body.1',
+    });
+    expect(variablesFit('cart_reminder', cart)).toBe(true);
+    expect(variablesFit('order_placed', cart)).toBe(false);
+    expect(
+      variablesFit('cart_reminder', {
+        header: [],
+        body: [{ source: 'order', field: 'order_name' }],
+      }),
+    ).toBe(false);
+  });
+
+  it('parses a Shopify checkout, keeping the consent only with the customer’s own number', () => {
+    const node = {
+      id: 'gid://shopify/AbandonedCheckout/9001',
+      name: '#C1001',
+      createdAt: '2026-09-27T09:00:00Z',
+      updatedAt: '2026-09-27T09:30:00Z',
+      completedAt: null,
+      abandonedCheckoutUrl: 'https://tara.example/checkouts/9001/recover?key=k',
+      totalPriceSet: { shopMoney: { amount: '1499.00', currencyCode: 'INR' } },
+      lineItemsQuantity: 3,
+      lineItems: {
+        nodes: [
+          { title: 'Darjeeling tea', variantTitle: '250 g', quantity: 2 },
+          { title: 'Kettle', variantTitle: null, quantity: 1 },
+        ],
+      },
+      shippingAddress: { name: 'Address Name', phone: '+919800000001' },
+      billingAddress: null,
+      customer: {
+        id: 'gid://shopify/Customer/77',
+        displayName: 'Asha K',
+        defaultPhoneNumber: {
+          phoneNumber: '+919800000002',
+          whatsAppMarketingConsent: {
+            state: 'SUBSCRIBED',
+            optInLevel: 'CONFIRMED_OPT_IN',
+            collectedFrom: 'SHOPIFY',
+            updatedAt: '2026-09-20T10:00:00Z',
+          },
+        },
+      },
+    };
+    expect(parseShopifyCheckout(node)).toEqual({
+      externalId: '9001',
+      name: '#C1001',
+      createdAt: at('2026-09-27T09:00:00Z'),
+      updatedAt: at('2026-09-27T09:30:00Z'),
+      completedAt: null,
+      customerExternalId: '77',
+      customerName: 'Asha K',
+      phone: '+919800000002',
+      consent: {
+        state: 'SUBSCRIBED',
+        optInLevel: 'CONFIRMED_OPT_IN',
+        collectedFrom: 'SHOPIFY',
+        updatedAt: at('2026-09-20T10:00:00Z'),
+      },
+      currency: 'INR',
+      totalMinor: 149_900,
+      items: [
+        { title: 'Darjeeling tea (250 g)', quantity: 2 },
+        { title: 'Kettle', quantity: 1 },
+      ],
+      itemCount: 3,
+      recoveryUrl: 'https://tara.example/checkouts/9001/recover?key=k',
+    });
+    // Without the customer's own number, the address's number is used and no consent kept.
+    const withheld = parseShopifyCheckout({
+      ...node,
+      customer: {
+        ...node.customer,
+        defaultPhoneNumber: { ...node.customer.defaultPhoneNumber, phoneNumber: null },
+      },
+    });
+    expect(withheld).toMatchObject({ phone: '+919800000001', consent: null });
+    // Unknown states are not trusted; an http recovery address is not kept.
+    expect(
+      parseShopifyCheckout({
+        ...node,
+        abandonedCheckoutUrl: 'http://tara.example/recover',
+        customer: {
+          ...node.customer,
+          defaultPhoneNumber: {
+            phoneNumber: '+919800000002',
+            whatsAppMarketingConsent: { state: 'MAYBE', updatedAt: 'nonsense' },
+          },
+        },
+      }),
+    ).toMatchObject({
+      recoveryUrl: null,
+      consent: { state: null, optInLevel: null, collectedFrom: null, updatedAt: null },
+    });
+    expect(parseShopifyCheckout({ ...node, id: 'gid://shopify/Order/9001' })).toBeNull();
+  });
+
+  it('asks for customer access only when a manager requested it', () => {
+    expect(shopifyScopesFor({ customerAccessRequestedAt: null })).toEqual([
+      'read_orders',
+      'read_products',
+    ]);
+    expect(shopifyScopesFor({ customerAccessRequestedAt: NOW })).toEqual([
+      'read_orders',
+      'read_products',
+      'read_customers',
+    ]);
+    const url = new URL(
+      shopifyAuthorizeUrl('https://tara.myshopify.com', {
+        clientId: 'id',
+        redirectUri: 'https://app.example/cb',
+        state: 's',
+        scopes: shopifyScopesFor({ customerAccessRequestedAt: NOW }),
+      }),
+    );
+    expect(url.searchParams.get('scope')).toBe('read_orders,read_products,read_customers');
+    expect(hasCustomerAccess('read_orders, read_products,read_customers')).toBe(true);
+    expect(hasCustomerAccess('read_orders,read_products,read_customers_extra')).toBe(false);
+    expect(hasCustomerAccess(null)).toBe(false);
+    expect(shopifyConsentSupported('2026-07')).toBe(true);
+    expect(shopifyConsentSupported('2026-10')).toBe(true);
+    expect(shopifyConsentSupported('2025-10')).toBe(false);
+    expect(shopifyConsentSupported('unstable')).toBe(false);
+    expect(shopifyConsentSupported(null)).toBe(false);
   });
 });
