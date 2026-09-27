@@ -59,7 +59,7 @@ export const MODULES: ModuleDefinition[] = [
     permission: 'automations.read',
     status: 'available',
     reason:
-      'Keyword, new-conversation and any-message automations with messages, reply buttons, questions, conditions, contact updates, waits and hand-off; immutable versions, test runs and a simulator. HTTP requests, WhatsApp Flows and drag-and-drop editing are not available yet.',
+      'Keyword, new-conversation and any-message automations with messages, reply buttons, questions, conditions, contact updates, waits, hand-off and web requests to allowed domains; immutable versions, test runs and a simulator. WhatsApp Flows and drag-and-drop editing are not available yet.',
   },
   {
     key: 'flows',
