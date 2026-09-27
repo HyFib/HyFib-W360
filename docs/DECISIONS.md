@@ -421,11 +421,15 @@ Decision: every request to an address a company supplies goes through `packages/
 or 1024 and up, and no credentials in the address. It resolves the name once, refuses the request
 if any answer is private, loopback, link-local, carrier-grade NAT, multicast, reserved,
 documentation, cloud-metadata or an IPv6 form of those (IPv4-mapped, NAT64, 6to4, unique-local,
-site-local), and then connects to exactly the address it checked (a `lookup` hook pins it; the name
-only goes into SNI and Host), so DNS rebinding between check and connect is not possible. IP
+site-local), and then connects only to the addresses it checked, trying them in turn until one
+connects (a `lookup` hook pins them; the name only goes into SNI and Host), so DNS rebinding between
+check and connect is not possible and one unreachable address does not fail the call. IP
 literals are checked the same way, in every notation Node's URL parser accepts. Redirects are never
 followed, there is no connection pool shared between companies, request bodies are limited to 64
-KiB, responses to 256 KiB and the whole exchange to 10 seconds, and callers cannot set framing,
+KiB, responses to 256 KiB and the whole exchange, name resolution included, to 10 seconds. System
+lookups cannot be cancelled and run in the process's thread pool, so at most two are in progress
+per client; a request that cannot get a lookup slot before its deadline fails as `dns_failed`
+without being sent. Callers cannot set framing,
 routing or proxy headers or send line breaks in headers. Every refusal says whether the request may
 have reached the server (`EgressError.sent`), which the caller needs to decide between "failed" and
 "unknown". Loopback and plain http exist only for local test targets (`W360_EGRESS_ALLOW_LOOPBACK`),
@@ -446,9 +450,13 @@ call that may have been sent. A call still in flight at the run's deadline (the 
 server was slow) becomes `unknown` (`no_result`) and the run takes its failure branch: it is never
 retried, because the server may have acted on it; a call not started by then is cancelled. The
 runner locks the call when it reads it, so a result cannot arrive between "not finished" and
-settling it, and a result recorded first always wins. Values saved from a response are kept only
-while the run can still use them, are cleared with captured answers (retention, erasure) and are
-never logged; the stored request is erased once the call has an outcome.
+settling it, and a result recorded first always wins. A run that ends while a call is in flight
+(taken over, stopped, resolved, archived, opted out, erased) settles the call as unknown at once,
+because no runner is left to do it; the worker's later result is not kept. Values saved from a
+response are kept only while the run can still use them, are cleared with captured answers
+(retention, erasure) and are never logged; the stored request is erased once the call has an
+outcome. The call record keeps the host and the step's path as written (placeholders not filled
+in), so it never holds a customer's values in plain text.
 
 Secrets are company settings (`integrations.manage`, audited by name): stored encrypted, never
 returned to a browser, referenced by name in header values only, and each saved for one allowed

@@ -162,8 +162,8 @@ Phase 4 rules (automation web requests, P4-02):
 - A company that allows a server which echoes request headers back exposes its secrets to anyone
   who can edit automations; the settings page says so. Automation editors cannot choose the host at
   run time and cannot place secrets in the address or body.
-- Run pages show each call's method, host, path (without the query), outcome and duration to
-  `automations.read`; requests are stored encrypted until the call finishes and then erased; saved
+- Run pages show each call's method, host, the step's path as written (placeholders not filled in,
+  without the query), outcome and duration to `automations.read`; requests are stored encrypted until the call finishes and then erased; saved
   response values are shown only with the run's captured answers.
 - `W360_EGRESS_ALLOW_LOOPBACK` (http:// and loopback targets for tests) is refused by the web and
   worker configuration outside `APP_ENV=local|test`.

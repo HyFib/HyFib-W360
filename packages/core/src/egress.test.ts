@@ -322,6 +322,64 @@ describe('egress requests', () => {
     }
   });
 
+  it('falls back to the next checked address when one cannot be reached', async () => {
+    const calls: string[] = [];
+    // 127.0.0.2 is loopback too (allowed for test targets) but nothing listens there.
+    const client = createEgressClient(LOCAL, {
+      resolve: async (name) => {
+        calls.push(name);
+        return [
+          { address: '127.0.0.2', family: 4 },
+          { address: '127.0.0.1', family: 4 },
+        ];
+      },
+    });
+    const res = await client.request({
+      method: 'GET',
+      url: `http://api.test:${port}/`,
+      headers: {},
+      body: null,
+    });
+    expect(res.status).toBe(201);
+    expect(res.address).toBe('127.0.0.1');
+    expect(calls).toEqual(['api.test']);
+  });
+
+  it('counts name resolution against the deadline and limits lookups in progress', async () => {
+    const hung = () => new Promise<never>(() => undefined);
+    const slow = createEgressClient({ ...LOCAL, timeoutMs: 300 }, { resolve: hung });
+    const started = Date.now();
+    expect(
+      await errorOf(
+        slow.request({ method: 'GET', url: 'http://hung.test/', headers: {}, body: null }),
+      ),
+    ).toMatchObject({ code: 'dns_failed', sent: false });
+    expect(Date.now() - started).toBeLessThan(2_000);
+
+    // A lookup that never ends keeps its slot (system lookups cannot be cancelled): with one slot,
+    // the next name waits for it and gives up at its own deadline instead of starting a lookup.
+    const resolved: string[] = [];
+    const capped = createEgressClient(
+      { ...LOCAL, timeoutMs: 300, maxConcurrentLookups: 1 },
+      {
+        resolve: async (name) => {
+          resolved.push(name);
+          if (name === 'hung.test') return hung();
+          return [{ address: '127.0.0.1', family: 4 }];
+        },
+      },
+    );
+    const first = errorOf(
+      capped.request({ method: 'GET', url: 'http://hung.test/', headers: {}, body: null }),
+    );
+    const second = errorOf(
+      capped.request({ method: 'GET', url: `http://api.test:${port}/`, headers: {}, body: null }),
+    );
+    expect(await first).toMatchObject({ code: 'dns_failed', sent: false });
+    expect(await second).toMatchObject({ code: 'dns_failed', sent: false });
+    expect(resolved).toEqual(['hung.test']);
+  });
+
   it('reports names that do not resolve and refused connections as not sent', async () => {
     const nowhere = createEgressClient(LOCAL, {
       resolve: async () => {

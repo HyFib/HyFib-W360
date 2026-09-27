@@ -295,12 +295,15 @@ answered (only 2xx counts as success). `domain_not_allowed`, `secret_missing` an
 `secret_domain_mismatch` mean the company's current settings refused the call before it was made
 (Settings → Web requests: the domain was removed, or the secret deleted or saved for another
 domain). `address_blocked` means the name resolves to a private or reserved address, which is never
-allowed; `dns_failed` and `connect_failed` mean nothing was sent. `timeout`, `network_error` and
+allowed; `dns_failed` (including a name that did not resolve within the 10-second deadline) and
+`connect_failed` (no checked address accepted a connection) mean nothing was sent. `timeout`, `network_error` and
 `no_result` mean the request may have reached the server without a complete answer: the outcome is
 unknown and the call is never repeated automatically, because the server may have acted on it
 (creating an order, say). Ask the company to check on their side, then take the conversation over
 if needed. `not_started` means the worker did not get to the call before the run's two-minute
-deadline (a backlog, a worker outage or a suspended company); it was not sent. Worker log lines
+deadline (a backlog, a worker outage or a suspended company); it was not sent.
+`run_ended_in_flight` means the run ended (take-over, stop, resolve, archive, opt-out) while the
+call was being made, so its outcome is unknown; after an erasure the code is `contact_erased`. Worker log lines
 "automation HTTP call" carry the call id and outcome, never the request, its headers or the
 response.
 

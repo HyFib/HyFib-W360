@@ -396,7 +396,8 @@ describe('automation HTTP step', () => {
       state: 'queued',
       method: 'POST',
       host: HOST,
-      path: '/orders/4217',
+      // The path as written: the customer's order number is only in the encrypted request.
+      path: '/orders/{{answer.order_no}}',
       status_code: null,
     });
     expect(queued.request_ciphertext).not.toBeNull();
@@ -657,7 +658,7 @@ describe('automation HTTP step', () => {
     });
   });
 
-  it('cancels a call that was not made when a member takes the conversation over', async () => {
+  it('settles open calls when a member takes the conversation over', async () => {
     const s = await setup();
     await publish(s.owner, orderGraph('/orders/5'));
     const waiting = await waitingAtCall(s);
@@ -673,6 +674,26 @@ describe('automation HTTP step', () => {
     });
     const before = received.length;
     expect(await processHttpCall(httpDeps(), scopeOf(s), waiting.call.id)).toBe('idle');
+    expect(received.length).toBe(before);
+
+    // A call left in flight by a worker that died: no runner is left to settle it, so ending the
+    // run makes its outcome unknown and erases the stored request.
+    const crashed = await waitingAtCall(s);
+    const dying: EgressClient = {
+      request: async () => {
+        throw new Error('worker process died');
+      },
+    };
+    await expect(processHttpCall(httpDeps(dying), scopeOf(s), crashed.call.id)).rejects.toThrow(
+      'worker process died',
+    );
+    await automations().takeOver(s.owner, crashed.conv);
+    expect(await onlyCall(crashed.run.id)).toMatchObject({
+      state: 'unknown',
+      error_code: 'run_ended_in_flight',
+      request_ciphertext: null,
+    });
+    expect(await processHttpCall(httpDeps(), scopeOf(s), crashed.call.id)).toBe('idle');
     expect(received.length).toBe(before);
   });
 
@@ -767,6 +788,11 @@ describe('automation HTTP step', () => {
     for (const conv of [done.conv, queued.conv, flying.conv]) {
       await contacts.eraseContact(s.owner, { contactId: await contactOf(conv), suppress: false });
     }
+    expect(await onlyCall(flying.run.id)).toMatchObject({
+      state: 'unknown',
+      error_code: 'contact_erased',
+      request_ciphertext: null,
+    });
     expect(await onlyCall(done.run.id)).toMatchObject({ state: 'succeeded', saved_values: {} });
     expect(await onlyCall(queued.run.id)).toMatchObject({
       state: 'canceled',
@@ -786,10 +812,11 @@ describe('automation HTTP step', () => {
       address: '127.0.0.1',
       durationMs: 5,
     });
-    expect(await pending).toBe('succeeded');
-    // The request was made before the erasure; its result is not kept for the stopped run.
+    expect(await pending).toBe('unknown');
+    // The request was made before the erasure; its result is not kept.
     expect(await onlyCall(flying.run.id)).toMatchObject({
-      state: 'succeeded',
+      state: 'unknown',
+      status_code: null,
       saved_values: {},
       request_ciphertext: null,
     });

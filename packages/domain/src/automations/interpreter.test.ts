@@ -807,6 +807,8 @@ describe('automation HTTP step', () => {
       kind: 'http_request',
       method: 'POST',
       url: 'https://api.shop.example/orders/4217?who=Asha%20%22A%22%20%26%20Co%2Fx',
+      // The call record keeps the path as written: never the customer's values.
+      path: '/orders/{{answer.order_no}}',
       // Secrets stay references: the worker fills them in when it makes the request.
       headers: [{ name: 'Authorization', parts: [{ text: 'Bearer ' }, { secret: 'shop_token' }] }],
       save: [{ path: 'data.status', saveAs: 'status' }],

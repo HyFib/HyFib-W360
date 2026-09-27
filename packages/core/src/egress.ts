@@ -1,7 +1,7 @@
 import { lookup as dnsLookup } from 'node:dns/promises';
 import http from 'node:http';
 import https from 'node:https';
-import { BlockList, isIP, type LookupFunction } from 'node:net';
+import { BlockList, isIP, type LookupFunction, type TcpNetConnectOpts } from 'node:net';
 
 /**
  * The egress client: the only way HyFib makes HTTP requests to addresses chosen by a company (the
@@ -10,11 +10,14 @@ import { BlockList, isIP, type LookupFunction } from 'node:net';
  * - every address the name resolves to must be public (private, loopback, link-local and cloud
  *   metadata ranges, CGNAT, multicast, reserved and documentation ranges and their IPv6
  *   equivalents, including IPv4-mapped, NAT64, 6to4 and Teredo forms, are refused);
- * - the connection goes to the address that was checked (the resolver runs once and the socket is
- *   pinned to its answer), so a name cannot be re-pointed at an internal address between the check
- *   and the connection (DNS rebinding); TLS still verifies the certificate for the name;
+ * - the connection goes to an address that was checked (the resolver runs once and the socket is
+ *   pinned to its answers, trying them in turn until one connects), so a name cannot be re-pointed
+ *   at an internal address between the check and the connection (DNS rebinding); TLS still
+ *   verifies the certificate for the name;
  * - redirects are never followed (a 3xx is returned as the response);
- * - requests and responses are size-limited and the whole exchange has a deadline.
+ * - requests and responses are size-limited and the whole exchange, name resolution included, has
+ *   a deadline; system lookups (which cannot be cancelled) are limited in number, so slow names
+ *   cannot occupy the process's thread pool.
  * Errors say whether the request may have reached the server (`sent`), so callers never retry a
  * request whose outcome is unknown.
  */
@@ -25,10 +28,15 @@ export interface EgressPolicy {
    * outside APP_ENV=local|test.
    */
   allowLoopbackForTests: boolean;
-  /** Deadline for the whole exchange, connection to last byte. */
+  /** Deadline for the whole exchange, name resolution to last byte. */
   timeoutMs: number;
   maxRequestBytes: number;
   maxResponseBytes: number;
+  /**
+   * System DNS lookups in progress at once, per client. They run in libuv's thread pool and cannot
+   * be cancelled, so a lookup that outlives its request's deadline keeps its slot until it ends.
+   */
+  maxConcurrentLookups: number;
 }
 
 export const DEFAULT_EGRESS_POLICY: EgressPolicy = {
@@ -36,7 +44,11 @@ export const DEFAULT_EGRESS_POLICY: EgressPolicy = {
   timeoutMs: 10_000,
   maxRequestBytes: 64 * 1024,
   maxResponseBytes: 256 * 1024,
+  maxConcurrentLookups: 2,
 };
+
+/** How long a connection attempt to one address may take before the next address is tried. */
+const CONNECT_ATTEMPT_MS = 2_000;
 
 export type EgressErrorCode =
   | 'invalid_url'
@@ -84,7 +96,12 @@ export interface EgressResponse {
   durationMs: number;
 }
 
-export type EgressResolver = (hostname: string) => Promise<{ address: string; family: 4 | 6 }[]>;
+export interface ResolvedAddress {
+  address: string;
+  family: 4 | 6;
+}
+
+export type EgressResolver = (hostname: string) => Promise<ResolvedAddress[]>;
 
 const systemResolver: EgressResolver = async (hostname) => {
   const answers = await dnsLookup(hostname, { all: true, verbatim: true });
@@ -232,18 +249,77 @@ function checkHeaders(headers: Readonly<Record<string, string>>): Record<string,
   return out;
 }
 
+class LookupDeadline extends Error {}
+
+/**
+ * Runs lookups through `resolve`, at most `max` at a time. A lookup that is still waiting for a
+ * slot, or still running, when `ms` pass is abandoned by its caller (`LookupDeadline`); a running
+ * one keeps its slot until it ends, because system lookups cannot be cancelled.
+ */
+function limitLookups(resolve: EgressResolver, max: number) {
+  let active = 0;
+  const waiting: (() => void)[] = [];
+  const release = () => {
+    active -= 1;
+    waiting.shift()?.();
+  };
+  return (hostname: string, ms: number): Promise<ResolvedAddress[]> =>
+    new Promise((resolvePromise, reject) => {
+      let settled = false;
+      const start = () => {
+        active += 1;
+        Promise.resolve()
+          .then(() => resolve(hostname))
+          .then(
+            (answers) => {
+              release();
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              resolvePromise(answers);
+            },
+            (error: unknown) => {
+              release();
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              reject(error instanceof Error ? error : new Error(String(error)));
+            },
+          );
+      };
+      const timer = setTimeout(
+        () => {
+          if (settled) return;
+          settled = true;
+          const queued = waiting.indexOf(start);
+          if (queued >= 0) waiting.splice(queued, 1);
+          reject(new LookupDeadline());
+        },
+        Math.max(0, ms),
+      );
+      if (active < Math.max(1, max)) start();
+      else waiting.push(start);
+    });
+}
+
 async function resolveTarget(
   target: Target,
   policy: EgressPolicy,
-  resolve: EgressResolver,
-): Promise<{ address: string; family: 4 | 6 }> {
+  lookup: (hostname: string, ms: number) => Promise<ResolvedAddress[]>,
+  ms: number,
+): Promise<ResolvedAddress[]> {
   const literal = isIP(target.hostname);
   const answers = literal
     ? [{ address: target.hostname, family: literal as 4 | 6 }]
-    : await resolve(target.hostname).catch((cause: unknown) => {
-        throw new EgressError('dns_failed', `The name ${target.hostname} did not resolve.`, false, {
-          cause,
-        });
+    : await lookup(target.hostname, ms).catch((cause: unknown) => {
+        throw new EgressError(
+          'dns_failed',
+          cause instanceof LookupDeadline
+            ? `The name ${target.hostname} did not resolve within ${policy.timeoutMs / 1000} seconds.`
+            : `The name ${target.hostname} did not resolve.`,
+          false,
+          { cause },
+        );
       });
   if (answers.length === 0) {
     throw new EgressError('dns_failed', `The name ${target.hostname} did not resolve.`, false);
@@ -258,7 +334,7 @@ async function resolveTarget(
       );
     }
   }
-  return answers[0] as { address: string; family: 4 | 6 };
+  return answers;
 }
 
 export interface EgressClient {
@@ -269,11 +345,13 @@ export function createEgressClient(
   policy: EgressPolicy = DEFAULT_EGRESS_POLICY,
   deps: { resolve?: EgressResolver; now?: () => number } = {},
 ): EgressClient {
-  const resolve = deps.resolve ?? systemResolver;
+  const lookup = limitLookups(deps.resolve ?? systemResolver, policy.maxConcurrentLookups);
   const now = deps.now ?? Date.now;
   return {
     async request(input) {
       const started = now();
+      // One deadline for the whole exchange, name resolution included.
+      const deadline = started + policy.timeoutMs;
       const target = parseEgressUrl(input.url, policy);
       if (!EGRESS_METHODS.includes(input.method)) {
         throw new EgressError('invalid_url', 'Choose GET, POST, PUT, PATCH or DELETE.', false);
@@ -287,11 +365,20 @@ export function createEgressClient(
           false,
         );
       }
-      const pinned = await resolveTarget(target, policy, resolve);
-      // The socket connects to the checked address; the name only goes into SNI and Host.
-      const lookup: LookupFunction = (_hostname, options, callback) => {
-        if (options.all) callback(null, [{ address: pinned.address, family: pinned.family }]);
-        else callback(null, pinned.address, pinned.family);
+      const pinned = await resolveTarget(target, policy, lookup, deadline - now());
+      const remaining = deadline - now();
+      if (remaining <= 0) {
+        throw new EgressError(
+          'timeout',
+          `No complete response within ${policy.timeoutMs / 1000} seconds.`,
+          false,
+        );
+      }
+      // The socket connects to a checked address, trying each in turn until one connects (Node's
+      // address selection); the name only goes into SNI and Host.
+      const pinnedLookup: LookupFunction = (_hostname, options, callback) => {
+        if (options.all) callback(null, pinned);
+        else callback(null, pinned[0]?.address ?? '', pinned[0]?.family ?? 4);
       };
       const requestHeaders: Record<string, string> = {
         'user-agent': EGRESS_USER_AGENT,
@@ -305,7 +392,7 @@ export function createEgressClient(
           : {}),
       };
       const transport = target.secure ? https : http;
-      const signal = AbortSignal.timeout(policy.timeoutMs);
+      const signal = AbortSignal.timeout(remaining);
 
       return new Promise<EgressResponse>((resolvePromise, reject) => {
         let connected = false;
@@ -315,20 +402,27 @@ export function createEgressClient(
           settled = true;
           reject(error);
         };
-        const req = transport.request({
+        // Node passes the socket options on to net.connect; its typings for request options omit
+        // the address-selection ones, so they are declared here.
+        const options: https.RequestOptions &
+          Pick<TcpNetConnectOpts, 'autoSelectFamily' | 'autoSelectFamilyAttemptTimeout'> = {
           host: target.hostname,
           port: target.port,
           path: `${target.url.pathname}${target.url.search}`,
           method: input.method,
           headers: requestHeaders,
-          lookup,
+          lookup: pinnedLookup,
+          // Try every checked address in turn (whatever the process default), not only the first.
+          autoSelectFamily: true,
+          autoSelectFamilyAttemptTimeout: CONNECT_ATTEMPT_MS,
           // A fresh connection per request: no keep-alive pool shared between companies.
           agent: false,
           signal,
           ...(target.secure
             ? { servername: isIP(target.hostname) ? undefined : target.hostname }
             : {}),
-        });
+        };
+        const req = transport.request(options);
         req.on('socket', (socket) => {
           socket.once(target.secure ? 'secureConnect' : 'connect', () => {
             connected = true;
@@ -365,7 +459,7 @@ export function createEgressClient(
               status: res.statusCode ?? 0,
               headers: responseHeaders,
               body: Buffer.concat(chunks),
-              address: pinned.address,
+              address: res.socket?.remoteAddress ?? pinned[0]?.address ?? '',
               durationMs: now() - started,
             });
           });

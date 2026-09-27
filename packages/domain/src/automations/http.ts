@@ -75,8 +75,10 @@ export async function queueHttpCall(
   const id = uuidv7();
   const valid = URL.canParse(effect.url);
   const url = valid ? new URL(effect.url) : null;
+  // The host has no placeholders (publishing refuses them); the path is kept as written, so the
+  // record never holds a customer's values (the rendered address is only in the encrypted request).
   const host = url?.hostname.slice(0, 253) || 'invalid';
-  const path = url?.pathname.slice(0, 300) || '/';
+  const path = effect.path.slice(0, 300) || '/';
   const stored: StoredRequest = {
     url: effect.url,
     headers: effect.headers,
@@ -195,20 +197,6 @@ export async function settleOverdueHttpCall(
     })
     .where(and(eq(automationHttpCalls.tenantId, tenantId), eq(automationHttpCalls.id, callId)));
   return errorCode;
-}
-
-/** Cancels the calls of a run that were not started (the run ended before the worker got to them). */
-export async function cancelQueuedHttpCalls(tx: Tx, run: AutomationRun, now: Date): Promise<void> {
-  await tx
-    .update(automationHttpCalls)
-    .set({ state: 'canceled', errorCode: 'run_ended', finishedAt: now, requestCiphertext: null })
-    .where(
-      and(
-        eq(automationHttpCalls.tenantId, run.tenantId),
-        eq(automationHttpCalls.runId, run.id),
-        eq(automationHttpCalls.state, 'queued'),
-      ),
-    );
 }
 
 /** Queued calls whose job was lost, for the minute sweep (ids of active companies only). */
