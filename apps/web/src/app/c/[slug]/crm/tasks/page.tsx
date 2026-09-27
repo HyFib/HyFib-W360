@@ -14,12 +14,11 @@ import {
   Select,
 } from '@w360/ui';
 import { CrmTabs } from '@/components/crm/crm-tabs';
-import type { MemberOption } from '@/components/crm/deal-forms';
 import { TaskForm, TaskStatusActions } from '@/components/crm/task-forms';
 import { PageHeader } from '@/components/page-header';
 import { contactLabel, REMINDER_DETAIL, REMINDER_TEXT, TASK_STATUS } from '@/lib/crm-labels';
 import { formatDateTime } from '@/lib/format';
-import { crmLookups } from '@/server/crm';
+import { crmLookups, memberOptionsWith } from '@/server/crm';
 import { isoToLocal } from '@/server/crm-time';
 import { getRuntime } from '@/server/runtime';
 import { requireTenant } from '@/server/session';
@@ -70,17 +69,6 @@ export default async function CrmTasksPage({
     active
       ? 'rounded-md bg-primary/10 px-3 py-1 font-medium'
       : 'rounded-md px-3 py-1 text-muted-foreground hover:text-foreground';
-  /** The edit form's assignee list, keeping a current assignee who has since lost CRM access. */
-  const assigneeOptions = (
-    current: { membershipId: string; name: string } | null,
-  ): MemberOption[] =>
-    current && !lookups.memberOptions.some((m) => m.membershipId === current.membershipId)
-      ? [
-          ...lookups.memberOptions,
-          { membershipId: current.membershipId, name: `${current.name} (no CRM access)` },
-        ]
-      : lookups.memberOptions;
-
   return (
     <>
       <PageHeader title="CRM" description="Deals by stage, and the tasks that move them forward." />
@@ -259,9 +247,9 @@ export default async function CrmTasksPage({
                           </summary>
                           <div className="mt-3">
                             <TaskForm
-                              key={t.version}
+                              key={t.id}
                               slug={ctx.tenant.slug}
-                              members={assigneeOptions(t.assignee)}
+                              members={memberOptionsWith(lookups.memberOptions, t.assignee)}
                               timeZone={tz}
                               defaultAssigneeId={defaultAssignee}
                               task={{

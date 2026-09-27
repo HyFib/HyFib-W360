@@ -15,6 +15,19 @@ export function pipelineOptions(pipelines: PipelineSummary[]): PipelineOption[] 
     }));
 }
 
+/**
+ * The member choices of a form, keeping the current owner or assignee when they no longer have CRM
+ * access (so the form shows who it is instead of silently showing someone else).
+ */
+export function memberOptionsWith(
+  options: MemberOption[],
+  current: { membershipId: string; name: string } | null,
+): MemberOption[] {
+  return current && !options.some((m) => m.membershipId === current.membershipId)
+    ? [...options, { membershipId: current.membershipId, name: `${current.name} (no CRM access)` }]
+    : options;
+}
+
 /** Names for timeline entries: every stage (archived too) and every member with CRM access. */
 export async function crmLookups(ctx: TenantContext) {
   const { crm } = await getRuntime();

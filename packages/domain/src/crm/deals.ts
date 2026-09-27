@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { AppError, notFound, uuidv7, type Clock } from '@w360/core';
 import {
   and,
+  asc,
   conversations,
   crmActivities,
   crmDeals,
@@ -27,6 +28,7 @@ import {
   assertCrmMember,
   assertLiveContact,
   contactRefs,
+  lockContact,
   memberRefs,
   trimmed,
   uuidSchema,
@@ -105,7 +107,11 @@ export interface ContactCrm {
 const dateSchema = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}$/, 'Enter a date.')
-  .refine((d) => !Number.isNaN(new Date(`${d}T00:00:00Z`).getTime()), 'Enter a valid date.');
+  // The date parser rolls impossible dates over (31 February becomes 3 March): require a round trip.
+  .refine((d) => {
+    const at = new Date(`${d}T00:00:00Z`);
+    return !Number.isNaN(at.getTime()) && at.toISOString().slice(0, 10) === d;
+  }, 'Enter a valid date.');
 
 const valueSchema = z.string().trim().max(40, 'Enter a shorter amount.');
 
@@ -319,18 +325,45 @@ async function lockDeal(tx: Tx, tenantId: string, id: string, expectedVersion: n
   return deal;
 }
 
+/**
+ * Locks a deal for a change, after locking its contact against erasure (the order erasure uses:
+ * contact, then deals). A deal's contact never changes, so reading it before the locks is safe.
+ */
+async function lockDealForChange(tx: Tx, tenantId: string, id: string, expectedVersion: number) {
+  const [ref] = await tx
+    .select({ contactId: crmDeals.contactId })
+    .from(crmDeals)
+    .where(and(eq(crmDeals.tenantId, tenantId), eq(crmDeals.id, id)));
+  if (!ref) throw notFound('Deal');
+  const { erased } = await lockContact(tx, tenantId, ref.contactId);
+  const deal = await lockDeal(tx, tenantId, id, expectedVersion);
+  return { deal, erased };
+}
+
+/**
+ * Shares the pipeline row for the rest of the transaction and returns it. Settings changes lock the
+ * pipeline FOR UPDATE before they count open deals and archive its stages or the pipeline itself, so
+ * they wait for a deal writer holding this lock, and a writer that had to wait sees their result.
+ * Take it before reading stages: the stage read is then a new statement, whose snapshot includes a
+ * change that just committed. (Locking stage rows as well would invert the settings change's order,
+ * pipeline then stages, and deadlock.)
+ */
+async function sharePipeline(tx: Tx, tenantId: string, pipelineId: string) {
+  const [pipeline] = await tx
+    .select({ archivedAt: crmPipelines.archivedAt, currency: crmPipelines.currency })
+    .from(crmPipelines)
+    .where(and(eq(crmPipelines.tenantId, tenantId), eq(crmPipelines.id, pipelineId)))
+    .for('share');
+  return pipeline ?? null;
+}
+
 async function activeStage(tx: Tx, tenantId: string, pipelineId: string, stageId: string) {
-  const [row] = await tx
-    .select({
-      stageArchived: crmStages.archivedAt,
-      pipelineArchived: crmPipelines.archivedAt,
-      currency: crmPipelines.currency,
-    })
+  const pipeline = await sharePipeline(tx, tenantId, pipelineId);
+  if (!pipeline) throw new AppError('validation_failed', 'Choose a stage of the pipeline.');
+  if (pipeline.archivedAt) throw new AppError('conflict', 'This pipeline is archived.');
+  const [stage] = await tx
+    .select({ archivedAt: crmStages.archivedAt })
     .from(crmStages)
-    .innerJoin(
-      crmPipelines,
-      and(eq(crmPipelines.tenantId, crmStages.tenantId), eq(crmPipelines.id, crmStages.pipelineId)),
-    )
     .where(
       and(
         eq(crmStages.tenantId, tenantId),
@@ -338,15 +371,9 @@ async function activeStage(tx: Tx, tenantId: string, pipelineId: string, stageId
         eq(crmStages.pipelineId, pipelineId),
       ),
     );
-  if (!row) throw new AppError('validation_failed', 'Choose a stage of the pipeline.');
-  if (row.pipelineArchived) throw new AppError('conflict', 'This pipeline is archived.');
-  if (row.stageArchived) throw new AppError('conflict', 'This stage was removed.');
-  return { currency: row.currency };
-}
-
-async function isErased(tx: Tx, tenantId: string, contactId: string): Promise<boolean> {
-  const people = await contactRefs(tx, tenantId, [contactId]);
-  return people.get(contactId)?.erased ?? true;
+  if (!stage) throw new AppError('validation_failed', 'Choose a stage of the pipeline.');
+  if (stage.archivedAt) throw new AppError('conflict', 'This stage was removed.');
+  return { currency: pipeline.currency };
 }
 
 export function dealOperations(deps: { db: Database; clock: Clock }) {
@@ -442,11 +469,14 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
         }
         cursor = { at, id };
       }
+      // Keyset on the millisecond: JavaScript dates cannot carry PostgreSQL's microseconds, so the
+      // order and the cursor both use the time truncated to milliseconds (ties broken by id).
+      const changedAt = sql<Date>`date_trunc('milliseconds', ${crmDeals.updatedAt})`;
       return db.run(
         ctx.scope,
         async (tx) => {
           const rows = await tx
-            .select()
+            .select({ deal: crmDeals, changedAt })
             .from(crmDeals)
             .where(
               and(
@@ -454,11 +484,11 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
                 data.status ? eq(crmDeals.status, data.status) : undefined,
                 data.pipelineId ? eq(crmDeals.pipelineId, data.pipelineId) : undefined,
                 cursor
-                  ? sql`(${crmDeals.updatedAt}, ${crmDeals.id}) < (${cursor.at.toISOString()}::timestamptz, ${cursor.id}::uuid)`
+                  ? sql`(${changedAt}, ${crmDeals.id}) < (${cursor.at.toISOString()}::timestamptz, ${cursor.id}::uuid)`
                   : undefined,
               ),
             )
-            .orderBy(desc(crmDeals.updatedAt), desc(crmDeals.id))
+            .orderBy(desc(changedAt), desc(crmDeals.id))
             .limit(LIST_PAGE + 1);
           const page = rows.slice(0, LIST_PAGE);
           const last = page.at(-1);
@@ -466,12 +496,14 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
             deals: await dealCards(
               tx,
               ctx.tenant.id,
-              page,
+              page.map((r) => r.deal),
               await pipelineCurrencies(tx, ctx.tenant.id),
             ),
             nextCursor:
               rows.length > LIST_PAGE && last
-                ? Buffer.from(`${last.updatedAt.toISOString()}|${last.id}`).toString('base64url')
+                ? Buffer.from(`${new Date(last.changedAt).toISOString()}|${last.deal.id}`).toString(
+                    'base64url',
+                  )
                 : null,
           };
         },
@@ -646,8 +678,13 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
       assertCan(ctx, 'crm.write');
       const data = parseInput(updateSchema, input);
       return db.run(ctx.scope, async (tx) => {
-        const deal = await lockDeal(tx, ctx.tenant.id, data.id, data.expectedVersion);
-        if (await isErased(tx, ctx.tenant.id, deal.contactId)) {
+        const { deal, erased } = await lockDealForChange(
+          tx,
+          ctx.tenant.id,
+          data.id,
+          data.expectedVersion,
+        );
+        if (erased) {
           throw new AppError(
             'conflict',
             'The contact was erased; this deal can no longer be edited.',
@@ -717,7 +754,7 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
       assertCan(ctx, 'crm.write');
       const data = parseInput(moveSchema, input);
       return db.run(ctx.scope, async (tx) => {
-        const deal = await lockDeal(tx, ctx.tenant.id, data.id, data.expectedVersion);
+        const { deal } = await lockDealForChange(tx, ctx.tenant.id, data.id, data.expectedVersion);
         if (deal.status !== 'open') throw new AppError('conflict', 'Reopen the deal to move it.');
         const pipelineId = data.pipelineId ?? deal.pipelineId;
         if (pipelineId === deal.pipelineId && data.stageId === deal.stageId) {
@@ -767,10 +804,15 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
       assertCan(ctx, 'crm.write');
       const data = parseInput(closeSchema, input);
       return db.run(ctx.scope, async (tx) => {
-        const deal = await lockDeal(tx, ctx.tenant.id, data.id, data.expectedVersion);
+        const { deal, erased } = await lockDealForChange(
+          tx,
+          ctx.tenant.id,
+          data.id,
+          data.expectedVersion,
+        );
         if (deal.status !== 'open') throw new AppError('conflict', 'This deal is already closed.');
         const reason = data.outcome === 'lost' && data.lostReason ? data.lostReason : null;
-        if (reason && (await isErased(tx, ctx.tenant.id, deal.contactId))) {
+        if (reason && erased) {
           throw new AppError(
             'validation_failed',
             'The contact was erased; close the deal without a reason.',
@@ -801,38 +843,46 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
       });
     },
 
+    /**
+     * Reopens a closed deal in its stage, or in the pipeline's first stage when its stage was
+     * removed in the meantime (stages are archived, not restorable). An archived pipeline must be
+     * restored first.
+     */
     async reopenDeal(ctx: TenantContext, input: unknown) {
       assertCan(ctx, 'crm.write');
       const data = parseInput(versionSchema, input);
       return db.run(ctx.scope, async (tx) => {
-        const deal = await lockDeal(tx, ctx.tenant.id, data.id, data.expectedVersion);
+        const { deal } = await lockDealForChange(tx, ctx.tenant.id, data.id, data.expectedVersion);
         if (deal.status === 'open') return { version: deal.version };
-        const [place] = await tx
-          .select({
-            stageArchived: crmStages.archivedAt,
-            pipelineArchived: crmPipelines.archivedAt,
-          })
-          .from(crmStages)
-          .innerJoin(
-            crmPipelines,
-            and(
-              eq(crmPipelines.tenantId, crmStages.tenantId),
-              eq(crmPipelines.id, crmStages.pipelineId),
-            ),
-          )
-          .where(and(eq(crmStages.tenantId, ctx.tenant.id), eq(crmStages.id, deal.stageId)));
-        if (place?.pipelineArchived || place?.stageArchived) {
+        // Like activeStage: a concurrent archive of the pipeline or a stage finishes first.
+        const pipeline = await sharePipeline(tx, ctx.tenant.id, deal.pipelineId);
+        if (!pipeline || pipeline.archivedAt) {
           throw new AppError(
             'conflict',
-            'The deal’s stage or pipeline was removed; restore it first.',
+            'This deal’s pipeline is archived. Restore it in Settings → Pipelines first.',
           );
         }
+        const stages = await tx
+          .select({ id: crmStages.id, stageArchived: crmStages.archivedAt })
+          .from(crmStages)
+          .where(
+            and(eq(crmStages.tenantId, ctx.tenant.id), eq(crmStages.pipelineId, deal.pipelineId)),
+          )
+          .orderBy(asc(crmStages.position), asc(crmStages.id));
+        const current = stages.find((st) => st.id === deal.stageId);
+        const stageId =
+          current && !current.stageArchived
+            ? deal.stageId
+            : stages.find((st) => !st.stageArchived)?.id;
+        if (!stageId) throw new AppError('conflict', 'This deal’s pipeline has no stages.');
         const now = clock.now();
         const version = deal.version + 1;
         await tx
           .update(crmDeals)
           .set({
             status: 'open',
+            stageId,
+            ...(stageId !== deal.stageId ? { stageEnteredAt: now } : {}),
             closedAt: null,
             closedByMembershipId: null,
             lostReason: null,
@@ -847,6 +897,17 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
           kind: 'deal_reopened',
           at: now,
         });
+        if (stageId !== deal.stageId) {
+          await addActivity(tx, {
+            tenantId: ctx.tenant.id,
+            contactId: deal.contactId,
+            dealId: deal.id,
+            actorMembershipId: ctx.membership.id,
+            kind: 'stage_changed',
+            data: { fromStageId: deal.stageId, toStageId: stageId },
+            at: now,
+          });
+        }
         return { version };
       });
     },

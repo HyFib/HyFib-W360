@@ -25,6 +25,7 @@ import {
   assertCrmMember,
   assertLiveContact,
   contactRefs,
+  lockContact,
   memberRefs,
   trimmed,
   uuidSchema,
@@ -186,6 +187,20 @@ async function lockTask(tx: Tx, tenantId: string, id: string, expectedVersion: n
   return task;
 }
 
+/**
+ * Locks a task for a change, after locking its contact (if any) against erasure, in the order
+ * erasure takes them. A task's contact never changes, so reading it before the locks is safe.
+ */
+async function lockTaskForChange(tx: Tx, tenantId: string, id: string, expectedVersion: number) {
+  const [ref] = await tx
+    .select({ contactId: crmTasks.contactId })
+    .from(crmTasks)
+    .where(and(eq(crmTasks.tenantId, tenantId), eq(crmTasks.id, id)));
+  if (!ref) throw notFound('Task');
+  if (ref.contactId) await lockContact(tx, tenantId, ref.contactId);
+  return lockTask(tx, tenantId, id, expectedVersion);
+}
+
 export function taskOperations(deps: {
   db: Database;
   clock: Clock;
@@ -203,7 +218,7 @@ export function taskOperations(deps: {
     assertCan(ctx, 'crm.write');
     const data = parseInput(versionSchema, input);
     return db.run(ctx.scope, async (tx) => {
-      const task = await lockTask(tx, ctx.tenant.id, data.id, data.expectedVersion);
+      const task = await lockTaskForChange(tx, ctx.tenant.id, data.id, data.expectedVersion);
       if (task.status === status) return { version: task.version };
       if (status !== 'open' && task.status !== 'open') {
         throw new AppError('conflict', 'Reopen the task first.');
@@ -363,7 +378,7 @@ export function taskOperations(deps: {
       const dueAt = data.dueAt ? new Date(data.dueAt) : null;
       const remindAt = data.remindAt ? new Date(data.remindAt) : null;
       return db.run(ctx.scope, async (tx) => {
-        const task = await lockTask(tx, ctx.tenant.id, data.id, data.expectedVersion);
+        const task = await lockTaskForChange(tx, ctx.tenant.id, data.id, data.expectedVersion);
         if (task.status !== 'open') throw new AppError('conflict', 'Reopen the task to edit it.');
         const remindChanged = (task.remindAt?.getTime() ?? null) !== (remindAt?.getTime() ?? null);
         checkTimes(dueAt, remindAt, now, remindChanged);

@@ -393,7 +393,11 @@ on `contact_id`), and composite foreign keys tie a task's and a timeline entry's
 contact, so erasing a contact finds every row that describes them: erasure deletes the contact's
 timeline (the only free text besides titles), notes and tasks, and blanks deal titles and lost
 reasons while keeping stage, value, owner and dates for reports. Concurrent edits are refused by
-version checks rather than merged. Custom deal fields, deal import and forecasting are deferred.
+version checks rather than merged. CRM writes lock the contact (FOR KEY SHARE) before a deal or
+task, in erasure's order, so nothing about a contact is written during or after its erasure; deal
+writers share the pipeline row before reading stages, so an open deal never lands in a stage or
+pipeline archived at the same moment; a closed deal whose stage was removed reopens in the first
+stage (stages are not restorable). Custom deal fields, deal import and forecasting are deferred.
 
 ## ADR-041 Task reminders: the task row decides, jobs only signal (2026-09-27)
 

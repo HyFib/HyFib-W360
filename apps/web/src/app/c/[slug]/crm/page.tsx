@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
+import { isAppError } from '@w360/core';
 import { can } from '@w360/domain';
 import { formatMinor } from '@w360/domain/crm-money';
 import { Badge, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
@@ -27,7 +28,7 @@ export default async function CrmPage({
   searchParams,
 }: {
   params: Promise<{ slug: string }>;
-  searchParams: Promise<{ pipeline?: string; owner?: string; view?: string }>;
+  searchParams: Promise<{ pipeline?: string; owner?: string; view?: string; cursor?: string }>;
 }) {
   const { slug } = await params;
   const query = await searchParams;
@@ -42,7 +43,17 @@ export default async function CrmPage({
   const lookups = await crmLookups(ctx);
   const pipelineId = lookups.options.find((p) => p.id === query.pipeline)?.id ?? null;
   const board = view === 'board' ? await crm.board(ctx, { pipelineId, owner }) : null;
-  const closed = view === 'board' ? null : await crm.listDeals(ctx, { status: view });
+  const cursor = view === 'board' ? null : (query.cursor ?? null);
+  let closed: Awaited<ReturnType<typeof crm.listDeals>> | null = null;
+  if (view !== 'board') {
+    try {
+      closed = await crm.listDeals(ctx, { status: view, cursor });
+    } catch (error) {
+      // A cursor from an old or edited link: show the newest page instead.
+      if (!isAppError(error) || error.code !== 'validation_failed' || !cursor) throw error;
+      closed = await crm.listDeals(ctx, { status: view });
+    }
+  }
   const href = (extra: Record<string, string | null>) => {
     const p = new URLSearchParams();
     const merged = { pipeline: board?.pipeline.id ?? null, owner, view, ...extra };
@@ -221,9 +232,9 @@ export default async function CrmPage({
           <Card>
             <CardHeader>
               <CardTitle>{view === 'won' ? 'Won deals' : 'Lost deals'}</CardTitle>
-              <CardDescription>Most recently changed first.</CardDescription>
+              <CardDescription>Most recently changed first, 50 at a time.</CardDescription>
             </CardHeader>
-            <CardContent>
+            <CardContent className="grid gap-4">
               {closed && closed.deals.length > 0 ? (
                 <ul className="grid gap-3">
                   {closed.deals.map((d) => {
@@ -254,6 +265,26 @@ export default async function CrmPage({
               ) : (
                 <p className="text-sm text-muted-foreground">None yet.</p>
               )}
+              {cursor || closed?.nextCursor ? (
+                <nav aria-label="More deals" className="flex flex-wrap gap-4 text-sm">
+                  {cursor ? (
+                    <Link
+                      href={href({ view })}
+                      className="text-primary underline-offset-4 hover:underline"
+                    >
+                      Newest
+                    </Link>
+                  ) : null}
+                  {closed?.nextCursor ? (
+                    <Link
+                      href={href({ view, cursor: closed.nextCursor })}
+                      className="text-primary underline-offset-4 hover:underline"
+                    >
+                      Older deals
+                    </Link>
+                  ) : null}
+                </nav>
+              ) : null}
             </CardContent>
           </Card>
         )}

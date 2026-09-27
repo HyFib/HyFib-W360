@@ -269,11 +269,7 @@ export function NewDealForm({
   );
 }
 
-export function DealEditForm({
-  slug,
-  deal,
-  members,
-}: {
+interface DealEditProps {
   slug: string;
   deal: {
     id: string;
@@ -285,14 +281,40 @@ export function DealEditForm({
     expectedCloseOn: string | null;
   };
   members: MemberOption[];
-}) {
+}
+
+/**
+ * Edits a deal. After each save the fields start again from the saved deal (they are keyed by its
+ * version); the confirmation is kept outside them so it stays visible.
+ */
+export function DealEditForm(props: DealEditProps) {
+  const [saved, setSaved] = useState<string | null>(null);
+  return (
+    <div className="grid gap-4">
+      <FormSuccess message={saved} />
+      <DealEditFields
+        key={props.deal.version}
+        {...props}
+        onSubmitting={() => setSaved(null)}
+        onSaved={() => setSaved('Deal saved.')}
+      />
+    </div>
+  );
+}
+
+function DealEditFields({
+  slug,
+  deal,
+  members,
+  onSubmitting,
+  onSaved,
+}: DealEditProps & { onSubmitting: () => void; onSaved: () => void }) {
   const prefix = useId();
   const [title, setTitle] = useState(deal.title);
   const [value, setValue] = useState(deal.value);
   const [owner, setOwner] = useState(deal.ownerMembershipId ?? '');
   const [closeOn, setCloseOn] = useState(deal.expectedCloseOn ?? '');
   const [error, setError] = useState<string | null>(null);
-  const [saved, setSaved] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   return (
     <ClientForm
@@ -301,7 +323,7 @@ export function DealEditForm({
         event.preventDefault();
         setBusy(true);
         setError(null);
-        setSaved(null);
+        onSubmitting();
         void updateDealAction(slug, {
           id: deal.id,
           expectedVersion: deal.version,
@@ -312,12 +334,11 @@ export function DealEditForm({
         }).then((r) => {
           setBusy(false);
           if (!r.ok) setError(r.message);
-          else setSaved('Deal saved.');
+          else onSaved();
         });
       }}
     >
       <FormError message={error} />
-      <FormSuccess message={saved} />
       <Field id={`${prefix}-title`} label="Deal title">
         {(aria) => (
           <Input

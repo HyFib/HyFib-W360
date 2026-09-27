@@ -74,7 +74,7 @@ export default async function PipelinesSettingsPage({
                         </summary>
                         <div className="mt-3 grid gap-4">
                           <PipelineForm
-                            key={p.version}
+                            key={p.id}
                             slug={ctx.tenant.slug}
                             pipeline={{
                               id: p.id,

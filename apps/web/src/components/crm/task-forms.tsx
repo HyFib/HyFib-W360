@@ -11,19 +11,7 @@ import { ClientButton, ClientForm } from '@/components/client-form';
 import { FormError, FormSuccess } from '@/components/form-status';
 import type { MemberOption } from './deal-forms';
 
-/**
- * Adds a task (optionally about a contact or deal) or edits an open one. Times are wall-clock
- * readings in the company's time zone; a reminder is emailed to the assignee at that time.
- */
-export function TaskForm({
-  slug,
-  members,
-  timeZone,
-  defaultAssigneeId,
-  contactId = null,
-  dealId = null,
-  task,
-}: {
+interface TaskFormProps {
   slug: string;
   members: MemberOption[];
   timeZone: string;
@@ -39,7 +27,40 @@ export function TaskForm({
     remindLocal: string;
     assigneeMembershipId: string;
   };
-}) {
+}
+
+/**
+ * Adds a task (optionally about a contact or deal) or edits an open one. Times are wall-clock
+ * readings in the company's time zone; a reminder is emailed to the assignee at that time. An edit
+ * form's fields start again from the saved task after each save (keyed by its version); the
+ * confirmation is kept outside them so it stays visible.
+ */
+export function TaskForm(props: TaskFormProps) {
+  const [saved, setSaved] = useState<string | null>(null);
+  return (
+    <div className="grid gap-3">
+      <FormSuccess message={saved} />
+      <TaskFields
+        key={props.task ? props.task.version : 'new'}
+        {...props}
+        onSubmitting={() => setSaved(null)}
+        onSaved={setSaved}
+      />
+    </div>
+  );
+}
+
+function TaskFields({
+  slug,
+  members,
+  timeZone,
+  defaultAssigneeId,
+  contactId = null,
+  dealId = null,
+  task,
+  onSubmitting,
+  onSaved,
+}: TaskFormProps & { onSubmitting: () => void; onSaved: (message: string) => void }) {
   const prefix = useId();
   const [title, setTitle] = useState(task?.title ?? '');
   const [notes, setNotes] = useState(task?.notes ?? '');
@@ -47,7 +68,6 @@ export function TaskForm({
   const [remind, setRemind] = useState(task?.remindLocal ?? '');
   const [assignee, setAssignee] = useState(task?.assigneeMembershipId ?? defaultAssigneeId);
   const [error, setError] = useState<string | null>(null);
-  const [saved, setSaved] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   return (
     <ClientForm
@@ -56,7 +76,7 @@ export function TaskForm({
         event.preventDefault();
         setBusy(true);
         setError(null);
-        setSaved(null);
+        onSubmitting();
         const common = {
           title,
           notes: notes || null,
@@ -73,7 +93,7 @@ export function TaskForm({
             setError(r.message);
             return;
           }
-          setSaved(task ? 'Task saved.' : 'Task added.');
+          onSaved(task ? 'Task saved.' : 'Task added.');
           if (!task) {
             setTitle('');
             setNotes('');
@@ -84,7 +104,6 @@ export function TaskForm({
       }}
     >
       <FormError message={error} />
-      <FormSuccess message={saved} />
       <Field id={`${prefix}-title`} label="Task">
         {(aria) => (
           <Input

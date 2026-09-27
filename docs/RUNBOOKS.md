@@ -319,7 +319,9 @@ another reminder, edit the task and set a new reminder time.
 
 **A pipeline cannot be archived or a stage cannot be removed.** Pipelines and stages with open
 deals are kept so no open deal loses its place: move the deals (or mark them won or lost) first.
-Closed deals stay in archived stages and pipelines and still count in reports. Restoring a pipeline
+Closed deals stay in archived stages and pipelines and still count in reports. Reopening a closed
+deal whose stage was removed puts it in the pipeline's first stage (the timeline shows the stage
+change); a deal in an archived pipeline reopens once the pipeline is restored. Restoring a pipeline
 fails if another pipeline in use has its name; rename one first. A company can use 20 pipelines at
 once.
 

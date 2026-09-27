@@ -80,6 +80,15 @@ test('a deal moves through a pipeline with tasks, an emailed reminder, notes and
   const timeline = page.getByRole('list', { name: 'Timeline' });
   await expect(timeline.getByText('New → Qualified')).toBeVisible();
 
+  // Edit the value: the form reloads with the saved deal and keeps saying so.
+  await page.getByLabel('Value (INR)').fill('26000');
+  await page.getByRole('button', { name: 'Save deal' }).click();
+  await expect(page.getByText('Deal saved.')).toBeVisible();
+  await expect(page.getByText('Sales · ₹26,000.00')).toBeVisible();
+  await expect(page.getByLabel('Value (INR)')).toHaveValue('26000.00');
+  await expect(timeline.getByText(/₹25,000.50 → ₹26,000.00/)).toBeVisible();
+  await expect(page.getByText('Deal saved.')).toBeVisible();
+
   // A task with a reminder at the current minute (up to a minute back is accepted), so the
   // worker emails it straight away rather than after a wait.
   const now = Date.now();
@@ -138,7 +147,7 @@ test('a deal moves through a pipeline with tasks, an emailed reminder, notes and
   // Reports count the win in the pipeline's currency.
   await page.goto(`/c/${slug}/reports`);
   await expect(stat(page, 'Deals won')).toContainText('1');
-  await expect(stat(page, 'Deals won')).toContainText('₹25,000.50');
+  await expect(stat(page, 'Deals won')).toContainText('₹26,000.00');
   await expect(stat(page, 'Win rate')).toContainText('100%');
   await expectNoHorizontalOverflow(page);
 });

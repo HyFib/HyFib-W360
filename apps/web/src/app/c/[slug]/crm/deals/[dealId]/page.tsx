@@ -11,7 +11,7 @@ import { Timeline } from '@/components/crm/timeline';
 import { PageHeader } from '@/components/page-header';
 import { contactLabel, DEAL_STATUS } from '@/lib/crm-labels';
 import { formatDateTime } from '@/lib/format';
-import { crmLookups } from '@/server/crm';
+import { crmLookups, memberOptionsWith } from '@/server/crm';
 import { getRuntime } from '@/server/runtime';
 import { requireTenant } from '@/server/session';
 
@@ -104,7 +104,7 @@ export default async function DealPage({
               </CardHeader>
               <CardContent>
                 <DealEditForm
-                  key={deal.version}
+                  key={deal.id}
                   slug={ctx.tenant.slug}
                   deal={{
                     id: deal.id,
@@ -116,7 +116,7 @@ export default async function DealPage({
                     ownerMembershipId: deal.owner?.membershipId ?? null,
                     expectedCloseOn: deal.expectedCloseOn,
                   }}
-                  members={lookups.memberOptions}
+                  members={memberOptionsWith(lookups.memberOptions, deal.owner)}
                 />
               </CardContent>
             </Card>

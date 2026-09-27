@@ -1,5 +1,6 @@
 import { randomInt } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type pg from 'pg';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { isAppError, systemClock, type Clock } from '@w360/core';
 import { QUEUES } from '@w360/contracts';
 import { authorizedTenantScope } from '@w360/db';
@@ -49,6 +50,37 @@ async function expectAppError(promise: Promise<unknown>, code: string, message?:
     return;
   }
   throw new Error(`expected ${code}`);
+}
+
+/**
+ * Opens a transaction on its own connection and takes a row lock with `lockSql`, standing in for
+ * another writer (an erasure, a settings change) caught in the middle of its transaction.
+ */
+async function holdLock(lockSql: string, params: unknown[]) {
+  const client: pg.PoolClient = await fx.dbs.adminPool.connect();
+  await client.query('begin');
+  const pid = (await client.query<{ pid: number }>('select pg_backend_pid() as pid')).rows[0]!.pid;
+  await client.query(lockSql, params);
+  return {
+    client,
+    /** Resolves once another backend is waiting for this transaction's locks. */
+    async blocking() {
+      await vi.waitFor(
+        async () => {
+          const [row] = await fx.query<{ n: number }>(
+            'select count(*)::int as n from pg_stat_activity where $1 = any(pg_blocking_pids(pid))',
+            [pid],
+          );
+          if (!row || row.n < 1) throw new Error('nobody is waiting yet');
+        },
+        { timeout: 10_000, interval: 20 },
+      );
+    },
+    async commit() {
+      await client.query('commit');
+      client.release();
+    },
+  };
 }
 
 async function newContact(owner: TenantContext, name: string) {
@@ -532,6 +564,138 @@ describe('crm tasks and reminders', () => {
     await fx.dbs.adminPool.query(`UPDATE app.tenants SET status = 'active' WHERE id = $1`, [
       c.tenant.id,
     ]);
+  });
+});
+
+describe('crm races and edge cases', () => {
+  it('runs a CRM change and an erasure of the same contact one after the other', async () => {
+    const { owner, agent } = await setup();
+    const svc = crm();
+    const notesOf = async (contactId: string) =>
+      (
+        await fx.query<{ n: number }>(
+          'select count(*)::int as n from app.crm_activities where contact_id = $1',
+          [contactId],
+        )
+      )[0]?.n;
+
+    // A note written while an erasure holds the contact waits, then sees the erasure and refuses.
+    const first = await newContact(owner, 'Farah');
+    const erasure = await holdLock('select 1 from app.contacts where id = $1 for update', [first]);
+    const note = svc.addNote(agent, { contactId: first, body: 'Lives at 12 Park Street' });
+    await erasure.blocking();
+    await erasure.client.query('update app.contacts set erased_at = now() where id = $1', [first]);
+    await erasure.commit();
+    await expectAppError(note, 'conflict', /erased/);
+    expect(await notesOf(first)).toBe(0);
+
+    // An erasure started while a CRM change holds the contact waits, then removes what it wrote.
+    const second = await newContact(owner, 'Gita');
+    const change = await holdLock('select 1 from app.contacts where id = $1 for key share', [
+      second,
+    ]);
+    const erase = createContactsService({ db: fx.dbs.app, clock: systemClock }).eraseContact(
+      owner,
+      { contactId: second, suppress: false },
+    );
+    await change.blocking();
+    await change.client.query(
+      `insert into app.crm_activities (id, tenant_id, contact_id, kind, body)
+       values (gen_random_uuid(), $1, $2, 'note', 'Lives at 5 Hill Road')`,
+      [owner.tenant.id, second],
+    );
+    await change.commit();
+    await erase;
+    expect(await notesOf(second)).toBe(0);
+  });
+
+  it('never leaves an open deal in a stage removed at the same time', async () => {
+    const { owner, agent, pipeline, proposal } = await setup();
+    const contactId = await newContact(owner, 'Hema');
+    // A settings change locks the pipeline, finds no open deal in "Proposal" and removes it.
+    const settings = await holdLock('select 1 from app.crm_pipelines where id = $1 for update', [
+      pipeline.id,
+    ]);
+    const creating = crm().createDeal(agent, {
+      contactId,
+      pipelineId: pipeline.id,
+      stageId: proposal.id,
+      title: 'Late arrival',
+    });
+    await settings.blocking();
+    await settings.client.query('update app.crm_stages set archived_at = now() where id = $1', [
+      proposal.id,
+    ]);
+    await settings.commit();
+    await expectAppError(creating, 'conflict', /removed/);
+  });
+
+  it('reopens a deal whose stage was removed in the first stage, but not in an archived pipeline', async () => {
+    const { owner, agent, pipeline, newStage, qualified, proposal } = await setup();
+    const svc = crm();
+    const contactId = await newContact(owner, 'Jaya');
+    const { id } = await svc.createDeal(agent, {
+      contactId,
+      pipelineId: pipeline.id,
+      stageId: proposal.id,
+      title: 'Renewal',
+    });
+    await svc.closeDeal(agent, { id, expectedVersion: 1, outcome: 'lost' });
+    // "Proposal" has no open deal, so it can be removed; the lost deal stays in it.
+    await svc.updatePipeline(owner, {
+      id: pipeline.id,
+      expectedVersion: pipeline.version,
+      name: 'Sales',
+      stages: [
+        { id: newStage.id, name: 'New' },
+        { id: qualified.id, name: 'Qualified' },
+      ],
+    });
+    await svc.reopenDeal(agent, { id, expectedVersion: 2 });
+    const deal = await svc.getDeal(agent, id);
+    expect(deal).toMatchObject({ status: 'open', stageId: newStage.id, version: 3 });
+    expect(
+      deal.timeline
+        .slice(0, 2)
+        .map((a) => a.kind)
+        .sort(),
+    ).toEqual(['deal_reopened', 'stage_changed']);
+    // A closed deal in an archived pipeline waits for the pipeline to be restored.
+    await svc.closeDeal(agent, { id, expectedVersion: 3, outcome: 'won' });
+    const [current] = (await svc.listPipelines(owner)).filter((p) => p.id === pipeline.id);
+    await svc.archivePipeline(owner, { id: pipeline.id, expectedVersion: current!.version });
+    await expectAppError(svc.reopenDeal(agent, { id, expectedVersion: 4 }), 'conflict', /archived/);
+    // Impossible dates are refused, not rolled over.
+    await expectAppError(
+      svc.createDeal(agent, {
+        contactId,
+        pipelineId: pipeline.id,
+        stageId: newStage.id,
+        title: 'Leap',
+        expectedCloseOn: '2026-02-31',
+      }),
+      'validation_failed',
+    );
+  });
+
+  it('pages through closed deals without skipping any that changed at the same moment', async () => {
+    const { owner, pipeline, newStage } = await setup();
+    const contactId = await newContact(owner, 'Isha');
+    // 60 deals won in one statement share one change time, to the microsecond.
+    await fx.query(
+      `insert into app.crm_deals (id, tenant_id, pipeline_id, stage_id, contact_id, title, status,
+         closed_at, closed_by_membership_id, created_by_membership_id)
+       select gen_random_uuid(), $1, $2, $3, $4, 'Deal ' || g, 'won', now(), $5, $5
+         from generate_series(1, 60) g`,
+      [owner.tenant.id, pipeline.id, newStage.id, contactId, owner.membership.id],
+    );
+    const first = await crm().listDeals(owner, { status: 'won' });
+    expect(first.deals).toHaveLength(50);
+    expect(first.nextCursor).not.toBeNull();
+    const second = await crm().listDeals(owner, { status: 'won', cursor: first.nextCursor });
+    expect(second.deals).toHaveLength(10);
+    expect(second.nextCursor).toBeNull();
+    expect(new Set([...first.deals, ...second.deals].map((d) => d.id)).size).toBe(60);
   });
 });
 

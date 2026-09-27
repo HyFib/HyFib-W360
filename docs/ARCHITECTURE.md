@@ -410,7 +410,12 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   (create, edit, done, cancel, reopen; lists of the member's or everyone's tasks; the member's
   overdue and due-today counts on the overview), notes, and the contact and deal timelines. Every
   change to a deal or task locks the row, checks its version and appends its timeline entry in the
-  same transaction. Moving a deal to another pipeline is supported by the service (a value in a
+  same transaction. Lock order: a CRM write about a contact first takes a key-share lock on the
+  contact (erasure takes FOR UPDATE), then the deal or task, so an erasure and a CRM change of the
+  same contact run one after the other; deal writers then share the pipeline row before reading its
+  stages, so a settings change (pipeline FOR UPDATE, count open deals, archive) never leaves an
+  open deal in an archived stage or pipeline. A closed deal whose stage was removed reopens in the
+  pipeline's first stage. Moving a deal to another pipeline is supported by the service (a value in a
   different currency must be cleared first) but not offered in the UI yet.
   Amounts are parsed and formatted by `crm/money.ts` (browser-safe, exact: no floats in parsing).
 - **Reminders** (ADR-041, queue `crm.reminder`): saving a reminder time schedules a delayed job keyed
@@ -419,7 +424,7 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   reminders more than 30 seconds overdue. Reminders are skipped with a reason when the task closed,
   the assignee lost CRM access or they are more than a day late.
 - **Web** (`/c/{slug}/crm`): the board (a column per stage, a stage picker on each card, owner and
-  pipeline filters), won and lost lists, the deal page (stage, outcome, details, tasks, contact,
+  pipeline filters), won and lost lists (50 at a time, keyset on the millisecond), the deal page (stage, outcome, details, tasks, contact,
   timeline with notes), the tasks page (mine or everyone's, open or closed, by assignee, edit), and
   Settings → Pipelines. The contact page and the inbox conversation page show the contact's deals,
   open tasks and timeline with forms to add a deal (tied to the conversation), a task or a note.

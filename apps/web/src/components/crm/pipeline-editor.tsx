@@ -17,16 +17,7 @@ interface StageDraft {
   name: string;
 }
 
-/**
- * Creates a pipeline, or renames one and sets its stages in order. Stages removed here are archived
- * (only when no open deal is in them); the currency is fixed when the pipeline is created.
- */
-export function PipelineForm({
-  slug,
-  pipeline,
-  currencies,
-  defaultCurrency,
-}: {
+interface PipelineFormProps {
   slug: string;
   pipeline?: {
     id: string;
@@ -37,7 +28,37 @@ export function PipelineForm({
   };
   currencies: string[];
   defaultCurrency: string;
-}) {
+}
+
+/**
+ * Creates a pipeline, or renames one and sets its stages in order. Stages removed here are archived
+ * (only when no open deal is in them); the currency is fixed when the pipeline is created. An edit
+ * form's fields start again from the saved pipeline after each save (keyed by its version); the
+ * confirmation is kept outside them so it stays visible.
+ */
+export function PipelineForm(props: PipelineFormProps) {
+  const [saved, setSaved] = useState<string | null>(null);
+  return (
+    <div className="grid gap-4">
+      <FormSuccess message={saved} />
+      <PipelineFields
+        key={props.pipeline ? props.pipeline.version : 'new'}
+        {...props}
+        onSubmitting={() => setSaved(null)}
+        onSaved={setSaved}
+      />
+    </div>
+  );
+}
+
+function PipelineFields({
+  slug,
+  pipeline,
+  currencies,
+  defaultCurrency,
+  onSubmitting,
+  onSaved,
+}: PipelineFormProps & { onSubmitting: () => void; onSaved: (message: string) => void }) {
   const prefix = useId();
   const [name, setName] = useState(pipeline?.name ?? '');
   const [currency, setCurrency] = useState(pipeline?.currency ?? defaultCurrency);
@@ -54,7 +75,6 @@ export function PipelineForm({
   const added = useRef(0);
   const newKey = () => `new-${(added.current += 1)}`;
   const [error, setError] = useState<string | null>(null);
-  const [saved, setSaved] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   const move = (index: number, delta: number) => {
@@ -71,11 +91,11 @@ export function PipelineForm({
         event.preventDefault();
         setBusy(true);
         setError(null);
-        setSaved(null);
+        onSubmitting();
         const done = (r: { ok: true } | { ok: false; message: string }, message: string) => {
           setBusy(false);
           if (!r.ok) setError(r.message);
-          else setSaved(message);
+          else onSaved(message);
         };
         if (pipeline) {
           void updatePipelineAction(slug, {
@@ -100,7 +120,6 @@ export function PipelineForm({
       }}
     >
       <FormError message={error} />
-      <FormSuccess message={saved} />
       <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_200px]">
         <Field id={`${prefix}-name`} label="Name">
           {(aria) => (

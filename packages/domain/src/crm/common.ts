@@ -129,14 +129,32 @@ export async function contactRefs(
   );
 }
 
-/** A contact CRM records can be attached to: it exists and was not erased. */
-export async function assertLiveContact(tx: Tx, tenantId: string, contactId: string) {
+/**
+ * Locks the contact against erasure for the rest of the transaction and says whether it is erased.
+ * Erasure locks the contact FOR UPDATE, so a CRM change and an erasure of the same contact run one
+ * after the other: erasure removes everything written before it, and a change that waited sees the
+ * erasure. Every CRM write about a contact takes this lock first, before locking a deal or task,
+ * because erasure locks the contact before the contact's deals and tasks.
+ */
+export async function lockContact(
+  tx: Tx,
+  tenantId: string,
+  contactId: string,
+): Promise<{ erased: boolean }> {
   const [row] = await tx
     .select({ erasedAt: contacts.erasedAt })
     .from(contacts)
-    .where(and(eq(contacts.tenantId, tenantId), eq(contacts.id, contactId)));
+    .where(and(eq(contacts.tenantId, tenantId), eq(contacts.id, contactId)))
+    .for('key share');
   if (!row) throw notFound('Contact');
-  if (row.erasedAt) throw new AppError('conflict', 'This contact was erased.');
+  return { erased: row.erasedAt !== null };
+}
+
+/** A contact CRM records can be attached to: it exists and was not erased (locked, see above). */
+export async function assertLiveContact(tx: Tx, tenantId: string, contactId: string) {
+  if ((await lockContact(tx, tenantId, contactId)).erased) {
+    throw new AppError('conflict', 'This contact was erased.');
+  }
 }
 
 export async function addActivity(
