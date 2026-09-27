@@ -259,6 +259,21 @@ export const QUEUES = {
     deadLetter: 'dead-letter',
     deleteAfterHours: 72,
   },
+  /**
+   * One store's work under a lease on its row: finishing a connection, reading what webhooks
+   * signalled, the incremental read, webhook checks and removal (store connectors).
+   */
+  commerceStore: {
+    name: 'commerce.store',
+    policy: 'exclusive',
+    retryLimit: 5,
+    retryDelaySeconds: 30,
+    retryBackoff: true,
+    retryDelayMaxSeconds: 900,
+    expireInSeconds: 300,
+    deadLetter: 'dead-letter',
+    deleteAfterHours: 72,
+  },
   deadLetter: {
     name: 'dead-letter',
     policy: 'standard',

@@ -16,6 +16,7 @@ import {
   commerceLinkHandler,
   commerceSyncHandler,
 } from './handlers/commerce';
+import { commerceStoreHandler } from './handlers/stores';
 import {
   channelOnboardHandler,
   messageSendHandler,
@@ -145,6 +146,11 @@ async function main(): Promise<void> {
     QUEUES.commerceAccount.name,
     { localConcurrency: 1, batchSize: 1 },
     commerceAccountHandler(rt),
+  );
+  await rt.boss.work(
+    QUEUES.commerceStore.name,
+    { localConcurrency: 2, batchSize: 1 },
+    commerceStoreHandler(rt),
   );
   await rt.boss.work(
     QUEUES.billingEventProcess.name,

@@ -59,6 +59,26 @@ const baseSchema = z.object({
   RAZORPAY_RECURRING_CARDS_ENABLED: bool.optional(),
   /** API origin override, allowed only for APP_ENV=local|test (a test stand-in). */
   RAZORPAY_API_BASE_URL: z.url().optional(),
+  /**
+   * HyFib's Shopify app, used by companies to connect their own stores (P4-06b): the client id and
+   * secret from the app's settings in Shopify, and the Admin API version the connector speaks.
+   */
+  SHOPIFY_CLIENT_ID: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]{8,128}$/, 'expected a Shopify client id')
+    .optional(),
+  SHOPIFY_CLIENT_SECRET: z.string().min(16, 'must be at least 16 characters').optional(),
+  /** Previous client secret, accepted for signatures only while a rotation is in progress. */
+  SHOPIFY_CLIENT_SECRET_PREVIOUS: z.string().min(16, 'must be at least 16 characters').optional(),
+  SHOPIFY_API_VERSION: z
+    .string()
+    .regex(/^20[0-9]{2}-(01|04|07|10)$/, 'expected a Shopify API version such as 2026-07')
+    .optional(),
+  /**
+   * Replaces `https://<shop>` with `<base>/<shop>` for every shop, allowed only for
+   * APP_ENV=local|test so that automated tests can point at a local stand-in.
+   */
+  SHOPIFY_TEST_BASE_URL: z.url().optional(),
   S3_ENDPOINT: z.string().optional(),
   S3_REGION: z.string().optional(),
   S3_BUCKET: z.string().optional(),
@@ -283,6 +303,35 @@ export function razorpayConfigFrom(config: BaseConfig): RazorpayConfig | null {
     recurringCardsEnabled: config.RAZORPAY_RECURRING_CARDS_ENABLED ?? false,
     apiBaseUrl,
     mode,
+  };
+}
+
+export interface ShopifyConfig {
+  clientId: string;
+  clientSecret: string;
+  /** Secrets accepted for signatures: current first, then the previous during rotation. */
+  secrets: string[];
+  apiVersion: string;
+  /** Test stand-in base (APP_ENV=local|test only); null means each shop's own https origin. */
+  testBaseUrl: string | null;
+}
+
+/** Returns HyFib's Shopify app configuration only when all mandatory values are present. */
+export function shopifyConfigFrom(config: BaseConfig): ShopifyConfig | null {
+  const { SHOPIFY_CLIENT_ID, SHOPIFY_CLIENT_SECRET, SHOPIFY_API_VERSION } = config;
+  if (!SHOPIFY_CLIENT_ID || !SHOPIFY_CLIENT_SECRET || !SHOPIFY_API_VERSION) return null;
+  const testBaseUrl = config.SHOPIFY_TEST_BASE_URL?.replace(/\/$/, '') ?? null;
+  if (testBaseUrl && config.APP_ENV !== 'local' && config.APP_ENV !== 'test') {
+    throw new ConfigError(`SHOPIFY_TEST_BASE_URL is not allowed in ${config.APP_ENV}`);
+  }
+  return {
+    clientId: SHOPIFY_CLIENT_ID,
+    clientSecret: SHOPIFY_CLIENT_SECRET,
+    secrets: [SHOPIFY_CLIENT_SECRET, config.SHOPIFY_CLIENT_SECRET_PREVIOUS].filter(
+      (v): v is string => Boolean(v),
+    ),
+    apiVersion: SHOPIFY_API_VERSION,
+    testBaseUrl,
   };
 }
 
