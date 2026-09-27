@@ -173,6 +173,17 @@ export const QUEUES = {
     deadLetter: 'dead-letter',
     deleteAfterHours: 72,
   },
+  crmReminder: {
+    name: 'crm.reminder',
+    policy: 'exclusive',
+    retryLimit: 5,
+    retryDelaySeconds: 30,
+    retryBackoff: true,
+    retryDelayMaxSeconds: 600,
+    expireInSeconds: 60,
+    deadLetter: 'dead-letter',
+    deleteAfterHours: 72,
+  },
   deadLetter: {
     name: 'dead-letter',
     policy: 'standard',

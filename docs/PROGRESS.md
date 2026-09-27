@@ -1,5 +1,68 @@
 # Progress
 
+## 2026-09-27 — Phase 4: CRM (P4-04)
+
+Status: **CRM implemented and locally verified, production blocked on email delivery only.**
+Pipelines, deals, tasks, notes, the timeline and the deal reports work on HyFib's own data and send
+nothing to Meta. Task reminders are emailed through the outbox; locally they arrive in Mailpit, and
+delivery through the production SMTP provider is a release item.
+
+### Completed
+
+- **Schema (migration 0013):** pipelines with one ISO 4217 currency each (no runtime UPDATE grant)
+  and ordered stages, both archived instead of deleted; deals (a contact for life, optionally the
+  conversation they came from, a value in the currency's minor unit, owner, open/won/lost with a
+  lost reason, expected close date, version); tasks (assignee, optionally a contact or one of its
+  deals, due and reminder times, reminder state with the reason when skipped); the append-only
+  timeline (a trigger refuses edits and deletes except inside contact erasure). Composite foreign
+  keys keep references in the company, a deal's stage in its pipeline and a task's or entry's deal
+  on the same contact. `ops.crm_reminders_due` (definer, ids of active companies only);
+  `app.erase_contact` replaced to delete the contact's timeline, notes and tasks and blank deal
+  titles and lost reasons; four metric definitions (deal outcomes v2, win rate, time to win, open
+  pipeline).
+- **Service:** pipelines (`tenant.settings.manage`, audited, 20 in use at most; removed stages are
+  archived only when empty), deals (from a contact or a conversation the member can see; edit,
+  move, won/lost/reopen), the board with owner filters and per-stage totals, tasks (mine or
+  everyone's, open or closed; done, cancel, reopen, edit), notes, contact and deal timelines, and
+  the member's overdue and due-today counts. Every change locks the row, checks its version and
+  appends its timeline entry in one transaction. Amounts are parsed exactly (no floats) with the
+  currency's ISO decimals.
+- **Reminders (queue `crm.reminder`):** a delayed job at the reminder time and the minute sweep for
+  lost jobs; the email is queued in the transaction that marks the reminder sent, so it goes out
+  once; skipped with a reason when the task closed, the assignee lost CRM access or it is more than
+  a day late.
+- **Web:** CRM in the navigation (board, won and lost lists, deal page, tasks page),
+  Settings → Pipelines, a CRM card on the contact page and next to the conversation in the inbox
+  (deals, open tasks, timeline; add a deal, task or note), a "Your tasks" card on the overview,
+  and a Deals section with CSV export in Reports. Task times are wall-clock times in the company
+  time zone.
+- **Found while building:**
+  - The money helpers caught and hid errors (falling back to two decimals or a plain string); they
+    no longer catch anything, since currency codes are validated when a pipeline is created.
+  - "End of today" for due-today counts drifted by up to an hour on daylight-saving days; it is now
+    computed from the calendar (unit tests for 23- and 25-hour days).
+  - The contact CRM view returned an empty result for another company's contact; it now answers
+    "not found", like every other lookup.
+  - The pipeline limit counts pipelines in use, not archived ones; the settings page said otherwise.
+
+### Test commands and results (local, 2026-09-27, fresh database)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                        |
+| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                |
+| `pnpm test` (unit)                                                          | 124 passed. New: 7 CRM tests — ISO currencies and decimals, exact parsing and its refusals, round trips and formatting, day boundaries across daylight-saving changes and month and year ends                                                                                                                                 |
+| `pnpm test:integration` (PostgreSQL 18.x)                                   | 215 passed, including CRM 10: pipelines (settings, audit, archive and restore, limit), deals (stage moves, won/lost/reopen, versions, timeline), conversation visibility, notes and tasks on the timeline, reminders emailed exactly once with a fixed clock and their skips, the sweep, erasure, the deals report, isolation |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 36 passed (18 tests × 2), including a pipeline created in settings, a deal added from a contact and from a conversation, a stage move, a task whose reminder email arrives in Mailpit, a note, a win, the board, the tasks page and the reports, with no horizontal overflow on the new pages                  |
+
+Firefox and WebKit run in CI only (not available in this environment).
+
+### Known gaps
+
+- Not built: custom deal fields, products on deals, deal import and export, forecasting, moving a
+  deal to another pipeline from the UI (the service supports it), automation steps that create
+  deals or tasks, and CRM connectors.
+- Reminder emails have been delivered only to Mailpit; a production SMTP delivery is a release item.
+
 ## 2026-09-27 — Phase 4: automation engine (P4-01)
 
 Status: **automation engine implemented and locally verified, production blocked.** Runs, the

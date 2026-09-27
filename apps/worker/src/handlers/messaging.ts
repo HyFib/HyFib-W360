@@ -15,6 +15,7 @@ import {
 } from '@w360/domain';
 import type { WorkerRuntime } from '../runtime';
 import { sweepAutomationRuns } from './automations';
+import { sweepTaskReminders } from './crm';
 import { signalDueCampaigns } from './campaigns';
 import { RetryableJobError } from './email';
 import { signalDueTemplateSyncs } from './templates';
@@ -136,8 +137,8 @@ export function channelOnboardHandler(rt: WorkerRuntime) {
 /**
  * Every minute: re-signal webhook receipts and send intents whose signal was lost, settle send
  * intents whose worker died (before dispatch: re-queued; after dispatch: unknown outcome, never an
- * automatic resend), signal automation runs that are due or lost their signal, and route waiting
- * conversations of round-robin teams.
+ * automatic resend), signal automation runs and task reminders that are due or lost their
+ * signal, and route waiting conversations of round-robin teams.
  */
 export function messagingSweepHandler(rt: WorkerRuntime) {
   return async (): Promise<void> => {
@@ -178,6 +179,8 @@ export function messagingSweepHandler(rt: WorkerRuntime) {
     if (campaignTicks > 0) rt.logger.info({ campaignTicks }, 'campaign ticks signalled');
     const automations = await sweepAutomationRuns(rt);
     if (automations.signalled > 0) rt.logger.info(automations, 'automation runs signalled');
+    const reminders = await sweepTaskReminders(rt);
+    if (reminders > 0) rt.logger.info({ reminders }, 'task reminders signalled');
     const routed = await routeDueConversations(rt.db);
     if (routed > 0) rt.logger.info({ routed }, 'waiting conversations assigned');
     const retention = await applyMessagingRetention(rt.db);

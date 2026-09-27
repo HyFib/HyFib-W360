@@ -702,13 +702,13 @@ describe('company report', () => {
       version: 2,
       available: true,
     });
+    // CRM deals became measurable (migration 0013): deal outcomes are a new, available version.
+    expect(report.definitions.find((d) => d.key === 'crm.deal_outcomes')).toMatchObject({
+      version: 2,
+      available: true,
+    });
     const unavailable = report.definitions.filter((d) => !d.available).map((d) => d.key);
-    expect(unavailable).toEqual([
-      'campaign.clicked',
-      'campaign.converted',
-      'crm.deal_outcomes',
-      'contacts.retention',
-    ]);
+    expect(unavailable).toEqual(['campaign.clicked', 'campaign.converted', 'contacts.retention']);
   });
 
   it('exports sections as formula-safe CSV for members with reports.export, audited', async () => {

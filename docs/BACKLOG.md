@@ -83,8 +83,8 @@ verification, app review, Embedded Signup configuration).
   unavailable metrics shown with reasons; audited formula-safe exports; business-hours figures,
   resolution times and CSAT (with P3-06). **Remaining:** reconciliation with Meta's
   `pricing_analytics` (M-078, verify first), materialised daily aggregates if report queries near
-  the statement timeout, scheduled report emails, deal and retention reports once those modules
-  exist (automation outcomes were added with P4-01).
+  the statement timeout, scheduled report emails, retention reports once that module exists
+  (automation outcomes were added with P4-01, deal outcomes with P4-04).
 - **P3-06 Inbox advanced** — _implemented (2026-09-26); CSAT sends verified against the Graph
   stand-in only_: teams with members and numbers, keyword and number routing, round robin with
   explicit availability and per-member limits, a minute sweep, release when members leave;
@@ -115,7 +115,20 @@ verification, app review, Embedded Signup configuration).
 - **P4-02 HTTP node + egress guard** (shared with SEC-3).
 - **P4-03 WhatsApp Flows**: Flow JSON validation, publish lifecycle, RSA key management per number,
   encrypted data endpoint (health check, error codes), response mapping.
-- **P4-04 CRM**: deals, pipelines, stages, tasks, reminders, activity history.
+- **P4-04 CRM** — _implemented and locally verified (2026-09-27); reminder emails verified through
+  Mailpit only_: pipelines (company settings, audited) with ordered stages and one currency each,
+  archived instead of deleted; deals linked to a contact for life and optionally to a conversation,
+  with exact minor-unit values, owners, stage moves, won/lost with a reason and reopening, all
+  version-checked; a board per pipeline with owner filters and per-stage totals; won and lost
+  lists; tasks with due times and reminders emailed once (durable job plus the minute sweep, skipped
+  with a reason when stale, closed or the assignee lost access); notes; an append-only timeline per
+  contact and deal; CRM panels on the contact page and beside a conversation; deal outcomes, win
+  rate, time to win and open pipeline in reports and CSV; erasure of the CRM free text. T: reminders
+  exactly once under repeated signals; erasure; isolation. **Remaining:** custom deal fields,
+  products on deals, deal import and export, forecasting, moving deals between pipelines in the UI
+  (the service supports it), automation steps that create deals or tasks, CRM connectors (HubSpot,
+  Salesforce, Zoho: integrations), reminder emails through the production SMTP provider (release
+  checklist).
 - **P4-05 Growth tools**: click-to-chat links, QR codes, consent-aware website widget, referral capture.
 - **P4-06 Commerce**: catalog connection, product messages, order capture, payment links with verified
   status; Shopify and WooCommerce connectors (authenticated setup, webhook verification, dedupe, sync

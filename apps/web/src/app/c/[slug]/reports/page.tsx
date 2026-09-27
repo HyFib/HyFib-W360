@@ -11,6 +11,7 @@ import {
   type Report,
   type TenantContext,
 } from '@w360/domain';
+import { formatMinor } from '@w360/domain/crm-money';
 import {
   Alert,
   Badge,
@@ -152,6 +153,7 @@ export default async function ReportsPage({
         <AutomationSection report={report} label={label} exportHref={exportHref} />
         <AgentSection report={report} exportHref={exportHref} />
         <CampaignSection report={report} ctx={ctx} exportHref={exportHref} />
+        <DealSection report={report} label={label} exportHref={exportHref} />
         <UnavailableSection definitions={report.definitions} />
         <DefinitionsSection definitions={report.definitions} />
       </div>
@@ -816,6 +818,85 @@ function AutomationSection({
               </Table>
             </div>
           </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+/** Amounts per pipeline currency, never added across currencies. */
+function amounts(list: { currency: string; valueMinor: number }[]): string {
+  return list.length === 0
+    ? 'no value'
+    : list.map((a) => formatMinor(a.valueMinor, a.currency)).join(' + ');
+}
+
+function DealSection({
+  report,
+  label,
+  exportHref,
+}: {
+  report: Report;
+  label: (key: string) => string;
+  exportHref: ExportHref;
+}) {
+  const d = report.deals;
+  const won = d.won.reduce((n, a) => n + a.deals, 0);
+  const lost = d.lost.reduce((n, a) => n + a.deals, 0);
+  const openPipelines = d.pipelines.filter((p) => p.stages.length > 0);
+  return (
+    <Card>
+      <SectionHeader
+        title="Deals"
+        description="Deals won or lost in the period, by the day they closed, and the open pipeline now. Values stay in each pipeline’s currency."
+        exportHref={exportHref}
+        section="deals"
+      />
+      <CardContent className="grid grid-cols-1 gap-6">
+        <dl className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+          <Stat label="Deals won" value={formatCount(won)} detail={amounts(d.won)} />
+          <Stat label="Deals lost" value={formatCount(lost)} detail={amounts(d.lost)} />
+          <Stat
+            label={label('crm.win_rate')}
+            value={percent(d.winRate.numerator, d.winRate.denominator)}
+            detail={`${d.winRate.numerator} of ${d.winRate.denominator} closed`}
+          />
+          <Stat
+            label={label('crm.time_to_win')}
+            value={formatDuration(d.medianSecondsToWin)}
+            detail="median, deals won in the period"
+          />
+        </dl>
+        {openPipelines.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No pipelines in use.</p>
+        ) : (
+          openPipelines.map((p) => (
+            <div key={p.id} className="grid gap-2">
+              <h3 className="text-sm font-semibold">
+                {label('crm.open_pipeline')}: {p.name}
+              </h3>
+              <div className="overflow-x-auto">
+                <Table>
+                  <THead>
+                    <TR>
+                      <TH>Stage</TH>
+                      <TH className="text-right">Open deals</TH>
+                      <TH className="text-right">Value ({p.currency})</TH>
+                    </TR>
+                  </THead>
+                  <TBody>
+                    {p.stages.map((s) => (
+                      <TR key={s.id}>
+                        <RowHeader>{s.name}</RowHeader>
+                        <TD className="text-right">{formatCount(s.deals)}</TD>
+                        <TD className="text-right">{formatMinor(s.valueMinor, p.currency)}</TD>
+                      </TR>
+                    ))}
+                  </TBody>
+                </Table>
+              </div>
+            </div>
+          ))
         )}
       </CardContent>
     </Card>

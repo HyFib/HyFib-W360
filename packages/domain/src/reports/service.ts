@@ -28,6 +28,7 @@ import {
   priceFor,
 } from '../campaigns/costs';
 import { CSV_BOM, csvLine } from '../contacts/csv';
+import { minorToInput } from '../crm/money';
 import { openPeriods } from '../inbox/business-hours';
 import { loadReplyTarget, type ReplyTarget } from '../inbox/sla';
 import { parseInput } from '../validation';
@@ -211,6 +212,38 @@ export interface AutomationReport {
   days: ({ day: string } & AutomationOutcomeCounts)[];
 }
 
+/** Deals closed in the period, per pipeline currency (values are never added across currencies). */
+export interface DealAmount {
+  currency: string;
+  deals: number;
+  valueMinor: number;
+}
+
+export interface DealReport {
+  won: DealAmount[];
+  lost: DealAmount[];
+  /** Deals won among deals closed (won or lost) in the period. */
+  winRate: Ratio;
+  /** Median time from creation to win of deals won in the period; null when none was won. */
+  medianSecondsToWin: number | null;
+  /** Open deals now, by pipeline and stage (pipelines and stages in use). */
+  pipelines: {
+    id: string;
+    name: string;
+    currency: string;
+    stages: { id: string; name: string; deals: number; valueMinor: number }[];
+  }[];
+  /** Closed deals per day and currency (days without any are left out). */
+  days: {
+    day: string;
+    currency: string;
+    won: number;
+    wonValueMinor: number;
+    lost: number;
+    lostValueMinor: number;
+  }[];
+}
+
 export interface AgentRow {
   membershipId: string;
   name: string;
@@ -260,6 +293,7 @@ export interface Report {
   inbox: InboxReport;
   csat: CsatReport;
   automations: AutomationReport;
+  deals: DealReport;
   agents: AgentRow[];
   campaigns: CampaignFunnel;
   /** Latest version of every persisted definition, in registry order. */
@@ -272,6 +306,7 @@ export const REPORT_SECTIONS = [
   'inbox',
   'csat',
   'automations',
+  'deals',
   'agents',
   'campaigns',
 ] as const;
@@ -821,6 +856,97 @@ async function automationReport(
   };
 }
 
+/** Deals closed in the period (by close time) and open deals now. */
+async function dealReport(tx: Tx, tenantId: string, period: ReportPeriod): Promise<DealReport> {
+  const closed = await tx.execute<{
+    day: string;
+    currency: string;
+    won: number;
+    won_value: string;
+    lost: number;
+    lost_value: string;
+  }>(sql`
+    select to_char(d.closed_at at time zone ${period.timezone}, 'YYYY-MM-DD') as day, p.currency,
+      (count(*) filter (where d.status = 'won'))::int as won,
+      (coalesce(sum(d.value_minor) filter (where d.status = 'won'), 0))::text as won_value,
+      (count(*) filter (where d.status = 'lost'))::int as lost,
+      (coalesce(sum(d.value_minor) filter (where d.status = 'lost'), 0))::text as lost_value
+    from app.crm_deals d
+    join app.crm_pipelines p on p.tenant_id = d.tenant_id and p.id = d.pipeline_id
+    where d.tenant_id = ${tenantId} and d.status in ('won', 'lost')
+      and d.closed_at >= ${ts(period.start)} and d.closed_at < ${ts(period.end)}
+    group by 1, 2 order by 1, 2`);
+  const [median] = (
+    await tx.execute<{ median: number | null }>(sql`
+      select (percentile_cont(0.5) within group (order by extract(epoch from d.closed_at - d.created_at)))::float8 as median
+        from app.crm_deals d
+       where d.tenant_id = ${tenantId} and d.status = 'won'
+         and d.closed_at >= ${ts(period.start)} and d.closed_at < ${ts(period.end)}`)
+  ).rows;
+  const open = await tx.execute<{
+    pipeline_id: string;
+    pipeline_name: string;
+    currency: string;
+    stage_id: string;
+    stage_name: string;
+    deals: number;
+    value: string;
+  }>(sql`
+    select p.id as pipeline_id, p.name as pipeline_name, p.currency, s.id as stage_id,
+           s.name as stage_name, count(d.id)::int as deals, coalesce(sum(d.value_minor), 0)::text as value
+      from app.crm_pipelines p
+      join app.crm_stages s on s.tenant_id = p.tenant_id and s.pipeline_id = p.id and s.archived_at is null
+      left join app.crm_deals d on d.tenant_id = s.tenant_id and d.stage_id = s.id and d.status = 'open'
+     where p.tenant_id = ${tenantId} and p.archived_at is null
+     group by p.id, p.name, p.currency, p.position, s.id, s.name, s.position
+     order by p.position, lower(p.name), s.position`);
+
+  const totals = (status: 'won' | 'lost'): DealAmount[] => {
+    const byCurrency = new Map<string, DealAmount>();
+    for (const r of closed.rows) {
+      const deals = status === 'won' ? r.won : r.lost;
+      if (deals === 0) continue;
+      const entry = byCurrency.get(r.currency) ?? { currency: r.currency, deals: 0, valueMinor: 0 };
+      entry.deals += deals;
+      entry.valueMinor += num(status === 'won' ? r.won_value : r.lost_value);
+      byCurrency.set(r.currency, entry);
+    }
+    return [...byCurrency.values()];
+  };
+  const won = totals('won');
+  const lost = totals('lost');
+  const wonDeals = won.reduce((n, a) => n + a.deals, 0);
+  const pipelines: DealReport['pipelines'] = [];
+  for (const r of open.rows) {
+    let pipeline = pipelines.find((p) => p.id === r.pipeline_id);
+    if (!pipeline) {
+      pipeline = { id: r.pipeline_id, name: r.pipeline_name, currency: r.currency, stages: [] };
+      pipelines.push(pipeline);
+    }
+    pipeline.stages.push({
+      id: r.stage_id,
+      name: r.stage_name,
+      deals: r.deals,
+      valueMinor: num(r.value),
+    });
+  }
+  return {
+    won,
+    lost,
+    winRate: { numerator: wonDeals, denominator: wonDeals + lost.reduce((n, a) => n + a.deals, 0) },
+    medianSecondsToWin: seconds(median?.median),
+    pipelines,
+    days: closed.rows.map((r) => ({
+      day: r.day,
+      currency: r.currency,
+      won: r.won,
+      wonValueMinor: num(r.won_value),
+      lost: r.lost,
+      lostValueMinor: num(r.lost_value),
+    })),
+  };
+}
+
 async function agentReport(tx: Tx, tenantId: string, period: ReportPeriod): Promise<AgentRow[]> {
   const replies = await tx.execute<{ membership_id: string; replies: number; templates: number }>(
     sql`
@@ -1195,6 +1321,32 @@ function sectionCsv(section: ReportSection, report: Report): string {
         );
       }
       break;
+    case 'deals':
+      lines.push(
+        csvLine([
+          'day',
+          'time_zone',
+          'currency',
+          'deals_won',
+          'value_won',
+          'deals_lost',
+          'value_lost',
+        ]),
+      );
+      for (const d of report.deals.days) {
+        lines.push(
+          csvLine([
+            d.day,
+            tz,
+            d.currency,
+            d.won,
+            minorToInput(d.wonValueMinor, d.currency),
+            d.lost,
+            minorToInput(d.lostValueMinor, d.currency),
+          ]),
+        );
+      }
+      break;
     case 'agents':
       lines.push(
         csvLine([
@@ -1298,6 +1450,7 @@ export function createReportsService(deps: ReportsDeps) {
         const inbox = await inboxReport(tx, ctx.tenant.id, period, now, settings.target);
         const csat = await csatReport(tx, ctx.tenant.id, period, settings.csatEnabled);
         const automations = await automationReport(tx, ctx.tenant.id, period);
+        const deals = await dealReport(tx, ctx.tenant.id, period);
         const agents = await agentReport(tx, ctx.tenant.id, period);
         const campaigns = await campaignFunnel(tx, ctx.tenant.id, period, settings.costCurrency);
         const definitions = await loadDefinitions(tx);
@@ -1309,6 +1462,7 @@ export function createReportsService(deps: ReportsDeps) {
           inbox,
           csat,
           automations,
+          deals,
           agents,
           campaigns,
           definitions,

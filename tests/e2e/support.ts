@@ -14,7 +14,11 @@ interface MailpitSummary {
 }
 
 /** Waits for an email to arrive in Mailpit and returns its text body. */
-export async function waitForEmail(to: string, subjectIncludes: string): Promise<string> {
+export async function waitForEmail(
+  to: string,
+  subjectIncludes: string,
+  timeout = 30_000,
+): Promise<string> {
   let found: MailpitSummary | undefined;
   await expect
     .poll(
@@ -26,7 +30,7 @@ export async function waitForEmail(to: string, subjectIncludes: string): Promise
         found = body.messages.find((m) => m.Subject.includes(subjectIncludes));
         return Boolean(found);
       },
-      { timeout: 30_000, intervals: [500, 1000, 2000] },
+      { timeout, intervals: [500, 1000, 2000] },
     )
     .toBe(true);
   const res = await fetch(`${MAILPIT}/api/v1/message/${found!.ID}`);

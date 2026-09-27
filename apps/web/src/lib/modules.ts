@@ -74,8 +74,9 @@ export const MODULES: ModuleDefinition[] = [
     label: 'CRM',
     path: '/crm',
     permission: 'crm.read',
-    status: 'planned',
-    reason: 'Phase 4: deals, pipelines and tasks.',
+    status: 'available',
+    reason:
+      'Pipelines with ordered stages, deals linked to contacts and conversations, won and lost outcomes, tasks with emailed reminders, notes and a contact timeline. Custom deal fields, deal import and forecasting are not available yet.',
   },
   {
     key: 'commerce',
@@ -100,7 +101,7 @@ export const MODULES: ModuleDefinition[] = [
     permission: 'reports.read',
     status: 'available',
     reason:
-      'Messaging outcomes, estimated Meta charges, inbox response times, CSAT, automation outcomes, member activity and campaign funnels. Deal and retention reports need modules that are not available yet.',
+      'Messaging outcomes, estimated Meta charges, inbox response times, CSAT, automation outcomes, member activity, campaign funnels and deal outcomes. Retention reports and campaign click or conversion tracking are not available yet.',
   },
   {
     key: 'integrations',

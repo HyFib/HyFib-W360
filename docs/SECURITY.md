@@ -144,6 +144,28 @@ Phase 4 rules (automations, P4-01):
   contact's WhatsApp number when queued. Live runs send as the company's automation (no member
   actor on the send); test runs send under the tester's authority.
 
+Phase 4 rules (CRM, P4-04):
+
+- Reading the board, deals, tasks, notes and timelines needs `crm.read`; creating and changing
+  deals, tasks and notes needs `crm.write`. CRM visibility is company-wide: an agent who sees only
+  assigned conversations still sees every deal, task and note of the company. Notes say so on the
+  form ("visible to members with CRM access"); conversation notes keep the inbox's visibility.
+- Pipelines and stages are company settings: creating, editing, archiving and restoring them need
+  `tenant.settings.manage` and are audited (`crm.pipeline_*`, with counts, never names). Deal and
+  task changes are recorded on the CRM timeline (member, time, what changed), not in the audit log.
+  A pipeline's currency cannot be changed by any runtime role (no UPDATE grant), and a deal's
+  contact cannot be changed (no UPDATE grant), so a deal's tasks and timeline stay with it.
+- Owners and assignees must be active members whose role has `crm.read`; a reminder is emailed only
+  to an assignee who still is one when it is due. The email names the task and the company and
+  links to the tasks page; it contains nothing else from the CRM.
+- Linking a deal to a conversation needs a member who can see that conversation, and only a
+  conversation of the deal's contact can be linked. Erased contacts get no new deals, tasks or
+  notes. The contact picker in the deal form uses the contact search (`contacts.read`).
+- Reports show deal counts, values, pipeline and stage names (never deal titles, notes or contacts)
+  to `reports.read`, including analysts and marketers, like the other report sections.
+- While a company is suspended, `crm.read` stays available and `crm.write` does not; reminder jobs
+  wait, and the sweep sends reminders after reactivation unless they are more than a day late.
+
 Platform roles (`ops.platform_admins`): `platform_owner` and `platform_operator`. Both require MFA;
 all actions are audited; neither can read customer content without a support grant.
 

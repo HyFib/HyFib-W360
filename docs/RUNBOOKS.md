@@ -303,6 +303,38 @@ recreates the definer functions `app.erase_contact` and `ops.conversations_to_ro
 role cannot act as `w360_definer` (see `infra/db/bootstrap-roles.sql`). Fix the cause and run the
 migrations again.
 
+## 10E. CRM
+
+**A task reminder was not emailed.** The tasks page shows each reminder's state: "Reminder set"
+(pending), "Reminder emailed" or "Reminder not sent" with the reason — the task was closed first,
+the assignee can no longer use the CRM (left the company, suspended, or their role lost
+`crm.read`), or it was more than a day late (the company was suspended or the worker was down for
+over a day). A pending reminder is signalled by a job at its time and again by the minute sweep
+once it is more than 30 seconds overdue; the worker logs "task reminder" with the outcome
+(`sent`, `skipped`, `not_due`, `idle`). If reminders stay pending, check that the worker runs, the
+`crm.reminder` queue drains (section 3) and the company is not suspended ("task reminder
+deferred"). If the state is "Reminder emailed" but nothing arrived, follow the email outbox
+(section 5 for SMTP outages): the reminder is queued once, and the outbox retries delivery. To send
+another reminder, edit the task and set a new reminder time.
+
+**A pipeline cannot be archived or a stage cannot be removed.** Pipelines and stages with open
+deals are kept so no open deal loses its place: move the deals (or mark them won or lost) first.
+Closed deals stay in archived stages and pipelines and still count in reports. Restoring a pipeline
+fails if another pipeline in use has its name; rename one first. A company can use 20 pipelines at
+once.
+
+**"Someone else changed this" on a deal or task.** Every deal and task carries a version, and a
+change made from a stale page is refused instead of overwriting another member's change. Reload
+the page and make the change again.
+
+**Deal values.** Values are stored exactly, in the pipeline currency's minor unit, and a
+pipeline's currency cannot be changed (create a new pipeline instead). Reports never add values in
+different currencies; they list a total per currency.
+
+**Migration 0013 failed.** It runs in one transaction, so a failure applies nothing. It replaces
+the definer function `app.erase_contact` through `SET ROLE w360_definer` (ADR-039) like 0011: see
+that section.
+
 ## 11. Compromised company (tenant) or account
 
 1. Suspend the company in `/platform` with a reason (stops outbound activity; ingestion continues).

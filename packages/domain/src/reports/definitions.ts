@@ -43,6 +43,9 @@ const TARGET_CLOCK =
   'The target, counted in business hours when business hours are on (Settings → Messaging → Business hours), otherwise in absolute time.';
 const SURVEY_DAYS =
   'Counted by the time the survey was created (when the conversation was resolved), in calendar days of the company’s time zone.';
+const RECORDS = 'Computed when the page loads from HyFib’s records.';
+const CLOSE_DAYS =
+  'Counted by the time the deal was closed, in calendar days of the company’s time zone.';
 
 export const METRIC_DEFINITIONS: readonly MetricDefinition[] = [
   {
@@ -901,6 +904,64 @@ export const METRIC_DEFINITIONS: readonly MetricDefinition[] = [
     missingData: 'Not measured: CRM deals are not available yet (planned for Phase 4).',
     freshness: NOT_AVAILABLE,
     available: false,
+  },
+  {
+    key: 'crm.deal_outcomes',
+    version: 2,
+    label: 'Deal outcomes',
+    unit: 'count',
+    description: 'Deals won and lost in the period, with their value in each pipeline currency.',
+    numerator:
+      'Deals whose status became won or lost in the period (a deal reopened and closed again counts once, at its latest close).',
+    denominator: null,
+    window: null,
+    timezoneRule: CLOSE_DAYS,
+    missingData:
+      'Values are the deals’ current values. Values in different currencies are never added together. Deals of erased contacts keep their value and outcome.',
+    freshness: RECORDS,
+    available: true,
+  },
+  {
+    key: 'crm.win_rate',
+    version: 1,
+    label: 'Win rate',
+    unit: 'rate',
+    description: 'Share of deals closed in the period that were won.',
+    numerator: 'Deals won in the period.',
+    denominator: 'Deals won or lost in the period.',
+    window: null,
+    timezoneRule: CLOSE_DAYS,
+    missingData: 'Not shown when no deal was closed in the period.',
+    freshness: RECORDS,
+    available: true,
+  },
+  {
+    key: 'crm.time_to_win',
+    version: 1,
+    label: 'Time to win',
+    unit: 'duration',
+    description: 'How long won deals took from creation to being won, reported as the median.',
+    numerator: 'Time from creation to close of deals won in the period.',
+    denominator: 'Deals won in the period.',
+    window: 'From when the deal was created in HyFib to when it was marked won, in absolute time.',
+    timezoneRule: CLOSE_DAYS,
+    missingData: 'Not shown when no deal was won in the period.',
+    freshness: RECORDS,
+    available: true,
+  },
+  {
+    key: 'crm.open_pipeline',
+    version: 1,
+    label: 'Open pipeline',
+    unit: 'count',
+    description: 'Open deals and their total value in each stage of each pipeline, now.',
+    numerator: 'Open deals, by pipeline and stage.',
+    denominator: null,
+    window: null,
+    timezoneRule: null,
+    missingData: 'Deals without a value count in the number of deals but add nothing to the value.',
+    freshness: NOW,
+    available: true,
   },
   {
     key: 'contacts.retention',

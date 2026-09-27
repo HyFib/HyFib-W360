@@ -392,6 +392,45 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   WhatsApp Flows steps (P4-03), catalog steps (P4-06), starting a run through the public API (P5),
   fuzzy keyword matching, template follow-ups outside the service window, usage billing.
 
+## 6F. CRM **[built — reminder emails verified through Mailpit only]**
+
+- **Model** (migration 0013, ADR-040): `crm_pipelines` (name, one ISO 4217 currency fixed at
+  creation, position, archived, version) with ordered `crm_stages` (archived, never deleted);
+  `crm_deals` (pipeline and stage — a composite key keeps the stage in the pipeline —, a contact for
+  life, optionally the conversation it came from, title, value in the currency's minor unit, owner,
+  `open`/`won`/`lost` with a lost reason, expected close date, stage entry time, version);
+  `crm_tasks` (title, notes, assignee, optionally a contact or one of its deals, due time, reminder
+  time and state, open/done/cancelled, version); `crm_activities`, the append-only timeline of each
+  contact and deal (ids and codes, plus the body of a note). Composite foreign keys keep every
+  reference inside the company and a task's or entry's deal on the same contact.
+- **Service** (`packages/domain/src/crm`): pipelines (`tenant.settings.manage`, audited, at most 20
+  in use; editing sets the stages in order and archives removed stages only when no open deal is in
+  them), deals (create — optionally from a conversation the member can see —, edit, move, close,
+  reopen, board per pipeline with owner filters and per-stage totals, won and lost lists), tasks
+  (create, edit, done, cancel, reopen; lists of the member's or everyone's tasks; the member's
+  overdue and due-today counts on the overview), notes, and the contact and deal timelines. Every
+  change to a deal or task locks the row, checks its version and appends its timeline entry in the
+  same transaction. Moving a deal to another pipeline is supported by the service (a value in a
+  different currency must be cleared first) but not offered in the UI yet.
+  Amounts are parsed and formatted by `crm/money.ts` (browser-safe, exact: no floats in parsing).
+- **Reminders** (ADR-041, queue `crm.reminder`): saving a reminder time schedules a delayed job keyed
+  by task and time; the job locks the task and, when it is due, queues the email through the outbox
+  in the transaction that marks it sent; the minute sweep (`ops.crm_reminders_due`) re-signals
+  reminders more than 30 seconds overdue. Reminders are skipped with a reason when the task closed,
+  the assignee lost CRM access or they are more than a day late.
+- **Web** (`/c/{slug}/crm`): the board (a column per stage, a stage picker on each card, owner and
+  pipeline filters), won and lost lists, the deal page (stage, outcome, details, tasks, contact,
+  timeline with notes), the tasks page (mine or everyone's, open or closed, by assignee, edit), and
+  Settings → Pipelines. The contact page and the inbox conversation page show the contact's deals,
+  open tasks and timeline with forms to add a deal (tied to the conversation), a task or a note.
+  Task times are entered and shown as wall-clock times in the company time zone.
+- **Reports:** deal outcomes (versioned definition `crm.deal_outcomes` v2), win rate, median time to
+  win and the open pipeline, per pipeline currency, with a CSV export of closed deals per day.
+- **Erasure** (`app.erase_contact`): deletes the contact's timeline, notes and tasks and blanks the
+  titles and lost reasons of its deals, keeping outcomes and values for reports.
+- **Not built yet:** custom deal fields, products on deals, deal import and export, forecasting,
+  automation steps that create deals or tasks, and syncing with external CRMs (integrations, P4–6).
+
 ## 7. Commercial model and billing **[built: wallet, top-ups, auto-recharge — verified against a local Razorpay stand-in only; subscriptions planned]**
 
 - **Who pays Meta:** as a Meta Tech Provider HyFib has no credit line; each customer adds its own

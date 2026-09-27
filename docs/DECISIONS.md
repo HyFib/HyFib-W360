@@ -376,3 +376,35 @@ recreates it as the migration role, grants EXECUTE to the caller, and hands it b
 `w360_definer`, all in the migration's transaction, so there is no moment without the function.
 `app.erase_contact` and `ops.conversations_to_route` were replaced this way; the isolation suite
 checks that neither is executable by PUBLIC and that both keep a pinned `search_path`.
+
+## ADR-040 CRM records: company-wide, single-currency pipelines and an append-only timeline (2026-09-27)
+
+Decision: the CRM is company-wide (`crm.read`/`crm.write`), not scoped like the inbox: sales work
+spans members, and a deal is not a conversation. Pipelines and their stages are company settings
+(`tenant.settings.manage`, audited); deal and task changes go to an append-only timeline per
+contact and deal instead of the audit log, which records settings and security events. Each
+pipeline has one currency fixed at creation (no runtime UPDATE grant), so every deal value and
+every board or report total within a pipeline is in one currency; values are integers in the
+currency's minor unit (ISO 4217 decimals from ICU; amounts are parsed without floats) and totals
+are never added across currencies. Won and lost are deal statuses, not stages, so reports do not
+depend on how a company names its stages; stages and pipelines are archived, never deleted, so
+closed deals keep the stage they ended in. A deal belongs to one contact for life (no UPDATE grant
+on `contact_id`), and composite foreign keys tie a task's and a timeline entry's deal to the same
+contact, so erasing a contact finds every row that describes them: erasure deletes the contact's
+timeline (the only free text besides titles), notes and tasks, and blanks deal titles and lost
+reasons while keeping stage, value, owner and dates for reports. Concurrent edits are refused by
+version checks rather than merged. Custom deal fields, deal import and forecasting are deferred.
+
+## ADR-041 Task reminders: the task row decides, jobs only signal (2026-09-27)
+
+Decision: a reminder is state on the task (`pending` → `sent` or `skipped` with a reason), not a
+job. Saving a reminder time schedules a delayed `crm.reminder` job keyed by task and time; the job
+locks the task, and the email is queued through the outbox in the same transaction that marks the
+reminder sent, so retries, duplicate signals and restarts never send twice and a crash before
+commit sends nothing. The minute sweep (`ops.crm_reminders_due`, ids of active companies only)
+re-signals reminders more than 30 seconds overdue, so a lost job delays a reminder but does not
+lose it. Changing the time makes a new reminder (a job for the old time finds the task not due);
+closing the task skips a pending reminder. A reminder is skipped, with the reason shown on the
+task, when the assignee is no longer an active member with CRM access or when it is more than a
+day late (a suspended company or a long outage), because a stale reminder is worse than none. The
+email carries the task title and a link, like other notices sent to a member's own address.
