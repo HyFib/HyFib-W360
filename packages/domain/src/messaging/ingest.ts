@@ -19,6 +19,7 @@ import {
   type Database,
   type Tx,
 } from '@w360/db';
+import { dispatchInboundToAutomation } from '../automations/dispatch';
 import { attributeCampaignReply } from '../campaigns/attribution';
 import { contactForPhone } from '../contacts/service';
 import { phoneFromWaId } from '../contacts/phone';
@@ -31,6 +32,8 @@ import {
 } from '../consent/service';
 import { isCsatTap, recordCsatAnswer } from '../inbox/csat';
 import { routeConversation, type RouteOptions } from '../inbox/routing';
+import type { JobSigner } from '../jobs/envelope';
+import type { JobQueue } from '../jobs/queue';
 import { emitTenantEvent } from './events';
 import {
   metaEnvelopeSchema,
@@ -58,6 +61,9 @@ export interface IngestDeps {
   db: Database;
   keyring: Keyring;
   clock: Clock;
+  /** Automation runs are signalled in the ingestion transaction. */
+  jobs: JobQueue;
+  signer: JobSigner;
 }
 
 interface Summary {
@@ -69,6 +75,8 @@ interface Summary {
   orphanStatuses: number;
   consentKeywords: number;
   providerOptOuts: number;
+  automationReplies: number;
+  automationStarts: number;
   templateSyncRequests: number;
   quarantined: number;
   malformed: number;
@@ -184,6 +192,8 @@ export async function processMetaWebhookReceipt(
       orphanStatuses: 0,
       consentKeywords: 0,
       providerOptOuts: 0,
+      automationReplies: 0,
+      automationStarts: 0,
       templateSyncRequests: 0,
       quarantined: 0,
       malformed: 0,
@@ -239,7 +249,7 @@ export async function processMetaWebhookReceipt(
           continue;
         }
         await deps.db.run(authorizedTenantScope(binding.tenant_id, null), (tx) =>
-          ingestMessagesChange(tx, {
+          ingestMessagesChange(tx, deps, {
             tenantId: binding.tenant_id,
             channelAccountId: binding.internal_id,
             value: value.data,
@@ -321,7 +331,11 @@ interface ChangeContext {
   summary: Summary;
 }
 
-async function ingestMessagesChange(tx: Tx, ctx: ChangeContext): Promise<void> {
+async function ingestMessagesChange(
+  tx: Tx,
+  deps: Pick<IngestDeps, 'jobs' | 'signer' | 'clock'>,
+  ctx: ChangeContext,
+): Promise<void> {
   const [channel] = await tx
     .select({ id: channelAccounts.id, whatsappAccountId: channelAccounts.whatsappAccountId })
     .from(channelAccounts)
@@ -418,6 +432,7 @@ async function ingestMessagesChange(tx: Tx, ctx: ChangeContext): Promise<void> {
       });
     }
     const keywordText = csatTap ? null : consentText(type, content);
+    let consent: Awaited<ReturnType<typeof applyInboundConsentKeyword>> = null;
     if (keywordText) {
       settings ??= await loadMessagingSettings(tx, ctx.tenantId);
       const matched = await applyInboundConsentKeyword(tx, {
@@ -429,6 +444,7 @@ async function ingestMessagesChange(tx: Tx, ctx: ChangeContext): Promise<void> {
         occurredAt: providerAt,
         settings,
       });
+      consent = matched;
       if (matched) ctx.summary.consentKeywords += 1;
     }
 
@@ -466,6 +482,21 @@ async function ingestMessagesChange(tx: Tx, ctx: ChangeContext): Promise<void> {
     });
     if (type !== 'system' && type !== 'reaction' && !csatTap) {
       const newCase = conversation.created || reopened;
+      // Automations first: a waiting run receives the reply, or a matching automation starts.
+      // Routing (below) leaves a conversation alone while a run is active.
+      const dispatched = await dispatchInboundToAutomation(tx, deps, {
+        tenantId: ctx.tenantId,
+        conversationId: conversation.id,
+        channelAccountId: channel.id,
+        contactId,
+        assignedMembershipId: conversation.assignedMembershipId,
+        messageId,
+        text: keywordText,
+        newCase,
+        consent,
+      });
+      if (dispatched === 'delivered') ctx.summary.automationReplies += 1;
+      if (dispatched === 'started') ctx.summary.automationStarts += 1;
       const queued = toRoute.get(conversation.id);
       if (!queued || (newCase && !queued.newCase)) {
         toRoute.set(conversation.id, { newCase, text: newCase ? keywordText : null });

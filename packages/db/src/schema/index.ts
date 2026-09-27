@@ -8,3 +8,4 @@ export * from './templates';
 export * from './campaigns';
 export * from './reports';
 export * from './inbox';
+export * from './automations';

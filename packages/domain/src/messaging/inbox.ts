@@ -31,6 +31,7 @@ import { assertCan, can, type TenantContext } from '../authz/context';
 import { ROLE_PERMISSIONS, type Permission } from '../authz/permissions';
 import { recordAudit, type RequestMeta } from '../audit';
 import { DEFAULT_MESSAGING_SETTINGS } from '../consent/service';
+import { endRunForHuman } from '../automations/runs';
 import { latestCsatSurvey, queueCsatSurvey } from '../inbox/csat';
 import { routeConversation } from '../inbox/routing';
 import type { JobSigner } from '../jobs/envelope';
@@ -647,6 +648,17 @@ export function createInboxService(deps: InboxDeps) {
             throw new AppError('validation_failed', 'Choose an active member.');
           }
         }
+        // Assigning a person ends an automation handling the conversation (hand-off lock).
+        if (data.membershipId) {
+          await endRunForHuman(tx, {
+            tenantId: ctx.tenant.id,
+            conversationId: current.id,
+            reason: 'assigned',
+            actorMembershipId: ctx.membership.id,
+            assigneeMembershipId: data.membershipId,
+            now: clock.now(),
+          });
+        }
         await tx
           .update(conversations)
           .set({
@@ -723,6 +735,15 @@ export function createInboxService(deps: InboxDeps) {
       const data = parse(statusSchema, input);
       await withConversation(ctx, data.conversationId, async (tx, current) => {
         if (current.version !== data.expectedVersion) throw staleVersion();
+        if (data.status === 'resolved' && current.status !== 'resolved') {
+          await endRunForHuman(tx, {
+            tenantId: ctx.tenant.id,
+            conversationId: current.id,
+            reason: 'conversation_resolved',
+            actorMembershipId: ctx.membership.id,
+            now: clock.now(),
+          });
+        }
         await tx
           .update(conversations)
           .set({

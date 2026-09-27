@@ -2,9 +2,11 @@ import {
   and,
   asc,
   authorizedTenantScope,
+  automationRuns,
   channelAccounts,
   conversations,
   eq,
+  inArray,
   isNull,
   memberAvailability,
   sql,
@@ -17,6 +19,7 @@ import {
 import { ROLE_PERMISSIONS } from '../authz/permissions';
 import { recordSystemAudit } from '../audit';
 import { emitTenantEvent } from '../messaging/events';
+import { matchesKeyword } from './keywords';
 
 /**
  * Conversation routing. A conversation starting a new case (created, or reopened after a resolve)
@@ -38,18 +41,7 @@ export const INBOX_WORKER_ROLES: readonly TenantRole[] = (
   return p.has('inbox.reply') && (p.has('inbox.read_assigned') || p.has('inbox.read_all'));
 });
 
-const WORD = /[\p{L}\p{M}\p{N}]+/gu;
-
-/** Lower-cases text and reduces it to single-space separated words (letters, marks and digits). */
-export function normalizeRoutingText(text: string): string {
-  return (text.normalize('NFKC').toLowerCase().match(WORD) ?? []).join(' ');
-}
-
-/** Whether `keyword` (one or more words) appears in `text` as whole words. */
-export function matchesKeyword(text: string, keyword: string): boolean {
-  const k = normalizeRoutingText(keyword);
-  return k.length > 0 && ` ${normalizeRoutingText(text)} `.includes(` ${k} `);
-}
+export { matchesKeyword, normalizeRoutingText } from './keywords';
 
 /**
  * The next member in a team's rotation: the first eligible member after `last` in team order
@@ -145,6 +137,20 @@ export async function routeConversation(
     changed: false,
   });
   if (!conv || conv.status === 'resolved' || conv.assignedMembershipId) return unchanged();
+  // An automation handling the conversation owns it until it ends or a person takes over; the run's
+  // end routes it (automations/runs endRun).
+  const [bot] = await tx
+    .select({ id: automationRuns.id })
+    .from(automationRuns)
+    .where(
+      and(
+        eq(automationRuns.tenantId, tenantId),
+        eq(automationRuns.conversationId, conv.id),
+        inArray(automationRuns.status, ['running', 'waiting']),
+      ),
+    )
+    .limit(1);
+  if (bot) return unchanged();
 
   let teamId = conv.teamId;
   let rule: RouteOutcome['rule'] = null;
@@ -261,6 +267,9 @@ export async function routeWaitingConversations(
         eq(conversations.tenantId, tenantId),
         sql`${conversations.status} in ('open', 'pending')`,
         isNull(conversations.assignedMembershipId),
+        sql`not exists (select 1 from app.automation_runs r
+                         where r.tenant_id = ${conversations.tenantId} and r.conversation_id = ${conversations.id}
+                           and r.status in ('running', 'waiting'))`,
       ),
     )
     .orderBy(sql`${conversations.lastInboundAt} asc nulls last`, asc(conversations.id))

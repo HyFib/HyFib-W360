@@ -6,6 +6,7 @@ import {
   billingEventProcessHandler,
   billingSweepHandler,
 } from './handlers/billing';
+import { automationRunHandler } from './handlers/automations';
 import { campaignRunHandler } from './handlers/campaigns';
 import { emailSendHandler, outboxSweepHandler } from './handlers/email';
 import {
@@ -90,6 +91,11 @@ async function main(): Promise<void> {
     QUEUES.campaignRun.name,
     { localConcurrency: 2, batchSize: 1 },
     campaignRunHandler(rt),
+  );
+  await rt.boss.work(
+    QUEUES.automationRun.name,
+    { localConcurrency: concurrency, batchSize: 1 },
+    automationRunHandler(rt),
   );
   await rt.boss.work(
     QUEUES.billingEventProcess.name,

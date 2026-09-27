@@ -182,6 +182,35 @@ export interface CsatReport {
   }[];
 }
 
+export const AUTOMATION_OUTCOMES = [
+  'completed',
+  'handed_off',
+  'taken_over',
+  'stopped',
+  'failed',
+] as const;
+export type AutomationOutcome = (typeof AUTOMATION_OUTCOMES)[number];
+
+export interface AutomationOutcomeCounts {
+  started: number;
+  active: number;
+  completed: number;
+  handed_off: number;
+  taken_over: number;
+  stopped: number;
+  failed: number;
+}
+
+export interface AutomationReport {
+  totals: AutomationOutcomeCounts;
+  /** Share of finished runs with each outcome. */
+  shares: Record<AutomationOutcome, Ratio>;
+  /** Failed runs by reason (budget, closed window, errors). */
+  failures: { reason: string; runs: number }[];
+  automations: ({ id: string; name: string } & AutomationOutcomeCounts)[];
+  days: ({ day: string } & AutomationOutcomeCounts)[];
+}
+
 export interface AgentRow {
   membershipId: string;
   name: string;
@@ -230,6 +259,7 @@ export interface Report {
   costs: CostReport;
   inbox: InboxReport;
   csat: CsatReport;
+  automations: AutomationReport;
   agents: AgentRow[];
   campaigns: CampaignFunnel;
   /** Latest version of every persisted definition, in registry order. */
@@ -241,6 +271,7 @@ export const REPORT_SECTIONS = [
   'costs',
   'inbox',
   'csat',
+  'automations',
   'agents',
   'campaigns',
 ] as const;
@@ -546,7 +577,9 @@ async function inboxReport(
            } as waited
       from app.conversation_turns t
      where t.tenant_id = ${tenantId} and t.started_at >= ${ts(period.start)}
-       and t.started_at < ${ts(period.end)}`;
+       and t.started_at < ${ts(period.end)}
+       -- Turns an automation took over while the customer waited were answered by the automation.
+       and t.end_reason is distinct from 'automated'`;
   // The target is met by a reply within it; turns still waiting count once they pass it.
   const replyTime = iv ? sql`pt.biz_dur` : sql`pt.dur`;
   const turns = await tx.execute<Record<string, number | null>>(sql`
@@ -727,6 +760,64 @@ async function csatReport(
         worst: num(r?.worst),
       };
     }),
+  };
+}
+
+/** Live runs (started by customer messages) that started in the period, by outcome. */
+async function automationReport(
+  tx: Tx,
+  tenantId: string,
+  period: ReportPeriod,
+): Promise<AutomationReport> {
+  const res = await tx.execute<Record<string, string | number | null>>(sql`
+    select to_char(r.started_at at time zone ${period.timezone}, 'YYYY-MM-DD') as day,
+      r.automation_id, a.name,
+      count(*)::int as started,
+      (count(*) filter (where r.status in ('running', 'waiting')))::int as active,
+      ${sql.join(
+        AUTOMATION_OUTCOMES.map(
+          (o) => sql`(count(*) filter (where r.status = ${o}))::int as ${sql.identifier(o)}`,
+        ),
+        sql`, `,
+      )}
+    from app.automation_runs r
+    join app.automations a on a.tenant_id = r.tenant_id and a.id = r.automation_id
+    where r.tenant_id = ${tenantId} and r.mode = 'live'
+      and r.started_at >= ${ts(period.start)} and r.started_at < ${ts(period.end)}
+    group by grouping sets ((1), (2, 3), ())`);
+  const failures = await tx.execute<{ reason: string; runs: number }>(sql`
+    select r.end_reason as reason, count(*)::int as runs
+      from app.automation_runs r
+     where r.tenant_id = ${tenantId} and r.mode = 'live' and r.status = 'failed'
+       and r.started_at >= ${ts(period.start)} and r.started_at < ${ts(period.end)}
+     group by 1 order by 2 desc, 1`);
+  const counts = (
+    r: Record<string, string | number | null> | undefined,
+  ): AutomationOutcomeCounts => ({
+    started: num(r?.started),
+    active: num(r?.active),
+    completed: num(r?.completed),
+    handed_off: num(r?.handed_off),
+    taken_over: num(r?.taken_over),
+    stopped: num(r?.stopped),
+    failed: num(r?.failed),
+  });
+  // Grouping sets: per day (day set), per automation (automation set), and the total (neither).
+  const total = res.rows.find((r) => r.day === null && r.automation_id === null);
+  const byDay = new Map(res.rows.filter((r) => r.day !== null).map((r) => [String(r.day), r]));
+  const totals = counts(total);
+  const finished = totals.started - totals.active;
+  return {
+    totals,
+    shares: Object.fromEntries(
+      AUTOMATION_OUTCOMES.map((o) => [o, { numerator: totals[o], denominator: finished }]),
+    ) as Record<AutomationOutcome, Ratio>,
+    failures: failures.rows.map((f) => ({ reason: f.reason, runs: f.runs })),
+    automations: res.rows
+      .filter((r) => r.automation_id !== null)
+      .map((r) => ({ id: String(r.automation_id), name: String(r.name), ...counts(r) }))
+      .sort((x, y) => y.started - x.started || x.name.localeCompare(y.name)),
+    days: period.days.map((day) => ({ day, ...counts(byDay.get(day)) })),
   };
 }
 
@@ -1074,6 +1165,36 @@ function sectionCsv(section: ReportSection, report: Report): string {
         );
       }
       break;
+    case 'automations':
+      lines.push(
+        csvLine([
+          'day',
+          'time_zone',
+          'runs_started',
+          'still_running',
+          'completed',
+          'handed_off',
+          'taken_over',
+          'stopped',
+          'failed',
+        ]),
+      );
+      for (const d of report.automations.days) {
+        lines.push(
+          csvLine([
+            d.day,
+            tz,
+            d.started,
+            d.active,
+            d.completed,
+            d.handed_off,
+            d.taken_over,
+            d.stopped,
+            d.failed,
+          ]),
+        );
+      }
+      break;
     case 'agents':
       lines.push(
         csvLine([
@@ -1176,6 +1297,7 @@ export function createReportsService(deps: ReportsDeps) {
         const costs = await costReport(tx, ctx.tenant.id, period, settings.costCurrency);
         const inbox = await inboxReport(tx, ctx.tenant.id, period, now, settings.target);
         const csat = await csatReport(tx, ctx.tenant.id, period, settings.csatEnabled);
+        const automations = await automationReport(tx, ctx.tenant.id, period);
         const agents = await agentReport(tx, ctx.tenant.id, period);
         const campaigns = await campaignFunnel(tx, ctx.tenant.id, period, settings.costCurrency);
         const definitions = await loadDefinitions(tx);
@@ -1186,6 +1308,7 @@ export function createReportsService(deps: ReportsDeps) {
           costs,
           inbox,
           csat,
+          automations,
           agents,
           campaigns,
           definitions,

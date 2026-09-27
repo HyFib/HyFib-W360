@@ -162,6 +162,17 @@ export const QUEUES = {
     deadLetter: 'dead-letter',
     deleteAfterHours: 24,
   },
+  automationRun: {
+    name: 'automation.run',
+    policy: 'exclusive',
+    retryLimit: 5,
+    retryDelaySeconds: 5,
+    retryBackoff: true,
+    retryDelayMaxSeconds: 300,
+    expireInSeconds: 120,
+    deadLetter: 'dead-letter',
+    deleteAfterHours: 72,
+  },
   deadLetter: {
     name: 'dead-letter',
     policy: 'standard',

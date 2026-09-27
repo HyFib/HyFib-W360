@@ -200,7 +200,7 @@ async function deliver(body: unknown) {
     { provider: 'meta_whatsapp', rawBody: Buffer.from(JSON.stringify(body)) },
   );
   const outcome = await processMetaWebhookReceipt(
-    { db: dbs.app, keyring, clock: systemClock },
+    { db: dbs.app, keyring, clock: systemClock, jobs: new PgBossJobQueue(boss), signer },
     stored.receiptId,
   );
   return { ...stored, outcome };
@@ -310,7 +310,7 @@ describe('inbound ingestion', () => {
     // A processed receipt cannot be claimed again.
     expect(
       await processMetaWebhookReceipt(
-        { db: dbs.app, keyring, clock: systemClock },
+        { db: dbs.app, keyring, clock: systemClock, jobs: new PgBossJobQueue(boss), signer },
         first.receiptId,
       ),
     ).toBe('not_claimable');
@@ -342,7 +342,7 @@ describe('inbound ingestion', () => {
       unknown.receiptId,
     ]);
     await processMetaWebhookReceipt(
-      { db: dbs.app, keyring, clock: systemClock },
+      { db: dbs.app, keyring, clock: systemClock, jobs: new PgBossJobQueue(boss), signer },
       unknown.receiptId,
     );
     const again = await adminQuery<{ n: number }>(

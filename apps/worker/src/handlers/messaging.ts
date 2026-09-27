@@ -14,6 +14,7 @@ import {
   routeDueConversations,
 } from '@w360/domain';
 import type { WorkerRuntime } from '../runtime';
+import { sweepAutomationRuns } from './automations';
 import { signalDueCampaigns } from './campaigns';
 import { RetryableJobError } from './email';
 import { signalDueTemplateSyncs } from './templates';
@@ -32,7 +33,7 @@ export function webhookProcessHandler(rt: WorkerRuntime) {
       return;
     }
     const outcome = await processMetaWebhookReceipt(
-      { db: rt.db, keyring: rt.keyring, clock: rt.clock },
+      { db: rt.db, keyring: rt.keyring, clock: rt.clock, jobs: rt.jobs, signer: rt.signer },
       auth.envelope.ref,
     );
     rt.logger.info({ jobId: job.id, receiptId: auth.envelope.ref, outcome }, 'webhook processed');
@@ -127,7 +128,8 @@ export function channelOnboardHandler(rt: WorkerRuntime) {
 /**
  * Every minute: re-signal webhook receipts and send intents whose signal was lost, settle send
  * intents whose worker died (before dispatch: re-queued; after dispatch: unknown outcome, never an
- * automatic resend), and route waiting conversations of round-robin teams.
+ * automatic resend), signal automation runs that are due or lost their signal, and route waiting
+ * conversations of round-robin teams.
  */
 export function messagingSweepHandler(rt: WorkerRuntime) {
   return async (): Promise<void> => {
@@ -166,6 +168,8 @@ export function messagingSweepHandler(rt: WorkerRuntime) {
     if (templateSyncs > 0) rt.logger.info({ templateSyncs }, 'template syncs signalled');
     const campaignTicks = await signalDueCampaigns(rt);
     if (campaignTicks > 0) rt.logger.info({ campaignTicks }, 'campaign ticks signalled');
+    const automations = await sweepAutomationRuns(rt);
+    if (automations.signalled > 0) rt.logger.info(automations, 'automation runs signalled');
     const routed = await routeDueConversations(rt.db);
     if (routed > 0) rt.logger.info({ routed }, 'waiting conversations assigned');
     const retention = await applyMessagingRetention(rt.db);

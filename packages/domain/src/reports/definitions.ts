@@ -33,7 +33,12 @@ const DAYS =
   'Counted by the time HyFib recorded each item, in calendar days of the company’s time zone (Settings → Company). A period runs from midnight at the start of its first day to midnight after its last day, with daylight-saving changes applied.';
 const TURNS =
   'A reply turn starts with the first customer message that has no reply from a member yet and ends when a member replies or the conversation is resolved. Turns are counted by the time they started, in calendar days of the company’s time zone.';
+/** Turns once automations exist (migration 0011): hand-offs start turns, automated time does not count. */
+const TURNS_V2 =
+  'A reply turn starts with the first customer message that has no reply from a member yet, or when an automation passes the conversation to people, and ends when a member replies or the conversation is resolved. No turn is open while an automation is handling the conversation, and a turn that was open when an automation took over is left out. Turns are counted by the time they started, in calendar days of the company’s time zone.';
 const NOT_AVAILABLE = 'Not available.';
+const RUN_DAYS =
+  'Counted by the time the run started, in calendar days of the company’s time zone. Test runs started by members are not counted.';
 const TARGET_CLOCK =
   'The target, counted in business hours when business hours are on (Settings → Messaging → Business hours), otherwise in absolute time.';
 const SURVEY_DAYS =
@@ -367,6 +372,21 @@ export const METRIC_DEFINITIONS: readonly MetricDefinition[] = [
     available: true,
   },
   {
+    key: 'inbox.waiting',
+    version: 2,
+    label: 'Waiting for a reply',
+    unit: 'count',
+    description:
+      'Conversations whose customer is waiting for a member: their latest messages have no reply from a member, no automation is handling the conversation, and it is not resolved. A conversation an automation passed to people waits from that moment.',
+    numerator: 'Open reply turns.',
+    denominator: null,
+    window: null,
+    timezoneRule: null,
+    missingData: 'Reply turns are recorded from the release of reports onwards.',
+    freshness: NOW,
+    available: true,
+  },
+  {
     key: 'inbox.oldest_wait',
     version: 1,
     label: 'Longest wait',
@@ -395,6 +415,22 @@ export const METRIC_DEFINITIONS: readonly MetricDefinition[] = [
     available: true,
   },
   {
+    key: 'inbox.oldest_wait',
+    version: 3,
+    label: 'Longest wait',
+    unit: 'duration',
+    description:
+      'How long the longest-waiting customer has been waiting for a member. Time while an automation was handling the conversation does not count.',
+    numerator:
+      'Time since the start of the oldest open reply turn (the customer’s first waiting message, or an automation’s hand-off).',
+    denominator: null,
+    window: null,
+    timezoneRule: null,
+    missingData: 'Measured in absolute time, including hours outside business hours.',
+    freshness: NOW,
+    available: true,
+  },
+  {
     key: 'inbox.overdue',
     version: 1,
     label: 'Overdue',
@@ -411,12 +447,43 @@ export const METRIC_DEFINITIONS: readonly MetricDefinition[] = [
     available: true,
   },
   {
+    key: 'inbox.overdue',
+    version: 2,
+    label: 'Overdue',
+    unit: 'count',
+    description:
+      'Waiting conversations whose customer has waited longer than the company’s first-response target. After an automation’s hand-off the wait counts from the hand-off.',
+    numerator: 'Open reply turns that have waited longer than the target.',
+    denominator: null,
+    window: TARGET_CLOCK,
+    timezoneRule: null,
+    missingData:
+      'Shown only when a target is set. Reply turns are recorded from the release of reports onwards.',
+    freshness: NOW,
+    available: true,
+  },
+  {
     key: 'inbox.windows_closing',
     version: 1,
     label: 'Reply windows closing',
     unit: 'count',
     description:
       'Waiting conversations whose 24-hour customer service window closes within 2 hours. After it closes only approved templates can be sent.',
+    numerator: 'Open reply turns whose customer’s last message was 22 to 24 hours ago.',
+    denominator: null,
+    window: 'The window closes 24 hours after the customer’s last message.',
+    timezoneRule: null,
+    missingData: 'None.',
+    freshness: NOW,
+    available: true,
+  },
+  {
+    key: 'inbox.windows_closing',
+    version: 2,
+    label: 'Reply windows closing',
+    unit: 'count',
+    description:
+      'Conversations waiting for a member whose 24-hour customer service window closes within 2 hours. After it closes only approved templates can be sent. Conversations an automation is handling are not counted.',
     numerator: 'Open reply turns whose customer’s last message was 22 to 24 hours ago.',
     denominator: null,
     window: 'The window closes 24 hours after the customer’s last message.',
@@ -460,6 +527,23 @@ export const METRIC_DEFINITIONS: readonly MetricDefinition[] = [
     available: true,
   },
   {
+    key: 'inbox.first_response_time',
+    version: 3,
+    label: 'First response time',
+    unit: 'duration',
+    description:
+      'Time from the start of a reply turn to the first reply by a member, reported as the median and the 90th percentile.',
+    numerator: 'Reply times of answered turns.',
+    denominator: 'Turns that started in the period and were answered.',
+    window:
+      'From when HyFib received the customer’s first waiting message, or from an automation’s hand-off, to when the member sent the reply, in absolute time, including hours outside business hours (see First response in business hours).',
+    timezoneRule: TURNS_V2,
+    missingData:
+      'Turns still waiting are not in the median; see Waiting. A reply counts when the member sends it, even if WhatsApp later rejects it (see Failed). Reply turns are recorded from the release of reports onwards.',
+    freshness: LIVE,
+    available: true,
+  },
+  {
     key: 'inbox.first_response_business_time',
     version: 1,
     label: 'First response in business hours',
@@ -471,6 +555,23 @@ export const METRIC_DEFINITIONS: readonly MetricDefinition[] = [
     window:
       'Only time inside the company’s business hours counts (Settings → Messaging → Business hours); closed days and hours outside the weekly schedule are skipped, in the company’s time zone.',
     timezoneRule: TURNS,
+    missingData:
+      'Shown only when business hours are on. The current schedule and closed days are applied to the whole period, including turns from before a change.',
+    freshness: LIVE,
+    available: true,
+  },
+  {
+    key: 'inbox.first_response_business_time',
+    version: 2,
+    label: 'First response in business hours',
+    unit: 'duration',
+    description:
+      'Time from the start of a reply turn to the first reply by a member, counting business hours only, reported as the median and the 90th percentile.',
+    numerator: 'Business-hours reply times of answered turns.',
+    denominator: 'Turns that started in the period and were answered.',
+    window:
+      'Only time inside the company’s business hours counts (Settings → Messaging → Business hours); closed days and hours outside the weekly schedule are skipped, in the company’s time zone.',
+    timezoneRule: TURNS_V2,
     missingData:
       'Shown only when business hours are on. The current schedule and closed days are applied to the whole period, including turns from before a change.',
     freshness: LIVE,
@@ -510,6 +611,23 @@ export const METRIC_DEFINITIONS: readonly MetricDefinition[] = [
     available: true,
   },
   {
+    key: 'inbox.within_target',
+    version: 3,
+    label: 'Answered within target',
+    unit: 'rate',
+    description:
+      'Share of reply turns answered within the company’s first-response target (Settings → Messaging).',
+    numerator: 'Turns answered within the target.',
+    denominator:
+      'Turns that started in the period and were answered or have waited longer than the target. Turns resolved without a reply, turns still within the target and turns an automation took over are left out.',
+    window: TARGET_CLOCK,
+    timezoneRule: TURNS_V2,
+    missingData:
+      'Shown only when a target is set. With business hours on, the current schedule and closed days are applied to the whole period.',
+    freshness: LIVE,
+    available: true,
+  },
+  {
     key: 'inbox.resolved_without_reply',
     version: 1,
     label: 'Resolved without a reply',
@@ -520,6 +638,21 @@ export const METRIC_DEFINITIONS: readonly MetricDefinition[] = [
     denominator: null,
     window: null,
     timezoneRule: TURNS,
+    missingData: 'None.',
+    freshness: LIVE,
+    available: true,
+  },
+  {
+    key: 'inbox.resolved_without_reply',
+    version: 2,
+    label: 'Resolved without a reply',
+    unit: 'count',
+    description:
+      'Reply turns closed by resolving the conversation without replying, for example after a customer’s thank-you.',
+    numerator: 'Turns that ended because the conversation was resolved.',
+    denominator: null,
+    window: null,
+    timezoneRule: TURNS_V2,
     missingData: 'None.',
     freshness: LIVE,
     available: true,
@@ -618,6 +751,23 @@ export const METRIC_DEFINITIONS: readonly MetricDefinition[] = [
     available: true,
   },
   {
+    key: 'agent.turns_answered',
+    version: 2,
+    label: 'Turns answered',
+    unit: 'count',
+    description:
+      'Reply turns the member answered first, including turns that started when an automation passed the conversation to people.',
+    numerator: 'Turns that ended with the member’s reply.',
+    denominator: null,
+    window: null,
+    timezoneRule:
+      'Counted by the time the turn was answered, in calendar days of the company’s time zone.',
+    missingData:
+      'Reply turns are recorded from the release of reports onwards. Replies that took a conversation over from an automation answer no turn.',
+    freshness: LIVE,
+    available: true,
+  },
+  {
     key: 'agent.first_response_time',
     version: 1,
     label: 'Median first response',
@@ -641,6 +791,22 @@ export const METRIC_DEFINITIONS: readonly MetricDefinition[] = [
     numerator: 'Reply times of the turns the member answered.',
     denominator: 'Turns the member answered in the period.',
     window: 'Absolute time, including hours outside business hours.',
+    timezoneRule:
+      'Counted by the time the turn was answered, in calendar days of the company’s time zone.',
+    missingData: 'Reply turns are recorded from the release of reports onwards.',
+    freshness: LIVE,
+    available: true,
+  },
+  {
+    key: 'agent.first_response_time',
+    version: 3,
+    label: 'Median first response',
+    unit: 'duration',
+    description: 'Median reply time of the turns the member answered.',
+    numerator: 'Reply times of the turns the member answered.',
+    denominator: 'Turns the member answered in the period.',
+    window:
+      'Absolute time from the start of the turn (the customer’s first waiting message, or an automation’s hand-off), including hours outside business hours.',
     timezoneRule:
       'Counted by the time the turn was answered, in calendar days of the company’s time zone.',
     missingData: 'Reply turns are recorded from the release of reports onwards.',
@@ -691,6 +857,36 @@ export const METRIC_DEFINITIONS: readonly MetricDefinition[] = [
     missingData: 'Not measured: automations are not available yet (planned for Phase 4).',
     freshness: NOT_AVAILABLE,
     available: false,
+  },
+  {
+    key: 'automation.outcomes',
+    version: 2,
+    label: 'Automation outcomes',
+    unit: 'rate',
+    description:
+      'Share of finished runs that completed without people, were handed off by the automation, were taken over by a member, were stopped, or failed (budget, closed window, errors).',
+    numerator: 'Finished runs with each outcome.',
+    denominator: 'Runs started in the period that have finished.',
+    window: 'Runs still running or waiting are not in the denominator until they finish.',
+    timezoneRule: RUN_DAYS,
+    missingData: 'Runs older than 180 days are deleted (docs/DATA-RETENTION.md).',
+    freshness: LIVE,
+    available: true,
+  },
+  {
+    key: 'automation.runs',
+    version: 1,
+    label: 'Automation runs',
+    unit: 'count',
+    description:
+      'Runs of published automations started by customer messages, by how they ended: completed, handed off to people, taken over by a member, stopped, failed, or still running.',
+    numerator: 'Runs started in the period, by outcome.',
+    denominator: null,
+    window: null,
+    timezoneRule: RUN_DAYS,
+    missingData: 'Runs older than 180 days are deleted (docs/DATA-RETENTION.md).',
+    freshness: LIVE,
+    available: true,
   },
   {
     key: 'crm.deal_outcomes',

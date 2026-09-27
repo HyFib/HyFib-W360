@@ -696,12 +696,16 @@ describe('company report', () => {
 
   it('includes the current version of every definition, with unavailable metrics marked', () => {
     expect(report.definitions).toEqual(currentMetricDefinitions());
-    expect(report.definitions.find((d) => d.key === 'inbox.within_target')?.version).toBe(2);
+    // Automations changed what a reply turn is (migration 0011): a new version, not an edit.
+    expect(report.definitions.find((d) => d.key === 'inbox.within_target')?.version).toBe(3);
+    expect(report.definitions.find((d) => d.key === 'automation.outcomes')).toMatchObject({
+      version: 2,
+      available: true,
+    });
     const unavailable = report.definitions.filter((d) => !d.available).map((d) => d.key);
     expect(unavailable).toEqual([
       'campaign.clicked',
       'campaign.converted',
-      'automation.outcomes',
       'crm.deal_outcomes',
       'contacts.retention',
     ]);

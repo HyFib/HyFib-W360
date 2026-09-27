@@ -225,7 +225,7 @@ export async function startWhatsAppFixture(): Promise<WhatsAppFixture> {
         { provider: 'meta_whatsapp', rawBody: Buffer.from(JSON.stringify(body)) },
       );
       const outcome = await processMetaWebhookReceipt(
-        { db: dbs.app, keyring, clock },
+        { db: dbs.app, keyring, clock, jobs: jobs(), signer },
         stored.receiptId,
       );
       return { receiptId: stored.receiptId, outcome };

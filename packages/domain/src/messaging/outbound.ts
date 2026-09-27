@@ -26,6 +26,7 @@ import {
   type Tx,
 } from '@w360/db';
 import { assertCan, can, type TenantContext } from '../authz/context';
+import { endRunForHuman } from '../automations/runs';
 import { recountedCounters } from '../campaigns/counters';
 import {
   PROVIDER_MARKETING_OPT_OUT_CODE,
@@ -193,6 +194,15 @@ export async function queueTextMessage(deps: OutboundDeps, ctx: TenantContext, i
       );
     }
 
+    // A member's reply ends an automation handling the conversation, and bot messages not yet
+    // handed to the sender are cancelled, so the bot and the member never answer at once.
+    await endRunForHuman(tx, {
+      tenantId: ctx.tenant.id,
+      conversationId: conv.id,
+      reason: 'agent_replied',
+      actorMembershipId: ctx.membership.id,
+      now,
+    });
     const messageId = uuidv7();
     const intentId = uuidv7();
     const request = {
@@ -397,6 +407,13 @@ export async function queueTemplateMessage(deps: OutboundDeps, ctx: TenantContex
     if (!can(ctx, 'campaigns.send') && !canSeeConversation(ctx, conv.assignedMembershipId)) {
       throw notFound('Contact');
     }
+    await endRunForHuman(tx, {
+      tenantId: ctx.tenant.id,
+      conversationId: conv.id,
+      reason: 'agent_replied',
+      actorMembershipId: ctx.membership.id,
+      now,
+    });
     const built = buildTemplateSend(template, spec, data.params);
     const messageId = uuidv7();
     const intentId = uuidv7();

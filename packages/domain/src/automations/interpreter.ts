@@ -1,0 +1,567 @@
+import { EMAIL_RE, normalizeTag } from '../contacts/fields';
+import {
+  AUTOMATION_LIMITS,
+  RUN_BUDGETS,
+  renderText,
+  type AutomationGraph,
+  type AutomationNode,
+  type ConditionRule,
+  type NodeOf,
+} from './graph';
+import { normalizeRoutingText } from '../inbox/keywords';
+
+/**
+ * The automation interpreter: a pure function from (graph, run state, event, facts) to the next
+ * state, the effects to apply and a log entry. One call is one step: entering a node, or handling
+ * a reply or deadline at the node the run waits in. The worker applies the effects and stores the
+ * new state in one transaction per step; the builder's simulator calls the same function with
+ * simulated facts and applies nothing.
+ */
+
+export interface RunState {
+  /** The node to enter next (running) or the node the run waits in (waiting); null when ended. */
+  nodeId: string | null;
+  /** How many times the current node has been entered. */
+  visit: number;
+  waiting: { for: 'reply' | 'timer'; until: Date } | null;
+  /** Unrecognised replies at the current question. */
+  retries: number;
+  steps: number;
+  messages: number;
+  visits: Readonly<Record<string, number>>;
+  variables: Readonly<Record<string, string>>;
+}
+
+export interface InboundReply {
+  type: 'text' | 'button' | 'other';
+  /** Text typed, or the tapped button's title. */
+  text: string | null;
+  /** Id of a tapped reply button. */
+  buttonId: string | null;
+}
+
+export type RunEvent =
+  | { kind: 'continue' }
+  | { kind: 'reply'; reply: InboundReply }
+  /** The reply deadline or the wait timer is due. */
+  | { kind: 'deadline' };
+
+export interface RunFacts {
+  contactName: string | null;
+  companyName: string;
+  tags: ReadonlySet<string>;
+  fields: Readonly<Record<string, string | number | boolean>>;
+  /** Whether the business is open now (true when business hours are off). */
+  businessOpen: boolean;
+}
+
+export type RunEffect =
+  | { kind: 'send_text'; text: string }
+  | {
+      kind: 'send_buttons';
+      header: string | null;
+      body: string;
+      footer: string | null;
+      buttons: { id: string; title: string }[];
+    }
+  | { kind: 'add_tag'; tag: string }
+  | { kind: 'remove_tag'; tag: string }
+  | { kind: 'set_field'; field: string; value: string }
+  | { kind: 'handoff'; teamId: string | null };
+
+export type StepStatus = 'running' | 'waiting' | 'completed' | 'handed_off' | 'failed';
+export type InterpreterEndReason =
+  | 'end_node'
+  | 'no_next'
+  | 'handoff_node'
+  | 'budget_steps'
+  | 'budget_loop'
+  | 'budget_messages'
+  | 'error';
+
+export type StepLogOutcome =
+  | 'sent'
+  | 'asked'
+  | 'answered'
+  | 'retried'
+  | 'timed_out'
+  | 'branched'
+  | 'updated'
+  | 'waiting'
+  | 'resumed'
+  | 'handed_off'
+  | 'completed'
+  | 'failed';
+
+export interface StepResult {
+  /** True when the event did not apply to the run's position (nothing to record or apply). */
+  noop: boolean;
+  state: RunState;
+  effects: RunEffect[];
+  status: StepStatus;
+  endReason: InterpreterEndReason | null;
+  log: {
+    nodeId: string | null;
+    nodeType: string | null;
+    outcome: StepLogOutcome;
+    branch: string | null;
+    detail: string | null;
+  };
+}
+
+export interface AdvanceInput {
+  graph: AutomationGraph;
+  state: RunState;
+  event: RunEvent;
+  facts: RunFacts;
+  /** The run's id (reply button ids carry it). */
+  runId: string;
+  now: Date;
+}
+
+export const BOT_BUTTON_PREFIX = 'w360bot:';
+const BOT_BUTTON_RE = /^w360bot:([0-9a-f-]{36}):([a-z0-9_-]{1,32}):(\d{1,4}):([0-2])$/;
+
+/** Reply button id: run, node, visit and button index, so a tap answers exactly one question. */
+export function botButtonId(runId: string, nodeId: string, visit: number, index: number): string {
+  return `${BOT_BUTTON_PREFIX}${runId}:${nodeId}:${visit}:${index}`;
+}
+
+export function parseBotButtonId(
+  id: string,
+): { runId: string; nodeId: string; visit: number; index: number } | null {
+  const m = BOT_BUTTON_RE.exec(id);
+  if (!m) return null;
+  return {
+    runId: m[1] as string,
+    nodeId: m[2] as string,
+    visit: Number(m[3]),
+    index: Number(m[4]),
+  };
+}
+
+export function initialRunState(graph: AutomationGraph): RunState {
+  return {
+    nodeId: graph.start,
+    visit: 0,
+    waiting: null,
+    retries: 0,
+    steps: 0,
+    messages: 0,
+    visits: {},
+    variables: {},
+  };
+}
+
+function truncate(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+}
+
+function numberOf(value: string | number | boolean | undefined): number | null {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim().replace(',', '.');
+  if (!/^-?\d+(\.\d+)?$/.test(normalized)) return null;
+  return Number(normalized);
+}
+
+function compare(
+  actual: string | number | boolean | undefined,
+  op: ConditionRule & { op: string },
+  value: string | null,
+): boolean {
+  const text = actual === undefined || actual === null ? '' : String(actual).trim();
+  const expected = (value ?? '').trim();
+  switch (op.op) {
+    case 'is_set':
+      return text.length > 0;
+    case 'is_not_set':
+      return text.length === 0;
+    case 'equals':
+      return text.toLowerCase() === expected.toLowerCase();
+    case 'not_equals':
+      return text.toLowerCase() !== expected.toLowerCase();
+    case 'contains':
+      return expected.length > 0 && text.toLowerCase().includes(expected.toLowerCase());
+    case 'greater_than':
+    case 'less_than': {
+      const a = numberOf(actual);
+      const b = numberOf(expected);
+      if (a === null || b === null) return false;
+      return op.op === 'greater_than' ? a > b : a < b;
+    }
+    default:
+      return false;
+  }
+}
+
+export function evaluateRule(
+  rule: ConditionRule,
+  facts: RunFacts,
+  variables: Readonly<Record<string, string>>,
+): boolean {
+  switch (rule.kind) {
+    case 'answer':
+      return compare(variables[rule.variable], rule, rule.value);
+    case 'field':
+      return compare(facts.fields[rule.field], rule, rule.value);
+    case 'tag': {
+      const normalized = normalizeTag(rule.tag);
+      const has = normalized.ok && facts.tags.has(normalized.tag);
+      return rule.op === 'has' ? has : !has;
+    }
+    case 'business_hours':
+      return rule.op === 'open' ? facts.businessOpen : !facts.businessOpen;
+  }
+}
+
+/** Validates a typed answer against the question's format; returns the value to save. */
+export function acceptAnswer(
+  format: NodeOf<'ask_text'>['format'],
+  reply: InboundReply,
+): string | null {
+  if (reply.type !== 'text' || !reply.text) return null;
+  const text = reply.text.trim();
+  if (!text) return null;
+  if (format === 'number') return numberOf(text) === null ? null : text;
+  if (format === 'email') return text.length <= 254 && EMAIL_RE.test(text) ? text : null;
+  return text.slice(0, AUTOMATION_LIMITS.answerLength);
+}
+
+/** The button a reply chose: a tap on this question's button, or its title typed as text. */
+export function chosenButton(
+  node: NodeOf<'ask_buttons'>,
+  reply: InboundReply,
+  runId: string,
+  visit: number,
+): number | null {
+  if (reply.buttonId) {
+    const parsed = parseBotButtonId(reply.buttonId);
+    if (
+      parsed &&
+      parsed.runId === runId &&
+      parsed.nodeId === node.id &&
+      parsed.visit === visit &&
+      parsed.index < node.buttons.length
+    ) {
+      return parsed.index;
+    }
+    if (parsed) return null;
+  }
+  if (!reply.text) return null;
+  const typed = normalizeRoutingText(reply.text);
+  if (!typed) return null;
+  const index = node.buttons.findIndex((b) => normalizeRoutingText(b.title) === typed);
+  return index >= 0 ? index : null;
+}
+
+/**
+ * Advances a run by one step. Never throws for problems caused by the graph or the customer: a
+ * missing node, an exhausted budget or an empty message ends the run as failed with a reason.
+ */
+export function advance(input: AdvanceInput): StepResult {
+  const { graph, event, facts, runId, now } = input;
+  const state = input.state;
+  const node = state.nodeId ? graph.nodes.find((n) => n.id === state.nodeId) : undefined;
+  const values = (variables: Readonly<Record<string, string>>) => ({
+    contactName: facts.contactName,
+    companyName: facts.companyName,
+    variables,
+  });
+
+  const fail = (
+    reason: InterpreterEndReason,
+    detail: string | null,
+    base: RunState = state,
+  ): StepResult => ({
+    noop: false,
+    state: { ...base, waiting: null, nodeId: null },
+    effects: [],
+    status: 'failed',
+    endReason: reason,
+    log: {
+      nodeId: node?.id ?? state.nodeId,
+      nodeType: node?.type ?? null,
+      outcome: 'failed',
+      branch: null,
+      detail,
+    },
+  });
+
+  if (!node) return fail('error', 'missing_node');
+  if (state.steps + 1 > RUN_BUDGETS.maxSteps) return fail('budget_steps', 'budget_steps');
+
+  /** Moves to `target` (or ends the run when there is none). */
+  const moveTo = (
+    target: string | null,
+    base: RunState,
+    effects: RunEffect[],
+    outcome: StepLogOutcome,
+    branch: string | null,
+  ): StepResult => ({
+    noop: false,
+    state: { ...base, nodeId: target, waiting: null, retries: 0 },
+    effects,
+    status: target === null ? 'completed' : 'running',
+    endReason: target === null ? 'no_next' : null,
+    log: { nodeId: node.id, nodeType: node.type, outcome, branch, detail: null },
+  });
+
+  const waitFor = (
+    kind: 'reply' | 'timer',
+    minutes: number,
+    base: RunState,
+    effects: RunEffect[],
+    outcome: StepLogOutcome,
+  ): StepResult => ({
+    noop: false,
+    state: { ...base, waiting: { for: kind, until: new Date(now.getTime() + minutes * 60_000) } },
+    effects,
+    status: 'waiting',
+    endReason: null,
+    log: { nodeId: node.id, nodeType: node.type, outcome, branch: null, detail: null },
+  });
+
+  /** A message effect, counted against the message budget; null when the text renders empty. */
+  const message = (
+    base: RunState,
+    build: () => RunEffect | null,
+  ): { effect: RunEffect; state: RunState } | StepResult => {
+    if (base.messages + 1 > RUN_BUDGETS.maxMessages)
+      return fail('budget_messages', 'budget_messages', base);
+    const effect = build();
+    if (!effect) return fail('error', 'empty_message', base);
+    return { effect, state: { ...base, messages: base.messages + 1 } };
+  };
+  const isResult = (value: unknown): value is StepResult =>
+    typeof value === 'object' && value !== null && 'status' in value;
+
+  const textEffect = (template: string, variables: Readonly<Record<string, string>>) => {
+    const text = truncate(renderText(template, values(variables)), AUTOMATION_LIMITS.textLength);
+    return text ? ({ kind: 'send_text', text } as const) : null;
+  };
+  const buttonsEffect = (
+    askNode: NodeOf<'ask_buttons'>,
+    body: string,
+    visit: number,
+    variables: Readonly<Record<string, string>>,
+  ): RunEffect | null => {
+    const rendered = truncate(
+      renderText(body, values(variables)),
+      AUTOMATION_LIMITS.questionLength,
+    );
+    if (!rendered) return null;
+    return {
+      kind: 'send_buttons',
+      header: askNode.header,
+      body: rendered,
+      footer: askNode.footer,
+      buttons: askNode.buttons.map((b, i) => ({
+        id: botButtonId(runId, askNode.id, visit, i),
+        title: b.title,
+      })),
+    };
+  };
+
+  const enter = (current: AutomationNode, base: RunState): StepResult => {
+    switch (current.type) {
+      case 'send_text': {
+        const built = message(base, () => textEffect(current.text, base.variables));
+        if (isResult(built)) return built;
+        return moveTo(current.next, built.state, [built.effect], 'sent', null);
+      }
+      case 'ask_buttons': {
+        const built = message(base, () =>
+          buttonsEffect(current, current.body, base.visit, base.variables),
+        );
+        if (isResult(built)) return built;
+        return waitFor('reply', current.timeoutMinutes, built.state, [built.effect], 'asked');
+      }
+      case 'ask_text': {
+        const built = message(base, () => textEffect(current.text, base.variables));
+        if (isResult(built)) return built;
+        return waitFor('reply', current.timeoutMinutes, built.state, [built.effect], 'asked');
+      }
+      case 'condition': {
+        const results = current.rules.map((r) => evaluateRule(r, facts, base.variables));
+        const yes = current.match === 'all' ? results.every(Boolean) : results.some(Boolean);
+        return moveTo(yes ? current.then : current.else, base, [], 'branched', yes ? 'yes' : 'no');
+      }
+      case 'update_contact': {
+        const action = current.action;
+        const effect: RunEffect =
+          action.kind === 'set_field'
+            ? {
+                kind: 'set_field',
+                field: action.field,
+                value: renderText(action.value, values(base.variables)).slice(
+                  0,
+                  AUTOMATION_LIMITS.fieldValueLength,
+                ),
+              }
+            : { kind: action.kind, tag: action.tag };
+        return moveTo(current.next, base, [effect], 'updated', null);
+      }
+      case 'wait':
+        return waitFor('timer', current.minutes, base, [], 'waiting');
+      case 'handoff':
+        return {
+          noop: false,
+          state: { ...base, nodeId: null, waiting: null },
+          effects: [{ kind: 'handoff', teamId: current.teamId }],
+          status: 'handed_off',
+          endReason: 'handoff_node',
+          log: {
+            nodeId: current.id,
+            nodeType: current.type,
+            outcome: 'handed_off',
+            branch: null,
+            detail: null,
+          },
+        };
+      case 'end':
+        return {
+          noop: false,
+          state: { ...base, nodeId: null, waiting: null },
+          effects: [],
+          status: 'completed',
+          endReason: 'end_node',
+          log: {
+            nodeId: current.id,
+            nodeType: current.type,
+            outcome: 'completed',
+            branch: null,
+            detail: null,
+          },
+        };
+    }
+  };
+
+  // Handling a reply or a deadline at the node the run waits in.
+  if (state.waiting) {
+    if (event.kind === 'continue') {
+      // Nothing to do yet; the runner never asks for this, but it must not advance the run.
+      return {
+        noop: true,
+        state,
+        effects: [],
+        status: 'waiting',
+        endReason: null,
+        log: {
+          nodeId: node.id,
+          nodeType: node.type,
+          outcome: 'waiting',
+          branch: null,
+          detail: 'not_due',
+        },
+      };
+    }
+    const counted: RunState = { ...state, steps: state.steps + 1 };
+    if (state.waiting.for === 'timer' || node.type === 'wait') {
+      if (event.kind !== 'deadline') {
+        return {
+          noop: true,
+          state,
+          effects: [],
+          status: 'waiting',
+          endReason: null,
+          log: {
+            nodeId: node.id,
+            nodeType: node.type,
+            outcome: 'waiting',
+            branch: null,
+            detail: 'ignored_reply',
+          },
+        };
+      }
+      return moveTo(node.type === 'wait' ? node.next : null, counted, [], 'resumed', null);
+    }
+    if (event.kind === 'deadline') {
+      const target =
+        node.type === 'ask_buttons' || node.type === 'ask_text' ? node.timeoutNext : null;
+      return moveTo(target, counted, [], 'timed_out', 'no reply');
+    }
+    // A reply.
+    const reply = event.reply;
+    if (node.type === 'ask_buttons') {
+      const index = chosenButton(node, reply, runId, state.visit);
+      if (index !== null) {
+        const button = node.buttons[index] as { title: string; next: string | null };
+        const variables = node.saveAs
+          ? { ...counted.variables, [node.saveAs]: button.title }
+          : counted.variables;
+        return moveTo(button.next, { ...counted, variables }, [], 'answered', button.title);
+      }
+      if (counted.retries < node.retries) {
+        const built = message(counted, () =>
+          buttonsEffect(node, node.retryText ?? node.body, counted.visit, counted.variables),
+        );
+        if (isResult(built)) return built;
+        return waitFor(
+          'reply',
+          node.timeoutMinutes,
+          { ...built.state, retries: counted.retries + 1 },
+          [built.effect],
+          'retried',
+        );
+      }
+      return moveTo(node.noMatchNext, counted, [], 'answered', 'other reply');
+    }
+    if (node.type === 'ask_text') {
+      const value = acceptAnswer(node.format, reply);
+      if (value !== null) {
+        return moveTo(
+          node.next,
+          { ...counted, variables: { ...counted.variables, [node.saveAs]: value } },
+          [],
+          'answered',
+          'answer',
+        );
+      }
+      if (counted.retries < node.retries) {
+        const built = message(counted, () =>
+          textEffect(node.retryText ?? node.text, counted.variables),
+        );
+        if (isResult(built)) return built;
+        return waitFor(
+          'reply',
+          node.timeoutMinutes,
+          { ...built.state, retries: counted.retries + 1 },
+          [built.effect],
+          'retried',
+        );
+      }
+      return moveTo(node.invalidNext, counted, [], 'answered', 'invalid answer');
+    }
+    return fail('error', 'not_a_question', counted);
+  }
+
+  // Entering the node.
+  if (event.kind !== 'continue') {
+    // A reply or deadline for a run that is not waiting is not for this run.
+    return {
+      noop: true,
+      state,
+      effects: [],
+      status: 'running',
+      endReason: null,
+      log: {
+        nodeId: node.id,
+        nodeType: node.type,
+        outcome: 'waiting',
+        branch: null,
+        detail: 'unexpected_event',
+      },
+    };
+  }
+  const visits = (state.visits[node.id] ?? 0) + 1;
+  if (visits > RUN_BUDGETS.maxVisitsPerNode) return fail('budget_loop', 'budget_loop');
+  const entered: RunState = {
+    ...state,
+    steps: state.steps + 1,
+    visit: visits,
+    retries: 0,
+    visits: { ...state.visits, [node.id]: visits },
+  };
+  return enter(node, entered);
+}
