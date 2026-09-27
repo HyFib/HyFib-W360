@@ -27,6 +27,7 @@ security operations. It is not a compliance claim; see `docs/THREAT-MODEL.md` fo
 | Reports            | Aggregates and member names only (no message content or contact details), computed in one read-only snapshot under the company's RLS scope; reply turns written only by database triggers (runtime role cannot rewrite or delete them); metric definitions global and read-only; per-section exports need `reports.export`, are formula-safe and audited before data is returned.                                                                                                                                                                                                                                                                                                                                                                                |
 | Automations        | Published versions are immutable (database trigger) and runs stay pinned to theirs; runs are durable rows advanced one step per transaction under the conversation and run row locks; a partial unique index allows one active run per conversation, and a member reply, template send, assignment, take-over or resolve ends it and cancels unclaimed bot sends; reply-button ids name the run, step and visit, and stale or forged ids select nothing; budgets cap steps, loops, messages, run time and runs per conversation per hour; step logs hold outcome codes and labels written by the company, never customer text; captured answers are shown only to members who can see the conversation and are cleared 30 days after the run ends or on erasure. |
 | Web requests       | Automation HTTP steps reach only company-allowed domains, over https, through one egress guard (public addresses only, DNS pinned to the checked address, no redirects, size and time limits); calls are written ahead, made once and marked unknown (never retried) when they may have been received without a result; secrets are encrypted, write-only, audited by name and sent only to the domain each was saved for; customer text in headers is never read as a placeholder.                                                                                                                                                                                                                                                                              |
+| Growth tools       | The public short link (`/l/<slug>`) and widget script (`/widget/<id>.js`) take only a random identifier and reach data through two SECURITY DEFINER functions that return what the response needs; the redirect is rebuilt from the stored link (wa.me and the company's own number only, never an open redirect) with no referrer and no caching; clicks are counted per link and day with nothing about the visitor; the widget sets no cookies, stores and sends nothing and draws text only; ad referrals keep the ad's id, type, http(s) address and headline, never the ad click id.                                                                                                                                                                       |
 | Templates          | Created, deleted and listed only by the worker with the stored WABA token (never in the browser); webhooks for templates are signals routed through verified WABA bindings and never change status on their own; submission is write-ahead so a lost response cannot create a duplicate.                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | Supply chain       | Exact pins + lockfile, pnpm minimum release age, explicit install-script allowlist, `pnpm audit` and gitleaks in CI, GitHub Actions pinned by SHA, Trivy image scanning, Dependabot.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 
@@ -190,6 +191,31 @@ Phase 4 rules (CRM, P4-04):
 - While a company is suspended, `crm.read` stays available and `crm.write` does not; reminder jobs
   wait, and the sweep sends reminders after reactivation unless they are more than a day late.
 
+Phase 4 rules (growth tools, P4-05):
+
+- Chat links, website buttons and the ads list need `campaigns.read` (owners, administrators,
+  supervisors, marketers and analysts); creating, editing, archiving and restoring links and
+  creating, editing and deleting buttons need `campaigns.write` (owners, administrators, marketers)
+  and are audited (`growth.link_created`, `growth.link_updated`, `growth.link_archived`,
+  `growth.link_restored`, `growth.widget_created`, `growth.widget_updated`,
+  `growth.widget_deleted`, with the name or button text). A link can only use an active number of
+  the company, and a button only an open link of the company, so a button can only ever open the
+  company's own numbers.
+- The public routes are unauthenticated by design. Their identifiers are random (60 bits for links,
+  80 for buttons) and unique across companies; `ops.follow_chat_link` and `ops.chat_widget_config`
+  are executable only by the runtime role, check the identifier's format, and return nothing for
+  archived links, numbers that are not active, disabled or deleted buttons and companies being
+  deleted. Counts can be inflated by anyone who requests a link; they are labelled as including
+  automated visits and affect nothing but the displayed number. Rate limiting these routes at the
+  edge is a deployment item (release checklist).
+- Button text and greetings are placed in the script as JSON escaped for a script context and shown
+  with `textContent`; ad addresses are kept only when they start with http(s) and are shown with
+  `rel="noopener noreferrer nofollow"`.
+- The inbox line saying where a conversation came from is shown to whoever can see the
+  conversation; the link name links to the link page only for members with `campaigns.read`.
+- While a company is suspended its links and buttons keep working (customers write to it) and
+  `campaigns.write` is unavailable.
+
 Platform roles (`ops.platform_admins`): `platform_owner` and `platform_operator`. Both require MFA;
 all actions are audited; neither can read customer content without a support grant.
 
@@ -212,5 +238,5 @@ Incident handling follows `docs/RUNBOOKS.md` (compromised tenant, credential exp
 
 See `docs/THREAT-MODEL.md` (status P/D/A) and `docs/BACKLOG.md` (SEC-* items): WebAuthn, breached
 password screening, hash-chained audit checkpoints, a network egress policy behind the egress guard
-(deployment), media scanning, dual-key job signing, OpenTelemetry alerting, independent penetration test, step-up re-authentication for payment
+(deployment), edge rate limits for the public chat-link and widget routes, media scanning, dual-key job signing, OpenTelemetry alerting, independent penetration test, step-up re-authentication for payment
 settings, and Razorpay sandbox verification of the payment flows and Checkout CSP.

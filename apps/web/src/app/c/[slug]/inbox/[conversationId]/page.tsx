@@ -136,6 +136,44 @@ export default async function ConversationPage({
               {conv.contactPhone ?? 'No phone number shared'} · via {conv.channelName ?? 'WhatsApp'}
               {conv.teamName && !can(ctx, 'inbox.assign') ? ` · ${conv.teamName}` : ''}
             </p>
+            {thread.source ? (
+              <p className="text-sm text-muted-foreground">
+                {thread.source.kind === 'ad' ? (
+                  <>
+                    Came from the ad{' '}
+                    {thread.source.adSourceUrl ? (
+                      <a
+                        href={thread.source.adSourceUrl}
+                        target="_blank"
+                        rel="noopener noreferrer nofollow"
+                        className="font-medium text-foreground underline underline-offset-4"
+                      >
+                        {thread.source.adHeadline ?? 'without a headline'}
+                      </a>
+                    ) : (
+                      <span className="font-medium text-foreground">
+                        {thread.source.adHeadline ?? 'without a headline'}
+                      </span>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    Came from the chat link{' '}
+                    {can(ctx, 'campaigns.read') && thread.source.linkId ? (
+                      <Link
+                        href={`/c/${ctx.tenant.slug}/growth/links/${thread.source.linkId}`}
+                        className="font-medium text-foreground underline underline-offset-4"
+                      >
+                        {thread.source.linkName}
+                      </Link>
+                    ) : (
+                      <span className="font-medium text-foreground">{thread.source.linkName}</span>
+                    )}
+                  </>
+                )}{' '}
+                ({formatDateTime(thread.source.occurredAt, tz)})
+              </p>
+            ) : null}
             {conv.waitingSince ? (
               <p className="text-sm">
                 <ReplyTimer

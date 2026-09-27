@@ -227,6 +227,7 @@ Doc-site note: official WhatsApp docs now live under `developers.facebook.com/do
 | M-133 | App callbacks | Data-deletion and deauthorization callback requirements specific to WhatsApp apps were not found. | none | none | none | Unconfirmed |
 | M-134 | Payload encryption | `POST /{PHONE_NUMBER_ID}/messages_encrypted` accepts JWE payloads once payload encryption is enabled with `POST /{PHONE_NUMBER_ID}/settings`. | `messages_encrypted`, `payload_encryption` | spec | OFF-GH-SPEC | Medium |
 | M-135 | Other endpoints | These exist in the spec but were not studied in detail: `/{PHONE_NUMBER_ID}/block_users` (GET, POST, DELETE), `/message_qrdls` (QR codes), `/whatsapp_business_profile`, `/conversational_automation`, `/official_business_account`, `/business_compliance_info` (India), and pre-verified phone number endpoints. | as named | spec | OFF-GH-SPEC | High (existence) |
+| M-160 | Click-to-chat links | A chat link is `https://wa.me/<number>`, where the number is the full international number with digits only: country code, area code and number, omitting any zeroes, brackets or dashes (and the plus sign). `?text=<urlencodedtext>` adds a pre-filled message that the customer still sends themselves. No API call is involved. | `wa.me/<number>`, `text` | https://faq.whatsapp.com/5913398998672934 ("How to use click to chat") | OFF-DOC-SNIP (the page was blocked by this environment's egress policy on 2026-09-27; wording from search results that cite it) | Medium–High |
 
 ## 11. Phone number and WABA health
 

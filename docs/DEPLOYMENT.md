@@ -24,7 +24,8 @@ PostgreSQL 18; CI workflow authored).
 
 ## Production topology (target)
 
-- Load balancer with TLS 1.2+ and HTTP/2 (SSE), WAF/rate limiting at the edge.
+- Load balancer with TLS 1.2+ and HTTP/2 (SSE), WAF/rate limiting at the edge (including the public
+  chat-link and widget routes, see below).
 - `web` ≥ 2 replicas (stateless); `worker` ≥ 2 replicas (jobs are claim-safe; schedules are
   deduplicated by pg-boss).
 - Managed PostgreSQL 17 or 18 with high availability, encryption at rest, automated backups and
@@ -93,6 +94,26 @@ unchanged), and `TRUSTED_PROXIES` must list the addresses or CIDR ranges of ever
 operate. Resolution reads hops from the right, skips trusted proxies, and stores the first other
 address only if it is a valid IP; malformed values are dropped rather than stored. A malformed
 `TRUSTED_PROXIES` entry stops start-up.
+
+## Public chat links and website buttons
+
+Two routes are public by design and must stay reachable without a session: `GET /l/<slug>` (chat
+links and their QR codes) and `GET /widget/<id>.js` (the website button script embedded on
+companies' sites).
+
+- **`APP_BASE_URL` is printed.** QR codes and short links contain `APP_BASE_URL`, and companies
+  print them. Choose the production origin before the first company creates a link and keep it; if
+  it must change, keep redirecting `/l/*` and `/widget/*` from the old origin.
+- **Caching.** Never cache `/l/*` at the edge or CDN (the app sends `Cache-Control: no-store`): a
+  cached redirect would skip counting and keep working after a link is archived. `/widget/*` may be
+  cached for its `max-age` (300 s); purge it if a button must disappear sooner.
+- **Rate limits.** Apply per-address rate limits to both routes at the edge (the app does not limit
+  them). Each `/l/*` request writes one counter row.
+- **Access logs.** The app stores nothing about visitors. Load-balancer or CDN access logs record
+  their addresses; keep such logs short-lived or exclude these routes, and mention them in the
+  privacy notice if kept.
+- **Headers.** The routes set their own `Cache-Control`, `Referrer-Policy: no-referrer` (links) and
+  `Cross-Origin-Resource-Policy: cross-origin` (script); do not override them at the edge.
 
 ## Razorpay
 

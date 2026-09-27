@@ -371,6 +371,45 @@ different currencies; they list a total per currency.
 the definer function `app.erase_contact` through `SET ROLE w360_definer` (ADR-039) like 0011: see
 that section.
 
+## 10F. Growth tools
+
+**A chat link shows "This chat link is not available".** The short link answers 404 when the link
+is archived (restore it on its page), its number is not active (Settings → Channels; a number that
+needs reconnecting stops its links until it is active again), or the company is being deleted. A
+suspended company's links keep working. The link page shows a warning in the first two cases.
+Unknown or mistyped addresses answer the same page. Nothing is logged about the visitor.
+
+**Clicks look too high.** Counts include every open of the short link and its QR code: repeated
+clicks by one person and automated visits (link previews in chat apps and social networks,
+crawlers, security scanners) all count, because nothing about the visitor is kept to tell them
+apart (ADR-044). Compare conversations from the link instead. Counts cannot be edited or reset.
+
+**Conversations from a link are not counted.** A conversation counts when the customer's message
+contains the whole marker "(ref ABC234)" (any case) and arrives on the number the link opens. It
+does not count when the customer deleted or changed the marker, sent it to another of the company's
+numbers, sent it inside a photo caption or other media, or when the link was created with the
+reference code switched off (the list shows "—"). The direct wa.me link skips the click count but
+still carries the code.
+
+**The website button does not appear.** Check, in order: the button is shown (not hidden) and not
+deleted; its link is not archived and its number is active (the Website button page shows a badge
+for both); the site's Content Security Policy allows the app origin in `script-src`; the tag is on
+the page (`/widget/<id>.js` returns a script, not the 404 comment). Browsers may keep the previous
+script for up to five minutes, so changes and removals reach visitors within five minutes. The
+script adds one button per page even if the tag appears twice.
+
+**A click-to-WhatsApp ad is not listed under Growth → Ads.** Only messages whose webhook carries a
+`referral` object are counted (Meta includes it on the message a customer sends from the ad); ads
+are not synced from an ad account, and ads with no conversation in the last 30 days are not
+listed. The inbox shows "Came from the ad …" on attributed conversations. Ad click ids are never
+stored, so conversions cannot be reported back to Meta.
+
+**Migration 0016 failed.** It runs in one transaction, so a failure applies nothing. It replaces the
+definer function `app.erase_contact` through `SET ROLE w360_definer` (ADR-039) like 0011 and 0015:
+see that section. It adds policies and column grants for `w360_definer` on `app.channel_accounts`
+and `app.messages`; a failure there usually means the bootstrap roles are missing
+(`infra/db/bootstrap-roles.sql`).
+
 ## 11. Compromised company (tenant) or account
 
 1. Suspend the company in `/platform` with a reason (stops outbound activity; ingestion continues).

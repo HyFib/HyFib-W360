@@ -28,6 +28,7 @@ import {
   createBusinessHoursService,
   createCampaignsService,
   createCsatService,
+  createGrowthService,
   createReportsService,
   createConsentService,
   createContactsService,
@@ -47,6 +48,7 @@ import {
   type BusinessHoursService,
   type CampaignsService,
   type CsatService,
+  type GrowthService,
   type ReportsService,
   type ConsentService,
   type ContactsService,
@@ -100,6 +102,8 @@ export interface Runtime {
   automations: AutomationService;
   /** Domains and secrets for the automation HTTP step. */
   webRequests: WebRequestService;
+  /** Click-to-chat links, QR codes, website widgets and conversation sources. */
+  growth: GrowthService;
   crm: CrmService;
   /** Null until the Meta app is configured (WhatsApp connection is then reported unavailable). */
   meta: MetaConfig | null;
@@ -194,6 +198,7 @@ async function init(): Promise<Runtime> {
     allowInsecureHttp: config.W360_EGRESS_ALLOW_LOOPBACK ?? false,
   });
   const webRequests = createWebRequestService({ db, clock: systemClock, keyring });
+  const growth = createGrowthService({ db, clock: systemClock });
   const crm = createCrmService({ db, clock: systemClock, jobs, signer });
   const meta = metaConfigFrom(config);
   const onboarding = meta
@@ -252,6 +257,7 @@ async function init(): Promise<Runtime> {
     reports,
     automations,
     webRequests,
+    growth,
     crm,
     meta,
     onboarding,

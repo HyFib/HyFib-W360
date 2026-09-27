@@ -18,8 +18,9 @@ specified here but not yet implemented.
                      SMTP provider  Object storage  Razorpay (designed)
 ```
 
-- **web** serves the UI, server actions, auth endpoints, provider webhooks (designed) and health
-  probes. Node.js runtime only. **[built]**
+- **web** serves the UI, server actions, auth endpoints, provider webhooks, health probes and two
+  public routes for growth tools (chat links `/l/*` and the website button script `/widget/*`,
+  section 6G). Node.js runtime only. **[built]**
 - **worker** processes durable jobs: email delivery, webhook processing, outbound sends, campaign
   ticks, automation runs, billing events, auto-recharge and the minute sweepers. **[built]**
 - **PostgreSQL** is the system of record, the job queue (pg-boss) and the durable event log. There is
@@ -448,6 +449,56 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   titles and lost reasons of its deals, keeping outcomes and values for reports.
 - **Not built yet:** custom deal fields, products on deals, deal import and export, forecasting,
   automation steps that create deals or tasks, and syncing with external CRMs (integrations, P4–6).
+
+## 6G. Growth tools **[built — links and ad sources verified with signed test webhooks only; no live WhatsApp or ad traffic]**
+
+- **Model** (migration 0016, ADR-044): `chat_links` (a number of the company, name, pre-filled
+  message ≤ 500 characters, a reference code of six characters from `A–H J–N P–Z 2–9` unique per
+  company, whether the code is added to the message, a 12-character base32 slug unique across
+  companies, archived, version); `chat_link_clicks` (one row per link and company day with a
+  count, written only by `ops.follow_chat_link`); `chat_widgets` (a link, a 16-character public id,
+  button text, optional greeting, corner, colour, shown or hidden, version);
+  `conversation_sources` (one row per attributed inbound message: its conversation, contact and
+  message, `ad` with the ad's id, type, web address and headline, or `link` with the link). Composite
+  foreign keys keep every reference inside the company.
+- **Service** (`packages/domain/src/growth`): links (create on an active number, edit, archive and
+  restore, all version-checked and audited; at most 500 open links), widgets (create for an open
+  link, edit, delete, audited; at most 50), each link's clicks per day for 30 days in the company
+  time zone, clicks and attributed conversations per link, and the ads that started conversations
+  in the last 30 days (`campaigns.read` to read, `campaigns.write` to change). `waMeUrl` and
+  `prefilledText` build `https://wa.me/<digits>?text=<encoded message> (ref CODE)` (research
+  M-160).
+- **Ingestion** (`messaging/ingest.ts` → `growth/sources.ts`): for each new inbound message (not a
+  reaction or system message), a `referral` object (research M-130) becomes an `ad` source with
+  only its id, type, http(s) address and headline (bounded); otherwise a complete `(ref CODE)`
+  marker in a text message, matched without regard to case, becomes a `link` source when a link of
+  the company with that code opens the number the message arrived on. Redelivered webhooks add
+  nothing (message dedupe; one source per message). The raw referral is no longer stored on the
+  message.
+- **Public routes** (no session, no company context in the URL beyond the random identifier):
+  `GET /l/<slug>` counts the click through `ops.follow_chat_link` and answers 302 to the wa.me
+  address rebuilt from the stored link (`Cache-Control: no-store`, `Referrer-Policy: no-referrer`,
+  no cookies), or 404 with a short "not available" page. `GET /widget/<id>.js` renders the button
+  script from `ops.chat_widget_config` (`Cache-Control: public, max-age=300`,
+  `Cross-Origin-Resource-Policy: cross-origin`), or a 404 script comment. Both definer functions
+  return only what the response needs and nothing for archived links, inactive numbers, disabled
+  widgets or companies being deleted.
+- **Widget script** (`growth/widget-script.ts`): configuration embedded as JSON escaped for a script
+  context; guards against a second copy on the same page; draws a fixed-position greeting and link
+  in an open shadow root with `textContent` and CSSOM styles (text colour chosen for contrast);
+  the link opens the short link in a new tab with `noopener noreferrer`. No storage, no requests,
+  nothing loaded.
+- **Web** (`/c/{slug}/growth`): Chat links (list with clicks and conversations over 30 days,
+  archived view, new-link form with a preview of the customer's message), a link page (short link
+  and direct wa.me link to copy, QR code as PNG and SVG generated on the server with `qrcode`,
+  clicks per day, edit, archive or restore), Website button (script tags to copy, a notice for sites
+  with a Content Security Policy, forms), Ads (ads that started conversations, with conversation and
+  message counts). The inbox conversation page says which link or ad the conversation came from.
+- **Erasure** (`app.erase_contact`, replaced in 0016): deletes the contact's conversation sources and
+  clears any referral objects stored on its messages before 0016.
+- **Not built yet:** connecting ad accounts (ad sync, spend, cost per conversation), conversion
+  reporting to Meta (W-072), a link or button per team or with routing rules, UTM-style campaign
+  parameters, and a public link generator for people without an account.
 
 ## 7. Commercial model and billing **[built: wallet, top-ups, auto-recharge — verified against a local Razorpay stand-in only; subscriptions planned]**
 

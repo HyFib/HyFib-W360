@@ -36,6 +36,23 @@ const config: NextConfig = {
         headers: [{ key: 'Cache-Control', value: 'private, no-store' }],
       },
       {
+        // Public short links: nothing is cached, and WhatsApp is not told where the click came from.
+        source: '/l/:slug',
+        headers: [
+          { key: 'Cache-Control', value: 'no-store' },
+          { key: 'Referrer-Policy', value: 'no-referrer' },
+        ],
+      },
+      {
+        // The website widget script is embedded by other sites: loadable cross-origin, briefly
+        // cacheable (it holds no private data), and served as script only.
+        source: '/widget/:file',
+        headers: [
+          { key: 'Cross-Origin-Resource-Policy', value: 'cross-origin' },
+          { key: 'Cache-Control', value: 'public, max-age=300' },
+        ],
+      },
+      {
         // Meta Embedded Signup's popup must be able to message this page back (later rules win).
         source: '/c/:slug/settings/channels',
         headers: [{ key: 'Cross-Origin-Opener-Policy', value: 'same-origin-allow-popups' }],

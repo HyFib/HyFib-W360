@@ -467,3 +467,46 @@ a secret, and it is percent-encoded unless it is printable ASCII (placeholders i
 URL-encoded, in the JSON body JSON-escaped). A server that echoes request headers back would still
 reveal a secret to automation editors; the settings page warns that only trusted domains should be
 allowed. Per run there are at most 20 calls (`budget_http`).
+
+## ADR-044 Growth tools count clicks, not visitors; sources keep only what identifies them (2026-09-27)
+
+Decision: a chat link is a short link on our origin, `/l/<slug>` (12 random base32 characters,
+unique across companies because the public route has no company context), that redirects to
+`https://wa.me/<number>?text=…` (research M-160). The redirect is built from the stored link only
+(the number's digits and the pre-filled message), so the route can never be pointed at another
+address. Following a link runs `ops.follow_chat_link` (SECURITY DEFINER), which adds one to the
+link's count for the company's current day and returns nothing for an archived link, a number
+that is not active or a company being deleted; a suspended company's links keep working, because
+the customer writes to the company and nothing is sent. Nothing about the visitor is stored: no
+address, user agent, referrer, cookie or time of the click; the redirect sends no referrer to
+WhatsApp. Counts therefore include repeated clicks and automated visits such as link previews, and
+the pages say so: removing them would need an identifier for the visitor, which we do not keep.
+QR codes hold the short link, so scans are counted and printed codes follow later edits.
+
+A conversation is attributed to a link when the customer's message carries the link's reference
+code ("(ref ABC234)", appended to the pre-filled message unless switched off), on the number the
+link opens; a code typed to another number does not count. The customer can edit the message, so
+link conversations are a lower bound, and the pages call them conversations that sent the code.
+Per-click codes (which would identify a click and so a visitor) and matching conversations to
+clicks by time were rejected. Messages from click-to-WhatsApp ads carry the ad in `referral`
+(M-130); ingestion keeps the ad's id, type, web address (http or https only) and headline, and no
+longer stores the raw object: the ad click id (`ctwa_clid`) identifies the visitor to Meta for
+conversion reporting, which HyFib does not do (W-072 needs explicit configuration and consent),
+and the image and video addresses and ad text add nothing to attribution. Each attributed inbound
+message gets one `conversation_sources` row (an ad wins over a code in the same message); rows are
+deleted when the contact is erased, and erasure also clears referral objects stored before this
+change. Starting a conversation from a link or an ad is not consent to marketing: consent is
+recorded as before.
+
+The website button is a script (`/widget/<id>.js`, 16 random characters) that draws one link to
+the company's short link from `ops.chat_widget_config` (nothing while the button is disabled or
+deleted, or while its link would not open). It sets no cookies, stores nothing in the visitor's
+browser, loads nothing else and sends nothing of its own, so it needs no cookie consent. It sets
+text with `textContent` and styles through the CSSOM in a shadow root, so neither the company's
+text nor the site's styles can inject markup, and it works on sites whose style policy forbids
+inline style elements. It is cacheable for five minutes (it holds no private data), so a change
+reaches visitors' browsers within five minutes; the short link itself stops at once. The page the
+visitor is on is not added to the message, unlike some products, because that would pass browsing
+data into the chat. Links and buttons are company data under `campaigns.read` and
+`campaigns.write` (created, edited, archived and deleted with an audit entry); at most 500 open
+links and 50 buttons per company.

@@ -71,3 +71,7 @@ export * from './crm/tasks';
 export * from './crm/time';
 export * from './crm/reminders';
 export * from './crm/service';
+export * from './growth/model';
+export * from './growth/service';
+export * from './growth/sources';
+export * from './growth/widget-script';

@@ -140,7 +140,23 @@ verification, app review, Embedded Signup configuration).
   (the service supports it), automation steps that create deals or tasks, CRM connectors (HubSpot,
   Salesforce, Zoho: integrations), reminder emails through the production SMTP provider (release
   checklist).
-- **P4-05 Growth tools**: click-to-chat links, QR codes, consent-aware website widget, referral capture.
+- **P4-05 Growth tools** — _implemented and locally verified (2026-09-27); no live WhatsApp or ad
+  traffic yet_: click-to-chat links (a short link that counts clicks per link and company day
+  without any visitor data and redirects to wa.me with a pre-filled message and an optional
+  reference code; QR codes as PNG and SVG; archive and restore; audited); conversations attributed
+  to a link by its reference code, on the number the link opens only; click-to-WhatsApp ad
+  referrals captured from inbound webhooks (the ad's id, type, address and headline, never the ad
+  click id) and listed under Growth → Ads; the inbox says where a conversation came from; a website
+  button that stores and sends nothing (no cookie consent needed) and is not served while its link
+  cannot open; conversation sources erased with the contact. T: `growth.test.ts` (permissions,
+  validation, versions, clicks per company day, attribution on the link's number only, ad sources
+  without the click id, erasure, widgets, limits, isolation), unit tests (codes, wa.me format,
+  referral parsing, the widget script against a stub DOM), e2e `growth.spec.ts` (link, QR code,
+  redirect headers, attributed conversation, ads list, the button embedded on another origin,
+  archive). **Remaining:** checks on real devices and with a real click-to-WhatsApp test ad on an
+  approved sandbox number (release checklist), connecting ad accounts (ad sync, spend, cost per
+  conversation) and conversion reporting to Meta (W-072), campaign parameters on links, a free
+  public link generator for people without an account.
 - **P4-06 Commerce**: catalog connection, product messages, order capture, payment links with verified
   status; Shopify and WooCommerce connectors (authenticated setup, webhook verification, dedupe, sync
   recovery, uninstall).

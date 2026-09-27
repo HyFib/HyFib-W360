@@ -44,6 +44,15 @@ export const MODULES: ModuleDefinition[] = [
       'Template campaigns to saved segments with approval, scheduling, pacing and caps. Per-recipient time zones and A/B tests are not supported yet.',
   },
   {
+    key: 'growth',
+    label: 'Growth',
+    path: '/growth',
+    permission: 'campaigns.read',
+    status: 'available',
+    reason:
+      'Click-to-chat links with QR codes and counted clicks, a website button, and conversations attributed to links and click-to-WhatsApp ads. Ad accounts, ad spend and conversion reporting to Meta are not connected.',
+  },
+  {
     key: 'templates',
     label: 'Templates',
     path: '/templates',

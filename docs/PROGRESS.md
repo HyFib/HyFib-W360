@@ -1,5 +1,71 @@
 # Progress
 
+## 2026-09-27 — Phase 4: growth tools (P4-05)
+
+Status: **Growth tools implemented and locally verified; production blocked on checks with real
+devices and a real click-to-WhatsApp test ad.** Companies can share chat links and QR codes that
+open WhatsApp with a pre-filled message, see clicks per day and the conversations each link
+started, add a WhatsApp button to their website, and see which click-to-WhatsApp ads started
+conversations. Nothing about visitors is stored. No message was exchanged with WhatsApp and no ad
+traffic was received: the webhooks in the tests are signed test payloads.
+
+### Completed
+
+- **Research (M-160):** a chat link is `https://wa.me/<number>?text=<urlencoded text>`, the number
+  in full international form with digits only; the customer still sends the pre-filled message
+  themselves. WhatsApp's Help Center page was blocked by this environment's network policy, so the
+  row cites it through search results (OFF-DOC-SNIP). The ad referral object is research M-130.
+- **Schema (migration 0016, ADR-044):** `chat_links` (number, name, pre-filled message, a reference
+  code unique per company, a slug unique across companies, archived, version), `chat_link_clicks`
+  (one count per link and company day), `chat_widgets` and `conversation_sources` (one row per
+  attributed inbound message: a link, or an ad's id, type, address and headline). Two definer
+  functions for the public routes, `ops.follow_chat_link` (counts the click, returns what the
+  redirect needs) and `ops.chat_widget_config`, return nothing for archived links, numbers that are
+  not active, disabled buttons or companies being deleted. `app.erase_contact` is replaced to delete
+  the contact's sources and clear referral objects stored on its messages before 0016.
+- **Ingestion:** an inbound message with a `referral` object records the ad (without the ad click
+  id, media addresses or ad text; the raw object is no longer stored on the message); otherwise a
+  complete "(ref ABC234)" marker records the link with that code, only if the link opens the number
+  the message arrived on.
+- **Growth pages (`campaigns.read`; changes need `campaigns.write` and are audited):** Chat links
+  (clicks and conversations over 30 days, archived links, a form with a preview of the customer's
+  message), the link page (short and direct links to copy, QR code as PNG and SVG, clicks per day
+  in the company time zone, edit, archive or restore), Website button (script tag, a note for sites
+  with a Content Security Policy, forms, badges when a button cannot show) and Ads (ads that started
+  conversations in the last 30 days). The inbox says which link or ad a conversation came from.
+- **Public routes:** `/l/<slug>` answers 302 to the wa.me address rebuilt from the stored link
+  (`no-store`, no referrer, no cookie) or a 404 page; `/widget/<id>.js` serves the button script
+  (cross-origin, cacheable for five minutes) or a 404 comment. The script stores nothing, loads
+  nothing and sends nothing; it draws text only, in a shadow root with inline styles, and adds one
+  button per page.
+- **Found while building:**
+  - A button whose number was disconnected would still have been drawn on sites and led to "not
+    available"; the button lookup now applies the same conditions as the short link, and the
+    Website button page says when a button's number is not active.
+  - The button first used a closed shadow root, which hides nothing from the host page (it controls
+    the page anyway) but kept accessibility tools and tests from reading the button; it now uses an
+    open one.
+  - Chromium does not let a page on a public origin load a script from a loopback address (Private
+    Network Access). This does not affect production, where the app is public; the e2e test serves
+    its embedding page from a loopback origin of its own.
+
+### Test commands and results (local, 2026-09-27, fresh database)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `pnpm test` (unit)                                                          | 148 passed. New: 6 growth tests (codes and slugs over their alphabets, the pre-filled text and wa.me format, finding a code in a message, ad referrals without the click id or media addresses, button text colour, and the widget script run against a stub DOM: text only, the short link, one button per page)                                                                                                                                                                                                                                                                                                                                                   |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 238 passed, including `growth.test.ts` 8: links with permissions for five roles, validation, versions, archive and audit; clicks per company day and nothing for unknown or malformed slugs, archived links, a number that needs reconnecting or a company being deleted (a suspended company's links still open); limits; attribution on the link's number only (not another number of the company or another company); ad sources without the click id, media addresses or ad text; erasure of sources and legacy referral objects; buttons served only while shown and while their link can open; isolation, including a direct query in another company's scope |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / `growth.spec.ts` 2 passed (desktop and mobile Chromium): a link created in the UI with its QR code, the short link's 302 to wa.me with `no-store` and `no-referrer`, the click count, the attributed conversation in the inbox, an ad listed under Ads, the button embedded on a page of another origin (it opens the short link; no other request, cookie or storage) and archiving stopping the link and the button                                                                                                                                                                                                                                |
+
+### Known gaps
+
+- Not built: connecting ad accounts (ad sync, spend, cost per conversation), conversion reporting to
+  Meta (W-072), campaign parameters on links, and a free public link generator.
+- Verified with signed test webhooks and local browsers only; Firefox and WebKit run in CI only.
+  Real devices, a printed QR code and a real click-to-WhatsApp test ad are release checklist items,
+  as are edge rate limits for the public routes.
+
 ## 2026-09-27 — Phase 4: automation web requests and the egress guard (P4-02)
 
 Status: **HTTP step implemented and locally verified against a local target server; production
