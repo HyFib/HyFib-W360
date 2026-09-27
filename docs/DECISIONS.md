@@ -297,3 +297,76 @@ conversation's row lock, a reply is refused once if another member's reply is ne
 newest message the sender had seen; the sender reads it and sends again. This needs no presence
 heartbeats and cannot be missed by a disconnected browser. Live "someone is typing" presence is
 backlog.
+
+## ADR-034 Automations: a structured builder with a generated diagram (2026-09-27)
+
+Decision: automations are edited as a list of typed steps (labelled forms, "next step" choices), and
+a diagram is generated from that list, instead of a drag-and-drop canvas. The list works with a
+keyboard and a screen reader, and every branch target is an explicit, validated choice. The graph
+format (steps with named outgoing branches) does not preclude a canvas later; it would edit the same
+JSON. The graph model and the interpreter have no server dependencies, so the builder checks
+drafts and simulates runs in the browser with the code the worker runs. The feature matrix states
+that the builder is not drag-and-drop.
+
+## ADR-035 Automation runs: durable rows advanced one step per transaction (2026-09-27)
+
+Decision: a run is a row holding its position (current step, visit counts, wait state, captured
+answers); each step is one transaction that locks the conversation, then the run, applies the
+step's effects and stores the new position. Bot messages are written through the existing send
+pipeline in that transaction (message, send intent, `message.send` job), so a crash before commit
+leaves nothing and a crash after commit loses nothing; the send worker keeps its own rule of never
+resending an unknown outcome. Jobs on `automation.run` only signal the row (keys per start, reply,
+timer and continuation), and the minute sweep re-signals any active run whose next step is more than
+30 seconds overdue, so a worker restart or a lost job delays a run but never loses or repeats a
+step. Runs are pinned to the version they started with; publishing never changes a run in progress.
+Budgets (200 steps, 20 entries per step, 50 messages, 7 days, 10 runs per conversation per hour)
+end runaway runs as failed and return the conversation to people. A step that raises an error fails
+its job as usual (pg-boss retries and keeps the error), and the run counts the attempt; after five
+failed attempts in a row the run fails (`error`, `step_error`) and the conversation goes to people,
+so a bug or a persistent database error cannot hold a customer for the full seven days. External
+calls (the HTTP step, P4-02) will need a write-ahead unknown state like auto-recharge before they
+can join a run.
+
+## ADR-036 The bot/human hand-off lock (2026-09-27)
+
+Decision: at most one run per conversation is active (partial unique index). While it is, the
+automation owns the conversation: automations start only in unassigned conversations, routing
+leaves bot-handled conversations alone (ingest, the sweep and availability changes), and no reply
+turn is open. A member's reply or template, an assignment to a member, Take over and a resolve end
+the run in the same transaction as the member's change, under the conversation lock, and cancel the
+run's bot messages that no send worker has claimed, so after a person acts nothing more from the bot
+leaves. A message already handed to the sender cannot be recalled; this is stated in the UI copy and
+the threat model. A hand-off step, a stop by a member, a failure or an opt-out returns the
+conversation to people and routes it (to the hand-off team, or like a new case of the number).
+
+## ADR-037 Reply turns while automations answer (2026-09-27)
+
+Decision: time an automation spends answering is not time a customer waits for a member. A
+customer message opens no turn while a run is active; a run that starts closes the open turn as
+`automated`; when a run passes the conversation to people (hand-off, stop, failure, Take over or
+an assignment, or the customer has the last word), a turn opens at that moment with
+`start_reason = 'handoff'`. A run ended by a member's reply, a resolve or an erasure opens none.
+Reports leave automated turns out, and every turn-based metric got a new definition version (not an
+edit) because what a turn is changed. Triggers on `app.automation_runs` maintain this, like the
+other turn triggers (ADR-027).
+
+## ADR-038 Automations act for the company; test runs act for the member (2026-09-27)
+
+Decision: live runs carry no member: they are the company's published configuration, and they
+keep running if the member who published them leaves (publishing, pausing and archiving need
+`automations.publish` and are audited). Test runs carry the member who started them: their jobs and
+bot messages are signed with that member, and each step re-checks that the member is still active
+with `automations.write` and `inbox.reply` (as the campaign runner re-checks its launcher), so a
+test stops if the member leaves or loses either permission. Suspended companies
+start no runs; jobs of existing runs wait until the company is active again (and runs older than
+7 days then fail as expired).
+
+## ADR-039 Replacing SECURITY DEFINER functions in later migrations (2026-09-27)
+
+Decision: a definer function owned by `w360_definer` cannot be replaced in place by the migration
+role (it may `SET ROLE w360_definer`, but that role has no CREATE on the schemas). Migration 0011
+drops such a function as its owner (`SET ROLE w360_definer; DROP FUNCTION …; RESET ROLE;`),
+recreates it as the migration role, grants EXECUTE to the caller, and hands it back to
+`w360_definer`, all in the migration's transaction, so there is no moment without the function.
+`app.erase_contact` and `ops.conversations_to_route` were replaced this way; the isolation suite
+checks that neither is executable by PUBLIC and that both keep a pinned `search_path`.

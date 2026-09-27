@@ -1,6 +1,6 @@
 # Architecture
 
-Last updated 2026-09-26. Status markers: **[built]** exists and is tested locally; **[designed]** is
+Last updated 2026-09-27. Status markers: **[built]** exists and is tested locally; **[designed]** is
 specified here but not yet implemented.
 
 ## 1. System context
@@ -20,8 +20,8 @@ specified here but not yet implemented.
 
 - **web** serves the UI, server actions, auth endpoints, provider webhooks (designed) and health
   probes. Node.js runtime only. **[built]**
-- **worker** processes durable jobs: email delivery, sweepers, and later webhook processing,
-  outbound sends, billing events and auto-recharge. **[built for email]**
+- **worker** processes durable jobs: email delivery, webhook processing, outbound sends, campaign
+  ticks, automation runs, billing events, auto-recharge and the minute sweepers. **[built]**
 - **PostgreSQL** is the system of record, the job queue (pg-boss) and the durable event log. There is
   no Redis, Kafka or search cluster (ADR-015).
 
@@ -267,6 +267,10 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   timestamps only, so erasure leaves them. First-response times are measured from HyFib's receipt of
   the customer message to the member's send, in absolute time and, when business hours are on, in
   business hours (§6D).
+- **Turns and automations** (migration 0011, ADR-037): no turn is open while an automation handles a
+  conversation; a run that starts closes the open turn as `automated` (left out of reports), and a
+  run that passes the conversation to people opens a turn at the hand-off (`start_reason =
+'handoff'`). Turn-based metrics have new definition versions for this.
 - **Cost estimates:** delivered messages (Meta charges per delivered message) that Meta's status
   webhook marked billable, priced with the published rate card for the company's billing currency in
   force when each message was recorded, by the market of the number Meta delivered to and Meta's
@@ -297,6 +301,9 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   Suspending, removing or demoting a member returns their conversations to the queue.
   **Teams never change visibility**: `inbox.read_assigned` still sees assigned-to-me plus the
   unassigned queue (ADR-029).
+- **Automations first:** a conversation an automation is handling is not routed (ingest, the sweep
+  and availability changes all skip it); when the run ends and passes the conversation to people it
+  is routed then (§6E).
 - **Business hours** (`inbox/business-hours.ts`): weekly intervals (ISO weekdays, `24:00` closes at
   midnight) and closed days in the company's time zone, turned into real instants with the same
   daylight-saving rules as campaign schedules; pure functions add business minutes, measure business
@@ -330,6 +337,56 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   M-158) match the conversation's survey; a tap never reopens the conversation, counts as unread,
   starts a reply turn (trigger, migration 0009), matches a consent keyword or counts as a campaign
   reply.
+
+## 6E. Automations **[built — bot messages verified against a local Graph stand-in only]**
+
+- **Model** (`packages/domain/src/automations/graph.ts`, browser-safe): a trigger (a message is or
+  contains a keyword; a customer starts a conversation; any customer message; optionally only while
+  the business is open or closed; a cooldown per conversation) and a graph of typed steps: send a
+  message, ask with reply buttons (Meta's limits: 1–3 buttons, titles ≤ 20, body ≤ 1024, header and
+  footer ≤ 60; research M-157/M-159), ask a question (any text, a number or an email; retries;
+  answer saved under a name), condition (answers, contact fields, tags, business hours), update
+  contact (tags, custom fields), wait (≤ 24 h), hand off to people (a team, or routed like a new
+  case), end. Texts may use `{{name}}`, `{{company}}` and `{{answer.<name>}}`. `checkGraph` rejects
+  missing targets, unsaved answers, unknown placeholders, missing teams or fields, and loops that
+  never pass through a question or a wait.
+- **Interpreter** (`automations/interpreter.ts`): a pure function (graph, run state, event, facts)
+  → new state, effects, log entry; one call is one step. Reply buttons carry
+  `w360bot:<run>:<step>:<visit>:<index>`, so a tap answers exactly the question it belongs to; a
+  typed reply equal to a button title counts as that button. Budgets end runaway runs.
+- **Versions** (migration 0011): drafts are edited freely (`automations.write`); publishing
+  (`automations.publish`) checks the draft and freezes trigger, graph and number into a numbered,
+  immutable `automation_versions` row that new runs use. Test runs use immutable test snapshots of
+  the draft (reused while the draft is unchanged).
+- **Dispatch** (`automations/dispatch.ts`, inside the ingestion transaction): an opt-out keyword
+  stops the active run; a run waiting for a reply receives the message (`input_message_id`, a job
+  keyed by the message); otherwise, in an unassigned conversation of an active company with no
+  active run, the best match starts (exact keyword, contained keyword, new conversation, any
+  message; then name order), subject to business-hours filters, cooldowns and 10 runs per
+  conversation per hour.
+- **Runner** (`automations/runner.ts`, queue `automation.run`, ADR-035): one transaction per step,
+  conversation lock then run lock; checks the hand-off lock, resolve and the 7-day age; loads the
+  pinned version's graph (cached: versions never change) and the contact facts; applies effects —
+  bot messages through the send pipeline (active number, open window and a WhatsApp id checked
+  first; a blocked send fails the run), contact updates as single statements, hand-off routing —
+  appends the step log row and stores the position. Up to 25 steps per job; waits enqueue a delayed
+  job; the minute sweep (`ops.automation_runs_due`) re-signals runs more than 30 seconds overdue. A
+  step that raises an error fails its job (retried by pg-boss) and is counted on the run; five failed
+  attempts in a row fail the run (`step_error`) and hand the conversation to people.
+- **Hand-off lock** (ADR-036): one active run per conversation (partial unique index). A member's
+  reply or template, an assignment, Take over and a resolve end the run under the conversation lock
+  and cancel bot messages not yet claimed by a send worker. The inbox shows which automation is
+  handling a conversation and what it waits for, with Take over.
+- **Logs and privacy:** `automation_run_steps` is append-only and holds step ids, outcomes,
+  authored branch labels and message ids, never customer text. Captured answers live on the run
+  (`variables`), are shown only to members who can see the conversation, and are cleared 30 days
+  after the run ends or when the contact is erased; ended runs are deleted after 180 days.
+- **Builder** (`/c/{slug}/automations`, ADR-034): a structured step list with a generated diagram,
+  live checks, an in-browser simulator (sends nothing and checks neither the window nor consent),
+  publish, pause, archive and restore, test runs, versions and run pages.
+- **Not built yet:** the HTTP step (P4-02, needs the egress guard and a write-ahead unknown state),
+  WhatsApp Flows steps (P4-03), catalog steps (P4-06), starting a run through the public API (P5),
+  fuzzy keyword matching, template follow-ups outside the service window, usage billing.
 
 ## 7. Commercial model and billing **[built: wallet, top-ups, auto-recharge — verified against a local Razorpay stand-in only; subscriptions planned]**
 

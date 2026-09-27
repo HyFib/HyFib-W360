@@ -246,6 +246,57 @@ error on the message in the thread (for example a consent change before dispatch
 INVALID index can remain: run `DROP INDEX CONCURRENTLY app.conversations_team_idx;` and run the
 migrations again.
 
+## 10D. Automations
+
+**A customer got no automated reply.** A run starts only when all of these hold: the automation is
+active with a live version and uses the number the message arrived on (or any number); the
+conversation is unassigned and no other run is handling it; the company is active (not suspended);
+the message matches the trigger (keywords are compared as whole words, ignoring case and
+punctuation); the business-hours filter and the cooldown allow it; fewer than 10 runs started in
+that conversation in the last hour; and the message is not an opt-out keyword. Automations → Runs
+lists every run with its outcome, and a failed run's page names the reason (for example the 24-hour
+window had closed or the WhatsApp number is not active).
+
+**A run looks stuck.** The run page shows the current step and whether it waits for a reply or a
+timer, and until when. A run waiting for a reply continues when the customer answers or at the
+deadline. A running run whose next step is more than 30 seconds overdue is signalled again by the
+minute sweep; the worker logs each attempt as "automation run advanced" with its outcome. If
+nothing happens, check that the worker runs and the `automation.run` queue drains (section 3), and
+that the company is not suspended: its runs wait ("automation run deferred") and resume after
+reactivation, and a run older than 7 days then fails as expired. A step that raises an error fails
+its job (pg-boss retries it and keeps the error; the worker logs it too) and is counted on the run;
+after five failed attempts in a row the run fails with "a step failed repeatedly because of an
+internal error" (`step_error`) and the conversation goes to people. Find the error in the worker
+log before publishing again.
+
+**Stopping automations.** One run: a member takes the conversation over from the inbox (replying,
+assigning or resolving also ends the run), or a member with publish permission stops it from the
+run page. The conversation goes to people and bot messages not yet claimed by a send worker are
+cancelled (`bot_stopped`). New runs: Pause the automation (runs in progress finish). Everything at
+once: Archive (runs in progress stop and their conversations go to people). Each action is audited
+(`automation.*`).
+
+**Budgets and failed sends.** A run fails, and hands the conversation to people, when it exceeds
+200 steps, enters one step 20 times, sends 50 messages or runs longer than 7 days, or when a
+message cannot be queued (number not active, 24-hour window closed, no WhatsApp id for the contact).
+A bot message that was queued but rejected by Meta shows Meta's error on the message in the thread;
+the run does not wait for send results, so a question whose message failed ends at its reply
+deadline.
+
+**Worker restarts and deploys.** Runs are rows, so a restart delays steps but never loses or repeats
+one: queued `automation.run` jobs continue, and runs whose signal was lost are picked up by the sweep
+within about 90 seconds. A test run stops when the member who started it leaves the company ("test
+run tester removed") or no longer holds `automations.write` and `inbox.reply` (the run page says so).
+
+**Retention.** The minute sweep clears captured answers 30 days after runs end and deletes runs
+(with their step logs) 180 days after they end ("automation retention applied").
+
+**Migration 0011 failed.** It runs in one transaction, so a failure applies nothing. It drops and
+recreates the definer functions `app.erase_contact` and `ops.conversations_to_route` through
+`SET ROLE w360_definer` (ADR-039): a failure mentioning ownership or `SET ROLE` means the migration
+role cannot act as `w360_definer` (see `infra/db/bootstrap-roles.sql`). Fix the cause and run the
+migrations again.
+
 ## 11. Compromised company (tenant) or account
 
 1. Suspend the company in `/platform` with a reason (stops outbound activity; ingestion continues).

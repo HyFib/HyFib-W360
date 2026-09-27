@@ -1,5 +1,86 @@
 # Progress
 
+## 2026-09-27 — Phase 4: automation engine (P4-01)
+
+Status: **automation engine implemented and locally verified, production blocked.** Runs, the
+hand-off to people, restart recovery and reports work on HyFib's own data. Bot messages, including
+reply buttons with a header and footer, are verified only against the test-only Graph stand-in,
+which checks them against the limits in Meta's OpenAPI spec; a real sandbox run is a release item.
+The Phase 4 gate is partly met: "published flow survives restart" and "handoff" are verified
+locally; "integration idempotency" waits for the HTTP step (P4-02) and commerce (P4-06).
+
+### Completed
+
+- **Schema (migration 0011):** automations with an editable draft (trigger, steps, number);
+  immutable versions (published, and test snapshots of the draft) with a definition hash; runs
+  pinned to a version with a durable position (current step, visits, wait state, captured answers,
+  budget counters, consecutive failures); an append-only step log; one active run per conversation
+  (partial unique index). Reply turns gain a start reason (customer or hand-off) and an `automated`
+  end, and the turn trigger skips conversations an automation is handling.
+  `ops.conversations_to_route` skips them too; `ops.automation_runs_due` and
+  `ops.apply_automation_retention` are new definer functions (ids only). Contact erasure clears
+  captured answers and stops the contact's active runs. Twelve metric definition rows: new versions
+  of the inbox and member figures that leave automated time out, plus automation runs and outcomes.
+- **Model and interpreter (browser-safe):** eight step types (message, question with reply buttons,
+  question with a typed answer and format check, condition, contact update, wait, hand-off, end);
+  checks for missing and unreachable steps, unknown teams, fields and placeholders, WhatsApp's
+  interactive limits and loops that never wait. A pure interpreter is shared by the worker and the
+  simulator. Reply-button ids name the run, step and visit; a typed reply equal to a button title
+  counts as that button.
+- **Dispatch and runner:** ingestion hands a reply to a waiting run, or starts the best matching
+  automation (exact keyword, contained keyword, new conversation, any message). A run starts only
+  in an unassigned conversation of an active company, subject to business-hours filters, cooldowns
+  and 10 runs per conversation per hour.
+  - Each step is one transaction (conversation lock, then run lock).
+  - Bot messages go through the normal send pipeline, with window, number and WhatsApp id checks.
+  - Budgets of 200 steps, 20 visits per step, 50 messages and 7 days.
+  - A step that keeps raising an error fails the run after five attempts.
+  - The minute sweep re-signals overdue runs and applies retention.
+  - Suspended companies defer runs; test runs stop when the tester leaves or loses permission.
+- **Hand-off lock:** a member's reply or template send, an assignment, Take over or a resolve ends
+  the run and cancels its unclaimed bot sends. Routing skips conversations an automation handles. A
+  run that hands off routes the conversation (to a chosen team, or like a new conversation) and opens
+  a hand-off turn.
+- **Web:**
+  - Automations list and editor: trigger, steps with per-step fields, live checks and a generated
+    diagram.
+  - An in-browser simulator.
+  - Save, publish with a note, pause, turn on, archive, restore and delete draft.
+  - Test runs on a real conversation, and versions.
+  - Run list and run pages with step logs and captured answers (captured answers only for members
+    who can see the conversation).
+  - Inbox: an "Automation" badge, labelled bot messages and a banner with Take over.
+  - Reports → Automations: outcomes, failures by reason, per automation and per day, and a CSV
+    export.
+- **Found while building:**
+  - The definer role could not read columns used in erasure's `CASE` expressions, so erasure now
+    updates runs in two statements.
+  - Erasure now locks conversations before contacts (the order every writer uses), avoiding a
+    deadlock with the runner.
+  - `GROUPING()` rejects parameterised expressions, so report rows are told apart by their null
+    columns.
+  - Versions of a metric definition must stay adjacent in the registry.
+  - Mobile layouts needed `minmax(0,1fr)` columns.
+  - A step that kept raising an error would have held the conversation for up to seven days; it now
+    fails after five attempts.
+
+### Test commands and results (local, 2026-09-27, fresh database)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                |
+| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                        |
+| `pnpm test` (unit)                                                          | 116 passed. New: 12 automation tests — graph checks (targets, reachability, loops, teams and fields, WhatsApp limits), trigger ranking, and the interpreter (taps, typed titles, stale and forged ids, answers and formats, conditions, timers, budgets, placeholders)                                                                                                                                |
+| `pnpm test:integration` (PostgreSQL 18.x)                                   | 204 passed, including automations 14: versions and pinning, roles, a full flow with a team hand-off, no competing replies, hours, cooldown and hourly cap, concurrent arrivals, crash and lost-signal recovery with real pg-boss consumers, a step that keeps failing, timers and budgets, opt-out, erasure, test runs (and a tester losing permission), reports, suspension and retention, isolation |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 32 passed (16 tests × 2), including an automation built in the editor, tried in the simulator, published with a note, run by the worker from a signed webhook, a typed button title handing over to people, the run log, Take over, the automation report and pause, with no horizontal overflow on the new pages                                                                      |
+
+### Known gaps
+
+- Not built: the HTTP step (P4-02), Flows and catalog steps, starting runs from the API or
+  campaigns, template follow-ups outside the service window, fuzzy keywords, a drag-and-drop
+  canvas, and usage billing for automations.
+- No run on a real WhatsApp number yet (release checklist). Migration 0011 re-checks the reply-turn
+  constraints under a table lock; rehearse it on production-sized data.
+
 ## 2026-09-26 — Phase 3: inbox teams, routing, business hours, CSAT (P3-06)
 
 Status: **implementation complete for the advanced inbox, production blocked** (routing, timers,

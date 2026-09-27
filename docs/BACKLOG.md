@@ -83,8 +83,8 @@ verification, app review, Embedded Signup configuration).
   unavailable metrics shown with reasons; audited formula-safe exports; business-hours figures,
   resolution times and CSAT (with P3-06). **Remaining:** reconciliation with Meta's
   `pricing_analytics` (M-078, verify first), materialised daily aggregates if report queries near
-  the statement timeout, scheduled report emails, automation/deal/retention reports once those
-  modules exist.
+  the statement timeout, scheduled report emails, deal and retention reports once those modules
+  exist (automation outcomes were added with P4-01).
 - **P3-06 Inbox advanced** — _implemented (2026-09-26); CSAT sends verified against the Graph
   stand-in only_: teams with members and numbers, keyword and number routing, round robin with
   explicit availability and per-member limits, a minute sweep, release when members leave;
@@ -98,9 +98,20 @@ verification, app review, Embedded Signup configuration).
 
 ## Phase 4 — automation, Flows, CRM, commerce
 
-- **P4-01 Automation engine**: typed node graph, validation, immutable published versions, runs pinned
-  to a version, durable step execution on pg-boss, budgets (steps/loops/time), test mode, handoff
-  lock (bot vs human). T: restart mid-run resumes; no competing responses.
+- **P4-01 Automation engine** — _implemented and locally verified (2026-09-27); WhatsApp sends
+  verified against the Graph stand-in only_: keyword, new-conversation and any-message triggers with
+  business-hours filters and cooldowns; eight step types (message, question with reply buttons,
+  question with a typed answer and format check, condition, contact update, wait, hand-off, end);
+  checks at save and publish (including loops that never wait); immutable published versions and
+  runs pinned to them; durable one-step-per-transaction runs on pg-boss with a minute sweep for lost
+  signals; budgets (steps, loops, messages, 7 days, runs per hour) and a limit on failing steps; test
+  runs of the draft on a real conversation; the bot/human hand-off lock with Take over; step logs,
+  captured answers with retention; an automation report section; a builder with a generated diagram
+  and an in-browser simulator. T: restart and lost signals resume from the stored position; bot and
+  person never answer at once. **Remaining:** the HTTP step (P4-02), Flows and catalog steps (P4-03,
+  P4-06), starting runs from the public API or campaigns, template follow-ups outside the service
+  window, fuzzy keyword matching, a drag-and-drop canvas (ADR-034), run export, usage billing for
+  automation steps, a real sandbox run (release checklist).
 - **P4-02 HTTP node + egress guard** (shared with SEC-3).
 - **P4-03 WhatsApp Flows**: Flow JSON validation, publish lifecycle, RSA key management per number,
   encrypted data endpoint (health check, error codes), response mapping.
