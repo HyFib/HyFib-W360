@@ -11,6 +11,7 @@ import {
   contacts,
   conversations,
   eq,
+  memberships,
   messages,
   sendIntents,
   sql,
@@ -20,6 +21,7 @@ import {
   type TenantScope,
   type Tx,
 } from '@w360/db';
+import { permissionsForRoles } from '../authz/permissions';
 import { MAX_TAGS_PER_CONTACT, coerceFieldValue } from '../contacts/fields';
 import { businessStatusAt, loadBusinessCalendar } from '../inbox/business-hours';
 import { emitTenantEvent } from '../messaging/events';
@@ -420,6 +422,10 @@ async function runStep(
       return end('taken_over', 'assigned', null);
     if (now.getTime() - run.startedAt.getTime() > RUN_BUDGETS.maxRunMs)
       return end('failed', 'expired', null);
+    // A test run acts for the member who started it, so it stops once they may no longer test
+    // (the job's actor check already stops it when they leave the company).
+    if (run.mode === 'test' && !(await testerMayContinue(tx, tenantId, run.startedByMembershipId)))
+      return end('failed', 'error', 'tester_not_permitted');
 
     let event: RunEvent;
     if (run.status === 'waiting') {
@@ -618,6 +624,28 @@ export async function advanceAutomationRun(
     key: `c:${deps.clock.now().getTime()}`,
   });
   return { outcome: 'yielded', steps };
+}
+
+/** Whether the member who started a test run is still active and may still run tests. */
+async function testerMayContinue(
+  tx: Tx,
+  tenantId: string,
+  membershipId: string | null,
+): Promise<boolean> {
+  if (!membershipId) return false;
+  const [member] = await tx
+    .select({ roles: memberships.roles })
+    .from(memberships)
+    .where(
+      and(
+        eq(memberships.tenantId, tenantId),
+        eq(memberships.id, membershipId),
+        eq(memberships.status, 'active'),
+      ),
+    );
+  if (!member) return false;
+  const permissions = permissionsForRoles(member.roles);
+  return permissions.has('automations.write') && permissions.has('inbox.reply');
 }
 
 /**

@@ -70,6 +70,7 @@ export const STEP_DETAILS: Record<string, string> = {
   field_missing: 'the contact field no longer exists',
   invalid_value: 'the value did not fit the contact field',
   tester_not_member: 'the member running the test left the company',
+  tester_not_permitted: 'the member running the test may no longer run tests',
   version_unreadable: 'the version could not be read',
   step_error: 'a step failed repeatedly because of an internal error',
   missing_node: 'the step no longer exists',

@@ -1119,6 +1119,39 @@ describe('automation runs', () => {
     const detail = await svc.getRun(owner, runId);
     expect(detail).toMatchObject({ mode: 'test', startedByName: 'Owner', conversationId: conv });
     expect(detail.log.map((s) => s.outcome)).toEqual(['started', 'sent']);
+
+    // A tester who may no longer run tests stops their run at its next step, before it sends.
+    await fx.query(
+      `UPDATE app.memberships SET roles = '{marketer,supervisor}' WHERE tenant_id = $1 AND user_id = $2`,
+      [c.tenant.id, c.marketer.id],
+    );
+    const tester = await fx.ctx(c, c.marketer);
+    const conv2 = await inbound(c, waId(), 'hi again');
+    const second = await svc.startTestRun(tester, {
+      id,
+      expectedVersion: saved.version,
+      conversationId: conv2,
+    });
+    await fx.query(
+      `UPDATE app.memberships SET roles = '{marketer}' WHERE tenant_id = $1 AND user_id = $2`,
+      [c.tenant.id, c.marketer.id],
+    );
+    expect(
+      (
+        await advanceAutomationRun(
+          runnerDeps(),
+          authorizedTenantScope(c.tenant.id, c.marketer.id),
+          second.runId,
+          c.marketer.id,
+        )
+      ).outcome,
+    ).toBe('ended');
+    expect(await onlyRun(conv2)).toMatchObject({ status: 'failed', end_reason: 'error' });
+    expect((await stepLog(second.runId)).at(-1)).toMatchObject({
+      outcome: 'failed',
+      detail: 'tester_not_permitted',
+    });
+    expect(await botMessages(conv2)).toEqual([]);
   });
 
   it('reports automation outcomes and leaves automated time out of reply times', async () => {
