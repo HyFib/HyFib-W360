@@ -107,6 +107,7 @@ export const automationRuns = appSchema.table('automation_runs', {
   waitUntil: tz('wait_until'),
   inputMessageId: uuid('input_message_id'),
   retries: smallint('retries').notNull().default(0),
+  failures: smallint('failures').notNull().default(0),
   stepCount: integer('step_count').notNull().default(0),
   messageCount: integer('message_count').notNull().default(0),
   visits: jsonb('visits')

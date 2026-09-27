@@ -9,11 +9,13 @@ import {
   applyAutomationRetention,
   authorizeJob,
   createAutomationService,
+  createBusinessHoursService,
   createContactsService,
   createInboxService,
   createReportsService,
   createTeamsService,
   findDueAutomationRuns,
+  MAX_STEP_FAILURES,
   PgBossJobQueue,
   processSendIntent,
   queueTextMessage,
@@ -678,6 +680,78 @@ describe('automation runs', () => {
     expect((await turns(conv4)).filter((t) => t.end_reason === null)).toEqual([]);
   });
 
+  it('applies business-hours filters, cooldowns and the hourly cap, and skips assigned conversations', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const hello = {
+      version: 1,
+      start: 'hi',
+      nodes: [{ id: 'hi', type: 'send_text', text: 'We are closed now.', next: null }],
+    };
+    // Business hours on, open all day every day, with yesterday, today and tomorrow closed (in the
+    // company's time zone): the business is closed while this test runs.
+    const hours = createBusinessHoursService({ db: fx.dbs.app, clock: systemClock });
+    await hours.updateBusinessHours(owner, { enabled: true, days: Array(7).fill('00:00-24:00') });
+    const localDay = (offsetDays: number) =>
+      new Intl.DateTimeFormat('en-CA', {
+        timeZone: owner.tenant.timezone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).format(new Date(Date.now() + offsetDays * 86_400_000));
+    for (const offset of [-1, 0, 1]) {
+      await hours.addHoliday(owner, { day: localDay(offset), name: `Closed ${offset}` });
+    }
+    await publish(
+      owner,
+      'While open',
+      { type: 'any_message', hours: 'open', cooldownMinutes: 0 },
+      { ...hello, nodes: [{ id: 'hi', type: 'send_text', text: 'We are open.', next: null }] },
+    );
+    await publish(
+      owner,
+      'Out of office',
+      { type: 'any_message', hours: 'closed', cooldownMinutes: 30 },
+      hello,
+    );
+    const ann = waId();
+    const conv = await inbound(c, ann, 'hello?');
+    const first = await onlyRun(conv);
+    const [started] = await fx.query<{ name: string }>(
+      `SELECT a.name FROM app.automations a JOIN app.automation_runs r ON r.automation_id = a.id WHERE r.id = $1`,
+      [first.id],
+    );
+    expect(started?.name).toBe('Out of office');
+    await advance(c, first.id);
+    // Within the 30-minute cooldown the same automation does not start again.
+    await fx.deliver(fx.messagesBody(c, { messages: [{ waId: ann, text: 'anyone there?' }] }));
+    expect(await runsOf(conv)).toHaveLength(1);
+
+    // A keyword automation without a cooldown starts every time, up to 10 runs per hour in one
+    // conversation (bot-to-bot loops).
+    await publish(owner, 'Ping', keyword('ping'), hello);
+    const bea = waId();
+    for (let i = 0; i < 11; i += 1) {
+      await fx.deliver(fx.messagesBody(c, { messages: [{ waId: bea, text: 'ping' }] }));
+      const runs = await runsOf(await conversationOf(c, bea));
+      const last = runs.at(-1);
+      if (last && (last.status === 'running' || last.status === 'waiting'))
+        await advance(c, last.id);
+    }
+    expect(await runsOf(await conversationOf(c, bea))).toHaveLength(10);
+
+    // A conversation assigned to a member is theirs: no automation starts.
+    const cyd = waId();
+    const conv3 = await inbound(c, cyd, 'first message');
+    await Promise.all((await runsOf(conv3)).map((r) => advance(c, r.id)));
+    await fx.dbs.adminPool.query(
+      `UPDATE app.conversations SET assigned_membership_id = $1 WHERE id = $2`,
+      [owner.membership.id, conv3],
+    );
+    await fx.deliver(fx.messagesBody(c, { messages: [{ waId: cyd, text: 'ping' }] }));
+    expect((await runsOf(conv3)).filter((r) => r.trigger_type === 'keyword')).toEqual([]);
+  });
+
   it('starts one run when messages arrive at the same time', async () => {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);
@@ -775,6 +849,73 @@ describe('automation runs', () => {
       [3, 'sent'],
       [4, 'handed_off'],
     ]);
+  });
+
+  it('fails a run whose step keeps raising an error, and passes the conversation to people', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    await publish(owner, 'Menu', keyword('menu'), menuGraph());
+    const from = waId();
+    const conv = await inbound(c, from, 'menu');
+    const run = await onlyRun(conv);
+    const broken: JobQueue = {
+      async enqueue(tx, queue, envelope, options) {
+        if (queue === QUEUES.messageSend.name) throw new Error('simulated persistent failure');
+        return fx.jobs().enqueue(tx, queue, envelope, options);
+      },
+      async enqueueMany(tx, queue, jobs) {
+        return fx.jobs().enqueueMany(tx, queue, jobs);
+      },
+    };
+    const attempt = () =>
+      advanceAutomationRun(
+        runnerDeps(systemClock, broken),
+        authorizedTenantScope(c.tenant.id, null),
+        run.id,
+        null,
+      );
+    const state = async () => {
+      const [row] = await fx.query<{ status: string; failures: number }>(
+        `SELECT status, failures FROM app.automation_runs WHERE id = $1`,
+        [run.id],
+      );
+      return row;
+    };
+
+    // Each attempt still fails the job with its error; the run only counts the attempts, and a
+    // step that succeeds starts the count again.
+    await expect(attempt()).rejects.toThrow('simulated persistent failure');
+    await expect(attempt()).rejects.toThrow('simulated persistent failure');
+    expect(await state()).toEqual({ status: 'running', failures: 2 });
+    expect(await advance(c, run.id)).toEqual({ outcome: 'waiting', steps: 1 });
+    expect(await state()).toEqual({ status: 'waiting', failures: 0 });
+
+    // The customer answers (that step commits), and sending the next message keeps failing.
+    await inbound(c, from, 'Talk to us');
+    for (let i = 1; i < MAX_STEP_FAILURES; i += 1) {
+      await expect(attempt()).rejects.toThrow('simulated persistent failure');
+      expect(await state()).toEqual({ status: 'running', failures: i });
+    }
+    await expect(attempt()).rejects.toThrow('simulated persistent failure');
+    expect(await onlyRun(conv)).toMatchObject({ status: 'failed', end_reason: 'error' });
+    expect((await stepLog(run.id)).map((s) => [s.outcome, s.detail])).toEqual([
+      ['started', 'keyword'],
+      ['asked', null],
+      ['answered', null],
+      ['failed', 'step_error'],
+    ]);
+    expect(await botMessages(conv)).toHaveLength(1);
+    // The conversation is back with people: a hand-off turn is open and no run holds it.
+    expect((await turns(conv)).at(-1)).toMatchObject({ start_reason: 'handoff', end_reason: null });
+    const inbox = createInboxService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+    });
+    expect((await inbox.getConversation(owner, conv)).automation).toBeNull();
+    // Later signals find nothing to do.
+    expect(await attempt()).toEqual({ outcome: 'idle', steps: 0 });
   });
 
   it('waits on timers and reply deadlines and fails runs that exceed a budget', async () => {

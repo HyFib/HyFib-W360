@@ -117,6 +117,9 @@ CREATE TABLE app.automation_runs (
   input_message_id uuid,
   -- Unrecognised replies at the current question.
   retries smallint NOT NULL DEFAULT 0 CHECK (retries BETWEEN 0 AND 10),
+  -- Step attempts that raised an error since the run last advanced; the runner fails the run (and
+  -- hands the conversation to people) after a few instead of retrying for ever.
+  failures smallint NOT NULL DEFAULT 0 CHECK (failures BETWEEN 0 AND 100),
   step_count integer NOT NULL DEFAULT 0 CHECK (step_count >= 0),
   message_count integer NOT NULL DEFAULT 0 CHECK (message_count >= 0),
   visits jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(visits) = 'object'),
@@ -206,11 +209,11 @@ BEGIN
   END IF;
   IF OLD.status NOT IN ('running', 'waiting') THEN
     IF (NEW.status, NEW.current_node_id, NEW.node_visit, NEW.waiting_for, NEW.wait_until,
-        NEW.input_message_id, NEW.retries, NEW.step_count, NEW.message_count, NEW.visits,
+        NEW.input_message_id, NEW.retries, NEW.failures, NEW.step_count, NEW.message_count, NEW.visits,
         NEW.next_step_at, NEW.ended_at, NEW.end_reason, NEW.end_detail, NEW.ended_by_membership_id)
        IS DISTINCT FROM
        (OLD.status, OLD.current_node_id, OLD.node_visit, OLD.waiting_for, OLD.wait_until,
-        OLD.input_message_id, OLD.retries, OLD.step_count, OLD.message_count, OLD.visits,
+        OLD.input_message_id, OLD.retries, OLD.failures, OLD.step_count, OLD.message_count, OLD.visits,
         OLD.next_step_at, OLD.ended_at, OLD.end_reason, OLD.end_detail, OLD.ended_by_membership_id)
        OR (NEW.variables IS DISTINCT FROM OLD.variables AND NEW.variables <> '{}'::jsonb) THEN
       RAISE EXCEPTION 'an ended automation run cannot change' USING ERRCODE = 'W3403';
@@ -665,7 +668,7 @@ GRANT UPDATE (name, description, status, draft_trigger, draft_graph, draft_chann
   draft_updated_by_membership_id, active_version_id, version, updated_at) ON app.automations TO w360_app;
 GRANT SELECT, INSERT ON app.automation_versions TO w360_app;
 GRANT SELECT, INSERT ON app.automation_runs TO w360_app;
-GRANT UPDATE (status, current_node_id, node_visit, waiting_for, wait_until, input_message_id, retries, step_count,
-  message_count, visits, variables, next_step_at, ended_at, end_reason, end_detail, ended_by_membership_id,
-  updated_at) ON app.automation_runs TO w360_app;
+GRANT UPDATE (status, current_node_id, node_visit, waiting_for, wait_until, input_message_id, retries, failures,
+  step_count, message_count, visits, variables, next_step_at, ended_at, end_reason, end_detail,
+  ended_by_membership_id, updated_at) ON app.automation_runs TO w360_app;
 GRANT SELECT, INSERT ON app.automation_run_steps TO w360_app;

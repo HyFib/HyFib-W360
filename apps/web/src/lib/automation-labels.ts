@@ -71,6 +71,7 @@ export const STEP_DETAILS: Record<string, string> = {
   invalid_value: 'the value did not fit the contact field',
   tester_not_member: 'the member running the test left the company',
   version_unreadable: 'the version could not be read',
+  step_error: 'a step failed repeatedly because of an internal error',
   missing_node: 'the step no longer exists',
 };
 

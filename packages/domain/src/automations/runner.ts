@@ -53,7 +53,9 @@ import {
  *    request leaves), contact updates, hand-off routing;
  * 6. append the step log row and store the new position, or end the run.
  * A crash before commit leaves nothing behind and the step runs again; after commit the next step
- * starts from the stored position. Nothing about a step is ever applied twice.
+ * starts from the stored position. Nothing about a step is ever applied twice. A step that keeps
+ * raising an error fails the run after `MAX_STEP_FAILURES` attempts, so the conversation goes to
+ * people instead of waiting on a run that cannot advance.
  */
 export interface AutomationRunnerDeps extends RunSignalDeps {
   db: Database;
@@ -62,6 +64,8 @@ export interface AutomationRunnerDeps extends RunSignalDeps {
 
 /** Steps one job processes before handing the run to a new job (fairness between runs). */
 export const STEPS_PER_JOB = 25;
+/** Failed attempts at a step (errors, not outcomes) before the run fails with `step_error`. */
+export const MAX_STEP_FAILURES = 5;
 const SERVICE_WINDOW_MS = 24 * 3600_000;
 
 /** Versions never change, so parsed graphs are cached by version id. */
@@ -527,6 +531,7 @@ async function runStep(
           waitUntil: waiting?.until ?? null,
           inputMessageId: null,
           nextStepAt: waiting?.until ?? now,
+          failures: 0,
         })
         .where(and(eq(automationRuns.tenantId, tenantId), eq(automationRuns.id, run.id)));
       if (waiting) {
@@ -581,7 +586,23 @@ export async function advanceAutomationRun(
 ): Promise<{ outcome: RunTickOutcome; steps: number }> {
   let steps = 0;
   for (let i = 0; i < STEPS_PER_JOB; i += 1) {
-    const outcome = await runStep(deps, scope, runId);
+    let outcome: StepOutcome;
+    try {
+      outcome = await runStep(deps, scope, runId);
+    } catch (error) {
+      // The job still fails with the error (pg-boss retries it and keeps it for inspection); the
+      // run only counts the attempt, and fails once the step has failed too often.
+      try {
+        await recordStepFailure(deps, scope, runId);
+      } catch (recordError) {
+        throw new AggregateError(
+          [error, recordError],
+          'An automation step failed, and so did recording the failure',
+          { cause: recordError },
+        );
+      }
+      throw error;
+    }
     if (outcome.kind !== 'progress') {
       return {
         outcome: outcome.kind,
@@ -597,6 +618,55 @@ export async function advanceAutomationRun(
     key: `c:${deps.clock.now().getTime()}`,
   });
   return { outcome: 'yielded', steps };
+}
+
+/**
+ * Counts a failed step attempt (its transaction rolled back, so nothing of the step remains). After
+ * `MAX_STEP_FAILURES` attempts in a row the run fails with `step_error` and, like any failed run,
+ * passes the conversation to people.
+ */
+async function recordStepFailure(
+  deps: AutomationRunnerDeps,
+  scope: TenantScope,
+  runId: string,
+): Promise<void> {
+  const tenantId = scope.tenantId;
+  await deps.db.run(scope, async (tx) => {
+    const [peek] = await tx
+      .select({ conversationId: automationRuns.conversationId })
+      .from(automationRuns)
+      .where(and(eq(automationRuns.tenantId, tenantId), eq(automationRuns.id, runId)));
+    if (!peek) return;
+    await tx
+      .select({ id: conversations.id })
+      .from(conversations)
+      .where(and(eq(conversations.tenantId, tenantId), eq(conversations.id, peek.conversationId)))
+      .for('update');
+    const [run] = await tx
+      .select()
+      .from(automationRuns)
+      .where(and(eq(automationRuns.tenantId, tenantId), eq(automationRuns.id, runId)))
+      .for('update');
+    if (!run || (run.status !== 'running' && run.status !== 'waiting')) return;
+    const failures = run.failures + 1;
+    await tx
+      .update(automationRuns)
+      .set({ failures })
+      .where(and(eq(automationRuns.tenantId, tenantId), eq(automationRuns.id, run.id)));
+    if (failures < MAX_STEP_FAILURES) return;
+    await appendRunStep(tx, tenantId, run.id, {
+      nodeId: run.currentNodeId,
+      nodeType: null,
+      outcome: 'failed',
+      detail: 'step_error',
+    });
+    await endRun(tx, run, {
+      status: 'failed',
+      reason: 'error',
+      detail: 'step_error',
+      now: deps.clock.now(),
+    });
+  });
 }
 
 /**
