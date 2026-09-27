@@ -57,8 +57,9 @@ export const MODULES: ModuleDefinition[] = [
     label: 'Automations',
     path: '/automations',
     permission: 'automations.read',
-    status: 'planned',
-    reason: 'Phase 4: versioned automation builder.',
+    status: 'available',
+    reason:
+      'Keyword, new-conversation and any-message automations with messages, reply buttons, questions, conditions, contact updates, waits and hand-off; immutable versions, test runs and a simulator. HTTP requests, WhatsApp Flows and drag-and-drop editing are not available yet.',
   },
   {
     key: 'flows',
@@ -99,7 +100,7 @@ export const MODULES: ModuleDefinition[] = [
     permission: 'reports.read',
     status: 'available',
     reason:
-      'Messaging outcomes, estimated Meta charges, inbox response times, member activity and campaign funnels. Automation, deal and retention reports need modules that are not available yet.',
+      'Messaging outcomes, estimated Meta charges, inbox response times, CSAT, automation outcomes, member activity and campaign funnels. Deal and retention reports need modules that are not available yet.',
   },
   {
     key: 'integrations',

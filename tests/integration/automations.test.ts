@@ -6,6 +6,7 @@ import { QUEUES } from '@w360/contracts';
 import { authorizedTenantScope, type Database } from '@w360/db';
 import {
   advanceAutomationRun,
+  applyAutomationRetention,
   authorizeJob,
   createAutomationService,
   createContactsService,
@@ -1030,6 +1031,64 @@ describe('automation runs', () => {
       'automations',
     );
     expect(csv.body.split('\r\n')[0]).toContain('runs_started');
+  });
+
+  it('starts no run while the company is suspended, and applies retention to ended runs', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    await publish(owner, 'Menu', keyword('menu'), menuGraph());
+    await fx.dbs.adminPool.query(`UPDATE app.tenants SET status = 'suspended' WHERE id = $1`, [
+      c.tenant.id,
+    ]);
+    const conv = await inbound(c, waId(), 'menu');
+    expect(await runsOf(conv)).toEqual([]);
+    await fx.dbs.adminPool.query(`UPDATE app.tenants SET status = 'active' WHERE id = $1`, [
+      c.tenant.id,
+    ]);
+
+    // An ended run with a captured answer: answers go after 30 days, the run after 180.
+    const moe = waId();
+    const conv2 = await inbound(c, moe, 'menu');
+    const run = await onlyRun(conv2);
+    await advance(c, run.id);
+    await fx.deliver(fx.messagesBody(c, { messages: [{ waId: moe, text: 'talk to us' }] }));
+    await advance(c, run.id);
+    expect(await onlyRun(conv2)).toMatchObject({
+      status: 'handed_off',
+      variables: { topic: 'Talk to us' },
+    });
+    // Backdating needs the retention setting (ended runs are guarded).
+    const client = await fx.dbs.adminPool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(`SELECT set_config('w360.allow_retention_purge', 'on', true)`);
+      await client.query(
+        `UPDATE app.automation_runs SET started_at = started_at - interval '31 days',
+                ended_at = ended_at - interval '31 days' WHERE id = $1`,
+        [run.id],
+      );
+      await client.query('COMMIT');
+    } finally {
+      client.release();
+    }
+    await applyAutomationRetention(fx.dbs.app);
+    expect(await onlyRun(conv2)).toMatchObject({ status: 'handed_off', variables: {} });
+    const client2 = await fx.dbs.adminPool.connect();
+    try {
+      await client2.query('BEGIN');
+      await client2.query(`SELECT set_config('w360.allow_retention_purge', 'on', true)`);
+      await client2.query(
+        `UPDATE app.automation_runs SET started_at = started_at - interval '150 days',
+                ended_at = ended_at - interval '150 days' WHERE id = $1`,
+        [run.id],
+      );
+      await client2.query('COMMIT');
+    } finally {
+      client2.release();
+    }
+    await applyAutomationRetention(fx.dbs.app);
+    expect(await runsOf(conv2)).toEqual([]);
+    expect(await stepLog(run.id)).toEqual([]);
   });
 
   it('keeps automations and runs inside their company', async () => {

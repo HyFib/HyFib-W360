@@ -93,6 +93,12 @@ export async function dispatchInboundToAutomation(
     return 'busy';
   }
   if (optOut || input.assignedMembershipId) return 'none';
+  // A suspended company sends nothing, so no run starts (it would hold the conversation).
+  const [tenant] = await tx
+    .select({ status: tenants.status, timezone: tenants.timezone })
+    .from(tenants)
+    .where(eq(tenants.id, input.tenantId));
+  if (tenant?.status !== 'active') return 'none';
 
   const candidates = await tx
     .select({
@@ -126,11 +132,7 @@ export async function dispatchInboundToAutomation(
   let open: boolean | null = null;
   const businessOpen = async () => {
     if (open !== null) return open;
-    const [tenant] = await tx
-      .select({ timezone: tenants.timezone })
-      .from(tenants)
-      .where(eq(tenants.id, input.tenantId));
-    const hours = await loadBusinessCalendar(tx, input.tenantId, tenant?.timezone ?? 'UTC');
+    const hours = await loadBusinessCalendar(tx, input.tenantId, tenant.timezone);
     open = hours.enabled ? businessStatusAt(hours.calendar, now).open : true;
     return open;
   };

@@ -4,6 +4,7 @@ import { notFound } from 'next/navigation';
 import { isAppError } from '@w360/core';
 import { can } from '@w360/domain';
 import { Alert, Badge, Card, CardContent, CardHeader, CardTitle } from '@w360/ui';
+import { TakeOverButton } from '@/components/automations/automation-actions';
 import { Composer } from '@/components/inbox/composer';
 import { ConversationControls, TeamControl } from '@/components/inbox/conversation-controls';
 import { InboxShell, inboxQueryString } from '@/components/inbox/inbox-shell';
@@ -139,6 +140,35 @@ export default async function ConversationPage({
                   now={now}
                 />
               </p>
+            ) : null}
+            {thread.automation ? (
+              <Alert tone="info">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <p>
+                    {thread.automation.mode === 'test' ? 'A test of ' : 'The automation '}
+                    {can(ctx, 'automations.read') ? (
+                      <Link
+                        href={`/c/${ctx.tenant.slug}/automations/runs/${thread.automation.runId}`}
+                        className="font-medium underline underline-offset-4"
+                      >
+                        {thread.automation.automationName}
+                      </Link>
+                    ) : (
+                      <span className="font-medium">{thread.automation.automationName}</span>
+                    )}{' '}
+                    is handling this conversation
+                    {thread.automation.waitingFor === 'reply'
+                      ? ' and is waiting for the customer’s reply'
+                      : thread.automation.waitingFor === 'timer'
+                        ? ' and is waiting before its next step'
+                        : ''}
+                    . Replying, assigning or taking over stops it.
+                  </p>
+                  {canReply ? (
+                    <TakeOverButton slug={ctx.tenant.slug} conversationId={conv.id} />
+                  ) : null}
+                </div>
+              </Alert>
             ) : null}
             {csat ? (
               <p className="text-sm text-muted-foreground">

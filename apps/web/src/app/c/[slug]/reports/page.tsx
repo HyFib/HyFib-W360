@@ -149,6 +149,7 @@ export default async function ReportsPage({
         <CostSection report={report} ctx={ctx} exportHref={exportHref} />
         <InboxSection report={report} label={label} exportHref={exportHref} />
         <CsatSection report={report} label={label} exportHref={exportHref} />
+        <AutomationSection report={report} label={label} exportHref={exportHref} />
         <AgentSection report={report} exportHref={exportHref} />
         <CampaignSection report={report} ctx={ctx} exportHref={exportHref} />
         <UnavailableSection definitions={report.definitions} />
@@ -715,6 +716,106 @@ function CsatSection({
             {skipped.map(([reason, n]) => `${SKIP_LABELS[reason] ?? reason} ${n}`).join(' · ')}
           </p>
         ) : null}
+      </CardContent>
+    </Card>
+  );
+}
+
+const runsLabel = (n: number) => `${n} ${n === 1 ? 'run' : 'runs'}`;
+
+const FAILURE_LABELS: Record<string, string> = {
+  budget_steps: 'step limit',
+  budget_loop: 'loop limit',
+  budget_messages: 'message limit',
+  expired: 'older than 7 days',
+  send_blocked: 'message could not be sent',
+  error: 'could not continue',
+};
+
+function AutomationSection({
+  report,
+  label,
+  exportHref,
+}: {
+  report: Report;
+  label: (key: string) => string;
+  exportHref: ExportHref;
+}) {
+  const a = report.automations;
+  const t = a.totals;
+  const finished = t.started - t.active;
+  const share = (n: number) => (finished > 0 ? percent(n, finished) : '—');
+  return (
+    <Card>
+      <SectionHeader
+        title="Automations"
+        description="Runs of published automations started by customer messages, by the day they started (test runs are left out). Shares are of the runs that have finished."
+        exportHref={exportHref}
+        section="automations"
+      />
+      <CardContent className="grid grid-cols-1 gap-4">
+        {t.started === 0 ? (
+          <p className="text-sm text-muted-foreground">No automation runs in this period.</p>
+        ) : (
+          <>
+            <dl className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+              <Stat
+                label={label('automation.runs')}
+                value={t.started}
+                detail={t.active > 0 ? `${t.active} still running` : 'all finished'}
+              />
+              <Stat label="Completed" value={share(t.completed)} detail={runsLabel(t.completed)} />
+              <Stat
+                label="Handed off"
+                value={share(t.handed_off)}
+                detail={runsLabel(t.handed_off)}
+              />
+              <Stat
+                label="Taken over"
+                value={share(t.taken_over)}
+                detail={runsLabel(t.taken_over)}
+              />
+              <Stat label="Stopped" value={share(t.stopped)} detail={runsLabel(t.stopped)} />
+              <Stat label="Failed" value={share(t.failed)} detail={runsLabel(t.failed)} />
+            </dl>
+            {a.failures.length > 0 ? (
+              <p className="text-sm text-muted-foreground">
+                Failures:{' '}
+                {a.failures
+                  .map((f) => `${FAILURE_LABELS[f.reason] ?? f.reason} ${f.runs}`)
+                  .join(' · ')}
+              </p>
+            ) : null}
+            <div className="overflow-x-auto">
+              <Table>
+                <THead>
+                  <TR>
+                    <TH>Automation</TH>
+                    <TH className="text-right">Runs</TH>
+                    <TH className="text-right">Completed</TH>
+                    <TH className="text-right">Handed off</TH>
+                    <TH className="text-right">Taken over</TH>
+                    <TH className="text-right">Stopped</TH>
+                    <TH className="text-right">Failed</TH>
+                  </TR>
+                </THead>
+                <TBody>
+                  {a.automations.map((row) => (
+                    <TR key={row.id}>
+                      <RowHeader>{row.name}</RowHeader>
+                      <TD className="text-right">{row.started}</TD>
+                      <TD className="text-right">{row.completed}</TD>
+                      <TD className="text-right">{row.handed_off}</TD>
+                      <TD className="text-right">{row.taken_over}</TD>
+                      <TD className="text-right">{row.stopped}</TD>
+                      <TD className="text-right">{row.failed}</TD>
+                    </TR>
+                  ))}
+                </TBody>
+              </Table>
+            </div>
+          </>
+        )}
       </CardContent>
     </Card>
   );

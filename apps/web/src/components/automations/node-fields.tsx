@@ -1,0 +1,822 @@
+'use client';
+import type { ReactNode } from 'react';
+import { Button, Field, Input, Select, Textarea } from '@w360/ui';
+import {
+  ANSWER_FORMATS,
+  AUTOMATION_LIMITS,
+  COMPARISONS,
+  type AutomationNode,
+  type ConditionRule,
+  type NodeOf,
+} from '@w360/domain/automation-model';
+
+/**
+ * Field editors for each step type. Every control is labelled; "next step" choices list the
+ * automation's steps by name, plus ending the automation there.
+ */
+export interface StepChoice {
+  id: string;
+  label: string;
+}
+
+export interface NodeFieldOptions {
+  steps: StepChoice[];
+  teams: { id: string; name: string }[];
+  fields: { key: string; label: string; type: string }[];
+  /** Answer names saved by questions in this automation. */
+  answers: string[];
+}
+
+const COMPARISON_LABELS: Record<(typeof COMPARISONS)[number], string> = {
+  equals: 'is',
+  not_equals: 'is not',
+  contains: 'contains',
+  is_set: 'has a value',
+  is_not_set: 'is empty',
+  greater_than: 'is more than',
+  less_than: 'is less than',
+};
+
+const FORMAT_LABELS: Record<(typeof ANSWER_FORMATS)[number], string> = {
+  any: 'Any text',
+  number: 'A number',
+  email: 'An email address',
+};
+
+const PLACEHOLDER_HINT = 'Use {{name}}, {{company}} or {{answer.<name>}} to fill in values.';
+
+function NextSelect({
+  id,
+  label,
+  value,
+  self,
+  options,
+  onChange,
+  description,
+}: {
+  id: string;
+  label: string;
+  value: string | null;
+  self: string;
+  options: NodeFieldOptions;
+  onChange: (next: string | null) => void;
+  description?: ReactNode;
+}) {
+  return (
+    <Field id={id} label={label} description={description}>
+      {(aria) => (
+        <Select
+          {...aria}
+          value={value ?? ''}
+          onChange={(e) => onChange(e.target.value === '' ? null : e.target.value)}
+        >
+          <option value="">End the automation here</option>
+          {options.steps.map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.id === self ? `${s.label} (this step)` : s.label}
+            </option>
+          ))}
+        </Select>
+      )}
+    </Field>
+  );
+}
+
+function MinutesInput({
+  id,
+  label,
+  value,
+  onChange,
+  description,
+}: {
+  id: string;
+  label: string;
+  value: number;
+  onChange: (value: number) => void;
+  description?: ReactNode;
+}) {
+  return (
+    <Field id={id} label={label} description={description}>
+      {(aria) => (
+        <Input
+          {...aria}
+          type="number"
+          inputMode="numeric"
+          min={1}
+          max={AUTOMATION_LIMITS.minutes}
+          value={Number.isFinite(value) ? value : ''}
+          onChange={(e) => onChange(Number.parseInt(e.target.value, 10))}
+        />
+      )}
+    </Field>
+  );
+}
+
+function RetryFields({
+  prefix,
+  retries,
+  retryText,
+  onChange,
+  limit,
+}: {
+  prefix: string;
+  retries: number;
+  retryText: string | null;
+  onChange: (patch: { retries?: number; retryText?: string | null }) => void;
+  limit: number;
+}) {
+  return (
+    <div className="grid gap-4 sm:grid-cols-[160px_1fr]">
+      <Field id={`${prefix}-retries`} label="Ask again">
+        {(aria) => (
+          <Select
+            {...aria}
+            value={String(retries)}
+            onChange={(e) => onChange({ retries: Number(e.target.value) })}
+          >
+            {[0, 1, 2, 3].map((n) => (
+              <option key={n} value={n}>
+                {n === 0 ? 'Never' : n === 1 ? 'Once' : `${n} times`}
+              </option>
+            ))}
+          </Select>
+        )}
+      </Field>
+      <Field
+        id={`${prefix}-retry-text`}
+        label="Text when asking again (optional)"
+        description="Empty: the question is repeated as it is."
+      >
+        {(aria) => (
+          <Input
+            {...aria}
+            value={retryText ?? ''}
+            maxLength={limit}
+            onChange={(e) => onChange({ retryText: e.target.value || null })}
+          />
+        )}
+      </Field>
+    </div>
+  );
+}
+
+function RuleEditor({
+  prefix,
+  rule,
+  options,
+  onChange,
+  onRemove,
+}: {
+  prefix: string;
+  rule: ConditionRule;
+  options: NodeFieldOptions;
+  onChange: (rule: ConditionRule) => void;
+  onRemove: (() => void) | null;
+}) {
+  const kindSelect = (
+    <Field id={`${prefix}-kind`} label="Check">
+      {(aria) => (
+        <Select
+          {...aria}
+          value={rule.kind}
+          onChange={(e) => {
+            const kind = e.target.value as ConditionRule['kind'];
+            if (kind === 'answer')
+              onChange({ kind, variable: options.answers[0] ?? 'answer', op: 'equals', value: '' });
+            else if (kind === 'field')
+              onChange({ kind, field: options.fields[0]?.key ?? 'field', op: 'equals', value: '' });
+            else if (kind === 'tag') onChange({ kind, op: 'has', tag: '' });
+            else onChange({ kind, op: 'open' });
+          }}
+        >
+          <option value="answer">A saved answer</option>
+          <option value="field">A contact field</option>
+          <option value="tag">A contact tag</option>
+          <option value="business_hours">Business hours</option>
+        </Select>
+      )}
+    </Field>
+  );
+  let rest: ReactNode;
+  if (rule.kind === 'answer' || rule.kind === 'field') {
+    const valueless = rule.op === 'is_set' || rule.op === 'is_not_set';
+    rest = (
+      <>
+        {rule.kind === 'answer' ? (
+          <Field id={`${prefix}-variable`} label="Answer">
+            {(aria) => (
+              <Select
+                {...aria}
+                value={rule.variable}
+                onChange={(e) => onChange({ ...rule, variable: e.target.value })}
+              >
+                {[...new Set([...options.answers, rule.variable])].map((a) => (
+                  <option key={a} value={a}>
+                    {a}
+                  </option>
+                ))}
+              </Select>
+            )}
+          </Field>
+        ) : (
+          <Field id={`${prefix}-field`} label="Field">
+            {(aria) => (
+              <Select
+                {...aria}
+                value={rule.field}
+                onChange={(e) => onChange({ ...rule, field: e.target.value })}
+              >
+                {options.fields.length === 0 ? <option value={rule.field}>No fields</option> : null}
+                {options.fields.map((f) => (
+                  <option key={f.key} value={f.key}>
+                    {f.label}
+                  </option>
+                ))}
+              </Select>
+            )}
+          </Field>
+        )}
+        <Field id={`${prefix}-op`} label="Comparison">
+          {(aria) => (
+            <Select
+              {...aria}
+              value={rule.op}
+              onChange={(e) =>
+                onChange({ ...rule, op: e.target.value as (typeof COMPARISONS)[number] })
+              }
+            >
+              {COMPARISONS.map((c) => (
+                <option key={c} value={c}>
+                  {COMPARISON_LABELS[c]}
+                </option>
+              ))}
+            </Select>
+          )}
+        </Field>
+        {valueless ? null : (
+          <Field id={`${prefix}-value`} label="Value">
+            {(aria) => (
+              <Input
+                {...aria}
+                value={rule.value ?? ''}
+                maxLength={AUTOMATION_LIMITS.ruleValueLength}
+                onChange={(e) => onChange({ ...rule, value: e.target.value })}
+              />
+            )}
+          </Field>
+        )}
+      </>
+    );
+  } else if (rule.kind === 'tag') {
+    rest = (
+      <>
+        <Field id={`${prefix}-op`} label="Contact">
+          {(aria) => (
+            <Select
+              {...aria}
+              value={rule.op}
+              onChange={(e) => onChange({ ...rule, op: e.target.value as 'has' | 'has_not' })}
+            >
+              <option value="has">has the tag</option>
+              <option value="has_not">does not have the tag</option>
+            </Select>
+          )}
+        </Field>
+        <Field id={`${prefix}-tag`} label="Tag">
+          {(aria) => (
+            <Input
+              {...aria}
+              value={rule.tag}
+              maxLength={40}
+              onChange={(e) => onChange({ ...rule, tag: e.target.value })}
+            />
+          )}
+        </Field>
+      </>
+    );
+  } else {
+    rest = (
+      <Field id={`${prefix}-op`} label="The business is">
+        {(aria) => (
+          <Select
+            {...aria}
+            value={rule.op}
+            onChange={(e) => onChange({ ...rule, op: e.target.value as 'open' | 'closed' })}
+          >
+            <option value="open">open</option>
+            <option value="closed">closed</option>
+          </Select>
+        )}
+      </Field>
+    );
+  }
+  return (
+    <div className="grid gap-3 rounded-md border border-border p-3 sm:grid-cols-2 lg:grid-cols-4">
+      {kindSelect}
+      {rest}
+      {onRemove ? (
+        <div className="flex items-end">
+          <Button type="button" variant="ghost" size="sm" onClick={onRemove}>
+            Remove rule
+          </Button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** The editable fields of one step. */
+export function NodeFields({
+  node,
+  options,
+  onChange,
+}: {
+  node: AutomationNode;
+  options: NodeFieldOptions;
+  onChange: (node: AutomationNode) => void;
+}) {
+  const p = `step-${node.id}`;
+  const patch = <T extends AutomationNode>(n: T, values: Partial<T>) =>
+    onChange({ ...n, ...values });
+  switch (node.type) {
+    case 'send_text':
+      return (
+        <div className="grid gap-4">
+          <Field id={`${p}-text`} label="Message" description={PLACEHOLDER_HINT}>
+            {(aria) => (
+              <Textarea
+                {...aria}
+                rows={3}
+                value={node.text}
+                maxLength={AUTOMATION_LIMITS.textLength}
+                onChange={(e) => patch(node, { text: e.target.value })}
+              />
+            )}
+          </Field>
+          <NextSelect
+            id={`${p}-next`}
+            label="Then"
+            value={node.next}
+            self={node.id}
+            options={options}
+            onChange={(next) => patch(node, { next })}
+          />
+        </div>
+      );
+    case 'ask_buttons':
+      return <AskButtonsFields node={node} options={options} onChange={onChange} />;
+    case 'ask_text':
+      return (
+        <div className="grid gap-4">
+          <Field id={`${p}-text`} label="Question" description={PLACEHOLDER_HINT}>
+            {(aria) => (
+              <Textarea
+                {...aria}
+                rows={2}
+                value={node.text}
+                maxLength={AUTOMATION_LIMITS.textLength}
+                onChange={(e) => patch(node, { text: e.target.value })}
+              />
+            )}
+          </Field>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field
+              id={`${p}-save`}
+              label="Save the answer as"
+              description="Lower-case letters, digits and _ ; use it as {{answer.name}}."
+            >
+              {(aria) => (
+                <Input
+                  {...aria}
+                  value={node.saveAs}
+                  maxLength={32}
+                  onChange={(e) => patch(node, { saveAs: e.target.value })}
+                />
+              )}
+            </Field>
+            <Field id={`${p}-format`} label="Accept">
+              {(aria) => (
+                <Select
+                  {...aria}
+                  value={node.format}
+                  onChange={(e) =>
+                    patch(node, { format: e.target.value as NodeOf<'ask_text'>['format'] })
+                  }
+                >
+                  {ANSWER_FORMATS.map((f) => (
+                    <option key={f} value={f}>
+                      {FORMAT_LABELS[f]}
+                    </option>
+                  ))}
+                </Select>
+              )}
+            </Field>
+          </div>
+          <RetryFields
+            prefix={p}
+            retries={node.retries}
+            retryText={node.retryText}
+            limit={AUTOMATION_LIMITS.textLength}
+            onChange={(values) => patch(node, values)}
+          />
+          <div className="grid gap-4 sm:grid-cols-3">
+            <NextSelect
+              id={`${p}-next`}
+              label="After an answer"
+              value={node.next}
+              self={node.id}
+              options={options}
+              onChange={(next) => patch(node, { next })}
+            />
+            <NextSelect
+              id={`${p}-invalid`}
+              label="After an answer that does not fit"
+              value={node.invalidNext}
+              self={node.id}
+              options={options}
+              onChange={(invalidNext) => patch(node, { invalidNext })}
+            />
+            <NextSelect
+              id={`${p}-timeout`}
+              label="If there is no reply"
+              value={node.timeoutNext}
+              self={node.id}
+              options={options}
+              onChange={(timeoutNext) => patch(node, { timeoutNext })}
+            />
+          </div>
+          <MinutesInput
+            id={`${p}-minutes`}
+            label="Wait for a reply (minutes)"
+            value={node.timeoutMinutes}
+            onChange={(timeoutMinutes) => patch(node, { timeoutMinutes })}
+          />
+        </div>
+      );
+    case 'condition':
+      return (
+        <div className="grid gap-4">
+          <Field id={`${p}-match`} label="Go to “yes” when">
+            {(aria) => (
+              <Select
+                {...aria}
+                value={node.match}
+                onChange={(e) => patch(node, { match: e.target.value as 'all' | 'any' })}
+              >
+                <option value="all">all rules are true</option>
+                <option value="any">any rule is true</option>
+              </Select>
+            )}
+          </Field>
+          <fieldset className="grid gap-3">
+            <legend className="mb-1 text-sm font-medium">Rules</legend>
+            {node.rules.map((rule, i) => (
+              <RuleEditor
+                key={i}
+                prefix={`${p}-rule-${i}`}
+                rule={rule}
+                options={options}
+                onChange={(r) =>
+                  patch(node, { rules: node.rules.map((x, j) => (j === i ? r : x)) })
+                }
+                onRemove={
+                  node.rules.length > 1
+                    ? () => patch(node, { rules: node.rules.filter((_, j) => j !== i) })
+                    : null
+                }
+              />
+            ))}
+            {node.rules.length < AUTOMATION_LIMITS.rules ? (
+              <div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() =>
+                    patch(node, { rules: [...node.rules, { kind: 'business_hours', op: 'open' }] })
+                  }
+                >
+                  Add rule
+                </Button>
+              </div>
+            ) : null}
+          </fieldset>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <NextSelect
+              id={`${p}-then`}
+              label="Yes: then"
+              value={node.then}
+              self={node.id}
+              options={options}
+              onChange={(then) => patch(node, { then })}
+            />
+            <NextSelect
+              id={`${p}-else`}
+              label="No: then"
+              value={node.else}
+              self={node.id}
+              options={options}
+              onChange={(value) => patch(node, { else: value })}
+            />
+          </div>
+        </div>
+      );
+    case 'update_contact': {
+      const action = node.action;
+      return (
+        <div className="grid gap-4">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field id={`${p}-action`} label="Change">
+              {(aria) => (
+                <Select
+                  {...aria}
+                  value={action.kind}
+                  onChange={(e) => {
+                    const kind = e.target.value;
+                    if (kind === 'set_field')
+                      patch(node, {
+                        action: { kind, field: options.fields[0]?.key ?? 'field', value: '' },
+                      });
+                    else
+                      patch(node, {
+                        action: {
+                          kind: kind as 'add_tag' | 'remove_tag',
+                          tag: 'tag' in action ? action.tag : '',
+                        },
+                      });
+                  }}
+                >
+                  <option value="add_tag">Add a tag</option>
+                  <option value="remove_tag">Remove a tag</option>
+                  <option value="set_field">Set a contact field</option>
+                </Select>
+              )}
+            </Field>
+            {action.kind === 'set_field' ? (
+              <Field id={`${p}-field`} label="Field">
+                {(aria) => (
+                  <Select
+                    {...aria}
+                    value={action.field}
+                    onChange={(e) => patch(node, { action: { ...action, field: e.target.value } })}
+                  >
+                    {options.fields.length === 0 ? (
+                      <option value={action.field}>No contact fields yet</option>
+                    ) : null}
+                    {options.fields.map((f) => (
+                      <option key={f.key} value={f.key}>
+                        {f.label}
+                      </option>
+                    ))}
+                  </Select>
+                )}
+              </Field>
+            ) : (
+              <Field id={`${p}-tag`} label="Tag">
+                {(aria) => (
+                  <Input
+                    {...aria}
+                    value={action.tag}
+                    maxLength={40}
+                    onChange={(e) => patch(node, { action: { ...action, tag: e.target.value } })}
+                  />
+                )}
+              </Field>
+            )}
+          </div>
+          {action.kind === 'set_field' ? (
+            <Field id={`${p}-value`} label="Value" description={PLACEHOLDER_HINT}>
+              {(aria) => (
+                <Input
+                  {...aria}
+                  value={action.value}
+                  maxLength={AUTOMATION_LIMITS.fieldValueLength}
+                  onChange={(e) => patch(node, { action: { ...action, value: e.target.value } })}
+                />
+              )}
+            </Field>
+          ) : null}
+          <NextSelect
+            id={`${p}-next`}
+            label="Then"
+            value={node.next}
+            self={node.id}
+            options={options}
+            onChange={(next) => patch(node, { next })}
+          />
+        </div>
+      );
+    }
+    case 'wait':
+      return (
+        <div className="grid gap-4 sm:grid-cols-2">
+          <MinutesInput
+            id={`${p}-minutes`}
+            label="Wait (minutes)"
+            value={node.minutes}
+            onChange={(minutes) => patch(node, { minutes })}
+            description="Messages after about 24 hours without a customer message cannot be sent."
+          />
+          <NextSelect
+            id={`${p}-next`}
+            label="Then"
+            value={node.next}
+            self={node.id}
+            options={options}
+            onChange={(next) => patch(node, { next })}
+          />
+        </div>
+      );
+    case 'handoff':
+      return (
+        <Field
+          id={`${p}-team`}
+          label="Team"
+          description="The conversation goes to this team (round-robin teams assign a member). Without a team it is routed like a new conversation of the number."
+        >
+          {(aria) => (
+            <Select
+              {...aria}
+              value={node.teamId ?? ''}
+              onChange={(e) => patch(node, { teamId: e.target.value || null })}
+            >
+              <option value="">Route like a new conversation</option>
+              {options.teams.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name}
+                </option>
+              ))}
+            </Select>
+          )}
+        </Field>
+      );
+    case 'end':
+      return <p className="text-sm text-muted-foreground">The automation ends here.</p>;
+  }
+}
+
+function AskButtonsFields({
+  node,
+  options,
+  onChange,
+}: {
+  node: NodeOf<'ask_buttons'>;
+  options: NodeFieldOptions;
+  onChange: (node: AutomationNode) => void;
+}) {
+  const p = `step-${node.id}`;
+  const patch = (values: Partial<NodeOf<'ask_buttons'>>) => onChange({ ...node, ...values });
+  return (
+    <div className="grid gap-4">
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Field id={`${p}-header`} label="Header (optional)">
+          {(aria) => (
+            <Input
+              {...aria}
+              value={node.header ?? ''}
+              maxLength={AUTOMATION_LIMITS.headerLength}
+              onChange={(e) => patch({ header: e.target.value || null })}
+            />
+          )}
+        </Field>
+        <Field id={`${p}-footer`} label="Footer (optional)">
+          {(aria) => (
+            <Input
+              {...aria}
+              value={node.footer ?? ''}
+              maxLength={AUTOMATION_LIMITS.footerLength}
+              onChange={(e) => patch({ footer: e.target.value || null })}
+            />
+          )}
+        </Field>
+      </div>
+      <Field id={`${p}-body`} label="Question" description={PLACEHOLDER_HINT}>
+        {(aria) => (
+          <Textarea
+            {...aria}
+            rows={2}
+            value={node.body}
+            maxLength={AUTOMATION_LIMITS.questionLength}
+            onChange={(e) => patch({ body: e.target.value })}
+          />
+        )}
+      </Field>
+      <fieldset className="grid gap-3">
+        <legend className="mb-1 text-sm font-medium">
+          Buttons (up to {AUTOMATION_LIMITS.buttons}, titles up to{' '}
+          {AUTOMATION_LIMITS.buttonTitleLength} characters)
+        </legend>
+        {node.buttons.map((button, i) => (
+          <div
+            key={i}
+            className="grid gap-3 rounded-md border border-border p-3 sm:grid-cols-[1fr_1fr_auto]"
+          >
+            <Field id={`${p}-button-${i}`} label={`Button ${i + 1}`}>
+              {(aria) => (
+                <Input
+                  {...aria}
+                  value={button.title}
+                  maxLength={AUTOMATION_LIMITS.buttonTitleLength}
+                  onChange={(e) =>
+                    patch({
+                      buttons: node.buttons.map((b, j) =>
+                        j === i ? { ...b, title: e.target.value } : b,
+                      ),
+                    })
+                  }
+                />
+              )}
+            </Field>
+            <NextSelect
+              id={`${p}-button-${i}-next`}
+              label="Then"
+              value={button.next}
+              self={node.id}
+              options={options}
+              onChange={(next) =>
+                patch({ buttons: node.buttons.map((b, j) => (j === i ? { ...b, next } : b)) })
+              }
+            />
+            <div className="flex items-end">
+              {node.buttons.length > 1 ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => patch({ buttons: node.buttons.filter((_, j) => j !== i) })}
+                >
+                  Remove
+                </Button>
+              ) : null}
+            </div>
+          </div>
+        ))}
+        {node.buttons.length < AUTOMATION_LIMITS.buttons ? (
+          <div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() =>
+                patch({
+                  buttons: [
+                    ...node.buttons,
+                    { title: `Option ${node.buttons.length + 1}`, next: null },
+                  ],
+                })
+              }
+            >
+              Add button
+            </Button>
+          </div>
+        ) : null}
+      </fieldset>
+      <Field
+        id={`${p}-save`}
+        label="Save the chosen button as (optional)"
+        description="Use it as {{answer.name}} or in a condition."
+      >
+        {(aria) => (
+          <Input
+            {...aria}
+            value={node.saveAs ?? ''}
+            maxLength={32}
+            onChange={(e) => patch({ saveAs: e.target.value || null })}
+          />
+        )}
+      </Field>
+      <RetryFields
+        prefix={p}
+        retries={node.retries}
+        retryText={node.retryText}
+        limit={AUTOMATION_LIMITS.questionLength}
+        onChange={(values) => patch(values)}
+      />
+      <div className="grid gap-4 sm:grid-cols-2">
+        <NextSelect
+          id={`${p}-nomatch`}
+          label="If the reply matches no button"
+          value={node.noMatchNext}
+          self={node.id}
+          options={options}
+          onChange={(noMatchNext) => patch({ noMatchNext })}
+          description="A typed reply that equals a button title counts as that button."
+        />
+        <NextSelect
+          id={`${p}-timeout`}
+          label="If there is no reply"
+          value={node.timeoutNext}
+          self={node.id}
+          options={options}
+          onChange={(timeoutNext) => patch({ timeoutNext })}
+        />
+      </div>
+      <MinutesInput
+        id={`${p}-minutes`}
+        label="Wait for a reply (minutes)"
+        value={node.timeoutMinutes}
+        onChange={(timeoutMinutes) => patch({ timeoutMinutes })}
+      />
+    </div>
+  );
+}

@@ -22,6 +22,7 @@ import {
   JobSigner,
   PgBossJobQueue,
   RazorpayClient,
+  createAutomationService,
   createBillingService,
   createBusinessHoursService,
   createCampaignsService,
@@ -38,6 +39,7 @@ import {
   createTeamsService,
   createTemplatesService,
   createTenancyService,
+  type AutomationService,
   type BillingService,
   type BusinessHoursService,
   type CampaignsService,
@@ -91,6 +93,7 @@ export interface Runtime {
   campaigns: CampaignsService;
   rateCards: RateCardsService;
   reports: ReportsService;
+  automations: AutomationService;
   /** Null until the Meta app is configured (WhatsApp connection is then reported unavailable). */
   meta: MetaConfig | null;
   onboarding: OnboardingService | null;
@@ -175,6 +178,7 @@ async function init(): Promise<Runtime> {
   const campaigns = createCampaignsService({ db, jobs, signer, clock: systemClock });
   const rateCards = createRateCardsService({ platformDb, clock: systemClock });
   const reports = createReportsService({ db, clock: systemClock });
+  const automations = createAutomationService({ db, clock: systemClock, jobs, signer });
   const meta = metaConfigFrom(config);
   const onboarding = meta
     ? createOnboardingService({
@@ -230,6 +234,7 @@ async function init(): Promise<Runtime> {
     campaigns,
     rateCards,
     reports,
+    automations,
     meta,
     onboarding,
     razorpay,
