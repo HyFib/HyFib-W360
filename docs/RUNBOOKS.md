@@ -519,6 +519,81 @@ grants for `w360_definer`; a failure there usually means the bootstrap roles are
 (`infra/db/bootstrap-roles.sql`). The `commerce.sync`, `commerce.link` and `commerce.account` queues
 are created by `pnpm db:migrate`.
 
+## 10I. Store connectors (Shopify, WooCommerce)
+
+**"Shopify is not set up for HyFib yet".** The web has no `SHOPIFY_CLIENT_ID`,
+`SHOPIFY_CLIENT_SECRET` and `SHOPIFY_API_VERSION` (both web and worker need them; the worker logs
+"Shopify is not configured" at start). See `docs/DEPLOYMENT.md` "Shopify app".
+
+**Connecting a Shopify store ends on "could not be verified or has expired".** The web log has a
+`shopify callback refused` line with the reason: `bad_signature` (the app secret in HyFib differs
+from the app's, or the callback is older than 90 seconds: check both servers' clocks),
+`unknown_state` (the approval took over 15 minutes, or the page was used twice) or `bad_request`.
+"Only the member who started connecting a store can finish it" means another account was signed in
+when Shopify sent the member back. In each case the member starts again.
+
+**A store is stuck on "Waiting for approval".** The owner never finished the approval (Shopify or
+WordPress). The handshake is deleted an hour after it expired (15 minutes) when the store was never
+connected; "Connect again" starts a new one. For WooCommerce, the web log has
+`woocommerce key handover` lines: `not_read_write` (the owner approved without write access, or the
+site sent other permissions) or `unknown_handshake` (too late, or already used). WooCommerce
+deletes keys HyFib did not accept.
+
+**A store is stuck on "Connecting".** The `commerce.store` worker finishes the connection (worker
+log `store job` lines with the store id and outcome). It retries while the store cannot be reached
+and fails the store after 30 minutes with "HyFib could not reach the store to finish connecting".
+Other messages name the cause: "Shopify did not grant read_orders and read_products" (the merchant
+declined some access), "WooCommerce refused the keys", "No WooCommerce REST API answered at this
+address" (wrong address, or the site lacks pretty permalinks), "HyFib cannot connect to this
+address" (the egress client refused it: private addresses, redirects, http outside local and test).
+
+**A store "Needs attention".** The store page shows why. "Shopify refused HyFib's access" or "no
+longer accepts HyFib's access" means the token or refresh token stopped working (uninstalled,
+access revoked, or the refresh token expired after about 90 days without a read, research SH-007):
+connect again. "WooCommerce refused the keys (they may have been revoked or lack Read/Write
+access)" means the key was revoked or its WordPress user lost rights: connect again with new keys.
+
+**Orders stop updating.** The store page shows the last read and the next one (hourly), changes
+waiting to be read, and "Webhooks last checked" (six-hourly). A read error is shown as "The last
+read did not finish" and retried in five minutes; Shopify throttling (research SH-011) only delays
+the next read. "Read the store now" asks for a read at once. The web log has `shopify webhook` or
+`woocommerce webhook` lines with the outcome: `bad_signature` (Shopify: the app secret differs;
+WooCommerce: the webhook was not created by HyFib or its secret was edited — remove the store and
+connect it again), `no_store`, `duplicate` or `fetch_signalled`. WooCommerce disables a webhook after
+more than five failed deliveries and never retries it (WC-018): the six-hourly check re-enables it,
+and the hourly read catches up meanwhile. "The keys cannot manage webhooks" means Read-only keys:
+reads still run hourly.
+
+**Orders show no customer name, number or email.** Shopify did not share protected customer data
+(the store page says so, research SH-020): HyFib's Shopify app needs Shopify's approval for those
+fields. Or the details were removed: a customer's redaction request or a contact erasure (the orders
+page shows "Details removed"). Numbers without a country code are linked to contacts only after the
+company sets a calling code on the store page.
+
+**Only part of the products are there.** HyFib keeps the first 20,000 products of a store (the
+store page says when a copy is incomplete); orders are not limited.
+
+**The merchant uninstalled HyFib in Shopify.** The store shows "Uninstalled in Shopify": reads stop
+and the access is dropped; the orders stay until Shopify's `shop/redact` (about 48 hours later,
+research SH-027) or until the company removes the store. "Connect again" installs HyFib again.
+
+**A Shopify data request arrived.** The store page lists it with the customer's email or number and
+the orders Shopify named. Answer the customer within 30 days with what HyFib holds (the orders page
+searches by email or number), then mark the request answered; the customer's details on the request
+are cleared.
+
+**Removing a store did not finish.** Removal waits up to 30 minutes for the store (Shopify
+uninstall, or deleting HyFib's WooCommerce webhooks), then deletes the store anyway; the audit entry
+`commerce.store_removed` says `remote: done`, `no_access` or `unreachable`. For WooCommerce, the
+owner must also revoke the key in WooCommerce → Settings → Advanced → REST API (the API cannot).
+
+**Migration 0019 failed.** It runs in one transaction, so a failure applies nothing. It replaces
+`app.erase_contact` through `SET ROLE w360_definer` (ADR-039) like 0011 and 0015–0018 and adds four
+definer functions (`ops.commerce_store_by_shop`, `ops.commerce_store_by_webhook`,
+`ops.commerce_store_by_connect`, `ops.commerce_store_work_due`) with column grants for
+`w360_definer`; a failure there usually means the bootstrap roles are missing
+(`infra/db/bootstrap-roles.sql`). The `commerce.store` queue is created by `pnpm db:migrate`.
+
 ## 11. Compromised company (tenant) or account
 
 1. Suspend the company in `/platform` with a reason (stops outbound activity; ingestion continues).

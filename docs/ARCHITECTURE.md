@@ -14,8 +14,9 @@ specified here but not yet implemented.
                         │   └── LISTEN/NOTIFY + event table       │
                         ▼                                         │
                    worker (pg-boss consumers, ≥1 replica) ────────┘
-                        │            │             │
-                     SMTP provider  Object storage  Razorpay (designed)
+                        │            │             │            │
+                     SMTP provider  Object storage  Razorpay   Companies' stores
+                                                               (Shopify, WooCommerce)
 ```
 
 - **web** serves the UI, server actions, auth endpoints, provider webhooks, health probes, two
@@ -24,8 +25,9 @@ specified here but not yet implemented.
   endpoints through the egress guard while WhatsApp waits, section 6H). Node.js runtime only.
   **[built]**
 - **worker** processes durable jobs: email delivery, webhook processing, outbound sends, campaign
-  ticks, automation runs, flow operations at Meta and flow keys, billing events, auto-recharge and
-  the minute sweepers. **[built]**
+  ticks, automation runs, flow operations at Meta and flow keys, billing events, auto-recharge,
+  catalog reads and Payment Links, reads from companies' Shopify and WooCommerce stores (section 6J)
+  and the minute sweepers. **[built]**
 - **PostgreSQL** is the system of record, the job queue (pg-boss) and the durable event log. There is
   no Redis, Kafka or search cluster (ADR-015).
 
@@ -585,9 +587,55 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   and message bubbles for orders, product messages and payment requests.
 - **Erasure** (`app.erase_contact`, replaced in 0018): clears the customer's note on their orders
   and requests cancellation of their open links; orders and amounts stay as business records.
-- **Not built yet:** Shopify and WooCommerce connectors (P4-06b), writing to catalogs, stock
-  updates, product enquiries (`referred_product`, M-171), payments inside WhatsApp
-  (`order_details`, M-174), refunds from HyFib, and order reports.
+- **Not built yet:** writing to catalogs, stock updates, product enquiries (`referred_product`,
+  M-171), payments inside WhatsApp (`order_details`, M-174), refunds from HyFib, and order reports.
+  Shopify and WooCommerce stores are §6J.
+
+## 6J. Store connectors **[built — verified against the local Shopify and WooCommerce stand-ins only; no live store traffic]**
+
+- **Model** (migration 0019, ADR-047): `commerce_stores` (platform, shop domain or site address,
+  name, currency, the state machine authorizing → connecting → connected, failed, uninstalled or
+  removing; sealed and versioned access, token expiry and granted scopes; the handshake's token hash,
+  member and deadline; the per-store webhook address id and sealed secret; read cursors and page
+  tokens, due times, errors, a lease); `commerce_store_orders` (external id, name, statuses,
+  currency, total in minor units, customer name, E.164 number and email, status page, redaction and
+  deletion times, the store's own update time) and `commerce_store_order_items`;
+  `commerce_store_products` (title, status, SKU, address, price range in minor units, stock,
+  variants); `commerce_store_fetches` (what signed webhooks asked the worker to read);
+  `commerce_store_events` (delivery ids, 30 days); `commerce_store_privacy_requests` (Shopify's
+  customer requests). Everything cascades from the store. `ops.commerce_store_by_shop`,
+  `ops.commerce_store_by_webhook`, `ops.commerce_store_by_connect` and
+  `ops.commerce_store_work_due` are the only cross-company lookups.
+- **Service** (`packages/domain/src/stores/service.ts`): stores and a store's detail
+  (`commerce.read`); connecting (Shopify handshake, WooCommerce approval or pasted keys), the calling
+  code setting, "read now", removal and answering data requests (`commerce.manage`); store orders
+  with search and keyset paging, an order with items and the matching contact, products, and the
+  orders next to a conversation (`commerce.read` and `contacts.read`; the conversation panel also
+  needs the conversation to be visible). Changes are audited.
+- **Clients**: `stores/shopify.ts` (the code exchange and refresh, Admin GraphQL with named
+  operations checked against the 2026-07 and 2025-10 schemas, cost-based throttling, withheld
+  customer data, subscriptions, `appUninstall`) and `stores/woocommerce.ts` (REST v3 with Basic
+  authentication: currency, orders and products by `modified_after` or ids, webhooks), both through
+  the egress client.
+- **Worker** (`stores/worker.ts`, queue `commerce.store`, one job at a time per store under a row
+  lease): finishes connecting (code exchange, scopes, shop details, webhooks), reads signalled items,
+  reads what changed since the cursor, refreshes Shopify tokens, checks webhooks every six hours,
+  prunes delivery ids and removes stores. The messaging sweep calls `sweepStoreWork`.
+- **Webhooks**: `/api/webhooks/shopify` (256 KB; HyFib's app secret; order, product,
+  `app/uninstalled` and compliance topics) and `/api/webhooks/woocommerce/<address id>` (1 MB; the
+  store's secret) → `stores/webhook.ts`: verify, dedupe, then mark deletions or signal a fetch.
+  `/api/stores/shopify/callback` (GET, signed query, the signed-in member) and
+  `/api/stores/woocommerce/callback` (the key handover, 16 KB) finish the handshakes.
+- **Web** (`/c/{slug}/commerce/stores`): the stores with status and counts; connect forms for both
+  platforms; a store page (status and errors, facts, read now, connect again, remove with a
+  confirmation, privacy requests, the calling code); orders with search, an order page (items,
+  customer, the matching contact, status page) and products. The inbox conversation page has a
+  "Store orders" panel for the contact's number.
+- **Erasure** (`app.erase_contact`, replaced in 0019): redacts the store orders with the contact's
+  number or email for good; new orders from a number suppressed as erased are kept without the
+  customer's details.
+- **Not built yet:** messages on store events (order confirmation, shipping updates, abandoned carts;
+  P4-06c), store customers, discount codes, writing to stores, other platforms.
 
 ## 7. Commercial model and billing **[built: wallet, top-ups, auto-recharge — verified against a local Razorpay stand-in only; subscriptions planned]**
 

@@ -48,3 +48,58 @@ export const PRODUCT_AVAILABILITY: Record<string, string> = {
   'available for order': 'Available to order',
   discontinued: 'Discontinued',
 };
+
+export const STORE_PLATFORM: Record<string, string> = {
+  shopify: 'Shopify',
+  woocommerce: 'WooCommerce',
+};
+
+export const STORE_STATE: Record<string, { label: string; tone: Tone }> = {
+  authorizing: { label: 'Waiting for approval', tone: 'info' },
+  connecting: { label: 'Connecting', tone: 'info' },
+  connected: { label: 'Connected', tone: 'success' },
+  failed: { label: 'Needs attention', tone: 'danger' },
+  uninstalled: { label: 'Uninstalled in Shopify', tone: 'warning' },
+  removing: { label: 'Being removed', tone: 'neutral' },
+};
+
+/** A store order's status as members see it (Shopify: open/closed/cancelled; WooCommerce's own). */
+export const STORE_ORDER_STATUS: Record<string, { label: string; tone: Tone }> = {
+  open: { label: 'Open', tone: 'info' },
+  closed: { label: 'Closed', tone: 'neutral' },
+  cancelled: { label: 'Cancelled', tone: 'neutral' },
+  pending: { label: 'Pending payment', tone: 'warning' },
+  processing: { label: 'Processing', tone: 'info' },
+  'on-hold': { label: 'On hold', tone: 'warning' },
+  completed: { label: 'Completed', tone: 'success' },
+  refunded: { label: 'Refunded', tone: 'neutral' },
+  failed: { label: 'Failed', tone: 'danger' },
+  'checkout-draft': { label: 'Draft', tone: 'neutral' },
+  trash: { label: 'Deleted', tone: 'neutral' },
+};
+
+/** Shopify's financial and fulfilment statuses (SH-013), as words. */
+export const STORE_STATUS_WORD: Record<string, string> = {
+  authorized: 'Authorized',
+  expired: 'Expired',
+  paid: 'Paid',
+  partially_paid: 'Partly paid',
+  partially_refunded: 'Partly refunded',
+  pending: 'Payment pending',
+  refunded: 'Refunded',
+  voided: 'Voided',
+  fulfilled: 'Fulfilled',
+  in_progress: 'In progress',
+  on_hold: 'On hold',
+  open: 'Unfulfilled',
+  partially_fulfilled: 'Partly fulfilled',
+  pending_fulfillment: 'Pending fulfilment',
+  request_declined: 'Request declined',
+  restocked: 'Restocked',
+  scheduled: 'Scheduled',
+  unfulfilled: 'Unfulfilled',
+};
+
+/** A label for a status word HyFib has no label for: the word itself, readable. */
+export const statusText = (word: string) =>
+  STORE_STATUS_WORD[word] ?? word.replace(/[_-]+/g, ' ').replace(/^\w/, (c) => c.toUpperCase());

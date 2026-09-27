@@ -1,5 +1,9 @@
 /** Formats timestamps in the company's time zone (server and client safe). */
-export function formatDateTime(iso: string | null, timeZone: string, locale = 'en-IN'): string {
+export function formatDateTime(
+  iso: string | Date | null,
+  timeZone: string,
+  locale = 'en-IN',
+): string {
   if (!iso) return '';
   return new Intl.DateTimeFormat(locale, {
     timeZone,

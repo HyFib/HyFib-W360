@@ -1,12 +1,16 @@
 import { startGraphStandIn } from '../support/graph-stand-in';
 import { startRazorpayStandIn } from '../support/razorpay-stand-in';
+import { startShopifyStandIn } from '../support/shopify-stand-in';
+import { startWooStandIn } from '../support/woocommerce-stand-in';
 import { E2E_CHANNEL_TOKEN } from './messaging-support';
 
 /**
  * Starts the TEST-ONLY provider stand-ins when the end-to-end environment points the app at them
- * (META_GRAPH_BASE_URL=http://127.0.0.1:$E2E_GRAPH_PORT and
- * RAZORPAY_API_BASE_URL=http://127.0.0.1:$E2E_RAZORPAY_PORT, both allowed only for
- * APP_ENV=local|test).
+ * (META_GRAPH_BASE_URL=http://127.0.0.1:$E2E_GRAPH_PORT,
+ * RAZORPAY_API_BASE_URL=http://127.0.0.1:$E2E_RAZORPAY_PORT and
+ * SHOPIFY_TEST_BASE_URL=http://127.0.0.1:$E2E_SHOPIFY_PORT, all allowed only for
+ * APP_ENV=local|test). WooCommerce sites are addressed by URL, so its stand-in only needs a port
+ * (and loopback egress, again only for local|test).
  */
 export default async function globalSetup(): Promise<(() => Promise<void>) | undefined> {
   const closers: (() => Promise<void>)[] = [];
@@ -28,6 +32,21 @@ export default async function globalSetup(): Promise<(() => Promise<void>) | und
       port: razorpayPort,
     });
     closers.push(() => razorpay.close());
+  }
+  const shopifyPort = Number(process.env.E2E_SHOPIFY_PORT ?? '0');
+  if (shopifyPort && process.env.SHOPIFY_CLIENT_ID && process.env.SHOPIFY_CLIENT_SECRET) {
+    const shopify = await startShopifyStandIn({
+      clientId: process.env.SHOPIFY_CLIENT_ID,
+      clientSecret: process.env.SHOPIFY_CLIENT_SECRET,
+      complianceUri: `${process.env.E2E_BASE_URL ?? 'http://localhost:3000'}/api/webhooks/shopify`,
+      port: shopifyPort,
+    });
+    closers.push(() => shopify.close());
+  }
+  const wooPort = Number(process.env.E2E_WOO_PORT ?? '0');
+  if (wooPort) {
+    const woo = await startWooStandIn({ port: wooPort });
+    closers.push(() => woo.close());
   }
   if (closers.length === 0) return undefined;
   return async () => {

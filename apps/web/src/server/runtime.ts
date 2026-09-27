@@ -8,6 +8,7 @@ import {
   metaConfigFrom,
   parseTrustedProxies,
   razorpayConfigFrom,
+  shopifyConfigFrom,
   systemClock,
   type Clock,
   type Logger,
@@ -24,6 +25,7 @@ import {
   RazorpayClient,
   createAutomationService,
   createCommerceService,
+  createStoreService,
   createCrmService,
   createBillingService,
   createBusinessHoursService,
@@ -70,6 +72,8 @@ import {
   type FlowsService,
   type FlowEndpointDeps,
   type PaymentWebhookDeps,
+  type StoreService,
+  type StoreWebhookDeps,
 } from '@w360/domain';
 import { DEFAULT_EGRESS_POLICY, createEgressClient } from '@w360/core/egress';
 import { createAuth, type Auth } from './auth';
@@ -120,6 +124,10 @@ export interface Runtime {
   commerce: CommerceService;
   /** Webhooks from companies' own Razorpay accounts (only signal a fetch of the link). */
   paymentWebhook: PaymentWebhookDeps;
+  /** Companies' own Shopify and WooCommerce stores: connections, orders and products read. */
+  stores: StoreService;
+  /** Store webhooks (verified, deduplicated; they only signal what the worker reads). */
+  storeWebhook: StoreWebhookDeps;
   /** Null until the Meta app is configured (WhatsApp connection is then reported unavailable). */
   meta: MetaConfig | null;
   onboarding: OnboardingService | null;
@@ -240,6 +248,26 @@ async function init(): Promise<Runtime> {
     allowLiveKeys: config.APP_ENV === 'production',
   });
   const paymentWebhook: PaymentWebhookDeps = { db, keyring, clock: systemClock, jobs, signer };
+  const shopify = shopifyConfigFrom(config);
+  const stores = createStoreService({
+    db,
+    clock: systemClock,
+    jobs,
+    signer,
+    keyring,
+    appBaseUrl: config.APP_BASE_URL,
+    shopify,
+    // http:// store addresses only where configuration allows loopback egress (local and test).
+    allowHttpStores: config.W360_EGRESS_ALLOW_LOOPBACK ?? false,
+  });
+  const storeWebhook: StoreWebhookDeps = {
+    db,
+    keyring,
+    clock: systemClock,
+    jobs,
+    signer,
+    shopifySecrets: shopify?.secrets ?? null,
+  };
   const meta = metaConfigFrom(config);
   // The Flows data endpoint forwards to companies' endpoints while WhatsApp waits, so it has its
   // own egress client with a shorter time limit (the only addresses chosen by companies that the
@@ -319,6 +347,8 @@ async function init(): Promise<Runtime> {
     crm,
     commerce,
     paymentWebhook,
+    stores,
+    storeWebhook,
     meta,
     onboarding,
     razorpay,

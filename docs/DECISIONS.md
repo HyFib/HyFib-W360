@@ -647,3 +647,88 @@ erasure.
 Erasure keeps an order and its amounts as a business record, clears the customer's note and asks
 Razorpay to cancel the contact's open links; the message that carried the order is redacted with the
 rest of the conversation.
+
+## ADR-047 Store connectors: read-only copies kept in step by signals, cursors and checks (2026-09-27)
+
+Decision: companies connect their own Shopify and WooCommerce stores (P4-06b, research
+`docs/research/store-connectors.md`). HyFib reads orders and products into a copy it keeps in step,
+shows orders next to the customer's conversations and never writes orders, products or customers
+to the store. Messages sent on store events (order confirmations, shipping updates) are the next
+slice (P4-06c).
+
+**Shopify** uses one HyFib app (non-embedded, authorization code grant, SH-002) configured by the
+operator (`SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET`, `SHOPIFY_API_VERSION`), with the scopes
+`read_orders,read_products` only. A member with `commerce.manage` starts a handshake: a single-use
+state (32 random bytes, stored as a hash, 15 minutes, bound to that member) and the store row in
+`authorizing`. The callback is checked before any company context exists: the HMAC with the app
+secret (current and previous), the timestamp (±90 s), the shop's shape and a handshake still waiting
+(`ops.commerce_store_by_connect`); the route then requires the same signed-in member, re-checked
+through `resolveTenantContext`. The code is exchanged by the worker for an expiring offline token
+(`expiring=1`, SH-006/SH-007). A shop can be connected to one company at a time (a unique index over
+the active states), because Shopify keeps one token per app and shop.
+
+**WooCommerce** uses REST API keys. The approval page (`/wc-auth/v1/authorize`, WC-002) asks for
+Read/Write keys (write is used only for HyFib's own webhooks, WC-004), or a member pastes keys.
+The key handover (WC-003) is unauthenticated: it is accepted only for a waiting handshake (the
+single-use id sent as `user_id`), only for `read_write` keys, and the keys are trusted only after
+they work against the address the member entered. Keys go in the Authorization header over https
+(WC-005), never in URLs; http:// addresses only where loopback egress is allowed (local and test).
+
+**Access** is sealed in the keyring, bound to the row (`commerce-store:<company>:<store>:credentials`)
+and versioned: every writer of the credentials bumps `credentials_version`, and a token refresh
+(five minutes before expiry) stores the new pair only if the version and state are unchanged, so a
+refresh never overwrites access saved meanwhile. All store traffic goes through the egress client
+(address checks, no redirects, 30 s, 4 MiB).
+
+**Webhooks only signal.** Shopify deliveries are verified with the app secret over the raw body
+(SH-024) and cut to `id`, `admin_graphql_api_id` and `updated_at` with `includeFields`; WooCommerce
+deliveries go to a per-store address (`/api/webhooks/woocommerce/<16 random characters>`) and are
+verified with that store's secret (WC-014); the unsigned creation ping (`webhook_id=N`, WC-012) is
+answered with 200 and changes nothing; anything else unsigned is refused with 401. A delivery id is
+recorded per store (a repeat does nothing; retained 30 days), deletions are marked, and everything
+else becomes a fetch row (store, kind, id) and a job: the worker reads the current state from the
+store's API. Nothing from a webhook body is stored. A fetch row is deleted only if no newer signal
+arrived during the read (each repeat moves its time forward, even within a millisecond).
+
+**Recovery.** Webhooks can be lost (Shopify drops subscriptions after failures, SH-025; WooCommerce
+disables a webhook after more than five failures, WC-018), so the worker reads what changed every
+hour, oldest first by `updated_at` (SH-016) or `modified_after` (WC-007). The cursor moves to the
+last item's whole second, so items at the boundary are read again rather than skipped, and a page
+token continues only among items sharing the cursor's second. Every six hours the worker checks
+HyFib's subscriptions and re-creates missing ones or re-enables disabled ones. The first read covers
+60 days of orders (SH-012) and the products (at most 20,000 per store; the store page says when a
+copy is incomplete).
+
+**One job at a time per store.** A job takes a five-minute lease on the store row; a busy store is
+skipped. A job reads at most five pages and 50 signalled items; when work remains (signals or a due
+read) it queues the next job in the transaction that releases the lease, so a signal arriving during
+a run is never lost to the singleton key of the running job. The minute sweep finds handshakes to
+expire, stores to finish connecting or removing and reads due (`ops.commerce_store_work_due`).
+Throttling (Shopify `THROTTLED`, HTTP 429) waits without an error; refused access fails the store
+with a reason the company can act on; other errors are shown on the store and retried in five
+minutes.
+
+**The copy.** An order or product is replaced only by a copy at least as recent
+(`remote_updated_at`). Amounts are Shopify `Decimal` strings or WooCommerce decimal strings
+converted exactly to minor units; a value with non-zero digits beyond the currency's exponent is
+unknown (never rounded); WooCommerce's float `price` is not used. Customer numbers are linked to
+contacts only in E.164; a number without a country code is read with the store's calling code only
+when the company set one (never guessed).
+
+**Privacy.** Order data needs `commerce.read` and `contacts.read`. When Shopify withholds protected
+customer data (SH-020), orders are kept without names, numbers and emails and the store says why.
+Shopify's compliance webhooks route by the shop named in the signed body (SH-027):
+`customers/redact` removes the customer's details from the named orders and orders with their
+number or email, for good (a redacted order keeps its details empty on every later read);
+`customers/data_request` is kept for the company to answer (managers see the contact details, which
+are cleared when answered); `shop/redact` deletes an uninstalled store and its copy.
+`app/uninstalled` must name the same shop in its body (the HMAC does not cover headers): the store
+stops, its access is dropped and the copy stays until `shop/redact` or removal. Contact erasure
+(`app.erase_contact`) redacts the store orders with the contact's number or email, and when the
+erasure keeps the number suppressed, new orders from it are kept without the customer's details.
+
+**Removal** by the company uninstalls HyFib from the shop (`appUninstall`, SH-028) or deletes
+HyFib's webhooks from the site (WooCommerce cannot revoke keys through its API, WC-020; the owner is
+told to revoke the key), then deletes the store and everything read from it. A store that cannot be
+reached is removed anyway after 30 minutes; the audit entry records what could not be done at the
+store.

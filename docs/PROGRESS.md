@@ -1,5 +1,93 @@
 # Progress
 
+## 2026-09-27 — Phase 4: store connectors (P4-06b)
+
+Status: **Store connectors implemented and locally verified; production blocked on HyFib's Shopify
+app (public distribution review, protected customer data approval) and checks on a Shopify
+development store and a WooCommerce test site.** Companies connect their Shopify and WooCommerce
+stores; HyFib reads orders and products into a copy it keeps in step and shows a customer's store
+orders next to their conversation. No request reached Shopify or a WooCommerce site: both were the
+test-only stand-ins in `tests/support/`, which answer and sign the way the research describes.
+Messages on store events (order confirmations, shipping updates) are the next slice (P4-06c).
+
+### Completed
+
+- **Research (`docs/research/store-connectors.md`, SH-001 to SH-029 and WC-001 to WC-020):**
+  Shopify's authorization code grant, callback HMAC, expiring offline tokens, the Admin GraphQL API
+  (cost-based throttling, the 60-day order limit, protected customer data), subscriptions with
+  `includeFields`, delivery headers, the compliance topics and uninstall, read from the 2026-07
+  Admin schema bundled in Shopify's dev MCP package and from the source of Shopify's official
+  libraries; WooCommerce's key approval and handover, REST v3 and webhooks (signature, creation
+  ping, delivery ids, disabling after failures), read from the plugin source and the source of its
+  official REST documentation. shopify.dev pages were seen only as search summaries: the token
+  lifetimes, retry schedule, `shop/redact` timing and compliance deadlines are listed as
+  unconfirmed and are release checklist items.
+- **GraphQL checked against Shopify's schemas:** the eight named operations HyFib sends (shop,
+  orders, orders by id, products, products by id, subscriptions, subscription create, uninstall)
+  validate with graphql-js against the 2026-07 and 2025-10 Admin introspection schemas, and the
+  variables (the subscription input for all seven topics with `includeFields`, the order search and
+  node ids) are valid for their types. Re-run at the end of the slice.
+- **Schema (migration 0019, ADR-047):** stores (state machine, sealed and versioned access, the
+  handshake, webhook address and secret, cursors, lease), store orders with items, products,
+  signalled fetches, delivery ids and Shopify privacy requests, all cascading from the store, with
+  composite foreign keys, FORCE RLS and column grants; four definer functions for the callbacks,
+  webhooks and the sweep; `app.erase_contact` replaced to redact store orders.
+- **Clients and worker (`commerce.store`):** the Shopify code exchange and refresh (tokens stored
+  only if the access was not changed meanwhile), Admin GraphQL with throttling and withheld
+  customer data, subscriptions and `appUninstall`; WooCommerce REST with Basic authentication over
+  https, webhooks created, re-enabled and deleted; one job per store under a lease, reading
+  signalled items and what changed since the cursor (whole seconds, page tokens within a second),
+  60 days of orders and up to 20,000 products at first, hourly reads, six-hourly webhook checks,
+  the next job queued in the transaction that ends a run, removal with a 30-minute deadline.
+- **Webhooks and handshakes:** `/api/webhooks/shopify` and `/api/webhooks/woocommerce/<address id>`
+  verify, deduplicate and only signal reads or mark deletions; Shopify's uninstall and compliance
+  topics act on the shop named in the signed body; `/api/stores/shopify/callback` needs the signed
+  query and the member who started the handshake; `/api/stores/woocommerce/callback` takes the key
+  handover for a waiting handshake only.
+- **Pages (`commerce.read`; orders and products also need `contacts.read`; managing needs
+  `commerce.manage`):** Commerce → Stores (stores, both connect forms, REST keys as a fallback), a
+  store page (status, errors, facts, read now, connect again, remove, privacy requests, the calling
+  code, a note while the first read runs), orders with search, an order page with the matching
+  contact, products; a "Store orders" panel next to conversations.
+- **Configuration and CI:** `SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET` (and `_PREVIOUS`),
+  `SHOPIFY_API_VERSION`, `SHOPIFY_TEST_BASE_URL` (local and test only); the Playwright global setup
+  starts both stand-ins (`E2E_SHOPIFY_PORT`, `E2E_WOO_PORT`), and the CI e2e job sets them with an
+  ephemeral client secret.
+- **Found while building:**
+  - A signal repeated in the same millisecond as the one being read, or from a web instance whose
+    clock lags, would have been deleted with it; every repeat now moves the signal's time forward.
+  - The store page said nothing between "Connected" and the end of the first read (the e2e test
+    first failed there); it now says the first read is running.
+  - Mutation checks: of 20 deliberate regressions (the stale-copy guards for orders and products,
+    sticky redaction of details and of the redaction time, delivery dedupe, the three signature
+    checks, the uninstall body check, the page token within a second, queueing the next job, the
+    credentials version on refresh, the signal time check and its advance, `shop/redact` on
+    installed stores, handshake expiry, unsigned bodies taken as pings, the approving member,
+    Read/Write keys, the product limit), eight of the first 19 survived the suite and the product
+    limit had no test. New tests (a signal during a read with equal clocks through a stand-in hook,
+    a refresh racing a credential change, the next job queued, redaction kept over two reads, a
+    products stale copy, late approvals, an unsigned delivery, the product limit) now make all 20
+    fail.
+
+### Test commands and results (local, 2026-09-27, fresh database)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `pnpm test` (unit)                                                          | 189 passed. New: 14 store model tests (shop and site addresses, the authorize addresses, token shapes, Shopify callback and webhook signatures with an independent signer, WooCommerce signatures, amounts to minor units, customer numbers, dates, the four record parsers, HTTP error mapping, throttle waits) and 3 Shopify configuration tests                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 266 passed, including `stores.test.ts` 13: Shopify connect, first read and contact link; forged, stale and replayed callbacks, another member, another company and an agent; signed webhooks, repeats, forgeries, stale copies and deletions; 130 orders in one second, lost subscriptions, token refresh, throttling and a refused refresh; a signal during a read; a refresh racing a credential change; withheld customer data; uninstall, customer redaction kept over two reads, data requests, shop redaction and removal; WooCommerce key handover, webhooks, pings, unsigned and forged deliveries, a disabled webhook re-enabled and revoked keys; read-only and foreign keys; erasure and isolation; late approvals and expired handshakes; the product limit. The tenant-isolation suite covers the seven new tables |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 50 tests (25 × 2): 49 passed in one full run. The one failure (`flows.spec.ts`, the data endpoint, on Chromium) came from this container losing its hosts entry for the local test host (the endpoint call ended `egress_failed`); with the entry restored it passed, as it had on mobile Chromium in the same run. `stores.spec.ts`, both platforms: approval in the store's admin (the stand-ins approve at once), the first read, orders and products, the panel next to the customer's chat, a webhook-driven update and removal; it also passed in two earlier separate runs per project                                                                                                                                                                                                                    |
+
+### Known gaps
+
+- Not built: messages on store events (P4-06c: order confirmation, shipping updates, cash on
+  delivery, abandoned carts), store customers, discount codes, writing to stores, other platforms.
+- Verified against the stand-ins only. HyFib's Shopify app (public distribution, protected customer
+  data), a development store, a WooCommerce test site, the unconfirmed Shopify timings and Firefox
+  and WebKit locally (they run in CI) are release checklist items.
+- Keyring rotation of existing ciphertexts, now including store access, needs the re-encryption job
+  (SEC-10). WooCommerce keys can be revoked only by the store's owner.
+
 ## 2026-09-27 — Phase 4: commerce on WhatsApp (P4-06a)
 
 Status: **Commerce on WhatsApp implemented and locally verified; production blocked on checks with an

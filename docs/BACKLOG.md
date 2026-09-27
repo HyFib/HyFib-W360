@@ -193,8 +193,34 @@ verification, app review, Embedded Signup configuration).
   company's Razorpay test keys (release checklist), product enquiries (`referred_product`), payments
   inside WhatsApp (`order_details`, needs Meta payment configuration), writing to catalogs and stock,
   refunds from HyFib, order reports and exports, sending products from automations.
-- **P4-06b Store connectors**: Shopify and WooCommerce (authenticated setup, webhook verification,
-  dedupe, sync recovery, uninstall), with orders and products kept in step with the store.
+- **P4-06b Store connectors** — _implemented and locally verified (2026-09-27) against the Shopify
+  and WooCommerce stand-ins; no live store traffic yet_: companies connect Shopify stores through
+  HyFib's Shopify app (a signed callback bound to the member who started it, `read_orders` and
+  `read_products` only, expiring offline tokens refreshed by the worker and stored only if the
+  access was not changed meanwhile) and WooCommerce stores with Read/Write keys (the approval page
+  or pasted keys, proven against the entered address, sent only in the Authorization header over
+  https); orders of the last 60 days and products (at most 20,000) are read into a copy kept in
+  step by verified, deduplicated webhooks that only signal reads, an hourly read of what changed
+  (a cursor on whole seconds with a page token within a second), six-hourly checks that re-create
+  or re-enable HyFib's webhooks, one job at a time per store; amounts exact in minor units;
+  customers' numbers linked to contacts in E.164 or with the company's calling code; store orders
+  next to the customer's conversation; Shopify's uninstall and privacy requests (sticky
+  redaction, data requests for the company to answer, shop redaction); removal that uninstalls
+  HyFib or deletes its webhooks; erasure. T: `stores.test.ts` (13 tests: handshakes and their
+  forgeries, webhooks, a 130-order burst in one second, lost subscriptions, token refresh and a
+  refresh racing a credential change, throttling, withheld data, a signal during a read, uninstall
+  and privacy requests, removal, key handover refusals, erasure, the product limit, isolation; 20
+  deliberate regressions caught), unit tests (addresses, signatures, amounts, numbers, dates,
+  parsers, HTTP errors), e2e `stores.spec.ts` (both platforms: approval, first read, orders and
+  products, the chat panel, a webhook-driven update, removal). The GraphQL operations were
+  checked against Shopify's 2026-07 and 2025-10 Admin schemas. **Remaining:** checks on a Shopify
+  development store and a WooCommerce test site (release checklist), Shopify's public app review
+  and protected customer data approval (docs/DEPLOYMENT.md), store customers, other platforms.
+- **P4-06c Messages on store events**: order confirmation, shipping and delivery updates, cash on
+  delivery confirmation and abandoned carts sent as approved templates from store events, with
+  consent checks, per-store settings, delays and quiet hours, and delivery reports; store events as
+  automation triggers; order data as template variables (needs research on checkout webhooks and
+  marketing consent for abandoned carts).
 
 ## Phase 5 — billing, wallet, platform, public API
 

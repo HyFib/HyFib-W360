@@ -20,7 +20,7 @@ export default async function CommerceLayout({
     <>
       <PageHeader
         title="Commerce"
-        description="Orders customers send from your WhatsApp catalog, the products you can send in a chat, and Payment Links from your own Razorpay account."
+        description="Orders customers send from your WhatsApp catalog, the products you can send in a chat, Payment Links from your own Razorpay account, and your Shopify or WooCommerce store."
       />
       <SettingsTabs
         label="Commerce sections"
@@ -28,6 +28,7 @@ export default async function CommerceLayout({
           { href: base, label: 'Orders' },
           { href: `${base}/catalogs`, label: 'Catalogs' },
           { href: `${base}/payments`, label: 'Payments' },
+          { href: `${base}/stores`, label: 'Stores' },
         ]}
       />
       <div className="mt-6">{children}</div>

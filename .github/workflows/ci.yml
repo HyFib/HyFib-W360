@@ -115,6 +115,15 @@ jobs:
       # allowed for APP_ENV=local|test only, and the name below resolves to 127.0.0.1 (hosts file).
       W360_EGRESS_ALLOW_LOOPBACK: 'true'
       E2E_HTTP_HOST: api.w360-e2e.test
+      # Test-only Shopify app: web and worker talk to the local Shopify stand-in started by the
+      # Playwright global setup (SHOPIFY_TEST_BASE_URL is refused outside APP_ENV=local|test).
+      # WooCommerce sites are addressed by URL; their stand-in needs only a port (and the loopback
+      # egress above).
+      SHOPIFY_CLIENT_ID: w360e2eshopify01
+      SHOPIFY_API_VERSION: '2026-07'
+      SHOPIFY_TEST_BASE_URL: http://127.0.0.1:4030
+      E2E_SHOPIFY_PORT: '4030'
+      E2E_WOO_PORT: '4040'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
@@ -136,6 +145,7 @@ jobs:
           echo "RAZORPAY_KEY_ID=rzp_test_$(openssl rand -hex 8)" >> "$GITHUB_ENV"
           echo "RAZORPAY_KEY_SECRET=$(openssl rand -hex 24)" >> "$GITHUB_ENV"
           echo "RAZORPAY_WEBHOOK_SECRET=$(openssl rand -hex 24)" >> "$GITHUB_ENV"
+          echo "SHOPIFY_CLIENT_SECRET=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
       - name: Bootstrap roles and migrate
         run: |
           psql postgres://postgres:postgres@localhost:5432/w360 -v ON_ERROR_STOP=1 -v db_name=w360 \

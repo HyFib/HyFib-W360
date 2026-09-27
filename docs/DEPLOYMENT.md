@@ -175,6 +175,48 @@ authenticated by Meta's signature and the flow's encryption key, not by a sessio
    pay, cancel and expire a Payment Link with a company's test keys, and confirm the list response
    shape for `GET /v1/payment_links?reference_id=` (research R-107).
 
+## Shopify app (companies' Shopify stores)
+
+Optional: without it, the Stores page says Shopify is not set up and WooCommerce still works.
+
+1. Create one Shopify app for HyFib (non-embedded; it uses the authorization code grant, research
+   SH-002). Companies from many unrelated businesses connect their stores, so it needs public
+   distribution through Shopify's app review (SH-001); custom distribution only reaches one store or
+   one Plus organization, which is enough for a pilot.
+2. Allowed redirection URL: `https://<app host>/api/stores/shopify/callback` (the whole address must
+   be listed, SH-003). Scopes: `read_orders,read_products` only; HyFib asks for exactly these and
+   fails a connection that is not granted both.
+3. Compliance webhooks (set on the app, not per shop, SH-027): `customers/data_request`,
+   `customers/redact` and `shop/redact` to `https://<app host>/api/webhooks/shopify`. HyFib creates
+   the per-shop order, product and uninstall subscriptions itself.
+4. Protected customer data (SH-020): request access to customers' name, phone and email in the
+   Partner Dashboard (API access requests). Until Shopify approves it, orders arrive without those
+   fields and cannot be linked to contacts (the store page says so).
+5. Set `SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET` and `SHOPIFY_API_VERSION` (the connector's
+   queries were checked against 2026-07 and 2025-10, SH-010) on web and worker.
+   `SHOPIFY_TEST_BASE_URL` is refused outside `APP_ENV=local|test`. Rotating the client secret:
+   `docs/SECURITY.md`.
+6. The app uses expiring offline tokens (60 minutes, refreshed by the worker; research SH-007): the
+   worker and its minute sweep must run for stores to stay connected.
+7. Not yet verified against a real Shopify store from this build environment: before launch, on a
+   development store, connect, read orders and products, receive `orders/updated`, uninstall and
+   reinstall, and send the three compliance webhooks from the Partner Dashboard; confirm the token
+   lifetimes, the retry schedule and the `shop/redact` timing listed as unconfirmed in
+   `docs/research/store-connectors.md`.
+
+## WooCommerce stores
+
+1. Nothing is configured per deployment. The site's owner approves Read/Write keys on their own
+   site; WooCommerce posts the keys to `https://<app host>/api/stores/woocommerce/callback` and sends
+   deliveries to `https://<app host>/api/webhooks/woocommerce/<address id>`. Both routes must be
+   reachable from the internet like the other webhook routes.
+2. Stores are reached over https through the egress client: sites on private addresses, behind
+   redirects or on http:// are refused (http:// only with `W360_EGRESS_ALLOW_LOOPBACK`, local and
+   test).
+3. Not yet verified against a real WooCommerce site from this build environment: before launch,
+   connect a test site through the approval page and with pasted keys, receive order and product
+   webhooks, revoke the key, and remove the store.
+
 ## Health and probes
 
 | Probe     | Web                                     | Worker                                                |

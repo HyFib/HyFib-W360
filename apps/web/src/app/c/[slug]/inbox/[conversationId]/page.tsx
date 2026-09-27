@@ -16,7 +16,7 @@ import { MarkRead } from '@/components/inbox/mark-read';
 import { MessageBubble, type ThreadMessage } from '@/components/inbox/message-bubble';
 import { NoteForm } from '@/components/inbox/note-form';
 import { ReplyTimer } from '@/components/inbox/reply-timer';
-import { ORDER_STATUS } from '@/lib/commerce-labels';
+import { ORDER_STATUS, STORE_ORDER_STATUS, statusText } from '@/lib/commerce-labels';
 import { formatDateTime } from '@/lib/format';
 import { crmLookups } from '@/server/crm';
 import { canUseInbox, liveEventCursor, loadInboxList, type SearchParams } from '@/server/inbox';
@@ -39,7 +39,7 @@ export default async function ConversationPage({
   const sp = await searchParams;
   const ctx = await requireTenant(slug);
   if (!canUseInbox(ctx)) notFound();
-  const { inbox, savedReplies, crm, flows, commerce } = await getRuntime();
+  const { inbox, savedReplies, crm, flows, commerce, stores } = await getRuntime();
   const since = await liveEventCursor(ctx);
   const before = typeof sp.before === 'string' ? sp.before : undefined;
   let thread: Awaited<ReturnType<typeof inbox.getConversation>>;
@@ -52,6 +52,8 @@ export default async function ConversationPage({
   const canReply = can(ctx, 'inbox.reply');
   const showCrm = can(ctx, 'crm.read');
   const showCommerce = can(ctx, 'commerce.read');
+  // Store orders carry customers' details: contacts.read too (as on the store pages).
+  const showStoreOrders = showCommerce && can(ctx, 'contacts.read');
   const [
     { query, views, list, filters, unreadMentions, available },
     members,
@@ -63,6 +65,7 @@ export default async function ConversationPage({
     forms,
     products,
     orders,
+    storeOrders,
   ] = await Promise.all([
     loadInboxList(ctx, sp),
     can(ctx, 'inbox.assign') && can(ctx, 'members.read')
@@ -76,6 +79,7 @@ export default async function ConversationPage({
     canReply && can(ctx, 'flows.read') ? flows.sendable(ctx, conversationId) : Promise.resolve([]),
     canReply && showCommerce ? commerce.sendableProducts(ctx, conversationId) : Promise.resolve([]),
     showCommerce ? commerce.orders(ctx, { conversationId }) : null,
+    showStoreOrders ? stores.conversationStoreOrders(ctx, conversationId) : null,
   ]);
   const conv = thread.conversation;
   const unread = list.items.find((i) => i.id === conv.id)?.unreadCount ?? 0;
@@ -411,6 +415,48 @@ export default async function ConversationPage({
                     </li>
                   ))}
                 </ul>
+              </CardContent>
+            </Card>
+          ) : null}
+          {storeOrders && storeOrders.orders.length > 0 ? (
+            <Card className="h-fit">
+              <CardHeader>
+                <CardTitle>Store orders</CardTitle>
+              </CardHeader>
+              <CardContent className="grid gap-2">
+                <ul className="grid gap-2 text-sm">
+                  {storeOrders.orders.map((o) => (
+                    <li key={o.id} className="grid gap-0.5">
+                      <Link
+                        href={`/c/${ctx.tenant.slug}/commerce/stores/orders/${o.id}`}
+                        className="text-primary underline-offset-4 hover:underline"
+                      >
+                        {o.name}
+                        <span className="text-muted-foreground"> · {o.storeName ?? 'Store'}</span>
+                      </Link>
+                      <span className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                        <Badge tone={STORE_ORDER_STATUS[o.status]?.tone ?? 'neutral'}>
+                          {STORE_ORDER_STATUS[o.status]?.label ?? statusText(o.status)}
+                        </Badge>
+                        {o.financialStatus ? <span>{statusText(o.financialStatus)}</span> : null}
+                        {o.fulfillmentStatus ? (
+                          <span>{statusText(o.fulfillmentStatus)}</span>
+                        ) : null}
+                        {o.totalMinor !== null && o.currency
+                          ? formatMinor(o.totalMinor, o.currency)
+                          : null}
+                        <span>{formatDateTime(o.placedAt, tz)}</span>
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+                {storeOrders.total > storeOrders.orders.length ? (
+                  <p className="text-xs text-muted-foreground">
+                    {storeOrders.total - storeOrders.orders.length} older order
+                    {storeOrders.total - storeOrders.orders.length === 1 ? '' : 's'} for this
+                    number.
+                  </p>
+                ) : null}
               </CardContent>
             </Card>
           ) : null}
