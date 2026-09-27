@@ -83,6 +83,22 @@ function Body({ type, content }: { type: string; content: unknown }) {
           </div>
         );
       }
+      if (text(c.body)) {
+        // A question with reply buttons sent by an automation.
+        const buttons = Array.isArray(c.buttons)
+          ? (c.buttons as unknown[]).map(text).filter(Boolean)
+          : [];
+        return (
+          <div className="grid gap-1">
+            {text(c.header) ? <p className="font-semibold">{text(c.header)}</p> : null}
+            <p className="whitespace-pre-wrap break-words">{text(c.body) ?? ''}</p>
+            {text(c.footer) ? <p className="text-xs opacity-80">{text(c.footer)}</p> : null}
+            {buttons.length > 0 ? (
+              <p className="text-xs opacity-80">Buttons: {buttons.join(' · ')}</p>
+            ) : null}
+          </div>
+        );
+      }
       const reply = (c.reply ?? {}) as Record<string, unknown>;
       const answer = text(reply.id)?.startsWith('w360csat:');
       return (
@@ -161,7 +177,9 @@ export function MessageBubble({
               ? 'Campaign message'
               : message.senderType === 'system'
                 ? 'Automatic message'
-                : `${message.senderName ?? 'Your team'} replied`
+                : message.senderType === 'bot'
+                  ? 'Automation replied'
+                  : `${message.senderName ?? 'Your team'} replied`
             : 'Customer wrote'}
           :{' '}
         </span>
@@ -169,6 +187,7 @@ export function MessageBubble({
         <p className="mt-1 flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
           <time dateTime={message.providerTimestamp ?? message.createdAt}>{at}</time>
           {outbound && message.senderType === 'system' ? <span>· Sent automatically</span> : null}
+          {outbound && message.senderType === 'bot' ? <span>· Automation</span> : null}
           {outbound && message.senderName && message.senderType !== 'system' ? (
             <span>· {message.senderName}</span>
           ) : null}

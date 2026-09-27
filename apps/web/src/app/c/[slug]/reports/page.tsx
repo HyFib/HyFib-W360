@@ -11,6 +11,7 @@ import {
   type Report,
   type TenantContext,
 } from '@w360/domain';
+import { formatMinor } from '@w360/domain/crm-money';
 import {
   Alert,
   Badge,
@@ -149,8 +150,10 @@ export default async function ReportsPage({
         <CostSection report={report} ctx={ctx} exportHref={exportHref} />
         <InboxSection report={report} label={label} exportHref={exportHref} />
         <CsatSection report={report} label={label} exportHref={exportHref} />
+        <AutomationSection report={report} label={label} exportHref={exportHref} />
         <AgentSection report={report} exportHref={exportHref} />
         <CampaignSection report={report} ctx={ctx} exportHref={exportHref} />
+        <DealSection report={report} label={label} exportHref={exportHref} />
         <UnavailableSection definitions={report.definitions} />
         <DefinitionsSection definitions={report.definitions} />
       </div>
@@ -715,6 +718,186 @@ function CsatSection({
             {skipped.map(([reason, n]) => `${SKIP_LABELS[reason] ?? reason} ${n}`).join(' · ')}
           </p>
         ) : null}
+      </CardContent>
+    </Card>
+  );
+}
+
+const runsLabel = (n: number) => `${n} ${n === 1 ? 'run' : 'runs'}`;
+
+const FAILURE_LABELS: Record<string, string> = {
+  budget_steps: 'step limit',
+  budget_loop: 'loop limit',
+  budget_messages: 'message limit',
+  expired: 'older than 7 days',
+  send_blocked: 'message could not be sent',
+  send_failed: 'message did not reach the customer',
+  error: 'could not continue',
+};
+
+function AutomationSection({
+  report,
+  label,
+  exportHref,
+}: {
+  report: Report;
+  label: (key: string) => string;
+  exportHref: ExportHref;
+}) {
+  const a = report.automations;
+  const t = a.totals;
+  const finished = t.started - t.active;
+  const share = (n: number) => (finished > 0 ? percent(n, finished) : '—');
+  return (
+    <Card>
+      <SectionHeader
+        title="Automations"
+        description="Runs of published automations started by customer messages, by the day they started (test runs are left out). Shares are of the runs that have finished."
+        exportHref={exportHref}
+        section="automations"
+      />
+      <CardContent className="grid grid-cols-1 gap-4">
+        {t.started === 0 ? (
+          <p className="text-sm text-muted-foreground">No automation runs in this period.</p>
+        ) : (
+          <>
+            <dl className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+              <Stat
+                label={label('automation.runs')}
+                value={t.started}
+                detail={t.active > 0 ? `${t.active} still running` : 'all finished'}
+              />
+              <Stat label="Completed" value={share(t.completed)} detail={runsLabel(t.completed)} />
+              <Stat
+                label="Handed off"
+                value={share(t.handed_off)}
+                detail={runsLabel(t.handed_off)}
+              />
+              <Stat
+                label="Taken over"
+                value={share(t.taken_over)}
+                detail={runsLabel(t.taken_over)}
+              />
+              <Stat label="Stopped" value={share(t.stopped)} detail={runsLabel(t.stopped)} />
+              <Stat label="Failed" value={share(t.failed)} detail={runsLabel(t.failed)} />
+            </dl>
+            {a.failures.length > 0 ? (
+              <p className="text-sm text-muted-foreground">
+                Failures:{' '}
+                {a.failures
+                  .map((f) => `${FAILURE_LABELS[f.reason] ?? f.reason} ${f.runs}`)
+                  .join(' · ')}
+              </p>
+            ) : null}
+            <div className="overflow-x-auto">
+              <Table>
+                <THead>
+                  <TR>
+                    <TH>Automation</TH>
+                    <TH className="text-right">Runs</TH>
+                    <TH className="text-right">Completed</TH>
+                    <TH className="text-right">Handed off</TH>
+                    <TH className="text-right">Taken over</TH>
+                    <TH className="text-right">Stopped</TH>
+                    <TH className="text-right">Failed</TH>
+                  </TR>
+                </THead>
+                <TBody>
+                  {a.automations.map((row) => (
+                    <TR key={row.id}>
+                      <RowHeader>{row.name}</RowHeader>
+                      <TD className="text-right">{row.started}</TD>
+                      <TD className="text-right">{row.completed}</TD>
+                      <TD className="text-right">{row.handed_off}</TD>
+                      <TD className="text-right">{row.taken_over}</TD>
+                      <TD className="text-right">{row.stopped}</TD>
+                      <TD className="text-right">{row.failed}</TD>
+                    </TR>
+                  ))}
+                </TBody>
+              </Table>
+            </div>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+/** Amounts per pipeline currency, never added across currencies. */
+function amounts(list: { currency: string; valueMinor: number }[]): string {
+  return list.length === 0
+    ? 'no value'
+    : list.map((a) => formatMinor(a.valueMinor, a.currency)).join(' + ');
+}
+
+function DealSection({
+  report,
+  label,
+  exportHref,
+}: {
+  report: Report;
+  label: (key: string) => string;
+  exportHref: ExportHref;
+}) {
+  const d = report.deals;
+  const won = d.won.reduce((n, a) => n + a.deals, 0);
+  const lost = d.lost.reduce((n, a) => n + a.deals, 0);
+  const openPipelines = d.pipelines.filter((p) => p.stages.length > 0);
+  return (
+    <Card>
+      <SectionHeader
+        title="Deals"
+        description="Deals won or lost in the period, by the day they closed, and the open pipeline now. Values stay in each pipeline’s currency."
+        exportHref={exportHref}
+        section="deals"
+      />
+      <CardContent className="grid grid-cols-1 gap-6">
+        <dl className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+          <Stat label="Deals won" value={formatCount(won)} detail={amounts(d.won)} />
+          <Stat label="Deals lost" value={formatCount(lost)} detail={amounts(d.lost)} />
+          <Stat
+            label={label('crm.win_rate')}
+            value={percent(d.winRate.numerator, d.winRate.denominator)}
+            detail={`${d.winRate.numerator} of ${d.winRate.denominator} closed`}
+          />
+          <Stat
+            label={label('crm.time_to_win')}
+            value={formatDuration(d.medianSecondsToWin)}
+            detail="median, deals won in the period"
+          />
+        </dl>
+        {openPipelines.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No pipelines in use.</p>
+        ) : (
+          openPipelines.map((p) => (
+            <div key={p.id} className="grid gap-2">
+              <h3 className="text-sm font-semibold">
+                {label('crm.open_pipeline')}: {p.name}
+              </h3>
+              <div className="overflow-x-auto">
+                <Table>
+                  <THead>
+                    <TR>
+                      <TH>Stage</TH>
+                      <TH className="text-right">Open deals</TH>
+                      <TH className="text-right">Value ({p.currency})</TH>
+                    </TR>
+                  </THead>
+                  <TBody>
+                    {p.stages.map((s) => (
+                      <TR key={s.id}>
+                        <RowHeader>{s.name}</RowHeader>
+                        <TD className="text-right">{formatCount(s.deals)}</TD>
+                        <TD className="text-right">{formatMinor(s.valueMinor, p.currency)}</TD>
+                      </TR>
+                    ))}
+                  </TBody>
+                </Table>
+              </div>
+            </div>
+          ))
+        )}
       </CardContent>
     </Card>
   );

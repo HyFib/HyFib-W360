@@ -31,6 +31,8 @@ import { assertCan, can, type TenantContext } from '../authz/context';
 import { ROLE_PERMISSIONS, type Permission } from '../authz/permissions';
 import { recordAudit, type RequestMeta } from '../audit';
 import { DEFAULT_MESSAGING_SETTINGS } from '../consent/service';
+import { endRunForHuman } from '../automations/runs';
+import { automationStateForConversation } from '../automations/service';
 import { latestCsatSurvey, queueCsatSurvey } from '../inbox/csat';
 import { routeConversation } from '../inbox/routing';
 import type { JobSigner } from '../jobs/envelope';
@@ -118,6 +120,8 @@ export interface ConversationSummary {
   overdue: boolean;
   /** Business hours are on and the business is closed: when the reply timer resumes. */
   timerPausedUntil: string | null;
+  /** An automation is handling the conversation (nobody waits for a member meanwhile). */
+  automationActive: boolean;
   version: number;
 }
 
@@ -294,6 +298,9 @@ export function createInboxService(deps: InboxDeps) {
               teamName: teams.name,
               lastInboundAt: conversations.lastInboundAt,
               waitingSince: conversationTurns.startedAt,
+              automationActive: sql<boolean>`exists (select 1 from app.automation_runs r
+                 where r.tenant_id = ${conversations.tenantId} and r.conversation_id = ${conversations.id}
+                   and r.status in ('running', 'waiting'))`,
               version: conversations.version,
             })
             .from(conversations)
@@ -383,6 +390,7 @@ export function createInboxService(deps: InboxDeps) {
           r.lastInboundAt && now.getTime() - r.lastInboundAt.getTime() <= SERVICE_WINDOW_MS,
         ),
         ...timerFields(target, r.status === 'resolved' ? null : r.waitingSince, now),
+        automationActive: r.automationActive,
         version: r.version,
       }));
       return {
@@ -568,6 +576,7 @@ export function createInboxService(deps: InboxDeps) {
                   );
           const target = await loadReplyTarget(tx, ctx.tenant.id, ctx.tenant.timezone);
           const survey = await latestCsatSurvey(tx, ctx.tenant.id, conv.id);
+          const automation = await automationStateForConversation(tx, ctx.tenant.id, conv.id);
           const page = rows.slice(0, pageSize);
           const oldest = page[page.length - 1];
           return {
@@ -602,6 +611,7 @@ export function createInboxService(deps: InboxDeps) {
             })),
             olderCursor:
               rows.length > pageSize && oldest ? encodeCursor(oldest.createdAt, oldest.id) : null,
+            automation,
             csat: survey
               ? {
                   skipReason: survey.skipReason,
@@ -646,6 +656,17 @@ export function createInboxService(deps: InboxDeps) {
           if (!target || target.status !== 'active') {
             throw new AppError('validation_failed', 'Choose an active member.');
           }
+        }
+        // Assigning a person ends an automation handling the conversation (hand-off lock).
+        if (data.membershipId) {
+          await endRunForHuman(tx, {
+            tenantId: ctx.tenant.id,
+            conversationId: current.id,
+            reason: 'assigned',
+            actorMembershipId: ctx.membership.id,
+            assigneeMembershipId: data.membershipId,
+            now: clock.now(),
+          });
         }
         await tx
           .update(conversations)
@@ -723,6 +744,15 @@ export function createInboxService(deps: InboxDeps) {
       const data = parse(statusSchema, input);
       await withConversation(ctx, data.conversationId, async (tx, current) => {
         if (current.version !== data.expectedVersion) throw staleVersion();
+        if (data.status === 'resolved' && current.status !== 'resolved') {
+          await endRunForHuman(tx, {
+            tenantId: ctx.tenant.id,
+            conversationId: current.id,
+            reason: 'conversation_resolved',
+            actorMembershipId: ctx.membership.id,
+            now: clock.now(),
+          });
+        }
         await tx
           .update(conversations)
           .set({

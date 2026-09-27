@@ -297,3 +297,118 @@ conversation's row lock, a reply is refused once if another member's reply is ne
 newest message the sender had seen; the sender reads it and sends again. This needs no presence
 heartbeats and cannot be missed by a disconnected browser. Live "someone is typing" presence is
 backlog.
+
+## ADR-034 Automations: a structured builder with a generated diagram (2026-09-27)
+
+Decision: automations are edited as a list of typed steps (labelled forms, "next step" choices), and
+a diagram is generated from that list, instead of a drag-and-drop canvas. The list works with a
+keyboard and a screen reader, and every branch target is an explicit, validated choice. The graph
+format (steps with named outgoing branches) does not preclude a canvas later; it would edit the same
+JSON. The graph model and the interpreter have no server dependencies, so the builder checks
+drafts and simulates runs in the browser with the code the worker runs. The feature matrix states
+that the builder is not drag-and-drop.
+
+## ADR-035 Automation runs: durable rows advanced one step per transaction (2026-09-27)
+
+Decision: a run is a row holding its position (current step, visit counts, wait state, captured
+answers); each step is one transaction that locks the conversation, then the run, applies the
+step's effects and stores the new position. Bot messages are written through the existing send
+pipeline in that transaction (message, send intent, `message.send` job), so a crash before commit
+leaves nothing and a crash after commit loses nothing; the send worker keeps its own rule of never
+resending an unknown outcome. Jobs on `automation.run` only signal the row (keys per start, reply,
+timer and continuation), and the minute sweep re-signals any active run whose next step is more than
+30 seconds overdue, so a worker restart or a lost job delays a run but never loses or repeats a
+step. Runs are pinned to the version they started with; publishing never changes a run in progress.
+Budgets (200 steps, 20 entries per step, 50 messages, 7 days, 10 runs per conversation per hour)
+end runaway runs as failed and return the conversation to people. A step that raises an error fails
+its job as usual (pg-boss retries and keeps the error), and the run counts the attempt; after five
+failed attempts in a row the run fails (`error`, `step_error`) and the conversation goes to people,
+so a bug or a persistent database error cannot hold a customer for the full seven days. A run
+waits for Meta to accept each bot message before its next step or its completion (the queued
+message is recorded on the run; the send worker signals the run when the send is settled), and a
+message that is rejected, cancelled, of unknown outcome, not accepted within 10 minutes or reported
+failed later fails the run (`send_failed`) and hands the conversation to people: a run never reports
+"completed", or moves on, on a message the customer did not get. This also keeps a run's messages in
+order. Acceptance, not delivery, is the bar (delivery can take days when a phone is off); a failure
+reported after a run has ended is shown on the message but does not rewrite the run's outcome. External calls (the HTTP step, P4-02) will need a write-ahead unknown state like
+auto-recharge before they can join a run.
+
+## ADR-036 The bot/human hand-off lock (2026-09-27)
+
+Decision: at most one run per conversation is active (partial unique index). While it is, the
+automation owns the conversation: automations start only in unassigned conversations, routing
+leaves bot-handled conversations alone (ingest, the sweep and availability changes), and no reply
+turn is open. A member's reply or template, an assignment to a member, Take over and a resolve end
+the run in the same transaction as the member's change, under the conversation lock, and cancel the
+run's bot messages that no send worker has claimed, so after a person acts nothing more from the bot
+leaves. A message already handed to the sender cannot be recalled; this is stated in the UI copy and
+the threat model. A hand-off step, a stop by a member, a failure or an opt-out returns the
+conversation to people and routes it (to the hand-off team, or like a new case of the number).
+
+## ADR-037 Reply turns while automations answer (2026-09-27)
+
+Decision: time an automation spends answering is not time a customer waits for a member. A
+customer message opens no turn while a run is active; a run that starts closes the open turn as
+`automated`; when a run passes the conversation to people (hand-off, stop, failure, Take over or
+an assignment, or the customer has the last word), a turn opens at that moment with
+`start_reason = 'handoff'`. A run ended by a member's reply, a resolve or an erasure opens none.
+Reports leave automated turns out, and every turn-based metric got a new definition version (not an
+edit) because what a turn is changed. Triggers on `app.automation_runs` maintain this, like the
+other turn triggers (ADR-027).
+
+## ADR-038 Automations act for the company; test runs act for the member (2026-09-27)
+
+Decision: live runs carry no member: they are the company's published configuration, and they
+keep running if the member who published them leaves (publishing, pausing and archiving need
+`automations.publish` and are audited). Test runs carry the member who started them: their jobs and
+bot messages are signed with that member, and each step re-checks that the member is still active
+with `automations.write` and `inbox.reply` (as the campaign runner re-checks its launcher), so a
+test stops if the member leaves or loses either permission. Suspended companies
+start no runs; jobs of existing runs wait until the company is active again (and runs older than
+7 days then fail as expired).
+
+## ADR-039 Replacing SECURITY DEFINER functions in later migrations (2026-09-27)
+
+Decision: a definer function owned by `w360_definer` cannot be replaced in place by the migration
+role (it may `SET ROLE w360_definer`, but that role has no CREATE on the schemas). Migration 0011
+drops such a function as its owner (`SET ROLE w360_definer; DROP FUNCTION …; RESET ROLE;`),
+recreates it as the migration role, grants EXECUTE to the caller, and hands it back to
+`w360_definer`, all in the migration's transaction, so there is no moment without the function.
+`app.erase_contact` and `ops.conversations_to_route` were replaced this way; the isolation suite
+checks that neither is executable by PUBLIC and that both keep a pinned `search_path`.
+
+## ADR-040 CRM records: company-wide, single-currency pipelines and an append-only timeline (2026-09-27)
+
+Decision: the CRM is company-wide (`crm.read`/`crm.write`), not scoped like the inbox: sales work
+spans members, and a deal is not a conversation. Pipelines and their stages are company settings
+(`tenant.settings.manage`, audited); deal and task changes go to an append-only timeline per
+contact and deal instead of the audit log, which records settings and security events. Each
+pipeline has one currency fixed at creation (no runtime UPDATE grant), so every deal value and
+every board or report total within a pipeline is in one currency; values are integers in the
+currency's minor unit (ISO 4217 decimals from ICU; amounts are parsed without floats) and totals
+are never added across currencies. Won and lost are deal statuses, not stages, so reports do not
+depend on how a company names its stages; stages and pipelines are archived, never deleted, so
+closed deals keep the stage they ended in. A deal belongs to one contact for life (no UPDATE grant
+on `contact_id`), and composite foreign keys tie a task's and a timeline entry's deal to the same
+contact, so erasing a contact finds every row that describes them: erasure deletes the contact's
+timeline (the only free text besides titles), notes and tasks, and blanks deal titles and lost
+reasons while keeping stage, value, owner and dates for reports. Concurrent edits are refused by
+version checks rather than merged. CRM writes lock the contact (FOR KEY SHARE) before a deal or
+task, in erasure's order, so nothing about a contact is written during or after its erasure; deal
+writers share the pipeline row before reading stages, so an open deal never lands in a stage or
+pipeline archived at the same moment; a closed deal whose stage was removed reopens in the first
+stage (stages are not restorable). Custom deal fields, deal import and forecasting are deferred.
+
+## ADR-041 Task reminders: the task row decides, jobs only signal (2026-09-27)
+
+Decision: a reminder is state on the task (`pending` → `sent` or `skipped` with a reason), not a
+job. Saving a reminder time schedules a delayed `crm.reminder` job keyed by task and time; the job
+locks the task, and the email is queued through the outbox in the same transaction that marks the
+reminder sent, so retries, duplicate signals and restarts never send twice and a crash before
+commit sends nothing. The minute sweep (`ops.crm_reminders_due`, ids of active companies only)
+re-signals reminders more than 30 seconds overdue, so a lost job delays a reminder but does not
+lose it. Changing the time makes a new reminder (a job for the old time finds the task not due);
+closing the task skips a pending reminder. A reminder is skipped, with the reason shown on the
+task, when the assignee is no longer an active member with CRM access or when it is more than a
+day late (a suspended company or a long outage), because a stale reminder is worse than none. The
+email carries the task title and a link, like other notices sent to a member's own address.

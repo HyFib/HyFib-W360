@@ -26,6 +26,7 @@ import {
   type Tx,
 } from '@w360/db';
 import { assertCan, can, type TenantContext } from '../authz/context';
+import { endRunForHuman, signalRunOfBotMessage } from '../automations/runs';
 import { recountedCounters } from '../campaigns/counters';
 import {
   PROVIDER_MARKETING_OPT_OUT_CODE,
@@ -193,6 +194,15 @@ export async function queueTextMessage(deps: OutboundDeps, ctx: TenantContext, i
       );
     }
 
+    // A member's reply ends an automation handling the conversation, and bot messages not yet
+    // handed to the sender are cancelled, so the bot and the member never answer at once.
+    await endRunForHuman(tx, {
+      tenantId: ctx.tenant.id,
+      conversationId: conv.id,
+      reason: 'agent_replied',
+      actorMembershipId: ctx.membership.id,
+      now,
+    });
     const messageId = uuidv7();
     const intentId = uuidv7();
     const request = {
@@ -397,6 +407,13 @@ export async function queueTemplateMessage(deps: OutboundDeps, ctx: TenantContex
     if (!can(ctx, 'campaigns.send') && !canSeeConversation(ctx, conv.assignedMembershipId)) {
       throw notFound('Contact');
     }
+    await endRunForHuman(tx, {
+      tenantId: ctx.tenant.id,
+      conversationId: conv.id,
+      reason: 'agent_replied',
+      actorMembershipId: ctx.membership.id,
+      now,
+    });
     const built = buildTemplateSend(template, spec, data.params);
     const messageId = uuidv7();
     const intentId = uuidv7();
@@ -519,7 +536,18 @@ export interface SendWorkerDeps {
   graph: GraphClient;
   clock: Clock;
   rate: { capacity: number; refillPerSecond: number };
+  /** An automation run waiting for a bot message is signalled when its send is settled. */
+  jobs: JobQueue;
+  signer: JobSigner;
 }
+
+/** Intent states after which a send will not change any more (an automation may move on). */
+const SETTLED_STATES: ReadonlySet<string> = new Set([
+  'accepted',
+  'failed',
+  'canceled',
+  'unknown_outcome',
+]);
 
 const SEND_LEASE_MS = 60_000;
 const MAX_ATTEMPTS = 12;
@@ -736,6 +764,13 @@ export async function processSendIntent(
         conversationId: claimed.conversationId,
         payload: { messageId: intent.messageId },
       });
+      if (intentUpdate.state && SETTLED_STATES.has(intentUpdate.state)) {
+        await signalRunOfBotMessage(deps, tx, {
+          tenantId: scope.tenantId,
+          messageId: intent.messageId,
+          key: `s:${intent.messageId}:${intentUpdate.state}`,
+        });
+      }
     });
   };
 
@@ -966,11 +1001,11 @@ async function applyEarlyStatuses(
  * that expired after dispatch (sent_at set) becomes an unknown outcome, never an automatic resend.
  */
 export async function recoverExpiredSend(
-  db: Database,
+  deps: { db: Database; clock: Clock; jobs: JobQueue; signer: JobSigner },
   scope: TenantScope,
   intentId: string,
-  clock: Clock,
 ): Promise<'requeued' | 'unknown_outcome' | 'untouched'> {
+  const { db, clock } = deps;
   return db.run(scope, async (tx) => {
     const [intent] = await tx
       .select()
@@ -1019,6 +1054,11 @@ export async function recoverExpiredSend(
           ),
         ),
       );
+    await signalRunOfBotMessage(deps, tx, {
+      tenantId: scope.tenantId,
+      messageId: intent.messageId,
+      key: `s:${intent.messageId}:unknown_outcome`,
+    });
     return 'unknown_outcome';
   });
 }

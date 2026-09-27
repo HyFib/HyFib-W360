@@ -6,7 +6,9 @@
   "exports": {
     ".": "./src/index.ts",
     "./template-definition": "./src/templates/definition.ts",
-    "./metric-definitions": "./src/reports/definitions.ts"
+    "./metric-definitions": "./src/reports/definitions.ts",
+    "./automation-model": "./src/automations/model.ts",
+    "./crm-money": "./src/crm/money.ts"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json"

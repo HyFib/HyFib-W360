@@ -6,7 +6,9 @@ import {
   billingEventProcessHandler,
   billingSweepHandler,
 } from './handlers/billing';
+import { automationRunHandler } from './handlers/automations';
 import { campaignRunHandler } from './handlers/campaigns';
+import { crmReminderHandler } from './handlers/crm';
 import { emailSendHandler, outboxSweepHandler } from './handlers/email';
 import {
   channelOnboardHandler,
@@ -46,16 +48,23 @@ async function main(): Promise<void> {
   await rt.boss.schedule(QUEUES.outboxSweep.name, '* * * * *', null, {
     singletonKey: 'outbox-sweep',
   });
+  // Conversational latency: an inbound message, each bot message and the automation step after it
+  // pass through these three queues, so they are polled every second (pg-boss's default is 2 s).
   await rt.boss.work(
     QUEUES.webhookProcess.name,
-    { localConcurrency: concurrency, batchSize: 1 },
+    { localConcurrency: concurrency, batchSize: 1, pollingIntervalSeconds: 1 },
     webhookProcessHandler(rt),
   );
   // Per-number fairness: at most two in-flight sends per business number across the cluster
   // (queued with group = channel id), so one busy number cannot starve the others.
   await rt.boss.work(
     QUEUES.messageSend.name,
-    { localConcurrency: concurrency, batchSize: 1, groupConcurrency: 2 },
+    {
+      localConcurrency: concurrency,
+      batchSize: 1,
+      groupConcurrency: 2,
+      pollingIntervalSeconds: 1,
+    },
     messageSendHandler(rt),
   );
   await rt.boss.work(
@@ -90,6 +99,16 @@ async function main(): Promise<void> {
     QUEUES.campaignRun.name,
     { localConcurrency: 2, batchSize: 1 },
     campaignRunHandler(rt),
+  );
+  await rt.boss.work(
+    QUEUES.automationRun.name,
+    { localConcurrency: concurrency, batchSize: 1, pollingIntervalSeconds: 1 },
+    automationRunHandler(rt),
+  );
+  await rt.boss.work(
+    QUEUES.crmReminder.name,
+    { localConcurrency: 2, batchSize: 1 },
+    crmReminderHandler(rt),
   );
   await rt.boss.work(
     QUEUES.billingEventProcess.name,

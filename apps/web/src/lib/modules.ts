@@ -57,8 +57,9 @@ export const MODULES: ModuleDefinition[] = [
     label: 'Automations',
     path: '/automations',
     permission: 'automations.read',
-    status: 'planned',
-    reason: 'Phase 4: versioned automation builder.',
+    status: 'available',
+    reason:
+      'Keyword, new-conversation and any-message automations with messages, reply buttons, questions, conditions, contact updates, waits and hand-off; immutable versions, test runs and a simulator. HTTP requests, WhatsApp Flows and drag-and-drop editing are not available yet.',
   },
   {
     key: 'flows',
@@ -73,8 +74,9 @@ export const MODULES: ModuleDefinition[] = [
     label: 'CRM',
     path: '/crm',
     permission: 'crm.read',
-    status: 'planned',
-    reason: 'Phase 4: deals, pipelines and tasks.',
+    status: 'available',
+    reason:
+      'Pipelines with ordered stages, deals linked to contacts and conversations, won and lost outcomes, tasks with emailed reminders, notes and a contact timeline. Custom deal fields, deal import and forecasting are not available yet.',
   },
   {
     key: 'commerce',
@@ -99,7 +101,7 @@ export const MODULES: ModuleDefinition[] = [
     permission: 'reports.read',
     status: 'available',
     reason:
-      'Messaging outcomes, estimated Meta charges, inbox response times, member activity and campaign funnels. Automation, deal and retention reports need modules that are not available yet.',
+      'Messaging outcomes, estimated Meta charges, inbox response times, CSAT, automation outcomes, member activity, campaign funnels and deal outcomes. Retention reports and campaign click or conversion tracking are not available yet.',
   },
   {
     key: 'integrations',

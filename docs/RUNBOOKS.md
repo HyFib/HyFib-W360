@@ -246,6 +246,97 @@ error on the message in the thread (for example a consent change before dispatch
 INVALID index can remain: run `DROP INDEX CONCURRENTLY app.conversations_team_idx;` and run the
 migrations again.
 
+## 10D. Automations
+
+**A customer got no automated reply.** A run starts only when all of these hold: the automation is
+active with a live version and uses the number the message arrived on (or any number); the
+conversation is unassigned and no other run is handling it; the company is active (not suspended);
+the message matches the trigger (keywords are compared as whole words, ignoring case and
+punctuation); the business-hours filter and the cooldown allow it; fewer than 10 runs started in
+that conversation in the last hour; and the message is not an opt-out keyword. Automations → Runs
+lists every run with its outcome, and a failed run's page names the reason (for example the 24-hour
+window had closed or the WhatsApp number is not active).
+
+**A run looks stuck.** The run page shows the current step and whether it waits for a reply or a
+timer, and until when. A run waiting for a reply continues when the customer answers or at the
+deadline. A running run whose next step is more than 30 seconds overdue is signalled again by the
+minute sweep; the worker logs each attempt as "automation run advanced" with its outcome. If
+nothing happens, check that the worker runs and the `automation.run` queue drains (section 3), and
+that the company is not suspended: its runs wait ("automation run deferred") and resume after
+reactivation, and a run older than 7 days then fails as expired. A step that raises an error fails
+its job (pg-boss retries it and keeps the error; the worker logs it too) and is counted on the run;
+after five failed attempts in a row the run fails with "a step failed repeatedly because of an
+internal error" (`step_error`) and the conversation goes to people. Find the error in the worker
+log before publishing again.
+
+**Stopping automations.** One run: a member takes the conversation over from the inbox (replying,
+assigning or resolving also ends the run), or a member with publish permission stops it from the
+run page. The conversation goes to people and bot messages not yet claimed by a send worker are
+cancelled (`bot_stopped`). New runs: Pause the automation (runs in progress finish). Everything at
+once: Archive (runs in progress stop and their conversations go to people). Each action is audited
+(`automation.*`).
+
+**Budgets and failed sends.** A run fails, and hands the conversation to people, when it exceeds
+200 steps, enters one step 20 times, sends 50 messages or runs longer than 7 days, or when a
+message cannot be queued (number not active, 24-hour window closed, no WhatsApp id for the contact).
+After queuing a message the run waits for Meta to accept it before its next step (the run page and
+the inbox banner say "sending"); the send worker signals the run as soon as the send is settled. A
+message Meta rejects, one that is cancelled, one whose outcome is unknown (the send worker never
+resends those), one not accepted within 10 minutes (it is then cancelled if no send worker has
+claimed it), or a failure Meta reports later for a message of an active run ends the run as "a
+message did not reach the customer" (`send_failed`, with Meta's error code or the reason in the
+detail) and passes the conversation to people. Meta's error is also shown on the message in the
+thread. A failure Meta reports after a run has already ended (for example after a completed run's
+last message was accepted) is shown on the message only; the run's recorded outcome does not change.
+
+**Worker restarts and deploys.** Runs are rows, so a restart delays steps but never loses or repeats
+one: queued `automation.run` jobs continue, and runs whose signal was lost are picked up by the sweep
+within about 90 seconds. A test run stops when the member who started it leaves the company ("test
+run tester removed") or no longer holds `automations.write` and `inbox.reply` (the run page says so).
+
+**Retention.** The minute sweep clears captured answers 30 days after runs end and deletes runs
+(with their step logs) 180 days after they end ("automation retention applied").
+
+**Migration 0011 failed.** It runs in one transaction, so a failure applies nothing. It drops and
+recreates the definer functions `app.erase_contact` and `ops.conversations_to_route` through
+`SET ROLE w360_definer` (ADR-039): a failure mentioning ownership or `SET ROLE` means the migration
+role cannot act as `w360_definer` (see `infra/db/bootstrap-roles.sql`). Fix the cause and run the
+migrations again.
+
+## 10E. CRM
+
+**A task reminder was not emailed.** The tasks page shows each reminder's state: "Reminder set"
+(pending), "Reminder emailed" or "Reminder not sent" with the reason — the task was closed first,
+the assignee can no longer use the CRM (left the company, suspended, or their role lost
+`crm.read`), or it was more than a day late (the company was suspended or the worker was down for
+over a day). A pending reminder is signalled by a job at its time and again by the minute sweep
+once it is more than 30 seconds overdue; the worker logs "task reminder" with the outcome
+(`sent`, `skipped`, `not_due`, `idle`). If reminders stay pending, check that the worker runs, the
+`crm.reminder` queue drains (section 3) and the company is not suspended ("task reminder
+deferred"). If the state is "Reminder emailed" but nothing arrived, follow the email outbox
+(section 5 for SMTP outages): the reminder is queued once, and the outbox retries delivery. To send
+another reminder, edit the task and set a new reminder time.
+
+**A pipeline cannot be archived or a stage cannot be removed.** Pipelines and stages with open
+deals are kept so no open deal loses its place: move the deals (or mark them won or lost) first.
+Closed deals stay in archived stages and pipelines and still count in reports. Reopening a closed
+deal whose stage was removed puts it in the pipeline's first stage (the timeline shows the stage
+change); a deal in an archived pipeline reopens once the pipeline is restored. Restoring a pipeline
+fails if another pipeline in use has its name; rename one first. A company can use 20 pipelines at
+once.
+
+**"Someone else changed this" on a deal or task.** Every deal and task carries a version, and a
+change made from a stale page is refused instead of overwriting another member's change. Reload
+the page and make the change again.
+
+**Deal values.** Values are stored exactly, in the pipeline currency's minor unit, and a
+pipeline's currency cannot be changed (create a new pipeline instead). Reports never add values in
+different currencies; they list a total per currency.
+
+**Migration 0013 failed.** It runs in one transaction, so a failure applies nothing. It replaces
+the definer function `app.erase_contact` through `SET ROLE w360_definer` (ADR-039) like 0011: see
+that section.
+
 ## 11. Compromised company (tenant) or account
 
 1. Suspend the company in `/platform` with a reason (stops outbound activity; ingestion continues).

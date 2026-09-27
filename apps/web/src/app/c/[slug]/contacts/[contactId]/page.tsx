@@ -23,9 +23,11 @@ import { ConsentForm } from '@/components/contacts/consent-form';
 import { ContactForm } from '@/components/contacts/contact-form';
 import { EraseContact } from '@/components/contacts/erase-contact';
 import { TagEditor } from '@/components/contacts/tag-editor';
+import { ContactCrmPanel } from '@/components/crm/contact-crm-panel';
 import { PageHeader } from '@/components/page-header';
 import { TemplateSender } from '@/components/templates/template-sender';
 import { formatDateTime } from '@/lib/format';
+import { crmLookups } from '@/server/crm';
 import { getRuntime } from '@/server/runtime';
 import { requireTenant } from '@/server/session';
 import { sendableTemplates } from '@/server/templates';
@@ -63,7 +65,7 @@ export default async function ContactPage({
   const { slug, contactId } = await params;
   const ctx = await requireTenant(slug);
   if (!can(ctx, 'contacts.read')) notFound();
-  const { contacts, consent, templates } = await getRuntime();
+  const { contacts, consent, templates, crm } = await getRuntime();
   let detail: Awaited<ReturnType<typeof contacts.getContact>>;
   try {
     detail = await contacts.getContact(ctx, contactId);
@@ -97,7 +99,8 @@ export default async function ContactPage({
     );
   }
 
-  const [consentView, suppressed, channels, sendable] = await Promise.all([
+  const showCrm = can(ctx, 'crm.read');
+  const [consentView, suppressed, channels, sendable, crmData, lookups] = await Promise.all([
     consent.consentForContact(ctx, contact.id),
     consent.suppressionsFor(ctx, [
       ...(contact.phoneE164 ? [contact.phoneE164] : []),
@@ -105,6 +108,8 @@ export default async function ContactPage({
     ]),
     templates.sendChannels(ctx),
     sendableTemplates(ctx),
+    showCrm ? crm.contactCrm(ctx, contact.id) : null,
+    showCrm ? crmLookups(ctx) : null,
   ]);
   const canWrite = can(ctx, 'contacts.write');
 
@@ -221,6 +226,27 @@ export default async function ContactPage({
           </Card>
         </div>
         <div className="grid content-start gap-6">
+          {crmData && lookups ? (
+            <Card>
+              <CardHeader>
+                <CardTitle>CRM</CardTitle>
+                <CardDescription>Deals, tasks and notes about this contact.</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <ContactCrmPanel
+                  slug={ctx.tenant.slug}
+                  timeZone={tz}
+                  canWrite={can(ctx, 'crm.write')}
+                  data={crmData}
+                  pipelines={lookups.options}
+                  members={lookups.memberOptions}
+                  myMembershipId={ctx.membership.id}
+                  stageNames={lookups.stageNames}
+                  memberNames={lookups.memberNames}
+                />
+              </CardContent>
+            </Card>
+          ) : null}
           {channels.length > 0 && can(ctx, 'templates.read') ? (
             <Card>
               <CardHeader>

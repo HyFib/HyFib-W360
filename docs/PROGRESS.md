@@ -1,5 +1,177 @@
 # Progress
 
+## 2026-09-27 — Phase 4: CRM (P4-04)
+
+Status: **CRM implemented and locally verified, production blocked on email delivery only.**
+Pipelines, deals, tasks, notes, the timeline and the deal reports work on HyFib's own data and send
+nothing to Meta. Task reminders are emailed through the outbox; locally they arrive in Mailpit, and
+delivery through the production SMTP provider is a release item.
+
+### Completed
+
+- **Schema (migration 0013):** pipelines with one ISO 4217 currency each (no runtime UPDATE grant)
+  and ordered stages, both archived instead of deleted; deals (a contact for life, optionally the
+  conversation they came from, a value in the currency's minor unit, owner, open/won/lost with a
+  lost reason, expected close date, version); tasks (assignee, optionally a contact or one of its
+  deals, due and reminder times, reminder state with the reason when skipped); the append-only
+  timeline (a trigger refuses edits and deletes except inside contact erasure). Composite foreign
+  keys keep references in the company, a deal's stage in its pipeline and a task's or entry's deal
+  on the same contact. `ops.crm_reminders_due` (definer, ids of active companies only);
+  `app.erase_contact` replaced to delete the contact's timeline, notes and tasks and blank deal
+  titles and lost reasons; four metric definitions (deal outcomes v2, win rate, time to win, open
+  pipeline).
+- **Service:** pipelines (`tenant.settings.manage`, audited, 20 in use at most; removed stages are
+  archived only when empty), deals (from a contact or a conversation the member can see; edit,
+  move, won/lost/reopen), the board with owner filters and per-stage totals, tasks (mine or
+  everyone's, open or closed; done, cancel, reopen, edit), notes, contact and deal timelines, and
+  the member's overdue and due-today counts. Every change locks the row, checks its version and
+  appends its timeline entry in one transaction. Amounts are parsed exactly (no floats) with the
+  currency's ISO decimals.
+- **Reminders (queue `crm.reminder`):** a delayed job at the reminder time and the minute sweep for
+  lost jobs; the email is queued in the transaction that marks the reminder sent, so it goes out
+  once; skipped with a reason when the task closed, the assignee lost CRM access or it is more than
+  a day late.
+- **Web:** CRM in the navigation (board, won and lost lists, deal page, tasks page),
+  Settings → Pipelines, a CRM card on the contact page and next to the conversation in the inbox
+  (deals, open tasks, timeline; add a deal, task or note), a "Your tasks" card on the overview,
+  and a Deals section with CSV export in Reports. Task times are wall-clock times in the company
+  time zone.
+- **Found while building:**
+  - The money helpers caught and hid errors (falling back to two decimals or a plain string); they
+    no longer catch anything, since currency codes are validated when a pipeline is created.
+  - "End of today" for due-today counts drifted by up to an hour on daylight-saving days; it is now
+    computed from the calendar (unit tests for 23- and 25-hour days).
+  - The contact CRM view returned an empty result for another company's contact; it now answers
+    "not found", like every other lookup.
+  - The pipeline limit counts pipelines in use, not archived ones; the settings page said otherwise.
+- **Review fixes (independent review of the slice):**
+  - A note, task or deal written while the contact was being erased could survive the erasure (and
+    a deal change during an erasure could deadlock with it, or leave a timeline entry). Every CRM
+    write now takes a key-share lock on the contact before its deal or task, in erasure's order.
+  - A deal created, moved or reopened while an administrator removed its stage (or archived the
+    pipeline) could end up open in an archived stage, off the board. Deal writers now share the
+    pipeline row, which settings changes lock before counting open deals; a first attempt that also
+    locked the stage rows deadlocked with settings changes in the new test and was replaced.
+  - A closed deal whose stage had been removed could never be reopened (stages cannot be restored);
+    it now reopens in the pipeline's first stage.
+  - The deal owner list hid an owner who had lost CRM access; "Deal saved.", "Task saved." and
+    "Pipeline saved." vanished when the saved form reloaded; the won and lost lists stopped at 50
+    with no way further and their cursor dropped microseconds (skipping deals changed in the same
+    millisecond); an impossible date such as 31 February caused an internal error instead of a
+    validation message.
+
+### Test commands and results (local, 2026-09-27, fresh database)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `pnpm test` (unit)                                                          | 124 passed. New: 7 CRM tests — ISO currencies and decimals, exact parsing and its refusals, round trips and formatting, day boundaries across daylight-saving changes and month and year ends                                                                                                                                                                                                                                                                                                                                     |
+| `pnpm test:integration` (PostgreSQL 18.x)                                   | 219 passed, including CRM 14: pipelines (settings, audit, archive and restore, limit), deals (stage moves, won/lost/reopen, versions, timeline), conversation visibility, notes and tasks on the timeline, reminders emailed exactly once with a fixed clock and their skips, the sweep, erasure (also racing a note and a change, with locks held on a second connection), a stage removed while a deal is created, reopening into a removed stage, paging through deals changed at the same moment, the deals report, isolation |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 36 passed (18 tests × 2), including a pipeline created in settings, a deal added from a contact and from a conversation, a stage move, a task whose reminder email arrives in Mailpit, a note, a win, the board, the tasks page and the reports, with no horizontal overflow on the new pages                                                                                                                                                                                                                      |
+
+Firefox and WebKit run in CI only (not available in this environment).
+
+### Known gaps
+
+- Not built: custom deal fields, products on deals, deal import and export, forecasting, moving a
+  deal to another pipeline from the UI (the service supports it), automation steps that create
+  deals or tasks, and CRM connectors.
+- Reminder emails have been delivered only to Mailpit; a production SMTP delivery is a release item.
+
+## 2026-09-27 — Phase 4: automation engine (P4-01)
+
+Status: **automation engine implemented and locally verified, production blocked.** Runs, the
+hand-off to people, restart recovery and reports work on HyFib's own data. Bot messages, including
+reply buttons with a header and footer, are verified only against the test-only Graph stand-in,
+which checks them against the limits in Meta's OpenAPI spec; a real sandbox run is a release item.
+The Phase 4 gate is partly met: "published flow survives restart" and "handoff" are verified
+locally; "integration idempotency" waits for the HTTP step (P4-02) and commerce (P4-06).
+
+### Completed
+
+- **Schema (migration 0011):** automations with an editable draft (trigger, steps, number);
+  immutable versions (published, and test snapshots of the draft) with a definition hash; runs
+  pinned to a version with a durable position (current step, visits, wait state, captured answers,
+  budget counters, consecutive failures); an append-only step log; one active run per conversation
+  (partial unique index). Reply turns gain a start reason (customer or hand-off) and an `automated`
+  end, and the turn trigger skips conversations an automation is handling.
+  `ops.conversations_to_route` skips them too; `ops.automation_runs_due` and
+  `ops.apply_automation_retention` are new definer functions (ids only). Contact erasure clears
+  captured answers and stops the contact's active runs. Twelve metric definition rows: new versions
+  of the inbox and member figures that leave automated time out, plus automation runs and outcomes.
+- **Model and interpreter (browser-safe):** eight step types (message, question with reply buttons,
+  question with a typed answer and format check, condition, contact update, wait, hand-off, end);
+  checks for missing and unreachable steps, unknown teams, fields and placeholders, WhatsApp's
+  interactive limits and loops that never wait. A pure interpreter is shared by the worker and the
+  simulator. Reply-button ids name the run, step and visit; a typed reply equal to a button title
+  counts as that button.
+- **Dispatch and runner:** ingestion hands a reply to a waiting run, or starts the best matching
+  automation (exact keyword, contained keyword, new conversation, any message). A run starts only
+  in an unassigned conversation of an active company, subject to business-hours filters, cooldowns
+  and 10 runs per conversation per hour.
+  - Each step is one transaction (conversation lock, then run lock).
+  - Bot messages go through the normal send pipeline, with window, number and WhatsApp id checks.
+  - Budgets of 200 steps, 20 visits per step, 50 messages and 7 days.
+  - A step that keeps raising an error fails the run after five attempts.
+  - The minute sweep re-signals overdue runs and applies retention.
+  - Suspended companies defer runs; test runs stop when the tester leaves or loses permission.
+- **Hand-off lock:** a member's reply or template send, an assignment, Take over or a resolve ends
+  the run and cancels its unclaimed bot sends. Routing skips conversations an automation handles. A
+  run that hands off routes the conversation (to a chosen team, or like a new conversation) and opens
+  a hand-off turn.
+- **Web:**
+  - Automations list and editor: trigger, steps with per-step fields, live checks and a generated
+    diagram.
+  - An in-browser simulator.
+  - Save, publish with a note, pause, turn on, archive, restore and delete draft.
+  - Test runs on a real conversation, and versions.
+  - Run list and run pages with step logs and captured answers (captured answers only for members
+    who can see the conversation).
+  - Inbox: an "Automation" badge, labelled bot messages and a banner with Take over.
+  - Reports → Automations: outcomes, failures by reason, per automation and per day, and a CSV
+    export.
+- **Found while building:**
+  - The definer role could not read columns used in erasure's `CASE` expressions, so erasure now
+    updates runs in two statements.
+  - Erasure now locks conversations before contacts (the order every writer uses), avoiding a
+    deadlock with the runner.
+  - `GROUPING()` rejects parameterised expressions, so report rows are told apart by their null
+    columns.
+  - Versions of a metric definition must stay adjacent in the registry.
+  - Mobile layouts needed `minmax(0,1fr)` columns.
+  - A step that kept raising an error would have held the conversation for up to seven days; it now
+    fails after five attempts.
+- **Review fixes (Codex on PR #5):**
+  - A run moved on (or completed) as soon as its message was queued, even if Meta then rejected it.
+    Runs now wait for Meta to accept each message (migration 0012 records the pending message; the
+    send worker signals the run when the send is settled). A rejected, cancelled, unknown or late
+    message, or a failure Meta reports later, fails the run with `send_failed` and hands the
+    conversation to people.
+  - A marketing opt-out keyword was taken as the answer to a waiting question; any opt-out now stops
+    the run.
+  - An answer used before the question that saves it (for example in the first message) passed the
+    checks. Answers are now checked along the paths that reach each step: never saved there is an
+    error, saved on only some paths a warning ("is set" rules excepted).
+  - Each bot message now takes a send job and an automation signal, so the worker polls the
+    webhook, send and automation queues every second instead of every two.
+
+### Test commands and results (local, 2026-09-27, fresh database)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `pnpm test` (unit)                                                          | 117 passed. New: 13 automation tests — graph checks (targets, reachability, answers saved on the way to each step, loops, teams and fields, WhatsApp limits), trigger ranking, and the interpreter (taps, typed titles, stale and forged ids, answers and formats, conditions, timers, budgets, placeholders)                                                                                                                                                                        |
+| `pnpm test:integration` (PostgreSQL 18.x)                                   | 205 passed, including automations 15: versions and pinning, roles, a full flow with a team hand-off, no competing replies, hours, cooldown and hourly cap, concurrent arrivals, crash and lost-signal recovery with real pg-boss consumers, a step that keeps failing, Meta rejecting, later failing or not accepting a message, timers and budgets, opt-outs (all and marketing), erasure, test runs (and a tester losing permission), reports, suspension and retention, isolation |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 32 passed (16 tests × 2), including an automation built in the editor, tried in the simulator, published with a note, run by the worker from a signed webhook, a typed button title handing over to people, the run log, Take over, the automation report and pause, with no horizontal overflow on the new pages                                                                                                                                                     |
+
+### Known gaps
+
+- Not built: the HTTP step (P4-02), Flows and catalog steps, starting runs from the API or
+  campaigns, template follow-ups outside the service window, fuzzy keywords, a drag-and-drop
+  canvas, and usage billing for automations.
+- No run on a real WhatsApp number yet (release checklist). Migration 0011 re-checks the reply-turn
+  constraints under a table lock; rehearse it on production-sized data.
+
 ## 2026-09-26 — Phase 3: inbox teams, routing, business hours, CSAT (P3-06)
 
 Status: **implementation complete for the advanced inbox, production blocked** (routing, timers,

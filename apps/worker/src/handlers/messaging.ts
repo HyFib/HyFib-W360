@@ -14,6 +14,8 @@ import {
   routeDueConversations,
 } from '@w360/domain';
 import type { WorkerRuntime } from '../runtime';
+import { sweepAutomationRuns } from './automations';
+import { sweepTaskReminders } from './crm';
 import { signalDueCampaigns } from './campaigns';
 import { RetryableJobError } from './email';
 import { signalDueTemplateSyncs } from './templates';
@@ -32,7 +34,7 @@ export function webhookProcessHandler(rt: WorkerRuntime) {
       return;
     }
     const outcome = await processMetaWebhookReceipt(
-      { db: rt.db, keyring: rt.keyring, clock: rt.clock },
+      { db: rt.db, keyring: rt.keyring, clock: rt.clock, jobs: rt.jobs, signer: rt.signer },
       auth.envelope.ref,
     );
     rt.logger.info({ jobId: job.id, receiptId: auth.envelope.ref, outcome }, 'webhook processed');
@@ -72,7 +74,15 @@ export function messageSendHandler(rt: WorkerRuntime) {
     if (!rt.graph) throw new RetryableJobError('Meta is not configured');
     const intentId = auth.envelope.ref;
     const result = await processSendIntent(
-      { db: rt.db, keyring: rt.keyring, graph: rt.graph, clock: rt.clock, rate: rt.sendRate },
+      {
+        db: rt.db,
+        keyring: rt.keyring,
+        graph: rt.graph,
+        clock: rt.clock,
+        rate: rt.sendRate,
+        jobs: rt.jobs,
+        signer: rt.signer,
+      },
       auth.scope,
       intentId,
     );
@@ -127,7 +137,8 @@ export function channelOnboardHandler(rt: WorkerRuntime) {
 /**
  * Every minute: re-signal webhook receipts and send intents whose signal was lost, settle send
  * intents whose worker died (before dispatch: re-queued; after dispatch: unknown outcome, never an
- * automatic resend), and route waiting conversations of round-robin teams.
+ * automatic resend), signal automation runs and task reminders that are due or lost their
+ * signal, and route waiting conversations of round-robin teams.
  */
 export function messagingSweepHandler(rt: WorkerRuntime) {
   return async (): Promise<void> => {
@@ -145,7 +156,7 @@ export function messagingSweepHandler(rt: WorkerRuntime) {
     for (const intent of intents) {
       // Tenant ids here come from the database (SECURITY DEFINER sweep query), not from a payload.
       const scope = authorizedTenantScope(intent.tenantId, null);
-      const recovery = await recoverExpiredSend(rt.db, scope, intent.id, rt.clock);
+      const recovery = await recoverExpiredSend(rt, scope, intent.id);
       if (recovery === 'unknown_outcome') {
         recovered += 1;
         continue;
@@ -166,6 +177,10 @@ export function messagingSweepHandler(rt: WorkerRuntime) {
     if (templateSyncs > 0) rt.logger.info({ templateSyncs }, 'template syncs signalled');
     const campaignTicks = await signalDueCampaigns(rt);
     if (campaignTicks > 0) rt.logger.info({ campaignTicks }, 'campaign ticks signalled');
+    const automations = await sweepAutomationRuns(rt);
+    if (automations.signalled > 0) rt.logger.info(automations, 'automation runs signalled');
+    const reminders = await sweepTaskReminders(rt);
+    if (reminders > 0) rt.logger.info({ reminders }, 'task reminders signalled');
     const routed = await routeDueConversations(rt.db);
     if (routed > 0) rt.logger.info({ routed }, 'waiting conversations assigned');
     const retention = await applyMessagingRetention(rt.db);

@@ -121,6 +121,22 @@ function interactiveProblem(body: unknown): string | null {
   if (!interactive || interactive.type !== 'button') return 'interactive.type';
   const text = (interactive.body as { text?: unknown } | undefined)?.text;
   if (typeof text !== 'string' || text.length === 0 || text.length > 1024) return 'body.text';
+  // Optional text header and footer (HeaderObject / FooterObject: at most 60 characters).
+  const header = interactive.header as { type?: unknown; text?: unknown } | undefined;
+  if (
+    header !== undefined &&
+    (header.type !== 'text' ||
+      typeof header.text !== 'string' ||
+      !header.text ||
+      header.text.length > 60)
+  )
+    return 'header';
+  const footer = interactive.footer as { text?: unknown } | undefined;
+  if (
+    footer !== undefined &&
+    (typeof footer.text !== 'string' || !footer.text || footer.text.length > 60)
+  )
+    return 'footer.text';
   const buttons = (interactive.action as { buttons?: unknown } | undefined)?.buttons;
   if (!Array.isArray(buttons) || buttons.length < 1 || buttons.length > 3) return 'action.buttons';
   const titles = new Set<string>();

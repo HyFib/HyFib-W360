@@ -527,6 +527,8 @@ describe('erasure', () => {
         graph: fx.graph,
         clock: systemClock,
         rate: { capacity: 100, refillPerSecond: 100 },
+        jobs: fx.jobs(),
+        signer: fx.signer,
       },
       authorizedTenantScope(c.tenant.id, c.agent.id),
       intent!.id,

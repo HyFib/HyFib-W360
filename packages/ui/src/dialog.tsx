@@ -12,6 +12,7 @@ export function ConfirmDialog({
   confirmLabel,
   onConfirm,
   destructive = false,
+  children,
 }: {
   trigger: ReactNode;
   title: string;
@@ -19,6 +20,8 @@ export function ConfirmDialog({
   confirmLabel: string;
   onConfirm: () => void;
   destructive?: boolean;
+  /** Extra content between the description and the buttons (for example an optional note). */
+  children?: ReactNode;
 }) {
   return (
     <AD.Root>
@@ -28,6 +31,7 @@ export function ConfirmDialog({
         <AD.Content className="fixed left-1/2 top-1/2 z-50 grid w-[calc(100%-2rem)] max-w-md -translate-x-1/2 -translate-y-1/2 gap-4 rounded-lg border border-border bg-background p-6 shadow-lg focus:outline-none">
           <AD.Title className="text-base font-semibold">{title}</AD.Title>
           <AD.Description className="text-sm text-muted-foreground">{description}</AD.Description>
+          {children}
           <div className="flex justify-end gap-2">
             <AD.Cancel className={buttonVariants({ variant: 'outline' })}>Cancel</AD.Cancel>
             <AD.Action

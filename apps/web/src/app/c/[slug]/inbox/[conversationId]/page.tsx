@@ -4,6 +4,8 @@ import { notFound } from 'next/navigation';
 import { isAppError } from '@w360/core';
 import { can } from '@w360/domain';
 import { Alert, Badge, Card, CardContent, CardHeader, CardTitle } from '@w360/ui';
+import { TakeOverButton } from '@/components/automations/automation-actions';
+import { ContactCrmPanel } from '@/components/crm/contact-crm-panel';
 import { Composer } from '@/components/inbox/composer';
 import { ConversationControls, TeamControl } from '@/components/inbox/conversation-controls';
 import { InboxShell, inboxQueryString } from '@/components/inbox/inbox-shell';
@@ -12,6 +14,7 @@ import { MessageBubble, type ThreadMessage } from '@/components/inbox/message-bu
 import { NoteForm } from '@/components/inbox/note-form';
 import { ReplyTimer } from '@/components/inbox/reply-timer';
 import { formatDateTime } from '@/lib/format';
+import { crmLookups } from '@/server/crm';
 import { canUseInbox, liveEventCursor, loadInboxList, type SearchParams } from '@/server/inbox';
 import { TemplateSender } from '@/components/templates/template-sender';
 import { getRuntime } from '@/server/runtime';
@@ -32,7 +35,7 @@ export default async function ConversationPage({
   const sp = await searchParams;
   const ctx = await requireTenant(slug);
   if (!canUseInbox(ctx)) notFound();
-  const { inbox, savedReplies } = await getRuntime();
+  const { inbox, savedReplies, crm } = await getRuntime();
   const since = await liveEventCursor(ctx);
   const before = typeof sp.before === 'string' ? sp.before : undefined;
   let thread: Awaited<ReturnType<typeof inbox.getConversation>>;
@@ -43,12 +46,15 @@ export default async function ConversationPage({
     throw error;
   }
   const canReply = can(ctx, 'inbox.reply');
+  const showCrm = can(ctx, 'crm.read');
   const [
     { query, views, list, filters, unreadMentions, available },
     members,
     templates,
     mentionable,
     replies,
+    crmData,
+    lookups,
   ] = await Promise.all([
     loadInboxList(ctx, sp),
     can(ctx, 'inbox.assign') && can(ctx, 'members.read')
@@ -57,6 +63,8 @@ export default async function ConversationPage({
     sendableTemplates(ctx),
     canReply ? inbox.mentionableMembers(ctx, conversationId) : Promise.resolve([]),
     canReply ? savedReplies.savedRepliesFor(ctx, conversationId) : Promise.resolve([]),
+    showCrm ? crm.contactCrm(ctx, thread.conversation.contactId) : null,
+    showCrm ? crmLookups(ctx) : null,
   ]);
   const conv = thread.conversation;
   const unread = list.items.find((i) => i.id === conv.id)?.unreadCount ?? 0;
@@ -139,6 +147,37 @@ export default async function ConversationPage({
                   now={now}
                 />
               </p>
+            ) : null}
+            {thread.automation ? (
+              <Alert tone="info">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <p>
+                    {thread.automation.mode === 'test' ? 'A test of ' : 'The automation '}
+                    {can(ctx, 'automations.read') ? (
+                      <Link
+                        href={`/c/${ctx.tenant.slug}/automations/runs/${thread.automation.runId}`}
+                        className="font-medium underline underline-offset-4"
+                      >
+                        {thread.automation.automationName}
+                      </Link>
+                    ) : (
+                      <span className="font-medium">{thread.automation.automationName}</span>
+                    )}{' '}
+                    is handling this conversation
+                    {thread.automation.sending
+                      ? ' and is sending a message'
+                      : thread.automation.waitingFor === 'reply'
+                        ? ' and is waiting for the customer’s reply'
+                        : thread.automation.waitingFor === 'timer'
+                          ? ' and is waiting before its next step'
+                          : ''}
+                    . Replying, assigning or taking over stops it.
+                  </p>
+                  {canReply ? (
+                    <TakeOverButton slug={ctx.tenant.slug} conversationId={conv.id} />
+                  ) : null}
+                </div>
+              </Alert>
             ) : null}
             {csat ? (
               <p className="text-sm text-muted-foreground">
@@ -228,40 +267,64 @@ export default async function ConversationPage({
             </Card>
           ) : null}
         </div>
-        <Card className="h-fit">
-          <CardHeader>
-            <CardTitle>Notes</CardTitle>
-          </CardHeader>
-          <CardContent className="grid gap-3">
-            {thread.notes.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No notes yet.</p>
-            ) : (
-              <ul className="grid gap-2">
-                {thread.notes.map((n) => (
-                  <li key={n.id} className="rounded-md border border-border p-2 text-sm">
-                    <p className="whitespace-pre-wrap break-words">{n.body}</p>
-                    {n.mentions.length > 0 ? (
-                      <p className="mt-1 text-xs">
-                        Mentioned: {n.mentions.map((m) => m.name).join(', ')}
+        <div className="grid min-w-0 content-start gap-4">
+          <Card className="h-fit">
+            <CardHeader>
+              <CardTitle>Notes</CardTitle>
+            </CardHeader>
+            <CardContent className="grid gap-3">
+              {thread.notes.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No notes yet.</p>
+              ) : (
+                <ul className="grid gap-2">
+                  {thread.notes.map((n) => (
+                    <li key={n.id} className="rounded-md border border-border p-2 text-sm">
+                      <p className="whitespace-pre-wrap break-words">{n.body}</p>
+                      {n.mentions.length > 0 ? (
+                        <p className="mt-1 text-xs">
+                          Mentioned: {n.mentions.map((m) => m.name).join(', ')}
+                        </p>
+                      ) : null}
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        {n.authorName} · {formatDateTime(n.createdAt, tz)}
                       </p>
-                    ) : null}
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      {n.authorName} · {formatDateTime(n.createdAt, tz)}
-                    </p>
-                  </li>
-                ))}
-              </ul>
-            )}
-            {canReply ? (
-              <NoteForm
-                slug={ctx.tenant.slug}
-                conversationId={conv.id}
-                mentionable={mentionable}
-                myMembershipId={ctx.membership.id}
-              />
-            ) : null}
-          </CardContent>
-        </Card>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {canReply ? (
+                <NoteForm
+                  slug={ctx.tenant.slug}
+                  conversationId={conv.id}
+                  mentionable={mentionable}
+                  myMembershipId={ctx.membership.id}
+                />
+              ) : null}
+            </CardContent>
+          </Card>
+          {crmData && lookups ? (
+            <Card className="h-fit">
+              <CardHeader>
+                <CardTitle>CRM</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <ContactCrmPanel
+                  slug={ctx.tenant.slug}
+                  timeZone={tz}
+                  canWrite={can(ctx, 'crm.write')}
+                  conversationId={conv.id}
+                  data={crmData}
+                  pipelines={lookups.options}
+                  members={lookups.memberOptions}
+                  myMembershipId={ctx.membership.id}
+                  stageNames={lookups.stageNames}
+                  memberNames={lookups.memberNames}
+                  compact
+                />
+              </CardContent>
+            </Card>
+          ) : null}
+        </div>
       </div>
     </InboxShell>
   );

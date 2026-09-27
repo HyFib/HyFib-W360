@@ -13,11 +13,12 @@ export const dynamic = 'force-dynamic';
 export default async function OverviewPage({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
   const ctx = await requireTenant(slug);
-  const { tenancy } = await getRuntime();
-  const [members, invitations, audit] = await Promise.all([
+  const { tenancy, crm } = await getRuntime();
+  const [members, invitations, audit, tasks] = await Promise.all([
     can(ctx, 'members.read') ? tenancy.listMembers(ctx) : Promise.resolve([]),
     can(ctx, 'members.read') ? tenancy.listInvitations(ctx) : Promise.resolve([]),
     can(ctx, 'audit.read') ? tenancy.listAuditEvents(ctx, { limit: 8 }) : Promise.resolve(null),
+    can(ctx, 'crm.read') ? crm.taskCounts(ctx) : Promise.resolve(null),
   ]);
   const activeMembers = members.filter((m) => m.status === 'active');
   const pendingInvites = invitations.filter((i) => i.status === 'pending');
@@ -106,6 +107,30 @@ export default async function OverviewPage({ params }: { params: Promise<{ slug:
             </div>
           </CardContent>
         </Card>
+        {tasks ? (
+          <Card>
+            <CardHeader>
+              <CardTitle>Your tasks</CardTitle>
+              <CardDescription>Open CRM tasks assigned to you, by due time.</CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-2 text-sm">
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Overdue</span>
+                <span className="font-medium">{tasks.overdue}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Due later today</span>
+                <span className="font-medium">{tasks.dueToday}</span>
+              </div>
+              <Link
+                href={`${base}/crm/tasks`}
+                className="text-primary underline-offset-4 hover:underline"
+              >
+                Open your tasks
+              </Link>
+            </CardContent>
+          </Card>
+        ) : null}
         {audit ? (
           <Card className="lg:col-span-3">
             <CardHeader>

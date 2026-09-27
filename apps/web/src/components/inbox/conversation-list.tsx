@@ -68,6 +68,7 @@ export function ConversationList({
                 </span>
                 <span className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
                   <span>{c.assignedName ? `Assigned to ${c.assignedName}` : 'Unassigned'}</span>
+                  {c.automationActive ? <Badge tone="neutral">Automation</Badge> : null}
                   {c.teamName ? <span>· {c.teamName}</span> : null}
                   {!c.windowOpen ? <span>· Window closed</span> : null}
                 </span>

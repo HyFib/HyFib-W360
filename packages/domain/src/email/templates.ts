@@ -17,6 +17,15 @@ export const emailPayloadSchema = z.discriminatedUnion('kind', [
     expiresAt: z.string(),
   }),
   z.object({
+    kind: z.literal('crm.task_reminder'),
+    companyName: z.string().max(120),
+    name: z.string().max(200),
+    taskTitle: z.string().max(200),
+    /** When the task is due, already formatted in the company's time zone. */
+    due: z.string().max(80).nullable(),
+    url: z.url(),
+  }),
+  z.object({
     kind: z.literal('billing.notice'),
     companyName: z.string().max(120),
     subject: z.string().max(200),
@@ -126,6 +135,18 @@ export function renderEmail(payload: EmailPayload): RenderedEmail {
           label: 'Review invitation',
           url: payload.url,
         }),
+      };
+    }
+    case 'crm.task_reminder': {
+      const lines = [
+        `Hi ${payload.name},`,
+        `A reminder about your task in ${payload.companyName}: ${payload.taskTitle}`,
+        payload.due ? `The task is due ${payload.due}.` : 'The task has no due date.',
+      ];
+      return {
+        subject: `Reminder: ${payload.taskTitle}`,
+        text: `${lines.join('\n\n')}\n\n${payload.url}`,
+        html: layout('Task reminder', lines, { label: 'Open your tasks', url: payload.url }),
       };
     }
     case 'billing.notice': {

@@ -1,0 +1,114 @@
+import { bigint, date, integer, jsonb, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { appSchema } from './tenancy';
+
+/**
+ * CRM (migration 0012): pipelines with ordered stages and one currency each, deals linked to a
+ * contact, tasks with email reminders, and an append-only activity timeline per contact and deal.
+ * Money is an integer in the pipeline currency's minor unit.
+ */
+const tz = (name: string) => timestamp(name, { withTimezone: true, mode: 'date' });
+
+export const crmPipelines = appSchema.table('crm_pipelines', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  name: text('name').notNull(),
+  currency: text('currency').notNull(),
+  position: integer('position').notNull().default(0),
+  archivedAt: tz('archived_at'),
+  version: integer('version').notNull().default(1),
+  createdByMembershipId: uuid('created_by_membership_id').notNull(),
+  createdAt: tz('created_at').notNull().defaultNow(),
+  updatedAt: tz('updated_at').notNull().defaultNow(),
+});
+
+export const crmStages = appSchema.table('crm_stages', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  pipelineId: uuid('pipeline_id').notNull(),
+  name: text('name').notNull(),
+  position: integer('position').notNull(),
+  archivedAt: tz('archived_at'),
+  createdAt: tz('created_at').notNull().defaultNow(),
+  updatedAt: tz('updated_at').notNull().defaultNow(),
+});
+
+export const DEAL_STATUSES = ['open', 'won', 'lost'] as const;
+export type DealStatus = (typeof DEAL_STATUSES)[number];
+
+export const crmDeals = appSchema.table('crm_deals', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  pipelineId: uuid('pipeline_id').notNull(),
+  stageId: uuid('stage_id').notNull(),
+  contactId: uuid('contact_id').notNull(),
+  conversationId: uuid('conversation_id'),
+  title: text('title').notNull(),
+  valueMinor: bigint('value_minor', { mode: 'number' }),
+  ownerMembershipId: uuid('owner_membership_id'),
+  status: text('status', { enum: DEAL_STATUSES }).notNull().default('open'),
+  lostReason: text('lost_reason'),
+  expectedCloseOn: date('expected_close_on', { mode: 'string' }),
+  stageEnteredAt: tz('stage_entered_at').notNull().defaultNow(),
+  closedAt: tz('closed_at'),
+  closedByMembershipId: uuid('closed_by_membership_id'),
+  version: integer('version').notNull().default(1),
+  createdByMembershipId: uuid('created_by_membership_id').notNull(),
+  createdAt: tz('created_at').notNull().defaultNow(),
+  updatedAt: tz('updated_at').notNull().defaultNow(),
+});
+
+export const TASK_STATUSES = ['open', 'done', 'cancelled'] as const;
+export type TaskStatus = (typeof TASK_STATUSES)[number];
+export const REMINDER_STATES = ['none', 'pending', 'sent', 'skipped'] as const;
+export type ReminderState = (typeof REMINDER_STATES)[number];
+
+export const crmTasks = appSchema.table('crm_tasks', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  title: text('title').notNull(),
+  notes: text('notes'),
+  contactId: uuid('contact_id'),
+  dealId: uuid('deal_id'),
+  assigneeMembershipId: uuid('assignee_membership_id').notNull(),
+  dueAt: tz('due_at'),
+  remindAt: tz('remind_at'),
+  reminderState: text('reminder_state', { enum: REMINDER_STATES }).notNull().default('none'),
+  reminderDetail: text('reminder_detail'),
+  remindedAt: tz('reminded_at'),
+  status: text('status', { enum: TASK_STATUSES }).notNull().default('open'),
+  completedAt: tz('completed_at'),
+  completedByMembershipId: uuid('completed_by_membership_id'),
+  version: integer('version').notNull().default(1),
+  createdByMembershipId: uuid('created_by_membership_id').notNull(),
+  createdAt: tz('created_at').notNull().defaultNow(),
+  updatedAt: tz('updated_at').notNull().defaultNow(),
+});
+
+export const CRM_ACTIVITY_KINDS = [
+  'deal_created',
+  'deal_updated',
+  'stage_changed',
+  'owner_changed',
+  'deal_won',
+  'deal_lost',
+  'deal_reopened',
+  'task_created',
+  'task_completed',
+  'task_reopened',
+  'task_cancelled',
+  'note',
+] as const;
+export type CrmActivityKind = (typeof CRM_ACTIVITY_KINDS)[number];
+
+export const crmActivities = appSchema.table('crm_activities', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  contactId: uuid('contact_id').notNull(),
+  dealId: uuid('deal_id'),
+  taskId: uuid('task_id'),
+  actorMembershipId: uuid('actor_membership_id'),
+  kind: text('kind', { enum: CRM_ACTIVITY_KINDS }).notNull(),
+  data: jsonb('data').notNull().$type<Record<string, unknown>>().default({}),
+  body: text('body'),
+  createdAt: tz('created_at').notNull().defaultNow(),
+});

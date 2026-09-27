@@ -200,7 +200,7 @@ async function deliver(body: unknown) {
     { provider: 'meta_whatsapp', rawBody: Buffer.from(JSON.stringify(body)) },
   );
   const outcome = await processMetaWebhookReceipt(
-    { db: dbs.app, keyring, clock: systemClock },
+    { db: dbs.app, keyring, clock: systemClock, jobs: new PgBossJobQueue(boss), signer },
     stored.receiptId,
   );
   return { ...stored, outcome };
@@ -211,7 +211,15 @@ async function adminQuery<T extends Record<string, unknown>>(text: string, param
 }
 
 function sendDeps() {
-  return { db: dbs.app, keyring, graph, clock: systemClock, rate };
+  return {
+    db: dbs.app,
+    keyring,
+    graph,
+    clock: systemClock,
+    rate,
+    jobs: new PgBossJobQueue(boss),
+    signer,
+  };
 }
 function outboundDeps() {
   return { db: dbs.app, jobs: new PgBossJobQueue(boss), signer, clock: systemClock };
@@ -310,7 +318,7 @@ describe('inbound ingestion', () => {
     // A processed receipt cannot be claimed again.
     expect(
       await processMetaWebhookReceipt(
-        { db: dbs.app, keyring, clock: systemClock },
+        { db: dbs.app, keyring, clock: systemClock, jobs: new PgBossJobQueue(boss), signer },
         first.receiptId,
       ),
     ).toBe('not_claimable');
@@ -342,7 +350,7 @@ describe('inbound ingestion', () => {
       unknown.receiptId,
     ]);
     await processMetaWebhookReceipt(
-      { db: dbs.app, keyring, clock: systemClock },
+      { db: dbs.app, keyring, clock: systemClock, jobs: new PgBossJobQueue(boss), signer },
       unknown.receiptId,
     );
     const again = await adminQuery<{ n: number }>(
@@ -705,11 +713,11 @@ describe('outbound sends', () => {
       ]),
     );
     expect(
-      await recoverExpiredSend(dbs.app, scope, (await intentFor(before.messageId)).id, systemClock),
+      await recoverExpiredSend(sendDeps(), scope, (await intentFor(before.messageId)).id),
     ).toBe('requeued');
-    expect(
-      await recoverExpiredSend(dbs.app, scope, (await intentFor(after.messageId)).id, systemClock),
-    ).toBe('unknown_outcome');
+    expect(await recoverExpiredSend(sendDeps(), scope, (await intentFor(after.messageId)).id)).toBe(
+      'unknown_outcome',
+    );
     expect((await messageRow(after.messageId)).status).toBe('unknown_outcome');
   });
 

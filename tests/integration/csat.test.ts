@@ -117,7 +117,15 @@ async function sendSurvey(c: Company, messageId: string) {
     [messageId],
   );
   return processSendIntent(
-    { db: fx.dbs.app, keyring: fx.keyring, graph: fx.graph, clock: systemClock, rate },
+    {
+      db: fx.dbs.app,
+      keyring: fx.keyring,
+      graph: fx.graph,
+      clock: systemClock,
+      rate,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+    },
     authorizedTenantScope(c.tenant.id, c.agent.id),
     intent!.id,
   );
