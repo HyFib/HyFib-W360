@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { AppError, notFound, uuidv7, type Clock } from '@w360/core';
 import {
+  outerColumn,
   RATE_CATEGORIES,
   asc,
   desc,
@@ -169,7 +170,7 @@ export function createRateCardsService(deps: { platformDb: PlatformDatabase; clo
             status: rateCards.status,
             sourceUrl: rateCards.sourceUrl,
             createdAt: rateCards.createdAt,
-            markets: sql<number>`(select count(distinct p.market)::int from ops.rate_card_prices p where p.rate_card_id = ${rateCards.id})`,
+            markets: sql<number>`(select count(distinct p.market)::int from ops.rate_card_prices p where p.rate_card_id = ${outerColumn(rateCards.id)})`,
           })
           .from(rateCards)
           .orderBy(

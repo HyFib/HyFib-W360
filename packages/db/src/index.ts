@@ -2,6 +2,7 @@ export * from './client';
 export * from './scope';
 export * from './errors';
 export * from './safety';
+export * from './sql';
 export * as schema from './schema/index';
 export * from './schema/index';
 export {

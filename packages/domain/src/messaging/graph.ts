@@ -126,6 +126,26 @@ export interface RemoteFlow {
   previewExpiresAt: Date | null;
 }
 
+/** A catalog connected to a WhatsApp account (research M-172). */
+export interface RemoteCatalog {
+  id: string;
+  name: string | null;
+  productCount: number | null;
+}
+
+/** A catalog product, with the fields members need to pick it for a message (research M-172). */
+export interface RemoteProduct {
+  id: string | null;
+  retailerId: string;
+  name: string;
+  description: string | null;
+  /** Meta's display text (format not documented). */
+  price: string | null;
+  currency: string | null;
+  availability: string | null;
+  reviewStatus: string | null;
+}
+
 const str = (value: unknown): string | null => (typeof value === 'string' ? value : null);
 const num = (value: unknown): number | null =>
   typeof value === 'number' && Number.isFinite(value) ? value : null;
@@ -412,6 +432,80 @@ export class GraphClient {
         const paging = (json.paging ?? {}) as { cursors?: { after?: unknown }; next?: unknown };
         const after = typeof paging.next === 'string' ? str(paging.cursors?.after) : null;
         return { flows, after };
+      },
+    );
+  }
+
+  /** GET /{waba-id}/product_catalogs: the catalogs connected to the WhatsApp account (M-172). */
+  listProductCatalogs(wabaId: string, token: string, page: { after?: string | null } = {}) {
+    return this.request(
+      'GET',
+      `/${encodeURIComponent(wabaId)}/product_catalogs`,
+      {
+        token,
+        query: {
+          fields: 'id,name,product_count',
+          limit: '25',
+          ...(page.after ? { after: page.after } : {}),
+        },
+      },
+      (json) => {
+        if (!Array.isArray(json.data)) return null;
+        const catalogs = (json.data as Record<string, unknown>[]).flatMap((c): RemoteCatalog[] => {
+          const id = str(c?.id);
+          if (!id || !/^[0-9]{1,32}$/.test(id)) return [];
+          return [
+            { id, name: str(c.name)?.slice(0, 200) ?? null, productCount: num(c.product_count) },
+          ];
+        });
+        const paging = (json.paging ?? {}) as { cursors?: { after?: unknown }; next?: unknown };
+        const after = typeof paging.next === 'string' ? str(paging.cursors?.after) : null;
+        return { catalogs, after };
+      },
+    );
+  }
+
+  /** GET /{catalog-id}/products, one page (M-172). */
+  listCatalogProducts(catalogId: string, token: string, page: { after?: string | null } = {}) {
+    return this.request(
+      'GET',
+      `/${encodeURIComponent(catalogId)}/products`,
+      {
+        token,
+        query: {
+          fields: 'id,retailer_id,name,description,price,currency,availability,review_status',
+          limit: '100',
+          ...(page.after ? { after: page.after } : {}),
+        },
+      },
+      (json) => {
+        if (!Array.isArray(json.data)) return null;
+        const clip = (v: unknown, max: number) => {
+          const t = str(v)?.trim();
+          return t ? t.slice(0, max) : null;
+        };
+        const products = (json.data as Record<string, unknown>[]).flatMap((p): RemoteProduct[] => {
+          const retailerId = str(p?.retailer_id);
+          const name = clip(p?.name, 200);
+          if (!retailerId || retailerId.length > 100 || !name) return [];
+          const id = str(p.id);
+          const currency = str(p.currency);
+          return [
+            {
+              id: id && /^[0-9]{1,32}$/.test(id) ? id : null,
+              retailerId,
+              name,
+              description: clip(p.description, 1000),
+              price: clip(p.price, 64),
+              currency: currency && /^[A-Z]{3}$/.test(currency) ? currency : null,
+              availability: clip(p.availability, 40),
+              reviewStatus: clip(p.review_status, 40),
+            },
+          ];
+        });
+        const paging = (json.paging ?? {}) as { cursors?: { after?: unknown }; next?: unknown };
+        const after = typeof paging.next === 'string' ? str(paging.cursors?.after) : null;
+        return { products, after };
       },
     );
   }

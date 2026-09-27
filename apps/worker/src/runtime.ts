@@ -4,6 +4,7 @@ import {
   createLogger,
   loadWorkerConfig,
   metaConfigFrom,
+  razorpayApiBaseUrl,
   razorpayConfigFrom,
   smtpConfigFrom,
   systemClock,
@@ -48,6 +49,8 @@ export interface WorkerRuntime {
   /** Null until Razorpay is configured; billing jobs then wait (retry) instead of failing. */
   razorpayConfig: RazorpayConfig | null;
   razorpay: RazorpayClient | null;
+  /** Razorpay's API origin for companies' own accounts (Payment Links), even without HyFib's keys. */
+  razorpayBaseUrl: string;
   notices: BillingNoticeDeps;
   /** The only client for company-chosen addresses (automation HTTP steps): see core/egress. */
   egress: EgressClient;
@@ -135,6 +138,7 @@ export async function createWorkerRuntime(): Promise<WorkerRuntime> {
           keySecret: razorpayConfig.keySecret,
         })
       : null,
+    razorpayBaseUrl: razorpayApiBaseUrl(config),
     notices: { outbox: { keyring, jobs, signer }, appBaseUrl: config.APP_BASE_URL },
     egress: createEgressClient(egressPolicy),
     egressPolicy,

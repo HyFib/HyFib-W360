@@ -12,6 +12,11 @@ import { crmReminderHandler } from './handlers/crm';
 import { emailSendHandler, outboxSweepHandler } from './handlers/email';
 import { flowKeysHandler, flowSyncHandler } from './handlers/flows';
 import {
+  commerceAccountHandler,
+  commerceLinkHandler,
+  commerceSyncHandler,
+} from './handlers/commerce';
+import {
   channelOnboardHandler,
   messageSendHandler,
   messagingSweepHandler,
@@ -125,6 +130,21 @@ async function main(): Promise<void> {
     QUEUES.flowKeys.name,
     { localConcurrency: 1, batchSize: 1 },
     flowKeysHandler(rt),
+  );
+  await rt.boss.work(
+    QUEUES.commerceSync.name,
+    { localConcurrency: 1, batchSize: 1 },
+    commerceSyncHandler(rt),
+  );
+  await rt.boss.work(
+    QUEUES.commerceLink.name,
+    { localConcurrency: 2, batchSize: 1 },
+    commerceLinkHandler(rt),
+  );
+  await rt.boss.work(
+    QUEUES.commerceAccount.name,
+    { localConcurrency: 1, batchSize: 1 },
+    commerceAccountHandler(rt),
   );
   await rt.boss.work(
     QUEUES.billingEventProcess.name,

@@ -1,5 +1,7 @@
 import { z } from 'zod';
 import { parseFlowCompletion } from '../flows/responses';
+import { parseOrder } from '../commerce/model';
+import { formatMinor } from '../crm/money';
 
 /**
  * Lenient schemas for Meta WhatsApp webhook payloads (object `whatsapp_business_account`).
@@ -222,12 +224,22 @@ export function normaliseInboundContent(message: MetaMessage): {
           typeof content.emoji === 'string' ? `Reacted ${content.emoji}` : 'Reaction removed',
       };
     }
-    case 'order':
+    case 'order': {
+      // A cart sent from the catalog (research M-170), with prices in minor units.
+      const order = parseOrder(body);
+      if (!order)
+        return { type, content: { order: null }, preview: '[order that could not be read]' };
+      const units = order.items.reduce((n, i) => n + i.quantity, 0);
+      const total =
+        order.subtotalMinor !== null && order.currency
+          ? ` · ${formatMinor(order.subtotalMinor, order.currency)}`
+          : '';
       return {
         type,
-        content: pick(body, ['catalog_id', 'text', 'product_items']),
-        preview: '[order]',
+        content: { order },
+        preview: `[Order] ${units} item${units === 1 ? '' : 's'}${total}`,
       };
+    }
     case 'system':
       return {
         type,

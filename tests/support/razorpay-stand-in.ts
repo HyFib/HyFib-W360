@@ -75,6 +75,21 @@ export interface StandInDispute {
   status: 'open' | 'under_review' | 'won' | 'lost' | 'closed';
 }
 
+/** A Payment Link in a company's own Razorpay account (research R-016, R-106 to R-109). */
+export interface StandInPaymentLink {
+  id: string;
+  merchantKeyId: string;
+  referenceId: string | null;
+  amount: number;
+  amountPaid: number;
+  currency: string;
+  description: string | null;
+  status: 'created' | 'partially_paid' | 'paid' | 'expired' | 'cancelled';
+  shortUrl: string;
+  expireBy: number | null;
+  notify: unknown;
+}
+
 export interface RecordedCall {
   method: string;
   path: string;
@@ -92,12 +107,17 @@ export interface RazorpayStandInState {
   tokens: Map<string, StandInToken>;
   refunds: Map<string, StandInRefund>;
   disputes: Map<string, StandInDispute>;
+  /** Companies' own accounts (key id → secret), used for Payment Links. */
+  merchants: Map<string, string>;
+  paymentLinks: Map<string, StandInPaymentLink>;
   /** Behaviours consumed by the next calls of each kind (default: ok). */
   queues: {
     createOrder: CallBehaviour[];
     recurring: CallBehaviour[];
     refund: CallBehaviour[];
     fetch: CallBehaviour[];
+    createPaymentLink: CallBehaviour[];
+    paymentLinks: CallBehaviour[];
   };
   calls: RecordedCall[];
 }
@@ -116,6 +136,11 @@ export interface RazorpayStandIn {
   ): StandInPayment;
   setPaymentStatus(paymentId: string, status: StandInPayment['status'], error?: string): void;
   addDispute(paymentId: string, amount: number, status?: StandInDispute['status']): StandInDispute;
+  /** A company's Razorpay account whose keys may create and read Payment Links. */
+  addMerchant(keyId: string, keySecret: string): void;
+  /** The customer pays a Payment Link in full (what the hosted page does). */
+  payLink(linkId: string): StandInPaymentLink;
+  setLinkStatus(linkId: string, status: StandInPaymentLink['status']): StandInPaymentLink;
   close(): Promise<void>;
 }
 
@@ -198,7 +223,16 @@ export async function startRazorpayStandIn(options: {
     tokens: new Map(),
     refunds: new Map(),
     disputes: new Map(),
-    queues: { createOrder: [], recurring: [], refund: [], fetch: [] },
+    merchants: new Map(),
+    paymentLinks: new Map(),
+    queues: {
+      createOrder: [],
+      recurring: [],
+      refund: [],
+      fetch: [],
+      createPaymentLink: [],
+      paymentLinks: [],
+    },
     calls: [],
   };
   const expectedAuth = `Basic ${Buffer.from(`${options.keyId}:${options.keySecret}`).toString('base64')}`;
@@ -257,6 +291,177 @@ export async function startRazorpayStandIn(options: {
     return payment;
   }
 
+  function merchantFor(authorization: string | undefined): string | null {
+    if (!authorization?.startsWith('Basic ')) return null;
+    const [keyId, secret] = Buffer.from(authorization.slice(6), 'base64')
+      .toString('utf8')
+      .split(':');
+    return keyId && secret !== undefined && state.merchants.get(keyId) === secret ? keyId : null;
+  }
+
+  function linkJson(l: StandInPaymentLink) {
+    return {
+      id: l.id,
+      entity: 'payment_link',
+      reference_id: l.referenceId,
+      amount: l.amount,
+      amount_paid: l.amountPaid,
+      currency: l.currency,
+      description: l.description,
+      status: l.status,
+      short_url: l.shortUrl,
+      expire_by: l.expireBy ?? 0,
+      accept_partial: false,
+      notify: l.notify,
+    };
+  }
+
+  function paymentLinkRoute(
+    req: IncomingMessage,
+    res: ServerResponse,
+    method: string,
+    seg: string[],
+    url: URL,
+    body: Record<string, unknown> | undefined,
+    merchantKeyId: string,
+  ): Promise<void> | void {
+    const own = (linkId: string | undefined) => {
+      const link = linkId ? state.paymentLinks.get(linkId) : undefined;
+      return link && link.merchantKeyId === merchantKeyId ? link : undefined;
+    };
+    const run = async (
+      queue: CallBehaviour[],
+      process: () => { status: number; body: unknown },
+    ) => {
+      const behaviour = queue.shift() ?? { kind: 'ok' };
+      if (behaviour.kind === 'drop') {
+        req.socket.destroy();
+        return;
+      }
+      if (behaviour.kind === 'error') {
+        return rzpError(
+          res,
+          behaviour.status,
+          behaviour.code ?? (behaviour.status >= 500 ? 'SERVER_ERROR' : 'BAD_REQUEST_ERROR'),
+          behaviour.description ?? 'Request failed',
+        );
+      }
+      const result = process();
+      if (behaviour.kind === 'process_then_drop') {
+        req.socket.destroy();
+        return;
+      }
+      json(res, result.status, result.body);
+    };
+    // POST /v1/payment_links (reference ids are single-use per account, R-106)
+    if (method === 'POST' && seg.length === 2) {
+      return run(state.queues.createPaymentLink, () => {
+        const amount = Number(body?.amount);
+        const referenceId = typeof body?.reference_id === 'string' ? body.reference_id : null;
+        if (!Number.isInteger(amount) || amount < 100) {
+          return {
+            status: 400,
+            body: { error: { code: 'BAD_REQUEST_ERROR', description: 'amount invalid' } },
+          };
+        }
+        if (referenceId && referenceId.length > 40) {
+          return {
+            status: 400,
+            body: { error: { code: 'BAD_REQUEST_ERROR', description: 'reference_id too long' } },
+          };
+        }
+        if (
+          referenceId &&
+          [...state.paymentLinks.values()].some(
+            (l) => l.merchantKeyId === merchantKeyId && l.referenceId === referenceId,
+          )
+        ) {
+          return {
+            status: 400,
+            body: {
+              error: {
+                code: 'BAD_REQUEST_ERROR',
+                description: 'payment link creation with reference ID already attempted',
+              },
+            },
+          };
+        }
+        const link: StandInPaymentLink = {
+          id: id('plink'),
+          merchantKeyId,
+          referenceId,
+          amount,
+          amountPaid: 0,
+          currency: typeof body?.currency === 'string' ? body.currency : 'INR',
+          description: typeof body?.description === 'string' ? body.description : null,
+          status: 'created',
+          shortUrl: `https://rzp.io/i/${randomBytes(5).toString('hex')}`,
+          expireBy: typeof body?.expire_by === 'number' ? body.expire_by : null,
+          notify: body?.notify ?? null,
+        };
+        state.paymentLinks.set(link.id, link);
+        return { status: 200, body: linkJson(link) };
+      });
+    }
+    // GET /v1/payment_links?reference_id= (R-107)
+    if (method === 'GET' && seg.length === 2) {
+      return run(state.queues.paymentLinks, () => {
+        const reference = url.searchParams.get('reference_id');
+        const links = [...state.paymentLinks.values()].filter(
+          (l) => l.merchantKeyId === merchantKeyId && (!reference || l.referenceId === reference),
+        );
+        return { status: 200, body: { payment_links: links.map(linkJson) } };
+      });
+    }
+    // GET /v1/payment_links/:id
+    if (method === 'GET' && seg.length === 3) {
+      return run(state.queues.paymentLinks, () => {
+        const link = own(seg[2]);
+        return link
+          ? { status: 200, body: linkJson(link) }
+          : {
+              status: 400,
+              body: {
+                error: { code: 'BAD_REQUEST_ERROR', description: 'The id provided does not exist' },
+              },
+            };
+      });
+    }
+    // POST /v1/payment_links/:id/cancel (R-109)
+    if (method === 'POST' && seg.length === 4 && seg[3] === 'cancel') {
+      return run(state.queues.paymentLinks, () => {
+        const link = own(seg[2]);
+        if (!link) {
+          return {
+            status: 400,
+            body: {
+              error: { code: 'BAD_REQUEST_ERROR', description: 'The id provided does not exist' },
+            },
+          };
+        }
+        if (link.status === 'paid' || link.status === 'partially_paid') {
+          return {
+            status: 400,
+            body: {
+              error: {
+                code: 'BAD_REQUEST_ERROR',
+                description: 'cannot cancel or expire an already paid/partially paid link',
+              },
+            },
+          };
+        }
+        if (link.status === 'created') link.status = 'cancelled';
+        return { status: 200, body: linkJson(link) };
+      });
+    }
+    return rzpError(
+      res,
+      404,
+      'BAD_REQUEST_ERROR',
+      'The requested URL was not found on the server.',
+    );
+  }
+
   const server: Server = createServer((req, res) => {
     void (async () => {
       const url = new URL(req.url ?? '/', 'http://stand-in');
@@ -286,11 +491,19 @@ export async function startRazorpayStandIn(options: {
           razorpay_signature: signature,
         });
       }
+      const seg = url.pathname.split('/').filter(Boolean);
+      const method = req.method ?? 'GET';
+      // Companies' accounts: Payment Links only, each account seeing its own links.
+      const merchant = merchantFor(req.headers.authorization);
+      if (seg[0] === 'v1' && seg[1] === 'payment_links') {
+        if (!merchant) {
+          return rzpError(res, 401, 'BAD_REQUEST_ERROR', 'The api key provided is invalid');
+        }
+        return paymentLinkRoute(req, res, method, seg, url, body, merchant);
+      }
       if (req.headers.authorization !== expectedAuth) {
         return rzpError(res, 401, 'BAD_REQUEST_ERROR', 'The api key provided is invalid');
       }
-      const seg = url.pathname.split('/').filter(Boolean);
-      const method = req.method ?? 'GET';
 
       const behave = async (
         queue: CallBehaviour[],
@@ -566,6 +779,22 @@ export async function startRazorpayStandIn(options: {
       };
       state.disputes.set(dispute.id, dispute);
       return dispute;
+    },
+    addMerchant(keyId: string, keySecret: string) {
+      state.merchants.set(keyId, keySecret);
+    },
+    payLink(linkId: string) {
+      const link = state.paymentLinks.get(linkId);
+      if (!link) throw new Error(`stand-in: unknown payment link ${linkId}`);
+      link.status = 'paid';
+      link.amountPaid = link.amount;
+      return link;
+    },
+    setLinkStatus(linkId: string, status: StandInPaymentLink['status']) {
+      const link = state.paymentLinks.get(linkId);
+      if (!link) throw new Error(`stand-in: unknown payment link ${linkId}`);
+      link.status = status;
+      return link;
     },
     close: () =>
       new Promise<void>((resolve, reject) => {

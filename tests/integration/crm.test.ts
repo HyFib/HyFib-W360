@@ -183,6 +183,9 @@ describe('crm pipelines', () => {
       'New',
     ]);
     expect(after!.stages.find((s) => s.id === proposal.id)).toMatchObject({ archived: true });
+    // Each stage counts its own open deals (the pipeline settings page shows them).
+    expect(after!.stages.find((s) => s.id === qualified.id)).toMatchObject({ openDeals: 1 });
+    expect(after!.stages.find((s) => s.id === newStage.id)).toMatchObject({ openDeals: 0 });
     // A stale editor is refused.
     await expectAppError(
       svc.updatePipeline(owner, {

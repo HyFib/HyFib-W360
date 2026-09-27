@@ -48,6 +48,8 @@ import {
 import { receiptAad } from './receipts';
 import { recordConversationSource } from '../growth/sources';
 import { parseFlowCompletion, recordFlowCompletion } from '../flows/responses';
+import type { ParsedOrder } from '../commerce/model';
+import { recordOrder } from '../commerce/orders';
 import { STATUS_RANK, providerStatusToMessageStatus, shouldAdvance } from './status';
 
 /**
@@ -449,6 +451,24 @@ async function ingestMessagesChange(
       });
     }
 
+    // An order from the customer's cart (research M-170) is recorded with its items and amounts.
+    const order =
+      type === 'order' && typeof content.order === 'object' && content.order !== null
+        ? (content.order as ParsedOrder)
+        : null;
+    if (order) {
+      await recordOrder(tx, {
+        tenantId: ctx.tenantId,
+        conversationId: conversation.id,
+        contactId,
+        channelAccountId: channel.id,
+        whatsappAccountId: channel.whatsappAccountId,
+        messageId,
+        order,
+        receivedAt: providerAt,
+      });
+    }
+
     // A tap on a CSAT button answers the survey: it is not a new question, so it neither reopens
     // the conversation nor counts as unread, a keyword, a campaign reply or a routing trigger.
     const csatTap = isCsatTap(type, content);
@@ -517,7 +537,7 @@ async function ingestMessagesChange(
       // Automations first: a waiting run receives the reply, or a matching automation starts.
       // Routing (below) leaves a conversation alone while a run is active. A completed form is
       // not an answer to a bot question and starts no automation.
-      if (!flowCompletion) {
+      if (!flowCompletion && !order) {
         const dispatched = await dispatchInboundToAutomation(tx, deps, {
           tenantId: ctx.tenantId,
           conversationId: conversation.id,

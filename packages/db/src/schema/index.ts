@@ -12,3 +12,4 @@ export * from './automations';
 export * from './crm';
 export * from './growth';
 export * from './flows';
+export * from './commerce';

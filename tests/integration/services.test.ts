@@ -7,6 +7,7 @@ import {
   JobSigner,
   PgBossJobQueue,
   createPlatformService,
+  createRateCardsService,
   createTenancyService,
   resolveTenantContext,
   type PlatformActor,
@@ -132,6 +133,19 @@ describe('platform console', () => {
         twoFactorEnabled: false,
       },
     ]);
+  });
+
+  it('lists rate cards with the number of markets each one prices', async () => {
+    const actor = await platformActor();
+    const rateCards = createRateCardsService({ platformDb: dbs.platform, clock: systemClock });
+    const { id } = await rateCards.createRateCard(actor, {
+      currency: 'XTS',
+      effectiveFrom: '2031-01-01T00:00',
+      sourceUrl: 'https://example.test/rate-card',
+      csv: 'market,calling_codes,marketing,utility\nIndia,91,0.78,0.12\nIndonesia,62,0.41,0.2',
+    });
+    const listed = await rateCards.listRateCards(actor);
+    expect(listed.find((c) => c.id === id)).toMatchObject({ currency: 'XTS', markets: 2 });
   });
 
   it('records the end of support access in the company audit log', async () => {

@@ -76,3 +76,4 @@ export * from './growth/service';
 export * from './growth/sources';
 export * from './growth/widget-script';
 export * from './flows';
+export * from './commerce';

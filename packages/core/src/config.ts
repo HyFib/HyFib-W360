@@ -248,9 +248,11 @@ export interface RazorpayConfig {
 
 export const RAZORPAY_API_ORIGIN = 'https://api.razorpay.com';
 
-export function razorpayConfigFrom(config: BaseConfig): RazorpayConfig | null {
-  const { RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET, RAZORPAY_WEBHOOK_SECRET } = config;
-  if (!RAZORPAY_KEY_ID || !RAZORPAY_KEY_SECRET || !RAZORPAY_WEBHOOK_SECRET) return null;
+/**
+ * Razorpay's API origin: the official one, or a test stand-in only with APP_ENV=local|test. Used for
+ * HyFib's own account and for companies' accounts (Payment Links for their orders).
+ */
+export function razorpayApiBaseUrl(config: BaseConfig): string {
   const apiBaseUrl = (config.RAZORPAY_API_BASE_URL ?? RAZORPAY_API_ORIGIN).replace(/\/$/, '');
   if (
     apiBaseUrl !== RAZORPAY_API_ORIGIN &&
@@ -261,6 +263,13 @@ export function razorpayConfigFrom(config: BaseConfig): RazorpayConfig | null {
       `RAZORPAY_API_BASE_URL must be ${RAZORPAY_API_ORIGIN} in ${config.APP_ENV}`,
     );
   }
+  return apiBaseUrl;
+}
+
+export function razorpayConfigFrom(config: BaseConfig): RazorpayConfig | null {
+  const { RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET, RAZORPAY_WEBHOOK_SECRET } = config;
+  if (!RAZORPAY_KEY_ID || !RAZORPAY_KEY_SECRET || !RAZORPAY_WEBHOOK_SECRET) return null;
+  const apiBaseUrl = razorpayApiBaseUrl(config);
   const mode = RAZORPAY_KEY_ID.startsWith('rzp_live_') ? 'live' : 'test';
   if (mode === 'live' && config.APP_ENV !== 'production') {
     throw new ConfigError('Razorpay live keys are allowed only with APP_ENV=production');
