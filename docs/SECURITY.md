@@ -266,7 +266,8 @@ Phase 4 rules (Commerce, P4-06a):
 - Money: HyFib records a payment only when the Payment Link fetched from Razorpay with the
   company's keys reports the whole amount paid; browsers, chats and webhook bodies never change an
   order's payment status. Links are INR only, for the order's own subtotal (computed from the
-  webhook's prices in minor units), and nothing is posted to HyFib's ledger.
+  webhook's prices in minor units, and never for a cart with an item HyFib could not read), at most
+  ₹50 crore, and nothing is posted to HyFib's ledger.
 - The merchant webhook (`/api/webhooks/razorpay-links/<address id>`) is unauthenticated except for
   the company's signature over the raw body; the address id (80 random bits) only names the
   company. Unsigned or wrongly signed deliveries get 400 and a rate-limited security event; a

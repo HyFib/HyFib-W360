@@ -17,7 +17,12 @@ export type CallBehaviour =
   /** The request is processed, then the connection drops before the response (unknown outcome). */
   | { kind: 'process_then_drop' }
   /** The connection drops before the request is processed. */
-  | { kind: 'drop' };
+  | { kind: 'drop' }
+  /**
+   * `run` completes first (a test changes the database while the call is in flight), then the next
+   * queued behaviour applies (ok when there is none).
+   */
+  | { kind: 'before'; run: () => Promise<void> };
 
 export interface StandInOrder {
   id: string;
@@ -110,6 +115,8 @@ export interface RazorpayStandInState {
   /** Companies' own accounts (key id → secret), used for Payment Links. */
   merchants: Map<string, string>;
   paymentLinks: Map<string, StandInPaymentLink>;
+  /** Answers Payment Link calls without `short_url` while set (a response HyFib cannot send). */
+  omitShortUrl: boolean;
   /** Behaviours consumed by the next calls of each kind (default: ok). */
   queues: {
     createOrder: CallBehaviour[];
@@ -225,6 +232,7 @@ export async function startRazorpayStandIn(options: {
     disputes: new Map(),
     merchants: new Map(),
     paymentLinks: new Map(),
+    omitShortUrl: false,
     queues: {
       createOrder: [],
       recurring: [],
@@ -309,7 +317,7 @@ export async function startRazorpayStandIn(options: {
       currency: l.currency,
       description: l.description,
       status: l.status,
-      short_url: l.shortUrl,
+      short_url: state.omitShortUrl ? null : l.shortUrl,
       expire_by: l.expireBy ?? 0,
       accept_partial: false,
       notify: l.notify,
@@ -333,7 +341,11 @@ export async function startRazorpayStandIn(options: {
       queue: CallBehaviour[],
       process: () => { status: number; body: unknown },
     ) => {
-      const behaviour = queue.shift() ?? { kind: 'ok' };
+      let behaviour = queue.shift() ?? { kind: 'ok' };
+      while (behaviour.kind === 'before') {
+        await behaviour.run();
+        behaviour = queue.shift() ?? { kind: 'ok' };
+      }
       if (behaviour.kind === 'drop') {
         req.socket.destroy();
         return;
@@ -534,7 +546,11 @@ export async function startRazorpayStandIn(options: {
         queue: CallBehaviour[],
         process: () => { status: number; body: unknown },
       ): Promise<void> => {
-        const behaviour = queue.shift() ?? { kind: 'ok' };
+        let behaviour = queue.shift() ?? { kind: 'ok' };
+        while (behaviour.kind === 'before') {
+          await behaviour.run();
+          behaviour = queue.shift() ?? { kind: 'ok' };
+        }
         if (behaviour.kind === 'drop') {
           req.socket.destroy();
           return;

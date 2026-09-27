@@ -79,9 +79,11 @@ export const commerceOrders = appSchema.table('commerce_orders', {
   metaCatalogId: text('meta_catalog_id').notNull(),
   /** Null when the items disagree on currency. */
   currency: text('currency'),
-  /** Minor units; null when a price could not be read or currencies differ. */
+  /** Minor units; null when a price or item could not be read or currencies differ. */
   subtotalMinor: money('subtotal_minor'),
   itemCount: integer('item_count').notNull(),
+  /** Cart items that could not be read (or were beyond HyFib's limit). */
+  droppedItems: integer('dropped_items').notNull().default(0),
   customerNote: text('customer_note'),
   status: text('status', { enum: ORDER_STATUSES }).notNull().default('received'),
   statusChangedAt: tz('status_changed_at').notNull().defaultNow(),

@@ -45,6 +45,7 @@ afterAll(async () => {
 // A test that stops early must not leave Meta refusing catalog reads for the next one.
 afterEach(() => {
   if (fx) fx.standIn.state.catalogError = null;
+  if (rzp) rzp.state.omitShortUrl = false;
 });
 
 const APP_BASE = 'https://app.example.test';
@@ -612,6 +613,67 @@ describe('orders', () => {
       'commerce.order_status_changed',
       'commerce.order_status_changed',
     ]);
+
+    // A cart with an item HyFib could not read has no total, so it is never charged short.
+    const kiran = waId();
+    await fx.deliver(
+      orderMessage(c, kiran, '5550004', [
+        { retailerId: 'sku-1', quantity: 1, price: 10 },
+        { retailerId: '', quantity: 1, price: 500 },
+      ]),
+    );
+    const partial = await orderOf((await conversationOf(c, kiran)).id);
+    expect(partial).toMatchObject({ dropped_items: 1, subtotal_minor: null, item_count: 1 });
+    await expectAppError(
+      svc.requestPayment(agent, { id: partial.id, expectedVersion: partial.version as number }),
+      'precondition_failed',
+      /could not read every item/,
+    );
+    expect((await svc.order(agent, partial.id as string)).payment).toMatchObject({
+      payable: false,
+      why: expect.stringMatching(/could not read every item/),
+    });
+    // Totals above HyFib's cap on one Payment Link are refused before anything is written.
+    const tara = waId();
+    await fx.deliver(
+      orderMessage(c, tara, '5550004', [{ retailerId: 'sku-2', quantity: 1, price: 600_000_000 }]),
+    );
+    const large = await orderOf((await conversationOf(c, tara)).id);
+    expect(large.subtotal_minor).toBe('60000000000');
+    await expectAppError(
+      svc.requestPayment(agent, { id: large.id, expectedVersion: large.version as number }),
+      'precondition_failed',
+      /at most ₹50,00,00,000/,
+    );
+    expect((await svc.order(agent, large.id as string)).payment.why).toMatch(/at most/);
+  });
+
+  it('pages through orders received in the same second without skipping any', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    await syncedCatalog(c, owner, '5550006', 2);
+    const buyer = waId();
+    for (let i = 0; i < 53; i += 1) {
+      await fx.deliver(
+        orderMessage(c, buyer, '5550006', [{ retailerId: 'sku-1', quantity: 1, price: 10 }]),
+      );
+    }
+    // Meta's timestamps have second precision: many orders can share one.
+    await fx.query(
+      `UPDATE app.commerce_orders SET received_at = '2026-09-01T10:00:00Z' WHERE tenant_id = $1`,
+      [c.tenant.id],
+    );
+    const svc = service();
+    const first = await svc.orders(owner);
+    expect(first.orders).toHaveLength(50);
+    expect(first.older).not.toBeNull();
+    const second = await svc.orders(owner, { before: first.older as string });
+    expect(second.orders).toHaveLength(3);
+    expect(second.older).toBeNull();
+    const ids = [...first.orders, ...second.orders].map((o) => o.id);
+    expect(new Set(ids).size).toBe(53);
+    // A cursor that is not one of ours is ignored rather than trusted.
+    expect((await svc.orders(owner, { before: 'not-a-cursor' })).orders).toHaveLength(50);
   });
 });
 
@@ -912,6 +974,103 @@ describe('payment links', () => {
     );
     expect(audit.map((a) => a.action)).toContain('commerce.payment_account_saved');
     expect(audit.map((a) => a.action)).toContain('commerce.payment_requested');
+  });
+
+  it('keeps each key check with the keys it used, and explains a link without an address', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    await syncedCatalog(c, owner, '5550007', 2);
+    const svc = service();
+    const [first, second, third] = [
+      'rzp_test_RACEKEY00001',
+      'rzp_test_RACEKEY00002',
+      'rzp_test_RACEKEY00003',
+    ];
+    rzp.addMerchant(first!, 'race-secret-1');
+    rzp.addMerchant(third!, 'race-secret-3');
+    await svc.savePaymentAccount(owner, {
+      keyId: first!,
+      keySecret: 'race-secret-1',
+      webhookSecret: 'race-hook-1',
+    });
+    const [row] = await fx.query<{ id: string }>(
+      `SELECT id FROM app.commerce_payment_accounts WHERE tenant_id = $1`,
+      [c.tenant.id],
+    );
+    // The keys are replaced while the first check is in flight: its (good) answer is not applied
+    // to the new, unregistered keys, which get their own check.
+    rzp.state.queues.paymentLinks.push({
+      kind: 'before',
+      run: async () => {
+        await svc.savePaymentAccount(owner, {
+          keyId: second!,
+          keySecret: 'not-registered',
+          webhookSecret: 'race-hook-2',
+        });
+      },
+    });
+    expect(await processPaymentAccountCheck(workerDeps(), scopeOf(c), row!.id)).toBe('done');
+    expect((await svc.paymentAccount(owner)).account).toMatchObject({
+      keyId: second,
+      status: 'checking',
+    });
+    expect(await processPaymentAccountCheck(workerDeps(), scopeOf(c), row!.id)).toBe('done');
+    expect((await svc.paymentAccount(owner)).account).toMatchObject({ status: 'failed' });
+
+    // Working keys, then a link request whose keys are replaced while Razorpay rejects the old ones:
+    // the rejection fails that link but does not mark the new keys failed.
+    await svc.savePaymentAccount(owner, {
+      keyId: third!,
+      keySecret: 'race-secret-3',
+      webhookSecret: 'race-hook-3',
+    });
+    expect(await processPaymentAccountCheck(workerDeps(), scopeOf(c), row!.id)).toBe('done');
+    const buyer = waId();
+    await fx.deliver(
+      orderMessage(c, buyer, '5550007', [{ retailerId: 'sku-1', quantity: 1, price: 150 }]),
+    );
+    const conv = await conversationOf(c, buyer);
+    let order = await orderOf(conv.id);
+    await svc.requestPayment(agent, { id: order.id, expectedVersion: order.version as number });
+    const rejected = await linkRow(order.id as string);
+    rzp.state.queues.createPaymentLink.push(
+      {
+        kind: 'before',
+        run: async () => {
+          await svc.savePaymentAccount(owner, {
+            keyId: third!,
+            keySecret: 'race-secret-3',
+            webhookSecret: 'race-hook-4',
+          });
+        },
+      },
+      { kind: 'error', status: 401, description: 'The api key provided is invalid' },
+    );
+    expect(await processPaymentLink(workerDeps(), scopeOf(c), rejected.id as string)).toBe('done');
+    expect(await linkRow(order.id as string)).toMatchObject({ status: 'failed' });
+    expect((await svc.paymentAccount(owner)).account).toMatchObject({ status: 'checking' });
+    expect(await processPaymentAccountCheck(workerDeps(), scopeOf(c), row!.id)).toBe('done');
+    expect((await svc.paymentAccount(owner)).account).toMatchObject({ status: 'verified' });
+
+    // Razorpay answers without a usable address: the link is kept with the reason, not sent.
+    order = await orderOf(conv.id);
+    await svc.requestPayment(agent, { id: order.id, expectedVersion: order.version as number });
+    const pending = await linkRow(order.id as string);
+    rzp.state.omitShortUrl = true;
+    expect(await processPaymentLink(workerDeps(), scopeOf(c), pending.id as string)).toBe('done');
+    expect(await linkRow(order.id as string)).toMatchObject({
+      status: 'created',
+      short_url: null,
+      message_id: null,
+      send_error: expect.stringMatching(/no https address/),
+    });
+    const detail = await svc.order(agent, order.id as string);
+    expect(detail.links[0]).toMatchObject({
+      shortUrl: null,
+      sendError: expect.stringMatching(/no https address/),
+    });
+    expect(detail.payment.canCancelLink).toBe(true);
   });
 
   it('erasure clears order notes and cancels open links; companies stay apart', async () => {

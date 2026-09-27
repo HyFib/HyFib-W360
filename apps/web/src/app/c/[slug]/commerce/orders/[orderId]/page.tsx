@@ -126,7 +126,16 @@ export default async function OrderPage({
                 </TR>
               </TBody>
             </Table>
-            {order.subtotalMinor === null ? (
+            {order.droppedItems > 0 ? (
+              <div className="px-6">
+                <Alert tone="warning">
+                  HyFib could not read {order.droppedItems} item
+                  {order.droppedItems === 1 ? '' : 's'} of this cart, so the order has no total and
+                  payment cannot be requested. The items above are the ones it could read; ask the
+                  customer to send the cart again.
+                </Alert>
+              </div>
+            ) : order.subtotalMinor === null ? (
               <p className="px-6 text-sm text-muted-foreground">
                 The total is not known: a price was missing, had more decimals than its currency, or
                 the items were in different currencies.

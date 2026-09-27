@@ -477,7 +477,8 @@ catalog are read (the page says so).
 
 **An order shows "Product not in your catalog copy" or no total.** Names come from HyFib's copy of
 the catalog: read it again. The total is unknown when a price in the webhook had more decimals than
-its currency or the items were in different currencies; payment cannot be requested for such an
+its currency, the items were in different currencies, or HyFib could not read an item of the cart
+(the order page says how many; ask the customer to send the cart again); payment cannot be requested for such an
 order (the amounts WhatsApp sent are shown per item).
 
 **"Your Razorpay account has not been checked successfully".** Commerce → Payments shows the check.
@@ -499,6 +500,9 @@ notifications do not arrive, the web log shows `payment link webhook` lines with
 saves the same secret in both), `unknown_account` (the address is wrong), `no_open_link` (the link
 is already settled) or `duplicate` (a redelivery). Payments are still recorded by the scheduled
 checks.
+
+**"Razorpay returned no https address".** The link exists at Razorpay but HyFib had nothing to
+send: cancel it on the order page and request payment again.
 
 **"The link was created but not sent".** The customer service window had closed, the number was not
 active or the contact has no phone number: the order page shows the link's address to copy and send

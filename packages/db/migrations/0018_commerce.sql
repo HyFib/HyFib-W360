@@ -96,6 +96,8 @@ CREATE TABLE app.commerce_orders (
   currency text CHECK (currency ~ '^[A-Z]{3}$'),
   subtotal_minor bigint CHECK (subtotal_minor >= 0),
   item_count integer NOT NULL CHECK (item_count BETWEEN 1 AND 100),
+  -- Cart items HyFib could not read or kept beyond its limit; an order with any has no total.
+  dropped_items integer NOT NULL DEFAULT 0 CHECK (dropped_items >= 0),
   customer_note text CHECK (char_length(customer_note) <= 1000),
   status text NOT NULL DEFAULT 'received' CHECK (status IN
     ('received', 'confirmed', 'awaiting_payment', 'paid', 'fulfilled', 'cancelled')),
@@ -108,7 +110,7 @@ CREATE TABLE app.commerce_orders (
   CONSTRAINT commerce_orders_tenant_id_id_uq UNIQUE (tenant_id, id),
   CONSTRAINT commerce_orders_message_uq UNIQUE (tenant_id, message_id),
   CONSTRAINT commerce_orders_reference_uq UNIQUE (tenant_id, reference),
-  CONSTRAINT commerce_orders_total CHECK (subtotal_minor IS NULL OR currency IS NOT NULL),
+  CONSTRAINT commerce_orders_total CHECK (subtotal_minor IS NULL OR (currency IS NOT NULL AND dropped_items = 0)),
   CONSTRAINT commerce_orders_paid CHECK (paid_at IS NULL OR status IN ('paid', 'fulfilled', 'cancelled')),
   CONSTRAINT commerce_orders_conversation_fk FOREIGN KEY (tenant_id, conversation_id)
     REFERENCES app.conversations (tenant_id, id),

@@ -360,6 +360,7 @@ async function merchantClient(deps: CommerceWorkerDeps, tx: Tx, tenantId: string
       keyId: commercePaymentAccounts.keyId,
       keySecret: commercePaymentAccounts.keySecretCiphertext,
       status: commercePaymentAccounts.status,
+      version: commercePaymentAccounts.version,
     })
     .from(commercePaymentAccounts)
     .where(eq(commercePaymentAccounts.tenantId, tenantId));
@@ -370,6 +371,7 @@ async function merchantClient(deps: CommerceWorkerDeps, tx: Tx, tenantId: string
   );
   return {
     accountId: account.id,
+    version: account.version,
     client: new RazorpayClient({ baseUrl: deps.razorpayBaseUrl, keyId: account.keyId, keySecret }),
   };
 }
@@ -463,7 +465,7 @@ export async function processPaymentLink(
     let remote: RazorpayPaymentLink | null = null;
     if (link.attempts > 1) {
       const found = await client.findPaymentLinksByReference(link.reference);
-      if (!found.ok) return failure(deps, scope, link, found, retryLater);
+      if (!found.ok) return failure(deps, scope, link, found, retryLater, merchant.version);
       remote = found.data[0] ?? null;
     }
     if (!remote && link.cancelRequestedAt) {
@@ -485,12 +487,12 @@ export async function processPaymentLink(
         /reference id already attempted/i.test(created.description)
       ) {
         const found = await client.findPaymentLinksByReference(link.reference);
-        if (!found.ok) return failure(deps, scope, link, found, retryLater);
+        if (!found.ok) return failure(deps, scope, link, found, retryLater, merchant.version);
         remote = found.data[0] ?? null;
         if (!remote)
           return retryLater('Razorpay reports the link exists but did not return it yet.');
       } else {
-        return failure(deps, scope, link, created, retryLater);
+        return failure(deps, scope, link, created, retryLater, merchant.version);
       }
     }
     if (remote.amount !== link.amountMinor || remote.currency !== link.currency) {
@@ -505,7 +507,7 @@ export async function processPaymentLink(
       const cancelled = await client.cancelPaymentLink(remote.id);
       if (cancelled.ok) remote = cancelled.data;
       else if (cancelled.kind !== 'permanent')
-        return failure(deps, scope, link, cancelled, retryLater);
+        return failure(deps, scope, link, cancelled, retryLater, merchant.version);
     }
     await adoptRemote(deps, scope, link, remote, { send: !link.cancelRequestedAt });
     return 'done';
@@ -522,7 +524,7 @@ export async function processPaymentLink(
   } else {
     remote = await client.fetchPaymentLink(link.providerLinkId);
   }
-  if (!remote.ok) return failure(deps, scope, link, remote, retryLater);
+  if (!remote.ok) return failure(deps, scope, link, remote, retryLater, merchant.version);
   if (remote.data.id !== link.providerLinkId || remote.data.amount !== link.amountMinor) {
     return retryLater('Razorpay returned a different link or amount; it was not applied.');
   }
@@ -536,6 +538,8 @@ async function failure(
   link: LinkRow,
   result: Extract<RazorpayResult<unknown>, { ok: false }>,
   retryLater: (error: string) => Promise<'retry'>,
+  /** The version of the keys the request used: keys saved since then are not marked failed. */
+  accountVersion: number,
 ): Promise<CommerceJobOutcome> {
   if (result.kind === 'retryable' || result.kind === 'unknown') {
     return retryLater(`Razorpay could not be reached (${result.description}).`);
@@ -549,7 +553,12 @@ async function failure(
       tx
         .update(commercePaymentAccounts)
         .set({ status: 'failed', statusError: message, checkedAt: deps.clock.now() })
-        .where(eq(commercePaymentAccounts.tenantId, scope.tenantId)),
+        .where(
+          and(
+            eq(commercePaymentAccounts.tenantId, scope.tenantId),
+            eq(commercePaymentAccounts.version, accountVersion),
+          ),
+        ),
     );
   }
   if (link.status === 'creating') {
@@ -655,6 +664,7 @@ async function adoptRemote(
   const open = status === 'created' || status === 'partially_paid' || (status === 'paid' && !paid);
   // The address to send in the chat, when a message may be queued.
   const sendUrl = options.send && open ? remote.shortUrl : null;
+  const noAddress = options.send && open && !remote.shortUrl;
   await deps.db.run(scope, async (tx) => {
     const conversation = sendUrl
       ? await lockConversation(tx, scope.tenantId, link.conversationId)
@@ -673,7 +683,7 @@ async function adoptRemote(
     // A link that already ended (paid, expired, cancelled, failed) never changes again.
     if (!current || !OPEN_PAYMENT_LINK_STATUSES.includes(current.status)) return;
     let messageId = current.messageId;
-    let sendError: string | undefined;
+    let sendError: string | undefined = noAddress && !messageId ? LINK_WITHOUT_ADDRESS : undefined;
     if (sendUrl && !messageId) {
       const sent = conversation
         ? await queueLinkMessage(tx, deps, scope.tenantId, link, conversation, sendUrl)
@@ -727,6 +737,8 @@ async function adoptRemote(
 
 const LINK_NOT_SENT = (reason: string) =>
   `The link was created but not sent: ${reason} Copy it from the order page.`;
+const LINK_WITHOUT_ADDRESS =
+  'The link was created, but Razorpay returned no https address for it, so it was not sent. Cancel it and request payment again.';
 
 async function lockConversation(tx: Tx, tenantId: string, conversationId: string) {
   const [conversation] = await tx
@@ -882,6 +894,8 @@ export async function processPaymentAccountCheck(
           eq(commercePaymentAccounts.tenantId, scope.tenantId),
           eq(commercePaymentAccounts.id, accountId),
           eq(commercePaymentAccounts.status, 'checking'),
+          // Keys saved again while this check ran are checked by their own job.
+          eq(commercePaymentAccounts.version, merchant.version),
         ),
       ),
   );

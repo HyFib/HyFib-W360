@@ -27,6 +27,8 @@ export const COMMERCE_LIMITS = {
   paymentLinkDays: 7,
   /** Razorpay's smallest amount for INR (one rupee, in paise). */
   minPaymentMinor: 100,
+  /** HyFib's own cap on one Payment Link (₹50 crore, in paise; the database enforces it too). */
+  maxPaymentMinor: 50_000_000_000,
 } as const;
 
 /** Order references members and customers can quote: 8 characters, no I, O, 0 or 1. */
@@ -195,6 +197,10 @@ export interface ParsedOrder {
   /** Items beyond HyFib's limit, or unreadable, that were left out. */
   dropped: number;
   currency: string | null;
+  /**
+   * Null unless every item was read with a price in one currency: a cart with items left out never
+   * has a total, so it can never be charged for less than the customer ordered.
+   */
   subtotalMinor: number | null;
 }
 
@@ -250,7 +256,7 @@ export function parseOrder(order: unknown): ParsedOrder | null {
   if (items.length === 0) return null;
   const currencies = new Set(items.map((i) => i.currency));
   const currency = currencies.size === 1 ? (items[0]?.currency ?? null) : null;
-  let subtotal: bigint | null = currency ? 0n : null;
+  let subtotal: bigint | null = currency && dropped === 0 ? 0n : null;
   for (const item of items) {
     if (subtotal === null || item.unitPriceMinor === null) {
       subtotal = null;

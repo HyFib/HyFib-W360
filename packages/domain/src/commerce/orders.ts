@@ -81,6 +81,7 @@ export async function recordOrder(
         currency: order.currency,
         subtotalMinor: order.subtotalMinor,
         itemCount: order.items.length,
+        droppedItems: order.dropped,
         customerNote: order.note,
         receivedAt: input.receivedAt,
       })

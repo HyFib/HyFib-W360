@@ -232,6 +232,11 @@ function Body({ type, content }: { type: string; content: unknown }) {
             {units} item{units === 1 ? '' : 's'}
             {subtotal ? ` · ${subtotal}` : ''}
           </p>
+          {typeof order.dropped === 'number' && order.dropped > 0 ? (
+            <p className="text-xs opacity-80">
+              {order.dropped} item{order.dropped === 1 ? '' : 's'} could not be read
+            </p>
+          ) : null}
           {text(order.note) ? (
             <p className="whitespace-pre-wrap break-words">{text(order.note)}</p>
           ) : null}

@@ -84,6 +84,8 @@ describe('parseOrder', () => {
     });
     expect(order?.items.map((i) => i.retailerId)).toEqual(['sku-1']);
     expect(order?.dropped).toBe(5);
+    // The readable items alone are not the cart: no total, so it cannot be charged short.
+    expect(order).toMatchObject({ currency: 'INR', subtotalMinor: null });
   });
 
   it('keeps at most the item limit', () => {
@@ -93,7 +95,9 @@ describe('parseOrder', () => {
     const order = parseOrder({ catalog_id: '1', product_items: many });
     expect(order?.items).toHaveLength(COMMERCE_LIMITS.orderItems);
     expect(order?.dropped).toBe(3);
-    expect(order?.subtotalMinor).toBe(COMMERCE_LIMITS.orderItems * 100);
+    expect(order?.subtotalMinor).toBeNull();
+    const full = parseOrder({ catalog_id: '1', product_items: many.slice(0, 100) });
+    expect(full).toMatchObject({ dropped: 0, subtotalMinor: COMMERCE_LIMITS.orderItems * 100 });
   });
 
   it('has no subtotal when a price is unreadable or currencies differ', () => {

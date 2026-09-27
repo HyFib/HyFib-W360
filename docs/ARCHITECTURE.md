@@ -553,7 +553,7 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   product count, whether the read was truncated, disconnected); `commerce_products` (retailer id,
   Meta id, name, description, price text, currency, availability, review status, removed);
   `commerce_orders` (reference, conversation, contact, message, Meta catalog id, currency, subtotal
-  in minor units, item count, customer note, status, version) and `commerce_order_items` (retailer
+  in minor units, item count, items that could not be read, customer note, status, version) and `commerce_order_items` (retailer
   id, name when matched, quantity, unit price in minor units); `commerce_payment_accounts` (one per
   company: key id, key and webhook secrets as keyring ciphertexts, webhook address id, check
   status); `commerce_payment_links` (written ahead: order, amount, single-use reference, Razorpay id

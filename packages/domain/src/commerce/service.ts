@@ -34,6 +34,7 @@ import {
   type Tx,
 } from '@w360/db';
 import { assertCan, can, type TenantContext } from '../authz/context';
+import { formatMinor } from '../crm/money';
 import { recordAudit, type RequestMeta } from '../audit';
 import { endRunForHuman } from '../automations/runs';
 import type { JobSigner } from '../jobs/envelope';
@@ -96,6 +97,13 @@ const accountSchema = z.object({
     .max(200),
 });
 
+const DROPPED_ITEMS_MESSAGE =
+  'HyFib could not read every item of this cart, so it has no total to ask for.';
+const PAYMENT_CAP_MESSAGE = `HyFib asks for at most ${formatMinor(
+  COMMERCE_LIMITS.maxPaymentMinor,
+  'INR',
+)} in one Payment Link.`;
+
 const stale = () =>
   new AppError(
     'conflict',
@@ -104,6 +112,17 @@ const stale = () =>
 
 const invalid = (path: string, message: string) =>
   new AppError('validation_failed', message, { issues: [{ path, message }] });
+
+/**
+ * The order list's paging cursor: the last order's time and id (orders are listed by both, newest
+ * first), so orders received in the same second are never skipped.
+ */
+function parseOrderCursor(cursor: string | undefined): { at: Date; id: string } | null {
+  if (!cursor) return null;
+  const [at, id] = cursor.split('~');
+  if (!at || !id || Number.isNaN(Date.parse(at)) || !z.uuid().safeParse(id).success) return null;
+  return { at: new Date(at), id };
+}
 
 export interface OrderListItem {
   id: string;
@@ -674,10 +693,7 @@ export function createCommerceService(deps: CommerceDeps) {
         options.conversationId && z.uuid().safeParse(options.conversationId).success
           ? options.conversationId
           : null;
-      const before =
-        options.before && !Number.isNaN(Date.parse(options.before))
-          ? new Date(options.before)
-          : null;
+      const before = parseOrderCursor(options.before);
       const rows = await db.run(
         ctx.scope,
         (tx) =>
@@ -715,7 +731,15 @@ export function createCommerceService(deps: CommerceDeps) {
                 orderVisibility(ctx),
                 status ? eq(commerceOrders.status, status) : undefined,
                 conversationId ? eq(commerceOrders.conversationId, conversationId) : undefined,
-                before ? lt(commerceOrders.receivedAt, before) : undefined,
+                before
+                  ? or(
+                      lt(commerceOrders.receivedAt, before.at),
+                      and(
+                        eq(commerceOrders.receivedAt, before.at),
+                        lt(commerceOrders.id, before.id),
+                      ),
+                    )
+                  : undefined,
               ),
             )
             .orderBy(desc(commerceOrders.receivedAt), desc(commerceOrders.id))
@@ -730,7 +754,7 @@ export function createCommerceService(deps: CommerceDeps) {
           contactName: contactErased ? 'Erased contact' : r.contactName,
           receivedAt: r.receivedAt.toISOString(),
         })),
-        older: rows.length > 50 && last ? last.receivedAt.toISOString() : null,
+        older: rows.length > 50 && last ? `${last.receivedAt.toISOString()}~${last.id}` : null,
       };
     },
 
@@ -823,7 +847,8 @@ export function createCommerceService(deps: CommerceDeps) {
             !openLink &&
             order.currency === 'INR' &&
             order.subtotalMinor !== null &&
-            order.subtotalMinor >= COMMERCE_LIMITS.minPaymentMinor;
+            order.subtotalMinor >= COMMERCE_LIMITS.minPaymentMinor &&
+            order.subtotalMinor <= COMMERCE_LIMITS.maxPaymentMinor;
           return {
             order: {
               id: order.id,
@@ -832,6 +857,7 @@ export function createCommerceService(deps: CommerceDeps) {
               currency: order.currency,
               subtotalMinor: order.subtotalMinor,
               itemCount: order.itemCount,
+              droppedItems: order.droppedItems,
               customerNote: order.customerNote,
               receivedAt: order.receivedAt.toISOString(),
               statusChangedAt: order.statusChangedAt.toISOString(),
@@ -856,17 +882,21 @@ export function createCommerceService(deps: CommerceDeps) {
                 : null,
               payable: payable && account?.status === 'verified',
               why:
-                order.currency !== 'INR'
-                  ? 'Payment Links are for amounts in Indian rupees.'
-                  : order.subtotalMinor === null
-                    ? 'The order total could not be worked out from the prices WhatsApp sent.'
-                    : order.subtotalMinor < COMMERCE_LIMITS.minPaymentMinor
-                      ? 'Razorpay needs at least ₹1.'
-                      : !account
-                        ? 'Add your Razorpay account in Commerce → Payments first.'
-                        : account.status !== 'verified'
-                          ? 'Your Razorpay account has not been checked successfully.'
-                          : null,
+                order.droppedItems > 0
+                  ? DROPPED_ITEMS_MESSAGE
+                  : order.currency !== 'INR'
+                    ? 'Payment Links are for amounts in Indian rupees.'
+                    : order.subtotalMinor === null
+                      ? 'The order total could not be worked out from the prices WhatsApp sent.'
+                      : order.subtotalMinor < COMMERCE_LIMITS.minPaymentMinor
+                        ? 'Razorpay needs at least ₹1.'
+                        : order.subtotalMinor > COMMERCE_LIMITS.maxPaymentMinor
+                          ? PAYMENT_CAP_MESSAGE
+                          : !account
+                            ? 'Add your Razorpay account in Commerce → Payments first.'
+                            : account.status !== 'verified'
+                              ? 'Your Razorpay account has not been checked successfully.'
+                              : null,
               canCancelLink: canAct && Boolean(openLink) && !openLink?.cancelRequestedAt,
             },
           };
@@ -931,6 +961,9 @@ export function createCommerceService(deps: CommerceDeps) {
             'Payment can be requested only for received or confirmed orders.',
           );
         }
+        if (order.droppedItems > 0) {
+          throw new AppError('precondition_failed', DROPPED_ITEMS_MESSAGE);
+        }
         if (order.currency !== 'INR' || order.subtotalMinor === null) {
           throw new AppError(
             'precondition_failed',
@@ -941,6 +974,9 @@ export function createCommerceService(deps: CommerceDeps) {
         }
         if (order.subtotalMinor < COMMERCE_LIMITS.minPaymentMinor) {
           throw new AppError('precondition_failed', 'Razorpay needs at least ₹1.');
+        }
+        if (order.subtotalMinor > COMMERCE_LIMITS.maxPaymentMinor) {
+          throw new AppError('precondition_failed', PAYMENT_CAP_MESSAGE);
         }
         const [account] = await tx
           .select({ status: commercePaymentAccounts.status })

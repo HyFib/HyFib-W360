@@ -602,8 +602,9 @@ product. They go through the normal send pipeline (send intent, message row, `me
 Orders come from the webhook (`type` = `order`, M-170). The prices there are JSON numbers in major
 units; each is converted to minor units exactly through its shortest decimal text, and refused
 (null) when it has more decimals than its currency, is negative or uses an exponent. The order's
-subtotal is kept only when every item has a readable price in one currency; otherwise it is unknown
-and payment cannot be requested. Items are matched to HyFib's copy of the catalog by retailer id for
+subtotal is kept only when every item of the cart was read, with a readable price, in one currency;
+otherwise it is unknown and payment cannot be requested (a cart with an item HyFib could not read
+is never charged for the items it could). Items are matched to HyFib's copy of the catalog by retailer id for
 their names; unknown products are kept by retailer id. An order has an 8-character reference and is
 visible only to members who can see its conversation. Members move orders along: received →
 confirmed or cancelled, confirmed → fulfilled or cancelled, paid → fulfilled. "Waiting for payment"
@@ -614,17 +615,21 @@ nothing is posted to HyFib's ledger. The company saves its key id, key secret an
 (`commerce.manage`); the secrets are keyring ciphertexts bound to the account row
 (`commerce-payments:<company>:<account>:<key|webhook>`), are never shown again, and live keys are
 accepted only in production. The worker checks the keys by listing links for a reference that
-cannot exist (R-107): an answer proves the keys, a 401 marks them failed.
+cannot exist (R-107): an answer proves the keys, a 401 marks them failed. A check's result, and a
+rejection seen while creating a link, apply only to the version of the keys they used, so keys saved
+again meanwhile are never marked by an older answer.
 
 Requesting payment (`inbox.reply`) writes a link ahead in the member's transaction: the order's
 subtotal in rupees (at least ₹1; other currencies are refused), a single-use `reference_id`
-(`w360_` plus 20 random characters, R-106), 7 days to expire. One link can be open per order. The
+(`w360_` plus 20 random characters, R-106), 7 days to expire; HyFib's own cap on one link is ₹50
+crore. One link can be open per order. The
 `commerce.link` worker takes a two-minute lease on the row and creates the link once: after an
 attempt whose response was lost it first looks the link up by its reference, and if Razorpay
 answers that the reference was already used it adopts the link found (never a second create).
 Links ask for the whole amount (`accept_partial` false) and Razorpay's SMS, email and reminders are
 turned off, because HyFib sends the link in the chat, and only while the service window is open; if
-it cannot, the link is kept with the reason (`send_error`) for the member to copy it.
+it cannot, the link is kept with the reason (`send_error`) for the member to copy it, or, when
+Razorpay returned no https address, to cancel it and ask again.
 
 A payment is recorded only from the link as HyFib fetches it from Razorpay with the company's keys:
 never from a browser, a chat or a webhook body. The link is fetched every 15 minutes on its first
