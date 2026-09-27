@@ -421,11 +421,15 @@ Decision: every request to an address a company supplies goes through `packages/
 or 1024 and up, and no credentials in the address. It resolves the name once, refuses the request
 if any answer is private, loopback, link-local, carrier-grade NAT, multicast, reserved,
 documentation, cloud-metadata or an IPv6 form of those (IPv4-mapped, NAT64, 6to4, unique-local,
-site-local), and then connects to exactly the address it checked (a `lookup` hook pins it; the name
-only goes into SNI and Host), so DNS rebinding between check and connect is not possible. IP
+site-local), and then connects only to the addresses it checked, trying them in turn until one
+connects (a `lookup` hook pins them; the name only goes into SNI and Host), so DNS rebinding between
+check and connect is not possible and one unreachable address does not fail the call. IP
 literals are checked the same way, in every notation Node's URL parser accepts. Redirects are never
 followed, there is no connection pool shared between companies, request bodies are limited to 64
-KiB, responses to 256 KiB and the whole exchange to 10 seconds, and callers cannot set framing,
+KiB, responses to 256 KiB and the whole exchange, name resolution included, to 10 seconds. System
+lookups cannot be cancelled and run in the process's thread pool, so at most two are in progress
+per client; a request that cannot get a lookup slot before its deadline fails as `dns_failed`
+without being sent. Callers cannot set framing,
 routing or proxy headers or send line breaks in headers. Every refusal says whether the request may
 have reached the server (`EgressError.sent`), which the caller needs to decide between "failed" and
 "unknown". Loopback and plain http exist only for local test targets (`W360_EGRESS_ALLOW_LOOPBACK`),
@@ -446,9 +450,13 @@ call that may have been sent. A call still in flight at the run's deadline (the 
 server was slow) becomes `unknown` (`no_result`) and the run takes its failure branch: it is never
 retried, because the server may have acted on it; a call not started by then is cancelled. The
 runner locks the call when it reads it, so a result cannot arrive between "not finished" and
-settling it, and a result recorded first always wins. Values saved from a response are kept only
-while the run can still use them, are cleared with captured answers (retention, erasure) and are
-never logged; the stored request is erased once the call has an outcome.
+settling it, and a result recorded first always wins. A run that ends while a call is in flight
+(taken over, stopped, resolved, archived, opted out, erased) settles the call as unknown at once,
+because no runner is left to do it; the worker's later result is not kept. Values saved from a
+response are kept only while the run can still use them, are cleared with captured answers
+(retention, erasure) and are never logged; the stored request is erased once the call has an
+outcome. The call record keeps the host and the step's path as written (placeholders not filled
+in), so it never holds a customer's values in plain text.
 
 Secrets are company settings (`integrations.manage`, audited by name): stored encrypted, never
 returned to a browser, referenced by name in header values only, and each saved for one allowed
@@ -459,3 +467,110 @@ a secret, and it is percent-encoded unless it is printable ASCII (placeholders i
 URL-encoded, in the JSON body JSON-escaped). A server that echoes request headers back would still
 reveal a secret to automation editors; the settings page warns that only trusted domains should be
 allowed. Per run there are at most 20 calls (`budget_http`).
+
+## ADR-044 Growth tools count clicks, not visitors; sources keep only what identifies them (2026-09-27)
+
+Decision: a chat link is a short link on our origin, `/l/<slug>` (12 random base32 characters,
+unique across companies because the public route has no company context), that redirects to
+`https://wa.me/<number>?text=…` (research M-160). The redirect is built from the stored link only
+(the number's digits and the pre-filled message), so the route can never be pointed at another
+address. Following a link runs `ops.follow_chat_link` (SECURITY DEFINER), which adds one to the
+link's count for the company's current day and returns nothing for an archived link, a number
+that is not active or a company being deleted; a suspended company's links keep working, because
+the customer writes to the company and nothing is sent. Nothing about the visitor is stored: no
+address, user agent, referrer, cookie or time of the click; the redirect sends no referrer to
+WhatsApp. Counts therefore include repeated clicks and automated visits such as link previews, and
+the pages say so: removing them would need an identifier for the visitor, which we do not keep.
+QR codes hold the short link, so scans are counted and printed codes follow later edits.
+
+A conversation is attributed to a link when the customer's message carries the link's reference
+code ("(ref ABC234)", appended to the pre-filled message unless switched off), on the number the
+link opens; a code typed to another number does not count. The customer can edit the message, so
+link conversations are a lower bound, and the pages call them conversations that sent the code.
+Per-click codes (which would identify a click and so a visitor) and matching conversations to
+clicks by time were rejected. Messages from click-to-WhatsApp ads carry the ad in `referral`
+(M-130); ingestion keeps the ad's id, type, web address (http or https only) and headline, and no
+longer stores the raw object: the ad click id (`ctwa_clid`) identifies the visitor to Meta for
+conversion reporting, which HyFib does not do (W-072 needs explicit configuration and consent),
+and the image and video addresses and ad text add nothing to attribution. Each attributed inbound
+message gets one `conversation_sources` row (an ad wins over a code in the same message); rows are
+deleted when the contact is erased, and erasure also clears referral objects stored before this
+change. Starting a conversation from a link or an ad is not consent to marketing: consent is
+recorded as before.
+
+The website button is a script (`/widget/<id>.js`, 16 random characters) that draws one link to
+the company's short link from `ops.chat_widget_config` (nothing while the button is disabled or
+deleted, or while its link would not open). It sets no cookies, stores nothing in the visitor's
+browser, loads nothing else and sends nothing of its own, so it needs no cookie consent. It sets
+text with `textContent` and styles through the CSSOM in a shadow root, so neither the company's
+text nor the site's styles can inject markup, and it works on sites whose style policy forbids
+inline style elements. It is cacheable for five minutes (it holds no private data), so a change
+reaches visitors' browsers within five minutes; the short link itself stops at once. The page the
+visitor is on is not added to the message, unlike some products, because that would pass browsing
+data into the chat. Links and buttons are company data under `campaigns.read` and
+`campaigns.write` (created, edited, archived and deleted with an audit entry); at most 500 open
+links and 50 buttons per company.
+
+## ADR-045 WhatsApp Flows: HyFib keeps the draft, the worker talks to Meta, HyFib's endpoint decrypts and forwards (2026-09-27)
+
+Decision: companies write Flow JSON as text (no visual builder yet). HyFib checks the structure it
+relies on while the member types (at most 256 KiB, a `version`, an optional `data_api_version`,
+1–100 screens with unique ids, `SUCCESS` reserved, at most 50 components a screen, at least one
+terminal screen) and stores the JSON exactly as written, because Meta's validation errors cite
+lines and columns of the uploaded file (research M-162); Meta validates every component on upload,
+and publishing is refused while it reports problems. The answers a flow returns are the keys of its
+`complete` payloads; each can be saved as the contact's name, email or a custom field.
+
+Everything done at Meta is one operation at a time, written ahead on the flow row (`sync_op`,
+`sync_state`) in the member's transaction and performed by the `flow.sync` worker: create, upload,
+publish, deprecate, delete and refresh. The worker claims the operation (queued → running), calls
+Meta, and records the result only if the row still waits for the same operation; a flow waiting for
+Meta cannot be changed. Transient failures are retried by pg-boss (five attempts, 30–900 seconds
+apart); permanent ones are shown with Meta's message and a Try again button; the sweep re-signals
+operations waiting for more than two minutes and fails those older than 30 minutes. Creating a flow
+has no idempotency key at Meta (M-161), so the name at Meta carries a HyFib reference
+(`Name (w360 abcdefgh)`): before creating, the worker lists the account's flows and adopts one with
+its reference, so a lost create response never makes a second flow. Publishing, deprecating and
+deleting read the flow's status first and skip the call when Meta already shows the result;
+uploading the same JSON again replaces the asset with itself.
+
+Publishing is irreversible at Meta (M-163), so it needs `flows.publish` (owners and administrators),
+a confirmation, a draft whose current JSON Meta has without validation errors, and, for a flow that
+fetches data, an endpoint address and a valid key on every active number of the account. A
+published flow is changed by making a new draft from it (HyFib uploads the JSON itself rather than
+using Meta's `clone_flow_id`). Members who edit flows can send a draft (mode `draft`) in a chat to
+test it. Sending a form is a reply (`inbox.reply`) and only while the customer service window is
+open.
+
+Keys: one RSA-2048 key pair per WhatsApp account, generated by the worker; the private key is a
+keyring ciphertext bound to its row (`flow-key:<company>:<key>`) and never leaves the server. The
+public key is uploaded to each active number (M-164: one active key per number, an upload replaces
+it) and read back; a number is ready when Meta reports `VALID` for that same key. Our sources do not
+say whether one key may serve several numbers; the worker checks each number, and the release
+checklist verifies it on a real account. Replacing the key (`flows.publish`) keeps the previous one
+decrypting for 24 hours while WhatsApp clients pick up the new one, then retires it and deletes its
+private key.
+
+The data endpoint is HyFib's `/api/flows/endpoint/<public id>` (16 random base32 characters),
+registered as the flow's `endpoint_uri`. It checks Meta's signature over the raw body (432), finds
+the flow through `ops.flow_endpoint_target` (companies that are active or suspended), and continues
+in that company's scope: the signature proves the request comes from WhatsApp and the public id
+names the flow, a verified provider mapping. It decrypts with the current key, then the previous
+one (421 when neither works, so the client refreshes the key; M-100, M-101), answers health checks
+and error notifications itself (M-103), and then requires a flow token HyFib issued for this flow:
+32 random bytes per send, valid for 30 days and ended by erasure (427 with a message otherwise; 427
+too while the company is suspended). Everything else is forwarded as plain JSON (the request plus
+the flow and the contact the form was sent to) to the company's endpoint on an allowed domain
+through the egress guard, within seven seconds (Meta's own wait is not documented in our sources),
+with the company's secret as a bearer token only when the secret belongs to that host. A company
+427 with `error_msg` is passed on; any other failure is a 500 with a code in the log. Requests are
+forwarded at least once: WhatsApp may repeat them, so company endpoints must tolerate repeats.
+`flow_token_signature` (M-168, low confidence) is not used.
+
+A completed flow arrives as an inbound `nfm_reply` (M-166, medium confidence: third-party sources).
+Its answers are kept without the token on a response row (at most 48 KB) and applied to the contact
+answer by answer, each with an outcome (saved, not answered, not saved, skipped); a completion from
+anyone other than the contact the form was sent to is kept but not applied. Completing a flow is
+never consent, and completions do not start automations. Answers are shown only to members who can
+read contacts, logs carry codes and ids only, and contact erasure deletes the answers and ends the
+contact's tokens.

@@ -256,7 +256,9 @@ export async function endRun(tx: Tx, run: AutomationRun, input: EndRunInput): Pr
   if (input.status === 'taken_over' || input.status === 'stopped') {
     await cancelQueuedBotMessages(tx, run.tenantId, run.conversationId, input.now);
   }
-  // Calls the worker has not started are never made once the run has ended.
+  // Calls the worker has not started are never made once the run has ended. A call in flight may
+  // have been received: its outcome becomes unknown now (no runner is left to settle it), and a
+  // result the worker records later is not kept.
   await tx
     .update(automationHttpCalls)
     .set({
@@ -270,6 +272,22 @@ export async function endRun(tx: Tx, run: AutomationRun, input: EndRunInput): Pr
         eq(automationHttpCalls.tenantId, run.tenantId),
         eq(automationHttpCalls.runId, run.id),
         eq(automationHttpCalls.state, 'queued'),
+      ),
+    );
+  await tx
+    .update(automationHttpCalls)
+    .set({
+      state: 'unknown',
+      errorCode: 'run_ended_in_flight',
+      finishedAt: input.now,
+      leaseUntil: null,
+      requestCiphertext: null,
+    })
+    .where(
+      and(
+        eq(automationHttpCalls.tenantId, run.tenantId),
+        eq(automationHttpCalls.runId, run.id),
+        eq(automationHttpCalls.state, 'in_flight'),
       ),
     );
   await emitTenantEvent(tx, run.tenantId, {

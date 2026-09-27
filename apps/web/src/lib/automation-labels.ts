@@ -91,6 +91,7 @@ export const STEP_DETAILS: Record<string, string> = {
   no_result: 'no result in time; the server may have received the request',
   missing_call: 'the request record was not found',
   run_ended: 'the run ended before the request was made',
+  run_ended_in_flight: 'the run ended before the server answered; it may have received the request',
   address_blocked: 'the address is on a private or reserved network',
   dns_failed: 'the host name could not be resolved',
   connect_failed: 'the server could not be reached',

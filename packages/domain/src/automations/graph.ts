@@ -609,6 +609,16 @@ export function httpStepHost(url: string): string | null {
   return host.replace(/^\[(.*)\]$/, '$1').replace(/\.$/, '') || null;
 }
 
+/**
+ * The path of an HTTP step's address as written, placeholders not filled in and without the query
+ * (for the call record: it names the endpoint and never holds a customer's values).
+ */
+export function httpPathTemplate(url: string): string {
+  const rest = url.replace(/^https?:\/\/[^/?#]*/i, '');
+  const path = rest.split(/[?#]/, 1)[0] ?? '';
+  return (path.startsWith('/') ? path : `/${path}`).slice(0, 300);
+}
+
 /** Placeholders used by a text: unknown ones, captured answers and (when allowed) secrets. */
 function placeholdersIn(
   text: string,

@@ -108,7 +108,7 @@ verification, app review, Embedded Signup configuration).
   runs of the draft on a real conversation; the bot/human hand-off lock with Take over; step logs,
   captured answers with retention; an automation report section; a builder with a generated diagram
   and an in-browser simulator. T: restart and lost signals resume from the stored position; bot and
-  person never answer at once. **Remaining:** Flows and catalog steps (P4-03, P4-06), starting runs from the public API or campaigns, template follow-ups outside the service
+  person never answer at once. **Remaining:** Flow and catalog steps (sending a WhatsApp Flow from a run, P4-06), starting runs from the public API or campaigns, template follow-ups outside the service
   window, fuzzy keyword matching, a drag-and-drop canvas (ADR-034), run export, usage billing for
   automation steps, a real sandbox run (release checklist).
 - **P4-02 HTTP node + egress guard** — _implemented and locally verified (2026-09-27) against a
@@ -124,8 +124,24 @@ verification, app review, Embedded Signup configuration).
   isolation), e2e `web-requests.spec.ts`. **Remaining:** calls against a real company API in an
   authorized environment (release checklist), response headers or non-JSON bodies as values,
   retries a company opts into for idempotent requests, form-encoded bodies, OAuth client flows.
-- **P4-03 WhatsApp Flows**: Flow JSON validation, publish lifecycle, RSA key management per number,
-  encrypted data endpoint (health check, error codes), response mapping.
+- **P4-03 WhatsApp Flows** — _implemented and locally verified (2026-09-27) against the Graph
+  stand-in and signed, encrypted test requests; no live WhatsApp traffic yet_: Flow JSON written as
+  text with checks while typing; drafts sent to Meta by the worker, one written-ahead operation at a
+  time (create, upload, publish, deprecate, delete, refresh), a lost create response adopting the
+  flow instead of creating a second, Meta's validation errors with line and column; publishing
+  (owners and administrators, confirmed) and new drafts from published flows; one RSA key per
+  WhatsApp account uploaded to every number, checked, and replaced with a 24-hour overlap; HyFib's
+  encrypted data endpoint (signature, key, health check, error notices, HyFib's flow tokens,
+  forwarding to the company's endpoint on an allowed domain through the egress guard); forms sent
+  from a conversation in the service window (drafts to testers); completed forms kept and mapped to
+  the contact's name, email and custom fields; erasure of answers and tokens. T:
+  `flows.test.ts` (lifecycle, lost create response, validation errors, keys and rotation, sending
+  and completion, a completion by another contact, erasure, the endpoint with every refusal and a
+  secret moved to another domain, isolation), unit tests (Flow JSON checks, decryption with
+  rotation and tampering, the message, health status), e2e `flows.spec.ts` (create, publish, send,
+  complete; encrypted requests through the route). **Remaining:** checks on an approved sandbox
+  number and a real account's keys (release checklist), a visual form builder, sending flows from
+  automations, campaigns and templates, flows that open with `data_exchange`, Meta's flow metrics.
 - **P4-04 CRM** — _implemented and locally verified (2026-09-27); reminder emails verified through
   Mailpit only_: pipelines (company settings, audited) with ordered stages and one currency each,
   archived instead of deleted; deals linked to a contact for life and optionally to a conversation,
@@ -140,7 +156,23 @@ verification, app review, Embedded Signup configuration).
   (the service supports it), automation steps that create deals or tasks, CRM connectors (HubSpot,
   Salesforce, Zoho: integrations), reminder emails through the production SMTP provider (release
   checklist).
-- **P4-05 Growth tools**: click-to-chat links, QR codes, consent-aware website widget, referral capture.
+- **P4-05 Growth tools** — _implemented and locally verified (2026-09-27); no live WhatsApp or ad
+  traffic yet_: click-to-chat links (a short link that counts clicks per link and company day
+  without any visitor data and redirects to wa.me with a pre-filled message and an optional
+  reference code; QR codes as PNG and SVG; archive and restore; audited); conversations attributed
+  to a link by its reference code, on the number the link opens only; click-to-WhatsApp ad
+  referrals captured from inbound webhooks (the ad's id, type, address and headline, never the ad
+  click id) and listed under Growth → Ads; the inbox says where a conversation came from; a website
+  button that stores and sends nothing (no cookie consent needed) and is not served while its link
+  cannot open; conversation sources erased with the contact. T: `growth.test.ts` (permissions,
+  validation, versions, clicks per company day, attribution on the link's number only, ad sources
+  without the click id, erasure, widgets, limits, isolation), unit tests (codes, wa.me format,
+  referral parsing, the widget script against a stub DOM), e2e `growth.spec.ts` (link, QR code,
+  redirect headers, attributed conversation, ads list, the button embedded on another origin,
+  archive). **Remaining:** checks on real devices and with a real click-to-WhatsApp test ad on an
+  approved sandbox number (release checklist), connecting ad accounts (ad sync, spend, cost per
+  conversation) and conversion reporting to Meta (W-072), campaign parameters on links, a free
+  public link generator for people without an account.
 - **P4-06 Commerce**: catalog connection, product messages, order capture, payment links with verified
   status; Shopify and WooCommerce connectors (authenticated setup, webhook verification, dedupe, sync
   recovery, uninstall).
@@ -199,7 +231,8 @@ review; production rollout per RELEASE-CHECKLIST.
 - **SEC-2** Breached-password screening at sign-up/reset (k-anonymity API or offline list).
 - **SEC-3** Central SSRF-safe egress client (DNS pinning, private/metadata range blocking, redirect
   re-validation, limits) used by all outbound HTTP — _built with P4-02 (ADR-042) and used by the
-  automation HTTP step; outgoing webhooks (P5-09) and imports must use it too. Remaining: a network
+  automation HTTP step and the Flows data endpoint (P4-03); outgoing webhooks (P5-09) and imports
+  must use it too. Remaining: a network
   egress policy as a second layer in deployment._
 - **SEC-4** Dual-key job signing for rotation without draining.
 - **SEC-5** Hash-chained audit checkpoints exported to WORM storage.
@@ -209,3 +242,6 @@ review; production rollout per RELEASE-CHECKLIST.
 - **SEC-8** Step-up verification endpoint (password + TOTP) recorded in `ops.step_up_verifications`
   for sensitive settings (billing, security).
 - **SEC-9** Per-user login history view.
+- **SEC-10** Keyring re-encryption job: re-encrypt every keyring ciphertext (provider tokens, HTTP
+  secrets, flow private keys, stored webhook bodies) under the primary key so an old key can be
+  removed (`Keyring.needsRotation` exists; the job does not).

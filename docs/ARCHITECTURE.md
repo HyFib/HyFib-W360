@@ -18,10 +18,14 @@ specified here but not yet implemented.
                      SMTP provider  Object storage  Razorpay (designed)
 ```
 
-- **web** serves the UI, server actions, auth endpoints, provider webhooks (designed) and health
-  probes. Node.js runtime only. **[built]**
+- **web** serves the UI, server actions, auth endpoints, provider webhooks, health probes, two
+  public routes for growth tools (chat links `/l/*` and the website button script `/widget/*`,
+  section 6G) and the WhatsApp Flows data endpoint (`/api/flows/endpoint/*`, which calls companies'
+  endpoints through the egress guard while WhatsApp waits, section 6H). Node.js runtime only.
+  **[built]**
 - **worker** processes durable jobs: email delivery, webhook processing, outbound sends, campaign
-  ticks, automation runs, billing events, auto-recharge and the minute sweepers. **[built]**
+  ticks, automation runs, flow operations at Meta and flow keys, billing events, auto-recharge and
+  the minute sweepers. **[built]**
 - **PostgreSQL** is the system of record, the job queue (pg-boss) and the durable event log. There is
   no Redis, Kafka or search cluster (ADR-015).
 
@@ -388,7 +392,7 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 - **Builder** (`/c/{slug}/automations`, ADR-034): a structured step list with a generated diagram,
   live checks, an in-browser simulator (sends nothing and checks neither the window nor consent),
   publish, pause, archive and restore, test runs, versions and run pages.
-- **HTTP step** (migration 0014, ADR-042, ADR-043): "Call a web address" calls a company's own API
+- **HTTP step** (migrations 0014 and 0015, ADR-042, ADR-043): "Call a web address" calls a company's own API
   (GET, POST, PUT, PATCH, DELETE; JSON body; up to 10 headers; values saved from a JSON response by
   path) and branches on success (2xx) or failure. Only domains on the company's list
   (`http_allowed_domains`) can be called, over https through the egress guard
@@ -448,6 +452,99 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   titles and lost reasons of its deals, keeping outcomes and values for reports.
 - **Not built yet:** custom deal fields, products on deals, deal import and export, forecasting,
   automation steps that create deals or tasks, and syncing with external CRMs (integrations, P4–6).
+
+## 6G. Growth tools **[built — links and ad sources verified with signed test webhooks only; no live WhatsApp or ad traffic]**
+
+- **Model** (migration 0016, ADR-044): `chat_links` (a number of the company, name, pre-filled
+  message ≤ 500 characters, a reference code of six characters from `A–H J–N P–Z 2–9` unique per
+  company, whether the code is added to the message, a 12-character base32 slug unique across
+  companies, archived, version); `chat_link_clicks` (one row per link and company day with a
+  count, written only by `ops.follow_chat_link`); `chat_widgets` (a link, a 16-character public id,
+  button text, optional greeting, corner, colour, shown or hidden, version);
+  `conversation_sources` (one row per attributed inbound message: its conversation, contact and
+  message, `ad` with the ad's id, type, web address and headline, or `link` with the link). Composite
+  foreign keys keep every reference inside the company.
+- **Service** (`packages/domain/src/growth`): links (create on an active number, edit, archive and
+  restore, all version-checked and audited; at most 500 open links), widgets (create for an open
+  link, edit, delete, audited; at most 50), each link's clicks per day for 30 days in the company
+  time zone, clicks and attributed conversations per link, and the ads that started conversations
+  in the last 30 days (`campaigns.read` to read, `campaigns.write` to change). `waMeUrl` and
+  `prefilledText` build `https://wa.me/<digits>?text=<encoded message> (ref CODE)` (research
+  M-160).
+- **Ingestion** (`messaging/ingest.ts` → `growth/sources.ts`): for each new inbound message (not a
+  reaction or system message), a `referral` object (research M-130) becomes an `ad` source with
+  only its id, type, http(s) address and headline (bounded); otherwise a complete `(ref CODE)`
+  marker in a text message, matched without regard to case, becomes a `link` source when a link of
+  the company with that code opens the number the message arrived on. Redelivered webhooks add
+  nothing (message dedupe; one source per message). The raw referral is no longer stored on the
+  message.
+- **Public routes** (no session, no company context in the URL beyond the random identifier):
+  `GET /l/<slug>` counts the click through `ops.follow_chat_link` and answers 302 to the wa.me
+  address rebuilt from the stored link (`Cache-Control: no-store`, `Referrer-Policy: no-referrer`,
+  no cookies), or 404 with a short "not available" page. `GET /widget/<id>.js` renders the button
+  script from `ops.chat_widget_config` (`Cache-Control: public, max-age=300`,
+  `Cross-Origin-Resource-Policy: cross-origin`), or a 404 script comment. Both definer functions
+  return only what the response needs and nothing for archived links, inactive numbers, disabled
+  widgets or companies being deleted.
+- **Widget script** (`growth/widget-script.ts`): configuration embedded as JSON escaped for a script
+  context; guards against a second copy on the same page; draws a fixed-position greeting and link
+  in an open shadow root with `textContent` and CSSOM styles (text colour chosen for contrast);
+  the link opens the short link in a new tab with `noopener noreferrer`. No storage, no requests,
+  nothing loaded.
+- **Web** (`/c/{slug}/growth`): Chat links (list with clicks and conversations over 30 days,
+  archived view, new-link form with a preview of the customer's message), a link page (short link
+  and direct wa.me link to copy, QR code as PNG and SVG generated on the server with `qrcode`,
+  clicks per day, edit, archive or restore), Website button (script tags to copy, a notice for sites
+  with a Content Security Policy, forms), Ads (ads that started conversations, with conversation and
+  message counts). The inbox conversation page says which link or ad the conversation came from.
+- **Erasure** (`app.erase_contact`, replaced in 0016): deletes the contact's conversation sources and
+  clears any referral objects stored on its messages before 0016.
+- **Not built yet:** connecting ad accounts (ad sync, spend, cost per conversation), conversion
+  reporting to Meta (W-072), a link or button per team or with routing rules, UTM-style campaign
+  parameters, and a public link generator for people without an account.
+
+## 6H. WhatsApp Flows **[built — verified against the local Graph stand-in and signed, encrypted test requests only; no live WhatsApp traffic]**
+
+- **Model** (migration 0017, ADR-045): `flows` (a WhatsApp account, name, categories, the Flow JSON
+  as written, its version, data API version, first screen and answer keys, where answers go, the
+  company endpoint and secret name, a public id, the Meta flow id, status, validation errors,
+  health and preview, the written-ahead operation and its state, archived, version); `flow_keys`
+  (one active and at most one previous key per account: public key, fingerprint, the private key
+  as a keyring ciphertext, deleted when retired); `flow_key_uploads` (the key's state on each
+  number: pending, uploaded or failed, and Meta's signature status); `flow_sends` (the token sent
+  with each flow message, its mode, expiry and completion); `flow_responses` (answers without the
+  token and what was applied). Composite foreign keys keep every reference inside the company.
+- **Service** (`packages/domain/src/flows`): Flow JSON checks shared with the browser
+  (`flow-json.ts`), drafts, settings (answer mapping; endpoint on an allowed domain; secret bound to
+  that domain), publish, deprecate, delete, refresh, try again, new draft from a flow, archive and
+  restore, all version-checked and audited; key status, set-up and replacement; the forms a member
+  may send in a conversation; sending; completed forms. `flows.read` to read, `flows.write` to
+  change and test drafts, `flows.publish` to publish, deprecate and replace keys, `inbox.reply` to
+  send, `contacts.read` to see answers.
+- **Worker** (`flows/worker.ts`, queues `flow.sync` and `flow.keys`): performs the written-ahead
+  operation against the Graph API (multipart create, asset upload, publish, deprecate, delete, read;
+  research M-161 to M-163), adopting its own flow after a lost create response; generates keys,
+  uploads them to every active number and reads them back (M-164), and retires previous keys after
+  24 hours. `ops.flow_work_due` feeds the messaging sweep with operations and uploads waiting for
+  more than two minutes and keys due to retire.
+- **Endpoint** (`/api/flows/endpoint/<public id>` → `flows/endpoint.ts`): 1 MB request limit;
+  signature (432), lookup, decryption with the current or previous key (421), health checks and
+  error notices, token and company checks (427), forwarding through the egress guard (seven
+  seconds, 64 KB answer limit), encrypted answer with the inverted IV (M-100, M-167). The web tier
+  has its own egress client for it.
+- **Ingestion** (`messaging/meta-webhook.ts`, `messaging/ingest.ts` → `flows/responses.ts`): an
+  `nfm_reply` becomes an interactive message with the answers (no token) and the preview
+  "[Form submitted]"; the token is matched to its send, the answers stored and applied to the
+  contact; automations are not started by it.
+- **Web** (`/c/{slug}/flows`): list with archived view; new flow from the example form with checks
+  while typing; a flow page with status, Meta's validation errors (line and column), health and
+  preview, lifecycle buttons with confirmation, the draft editor or the published JSON, answer and
+  endpoint settings, the data endpoint address and key status per number, and completed forms with
+  paging. The inbox conversation page has a "Send a form" card while the window is open.
+- **Erasure** (`app.erase_contact`, replaced in 0017): deletes the contact's flow responses and
+  ends their tokens (expiry set to now).
+- **Not built yet:** a visual form builder, sending flows from automations, campaigns or templates,
+  flows that start with `data_exchange`, Meta's flow metrics, and `flow_token_signature`.
 
 ## 7. Commercial model and billing **[built: wallet, top-ups, auto-recharge — verified against a local Razorpay stand-in only; subscriptions planned]**
 

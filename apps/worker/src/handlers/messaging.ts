@@ -19,6 +19,7 @@ import { sweepTaskReminders } from './crm';
 import { signalDueCampaigns } from './campaigns';
 import { RetryableJobError } from './email';
 import { signalDueTemplateSyncs } from './templates';
+import { sweepFlowWork } from './flows';
 
 /** Processes one stored Meta webhook receipt (idempotent; see processMetaWebhookReceipt). */
 export function webhookProcessHandler(rt: WorkerRuntime) {
@@ -175,6 +176,8 @@ export function messagingSweepHandler(rt: WorkerRuntime) {
     }
     const templateSyncs = await signalDueTemplateSyncs(rt);
     if (templateSyncs > 0) rt.logger.info({ templateSyncs }, 'template syncs signalled');
+    const flowWork = await sweepFlowWork(rt);
+    if (flowWork > 0) rt.logger.info({ flowWork }, 'flow work signalled');
     const campaignTicks = await signalDueCampaigns(rt);
     if (campaignTicks > 0) rt.logger.info({ campaignTicks }, 'campaign ticks signalled');
     const automations = await sweepAutomationRuns(rt);

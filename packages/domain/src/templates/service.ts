@@ -620,7 +620,8 @@ export interface TemplateWorkerDeps {
   clock: Clock;
 }
 
-async function wabaCredential(
+/** The WhatsApp account's id at Meta and its decrypted token (null unless connected). */
+export async function wabaCredential(
   tx: Tx,
   tenantId: string,
   whatsappAccountId: string,

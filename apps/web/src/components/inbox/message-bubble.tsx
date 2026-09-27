@@ -1,5 +1,6 @@
 import { cn } from '@w360/ui/cn';
 import { formatDateTime } from '@/lib/format';
+import { flowAnswerText } from '@/lib/flow-labels';
 import { UnknownOutcomeActions } from './unknown-outcome-actions';
 
 export interface ThreadMessage {
@@ -33,6 +34,7 @@ function text(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
+/** One answer of a completed form as text (lists joined, other values as JSON, bounded). */
 /** Renders message content as plain text only (never HTML), by type. */
 function Body({ type, content }: { type: string; content: unknown }) {
   const c = (typeof content === 'object' && content !== null ? content : {}) as Record<
@@ -69,6 +71,55 @@ function Body({ type, content }: { type: string; content: unknown }) {
     case 'reaction':
       return <p>{text(c.emoji) ? `Reacted ${text(c.emoji)}` : 'Removed a reaction'}</p>;
     case 'interactive': {
+      const flow = (typeof c.flow === 'object' && c.flow !== null ? c.flow : null) as Record<
+        string,
+        unknown
+      > | null;
+      if (flow && c.interactiveType === 'nfm_reply') {
+        // A completed WhatsApp Flow: its answers.
+        const answers = (
+          typeof flow.answers === 'object' && flow.answers !== null ? flow.answers : null
+        ) as Record<string, unknown> | null;
+        const entries = answers ? Object.entries(answers).slice(0, 40) : [];
+        return (
+          <div className="grid gap-1">
+            <p className="text-xs font-medium uppercase tracking-wide opacity-70">Form submitted</p>
+            {answers === null ? (
+              <p className="text-xs opacity-80">
+                {flow.tooLarge === true
+                  ? 'The answers were larger than HyFib keeps.'
+                  : 'The answers could not be read.'}
+              </p>
+            ) : entries.length === 0 ? (
+              <p className="text-xs opacity-80">No answers.</p>
+            ) : (
+              <dl className="grid gap-0.5">
+                {entries.map(([key, value]) => (
+                  <div key={key} className="break-words">
+                    <dt className="inline font-medium">{key}: </dt>
+                    <dd className="inline">{flowAnswerText(value)}</dd>
+                  </div>
+                ))}
+              </dl>
+            )}
+          </div>
+        );
+      }
+      if (flow) {
+        // A form sent from the inbox.
+        return (
+          <div className="grid gap-1">
+            <p className="text-xs font-medium uppercase tracking-wide opacity-70">
+              Form: {text(flow.name) ?? 'WhatsApp Flow'}
+              {flow.mode === 'draft' ? ' (draft, for testing)' : ''}
+            </p>
+            {text(flow.header) ? <p className="font-semibold">{text(flow.header)}</p> : null}
+            <p className="whitespace-pre-wrap break-words">{text(flow.body) ?? ''}</p>
+            {text(flow.footer) ? <p className="text-xs opacity-80">{text(flow.footer)}</p> : null}
+            <p className="text-xs opacity-80">Button: {text(flow.cta) ?? ''}</p>
+          </div>
+        );
+      }
       if (c.csat === true) {
         const buttons = Array.isArray(c.buttons)
           ? (c.buttons as unknown[]).map(text).filter(Boolean)

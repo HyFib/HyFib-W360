@@ -24,7 +24,8 @@ PostgreSQL 18; CI workflow authored).
 
 ## Production topology (target)
 
-- Load balancer with TLS 1.2+ and HTTP/2 (SSE), WAF/rate limiting at the edge.
+- Load balancer with TLS 1.2+ and HTTP/2 (SSE), WAF/rate limiting at the edge (including the public
+  chat-link and widget routes, see below).
 - `web` ≥ 2 replicas (stateless); `worker` ≥ 2 replicas (jobs are claim-safe; schedules are
   deduplicated by pg-boss).
 - Managed PostgreSQL 17 or 18 with high availability, encryption at rest, automated backups and
@@ -38,7 +39,11 @@ PostgreSQL 18; CI workflow authored).
   to the domains companies allow for automation web requests. The egress guard already refuses
   private, loopback, link-local and metadata addresses and pins DNS (ADR-042); as a second layer,
   route that traffic through an egress proxy or firewall that denies private ranges and the cloud
-  metadata endpoint. The web tier makes no such requests.
+  metadata endpoint.
+- Outbound network for the web tier: Meta Graph and Razorpay (onboarding and top-ups), plus the
+  same company-allowed domains for the WhatsApp Flows data endpoint, which forwards WhatsApp's
+  requests to companies' endpoints while WhatsApp waits (section below). It uses the same egress
+  guard; apply the same egress proxy or firewall to the web tier.
 
 **Pilot option (lower cost):** single web and worker replicas and a single managed PostgreSQL
 instance with PITR. Limitations: no redundancy during deploys or instance failure (brief downtime),
@@ -93,6 +98,47 @@ unchanged), and `TRUSTED_PROXIES` must list the addresses or CIDR ranges of ever
 operate. Resolution reads hops from the right, skips trusted proxies, and stores the first other
 address only if it is a valid IP; malformed values are dropped rather than stored. A malformed
 `TRUSTED_PROXIES` entry stops start-up.
+
+## Public chat links and website buttons
+
+Two routes are public by design and must stay reachable without a session: `GET /l/<slug>` (chat
+links and their QR codes) and `GET /widget/<id>.js` (the website button script embedded on
+companies' sites).
+
+- **`APP_BASE_URL` is printed.** QR codes and short links contain `APP_BASE_URL`, and companies
+  print them. Choose the production origin before the first company creates a link and keep it; if
+  it must change, keep redirecting `/l/*` and `/widget/*` from the old origin.
+- **Caching.** Never cache `/l/*` at the edge or CDN (the app sends `Cache-Control: no-store`): a
+  cached redirect would skip counting and keep working after a link is archived. `/widget/*` may be
+  cached for its `max-age` (300 s); purge it if a button must disappear sooner.
+- **Rate limits.** Apply per-address rate limits to both routes at the edge (the app does not limit
+  them). Each `/l/*` request writes one counter row.
+- **Access logs.** The app stores nothing about visitors. Load-balancer or CDN access logs record
+  their addresses; keep such logs short-lived or exclude these routes, and mention them in the
+  privacy notice if kept.
+- **Headers.** The routes set their own `Cache-Control`, `Referrer-Policy: no-referrer` (links) and
+  `Cross-Origin-Resource-Policy: cross-origin` (script); do not override them at the edge.
+
+## WhatsApp Flows data endpoint
+
+`POST /api/flows/endpoint/<public id>` is called by WhatsApp while a customer has a form open. It is
+authenticated by Meta's signature and the flow's encryption key, not by a session.
+
+- **`APP_BASE_URL` is registered at Meta.** The address is sent to Meta as each data flow's
+  `endpoint_uri` when the flow is created or updated. Choose the production origin before the first
+  company creates such a flow; after a change, every data flow needs a new draft (published flows
+  cannot change at Meta).
+- **Reachability and limits.** The route must be reachable from the internet over HTTPS without
+  authentication at the edge. Allow request bodies up to 1 MB (the app refuses larger ones) and do
+  not buffer or rewrite them: the signature covers the raw body. Do not cache responses (the app
+  sends `no-store`).
+- **Timeouts.** The app waits at most seven seconds for a company's endpoint. Keep the load
+  balancer's upstream timeout above that (for example 15 seconds). Meta's own wait for the endpoint
+  is not documented in our research; the release checklist measures it.
+- **Rate limits.** Apply per-address limits at the edge generous enough for WhatsApp's servers
+  (they send every request); the app does not limit the route.
+- **Logs.** The app logs an outcome code and ids per request. Access logs must not record request
+  bodies (they are encrypted, but keep them out of logs anyway).
 
 ## Razorpay
 

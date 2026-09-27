@@ -6,6 +6,7 @@ import { can } from '@w360/domain';
 import { Alert, Badge, Card, CardContent, CardHeader, CardTitle } from '@w360/ui';
 import { TakeOverButton } from '@/components/automations/automation-actions';
 import { ContactCrmPanel } from '@/components/crm/contact-crm-panel';
+import { FlowSender } from '@/components/flows/flow-sender';
 import { Composer } from '@/components/inbox/composer';
 import { ConversationControls, TeamControl } from '@/components/inbox/conversation-controls';
 import { InboxShell, inboxQueryString } from '@/components/inbox/inbox-shell';
@@ -35,7 +36,7 @@ export default async function ConversationPage({
   const sp = await searchParams;
   const ctx = await requireTenant(slug);
   if (!canUseInbox(ctx)) notFound();
-  const { inbox, savedReplies, crm } = await getRuntime();
+  const { inbox, savedReplies, crm, flows } = await getRuntime();
   const since = await liveEventCursor(ctx);
   const before = typeof sp.before === 'string' ? sp.before : undefined;
   let thread: Awaited<ReturnType<typeof inbox.getConversation>>;
@@ -55,6 +56,7 @@ export default async function ConversationPage({
     replies,
     crmData,
     lookups,
+    forms,
   ] = await Promise.all([
     loadInboxList(ctx, sp),
     can(ctx, 'inbox.assign') && can(ctx, 'members.read')
@@ -65,6 +67,7 @@ export default async function ConversationPage({
     canReply ? savedReplies.savedRepliesFor(ctx, conversationId) : Promise.resolve([]),
     showCrm ? crm.contactCrm(ctx, thread.conversation.contactId) : null,
     showCrm ? crmLookups(ctx) : null,
+    canReply && can(ctx, 'flows.read') ? flows.sendable(ctx, conversationId) : Promise.resolve([]),
   ]);
   const conv = thread.conversation;
   const unread = list.items.find((i) => i.id === conv.id)?.unreadCount ?? 0;
@@ -136,6 +139,44 @@ export default async function ConversationPage({
               {conv.contactPhone ?? 'No phone number shared'} · via {conv.channelName ?? 'WhatsApp'}
               {conv.teamName && !can(ctx, 'inbox.assign') ? ` · ${conv.teamName}` : ''}
             </p>
+            {thread.source ? (
+              <p className="text-sm text-muted-foreground">
+                {thread.source.kind === 'ad' ? (
+                  <>
+                    Came from the ad{' '}
+                    {thread.source.adSourceUrl ? (
+                      <a
+                        href={thread.source.adSourceUrl}
+                        target="_blank"
+                        rel="noopener noreferrer nofollow"
+                        className="font-medium text-foreground underline underline-offset-4"
+                      >
+                        {thread.source.adHeadline ?? 'without a headline'}
+                      </a>
+                    ) : (
+                      <span className="font-medium text-foreground">
+                        {thread.source.adHeadline ?? 'without a headline'}
+                      </span>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    Came from the chat link{' '}
+                    {can(ctx, 'campaigns.read') && thread.source.linkId ? (
+                      <Link
+                        href={`/c/${ctx.tenant.slug}/growth/links/${thread.source.linkId}`}
+                        className="font-medium text-foreground underline underline-offset-4"
+                      >
+                        {thread.source.linkName}
+                      </Link>
+                    ) : (
+                      <span className="font-medium text-foreground">{thread.source.linkName}</span>
+                    )}
+                  </>
+                )}{' '}
+                ({formatDateTime(thread.source.occurredAt, tz)})
+              </p>
+            ) : null}
             {conv.waitingSince ? (
               <p className="text-sm">
                 <ReplyTimer
@@ -247,6 +288,16 @@ export default async function ConversationPage({
             savedReplies={replies}
             {...(latestMessageId ? { latestMessageId } : {})}
           />
+          {disabledReason === null && forms.length > 0 ? (
+            <Card>
+              <CardHeader>
+                <CardTitle>Send a form</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <FlowSender slug={ctx.tenant.slug} conversationId={conv.id} flows={forms} />
+              </CardContent>
+            </Card>
+          ) : null}
           {canReply && conv.channelActive && !conv.windowOpen && can(ctx, 'templates.read') ? (
             <Card>
               <CardHeader>

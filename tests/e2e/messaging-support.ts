@@ -120,6 +120,29 @@ export function inboundMessage(
   });
 }
 
+/** A message sent from a click-to-WhatsApp ad: the webhook carries the ad as `referral` (M-130). */
+export function adInboundMessage(
+  wabaId: string,
+  phoneNumberId: string,
+  waId: string,
+  text: string,
+  referral: Record<string, string>,
+) {
+  return envelope(wabaId, phoneNumberId, {
+    contacts: [{ profile: { name: 'Arjun Customer' }, wa_id: waId }],
+    messages: [
+      {
+        from: waId,
+        id: `wamid.e2e.${randomUUID()}`,
+        timestamp: String(Math.floor(Date.now() / 1000)),
+        type: 'text',
+        text: { body: text },
+        referral,
+      },
+    ],
+  });
+}
+
 /** A customer's tap on a reply button of the message `contextId` (research M-158). */
 export function buttonReply(
   wabaId: string,
@@ -137,6 +160,35 @@ export function buttonReply(
         timestamp: String(Math.floor(Date.now() / 1000)),
         type: 'interactive',
         interactive: { type: 'button_reply', button_reply: button },
+        context: { from: '919000012345', id: contextId },
+      },
+    ],
+  });
+}
+
+/**
+ * A completed WhatsApp Flow: an interactive `nfm_reply` whose `response_json` string holds the flow
+ * token and the answers, in reply to the flow message `contextId` (research M-166).
+ */
+export function flowCompletion(
+  wabaId: string,
+  phoneNumberId: string,
+  waId: string,
+  response: Record<string, unknown>,
+  contextId: string,
+) {
+  return envelope(wabaId, phoneNumberId, {
+    contacts: [{ profile: { name: 'Priya Customer' }, wa_id: waId }],
+    messages: [
+      {
+        from: waId,
+        id: `wamid.e2e.${randomUUID()}`,
+        timestamp: String(Math.floor(Date.now() / 1000)),
+        type: 'interactive',
+        interactive: {
+          type: 'nfm_reply',
+          nfm_reply: { name: 'flow', body: 'Sent', response_json: JSON.stringify(response) },
+        },
         context: { from: '919000012345', id: contextId },
       },
     ],

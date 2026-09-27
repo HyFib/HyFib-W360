@@ -14,6 +14,16 @@ const PASSWORD = 'correct horse battery staple 42';
 
 test.skip(!messagingConfigured, 'Meta test configuration (stand-in, app secret) not provided');
 
+/**
+ * Opens a module from the main navigation. Used to leave inbox pages: their live updates refresh
+ * the page, and a page load started while such a refresh is in flight is cancelled by Firefox;
+ * Next.js answers the cancelled refresh by loading the current page again, which aborts the
+ * navigation (NS_BINDING_ABORTED). Navigation inside the app does not cancel the refresh.
+ */
+async function openFromNav(page: Page, name: string) {
+  await page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name }).click();
+}
+
 /** The value box of a report statistic, found by its label. */
 function stat(page: Page, label: string) {
   return page
@@ -110,7 +120,8 @@ test('an automation is built, simulated, published, runs on WhatsApp and hands o
   await expect(banner).toHaveCount(0, { timeout: 30_000 });
 
   // The run log shows each step.
-  await page.goto(`/c/${slug}/automations/runs`);
+  await openFromNav(page, 'Automations');
+  await page.getByRole('link', { name: 'All runs' }).click();
   await expect(page.getByText('Handed off').first()).toBeVisible();
   await page.getByRole('table').getByRole('link').first().click();
   await expect(page.getByRole('heading', { name: 'Run of Menu bot' })).toBeVisible();
@@ -134,11 +145,12 @@ test('an automation is built, simulated, published, runs on WhatsApp and hands o
   await expect(page.getByText(/is handling this conversation/)).toBeVisible({ timeout: 30_000 });
   await page.getByRole('button', { name: 'Take over' }).click();
   await expect(page.getByText(/is handling this conversation/)).toBeHidden({ timeout: 20_000 });
-  await page.goto(`/c/${slug}/inbox`);
+  await openFromNav(page, 'Inbox');
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}/inbox$`));
   await expect(page.getByText(/Assigned to Bina Bot/).first()).toBeVisible();
 
   // Reports count both runs.
-  await page.goto(`/c/${slug}/reports`);
+  await openFromNav(page, 'Reports');
   await expect(stat(page, 'Automation runs')).toContainText('2');
   await expect(stat(page, 'Handed off')).toContainText('1 run');
   await expect(stat(page, 'Taken over')).toContainText('1 run');

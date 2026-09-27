@@ -1,5 +1,145 @@
 # Progress
 
+## 2026-09-27 — Phase 4: WhatsApp Flows (P4-03)
+
+Status: **WhatsApp Flows implemented and locally verified; production blocked on checks with an
+approved sandbox number and a real account's keys.** Companies write forms as Flow JSON, send them
+to Meta as drafts, publish them, send them in conversations and save the answers on the contact.
+Forms that fetch data use HyFib's encrypted endpoint, which forwards requests to the company's own
+endpoint. No request reached Meta and no WhatsApp client opened a form: Meta was the local Graph
+stand-in, and endpoint requests were encrypted and signed by the tests the way WhatsApp does.
+
+### Completed
+
+- **Research (M-161 to M-168):** flow creation, JSON upload with validation errors, publish,
+  deprecate, delete and read (official OpenAPI description, high confidence); the business public
+  key per phone number (M-164); the flow message (M-165); the completion webhook `nfm_reply`
+  (M-166, medium confidence: third-party sources); endpoint status codes and encryption (Meta's
+  sample endpoint, M-167); `flow_token_signature` (M-168, low confidence, not used). M-163 now also
+  records the `health_status` fields (with M-107).
+- **Schema (migration 0017, ADR-045):** `flows`, `flow_keys`, `flow_key_uploads`, `flow_sends` and
+  `flow_responses`, with composite foreign keys, FORCE RLS and column grants; definer functions
+  `ops.flow_endpoint_target` (the endpoint's lookup by public id) and `ops.flow_work_due` (the
+  sweep); `app.erase_contact` replaced to delete answers and end tokens.
+- **Worker (`flow.sync`, `flow.keys`):** every operation at Meta is written ahead on the flow row and
+  performed once; a lost create response is recovered by adopting the flow whose name carries the
+  flow's reference; publish, deprecate and delete read Meta's status first; operations waiting over
+  two minutes are signalled again and those over 30 minutes fail with a message. Keys: one RSA-2048
+  key per WhatsApp account, uploaded to every active number and read back, replaced with a 24-hour
+  overlap, private keys deleted when retired.
+- **Endpoint (`/api/flows/endpoint/<public id>`):** signature (432), decryption with the current or
+  previous key (421), health checks and error notices answered by HyFib, HyFib's flow tokens only
+  (427 with a message), suspended companies refused, forwarding through the egress guard to the
+  company's endpoint on an allowed domain with its secret only for that host, the company's own 427
+  passed on, and codes-only logging.
+- **Pages (`flows.read`; drafts and settings need `flows.write`, publishing and key replacement
+  `flows.publish`):** Flows list with archived view, New flow with the example form and live checks,
+  and a flow page with status, Meta's validation errors with line and column, health, preview,
+  lifecycle buttons (irreversible actions confirmed), the draft editor or the published JSON,
+  answer and endpoint settings, the endpoint address and key state per number, and completed forms.
+  The inbox has a "Send a form" card while the window is open, and shows sent and completed forms
+  in the thread. The Flows module is now listed as available.
+- **Found while building:**
+  - Saving an unchanged draft said the changes were being sent to Meta; it now says nothing changed,
+    and saving a restored draft (or one whose upload failed) sends it to Meta again. Unchanged saves
+    are no longer audited.
+  - Operations that ran out of time said Meta did not answer, also when the company had been
+    suspended and nothing was sent; the message now names both causes.
+  - The published Flow JSON widened the flow page on phones; the page grid now keeps it scrolling
+    inside its card.
+  - Mutation checks found two untested rules (a secret re-pointed to another domain, a completion by
+    someone other than the form's contact); both now have integration tests, and all seven
+    deliberate regressions tried (signature, expiry, secret domain, contact match, lost create
+    response, draft sending, erasure) fail the tests.
+  - PR #7's Firefox e2e run failed with `NS_BINDING_ABORTED` when the automations test left an inbox
+    page with `page.goto` while a live refresh was in flight (Next.js answers a cancelled refresh by
+    loading the current page again). The test now leaves inbox pages through the app navigation.
+
+### Test commands and results (local, 2026-09-27, fresh database)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `pnpm test` (unit)                                                          | 155 passed. New: 7 Flows tests (request decryption with the previous key during rotation and the inverted IV in answers; refusals of wrong keys, tampered data and malformed fields; Flow JSON checks on the starter form, errors and data flows; the flow message; health status)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 245 passed, including `flows.test.ts` 7: the lifecycle with permissions, validation errors, one operation at a time, publishing, new drafts, deprecation, deletion, restoring and re-sending a draft, and audit; a lost create response adopted without a second flow, refusals and the 30-minute limit; keys uploaded to every number, a mismatch, rotation and retirement; sending in the window (drafts to testers only), completion with answer outcomes, a completion by another contact, unknown tokens and answer visibility by role; erasure; the endpoint (signature, unknown flow, wrong key, health check, error notice, unknown and expired tokens, forwarding with the secret, the company's 427, failures, a removed domain, a secret moved to another domain, suspension, rotation); isolation |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 44 passed (22 tests × 2), including `flows.spec.ts`: a form created with live checks, sent to Meta, mapped, published after confirmation, sent in a conversation, completed by a signed `nfm_reply` with its answers shown in the chat, the contact renamed and the flow page listing the answers; and a data flow whose key is uploaded, answering an encrypted health check through the route, refusing a bad signature (432) and a token HyFib did not issue (427), and forwarding a data exchange from a test send to a local company endpoint with its secret                                                                                                                                                                                                                             |
+
+### Known gaps
+
+- Not built: a visual form builder, sending flows from automations, campaigns or templates, flows
+  that open with `data_exchange`, Meta's flow metrics and `flow_token_signature`.
+- Verified against the Graph stand-in only. Whether one key per account is accepted on every
+  number, the `nfm_reply` shape (third-party sources) and Meta's wait for the endpoint are release
+  checklist items, as are Firefox and WebKit locally (they run in CI).
+- Keyring rotation of existing ciphertexts, now including flow private keys, needs the
+  re-encryption job (SEC-10).
+
+## 2026-09-27 — Phase 4: growth tools (P4-05)
+
+Status: **Growth tools implemented and locally verified; production blocked on checks with real
+devices and a real click-to-WhatsApp test ad.** Companies can share chat links and QR codes that
+open WhatsApp with a pre-filled message, see clicks per day and the conversations each link
+started, add a WhatsApp button to their website, and see which click-to-WhatsApp ads started
+conversations. Nothing about visitors is stored. No message was exchanged with WhatsApp and no ad
+traffic was received: the webhooks in the tests are signed test payloads.
+
+### Completed
+
+- **Research (M-160):** a chat link is `https://wa.me/<number>?text=<urlencoded text>`, the number
+  in full international form with digits only; the customer still sends the pre-filled message
+  themselves. WhatsApp's Help Center page was blocked by this environment's network policy, so the
+  row cites it through search results (OFF-DOC-SNIP). The ad referral object is research M-130.
+- **Schema (migration 0016, ADR-044):** `chat_links` (number, name, pre-filled message, a reference
+  code unique per company, a slug unique across companies, archived, version), `chat_link_clicks`
+  (one count per link and company day), `chat_widgets` and `conversation_sources` (one row per
+  attributed inbound message: a link, or an ad's id, type, address and headline). Two definer
+  functions for the public routes, `ops.follow_chat_link` (counts the click, returns what the
+  redirect needs) and `ops.chat_widget_config`, return nothing for archived links, numbers that are
+  not active, disabled buttons or companies being deleted. `app.erase_contact` is replaced to delete
+  the contact's sources and clear referral objects stored on its messages before 0016.
+- **Ingestion:** an inbound message with a `referral` object records the ad (without the ad click
+  id, media addresses or ad text; the raw object is no longer stored on the message); otherwise a
+  complete "(ref ABC234)" marker records the link with that code, only if the link opens the number
+  the message arrived on.
+- **Growth pages (`campaigns.read`; changes need `campaigns.write` and are audited):** Chat links
+  (clicks and conversations over 30 days, archived links, a form with a preview of the customer's
+  message), the link page (short and direct links to copy, QR code as PNG and SVG, clicks per day
+  in the company time zone, edit, archive or restore), Website button (script tag, a note for sites
+  with a Content Security Policy, forms, badges when a button cannot show) and Ads (ads that started
+  conversations in the last 30 days). The inbox says which link or ad a conversation came from.
+- **Public routes:** `/l/<slug>` answers 302 to the wa.me address rebuilt from the stored link
+  (`no-store`, no referrer, no cookie) or a 404 page; `/widget/<id>.js` serves the button script
+  (cross-origin, cacheable for five minutes) or a 404 comment. The script stores nothing, loads
+  nothing and sends nothing; it draws text only, in a shadow root with inline styles, and adds one
+  button per page.
+- **Found while building:**
+  - A button whose number was disconnected would still have been drawn on sites and led to "not
+    available"; the button lookup now applies the same conditions as the short link, and the
+    Website button page says when a button's number is not active.
+  - The button first used a closed shadow root, which hides nothing from the host page (it controls
+    the page anyway) but kept accessibility tools and tests from reading the button; it now uses an
+    open one.
+  - Chromium does not let a page on a public origin load a script from a loopback address (Private
+    Network Access). This does not affect production, where the app is public; the e2e test serves
+    its embedding page from a loopback origin of its own.
+
+### Test commands and results (local, 2026-09-27, fresh database)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `pnpm test` (unit)                                                          | 148 passed. New: 6 growth tests (codes and slugs over their alphabets, the pre-filled text and wa.me format, finding a code in a message, ad referrals without the click id or media addresses, button text colour, and the widget script run against a stub DOM: text only, the short link, one button per page)                                                                                                                                                                                                                                                                                                                                                   |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 238 passed, including `growth.test.ts` 8: links with permissions for five roles, validation, versions, archive and audit; clicks per company day and nothing for unknown or malformed slugs, archived links, a number that needs reconnecting or a company being deleted (a suspended company's links still open); limits; attribution on the link's number only (not another number of the company or another company); ad sources without the click id, media addresses or ad text; erasure of sources and legacy referral objects; buttons served only while shown and while their link can open; isolation, including a direct query in another company's scope |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 40 passed (20 tests × 2), including growth: a link created in the UI with its QR code, the short link's 302 to wa.me with `no-store` and `no-referrer`, the click count, the attributed conversation in the inbox, an ad listed under Ads, the button embedded on a page of another origin (it opens the short link; no other request, cookie or storage) and archiving stopping the link and the button. In the full run, 39 passed and the desktop web-request test failed with `dns_failed`: this sandbox had lost its hosts entry for the local test API name. With the entry restored, that test passed on its own.                             |
+
+### Known gaps
+
+- Not built: connecting ad accounts (ad sync, spend, cost per conversation), conversion reporting to
+  Meta (W-072), campaign parameters on links, and a free public link generator.
+- Verified with signed test webhooks and local browsers only; Firefox and WebKit run in CI only.
+  Real devices, a printed QR code and a real click-to-WhatsApp test ad are release checklist items,
+  as are edge rate limits for the public routes.
+
 ## 2026-09-27 — Phase 4: automation web requests and the egress guard (P4-02)
 
 Status: **HTTP step implemented and locally verified against a local target server; production
@@ -53,15 +193,25 @@ locally for the HTTP step; commerce (P4-06) is still open.
     recorded in between would have taken the failure branch; the runner now locks the call.
   - A queued call whose job ran after the run's deadline would have been sent late; it is now
     cancelled.
+- **Review fixes (Codex on PR #6):**
+  - The call record stored the rendered path, so a customer's value placed in the address outlived
+    an erasure; it now keeps the step's path as written (placeholders not filled in).
+  - A call left in flight by a worker that died stayed "in progress", with its encrypted request,
+    when the run ended before its deadline; ending a run (and erasing its contact, migration 0015)
+    now settles such calls as unknown and erases the request.
+  - Name resolution now counts against the 10-second deadline, and at most two system lookups run
+    at once per worker (they cannot be cancelled), so a slow name cannot hold the thread pool.
+  - Every checked address is tried in turn, so one unreachable address (an AAAA record on an
+    IPv4-only network, a dead pool member) no longer fails the call.
 
 ### Test commands and results (local, 2026-09-27, fresh database)
 
-| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                        |
-| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                |
-| `pnpm test` (unit)                                                          | 140 passed. New: 11 egress tests (blocked ranges and notations, pinning and Host, redirects, size and time limits, headers, DNS and connection failures) and HTTP step interpreter tests (rendering, waiting, saved values only on success, customer text never read as a secret, the call budget, publish checks including a secret's domain)                                |
-| `pnpm test:integration` (PostgreSQL 18.x)                                   | 230 passed, including `automation-http.test.ts` 11: a call made once with its secret and values saved, error statuses and refusals by current settings, a crash leaving the call in flight and a late result both ending as unknown, a timeout, cancellation on take-over, at the deadline and for a late job, the lost-job sweep, retention, erasure, settings and isolation |
-| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 38 passed (19 tests × 2), including web requests: Settings → Web requests, a step built in the editor with a stored secret, tried in the simulator, published, and a live run in which the worker calls a local target once with the secret and answers with the result, and the run page's call list                                                          |
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                   |
+| `pnpm test` (unit)                                                          | 142 passed. New: 13 egress tests (blocked ranges and notations, pinning and Host, fallback to the next checked address, redirects, size and time limits including name resolution, the lookup limit, headers, DNS and connection failures) and HTTP step interpreter tests (rendering, waiting, saved values only on success, customer text never read as a secret, the call budget, publish checks including a secret's domain) |
+| `pnpm test:integration` (PostgreSQL 18.x)                                   | 230 passed, including `automation-http.test.ts` 11: a call made once with its secret and values saved, error statuses and refusals by current settings, a crash leaving the call in flight and a late result both ending as unknown, a timeout, cancellation on take-over, at the deadline and for a late job, the lost-job sweep, retention, erasure, settings and isolation                                                    |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 38 passed (19 tests × 2), including web requests: Settings → Web requests, a step built in the editor with a stored secret, tried in the simulator, published, and a live run in which the worker calls a local target once with the secret and answers with the result, and the run page's call list                                                                                                             |
 
 ### Known gaps
 

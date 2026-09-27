@@ -45,6 +45,25 @@ export type TemplateCreateBehaviour =
   /** Refuses the connection-level request without creating anything. */
   | { kind: 'drop_connection' };
 
+/** A WhatsApp flow as the stand-in keeps it (research M-161 to M-163). */
+export interface FlowFixture {
+  id: string;
+  wabaId: string;
+  name: string;
+  categories: string[];
+  status: 'DRAFT' | 'PUBLISHED' | 'DEPRECATED' | 'BLOCKED' | 'THROTTLED';
+  json: string | null;
+  endpointUri: string | null;
+  validationErrors: Record<string, unknown>[];
+}
+
+export type FlowCreateBehaviour =
+  | { kind: 'accept' }
+  | { kind: 'error'; status: number; code: number; message: string }
+  /** Creates the flow, then drops the connection before answering (lost response). */
+  | { kind: 'create_then_drop' }
+  | { kind: 'drop_connection' };
+
 export interface StandInState {
   appId: string;
   appSecret: string;
@@ -72,6 +91,15 @@ export interface StandInState {
   /** Recipient -> WhatsApp id returned in send responses (defaults to the recipient). */
   waIdFor: Map<string, string>;
   templateCounter: number;
+  flows: Map<string, FlowFixture>;
+  flowCounter: number;
+  flowCreateQueue: FlowCreateBehaviour[];
+  /** Validation errors returned by the next Flow JSON uploads (one entry per upload). */
+  flowUploadErrors: Record<string, unknown>[][];
+  /** Business public keys per phone number id (research M-164). */
+  businessKeys: Map<string, { pem: string; status: 'VALID' | 'MISMATCH' }>;
+  /** Signature status reported for keys uploaded from now on. */
+  keySignatureStatus: 'VALID' | 'MISMATCH';
 }
 
 export interface GraphStandIn {
@@ -80,11 +108,35 @@ export interface GraphStandIn {
   close(): Promise<void>;
 }
 
+/** The stored Flow JSON as an object, or null when there is none or it does not parse. */
+function parseFlowJson(text: string | null): Record<string, unknown> | null {
+  if (!text) return null;
+  try {
+    return JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
 async function readBody(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
   for await (const chunk of req) chunks.push(chunk as Buffer);
   if (chunks.length === 0) return undefined;
-  const text = Buffer.concat(chunks).toString('utf8');
+  const raw = Buffer.concat(chunks);
+  const type = req.headers['content-type'] ?? '';
+  if (type.startsWith('multipart/form-data')) {
+    // Flows endpoints take multipart form data (research M-161): fields as strings, files as text.
+    const form = await new Response(raw, { headers: { 'content-type': type } }).formData();
+    const out: Record<string, unknown> = {};
+    for (const [key, value] of form.entries()) {
+      out[key] =
+        typeof value === 'string'
+          ? value
+          : { filename: value.name, type: value.type, content: await value.text() };
+    }
+    return out;
+  }
+  const text = raw.toString('utf8');
   try {
     return JSON.parse(text);
   } catch {
@@ -152,6 +204,37 @@ function interactiveProblem(body: unknown): string | null {
   return null;
 }
 
+/** Checks an interactive flow message (research M-165) against the flows the stand-in has. */
+function flowMessageProblem(body: unknown, flows: Map<string, FlowFixture>): string | null {
+  const b = body as { type?: unknown; interactive?: Record<string, unknown> } | undefined;
+  if (b?.type !== 'interactive' || b.interactive?.type !== 'flow') return null;
+  const interactive = b.interactive;
+  const text = (interactive.body as { text?: unknown } | undefined)?.text;
+  if (typeof text !== 'string' || text.length === 0 || text.length > 1024) return 'body.text';
+  const action = interactive.action as { name?: unknown; parameters?: Record<string, unknown> };
+  if (action?.name !== 'flow' || !action.parameters) return 'action';
+  const p = action.parameters;
+  if (p.flow_message_version !== '3') return 'flow_message_version';
+  if (typeof p.flow_cta !== 'string' || !p.flow_cta || p.flow_cta.length > 30) return 'flow_cta';
+  if (typeof p.flow_token !== 'string' || !p.flow_token) return 'flow_token';
+  if (
+    p.flow_action !== undefined &&
+    p.flow_action !== 'navigate' &&
+    p.flow_action !== 'data_exchange'
+  )
+    return 'flow_action';
+  const flow = typeof p.flow_id === 'string' ? flows.get(p.flow_id) : undefined;
+  if (!flow) return 'flow_id';
+  const mode = p.mode ?? 'published';
+  if (
+    mode === 'draft'
+      ? flow.status !== 'DRAFT'
+      : flow.status !== 'PUBLISHED' && flow.status !== 'THROTTLED'
+  )
+    return 'mode';
+  return null;
+}
+
 export async function startGraphStandIn(options: {
   appId: string;
   appSecret: string;
@@ -175,6 +258,12 @@ export async function startGraphStandIn(options: {
     rejectExtraTemplateFields: false,
     waIdFor: new Map(),
     templateCounter: 0,
+    flows: new Map(),
+    flowCounter: 0,
+    flowCreateQueue: [],
+    flowUploadErrors: [],
+    businessKeys: new Map(),
+    keySignatureStatus: 'VALID',
   };
   for (const token of options.acceptTokens ?? []) {
     state.tokens.set(token, {
@@ -261,7 +350,12 @@ export async function startGraphStandIn(options: {
         return json(res, 200, { success: true });
       }
       if (req.method === 'POST' && first && second === 'messages') {
-        const invalid = interactiveProblem(body);
+        const flowInvalid = flowMessageProblem(body, state.flows);
+        if (flowInvalid)
+          return graphError(res, 400, 100, `(#100) Invalid parameter: ${flowInvalid}`);
+        const isFlow =
+          (body as { interactive?: { type?: unknown } } | undefined)?.interactive?.type === 'flow';
+        const invalid = isFlow ? null : interactiveProblem(body);
         if (invalid) return graphError(res, 400, 100, `(#100) Invalid parameter: ${invalid}`);
         const behaviour = state.sendQueue.shift() ?? { kind: 'accept' };
         if (behaviour.kind === 'drop_connection') {
@@ -368,6 +462,158 @@ export async function startGraphStandIn(options: {
           if (index < 0) return graphError(res, 400, 100, 'Template not found');
           list.splice(index, 1);
           return json(res, 200, { success: true });
+        }
+      }
+      // WhatsApp Flows (research M-161 to M-164) ------------------------------------------------
+      if (first && second === 'flows') {
+        if (req.method === 'POST') {
+          const b = (body ?? {}) as Record<string, unknown>;
+          let categories: unknown;
+          try {
+            categories = JSON.parse(String(b.categories));
+          } catch {
+            categories = null;
+          }
+          if (typeof b.name !== 'string' || !b.name || !Array.isArray(categories)) {
+            return graphError(res, 400, 100, 'Invalid parameter');
+          }
+          const behaviour = state.flowCreateQueue.shift() ?? { kind: 'accept' };
+          if (behaviour.kind === 'drop_connection') {
+            req.socket.destroy();
+            return;
+          }
+          if (behaviour.kind === 'error') {
+            return graphError(res, behaviour.status, behaviour.code, behaviour.message);
+          }
+          state.flowCounter += 1;
+          const flow: FlowFixture = {
+            id: String(7_000_000_000 + state.flowCounter),
+            wabaId: first,
+            name: b.name,
+            categories: categories as string[],
+            status: 'DRAFT',
+            json: null,
+            endpointUri: typeof b.endpoint_uri === 'string' ? b.endpoint_uri : null,
+            validationErrors: [],
+          };
+          state.flows.set(flow.id, flow);
+          if (behaviour.kind === 'create_then_drop') {
+            req.socket.destroy();
+            return;
+          }
+          return json(res, 200, { id: flow.id });
+        }
+        if (req.method === 'GET') {
+          const list = [...state.flows.values()].filter((f) => f.wabaId === first);
+          return json(res, 200, {
+            data: list.map((f) => ({
+              id: f.id,
+              name: f.name,
+              status: f.status,
+              categories: f.categories,
+              validation_errors: f.validationErrors,
+            })),
+            paging: { cursors: { before: 'MA', after: 'MA' } },
+          });
+        }
+      }
+      const flow = first ? state.flows.get(first) : undefined;
+      if (flow && !second) {
+        if (req.method === 'GET') {
+          const parsed = parseFlowJson(flow.json);
+          const jsonVersion = typeof parsed?.version === 'string' ? parsed.version : null;
+          const dataApi =
+            typeof parsed?.data_api_version === 'string' ? parsed.data_api_version : null;
+          return json(res, 200, {
+            id: flow.id,
+            name: flow.name,
+            status: flow.status,
+            categories: flow.categories,
+            validation_errors: flow.validationErrors,
+            json_version: jsonVersion,
+            data_api_version: dataApi,
+            data_channel_uri: flow.endpointUri,
+            health_status: {
+              can_send_message: flow.status === 'BLOCKED' ? 'BLOCKED' : 'AVAILABLE',
+              entities: [{ entity_type: 'FLOW', id: flow.id, can_send_message: 'AVAILABLE' }],
+            },
+            preview: {
+              preview_url: `https://business.facebook.com/wa/manage/flows/${flow.id}/preview/?token=stand-in`,
+              expires_at: new Date(Date.now() + 30 * 86_400_000).toISOString(),
+            },
+          });
+        }
+        if (req.method === 'POST') {
+          const b = (body ?? {}) as Record<string, unknown>;
+          if (typeof b.name === 'string') flow.name = b.name;
+          if (typeof b.categories === 'string')
+            flow.categories = JSON.parse(b.categories) as string[];
+          flow.endpointUri = typeof b.endpoint_uri === 'string' ? b.endpoint_uri : flow.endpointUri;
+          return json(res, 200, { success: true });
+        }
+        if (req.method === 'DELETE') {
+          if (flow.status !== 'DRAFT')
+            return graphError(res, 400, 100, 'Only draft flows can be deleted');
+          state.flows.delete(flow.id);
+          return json(res, 200, { success: true });
+        }
+      }
+      if (flow && second === 'assets' && req.method === 'POST') {
+        const b = (body ?? {}) as Record<string, unknown>;
+        const file = b.file as { content?: unknown } | undefined;
+        if (b.asset_type !== 'FLOW_JSON' || typeof file?.content !== 'string') {
+          return graphError(res, 400, 100, 'Invalid parameter');
+        }
+        if (flow.status !== 'DRAFT') return graphError(res, 400, 100, 'The flow is not a draft');
+        flow.json = file.content;
+        let errors = state.flowUploadErrors.shift() ?? [];
+        try {
+          JSON.parse(file.content);
+        } catch {
+          errors = [
+            {
+              error: 'INVALID_JSON',
+              error_type: 'JSON_SCHEMA_ERROR',
+              message: 'Invalid JSON',
+              line_start: 1,
+              line_end: 1,
+              column_start: 1,
+              column_end: 1,
+            },
+          ];
+        }
+        flow.validationErrors = errors;
+        return json(res, 200, { success: true, validation_errors: errors });
+      }
+      if (flow && second === 'publish' && req.method === 'POST') {
+        if (flow.status !== 'DRAFT' || !flow.json || flow.validationErrors.length > 0) {
+          return graphError(res, 400, 100, 'The flow cannot be published');
+        }
+        flow.status = 'PUBLISHED';
+        return json(res, 200, { success: true });
+      }
+      if (flow && second === 'deprecate' && req.method === 'POST') {
+        if (flow.status !== 'PUBLISHED')
+          return graphError(res, 400, 100, 'Only published flows can be deprecated');
+        flow.status = 'DEPRECATED';
+        return json(res, 200, { success: true });
+      }
+      if (first && second === 'whatsapp_business_encryption') {
+        if (req.method === 'POST') {
+          const pem = (body as Record<string, unknown> | undefined)?.business_public_key;
+          if (typeof pem !== 'string' || !pem.includes('BEGIN PUBLIC KEY')) {
+            return graphError(res, 400, 100, 'Business public key is invalid');
+          }
+          state.businessKeys.set(first, { pem, status: state.keySignatureStatus });
+          return json(res, 200, { success: true });
+        }
+        if (req.method === 'GET') {
+          const key = state.businessKeys.get(first);
+          return json(res, 200, {
+            data: key
+              ? [{ business_public_key: key.pem, business_public_key_signature_status: key.status }]
+              : [],
+          });
         }
       }
       if (req.method === 'GET' && first && !second) {

@@ -28,6 +28,8 @@ import {
   createBusinessHoursService,
   createCampaignsService,
   createCsatService,
+  createGrowthService,
+  createFlowsService,
   createReportsService,
   createConsentService,
   createContactsService,
@@ -47,6 +49,7 @@ import {
   type BusinessHoursService,
   type CampaignsService,
   type CsatService,
+  type GrowthService,
   type ReportsService,
   type ConsentService,
   type ContactsService,
@@ -62,7 +65,10 @@ import {
   type TemplatesService,
   type TenancyService,
   type WebRequestService,
+  type FlowsService,
+  type FlowEndpointDeps,
 } from '@w360/domain';
+import { DEFAULT_EGRESS_POLICY, createEgressClient } from '@w360/core/egress';
 import { createAuth, type Auth } from './auth';
 import { createTenantEventHub, type TenantEventHub } from './event-hub';
 
@@ -100,6 +106,12 @@ export interface Runtime {
   automations: AutomationService;
   /** Domains and secrets for the automation HTTP step. */
   webRequests: WebRequestService;
+  /** Click-to-chat links, QR codes, website widgets and conversation sources. */
+  growth: GrowthService;
+  /** WhatsApp Flows: drafts, Meta lifecycle (through the worker), keys, sending, answers. */
+  flows: FlowsService;
+  /** The Flows data endpoint (null until the Meta app is configured: requests cannot be verified). */
+  flowEndpoint: FlowEndpointDeps | null;
   crm: CrmService;
   /** Null until the Meta app is configured (WhatsApp connection is then reported unavailable). */
   meta: MetaConfig | null;
@@ -110,6 +122,12 @@ export interface Runtime {
   events: TenantEventHub;
   shutdown(): Promise<void>;
 }
+
+/**
+ * HyFib's limit on a company endpoint's answer to a flow request. Meta's own wait for the data
+ * endpoint is not documented in our research; this leaves time for decryption and encryption.
+ */
+const FLOW_ENDPOINT_TIMEOUT_MS = 7_000;
 
 async function init(): Promise<Runtime> {
   const config = loadWebConfig();
@@ -194,8 +212,33 @@ async function init(): Promise<Runtime> {
     allowInsecureHttp: config.W360_EGRESS_ALLOW_LOOPBACK ?? false,
   });
   const webRequests = createWebRequestService({ db, clock: systemClock, keyring });
+  const growth = createGrowthService({ db, clock: systemClock });
+  const flows = createFlowsService({
+    db,
+    clock: systemClock,
+    jobs,
+    signer,
+    appBaseUrl: config.APP_BASE_URL,
+    allowInsecureHttp: config.W360_EGRESS_ALLOW_LOOPBACK ?? false,
+  });
   const crm = createCrmService({ db, clock: systemClock, jobs, signer });
   const meta = metaConfigFrom(config);
+  // The Flows data endpoint forwards to companies' endpoints while WhatsApp waits, so it has its
+  // own egress client with a shorter time limit (the only addresses chosen by companies that the
+  // web tier calls; its other requests go to the fixed Meta and Razorpay origins).
+  const flowEndpoint: FlowEndpointDeps | null = meta
+    ? {
+        db,
+        keyring,
+        clock: systemClock,
+        appSecrets: meta.webhookSecrets,
+        egress: createEgressClient({
+          ...DEFAULT_EGRESS_POLICY,
+          timeoutMs: FLOW_ENDPOINT_TIMEOUT_MS,
+          allowLoopbackForTests: config.W360_EGRESS_ALLOW_LOOPBACK ?? false,
+        }),
+      }
+    : null;
   const onboarding = meta
     ? createOnboardingService({
         db,
@@ -252,6 +295,9 @@ async function init(): Promise<Runtime> {
     reports,
     automations,
     webRequests,
+    growth,
+    flows,
+    flowEndpoint,
     crm,
     meta,
     onboarding,

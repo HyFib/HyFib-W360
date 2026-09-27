@@ -212,6 +212,7 @@ export const messages = appSchema.table('messages', {
   senderMembershipId: uuid('sender_membership_id'),
   clientKey: text('client_key'),
   contextExternalId: text('context_external_id'),
+  /** No longer written (0016): ad sources are kept in `conversation_sources`; erasure clears it. */
   referral: jsonb('referral').$type<Record<string, unknown>>(),
   pricing: jsonb('pricing').$type<Record<string, unknown>>(),
   providerTimestamp: tz('provider_timestamp'),

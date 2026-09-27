@@ -11,6 +11,8 @@
  *   `unknown`     the request may have reached Meta but no response was received (timeouts,
  *                 resets). Callers must NOT blindly retry sends in this case.
  */
+import type { FlowValidationError } from '@w360/db';
+
 export type GraphFailureKind = 'retryable' | 'permanent' | 'auth' | 'unknown';
 
 export type GraphResult<T> =
@@ -103,6 +105,77 @@ export function classifyGraphError(
   };
 }
 
+/** A file part of a multipart request. */
+export interface FormFile {
+  filename: string;
+  contentType: string;
+  content: string;
+}
+
+/** A flow as `GET /{flow-id}` describes it (research M-163). */
+export interface RemoteFlow {
+  id: string;
+  name: string | null;
+  status: string | null;
+  categories: string[];
+  validationErrors: FlowValidationError[];
+  jsonVersion: string | null;
+  dataApiVersion: string | null;
+  health: Record<string, unknown> | null;
+  previewUrl: string | null;
+  previewExpiresAt: Date | null;
+}
+
+const str = (value: unknown): string | null => (typeof value === 'string' ? value : null);
+const num = (value: unknown): number | null =>
+  typeof value === 'number' && Number.isFinite(value) ? value : null;
+
+/** Meta's Flow JSON validation errors (research M-162), bounded. */
+export function mapFlowValidationErrors(value: unknown): FlowValidationError[] {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 100).flatMap((raw) => {
+    if (typeof raw !== 'object' || raw === null) return [];
+    const e = raw as Record<string, unknown>;
+    const message = str(e.message);
+    if (!message) return [];
+    return [
+      {
+        error: (str(e.error) ?? 'ERROR').slice(0, 100),
+        errorType: str(e.error_type)?.slice(0, 100) ?? null,
+        message: message.slice(0, 1000),
+        lineStart: num(e.line_start),
+        lineEnd: num(e.line_end),
+        columnStart: num(e.column_start),
+        columnEnd: num(e.column_end),
+      },
+    ];
+  });
+}
+
+function mapRemoteFlow(json: Record<string, unknown>): RemoteFlow | null {
+  const id = str(json.id);
+  if (!id) return null;
+  const preview = (json.preview ?? null) as Record<string, unknown> | null;
+  const expires = str(preview?.expires_at);
+  const previewUrl = str(preview?.preview_url);
+  const health = json.health_status;
+  return {
+    id,
+    name: str(json.name),
+    status: str(json.status),
+    categories: Array.isArray(json.categories)
+      ? json.categories.filter((c): c is string => typeof c === 'string')
+      : [],
+    validationErrors: mapFlowValidationErrors(json.validation_errors),
+    jsonVersion: str(json.json_version),
+    dataApiVersion: str(json.data_api_version),
+    health:
+      typeof health === 'object' && health !== null ? (health as Record<string, unknown>) : null,
+    previewUrl: previewUrl && /^https:\/\//.test(previewUrl) ? previewUrl : null,
+    previewExpiresAt: expires && !Number.isNaN(Date.parse(expires)) ? new Date(expires) : null,
+  };
+}
+
 export class GraphClient {
   private readonly base: string;
   private readonly timeoutMs: number;
@@ -118,20 +191,38 @@ export class GraphClient {
   private async request<T>(
     method: 'GET' | 'POST' | 'DELETE',
     path: string,
-    options: { token?: string; query?: Record<string, string>; body?: unknown },
+    options: {
+      token?: string;
+      query?: Record<string, string>;
+      body?: unknown;
+      /** Multipart form data (Flows endpoints take form fields and files, research M-161). */
+      form?: Record<string, string | FormFile>;
+    },
     map: (json: Record<string, unknown>) => T | null,
   ): Promise<GraphResult<T>> {
     const url = new URL(`${this.base}${path}`);
     for (const [k, v] of Object.entries(options.query ?? {})) url.searchParams.set(k, v);
     const headers: Record<string, string> = { accept: 'application/json' };
     if (options.token) headers.authorization = `Bearer ${options.token}`;
-    if (options.body !== undefined) headers['content-type'] = 'application/json';
+    let body: string | FormData | undefined;
+    if (options.form) {
+      // fetch sets the multipart content type with its boundary.
+      const form = new FormData();
+      for (const [k, v] of Object.entries(options.form)) {
+        if (typeof v === 'string') form.append(k, v);
+        else form.append(k, new Blob([v.content], { type: v.contentType }), v.filename);
+      }
+      body = form;
+    } else if (options.body !== undefined) {
+      headers['content-type'] = 'application/json';
+      body = JSON.stringify(options.body);
+    }
     let response: Response;
     try {
       response = await this.fetchImpl(url, {
         method,
         headers,
-        ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
+        ...(body !== undefined ? { body } : {}),
         signal: AbortSignal.timeout(this.timeoutMs),
         redirect: 'error',
       });
@@ -274,6 +365,159 @@ export class GraphClient {
       `/${encodeURIComponent(wabaId)}/message_templates`,
       { token, query: { name: template.name, hsm_id: template.hsmId } },
       (json) => (json.success === true ? { deleted: true } : null),
+    );
+  }
+
+  // WhatsApp Flows (research M-097, M-161 to M-164) ------------------------------------------------
+
+  /** POST /{waba-id}/flows (multipart: name, categories as a JSON array, endpoint_uri). */
+  createFlow(
+    wabaId: string,
+    token: string,
+    flow: { name: string; categories: string[]; endpointUri: string | null },
+  ) {
+    return this.request(
+      'POST',
+      `/${encodeURIComponent(wabaId)}/flows`,
+      {
+        token,
+        form: {
+          name: flow.name,
+          categories: JSON.stringify(flow.categories),
+          ...(flow.endpointUri ? { endpoint_uri: flow.endpointUri } : {}),
+        },
+      },
+      (json) => (typeof json.id === 'string' && json.id.length > 0 ? { id: json.id } : null),
+    );
+  }
+
+  /** GET /{waba-id}/flows, one page (id, name, status). */
+  listFlows(wabaId: string, token: string, page: { after?: string | null } = {}) {
+    return this.request(
+      'GET',
+      `/${encodeURIComponent(wabaId)}/flows`,
+      {
+        token,
+        query: {
+          fields: 'id,name,status',
+          limit: '100',
+          ...(page.after ? { after: page.after } : {}),
+        },
+      },
+      (json) => {
+        if (!Array.isArray(json.data)) return null;
+        const flows = (json.data as Record<string, unknown>[]).flatMap((f) =>
+          typeof f?.id === 'string' ? [{ id: f.id, name: str(f.name), status: str(f.status) }] : [],
+        );
+        const paging = (json.paging ?? {}) as { cursors?: { after?: unknown }; next?: unknown };
+        const after = typeof paging.next === 'string' ? str(paging.cursors?.after) : null;
+        return { flows, after };
+      },
+    );
+  }
+
+  /** POST /{flow-id} (multipart: name, categories, endpoint_uri). */
+  updateFlowMetadata(
+    flowId: string,
+    token: string,
+    metadata: { name: string; categories: string[]; endpointUri: string | null },
+  ) {
+    return this.request(
+      'POST',
+      `/${encodeURIComponent(flowId)}`,
+      {
+        token,
+        form: {
+          name: metadata.name,
+          categories: JSON.stringify(metadata.categories),
+          ...(metadata.endpointUri ? { endpoint_uri: metadata.endpointUri } : {}),
+        },
+      },
+      (json) => (json.success === true ? { updated: true } : null),
+    );
+  }
+
+  /** POST /{flow-id}/assets: uploads the Flow JSON and returns Meta's validation errors. */
+  uploadFlowJson(flowId: string, token: string, json: string) {
+    return this.request(
+      'POST',
+      `/${encodeURIComponent(flowId)}/assets`,
+      {
+        token,
+        form: {
+          asset_type: 'FLOW_JSON',
+          name: 'flow.json',
+          file: { filename: 'flow.json', contentType: 'application/json', content: json },
+        },
+      },
+      (res) =>
+        res.success === true
+          ? { validationErrors: mapFlowValidationErrors(res.validation_errors) }
+          : null,
+    );
+  }
+
+  /** POST /{flow-id}/publish (irreversible). */
+  publishFlow(flowId: string, token: string) {
+    return this.request('POST', `/${encodeURIComponent(flowId)}/publish`, { token }, (json) =>
+      json.success === true ? { published: true } : null,
+    );
+  }
+
+  /** POST /{flow-id}/deprecate (published flows only; irreversible). */
+  deprecateFlow(flowId: string, token: string) {
+    return this.request('POST', `/${encodeURIComponent(flowId)}/deprecate`, { token }, (json) =>
+      json.success === true ? { deprecated: true } : null,
+    );
+  }
+
+  /** DELETE /{flow-id} (DRAFT flows only). */
+  deleteFlow(flowId: string, token: string) {
+    return this.request('DELETE', `/${encodeURIComponent(flowId)}`, { token }, (json) =>
+      json.success === true ? { deleted: true } : null,
+    );
+  }
+
+  /** GET /{flow-id} with the fields HyFib shows. */
+  getFlow(flowId: string, token: string) {
+    return this.request(
+      'GET',
+      `/${encodeURIComponent(flowId)}`,
+      {
+        token,
+        query: {
+          fields:
+            'id,name,status,categories,validation_errors,json_version,data_api_version,health_status,preview',
+        },
+      },
+      mapRemoteFlow,
+    );
+  }
+
+  /** POST /{phone-number-id}/whatsapp_business_encryption (replaces the number's key, M-164). */
+  setBusinessPublicKey(phoneNumberId: string, token: string, publicKeyPem: string) {
+    return this.request(
+      'POST',
+      `/${encodeURIComponent(phoneNumberId)}/whatsapp_business_encryption`,
+      { token, form: { business_public_key: publicKeyPem } },
+      (json) => (json.success === true ? { uploaded: true } : null),
+    );
+  }
+
+  /** GET /{phone-number-id}/whatsapp_business_encryption: the key Meta has and its signature status. */
+  getBusinessPublicKey(phoneNumberId: string, token: string) {
+    return this.request(
+      'GET',
+      `/${encodeURIComponent(phoneNumberId)}/whatsapp_business_encryption`,
+      { token },
+      (json) => {
+        if (!Array.isArray(json.data)) return null;
+        const first = (json.data[0] ?? {}) as Record<string, unknown>;
+        const status = str(first.business_public_key_signature_status);
+        const signatureStatus: 'VALID' | 'MISMATCH' | null =
+          status === 'VALID' || status === 'MISMATCH' ? status : null;
+        return { publicKeyPem: str(first.business_public_key)?.trim() || null, signatureStatus };
+      },
     );
   }
 

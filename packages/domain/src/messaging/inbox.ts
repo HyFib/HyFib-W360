@@ -33,6 +33,7 @@ import { recordAudit, type RequestMeta } from '../audit';
 import { DEFAULT_MESSAGING_SETTINGS } from '../consent/service';
 import { endRunForHuman } from '../automations/runs';
 import { automationStateForConversation } from '../automations/service';
+import { latestConversationSource } from '../growth/sources';
 import { latestCsatSurvey, queueCsatSurvey } from '../inbox/csat';
 import { routeConversation } from '../inbox/routing';
 import type { JobSigner } from '../jobs/envelope';
@@ -577,6 +578,7 @@ export function createInboxService(deps: InboxDeps) {
           const target = await loadReplyTarget(tx, ctx.tenant.id, ctx.tenant.timezone);
           const survey = await latestCsatSurvey(tx, ctx.tenant.id, conv.id);
           const automation = await automationStateForConversation(tx, ctx.tenant.id, conv.id);
+          const source = await latestConversationSource(tx, ctx.tenant.id, conv.id);
           const page = rows.slice(0, pageSize);
           const oldest = page[page.length - 1];
           return {
@@ -612,6 +614,7 @@ export function createInboxService(deps: InboxDeps) {
             olderCursor:
               rows.length > pageSize && oldest ? encodeCursor(oldest.createdAt, oldest.id) : null,
             automation,
+            source,
             csat: survey
               ? {
                   skipReason: survey.skipReason,

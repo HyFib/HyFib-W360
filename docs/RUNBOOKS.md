@@ -295,12 +295,15 @@ answered (only 2xx counts as success). `domain_not_allowed`, `secret_missing` an
 `secret_domain_mismatch` mean the company's current settings refused the call before it was made
 (Settings → Web requests: the domain was removed, or the secret deleted or saved for another
 domain). `address_blocked` means the name resolves to a private or reserved address, which is never
-allowed; `dns_failed` and `connect_failed` mean nothing was sent. `timeout`, `network_error` and
+allowed; `dns_failed` (including a name that did not resolve within the 10-second deadline) and
+`connect_failed` (no checked address accepted a connection) mean nothing was sent. `timeout`, `network_error` and
 `no_result` mean the request may have reached the server without a complete answer: the outcome is
 unknown and the call is never repeated automatically, because the server may have acted on it
 (creating an order, say). Ask the company to check on their side, then take the conversation over
 if needed. `not_started` means the worker did not get to the call before the run's two-minute
-deadline (a backlog, a worker outage or a suspended company); it was not sent. Worker log lines
+deadline (a backlog, a worker outage or a suspended company); it was not sent.
+`run_ended_in_flight` means the run ended (take-over, stop, resolve, archive, opt-out) while the
+call was being made, so its outcome is unknown; after an erasure the code is `contact_erased`. Worker log lines
 "automation HTTP call" carry the call id and outcome, never the request, its headers or the
 response.
 
@@ -324,8 +327,9 @@ run tester removed") or no longer holds `automations.write` and `inbox.reply` (t
 **Retention.** The minute sweep clears captured answers 30 days after runs end and deletes runs
 (with their step logs) 180 days after they end ("automation retention applied").
 
-**Migration 0014 failed.** Like 0011, it replaces `app.erase_contact` and
-`ops.apply_automation_retention` through `SET ROLE w360_definer` and applies nothing on failure.
+**Migration 0014 or 0015 failed.** Like 0011, they replace definer functions through
+`SET ROLE w360_definer` (0014: `app.erase_contact` and `ops.apply_automation_retention`; 0015:
+`app.erase_contact` again) and apply nothing on failure.
 
 **Migration 0011 failed.** It runs in one transaction, so a failure applies nothing. It drops and
 recreates the definer functions `app.erase_contact` and `ops.conversations_to_route` through
@@ -366,6 +370,98 @@ different currencies; they list a total per currency.
 **Migration 0013 failed.** It runs in one transaction, so a failure applies nothing. It replaces
 the definer function `app.erase_contact` through `SET ROLE w360_definer` (ADR-039) like 0011: see
 that section.
+
+## 10F. Growth tools
+
+**A chat link shows "This chat link is not available".** The short link answers 404 when the link
+is archived (restore it on its page), its number is not active (Settings → Channels; a number that
+needs reconnecting stops its links until it is active again), or the company is being deleted. A
+suspended company's links keep working. The link page shows a warning in the first two cases.
+Unknown or mistyped addresses answer the same page. Nothing is logged about the visitor.
+
+**Clicks look too high.** Counts include every open of the short link and its QR code: repeated
+clicks by one person and automated visits (link previews in chat apps and social networks,
+crawlers, security scanners) all count, because nothing about the visitor is kept to tell them
+apart (ADR-044). Compare conversations from the link instead. Counts cannot be edited or reset.
+
+**Conversations from a link are not counted.** A conversation counts when the customer's message
+contains the whole marker "(ref ABC234)" (any case) and arrives on the number the link opens. It
+does not count when the customer deleted or changed the marker, sent it to another of the company's
+numbers, sent it inside a photo caption or other media, or when the link was created with the
+reference code switched off (the list shows "—"). The direct wa.me link skips the click count but
+still carries the code.
+
+**The website button does not appear.** Check, in order: the button is shown (not hidden) and not
+deleted; its link is not archived and its number is active (the Website button page shows a badge
+for both); the site's Content Security Policy allows the app origin in `script-src`; the tag is on
+the page (`/widget/<id>.js` returns a script, not the 404 comment). Browsers may keep the previous
+script for up to five minutes, so changes and removals reach visitors within five minutes. The
+script adds one button per page even if the tag appears twice.
+
+**A click-to-WhatsApp ad is not listed under Growth → Ads.** Only messages whose webhook carries a
+`referral` object are counted (Meta includes it on the message a customer sends from the ad); ads
+are not synced from an ad account, and ads with no conversation in the last 30 days are not
+listed. The inbox shows "Came from the ad …" on attributed conversations. Ad click ids are never
+stored, so conversions cannot be reported back to Meta.
+
+**Migration 0016 failed.** It runs in one transaction, so a failure applies nothing. It replaces the
+definer function `app.erase_contact` through `SET ROLE w360_definer` (ADR-039) like 0011 and 0015:
+see that section. It adds policies and column grants for `w360_definer` on `app.channel_accounts`
+and `app.messages`; a failure there usually means the bootstrap roles are missing
+(`infra/db/bootstrap-roles.sql`).
+
+## 10G. WhatsApp Flows
+
+**A flow stays on "Sending to Meta…" (or another operation).** The flow page shows the operation and
+when it was requested. The `flow.sync` worker retries Meta's temporary failures five times over
+about 15 minutes; the minute sweep signals operations waiting for more than two minutes again and
+marks those older than 30 minutes failed ("did not finish within 30 minutes"), which the member can
+try again. Check the worker log for `flow job` lines with the flow id and outcome, and that Meta is
+configured (without it the worker does nothing and says "Meta is not configured"). Jobs of a
+suspended company are dropped and picked up by the sweep after reactivation.
+
+**"Meta did not accept the change".** The message is Meta's own (title or detail, trimmed). A
+credential problem says to reconnect the WhatsApp account. Validation problems in the Flow JSON are
+not failures: they are listed on the flow page with line and column, and publishing waits until
+Meta reports none. A failed delete that says Meta could not read the flow usually means it was
+already deleted in WhatsApp Manager: archive it in HyFib.
+
+**Two flows appeared at Meta for one draft.** It should not happen: the name at Meta ends with
+"(w360 " and the first eight characters of the flow's public id, and the worker adopts a flow with
+its reference instead of creating another after a lost response. A copy made by hand in WhatsApp
+Manager keeps the reference in its name; rename or delete it there.
+
+**The encryption key is not valid on a number.** The flow page lists each number with the key's
+state. "Uploading…" clears within minutes (the sweep retries uploads pending for more than two
+minutes). "Failed" shows the reason: the account is not connected (reconnect it), the number is not
+active, or Meta reports a signature mismatch or a different key for the number (another system may
+have uploaded its own key: use "Upload the key again", and stop the other system from replacing it).
+New numbers of the account get the key automatically. Replacing the key keeps the previous one
+working for 24 hours.
+
+**Customers see "This form is no longer available".** The token of that message was not issued by
+HyFib for this flow, is older than 30 days, or belongs to an erased contact: send the form again.
+"This form is not available right now" means the company is suspended. Other failures answer 500
+(what WhatsApp then shows the customer is not documented in our research); the web log has a
+`flow endpoint request` line with the outcome: `endpoint_not_set`, `endpoint_domain_not_allowed` (add the domain in Settings → Web
+requests), `endpoint_secret_missing`, `endpoint_secret_domain_mismatch` (the secret now belongs to
+another domain), `endpoint_failed` with the company's status or the egress code, `endpoint_answer_not_json`
+or `endpoint_answer_too_large` (over 64 KB). `decrypt_failed` (421) makes WhatsApp fetch the key
+again; if it persists, check the number's key state. `bad_signature` (432) means the request was not
+signed with the current or previous app secret.
+
+**Answers were not saved on the contact.** Each completed form lists what happened to every answer:
+saved, not answered, not saved (with the reason, for example an invalid email or a value that does
+not fit the field's type) or skipped (the answers could not be read or were too large, or the form
+was completed by someone other than the contact it was sent to). Answers are always kept with the
+completed form, and saving them never changes consent.
+
+**Migration 0017 failed.** It runs in one transaction, so a failure applies nothing. It replaces the
+definer function `app.erase_contact` through `SET ROLE w360_definer` (ADR-039) like 0011, 0015 and
+0016, and adds two definer functions (`ops.flow_endpoint_target`, `ops.flow_work_due`) with column
+grants for `w360_definer` on the flow tables and `app.channel_accounts`; a failure there usually
+means the bootstrap roles are missing (`infra/db/bootstrap-roles.sql`). The `flow.sync` and
+`flow.keys` queues are created by `pnpm db:migrate` with the other pg-boss queues.
 
 ## 11. Compromised company (tenant) or account
 

@@ -5,6 +5,7 @@ import {
   HTTP_WAIT_MINUTES,
   RUN_BUDGETS,
   encodeJsonString,
+  httpPathTemplate,
   renderHttpHeader,
   renderHttpText,
   renderText,
@@ -94,6 +95,8 @@ export type RunEffect =
       kind: 'http_request';
       method: HttpMethod;
       url: string;
+      /** The address's path as written (placeholders not filled in), for the call record. */
+      path: string;
       headers: { name: string; parts: HttpHeaderPart[] }[];
       body: string | null;
       save: { path: string; saveAs: string }[];
@@ -446,6 +449,7 @@ export function advance(input: AdvanceInput): StepResult {
           kind: 'http_request',
           method: current.method,
           url: renderHttpText(current.url, vals, encodeURIComponent),
+          path: httpPathTemplate(current.url),
           headers: current.headers.map((h) => ({
             name: h.name,
             parts: renderHttpHeader(h.value, vals),

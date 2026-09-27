@@ -4,13 +4,16 @@ import { usePathname } from 'next/navigation';
 import { cn } from '@w360/ui/cn';
 import { needsOwnDocument } from '@/lib/document-routes';
 
-export function SettingsTabs({ tabs }: { tabs: { href: string; label: string }[] }) {
+export function SettingsTabs({
+  tabs,
+  label = 'Settings sections',
+}: {
+  tabs: { href: string; label: string }[];
+  label?: string;
+}) {
   const pathname = usePathname();
   return (
-    <nav
-      aria-label="Settings sections"
-      className="flex gap-1 overflow-x-auto border-b border-border"
-    >
+    <nav aria-label={label} className="flex gap-1 overflow-x-auto border-b border-border">
       {tabs.map((tab, i) => {
         const active = i === 0 ? pathname === tab.href : pathname.startsWith(tab.href);
         const className = cn(

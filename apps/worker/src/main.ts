@@ -10,6 +10,7 @@ import { automationHttpHandler, automationRunHandler } from './handlers/automati
 import { campaignRunHandler } from './handlers/campaigns';
 import { crmReminderHandler } from './handlers/crm';
 import { emailSendHandler, outboxSweepHandler } from './handlers/email';
+import { flowKeysHandler, flowSyncHandler } from './handlers/flows';
 import {
   channelOnboardHandler,
   messageSendHandler,
@@ -114,6 +115,16 @@ async function main(): Promise<void> {
     QUEUES.crmReminder.name,
     { localConcurrency: 2, batchSize: 1 },
     crmReminderHandler(rt),
+  );
+  await rt.boss.work(
+    QUEUES.flowSync.name,
+    { localConcurrency: 2, batchSize: 1 },
+    flowSyncHandler(rt),
+  );
+  await rt.boss.work(
+    QUEUES.flowKeys.name,
+    { localConcurrency: 1, batchSize: 1 },
+    flowKeysHandler(rt),
   );
   await rt.boss.work(
     QUEUES.billingEventProcess.name,
