@@ -173,6 +173,21 @@ export const QUEUES = {
     deadLetter: 'dead-letter',
     deleteAfterHours: 72,
   },
+  /**
+   * Makes one automation HTTP call. Retrying the job is safe: only a queued call is ever claimed
+   * and sent, so a retry after the claim never sends the request twice.
+   */
+  automationHttp: {
+    name: 'automation.http',
+    policy: 'exclusive',
+    retryLimit: 3,
+    retryDelaySeconds: 5,
+    retryBackoff: true,
+    retryDelayMaxSeconds: 60,
+    expireInSeconds: 60,
+    deadLetter: 'dead-letter',
+    deleteAfterHours: 72,
+  },
   crmReminder: {
     name: 'crm.reminder',
     policy: 'exclusive',

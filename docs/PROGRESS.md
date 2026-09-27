@@ -1,5 +1,75 @@
 # Progress
 
+## 2026-09-27 — Phase 4: automation web requests and the egress guard (P4-02)
+
+Status: **HTTP step implemented and locally verified against a local target server; production
+blocked.** Automations can call a company's own API and branch on the result. Every call goes
+through the new egress guard; calls to a real company API through a production egress path are a
+release item. With this slice the "integration idempotency" part of the Phase 4 gate is verified
+locally for the HTTP step; commerce (P4-06) is still open.
+
+### Completed
+
+- **Egress guard (`packages/core/src/egress.ts`, ADR-042):** https only, port 443 or 1024+, no URL
+  credentials; one DNS resolution with every answer checked against blocked IPv4 and IPv6 ranges
+  (private, loopback, link-local, CGNAT, multicast, reserved, documentation, metadata, mapped,
+  NAT64, 6to4, unique- and site-local), then a socket pinned to the checked address with the name
+  only in SNI and Host; IP literals checked in every notation; no redirects; a fresh connection per
+  request; 64 KiB request, 256 KiB response, 10 s; reserved headers and line breaks refused; each
+  error says whether the request may have been sent. `W360_EGRESS_ALLOW_LOOPBACK` (http:// and
+  loopback test targets) is refused by web and worker configuration outside `APP_ENV=local|test`.
+- **Schema (migration 0014):** `http_allowed_domains` (exact names or `*.` wildcards),
+  `http_secrets` (encrypted value bound to the row, the one domain it may be sent to, version),
+  `automation_http_calls` (one per step visit: method, host, path, the request encrypted until the
+  call finishes, state, status or error code, duration, saved values); a trigger keeps a finished
+  call final and refuses to queue a call that may have been sent; runs wait for `http` and count
+  calls (budget 20, `budget_http`); `ops.automation_http_calls_due` for the sweep; retention and
+  contact erasure replaced to clear saved values and cancel calls not yet made.
+- **Step and runner (ADR-043):** "Call a web address" (method, address with URL-encoded
+  placeholders, up to 10 headers, a JSON body with escaped placeholders, values saved from a JSON
+  response by path, success and failure branches) with publish checks (allowed host, no
+  placeholders in the host, secrets only in header values and only to their domain, valid JSON).
+  The step's transaction writes the call ahead and the run waits up to two minutes; the
+  `automation.http` worker claims a queued call, re-checks the current domains and secrets, sends it
+  with no locks held and records the outcome, then signals the run. A call is only sent from
+  `queued`; one that may have been received without a result is `unknown` at the deadline and never
+  repeated; one not made by then (or whose job runs late, for example after a suspension) is
+  cancelled. Saved values are kept only for a run that can still use them.
+- **Web:** Settings → Web requests (domains; secrets saved write-only for one domain, replaced or
+  deleted; a warning about servers that echo headers); the step editor (method, address, headers
+  with a ready bearer-token header, body, values to save, both branches); the simulator shows the
+  request it would make, sends nothing and lets the tester choose success (with values) or failure;
+  run pages list each call with its outcome; the inbox banner says when a run waits for a web
+  request; labels for every refusal and egress code.
+- **Found while building:**
+  - Customer text rendered into a header (a WhatsApp profile name or an answer containing
+    `{{secret.x}}`) would have been read as a placeholder by the worker and filled with the secret.
+    Header values are now rendered into text and secret parts, so rendered values are never parsed
+    again, and customer text is percent-encoded unless it is printable ASCII (a name in another
+    script can no longer make the call fail).
+  - Anyone who can edit automations could have sent a secret meant for one allowed domain to
+    another; secrets are now saved for one domain and the worker refuses a mismatch.
+  - The runner read the call without a lock before settling it at the deadline, so a success
+    recorded in between would have taken the failure branch; the runner now locks the call.
+  - A queued call whose job ran after the run's deadline would have been sent late; it is now
+    cancelled.
+
+### Test commands and results (local, 2026-09-27, fresh database)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                        |
+| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                |
+| `pnpm test` (unit)                                                          | 140 passed. New: 11 egress tests (blocked ranges and notations, pinning and Host, redirects, size and time limits, headers, DNS and connection failures) and HTTP step interpreter tests (rendering, waiting, saved values only on success, customer text never read as a secret, the call budget, publish checks including a secret's domain)                                |
+| `pnpm test:integration` (PostgreSQL 18.x)                                   | 230 passed, including `automation-http.test.ts` 11: a call made once with its secret and values saved, error statuses and refusals by current settings, a crash leaving the call in flight and a late result both ending as unknown, a timeout, cancellation on take-over, at the deadline and for a late job, the lost-job sweep, retention, erasure, settings and isolation |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 38 passed (19 tests × 2), including web requests: Settings → Web requests, a step built in the editor with a stored secret, tried in the simulator, published, and a live run in which the worker calls a local target once with the secret and answers with the result, and the run page's call list                                                          |
+
+### Known gaps
+
+- Not built: retries a company opts into for idempotent requests, form-encoded bodies, response
+  headers or non-JSON bodies as values, OAuth client flows, calls from outgoing webhooks and imports
+  (they must use the same guard), a network egress policy in deployment (release checklist).
+- Verified only against a local target server; Firefox and WebKit run in CI only.
+
 ## 2026-09-27 — Phase 4: CRM (P4-04)
 
 Status: **CRM implemented and locally verified, production blocked on email delivery only.**
@@ -638,6 +708,9 @@ Playwright's global setup starts the Graph stand-in on that port. Without them t
 The billing e2e test similarly needs `RAZORPAY_KEY_ID=rzp_test_…`, `RAZORPAY_KEY_SECRET` and
 `RAZORPAY_WEBHOOK_SECRET` (random values), `RAZORPAY_API_BASE_URL=http://127.0.0.1:4020` and
 `E2E_RAZORPAY_PORT=4020`.
+The web request e2e test calls a local target server: set `W360_EGRESS_ALLOW_LOOPBACK=true` for the
+web, the worker and Playwright, and `E2E_HTTP_HOST` to a name that resolves to 127.0.0.1 (for example
+add `127.0.0.1 api.w360-e2e.test` to `/etc/hosts`, as CI does). Without them the test is skipped.
 
 ### Blockers (external)
 

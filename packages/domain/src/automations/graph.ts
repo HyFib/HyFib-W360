@@ -33,6 +33,11 @@ export const AUTOMATION_LIMITS = {
   minutes: 1440,
   cooldownMinutes: 1440,
   labelLength: 60,
+  httpUrlLength: 2000,
+  httpHeaders: 10,
+  httpHeaderValueLength: 1000,
+  httpBodyLength: 8000,
+  httpSaves: 10,
 } as const;
 
 /**
@@ -50,6 +55,8 @@ export const RUN_BUDGETS = {
   maxRunMs: 7 * 24 * 3600_000,
   /** Runs started in one conversation per hour, across automations (bot-to-bot loops). */
   maxRunsPerConversationPerHour: 10,
+  /** HTTP calls per run. */
+  maxHttpCalls: 20,
 } as const;
 
 const nodeIdSchema = z.string().regex(NODE_ID_RE, 'Step ids use a-z, 0-9, - and _ (at most 32).');
@@ -228,6 +235,89 @@ const updateContactNode = z.object({
   next: nextSchema,
 });
 
+export const HTTP_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] as const;
+export type HttpMethod = (typeof HTTP_METHODS)[number];
+/** Methods that send a body. */
+export const HTTP_BODY_METHODS: ReadonlySet<HttpMethod> = new Set(['POST', 'PUT', 'PATCH']);
+/** How long a run waits for an HTTP call's result before taking the failure branch. */
+export const HTTP_WAIT_MINUTES = 2;
+const HTTP_HEADER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,59}$/;
+/** Headers the egress client sets itself (framing, routing, the connection). */
+const RESERVED_HTTP_HEADERS: ReadonlySet<string> = new Set([
+  'host',
+  'content-length',
+  'transfer-encoding',
+  'connection',
+  'keep-alive',
+  'upgrade',
+  'te',
+  'trailer',
+  'expect',
+  'accept-encoding',
+]);
+/** A path into a JSON response: keys and array positions separated by dots (data.items.0.id). */
+export const RESPONSE_PATH_RE = /^[A-Za-z0-9_$-]{1,64}(\.[A-Za-z0-9_$-]{1,64}){0,9}$/;
+
+const httpRequestNode = z.object({
+  id: nodeIdSchema,
+  type: z.literal('http_request'),
+  label: labelSchema,
+  method: z.enum(HTTP_METHODS),
+  url: z
+    .string()
+    .trim()
+    .min(1, 'Enter the address to call.')
+    .max(
+      AUTOMATION_LIMITS.httpUrlLength,
+      `Addresses are limited to ${AUTOMATION_LIMITS.httpUrlLength} characters.`,
+    ),
+  headers: z
+    .array(
+      z.object({
+        name: z
+          .string()
+          .trim()
+          .regex(HTTP_HEADER_NAME_RE, 'Header names use letters, digits and - (at most 60).')
+          .refine(
+            (n) => !RESERVED_HTTP_HEADERS.has(n.toLowerCase()) && !/^proxy-/i.test(n),
+            'HyFib sets this header itself.',
+          ),
+        value: z
+          .string()
+          .max(
+            AUTOMATION_LIMITS.httpHeaderValueLength,
+            `Header values are limited to ${AUTOMATION_LIMITS.httpHeaderValueLength} characters.`,
+          )
+          .refine(
+            (v) => /^[\x20-\x7e]*$/.test(v),
+            'Header values use printable ASCII characters, without line breaks (put other text in the body).',
+          ),
+      }),
+    )
+    .max(AUTOMATION_LIMITS.httpHeaders, `At most ${AUTOMATION_LIMITS.httpHeaders} headers.`),
+  body: z
+    .string()
+    .max(
+      AUTOMATION_LIMITS.httpBodyLength,
+      `The body is limited to ${AUTOMATION_LIMITS.httpBodyLength} characters.`,
+    )
+    .nullable()
+    .transform((v) => (v && v.trim() ? v : null)),
+  /** Values to save from a JSON response, as answers. */
+  save: z
+    .array(
+      z.object({
+        path: z.string().trim().regex(RESPONSE_PATH_RE, 'Use a path such as data.order.status.'),
+        saveAs: variableSchema,
+      }),
+    )
+    .max(AUTOMATION_LIMITS.httpSaves, `At most ${AUTOMATION_LIMITS.httpSaves} saved values.`),
+  /** A 2xx response. */
+  next: nextSchema,
+  /** Anything else: another status, a refused or failed call, no result in time. */
+  failureNext: nextSchema,
+});
+
 const waitNode = z.object({
   id: nodeIdSchema,
   type: z.literal('wait'),
@@ -252,6 +342,7 @@ export const nodeSchema = z.discriminatedUnion('type', [
   askTextNode,
   conditionNode,
   updateContactNode,
+  httpRequestNode,
   waitNode,
   handoffNode,
   endNode,
@@ -266,6 +357,7 @@ export const NODE_TYPES: readonly NodeType[] = [
   'ask_text',
   'condition',
   'update_contact',
+  'http_request',
   'wait',
   'handoff',
   'end',
@@ -277,6 +369,7 @@ export const NODE_TYPE_LABELS: Record<NodeType, string> = {
   ask_text: 'Ask a question',
   condition: 'Condition',
   update_contact: 'Update contact',
+  http_request: 'Call a web address',
   wait: 'Wait',
   handoff: 'Hand off to people',
   end: 'End',
@@ -424,18 +517,157 @@ export function renderText(template: string, values: TextValues): string {
     .trim();
 }
 
-/** Placeholders used by a text: unknown ones and captured answers referenced. */
-function placeholdersIn(text: string): { unknown: string[]; answers: string[]; literal: boolean } {
+/** Names of HTTP secrets ({{secret.<name>}}), stored encrypted by the company. */
+export const SECRET_NAME_RE = /^[a-z][a-z0-9_]{0,39}$/;
+
+/**
+ * Renders the address or body of an HTTP step: {{name}}, {{company}} and {{answer.<name>}} are
+ * filled through `encode` (URL-encoded in the address, JSON-escaped in the body). Secrets are only
+ * allowed in header values (see `renderHttpHeader`); anything else stays as written.
+ */
+export function renderHttpText(
+  template: string,
+  values: TextValues,
+  encode: (value: string) => string,
+): string {
+  return template.replace(PLACEHOLDER_RE, (whole, raw: string) => {
+    const value = placeholderValue(raw.toLowerCase(), values);
+    return value === null ? whole : encode(value);
+  });
+}
+
+function placeholderValue(name: string, values: TextValues): string | null {
+  if (name === 'name') return values.contactName ?? '';
+  if (name === 'company') return values.companyName;
+  if (name.startsWith('answer.')) return values.variables[name.slice(7)] ?? '';
+  return null;
+}
+
+/** Escapes a value for use inside a JSON string of an HTTP body. */
+export const encodeJsonString = (value: string): string => JSON.stringify(value).slice(1, -1);
+
+const utf8 = new TextEncoder();
+/**
+ * Makes a value safe in a header value: printable ASCII other than % stays; anything else (line
+ * breaks, other scripts, emoji, %) is percent-encoded as UTF-8, so the receiver can decode it.
+ */
+export const encodeHeaderValue = (value: string): string =>
+  value.replace(/[^\x20-\x24\x26-\x7e]/gu, (c) =>
+    Array.from(utf8.encode(c), (b) => `%${b.toString(16).toUpperCase().padStart(2, '0')}`).join(''),
+  );
+
+/** A header value of an HTTP call: text, and the secrets the worker fills in, in order. */
+export type HttpHeaderPart = { text: string } | { secret: string };
+
+/**
+ * Renders a header value into parts. Values are filled as text (header-encoded) and never read as
+ * placeholders again, so a customer's name or answer cannot pull in a secret; only the step's own
+ * {{secret.<name>}} placeholders become secret parts.
+ */
+export function renderHttpHeader(template: string, values: TextValues): HttpHeaderPart[] {
+  const parts: HttpHeaderPart[] = [];
+  let text = '';
+  let last = 0;
+  for (const match of template.matchAll(PLACEHOLDER_RE)) {
+    text += template.slice(last, match.index);
+    last = match.index + match[0].length;
+    const name = (match[1] ?? '').toLowerCase();
+    if (name.startsWith('secret.') && SECRET_NAME_RE.test(name.slice(7))) {
+      if (text) parts.push({ text });
+      text = '';
+      parts.push({ secret: name.slice(7) });
+      continue;
+    }
+    const value = placeholderValue(name, values);
+    text += value === null ? match[0] : encodeHeaderValue(value);
+  }
+  text += template.slice(last);
+  if (text) parts.push({ text });
+  return parts;
+}
+
+/** A header value for display: secrets are shown as their placeholders, never as values. */
+export const httpHeaderText = (parts: readonly HttpHeaderPart[]): string =>
+  parts.map((p) => ('secret' in p ? `{{secret.${p.secret}}}` : p.text)).join('');
+
+/**
+ * Whether `host` is on a company's list of allowed domains: an exact name ("api.example.com") or
+ * any subdomain of a wildcard entry ("*.example.com", which does not include example.com itself).
+ */
+export function hostAllowed(host: string, domains: readonly string[]): boolean {
+  const h = host.toLowerCase().replace(/\.$/, '');
+  return domains.some((d) =>
+    d.startsWith('*.') ? h.endsWith(d.slice(1)) && h.length > d.length - 1 : h === d,
+  );
+}
+
+/** The host an HTTP step calls, when its address names one (no placeholders in the host). */
+export function httpStepHost(url: string): string | null {
+  const authority = url.replace(/^https?:\/\//i, '').split(/[/?#]/, 1)[0] ?? '';
+  if (authority.includes('{{') || !URL.canParse(url.replace(PLACEHOLDER_RE, 'x'))) return null;
+  const host = new URL(url.replace(PLACEHOLDER_RE, 'x')).hostname;
+  return host.replace(/^\[(.*)\]$/, '$1').replace(/\.$/, '') || null;
+}
+
+/** Placeholders used by a text: unknown ones, captured answers and (when allowed) secrets. */
+function placeholdersIn(
+  text: string,
+  allowSecrets = false,
+): { unknown: string[]; answers: string[]; secrets: string[]; literal: boolean } {
   const unknown: string[] = [];
   const answers: string[] = [];
+  const secrets: string[] = [];
   for (const match of text.matchAll(PLACEHOLDER_RE)) {
     const name = (match[1] ?? '').toLowerCase();
     if (name === 'name' || name === 'company') continue;
     if (name.startsWith('answer.') && VARIABLE_RE.test(name.slice(7))) answers.push(name.slice(7));
+    else if (allowSecrets && name.startsWith('secret.') && SECRET_NAME_RE.test(name.slice(7)))
+      secrets.push(name.slice(7));
     else unknown.push(match[0]);
   }
   const literal = text.replace(PLACEHOLDER_RE, '').trim().length > 0;
-  return { unknown, answers, literal };
+  return { unknown, answers, secrets, literal };
+}
+
+/** Problems with an HTTP step's address and body (placeholders are checked separately). */
+function httpStepIssues(node: NodeOf<'http_request'>, refs: GraphReferences): string[] {
+  const out: string[] = [];
+  const insecure = /^http:\/\//i.test(node.url);
+  if (!/^https:\/\//i.test(node.url) && !(insecure && refs.allowInsecureHttp)) {
+    out.push('Use an https:// address.');
+  } else {
+    const authority = node.url.replace(/^https?:\/\//i, '').split(/[/?#]/, 1)[0] ?? '';
+    if (authority.includes('{{')) {
+      out.push('The host name cannot contain placeholders.');
+    } else {
+      let parsed: URL | null = null;
+      try {
+        parsed = new URL(node.url.replace(PLACEHOLDER_RE, 'x'));
+      } catch {
+        out.push('Enter a valid address.');
+      }
+      if (parsed) {
+        const host = parsed.hostname.replace(/^\[(.*)\]$/, '$1');
+        if (parsed.username || parsed.password) {
+          out.push('Put credentials in a header, not in the address.');
+        } else if (refs.allowedDomains && !hostAllowed(host, refs.allowedDomains)) {
+          out.push(
+            `${host} is not an allowed domain. An administrator can add it under Settings → Web requests.`,
+          );
+        }
+      }
+    }
+  }
+  if (node.body && !HTTP_BODY_METHODS.has(node.method)) {
+    out.push(`${node.method} requests have no body.`);
+  } else if (node.body) {
+    try {
+      JSON.parse(node.body.replace(PLACEHOLDER_RE, 'x'));
+    } catch {
+      out.push('The body must be JSON, with placeholders inside quotes.');
+    }
+  }
+  return out;
 }
 
 // Graph checks -----------------------------------------------------------------------------------
@@ -471,6 +703,11 @@ export function edgesOf(node: AutomationNode): { label: string; target: string |
         { label: 'yes', target: node.then },
         { label: 'no', target: node.else },
       ];
+    case 'http_request':
+      return [
+        { label: 'success', target: node.next },
+        { label: 'failure', target: node.failureNext },
+      ];
     case 'handoff':
     case 'end':
       return [];
@@ -498,6 +735,15 @@ export interface GraphReferences {
   teamIds?: ReadonlySet<string>;
   /** Contact field keys of the company; when given, fields must be among them. */
   fieldKeys?: ReadonlySet<string>;
+  /** Domains the company allows HTTP steps to call; when given, addresses must match one. */
+  allowedDomains?: readonly string[];
+  /**
+   * The company's HTTP secrets by name, with the domain each may be sent to; when given, secrets
+   * used must be among them and the step must call their domain.
+   */
+  secrets?: ReadonlyMap<string, string>;
+  /** http:// addresses, for local test targets only (the server decides from its configuration). */
+  allowInsecureHttp?: boolean;
 }
 
 /**
@@ -524,6 +770,7 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
   for (const node of graph.nodes) {
     if ((node.type === 'ask_buttons' || node.type === 'ask_text') && node.saveAs)
       saved.add(node.saveAs);
+    if (node.type === 'http_request') for (const item of node.save) saved.add(item.saveAs);
   }
   const reachable = reachableFrom(graph.start, byId);
   const available = answerAvailability(graph.start, byId, reachable, saved);
@@ -534,6 +781,30 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
       message: `An automation can save at most ${AUTOMATION_LIMITS.variables} different answers.`,
     });
   }
+
+  /** Errors or a warning when a step uses an answer that is not saved (on every path) before it. */
+  const checkAnswerUse = (nodeId: string, a: string) => {
+    const at = available.get(nodeId);
+    if (!saved.has(a)) {
+      issues.push({
+        level: 'error',
+        nodeId,
+        message: `{{answer.${a}}} is not saved by any question or web request.`,
+      });
+    } else if (at && !at.may.has(a)) {
+      issues.push({
+        level: 'error',
+        nodeId,
+        message: `{{answer.${a}}} is used before any question saves it.`,
+      });
+    } else if (at && !at.must.has(a)) {
+      issues.push({
+        level: 'warning',
+        nodeId,
+        message: `{{answer.${a}}} can be empty here: some paths reach this step without saving it.`,
+      });
+    }
+  };
 
   for (const node of graph.nodes) {
     for (const edge of edgesOf(node)) {
@@ -554,33 +825,62 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
           message: `Unknown placeholder ${u}. Use {{name}}, {{company}} or {{answer.<name>}}.`,
         });
       }
-      for (const a of found.answers) {
-        const at = available.get(node.id);
-        if (!saved.has(a)) {
-          issues.push({
-            level: 'error',
-            nodeId: node.id,
-            message: `{{answer.${a}}} is not saved by any question.`,
-          });
-        } else if (at && !at.may.has(a)) {
-          issues.push({
-            level: 'error',
-            nodeId: node.id,
-            message: `{{answer.${a}}} is used before any question saves it.`,
-          });
-        } else if (at && !at.must.has(a)) {
-          issues.push({
-            level: 'warning',
-            nodeId: node.id,
-            message: `{{answer.${a}}} can be empty here: some paths reach this step without saving it.`,
-          });
-        }
-      }
+      for (const a of found.answers) checkAnswerUse(node.id, a);
       if (!found.literal && node.type !== 'update_contact') {
         issues.push({
           level: 'warning',
           nodeId: node.id,
           message: 'This text is only placeholders; if they are empty the message cannot be sent.',
+        });
+      }
+    }
+    if (node.type === 'http_request') {
+      for (const message of httpStepIssues(node, refs)) {
+        issues.push({ level: 'error', nodeId: node.id, message });
+      }
+      const host = httpStepHost(node.url);
+      const texts = [
+        { text: node.url, headers: false },
+        ...node.headers.map((h) => ({ text: h.value, headers: true })),
+        ...(node.body ? [{ text: node.body, headers: false }] : []),
+      ];
+      for (const { text, headers } of texts) {
+        const found = placeholdersIn(text, headers);
+        for (const u of found.unknown) {
+          issues.push({
+            level: 'error',
+            nodeId: node.id,
+            message: headers
+              ? `Unknown placeholder ${u}. Use {{name}}, {{company}}, {{answer.<name>}} or {{secret.<name>}}.`
+              : /secret\./i.test(u)
+                ? `Secrets can only be used in header values (${u}).`
+                : `Unknown placeholder ${u}. Use {{name}}, {{company}} or {{answer.<name>}}.`,
+          });
+        }
+        for (const a of found.answers) checkAnswerUse(node.id, a);
+        for (const secret of found.secrets) {
+          const domain = refs.secrets?.get(secret);
+          if (refs.secrets && domain === undefined) {
+            issues.push({
+              level: 'error',
+              nodeId: node.id,
+              message: `The secret “${secret}” does not exist. An administrator can add it under Settings → Web requests.`,
+            });
+          } else if (domain !== undefined && host !== null && !hostAllowed(host, [domain])) {
+            issues.push({
+              level: 'error',
+              nodeId: node.id,
+              message: `The secret “${secret}” can only be sent to ${domain}.`,
+            });
+          }
+        }
+      }
+      const names = node.save.map((item) => item.saveAs);
+      if (new Set(names).size !== names.length) {
+        issues.push({
+          level: 'error',
+          nodeId: node.id,
+          message: 'Save each value under a different name.',
         });
       }
     }
@@ -591,7 +891,7 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
           issues.push({
             level: 'error',
             nodeId: node.id,
-            message: `The answer “${rule.variable}” is not saved by any question.`,
+            message: `The answer “${rule.variable}” is not saved by any question or web request.`,
           });
         } else if (rule.kind === 'answer' && at && !at.may.has(rule.variable)) {
           issues.push({
@@ -690,14 +990,28 @@ function reachableFrom(start: string, byId: ReadonlyMap<string, AutomationNode>)
 }
 
 /**
- * The answer a question saves when the run leaves it by the edge at `index` of `edgesOf`: only its
- * answered edges (a button, or a valid typed answer) save it; other replies, invalid answers and
- * timeouts do not.
+ * The answers a step saves when the run leaves it by the edge at `index` of `edgesOf`: `must` are
+ * always set, `may` perhaps. A question's answered edges (a button, or a valid typed answer) set its
+ * answer; other replies, invalid answers and timeouts do not. A web request's success edge may set
+ * its values (a response can lack a field).
  */
-function answerSavedOnEdge(node: AutomationNode, index: number): string | null {
-  if (node.type === 'ask_buttons') return index < node.buttons.length ? node.saveAs : null;
-  if (node.type === 'ask_text') return index === 0 ? node.saveAs : null;
-  return null;
+function answersSavedOnEdge(
+  node: AutomationNode,
+  index: number,
+): { may: readonly string[]; must: readonly string[] } {
+  const none = { may: [], must: [] };
+  if (node.type === 'ask_buttons') {
+    return index < node.buttons.length && node.saveAs
+      ? { may: [node.saveAs], must: [node.saveAs] }
+      : none;
+  }
+  if (node.type === 'ask_text') {
+    return index === 0 ? { may: [node.saveAs], must: [node.saveAs] } : none;
+  }
+  if (node.type === 'http_request' && index === 0) {
+    return { may: node.save.map((item) => item.saveAs), must: [] };
+  }
+  return none;
 }
 
 /**
@@ -725,21 +1039,17 @@ function answerAvailability(
       edgesOf(node).forEach((edge, index) => {
         const to = edge.target === null ? undefined : flow.get(edge.target);
         if (!to) return;
-        const answer = answerSavedOnEdge(node, index);
-        for (const a of from.may) {
+        const answers = answersSavedOnEdge(node, index);
+        for (const a of [...from.may, ...answers.may]) {
           if (!to.may.has(a)) {
             to.may.add(a);
             changed = true;
           }
         }
-        if (answer && !to.may.has(answer)) {
-          to.may.add(answer);
-          changed = true;
-        }
         // The first step is also entered with nothing saved, so its `must` stays empty.
         if (edge.target === start) return;
         for (const a of [...to.must]) {
-          if (a !== answer && !from.must.has(a)) {
+          if (!answers.must.includes(a) && !from.must.has(a)) {
             to.must.delete(a);
             changed = true;
           }

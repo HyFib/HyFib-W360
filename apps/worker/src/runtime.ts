@@ -13,6 +13,12 @@ import {
   type RazorpayConfig,
   type WorkerConfig,
 } from '@w360/core';
+import {
+  DEFAULT_EGRESS_POLICY,
+  createEgressClient,
+  type EgressClient,
+  type EgressPolicy,
+} from '@w360/core/egress';
 import { assertRuntimeRoleSafety, createDatabase, createPool, type Database } from '@w360/db';
 import {
   GraphClient,
@@ -43,6 +49,9 @@ export interface WorkerRuntime {
   razorpayConfig: RazorpayConfig | null;
   razorpay: RazorpayClient | null;
   notices: BillingNoticeDeps;
+  /** The only client for company-chosen addresses (automation HTTP steps): see core/egress. */
+  egress: EgressClient;
+  egressPolicy: EgressPolicy;
   close(): Promise<void>;
 }
 
@@ -91,6 +100,14 @@ export async function createWorkerRuntime(): Promise<WorkerRuntime> {
     logger.warn('Razorpay is not configured: billing jobs stay queued until it is.');
   const jobs = new PgBossJobQueue(boss);
   const signer = new JobSigner(config.W360_JOB_SIGNING_KEY);
+  const egressPolicy: EgressPolicy = {
+    ...DEFAULT_EGRESS_POLICY,
+    // Only for local test targets; configuration refuses it outside APP_ENV=local|test.
+    allowLoopbackForTests: config.W360_EGRESS_ALLOW_LOOPBACK ?? false,
+  };
+  if (egressPolicy.allowLoopbackForTests) {
+    logger.warn('Egress to http:// and loopback addresses is allowed (local test targets only).');
+  }
 
   return {
     config,
@@ -119,6 +136,8 @@ export async function createWorkerRuntime(): Promise<WorkerRuntime> {
         })
       : null,
     notices: { outbox: { keyring, jobs, signer }, appBaseUrl: config.APP_BASE_URL },
+    egress: createEgressClient(egressPolicy),
+    egressPolicy,
     async close() {
       await pool.end();
     },

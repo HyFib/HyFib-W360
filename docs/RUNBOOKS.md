@@ -289,6 +289,33 @@ detail) and passes the conversation to people. Meta's error is also shown on the
 thread. A failure Meta reports after a run has already ended (for example after a completed run's
 last message was accepted) is shown on the message only; the run's recorded outcome does not change.
 
+**A web request step failed or its outcome is unknown.** The run page lists each call (method,
+host, path, outcome, duration) and the step log names the reason. A status code means the server
+answered (only 2xx counts as success). `domain_not_allowed`, `secret_missing` and
+`secret_domain_mismatch` mean the company's current settings refused the call before it was made
+(Settings → Web requests: the domain was removed, or the secret deleted or saved for another
+domain). `address_blocked` means the name resolves to a private or reserved address, which is never
+allowed; `dns_failed` and `connect_failed` mean nothing was sent. `timeout`, `network_error` and
+`no_result` mean the request may have reached the server without a complete answer: the outcome is
+unknown and the call is never repeated automatically, because the server may have acted on it
+(creating an order, say). Ask the company to check on their side, then take the conversation over
+if needed. `not_started` means the worker did not get to the call before the run's two-minute
+deadline (a backlog, a worker outage or a suspended company); it was not sent. Worker log lines
+"automation HTTP call" carry the call id and outcome, never the request, its headers or the
+response.
+
+**Web requests are slow or piling up.** Each call holds a worker slot for at most 10 seconds. Check
+the `automation.http` queue (section 3) and the worker log; a call still queued 30 seconds after it
+was recorded is signalled again by the minute sweep, and a call past its run's deadline is cancelled
+rather than sent late. Loopback and http:// targets are refused in production: the web and worker
+refuse to start with `W360_EGRESS_ALLOW_LOOPBACK` outside `APP_ENV=local|test`.
+
+**A secret may have leaked.** Replace it at its source (the company's API), then save the new value
+under the same name in Settings → Web requests (the version increases; steps keep working), or
+delete it to stop every step that uses it. The audit log shows who created, replaced or deleted
+secrets and domains (`http.*`). Values are never shown, so a leak points at the receiving server
+(one that echoes request headers, for example) or at the keyring (section 13).
+
 **Worker restarts and deploys.** Runs are rows, so a restart delays steps but never loses or repeats
 one: queued `automation.run` jobs continue, and runs whose signal was lost are picked up by the sweep
 within about 90 seconds. A test run stops when the member who started it leaves the company ("test
@@ -296,6 +323,9 @@ run tester removed") or no longer holds `automations.write` and `inbox.reply` (t
 
 **Retention.** The minute sweep clears captured answers 30 days after runs end and deletes runs
 (with their step logs) 180 days after they end ("automation retention applied").
+
+**Migration 0014 failed.** Like 0011, it replaces `app.erase_contact` and
+`ops.apply_automation_retention` through `SET ROLE w360_definer` and applies nothing on failure.
 
 **Migration 0011 failed.** It runs in one transaction, so a failure applies nothing. It drops and
 recreates the definer functions `app.erase_contact` and `ops.conversations_to_route` through

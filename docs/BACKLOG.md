@@ -108,11 +108,22 @@ verification, app review, Embedded Signup configuration).
   runs of the draft on a real conversation; the bot/human hand-off lock with Take over; step logs,
   captured answers with retention; an automation report section; a builder with a generated diagram
   and an in-browser simulator. T: restart and lost signals resume from the stored position; bot and
-  person never answer at once. **Remaining:** the HTTP step (P4-02), Flows and catalog steps (P4-03,
-  P4-06), starting runs from the public API or campaigns, template follow-ups outside the service
+  person never answer at once. **Remaining:** Flows and catalog steps (P4-03, P4-06), starting runs from the public API or campaigns, template follow-ups outside the service
   window, fuzzy keyword matching, a drag-and-drop canvas (ADR-034), run export, usage billing for
   automation steps, a real sandbox run (release checklist).
-- **P4-02 HTTP node + egress guard** (shared with SEC-3).
+- **P4-02 HTTP node + egress guard** — _implemented and locally verified (2026-09-27) against a
+  local target server only_: "Call a web address" steps (method, address with URL-encoded
+  placeholders, headers, JSON body, values saved from the response, success and failure branches);
+  per-company allowed domains and encrypted write-only secrets bound to a domain (Settings → Web
+  requests, `integrations.manage`, audited); calls written ahead and made once by the
+  `automation.http` worker through the egress guard, unknown (never retried) when they may have been
+  received without a result, cancelled when not made before the run's two-minute deadline; call
+  outcomes on run pages; erasure and retention of saved values. T: egress unit suite (blocked
+  ranges and notations, pinning, redirects, limits, headers), `automation-http.test.ts` (made once,
+  refusals, crash and late results, timeouts, cancellation, sweep, erasure, retention, settings,
+  isolation), e2e `web-requests.spec.ts`. **Remaining:** calls against a real company API in an
+  authorized environment (release checklist), response headers or non-JSON bodies as values,
+  retries a company opts into for idempotent requests, form-encoded bodies, OAuth client flows.
 - **P4-03 WhatsApp Flows**: Flow JSON validation, publish lifecycle, RSA key management per number,
   encrypted data endpoint (health check, error codes), response mapping.
 - **P4-04 CRM** — _implemented and locally verified (2026-09-27); reminder emails verified through
@@ -187,7 +198,9 @@ review; production rollout per RELEASE-CHECKLIST.
 - **SEC-1** WebAuthn/passkeys for privileged roles.
 - **SEC-2** Breached-password screening at sign-up/reset (k-anonymity API or offline list).
 - **SEC-3** Central SSRF-safe egress client (DNS pinning, private/metadata range blocking, redirect
-  re-validation, limits) used by all outbound HTTP.
+  re-validation, limits) used by all outbound HTTP — _built with P4-02 (ADR-042) and used by the
+  automation HTTP step; outgoing webhooks (P5-09) and imports must use it too. Remaining: a network
+  egress policy as a second layer in deployment._
 - **SEC-4** Dual-key job signing for rotation without draining.
 - **SEC-5** Hash-chained audit checkpoints exported to WORM storage.
 - **SEC-6** Media scanning pipeline (malware) before exposure.

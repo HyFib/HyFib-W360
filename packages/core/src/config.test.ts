@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { ConfigError, loadWebConfig, metaConfigFrom, razorpayConfigFrom } from './config';
+import {
+  ConfigError,
+  loadWebConfig,
+  loadWorkerConfig,
+  metaConfigFrom,
+  razorpayConfigFrom,
+} from './config';
 
 const base = {
   DATABASE_URL_APP: 'postgres://app@localhost/w360',
@@ -142,5 +148,23 @@ describe('Razorpay configuration', () => {
     expect(() =>
       razorpayConfigFrom(loadWebConfig({ ...production, ...razorpay, ...standIn })),
     ).toThrow(/RAZORPAY_API_BASE_URL/);
+  });
+});
+
+describe('egress for local test targets', () => {
+  it('is allowed only with APP_ENV=local or test', () => {
+    const flag = { W360_EGRESS_ALLOW_LOOPBACK: 'true' };
+    expect(
+      loadWorkerConfig({ ...base, ...flag, APP_ENV: 'test', APP_BASE_URL: 'http://localhost:3000' })
+        .W360_EGRESS_ALLOW_LOOPBACK,
+    ).toBe(true);
+    for (const APP_ENV of ['staging', 'production']) {
+      expect(() =>
+        loadWorkerConfig({ ...base, ...flag, APP_ENV, APP_BASE_URL: 'https://w360.example.net' }),
+      ).toThrow(/W360_EGRESS_ALLOW_LOOPBACK/);
+      expect(() =>
+        loadWebConfig({ ...base, ...flag, APP_ENV, APP_BASE_URL: 'https://w360.example.net' }),
+      ).toThrow(/W360_EGRESS_ALLOW_LOOPBACK/);
+    }
   });
 });

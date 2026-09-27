@@ -330,8 +330,9 @@ message that is rejected, cancelled, of unknown outcome, not accepted within 10 
 failed later fails the run (`send_failed`) and hands the conversation to people: a run never reports
 "completed", or moves on, on a message the customer did not get. This also keeps a run's messages in
 order. Acceptance, not delivery, is the bar (delivery can take days when a phone is off); a failure
-reported after a run has ended is shown on the message but does not rewrite the run's outcome. External calls (the HTTP step, P4-02) will need a write-ahead unknown state like
-auto-recharge before they can join a run.
+reported after a run has ended is shown on the message but does not rewrite the run's outcome.
+External calls (the HTTP step) use a write-ahead call with an unknown outcome, like auto-recharge
+(ADR-043).
 
 ## ADR-036 The bot/human hand-off lock (2026-09-27)
 
@@ -412,3 +413,49 @@ closing the task skips a pending reminder. A reminder is skipped, with the reaso
 task, when the assignee is no longer an active member with CRM access or when it is more than a
 day late (a suspended company or a long outage), because a stale reminder is worse than none. The
 email carries the task title and a link, like other notices sent to a member's own address.
+
+## ADR-042 One egress guard for requests to addresses a company chooses (2026-09-27)
+
+Decision: every request to an address a company supplies goes through `packages/core/src/egress.ts`
+(the automation HTTP step now; tenant webhooks and imports later). It allows https only, port 443
+or 1024 and up, and no credentials in the address. It resolves the name once, refuses the request
+if any answer is private, loopback, link-local, carrier-grade NAT, multicast, reserved,
+documentation, cloud-metadata or an IPv6 form of those (IPv4-mapped, NAT64, 6to4, unique-local,
+site-local), and then connects to exactly the address it checked (a `lookup` hook pins it; the name
+only goes into SNI and Host), so DNS rebinding between check and connect is not possible. IP
+literals are checked the same way, in every notation Node's URL parser accepts. Redirects are never
+followed, there is no connection pool shared between companies, request bodies are limited to 64
+KiB, responses to 256 KiB and the whole exchange to 10 seconds, and callers cannot set framing,
+routing or proxy headers or send line breaks in headers. Every refusal says whether the request may
+have reached the server (`EgressError.sent`), which the caller needs to decide between "failed" and
+"unknown". Loopback and plain http exist only for local test targets (`W360_EGRESS_ALLOW_LOOPBACK`),
+and both web and worker configuration refuse that flag outside `APP_ENV=local|test`. A network
+egress policy (a proxy or firewall that denies private ranges) remains recommended as a second
+layer in deployment.
+
+## ADR-043 Automation HTTP step: written ahead, made once, secrets bound to a domain (2026-09-27)
+
+Decision: an HTTP step never calls out from the runner. The step's transaction records the call
+(`automation_http_calls`, one per step visit, the request encrypted with the keyring and bound to
+the row) and the run waits for it (`waiting_for = 'http'`, two minutes). The `automation.http`
+worker claims a queued call (`in_flight`, with a lease) in one transaction, re-checks the company's
+current allowed domains and secrets, makes the request through the egress guard with no locks held,
+and records the outcome in another transaction, then signals the run. A call is only ever sent from
+`queued`, so a retried or duplicated job cannot send it twice, and the database refuses to queue a
+call that may have been sent. A call still in flight at the run's deadline (the worker died, or the
+server was slow) becomes `unknown` (`no_result`) and the run takes its failure branch: it is never
+retried, because the server may have acted on it; a call not started by then is cancelled. The
+runner locks the call when it reads it, so a result cannot arrive between "not finished" and
+settling it, and a result recorded first always wins. Values saved from a response are kept only
+while the run can still use them, are cleared with captured answers (retention, erasure) and are
+never logged; the stored request is erased once the call has an outcome.
+
+Secrets are company settings (`integrations.manage`, audited by name): stored encrypted, never
+returned to a browser, referenced by name in header values only, and each saved for one allowed
+domain; the worker sends a secret only to that domain, so whoever edits automations cannot send one
+company API's key to another allowed host. Header values are rendered into text and secret parts:
+customer text (a profile name, an answer) is never read as a placeholder again, so it cannot pull in
+a secret, and it is percent-encoded unless it is printable ASCII (placeholders in the address are
+URL-encoded, in the JSON body JSON-escaped). A server that echoes request headers back would still
+reveal a secret to automation editors; the settings page warns that only trusted domains should be
+allowed. Per run there are at most 20 calls (`budget_http`).

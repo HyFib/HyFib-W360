@@ -4,7 +4,10 @@ import {
   applyAutomationRetention,
   authorizeJob,
   findDueAutomationRuns,
+  findDueHttpCalls,
+  processHttpCall,
   signalAutomationRun,
+  signalHttpCall,
   stopRunForRemovedTester,
 } from '@w360/domain';
 import type { WorkerRuntime } from '../runtime';
@@ -45,7 +48,7 @@ export function automationRunHandler(rt: WorkerRuntime) {
       return;
     }
     const result = await advanceAutomationRun(
-      { db: rt.db, jobs: rt.jobs, signer: rt.signer, clock: rt.clock },
+      { db: rt.db, jobs: rt.jobs, signer: rt.signer, clock: rt.clock, keyring: rt.keyring },
       auth.scope,
       auth.envelope.ref,
       auth.envelope.actorUserId,
@@ -54,6 +57,44 @@ export function automationRunHandler(rt: WorkerRuntime) {
       { jobId: job.id, runId: auth.envelope.ref, outcome: result.outcome, steps: result.steps },
       'automation run advanced',
     );
+  };
+}
+
+/**
+ * Makes one automation HTTP call (see automations/http). Only a queued call is ever sent, so a
+ * duplicate or retried job does nothing; logs carry the call's outcome, never its request.
+ */
+export function automationHttpHandler(rt: WorkerRuntime) {
+  return async ([job]: Job<unknown>[]): Promise<void> => {
+    if (!job) return;
+    const auth = await authorizeJob(rt, job.data, {
+      expectedKind: 'automation.http',
+      requireActiveTenant: true,
+      requireActiveActor: true,
+    });
+    if (auth.outcome === 'deferred') {
+      // Suspended company: the call waits; the run's deadline cancels it if it is still queued.
+      rt.logger.info({ jobId: job.id, callId: auth.envelope.ref }, 'automation HTTP call deferred');
+      return;
+    }
+    if (auth.outcome !== 'authorized' || !auth.scope) {
+      rt.logger.warn({ jobId: job.id, outcome: auth.outcome }, 'automation HTTP job dropped');
+      return;
+    }
+    const outcome = await processHttpCall(
+      {
+        db: rt.db,
+        clock: rt.clock,
+        keyring: rt.keyring,
+        jobs: rt.jobs,
+        signer: rt.signer,
+        egress: rt.egress,
+        timeoutMs: rt.egressPolicy.timeoutMs,
+      },
+      auth.scope,
+      auth.envelope.ref,
+    );
+    rt.logger.info({ jobId: job.id, callId: auth.envelope.ref, outcome }, 'automation HTTP call');
   };
 }
 
@@ -73,6 +114,8 @@ export async function sweepAutomationRuns(rt: WorkerRuntime): Promise<{ signalle
       key: `sweep:${minute}`,
     });
   }
+  // Queued HTTP calls whose job was lost (tenant ids from the definer sweep query).
+  for (const call of await findDueHttpCalls(rt.db)) await signalHttpCall(rt, call);
   const retention = await applyAutomationRetention(rt.db);
   if (retention.cleared + retention.deleted > 0) {
     rt.logger.info(retention, 'automation retention applied');

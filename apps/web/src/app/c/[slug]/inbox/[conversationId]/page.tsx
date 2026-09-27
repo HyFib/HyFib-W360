@@ -170,7 +170,9 @@ export default async function ConversationPage({
                         ? ' and is waiting for the customer’s reply'
                         : thread.automation.waitingFor === 'timer'
                           ? ' and is waiting before its next step'
-                          : ''}
+                          : thread.automation.waitingFor === 'http'
+                            ? ' and is waiting for a web request'
+                            : ''}
                     . Replying, assigning or taking over stops it.
                   </p>
                   {canReply ? (

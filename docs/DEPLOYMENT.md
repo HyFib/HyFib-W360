@@ -34,6 +34,11 @@ PostgreSQL 18; CI workflow authored).
   collector/hosted backend.
 - Region: India (`ap-south-1` or equivalent) for the initial launch; `tenants.data_region` records
   the region; other regions are separate deployments.
+- Outbound network for the worker: Meta Graph, Razorpay and SMTP, plus HTTPS (443 or ports from 1024)
+  to the domains companies allow for automation web requests. The egress guard already refuses
+  private, loopback, link-local and metadata addresses and pins DNS (ADR-042); as a second layer,
+  route that traffic through an egress proxy or firewall that denies private ranges and the cloud
+  metadata endpoint. The web tier makes no such requests.
 
 **Pilot option (lower cost):** single web and worker replicas and a single managed PostgreSQL
 instance with PITR. Limitations: no redundancy during deploys or instance failure (brief downtime),
@@ -78,7 +83,8 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
 See `.env.example` (every variable documented). Start-up refuses a non-HTTPS `APP_BASE_URL` for
 `APP_ENV=staging|production` in any build mode; production builds also refuse `APP_ENV=local`,
 `APP_ENV=test` off loopback, placeholder-looking secrets, a missing SMTP host, and unsafe database
-roles. Auth cookies are `Secure` whenever the origin is https. Share
+roles. `W360_EGRESS_ALLOW_LOOPBACK` (test targets for automation web requests) is refused outside
+`APP_ENV=local|test`. Auth cookies are `Secure` whenever the origin is https. Share
 `NEXT_SERVER_ACTIONS_ENCRYPTION_KEY` across web replicas.
 
 Client addresses (audit, security events, rate limits) come from `X-Forwarded-For`. The edge load

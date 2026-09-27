@@ -26,6 +26,7 @@ security operations. It is not a compliance claim; see `docs/THREAT-MODEL.md` fo
 | Campaigns          | Audience snapshots without personal data; recipients re-checked (erasure, suppression, consent, variables, frequency cap, spending cap) when queued and again by the send worker before dispatch; pause/cancel cancel unclaimed sends atomically; one runner tick per campaign and per company; sends under a named member's authority; four-eyes approval option; formula-safe audited export; rate cards immutable once published.                                                                                                                                                                                                                                                                                                                             |
 | Reports            | Aggregates and member names only (no message content or contact details), computed in one read-only snapshot under the company's RLS scope; reply turns written only by database triggers (runtime role cannot rewrite or delete them); metric definitions global and read-only; per-section exports need `reports.export`, are formula-safe and audited before data is returned.                                                                                                                                                                                                                                                                                                                                                                                |
 | Automations        | Published versions are immutable (database trigger) and runs stay pinned to theirs; runs are durable rows advanced one step per transaction under the conversation and run row locks; a partial unique index allows one active run per conversation, and a member reply, template send, assignment, take-over or resolve ends it and cancels unclaimed bot sends; reply-button ids name the run, step and visit, and stale or forged ids select nothing; budgets cap steps, loops, messages, run time and runs per conversation per hour; step logs hold outcome codes and labels written by the company, never customer text; captured answers are shown only to members who can see the conversation and are cleared 30 days after the run ends or on erasure. |
+| Web requests       | Automation HTTP steps reach only company-allowed domains, over https, through one egress guard (public addresses only, DNS pinned to the checked address, no redirects, size and time limits); calls are written ahead, made once and marked unknown (never retried) when they may have been received without a result; secrets are encrypted, write-only, audited by name and sent only to the domain each was saved for; customer text in headers is never read as a placeholder.                                                                                                                                                                                                                                                                              |
 | Templates          | Created, deleted and listed only by the worker with the stored WABA token (never in the browser); webhooks for templates are signals routed through verified WABA bindings and never change status on their own; submission is write-ahead so a lost response cannot create a duplicate.                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | Supply chain       | Exact pins + lockfile, pnpm minimum release age, explicit install-script allowlist, `pnpm audit` and gitleaks in CI, GitHub Actions pinned by SHA, Trivy image scanning, Dependabot.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 
@@ -144,6 +145,29 @@ Phase 4 rules (automations, P4-01):
   contact's WhatsApp number when queued. Live runs send as the company's automation (no member
   actor on the send); test runs send under the tester's authority.
 
+Phase 4 rules (automation web requests, P4-02):
+
+- Settings → Web requests (allowed domains and secrets) is readable with `automations.read` or
+  `integrations.read`; adding and removing domains and saving, replacing and deleting secrets need
+  `integrations.manage` and are audited (`http.domain_added`, `http.domain_removed`,
+  `http.secret_created`, `http.secret_updated`, `http.secret_deleted`, with the name and domain,
+  never a value). At most 50 domains and 50 secrets per company.
+- A secret value is sent to the server once, encrypted with the keyring and bound to its row (AAD
+  `http-secret:<company>:<id>`), and never returned to a browser, a log or an export; only the
+  `automation.http` worker decrypts it, when it makes a request to the secret's own domain.
+- Publishing refuses HTTP steps whose host is not allowed, that use a secret that does not exist or
+  belongs to another domain, that use secrets outside header values, or whose host contains
+  placeholders. The worker re-checks the current domain list and secrets when it makes each call
+  (removing a domain or secret takes effect on the next call).
+- A company that allows a server which echoes request headers back exposes its secrets to anyone
+  who can edit automations; the settings page says so. Automation editors cannot choose the host at
+  run time and cannot place secrets in the address or body.
+- Run pages show each call's method, host, path (without the query), outcome and duration to
+  `automations.read`; requests are stored encrypted until the call finishes and then erased; saved
+  response values are shown only with the run's captured answers.
+- `W360_EGRESS_ALLOW_LOOPBACK` (http:// and loopback targets for tests) is refused by the web and
+  worker configuration outside `APP_ENV=local|test`.
+
 Phase 4 rules (CRM, P4-04):
 
 - Reading the board, deals, tasks, notes and timelines needs `crm.read`; creating and changing
@@ -187,6 +211,6 @@ Incident handling follows `docs/RUNBOOKS.md` (compromised tenant, credential exp
 ## Known gaps before launch
 
 See `docs/THREAT-MODEL.md` (status P/D/A) and `docs/BACKLOG.md` (SEC-* items): WebAuthn, breached
-password screening, hash-chained audit checkpoints, SSRF egress guard, media scanning, dual-key job
-signing, OpenTelemetry alerting, independent penetration test, step-up re-authentication for payment
+password screening, hash-chained audit checkpoints, a network egress policy behind the egress guard
+(deployment), media scanning, dual-key job signing, OpenTelemetry alerting, independent penetration test, step-up re-authentication for payment
 settings, and Razorpay sandbox verification of the payment flows and Checkout CSP.

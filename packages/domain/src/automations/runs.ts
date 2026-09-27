@@ -1,6 +1,7 @@
 import { QUEUES } from '@w360/contracts';
 import {
   and,
+  automationHttpCalls,
   automationRunSteps,
   automationRuns,
   conversations,
@@ -255,6 +256,22 @@ export async function endRun(tx: Tx, run: AutomationRun, input: EndRunInput): Pr
   if (input.status === 'taken_over' || input.status === 'stopped') {
     await cancelQueuedBotMessages(tx, run.tenantId, run.conversationId, input.now);
   }
+  // Calls the worker has not started are never made once the run has ended.
+  await tx
+    .update(automationHttpCalls)
+    .set({
+      state: 'canceled',
+      errorCode: 'run_ended',
+      finishedAt: input.now,
+      requestCiphertext: null,
+    })
+    .where(
+      and(
+        eq(automationHttpCalls.tenantId, run.tenantId),
+        eq(automationHttpCalls.runId, run.id),
+        eq(automationHttpCalls.state, 'queued'),
+      ),
+    );
   await emitTenantEvent(tx, run.tenantId, {
     type: 'automation.ended',
     conversationId: run.conversationId,

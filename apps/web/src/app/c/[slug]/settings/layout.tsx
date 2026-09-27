@@ -32,6 +32,9 @@ export default async function SettingsLayout({
       ? [{ href: `${base}/saved-replies`, label: 'Saved replies' }]
       : []),
     ...(ctx.permissions.has('crm.read') ? [{ href: `${base}/pipelines`, label: 'Pipelines' }] : []),
+    ...(ctx.permissions.has('automations.read') || ctx.permissions.has('integrations.read')
+      ? [{ href: `${base}/web-requests`, label: 'Web requests' }]
+      : []),
     ...(ctx.permissions.has('audit.read') ? [{ href: `${base}/audit`, label: 'Audit log' }] : []),
     { href: `${base}/modules`, label: 'Modules' },
   ];
