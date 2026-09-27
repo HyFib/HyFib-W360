@@ -26,6 +26,7 @@ import {
   createAutomationService,
   createCommerceService,
   createStoreService,
+  createStoreMessagesService,
   createCrmService,
   createBillingService,
   createBusinessHoursService,
@@ -73,6 +74,7 @@ import {
   type FlowEndpointDeps,
   type PaymentWebhookDeps,
   type StoreService,
+  type StoreMessagesService,
   type StoreWebhookDeps,
 } from '@w360/domain';
 import { DEFAULT_EGRESS_POLICY, createEgressClient } from '@w360/core/egress';
@@ -126,6 +128,8 @@ export interface Runtime {
   paymentWebhook: PaymentWebhookDeps;
   /** Companies' own Shopify and WooCommerce stores: connections, orders and products read. */
   stores: StoreService;
+  /** Order messages: a store's message settings, rules per event and what was sent. */
+  storeMessages: StoreMessagesService;
   /** Store webhooks (verified, deduplicated; they only signal what the worker reads). */
   storeWebhook: StoreWebhookDeps;
   /** Null until the Meta app is configured (WhatsApp connection is then reported unavailable). */
@@ -260,6 +264,7 @@ async function init(): Promise<Runtime> {
     // http:// store addresses only where configuration allows loopback egress (local and test).
     allowHttpStores: config.W360_EGRESS_ALLOW_LOOPBACK ?? false,
   });
+  const storeMessages = createStoreMessagesService({ db, clock: systemClock });
   const storeWebhook: StoreWebhookDeps = {
     db,
     keyring,
@@ -348,6 +353,7 @@ async function init(): Promise<Runtime> {
     commerce,
     paymentWebhook,
     stores,
+    storeMessages,
     storeWebhook,
     meta,
     onboarding,

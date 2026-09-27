@@ -18,7 +18,7 @@ export type Condition =
     }
   | { type: 'field'; key: string; op: string; value?: string }
   | { type: 'created'; op: 'before' | 'after'; date: string }
-  | { type: 'source'; source: 'whatsapp' | 'manual' | 'import' | 'api' }
+  | { type: 'source'; source: 'whatsapp' | 'manual' | 'import' | 'api' | 'store' }
   | { type: 'last_message'; op: 'within_days' | 'not_within_days'; days: number }
   | { type: 'calling_code'; prefix: string }
   | {
@@ -437,6 +437,7 @@ function ConditionFields({
               <option value="manual">manual entry</option>
               <option value="import">an import</option>
               <option value="api">the API</option>
+              <option value="store">a store order</option>
             </Select>
           )}
         </Field>

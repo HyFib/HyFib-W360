@@ -126,6 +126,13 @@ export default async function StorePage({
                   >
                     View products
                   </Link>
+                  {' · '}
+                  <Link
+                    href={`${base}/messages`}
+                    className="text-primary underline-offset-4 hover:underline"
+                  >
+                    Order messages
+                  </Link>
                 </dd>
               </div>
               <div>

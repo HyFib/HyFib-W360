@@ -1,5 +1,110 @@
 # Progress
 
+## 2026-09-27 — Phase 4: order messages (P4-06c)
+
+Status: **Order messages implemented and locally verified; production blocked on checks with a
+Shopify development store (and a WooCommerce test site), an approved sandbox number, approved
+utility templates and a test recipient, and on the Shopify app approvals of P4-06b.** A connected
+store sends the approved WhatsApp template a manager chose when an order is placed, paid for on
+delivery, shipped, delivered (Shopify) or cancelled, and the customer's cash on delivery answer
+shows on the order. No request reached Shopify, a WooCommerce site or Meta: all three were the
+test-only stand-ins in `tests/support/`, and the customer's taps were webhooks signed by the tests.
+Abandoned carts and store events in automations are the next slice (P4-06d).
+
+### Completed
+
+- **Research (`docs/research/store-connectors.md` §3, SH-030 to SH-036 and WC-021 to WC-023;
+  `docs/research/meta-whatsapp.md` §16, M-175 to M-178):** Shopify shipments, tracking and payment
+  gateway names are readable with `read_orders`, while the fulfillment topics need
+  `read_fulfillments`; whether a delivery changes an order or sends `orders/updated` is unconfirmed
+  (SH-034); abandoned checkouts carry no phone of their own (SH-035); WooCommerce's core cash on
+  delivery gateway id is `cod`, orders carry `date_completed_gmt`, and there is no delivered status
+  and no cart API. From Meta: opt-in before business-initiated messages (M-175), order and shipment
+  confirmations as utility and cart reminders as marketing examples (M-176), quick-reply payloads
+  in template sends (M-177) and taps arriving as `button` messages with `context.id` (M-178, the
+  official OpenAPI description; the policy pages were seen as search results only).
+- **GraphQL checked again:** the order query with `paymentGatewayNames` and
+  `fulfillments(first: 10) { … trackingInfo(first: 1) … }` validates with graphql-js against the
+  2026-07 and 2025-10 Admin schemas, and the same check refuses a deliberately wrong field.
+- **Schema (migration 0020, ADR-048):** order milestones on store orders (payment names, cash on
+  delivery, shipped, delivered, tracking, last delivery check; a check constraint keeps tracking
+  numbers and addresses off redacted orders), message settings on stores (the opt-in confirmation
+  and its member, sending hours, test orders), rules unique per store and event, store messages
+  unique per order and event with state and answer shape checks, composite foreign keys, FORCE RLS
+  and column grants; `ops.commerce_store_messages_due` (definer, active companies only); contacts
+  may come from a `store`; `app.erase_contact` replaced to erase tracking too.
+- **Events and timing (`messages-model.ts`, `order-messages.ts`):** each read of the store copy
+  compares every order's milestones before and after, in the read's own transaction, and records at
+  most one message per order and event from the second a rule was switched on; test orders, events
+  first seen over 48 hours late and the plain confirmation of a cash on delivery order are recorded
+  as skipped; a message is due at the event plus the rule's delay, never before now, moved into the
+  sending hours in the company's time zone; one `commerce.store-message` job per message and the
+  minute sweep for lost jobs; Shopify orders in transit read again every three hours for 14 days
+  while the delivered message is on.
+- **Sending (`commerce.store-message` worker):** every check again under the message's row lock
+  (store connected, opt-in, rule on since before the event, sending hours, the order present, not
+  erased and not cancelled, a number, the template approved and sendable, the number active on the
+  template's account, the cash on delivery buttons, variables, suppression before any contact is
+  created, erasure, opt-out and marketing opt-in), then the contact (source `store`), a conversation
+  (a new one starts resolved), a system message naming the store and event, and a send intent
+  through the existing pipeline; template sends now set quick-reply payloads (`buildTemplateSend`).
+- **Cash on delivery answers (ingest):** a tap on the message's own confirm or cancel button, in its
+  conversation and replying to it, is kept as the answer (the newest tap wins); it is not a consent
+  keyword, a campaign reply or an automation trigger; a confirmation stays quiet and a cancellation
+  reopens the conversation for the team.
+- **Pages (`commerce.read`; changes need `commerce.manage`; marketing templates also
+  `campaigns.send`):** a store's Order messages page (the opt-in confirmation, sending hours, Shopify
+  test orders, one form per event with the template, number, variables, buttons and delay, and a
+  report of the last 50 messages with statuses, reasons and answers); the order page shows payment
+  and shipping and its WhatsApp messages (with `contacts.read`); the inbox names the store and
+  event on system messages; segments can pick contacts that came from a store order. Settings and
+  rule changes are audited, and rules carry edit versions.
+- **Docs:** ADR-048, ARCHITECTURE §6K, SECURITY (order message controls and Phase 4 rules),
+  THREAT-MODEL T54 to T56, DATA-RETENTION, RUNBOOKS §10J, DEPLOYMENT (Shopify step 8),
+  RELEASE-CHECKLIST, BACKLOG (P4-06c built, P4-06d).
+- **Found while building:**
+  - Drizzle's `for('update', { of })` qualified the table name, which PostgreSQL refuses ("FOR
+    UPDATE must specify unqualified relation names"); the answer path now locks the store message
+    row alone and reads its message separately.
+  - Store timestamps are whole seconds, so a rule switched on at 10:00:00.700 would have ignored an
+    order placed at 10:00:00; a rule now starts at its whole second.
+  - Mutation checks: of 30 deliberate regressions (the rule start, the cash on delivery message
+    replacing the confirmation, lateness, test orders, shipped and cancelled once, one message per
+    order and event, a re-enabled rule, sending hours at send time, cancelled orders, suppression
+    before a contact exists, consent at send time, erased customers, the button payloads, the
+    answer's conversation and reply, older taps, taps as keywords, quiet confirmations, the transit
+    interval, a rule's start kept on edit, the opt-in requirement and its withdrawal, tracking kept
+    off erased orders, failed shipments, cash on delivery names, approved templates, active numbers,
+    quick-reply buttons, delivered for WooCommerce), four survived at first: the answer's
+    conversation (a separate contact check refused the same taps; the two are now one check), one
+    message per order and event (no test produced the same event twice), tracking after erasure
+    (no test read the order again) and failed shipments (no fixture had one before a real
+    shipment). New checks (a WooCommerce order completed, reopened and completed again; erasure
+    without suppression followed by a read from a store that still has the tracking; cancelled and
+    failed shipments in the Shopify fixtures) now make all 30 fail.
+
+### Test commands and results (local, 2026-09-27, fresh database)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `pnpm test` (unit)                                                          | 203 passed. New: 14 order message tests (events before and after a rule starts, the cash on delivery message replacing the confirmation, shipped, delivered and cancelled once, lateness and test orders, the delay and sending hours in Asia/Kolkata, order values and variables with fallbacks, button payloads on quick-reply buttons, Shopify shipments, WooCommerce milestones, cash on delivery names)                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 273 passed, including `stores.test.ts` 20 (7 new: Shopify orders placed, shipped, delivered by the transit re-read and cancelled, and the contact made from an order found by a segment; cash on delivery taps and taps from another customer or replying to another message; the past, test orders, late events, opt-outs, suppression, missing numbers and erasure; sending hours, rules switched off and on, templates, numbers and the opt-in changed before sending; every check again at send time and a rule's start kept on edit; WooCommerce completion, cancellation, cash on delivery by gateway and no delivered message; permissions, audit, edit conflicts and isolation). The tenant-isolation suite covers the two new tables, and `ops.commerce_store_messages_due` is on its app-only function list |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 52 passed (26 × 2) in each of two full runs (7.4 and 6.9 min), the second after the last code change. New in `stores.spec.ts`, on both projects: a rule refused before the opt-in, the opt-in confirmed and the cash on delivery rule saved on the Order messages page, a new order paid on delivery signalled by a signed `orders/create` delivery, the template sent through the Graph stand-in with the order's values and both button payloads, the report, the customer's signed tap, and "Customer asked to cancel" on the order page                                                                                                                                                                                                                                                            |
+| GraphQL check (graphql-js, the Admin introspection schemas)                 | the order query with shipments and payment gateways validates against 2026-07 and 2025-10; a deliberately wrong field is refused                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+
+### Known gaps
+
+- Not built: abandoned carts and store events as automation triggers (P4-06d), messages per
+  shipment or on tracking changes, discount codes, store customers, recovered-revenue reports,
+  WooCommerce deliveries (WooCommerce reports none).
+- Verified against the stand-ins only. Real templates on a sandbox number, the taps on Android and
+  iOS, Shopify's delivery timing (SH-034) and Firefox and WebKit locally (they run in CI) are
+  release checklist items.
+- The opt-in is the company's own confirmation: HyFib cannot see what a store's checkout asked
+  (M-175). A cash on delivery answer is recorded for the team; HyFib does not change the order in the
+  store (its Shopify scopes are read-only).
+
 ## 2026-09-27 — Phase 4: store connectors (P4-06b)
 
 Status: **Store connectors implemented and locally verified; production blocked on HyFib's Shopify

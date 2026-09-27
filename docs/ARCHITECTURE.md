@@ -26,8 +26,8 @@ specified here but not yet implemented.
   **[built]**
 - **worker** processes durable jobs: email delivery, webhook processing, outbound sends, campaign
   ticks, automation runs, flow operations at Meta and flow keys, billing events, auto-recharge,
-  catalog reads and Payment Links, reads from companies' Shopify and WooCommerce stores (section 6J)
-  and the minute sweepers. **[built]**
+  catalog reads and Payment Links, reads from companies' Shopify and WooCommerce stores (section 6J),
+  order messages (section 6K) and the minute sweepers. **[built]**
 - **PostgreSQL** is the system of record, the job queue (pg-boss) and the durable event log. There is
   no Redis, Kafka or search cluster (ADR-015).
 
@@ -634,8 +634,50 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 - **Erasure** (`app.erase_contact`, replaced in 0019): redacts the store orders with the contact's
   number or email for good; new orders from a number suppressed as erased are kept without the
   customer's details.
-- **Not built yet:** messages on store events (order confirmation, shipping updates, abandoned carts;
-  P4-06c), store customers, discount codes, writing to stores, other platforms.
+- **Not built yet:** store customers, discount codes, writing to stores, other platforms. Messages on
+  store events are §6K.
+
+## 6K. Order messages **[built — verified against the local Shopify, WooCommerce and Graph stand-ins only; no live store or WhatsApp traffic]**
+
+- **Model** (migration 0020, ADR-048): store orders gain their payment names, whether they are paid
+  on delivery, when they shipped and were delivered, the latest shipment's tracking (redacted with
+  the customer's details; a constraint ties them to `redacted_at`) and when an order in transit was
+  last read. Stores gain the manager's opt-in confirmation (who and when), sending hours (minutes in
+  the company's time zone) and whether test orders are messaged.
+  `commerce_store_message_rules` holds one rule per store and event (`order_placed`,
+  `cod_confirmation`, `order_shipped`, `order_delivered`, `order_cancelled`): on or off, when it was
+  switched on, the number, the template, the variables, the delay and the cash on delivery buttons.
+  `commerce_store_messages` holds at most one message per order and event: pending, queued (with the
+  chat message and contact) or skipped (with the reason), the event's time, the send time and the
+  cash on delivery answer. `ops.commerce_store_messages_due` is the only cross-company lookup.
+  `contacts.source` gains `store`.
+- **Rules** (`stores/messages-model.ts`, browser-safe): event detection from an order's milestones
+  before and after a read (never about the past, never twice, test orders and events seen more than
+  48 hours late recorded as skipped, cancelled orders never shipped or delivered), the send time
+  (delay, sending hours via `sendingWindow`), variables (fixed text or order fields: number,
+  customer, total, items, status page, tracking, store name) and the cash on delivery payloads.
+- **Worker**: the store job (`stores/worker.ts`) records events in the transaction that saves the
+  orders, and reads Shopify orders in transit again every three hours while the delivered message
+  is on. `stores/order-messages.ts` runs the `commerce.store-message` job: every check again under
+  the row lock, then the contact, conversation, message (`sender_type = system`) and send intent;
+  the send pipeline checks consent once more and records delivery. The messaging sweep calls
+  `sweepStoreMessages`.
+- **Answers**: webhook ingestion hands `button` messages to `recordStoreMessageAnswer`, which accepts
+  a cash on delivery tap only from the message's own contact, conversation and (when named) message,
+  keeps the newest answer, and tells ingestion to treat it as an answer (no keyword, campaign reply
+  or automation; a confirmation stays quiet, a cancellation reopens the conversation).
+- **Service** (`stores/messages-service.ts`): a store's Messages page (settings, one rule per event,
+  numbers, sendable templates, the last 30 days by status; `commerce.read`, customer names with
+  `contacts.read`), saving settings and rules (`commerce.manage`; marketing templates also
+  `campaigns.send`; optimistic versions; audited), and an order's messages (`commerce.read` and
+  `contacts.read`).
+- **Web** (`/c/{slug}/commerce/stores/{id}/messages`): the opt-in confirmation, sending hours and test
+  orders; a form per event (number, template with its text, variables with fallbacks, delay, the
+  cash on delivery buttons); the report with reasons. Order pages show payment, shipping, tracking and
+  the order's messages with the customer's answer; the inbox labels the message with its store and
+  event.
+- **Not built yet:** abandoned carts and store events as automation triggers (P4-06d), messages per
+  shipment or on tracking changes, changing orders in the store from a customer's answer.
 
 ## 7. Commercial model and billing **[built: wallet, top-ups, auto-recharge — verified against a local Razorpay stand-in only; subscriptions planned]**
 

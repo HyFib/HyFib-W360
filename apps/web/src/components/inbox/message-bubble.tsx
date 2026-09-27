@@ -18,6 +18,14 @@ export interface ThreadMessage {
   providerTimestamp: string | null;
 }
 
+/** An order message's label ("Order shipped · Tara Tea") from its content (order messages). */
+function storeMessageLabel(content: unknown): string | null {
+  if (typeof content !== 'object' || content === null) return null;
+  const store = (content as { store?: { label?: unknown; name?: unknown } }).store;
+  if (!store || typeof store.label !== 'string') return null;
+  return typeof store.name === 'string' ? `${store.label} · ${store.name}` : store.label;
+}
+
 const STATUS_LABELS: Record<string, string> = {
   queued: 'Queued',
   sending: 'Sending',
@@ -311,7 +319,9 @@ export function MessageBubble({
         <Body type={message.type} content={message.content} />
         <p className="mt-1 flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
           <time dateTime={message.providerTimestamp ?? message.createdAt}>{at}</time>
-          {outbound && message.senderType === 'system' ? <span>· Sent automatically</span> : null}
+          {outbound && message.senderType === 'system' ? (
+            <span>· {storeMessageLabel(message.content) ?? 'Sent automatically'}</span>
+          ) : null}
           {outbound && message.senderType === 'bot' ? <span>· Automation</span> : null}
           {outbound && message.senderName && message.senderType !== 'system' ? (
             <span>· {message.senderName}</span>

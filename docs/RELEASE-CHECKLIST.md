@@ -94,6 +94,13 @@ made. This checklist records the evidence required per gate; unchecked items blo
       webhooks created with the creation ping answered, a signed delivery read, a webhook disabled
       by WooCommerce re-enabled, a revoked key failing the store, and removal deleting HyFib's
       webhooks
+- [ ] Order messages with a development store (and a WooCommerce test site), an approved sandbox
+      number and a test recipient: approved utility templates for each event, an order placed and
+      paid on delivery, the confirm and cancel buttons tapped on Android and iOS (their payloads
+      returned as research M-177 and M-178 describe), a shipment with tracking, Shopify's delivery
+      timing measured (whether a delivered shipment changes the order or sends `orders/updated`,
+      research SH-034, against the three-hour re-read), a cancellation, and the sending hours in
+      the company's time zone
 - [ ] Tenant-isolation and security gates passing in CI on the release commit
 - [ ] Measured load behaviour against the test envelope (k6 results)
 - [ ] Backup restoration drill performed and timings recorded (RPO/RTO)

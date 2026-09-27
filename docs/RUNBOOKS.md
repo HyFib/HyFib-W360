@@ -594,6 +594,61 @@ definer functions (`ops.commerce_store_by_shop`, `ops.commerce_store_by_webhook`
 `w360_definer`; a failure there usually means the bootstrap roles are missing
 (`infra/db/bootstrap-roles.sql`). The `commerce.store` queue is created by `pnpm db:migrate`.
 
+## 10J. Order messages (messages on store events)
+
+**A customer did not get an order message.** Open the store's Messages page (Commerce → Stores → the
+store → Order messages): the report lists the last 30 days with the status and, for "Not sent", the
+reason; the order page lists the order's messages. The reasons:
+
+- "saw this more than 48 hours after it happened" — the store was disconnected, failing or its
+  webhooks were lost and the event was found late (by the hourly read); HyFib does not send stale
+  updates.
+- "A test order" — Shopify test orders are messaged only when the store's setting allows it.
+- "The message for this event was switched off" — the rule was off at send time, or was switched off
+  and on again after the event (a rule never messages about what happened before it was switched on).
+- "Nobody has confirmed that this store's customers agreed" — the opt-in confirmation was withdrawn.
+- "The order has no phone number" — the store gave no number, it had no country code and the store
+  has no calling code set (store page), or Shopify withheld customer data (protected customer data,
+  research SH-020).
+- "opted out", "suppression list", "erased", "has not opted in" (marketing templates) — consent, as
+  for any business-initiated message.
+- "The template is not approved", "The WhatsApp number is not active", "The template's variables or
+  buttons changed" — fix the template or number, then set the rule up again.
+- "A template variable had no value" — the order had no value for a field chosen without a fallback
+  (for example the tracking number of an order shipped without one).
+
+A message shown as "Not delivered" was sent to WhatsApp and failed there: Meta's error is shown in
+the report and in the conversation, as for any failed message. Worker logs have `store message`
+lines with the outcome and reason.
+
+**Nothing is recorded for new orders.** Check that the rule is on (the Messages page), that the store
+reads orders (store page: last read, webhooks), and that orders reach HyFib: an order placed before
+the rule was switched on, or already in the copy, never gets a placed message. Order messages are
+found when HyFib reads an order, so a webhook outage delays them until the hourly read (and the
+48-hour limit applies).
+
+**Messages wait.** "Waiting" messages show when they are due: the rule's delay after the event, moved
+to the start of the store's sending hours when outside them (company time zone). The minute sweep
+signals due messages whose job was lost; a suspended company's messages wait until it is reactivated.
+
+**Delivered messages come late or not at all (Shopify).** Deliveries are found by reading orders in
+transit again every three hours for 14 days after shipping (research SH-034); the store job must be
+running (store page: last read). Only fully shipped orders whose shipments are all delivered count.
+WooCommerce has no delivered status.
+
+**A customer's cash on delivery answer is missing.** Only taps on the message's own buttons, from the
+same customer and conversation, count; the newest answer wins. The template's two chosen buttons
+must be quick replies (the rule says which confirms and which cancels). HyFib does not change the
+order in the store: cancel it there. A cancellation reopens the conversation; a confirmation does
+not.
+
+**Migration 0020 failed.** It runs in one transaction, so a failure applies nothing. It replaces
+`app.erase_contact` through `SET ROLE w360_definer` (ADR-039) and adds
+`ops.commerce_store_messages_due` with column grants for `w360_definer`; a failure there usually
+means the bootstrap roles are missing (`infra/db/bootstrap-roles.sql`). It also redefines the
+`contacts.source` check to allow `store`. The `commerce.store-message` queue is created by
+`pnpm db:migrate`.
+
 ## 11. Compromised company (tenant) or account
 
 1. Suspend the company in `/platform` with a reason (stops outbound activity; ingestion continues).

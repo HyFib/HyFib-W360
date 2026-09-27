@@ -166,6 +166,29 @@ export function buttonReply(
   });
 }
 
+/** A customer's tap on a quick-reply button of the template message `contextId` (research M-178). */
+export function templateButtonReply(
+  wabaId: string,
+  phoneNumberId: string,
+  waId: string,
+  button: { payload: string; text: string },
+  contextId: string,
+) {
+  return envelope(wabaId, phoneNumberId, {
+    contacts: [{ profile: { name: 'Priya Customer' }, wa_id: waId }],
+    messages: [
+      {
+        from: waId,
+        id: `wamid.e2e.${randomUUID()}`,
+        timestamp: String(Math.floor(Date.now() / 1000)),
+        type: 'button',
+        button,
+        context: { from: '919000012345', id: contextId },
+      },
+    ],
+  });
+}
+
 /**
  * A completed WhatsApp Flow: an interactive `nfm_reply` whose `response_json` string holds the flow
  * token and the answers, in reply to the flow message `contextId` (research M-166).

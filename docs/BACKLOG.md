@@ -216,11 +216,29 @@ verification, app review, Embedded Signup configuration).
   checked against Shopify's 2026-07 and 2025-10 Admin schemas. **Remaining:** checks on a Shopify
   development store and a WooCommerce test site (release checklist), Shopify's public app review
   and protected customer data approval (docs/DEPLOYMENT.md), store customers, other platforms.
-- **P4-06c Messages on store events**: order confirmation, shipping and delivery updates, cash on
-  delivery confirmation and abandoned carts sent as approved templates from store events, with
-  consent checks, per-store settings, delays and quiet hours, and delivery reports; store events as
-  automation triggers; order data as template variables (needs research on checkout webhooks and
-  marketing consent for abandoned carts).
+- **P4-06c Order messages** — _implemented and locally verified (2026-09-27) against the Shopify,
+  WooCommerce and Graph stand-ins; no live store or WhatsApp traffic yet_ (ADR-048): per store and
+  event (order placed, cash on delivery confirmation, shipped, delivered (Shopify), cancelled) a
+  manager chooses an approved utility or marketing template, the number, variables filled from the
+  order (number, customer, total, items, status page, tracking, store name) with fallbacks, a delay
+  and, for cash on delivery, the confirm and cancel buttons; no rule can be switched on before a
+  manager confirms the customers' opt-in; events come from the store copy (Shopify shipments and
+  gateways read with `read_orders`, WooCommerce payment method and completion), never about the
+  past and at most once per order and event; test orders and events seen over 48 hours late are
+  recorded, not sent; sending hours in the company's time zone; every check again at send time
+  (rule, opt-in, order, number, template, variables, suppression, erasure, opt-out, marketing
+  opt-in); Shopify deliveries found by reading orders in transit again every three hours; the
+  customer's cash on delivery tap recorded from that message only; a report per store, the messages
+  on the order page, and contacts from store orders as a segment source. T: `stores.test.ts` (7 new
+  tests; 30 deliberate regressions caught), unit tests (detection, send time, variables, payloads,
+  parsers), e2e `stores.spec.ts` (a rule set up after the opt-in, a cash on delivery order sent
+  with its button payloads, the customer's tap on the order page). **Remaining:** checks with a
+  real store, approved templates and a WhatsApp test number (release checklist), Shopify's delivery
+  timing (research SH-034).
+- **P4-06d Abandoned carts and store events in automations**: abandoned checkout reminders (Shopify
+  checkouts need `read_customers` or protected address data for a number, research SH-035;
+  WooCommerce has no carts, WC-023) as marketing templates with marketing opt-in (M-176); store
+  events as automation triggers; messages per shipment or on tracking changes.
 
 ## Phase 5 — billing, wallet, platform, public API
 

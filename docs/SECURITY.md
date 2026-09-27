@@ -31,6 +31,7 @@ security operations. It is not a compliance claim; see `docs/THREAT-MODEL.md` fo
 | WhatsApp Flows     | Everything at Meta goes through written-ahead operations performed by the worker with the stored token; publishing and key replacement need `flows.publish`; the data endpoint checks Meta's signature, finds the flow by a random public id, decrypts with that WhatsApp account's own keys (private keys are keyring ciphertexts bound to their row, deleted 24 hours after replacement), accepts only flow tokens HyFib issued for that flow (30 days, ended by erasure), and forwards to the company's endpoint on an allowed domain through the egress guard, with its secret only for that host; answers are shown only with `contacts.read` and deleted by erasure.                                                                                                                                             |
 | Commerce           | Catalogs are only read from Meta by the worker; orders come only from signed Meta webhooks with prices converted to minor units exactly; Payment Links use the company's own Razorpay keys (keyring ciphertexts bound to their row, write-only, live keys only in production), are written ahead and created once per single-use reference, and a payment is recorded only from the link as fetched from Razorpay, never from a browser or a webhook body; the merchant webhook verifies the company's own secret, deduplicates by event id and only signals a fetch; orders are visible only with the conversation.                                                                                                                                                                                                   |
 | Store connectors   | Companies' Shopify and WooCommerce stores are only read, by the worker, through the egress client; access (Shopify expiring tokens, WooCommerce keys) is sealed in the keyring, bound to the store row and versioned so a token refresh never overwrites access saved meanwhile; handshakes use single-use hashed tokens (Shopify: signed callback, timestamp, the member who started it; WooCommerce: Read/Write keys proven against the entered address); webhooks are verified over the raw body (Shopify with the app secret, WooCommerce with a per-store secret), deduplicated and only make the worker read from the store; Shopify's compliance and uninstall topics act only on the shop named in the signed body; redaction of store orders is sticky; order data needs `commerce.read` and `contacts.read`. |
+| Order messages     | Sent only by the worker after a manager confirmed the store's customers opted in; never about orders from before a rule was switched on; one message per order and event (unique); every rule, consent and suppression check repeated at send time and at dispatch; cash on delivery answers accepted only from the message's own contact and thread; tracking redacted with the customer.                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | Templates          | Created, deleted and listed only by the worker with the stored WABA token (never in the browser); webhooks for templates are signals routed through verified WABA bindings and never change status on their own; submission is write-ahead so a lost response cannot create a duplicate.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | Supply chain       | Exact pins + lockfile, pnpm minimum release age, explicit install-script allowlist, `pnpm audit` and gitleaks in CI, GitHub Actions pinned by SHA, Trivy image scanning, Dependabot.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 
@@ -318,6 +319,32 @@ Phase 4 rules (Store connectors, P4-06b):
   are linked to contacts only when they are E.164 or the company set a calling code.
 - While a company is suspended, store jobs are dropped and the sweep skips its stores; webhooks are
   still verified and recorded, and the reads they asked for run after reactivation.
+
+Phase 4 rules (Order messages, P4-06c):
+
+- A store's Messages page needs `commerce.read`; customer names in its report and an order's messages
+  also need `contacts.read`. Changing the settings or a rule needs `commerce.manage`, and choosing a
+  marketing template also `campaigns.send`, as sending one by hand does. Changes are audited
+  (`commerce.store_message_settings_saved`, `commerce.store_message_rule_saved`, with the event,
+  template, number and delay, never customer details).
+- No rule can be switched on until a manager confirms that the store's customers agreed to WhatsApp
+  messages from the business (Meta's opt-in rule, research M-175); the confirmation records who and
+  when, and withdrawing it switches every rule off. A rule applies only to what happens from the
+  second it is switched on, so connecting a store or switching a rule on never messages customers
+  about past orders.
+- Messages are sent only by the worker, with no member as sender. Every check is made again at send
+  time under the store message's row lock (store, opt-in, rule, sending hours, order, number,
+  template, WhatsApp number, variables, suppression before any contact is created, then erasure,
+  opt-out and marketing opt-in), and the send pipeline checks consent once more at dispatch. At most
+  one message per order and event can exist (a unique constraint), whatever webhooks and reads repeat.
+- Cash on delivery answers come only from the message's quick-reply payloads and count only from its
+  own contact and conversation (and the message the reply names); a payload naming another message
+  is ignored. A tap is never a consent keyword; HyFib never changes the order in the store.
+- Tracking numbers and links are removed with the customer's details (erasure, `customers/redact`)
+  and stay removed on later reads (a constraint enforces it). Store messages keep ids, times, states
+  and the answer only.
+- While a company is suspended, its store messages wait (the sweep skips it and jobs are dropped);
+  they are checked again, including their lateness at detection, when it is reactivated.
 
 Platform roles (`ops.platform_admins`): `platform_owner` and `platform_operator`. Both require MFA;
 all actions are audited; neither can read customer content without a support grant.

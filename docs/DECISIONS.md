@@ -732,3 +732,76 @@ HyFib's webhooks from the site (WooCommerce cannot revoke keys through its API, 
 told to revoke the key), then deletes the store and everything read from it. A store that cannot be
 reached is removed anyway after 30 minutes; the audit entry records what could not be done at the
 store.
+
+## ADR-048 Order messages: events from the store copy, one message per order and event, checked again at send time (2026-09-27)
+
+Decision: a connected store sends the approved WhatsApp template a manager chose when one of its
+orders is placed, paid for on delivery, shipped, delivered or cancelled (P4-06c, research
+`docs/research/store-connectors.md` §3 and `docs/research/meta-whatsapp.md` §16). Abandoned carts and
+store events as automation triggers are not built (P4-06d).
+
+**Events come from the copy, not from webhook bodies.** A read from the store (a signalled read, the
+hourly read or the delivery check below) upserts the order and compares its milestones before and
+after: new to the copy (placed, and cash on delivery when the payment method says so), shipped,
+delivered, cancelled. Shopify orders now carry `paymentGatewayNames` and up to ten `fulfillments`
+with `trackingInfo`, all readable with `read_orders` (SH-030, SH-031), so the app's scopes are
+unchanged. A shipment that is cancelled or failed does not count; shipped is the first real
+shipment; delivered needs a fully shipped order whose shipments are all delivered. WooCommerce
+orders carry `payment_method` (`cod` is the core cash on delivery gateway, WC-021) and
+`date_completed_gmt`; completion counts as shipped and there is no delivered event (WC-022).
+Cash on delivery on Shopify is recognised only by a gateway name containing "cash on delivery"
+(Shopify's own example is "Cash on Delivery (COD)").
+
+**Deliveries are found by reading again.** Whether a delivery changes a Shopify order or sends
+`orders/updated` is unconfirmed (SH-034), and the fulfillment topics need `read_fulfillments`
+(SH-033). While a store's delivered message is on, each store job reads again up to 100 orders
+shipped in the last 14 days, not delivered or cancelled and last read three or more hours ago.
+
+**Never about the past, never twice.** A rule applies from the second it is switched on (store
+timestamps are whole seconds); editing an enabled rule keeps that time, switching it off and on
+again resets it. An event is recorded only when it happened at or after that time: the first read of
+a store (60 days of orders) and orders already in the copy send nothing. Store messages are rows
+unique per order and event, written in the read's own transaction, so repeated webhooks, reads and
+jobs cannot send a second message. An event first seen more than 48 hours after it happened, a test
+order (unless the store allows them) and a plain confirmation of an order covered by the cash on
+delivery message are recorded as skipped with their reason. Cancelled orders get no shipped or
+delivered message.
+
+**When.** A message goes out at the event's time plus the rule's delay (0–1,440 minutes), never
+before it is seen, and inside the store's sending hours in the company's time zone
+(`sendingWindow`, the campaign scheduler's daylight-saving rules). A `commerce.store-message` job is
+queued for that time; the minute sweep (`ops.commerce_store_messages_due`, active companies only)
+signals any whose job was lost.
+
+**Checked again at send time.** Under the store message's row lock the worker checks, in order: the
+store is connected; a manager's opt-in confirmation stands; the rule is still on and was switched
+on before the event; the sending hours (a message outside them moves to their start); the order
+still exists, is not redacted, and (except for the cancellation message) is not cancelled; it has an
+E.164 number; the template is approved, utility or marketing, and sendable; the number is active
+and belongs to the template's account; the cash on delivery buttons are still quick replies; every
+variable has a value (fixed text or an order field, with an optional fallback); the number is not
+suppressed (checked before any contact is created); and the customer may receive the template
+(`checkTemplateEligibility`: erasure, opt-out, marketing opt-in). Any failed check skips the message
+with its reason. Otherwise it creates the contact from the order when needed (`source = store`),
+the conversation (a new one starts resolved, like a campaign's), the message (`sender_type =
+system`, labelled with the store and event) and a send intent without an actor; the send pipeline
+checks consent once more at dispatch and records Meta's statuses.
+
+**Opt-in.** Meta requires opt-in before business-initiated messages (M-175) and HyFib cannot see a
+store's checkout, so no rule can be switched on until a manager confirms that the store's customers
+agreed to WhatsApp messages from the business. The confirmation records who and when; withdrawing it
+switches every rule of the store off. A marketing template follows the marketing consent rules and
+needs `campaigns.send` to be chosen (cart reminders are marketing, M-176).
+
+**Cash on delivery answers.** The message's two chosen quick-reply buttons carry payloads
+`w360-cod:<store message id>:confirm|cancel` (M-177). A tap (a `button` message with the payload and
+`context.id`, M-178) is recorded as the store message's answer only from that message's own contact
+and conversation, only when the reply names that message (when it names one), and only if it is not
+older than the answer already kept. A tap is not a consent keyword, a campaign reply or an
+automation trigger; a confirmation stays quiet, a cancellation reopens the conversation so the team
+can cancel the order in the store. HyFib does not change orders in the store.
+
+**Privacy.** Tracking numbers and links are redacted with the customer's details (contact erasure,
+Shopify's `customers/redact`) and stay empty on later reads; a constraint ties them to
+`redacted_at`. Store messages hold ids, times, states and the answer; they are deleted with their
+order or store.

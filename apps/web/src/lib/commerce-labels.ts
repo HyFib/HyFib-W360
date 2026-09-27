@@ -103,3 +103,20 @@ export const STORE_STATUS_WORD: Record<string, string> = {
 /** A label for a status word HyFib has no label for: the word itself, readable. */
 export const statusText = (word: string) =>
   STORE_STATUS_WORD[word] ?? word.replace(/[_-]+/g, ' ').replace(/^\w/, (c) => c.toUpperCase());
+
+/** An order message's status in the store's report (waiting, handed to WhatsApp, Meta's statuses). */
+export const STORE_MESSAGE_STATUS: Record<string, { label: string; tone: Tone }> = {
+  waiting: { label: 'Waiting', tone: 'info' },
+  sending: { label: 'Sending', tone: 'info' },
+  sent: { label: 'Sent', tone: 'info' },
+  delivered: { label: 'Delivered', tone: 'success' },
+  read: { label: 'Read', tone: 'success' },
+  failed: { label: 'Not delivered', tone: 'danger' },
+  skipped: { label: 'Not sent', tone: 'neutral' },
+};
+
+/** A customer's answer to a cash on delivery message. */
+export const COD_ANSWER: Record<string, { label: string; tone: Tone }> = {
+  confirmed: { label: 'Customer confirmed', tone: 'success' },
+  cancelled: { label: 'Customer asked to cancel', tone: 'warning' },
+};

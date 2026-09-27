@@ -2,7 +2,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { isAppError } from '@w360/core';
-import { can } from '@w360/domain';
+import { STORE_MESSAGE_SKIP_REASONS, can } from '@w360/domain';
 import { formatMinor } from '@w360/domain/crm-money';
 import {
   Alert,
@@ -20,7 +20,13 @@ import {
   Table,
 } from '@w360/ui';
 import { CopyField } from '@/components/growth/copy-field';
-import { STORE_ORDER_STATUS, STORE_PLATFORM, statusText } from '@/lib/commerce-labels';
+import {
+  COD_ANSWER,
+  STORE_MESSAGE_STATUS,
+  STORE_ORDER_STATUS,
+  STORE_PLATFORM,
+  statusText,
+} from '@/lib/commerce-labels';
 import { formatDateTime } from '@/lib/format';
 import { getRuntime } from '@/server/runtime';
 import { requireTenant } from '@/server/session';
@@ -36,10 +42,12 @@ export default async function StoreOrderPage({
   const { slug, orderId } = await params;
   const ctx = await requireTenant(slug);
   if (!can(ctx, 'commerce.read') || !can(ctx, 'contacts.read')) notFound();
-  const { stores } = await getRuntime();
+  const { stores, storeMessages } = await getRuntime();
   let detail: Awaited<ReturnType<typeof stores.storeOrder>>;
+  let sent: Awaited<ReturnType<typeof storeMessages.orderMessages>>;
   try {
     detail = await stores.storeOrder(ctx, orderId);
+    sent = await storeMessages.orderMessages(ctx, orderId);
   } catch (error) {
     if (isAppError(error) && (error.code === 'not_found' || error.code === 'validation_failed')) {
       notFound();
@@ -159,6 +167,92 @@ export default async function StoreOrderPage({
                 Open contact{contact.name ? `: ${contact.name}` : ''}
               </Link>
             ) : null}
+          </CardContent>
+        </Card>
+        <Card className="h-fit">
+          <CardHeader>
+            <CardTitle>Payment and shipping</CardTitle>
+          </CardHeader>
+          <CardContent className="grid gap-2 text-sm">
+            {order.paymentNames.length > 0 ? (
+              <p>
+                Paid with {order.paymentNames.join(', ')}
+                {order.cashOnDelivery ? (
+                  <span className="ml-2">
+                    <Badge tone="info">Cash on delivery</Badge>
+                  </span>
+                ) : null}
+              </p>
+            ) : null}
+            <p>
+              {order.shippedAt
+                ? `Shipped ${formatDateTime(order.shippedAt, tz)}`
+                : 'Not shipped yet (as last read).'}
+            </p>
+            {order.deliveredAt ? <p>Delivered {formatDateTime(order.deliveredAt, tz)}</p> : null}
+            {order.trackingCompany || order.trackingNumber ? (
+              <p>{[order.trackingCompany, order.trackingNumber].filter(Boolean).join(' · ')}</p>
+            ) : null}
+            {order.trackingUrl ? (
+              <CopyField label="Tracking link" value={order.trackingUrl} />
+            ) : null}
+          </CardContent>
+        </Card>
+        <Card className="h-fit">
+          <CardHeader>
+            <CardTitle>WhatsApp messages</CardTitle>
+            <CardDescription>
+              Order messages sent about this order (set up per store).
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-3 text-sm">
+            {sent.length === 0 ? (
+              <p className="text-muted-foreground">None.</p>
+            ) : (
+              <ul className="grid gap-3">
+                {sent.map((m) => {
+                  const label = STORE_MESSAGE_STATUS[m.status];
+                  const answer = m.answer ? COD_ANSWER[m.answer] : null;
+                  return (
+                    <li key={m.id} className="grid gap-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-medium">{m.label}</span>
+                        <Badge tone={label?.tone ?? 'neutral'}>{label?.label ?? m.status}</Badge>
+                      </div>
+                      {m.skipReason ? (
+                        <p className="text-xs text-muted-foreground">
+                          {STORE_MESSAGE_SKIP_REASONS[m.skipReason] ?? m.skipReason}
+                        </p>
+                      ) : null}
+                      {m.status === 'failed' && m.errorTitle ? (
+                        <p className="text-xs text-muted-foreground">{m.errorTitle}</p>
+                      ) : null}
+                      {m.status === 'waiting' ? (
+                        <p className="text-xs text-muted-foreground">
+                          Due {formatDateTime(m.sendAt, tz)}
+                        </p>
+                      ) : null}
+                      {answer && m.answeredAt ? (
+                        <p>
+                          <Badge tone={answer.tone}>{answer.label}</Badge>{' '}
+                          <span className="text-xs text-muted-foreground">
+                            {formatDateTime(m.answeredAt, tz)}
+                          </span>
+                        </p>
+                      ) : null}
+                      {m.conversationId ? (
+                        <Link
+                          href={`${base}/inbox/${m.conversationId}`}
+                          className="text-primary underline-offset-4 hover:underline"
+                        >
+                          Open conversation
+                        </Link>
+                      ) : null}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
           </CardContent>
         </Card>
         {order.statusUrl ? (

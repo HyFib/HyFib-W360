@@ -203,6 +203,12 @@ Optional: without it, the Stores page says Shopify is not set up and WooCommerce
    reinstall, and send the three compliance webhooks from the Partner Dashboard; confirm the token
    lifetimes, the retry schedule and the `shop/redact` timing listed as unconfirmed in
    `docs/research/store-connectors.md`.
+8. Order messages (P4-06c) need no other scope or setting: shipments, tracking and payment gateways
+   are read with `read_orders` (research SH-030, SH-031). The fulfillment webhooks would need
+   `read_fulfillments` (SH-033), so the worker finds deliveries by reading orders in transit again
+   every three hours. Each message is a `commerce.store-message` job scheduled for its send time
+   (the queue is created by `pnpm db:migrate` with the others), and the worker's minute sweep
+   queues again any message that is due but lost its job.
 
 ## WooCommerce stores
 
