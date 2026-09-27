@@ -100,28 +100,14 @@ test('an automation is built, simulated, published, runs on WhatsApp and hands o
   await expect(thread.getByText('Hi Priya Customer, welcome!')).toBeVisible();
   await expect(thread.getByText('Do you want to talk to our team?')).toBeVisible();
   const banner = page.getByText(/is handling this conversation/);
-  // The banner says "sending" until Meta has accepted the question, then shows the wait.
-  await expect
-    .poll(
-      async () => {
-        await page.reload();
-        return banner.textContent();
-      },
-      { timeout: 30_000 },
-    )
-    .toContain('waiting for the customer’s reply');
+  // The banner says "sending" until Meta has accepted the question; the page's live updates then
+  // show the wait. (No reloads here: reloading while a live refresh is in flight makes WebKit
+  // cancel it, and Next.js answers with a navigation that interrupts the reload.)
+  await expect(banner).toContainText('waiting for the customer’s reply', { timeout: 30_000 });
 
   // The customer types the button's title: the automation hands the conversation to people.
   await sendSignedWebhook(request, inboundMessage(wabaId, phoneNumberId, customer, 'Yes'));
-  await expect
-    .poll(
-      async () => {
-        await page.reload();
-        return banner.count();
-      },
-      { timeout: 30_000 },
-    )
-    .toBe(0);
+  await expect(banner).toHaveCount(0, { timeout: 30_000 });
 
   // The run log shows each step.
   await page.goto(`/c/${slug}/automations/runs`);
@@ -142,15 +128,8 @@ test('an automation is built, simulated, published, runs on WhatsApp and hands o
   await sendSignedWebhook(request, inboundMessage(wabaId, phoneNumberId, second, 'Show the MENU'));
   await page.goto(`/c/${slug}/inbox`);
   const secondItem = page.getByRole('link', { name: /Priya Customer/ }).first();
-  await expect
-    .poll(
-      async () => {
-        await page.reload();
-        return page.getByText('Automation', { exact: true }).count();
-      },
-      { timeout: 30_000 },
-    )
-    .toBeGreaterThan(0);
+  // The list updates live when the worker starts the run.
+  await expect(secondItem).toContainText('Automation', { timeout: 30_000 });
   await secondItem.click();
   await expect(page.getByText(/is handling this conversation/)).toBeVisible({ timeout: 30_000 });
   await page.getByRole('button', { name: 'Take over' }).click();
