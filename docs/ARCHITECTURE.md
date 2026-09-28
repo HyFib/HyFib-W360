@@ -811,7 +811,8 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   so no company id is ever read from the request. Failed authentication is limited per client
   address (bursts of 20, one every 5 seconds), then each key (bursts of 50, 10 a second) and each
   company (bursts of 200, 30 a second) have token buckets; over the limit answers 429 with
-  `Retry-After`. JSON bodies need `Content-Type: application/json` and at most 64 KB. Writing scopes
+  `Retry-After`. Then the request is counted against the plan's monthly API requests (below). JSON
+  bodies need `Content-Type: application/json` and at most 64 KB. Writing scopes
   are refused while the company is suspended or restricted (reading continues). Errors are
   `{"error": {"code", "message", "reason"?, "issues"?}, "requestId"}` with the status of the
   application error; other failures are a generic 500 logged with the request id. Tokens are never
@@ -830,15 +831,25 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   retry waits on the unique index and then replays the stored response (`Idempotent-Replayed:
 true`); the same key with another request (method, path and body hashed) answers 422
   `idempotency_key_reused`; a failed request stores nothing; an expired key is reused.
+- **Monthly API requests by plan (0035, ADR-061):** `ops.plans.api_requests_monthly` is empty for no
+  limit, 0 when the plan leaves the API out, or the requests a company may make per monthly usage
+  period (§7). `admitApiRequest` (`api/quota.ts`) counts every request that passed authentication
+  and the rate limits in `app.usage_counters` (metric `api_requests`) with one upsert that never
+  counts beyond the limit, and counts without a limit too. A plan without the API answers 403
+  `forbidden` with reason `not_in_plan` (creating and rotating keys are refused too); a month used
+  up answers 429 `rate_limited` with reason `quota_exceeded` and `Retry-After` until the next
+  period. The minute plan sweep emails the billing managers once per period
+  (`ops.api_quota_reached`).
 - **OpenAPI** (`api/openapi.ts`): `GET /api/v1/openapi.json` (no key; cacheable 5 minutes) is built
   from the zod schemas that validate requests; a unit test checks it against the route handlers.
-- **Web:** Settings → API keys (`developer.manage`): the base URL and an example, the keys with state,
-  prefix, scopes, author, last use and expiry; creation with the scopes the member may grant; the new
-  token shown once with a copy button (kept only in the page's memory); rotation with an overlap;
+- **Web:** Settings → API keys (`developer.manage`): the month's API requests and the plan's limit
+  (or that the plan leaves the API out), the base URL and an example, the keys with state, prefix,
+  scopes, author, last use and expiry; creation with the scopes the member may grant; the new token
+  shown once with a copy button (kept only in the page's memory); rotation with an overlap;
   revocation.
 - **Not built yet:** session, media and interactive messages, listing conversations and messages,
-  starting automations, OAuth apps, IP allowlists per key, monthly API quotas per plan and API
-  access as a plan module. Outgoing webhooks are section 6O.
+  starting automations, OAuth apps, IP allowlists per key, packs of extra API requests and per-key
+  quotas. Outgoing webhooks are section 6O.
 
 ## 6O. Outgoing webhooks **[built — verified with local test receivers only; no customer endpoints yet]**
 
@@ -1012,7 +1023,8 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
 WHERE used < limit`), per monthly period from `usage_anchor`; the sweep announces a used-up month
   once (`notified_at`). The tenant context drops the write permissions of modules the plan leaves
   out (`MODULE_WRITE_PERMISSIONS`); workers check the module before starting runs, order messages
-  and cart reminders (`not_in_plan`). Platform staff see usage as counts only
+  and cart reminders (`not_in_plan`). Public API requests are counted the same way against the
+  version's monthly API requests (0035, ADR-061; §6N). Platform staff see usage as counts only
   (`ops.platform_tenant_usage`). Charging for plans (Razorpay Subscriptions), self-serve changes,
   proration and plan invoices are not built: staff set paid periods.
 - **Ledger (0004_billing):** one INR wallet per company with five accounts (`wallet_available`,

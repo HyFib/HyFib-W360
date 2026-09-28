@@ -262,6 +262,17 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
                   <dd>{used(usage.automationRuns, limits.automationRuns)}</dd>
                 </div>
                 <div className="sm:col-span-2">
+                  <dt className="text-muted-foreground">
+                    API requests {formatDate(usage.periodStart, tz)} to{' '}
+                    {formatDate(usage.periodEnd, tz)}
+                  </dt>
+                  <dd>
+                    {limits.apiRequests === 0
+                      ? 'Not in the plan'
+                      : used(usage.apiRequests, limits.apiRequests)}
+                  </dd>
+                </div>
+                <div className="sm:col-span-2">
                   <dt className="text-muted-foreground">Modules</dt>
                   <dd>
                     {PLAN_MODULE_KEYS.filter((m) => planView.modules.includes(m))

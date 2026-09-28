@@ -1,9 +1,10 @@
 import 'server-only';
 import type { NextRequest } from 'next/server';
-import { resolveClientIp, sha256Hex, toError } from '@w360/core';
+import { resolveClientIp, sha256Hex, systemClock, toError } from '@w360/core';
 import {
   API_LIMITS,
   IDEMPOTENCY_KEY_RE,
+  admitApiRequest,
   apiErrorResponse,
   apiRequestError,
   authenticateApiToken,
@@ -51,7 +52,8 @@ function respond(
 
 /**
  * Runs one public API request (ADR-052): authenticates the bearer key (failed attempts are limited
- * per client address), applies the key's and the company's rate limits, reads a bounded JSON body,
+ * per client address), applies the key's and the company's rate limits, counts the request against
+ * the plan's monthly API requests (ADR-061), reads a bounded JSON body,
  * checks the Idempotency-Key header, and turns results and errors into JSON responses. Tokens are
  * never logged.
  */
@@ -98,6 +100,26 @@ export async function handleApiRequest(
     if (!keyAllowed || !companyAllowed) {
       const e = apiRequestError(429, 'rate_limited', 'Too many requests. Slow down.', requestId);
       return respond(e.status, e.body, requestId, { 'Retry-After': '1' });
+    }
+
+    // The plan's monthly API requests (ADR-061): counted here, before the request is read.
+    const admission = await admitApiRequest(runtime.db, ctx, systemClock.now());
+    if (!admission.ok) {
+      const e = apiRequestError(
+        admission.status,
+        admission.code,
+        admission.message,
+        requestId,
+        admission.reason,
+      );
+      return respond(
+        e.status,
+        e.body,
+        requestId,
+        admission.retryAfterSeconds === null
+          ? {}
+          : { 'Retry-After': String(admission.retryAfterSeconds) },
+      );
     }
 
     let body: unknown = undefined;

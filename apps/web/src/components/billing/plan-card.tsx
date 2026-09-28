@@ -214,6 +214,19 @@ export function PlanCard({
               limit={usage.limits.automationRuns}
               detail={`${day(runs.periodStart)} to ${day(runs.periodEnd)}; test runs are not counted`}
             />
+            {usage.limits.apiRequests === 0 ? (
+              <TR>
+                <TD className="font-medium">API requests this month</TD>
+                <TD className="text-muted-foreground">The public API is not in the plan</TD>
+              </TR>
+            ) : (
+              <UsageRow
+                label="API requests this month"
+                used={usage.apiRequests.used}
+                limit={usage.limits.apiRequests}
+                detail={`${day(usage.apiRequests.periodStart)} to ${day(usage.apiRequests.periodEnd)}; requests with the company's API keys`}
+              />
+            )}
           </TBody>
         </Table>
       </CardContent>

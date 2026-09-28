@@ -1,5 +1,57 @@
 # Progress
 
+## 2026-09-28 — Phase 5: monthly API requests and API access by plan (P5-01, P5-08)
+
+Status: **Implemented and locally verified with test data only.** Each plan version now sets how
+many public API requests a company may make per month, or leaves the API out; requests beyond the
+month's limit are refused until the next period.
+
+### Completed
+
+- **Design (ADR-061):** `api_requests_monthly` per plan version: empty for no limit, 0 when the
+  plan leaves the public API out. Versions published before keep no limit, which is what they gave.
+  Every request that passes authentication and the rate limits counts, before it is read (a
+  malformed request or an idempotent replay too; a failed authentication or a rate-limited request
+  not), per monthly usage period like automation runs.
+- **Schema (migration 0035):** the plan column (the guard keeps it unchangeable once published;
+  staff may set it on drafts), the `api_requests` usage metric, `app.tenant_entitlements` with the
+  limit (recreated, as its result gained a column), and `ops.api_quota_reached` for the notice.
+- **Domain:** `consumeApiRequest` counts with one upsert that never passes the limit (and counts
+  without a limit too); `admitApiRequest` turns a refusal into 403 `forbidden` / `not_in_plan` or
+  429 `rate_limited` / `quota_exceeded` with `Retry-After` until the next period; creating and
+  rotating keys are refused without the API; the minute plan sweep emails the billing managers
+  once per period; the OpenAPI document names both reasons.
+- **Web:** the public API wrapper counts each request after the rate limits. The platform plan
+  form and page show the limit ("Not included" for 0); the platform company page, the Billing plan
+  card and Settings → API keys show the month's use, and the API keys page says when the plan does
+  not include the API and offers no new keys.
+- **Docs:** ADR-061; ARCHITECTURE §6N and §7; SECURITY (Phase 5 API rules); THREAT-MODEL T85;
+  BACKLOG P5-01 and P5-08; FEATURE-MATRIX H-039.
+- **Mutation checks:** 26 guards broken one at a time; all 26 make a test fail: the published-version
+  guard (caught only once the test tried retiring a version while changing its limit, the one change
+  the guard allows), the entitlement, the upsert's limit and period and metric, the plan without the
+  API, the key checks, the refusal's status, reason and Retry-After, the notice's claim and query,
+  the plan form and new versions, the month's use shown, the OpenAPI text, and the web wrapper's
+  check (through the e2e test).
+
+### Test commands and results (local, 2026-09-28)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `pnpm test` (unit)                                                          | 315 passed. New: `api/quota.test.ts` (Retry-After in whole seconds, at least one) and, in `api/api.test.ts`, the error reason and the OpenAPI document naming `not_in_plan` and `quota_exceeded` on every route.                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 405 passed, including the new `api-quota.test.ts` 4: requests counted without a limit; twelve concurrent requests admitting five of a limit of five, the others refused with Retry-After and not counted; the next period counted from zero; a larger plan within the period carrying the count on and a plan without a limit letting every request through; one notice to the billing managers however often the sweep runs; a plan without the API refusing every request, new and rotated keys (the existing key revoked, and new keys working again on a plan with the API); the limit of a published version unchangeable, even while retiring it, and carried into its next version. |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 405 passed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 80 passed (40 × 2) in one full run (18.6 min), including the new `api-quota.spec.ts` on both projects: a key made while the company is complimentary; staff publish a plan with two API requests a month and put the company on it; two requests pass and the third answers 429 with reason `quota_exceeded` and Retry-After; the API keys page and the Billing plan card show two of two, with no sideways scrolling on the phone.                                                                                                                                                                                                                                         |
+| Mutation checks                                                             | 26 guards broken one at a time; all 26 make a test fail                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+
+### Known gaps
+
+- Packs of extra API requests, per-key or per-endpoint quotas, and alerts before the limit are not
+  built. A company learns of the limit from the refusal, the email once it is reached, and its
+  Billing and API keys pages.
+- Firefox and WebKit run the new spec in CI only; only Chromium is installed locally.
+
 ## 2026-09-28 — Phase 5: usage and rates for companies (P5-07, part)
 
 Status: **Billing → Usage and rates implemented and locally verified with test data only.**

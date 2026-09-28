@@ -77,10 +77,11 @@ jobs:
   e2e:
     name: End-to-end (Chromium, Firefox, WebKit, mobile)
     runs-on: ubuntu-24.04
-    # 156 tests run one at a time across four browser projects: about 3 minutes of set-up and 40 of
-    # tests on a66f64e (152 tests, all passing on the first attempt), plus about a minute for the
-    # usage and rates spec. Runners vary (148 tests took 33.5 minutes on b2b7614), and one retry of
-    # a long test (the cart reminder test allows 5 minutes) must still fit on a slow runner.
+    # 160 tests run one at a time across four browser projects: about 3 minutes of set-up and 40 of
+    # tests on a66f64e (152 tests, all passing on the first attempt), plus about a minute each for
+    # the usage and rates and API quota specs. Runners vary (148 tests took 33.5 minutes on
+    # b2b7614), and one retry of a long test (the cart reminder test allows 5 minutes) must still
+    # fit on a slow runner.
     timeout-minutes: 70
     services:
       postgres:

@@ -288,9 +288,12 @@ verification, app review, Embedded Signup configuration).
   with audit; a minute sweep for trial, period and grace ends with notices; restricted companies;
   limits checked where things are added (seats in SQL too) and an atomic run quota; module gating
   in permissions and workers; plan card, limit hints and banners for companies; platform plan
-  screens. Remaining: paying for plans in HyFib (Razorpay Subscriptions, P5-07), self-serve plan
-  changes and higher-plan trials, proration, plan invoices, usage alerts before a limit is reached,
-  plan-change emails to companies, API quotas (not built with P5-08) and AI credits (Phase 6).
+  screens; **[monthly API requests per plan version built, locally verified]** (ADR-061: empty
+  for no limit, 0 leaves the public API out; counted atomically, refused with 429 when used up and
+  403 without the API, one notice per period). Remaining: paying for plans in HyFib (Razorpay
+  Subscriptions, P5-07), self-serve plan changes and higher-plan trials, proration, plan invoices,
+  usage alerts before a limit is reached, plan-change emails to companies, packs of extra API
+  requests and AI credits (Phase 6).
 - **P5-02 Ledger** **[built, locally verified]**: accounts, append-only journal balanced at commit,
   balances by trigger, holds, settlements, releases (expiry sweep), refunds and chargebacks as
   compensating postings; INR paise; monthly statements computed from the ledger (ADR-057).
@@ -350,10 +353,10 @@ verification, app review, Embedded Signup configuration).
   expiry, rotation with an overlap, revocation, audit), `/api/v1` with approved template sends,
   contacts (cursor pages, create or existing), consent with evidence and message status; idempotency
   keys, per-key, per-company and failed-authentication rate limits, 64 KB bodies, an OpenAPI 3.1
-  document from the validation schemas, Settings → API keys. Remaining: monthly quotas per plan,
-  API access as a plan module, session, media and interactive messages, conversation and message
-  lists, starting automations (W-086), bulk sends in one call, IP allowlists, key expiry reminders,
-  tests of the rate limits.
+  document from the validation schemas, Settings → API keys; monthly API requests and API access
+  by plan (ADR-061, see P5-01). Remaining: session, media and interactive messages, conversation
+  and message lists, starting automations (W-086), bulk sends in one call, IP allowlists, key expiry
+  reminders, per-key quotas, tests of the rate limits.
 - **P5-09 Outgoing webhooks** **[built, locally verified; delivered to local test receivers only]**
   (ADR-053): up to 10 endpoints per company (`developer.manage`) for `message.received`,
   `message.status`, `consent.changed` and `template.status_changed`, captured by database triggers

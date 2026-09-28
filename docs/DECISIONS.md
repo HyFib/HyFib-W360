@@ -1693,3 +1693,35 @@ category, without any message, number, contact or market breakdown: a subset of 
 Not built: alerts or emails about an upcoming change, estimates per number or campaign on this page
 (campaigns show their own), a history of past cards, and exact charges (Meta's invoice is
 authoritative; reconciling with `pricing_analytics` stays in the backlog, ADR-028).
+
+## ADR-061 API access and monthly API requests by plan (2026-09-28)
+
+Context: the public API (ADR-052) limits requests per key and per company per second, but not per
+month, and every plan includes it. Plans (ADR-051) limit seats, numbers, teams, live automations and
+automation runs; API quotas and API access by plan were left for later (backlog P5-01, P5-08).
+
+Decision: one more limit per plan version, `api_requests_monthly`:
+
+- **Meaning:** empty (NULL) for no monthly limit, 0 when the plan leaves the public API out, or the
+  requests a company may make per monthly usage period (the plan's usage anchor, as for automation
+  runs). A new column, so versions published before it keep NULL, which is what they gave: the API
+  without a monthly limit. Published versions stay unchangeable (the guard compares the new column
+  too). Complimentary access has no limit. No add-on packs yet.
+- **What counts:** every request authenticated with the company's API key that passes the key and
+  company rate limits, counted before the body is read or the request handled, so a malformed
+  request or an idempotent replay counts too; a failed authentication or a rate-limited request does
+  not. Counted in `app.usage_counters` (metric `api_requests`) for the period, atomically and never
+  beyond the limit, and counted without a limit too, so companies and staff see the month's use.
+- **Refusals:** a plan without the API gets 403 `forbidden` with reason `not_in_plan` on every
+  request, and creating or rotating keys is refused with the same message (existing keys stay
+  listed and can be revoked). When the month's requests are used, requests get 429 `rate_limited`
+  with reason `quota_exceeded` and `Retry-After` counting the seconds until the next period. The
+  OpenAPI document describes both.
+- **Notice:** the minute plan sweep emails the billing managers once per period when the month's API
+  requests reach the limit (`ops.api_quota_reached`, alongside the automation run notice).
+- **Where it shows:** the Billing plan card and Settings → API keys (the month's use and limit, or
+  that the plan does not include the API, with creating keys disabled); the platform plan form and
+  page; the platform company page.
+
+Not built: packs of extra requests, per-key or per-endpoint quotas, alerts before the limit, and
+quotas for outgoing webhooks (deliveries are not API requests).

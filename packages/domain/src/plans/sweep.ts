@@ -47,7 +47,8 @@ export interface PlanSweepResult {
  * The minute sweep's plan work (ADR-051): moves trials, paid periods and grace periods that have
  * ended to their next state (each in the company's own scope, recorded in its audit log) and
  * emails the company's billing managers; then announces, once per month, automation run limits
- * that were reached. One company's failure does not hold up the others.
+ * and monthly API request limits (ADR-061) that were reached. One company's failure does not hold
+ * up the others.
  */
 export async function sweepPlanStates(deps: PlanSweepDeps, limit = 200): Promise<PlanSweepResult> {
   const failed: PlanSweepResult['failed'] = [];
@@ -127,7 +128,33 @@ export async function sweepPlanStates(deps: PlanSweepDeps, limit = 200): Promise
     });
     if (sent) announced += 1;
   }
+
+  const apiReached = await deps.db.run(
+    systemScope,
+    (tx) =>
+      tx.execute<{ tenant_id: string; counter_id: string }>(
+        sql`select tenant_id, counter_id from ops.api_quota_reached(${limit})`,
+      ),
+    { accessMode: 'read only' },
+  );
+  for (const { tenant_id: tenantId, counter_id: counterId } of apiReached.rows) {
+    const sent = await announceApiQuota(deps, tenantId, counterId).catch((error: unknown) => {
+      failed.push({ tenantId, error });
+      return false;
+    });
+    if (sent) announced += 1;
+  }
   return { transitioned, announced, failed };
+}
+
+/** Claims the counter's notice: only one of two sweeps that listed the same counter gets it. */
+async function claimNotice(tx: Tx, tenantId: string, counterId: string): Promise<boolean> {
+  const claimed = await tx.execute<{ id: string }>(
+    sql`update app.usage_counters set notified_at = now()
+         where tenant_id = ${tenantId}::uuid and id = ${counterId}::uuid and notified_at is null
+         returning id`,
+  );
+  return claimed.rows.length > 0;
 }
 
 /**
@@ -142,12 +169,7 @@ export async function announceRunLimit(
 ): Promise<boolean> {
   const scope = authorizedTenantScope(tenantId, null);
   return deps.db.run(scope, async (tx) => {
-    const claimed = await tx.execute<{ id: string }>(
-      sql`update app.usage_counters set notified_at = now()
-           where tenant_id = ${tenantId}::uuid and id = ${counterId}::uuid and notified_at is null
-           returning id`,
-    );
-    if (claimed.rows.length === 0) return false;
+    if (!(await claimNotice(tx, tenantId, counterId))) return false;
     const entitlements = await loadEntitlements(tx, tenantId);
     const { planName, day } = await companyFacts(tx, tenantId, entitlements.planId);
     const { end } = usagePeriod(entitlements.usageAnchor, deps.clock.now());
@@ -157,6 +179,34 @@ export async function announceRunLimit(
         `Your company used all ${entitlements.limits.automationRuns ?? 0} automation runs of the ${planName} plan for this month.`,
         `Automations will not start again from customer messages or store events until ${day(end)}. Runs already in progress continue.`,
         'Ask HyFib for more automation runs or a larger plan.',
+      ],
+    });
+    return true;
+  });
+}
+
+/**
+ * Emails the company's billing managers that its API requests for the month are used up (ADR-061),
+ * once per counter, like the automation run notice. Returns whether this call sent it.
+ */
+export async function announceApiQuota(
+  deps: PlanSweepDeps,
+  tenantId: string,
+  counterId: string,
+): Promise<boolean> {
+  const scope = authorizedTenantScope(tenantId, null);
+  return deps.db.run(scope, async (tx) => {
+    if (!(await claimNotice(tx, tenantId, counterId))) return false;
+    const entitlements = await loadEntitlements(tx, tenantId);
+    const { planName, day } = await companyFacts(tx, tenantId, entitlements.planId);
+    const { end } = usagePeriod(entitlements.usageAnchor, deps.clock.now());
+    const limit = entitlements.limits.apiRequests ?? 0;
+    await notifyBillingManagers(deps.notices, tx, scope, {
+      subject: "This month's API requests are used up",
+      lines: [
+        `Your company used all ${limit.toLocaleString('en-IN')} API requests of the ${planName} plan for this month.`,
+        `The public API refuses requests until ${day(end)}. The app itself, automations and outgoing webhooks are not affected.`,
+        'Ask HyFib for a larger plan.',
       ],
     });
     return true;

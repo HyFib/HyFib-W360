@@ -10,11 +10,11 @@ import {
   RECENT_SIGN_IN_MINUTES,
   type ApiKeyView,
 } from '@w360/domain';
-import { Badge, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
+import { Alert, Badge, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
 import { ApiKeyActions, CreateApiKeyForm } from '@/components/settings/api-keys';
 import { CopyField } from '@/components/growth/copy-field';
 import { SignInAgain } from '@/components/sign-in-again';
-import { formatDateTime } from '@/lib/format';
+import { formatDate, formatDateTime } from '@/lib/format';
 import { getRuntime } from '@/server/runtime';
 import { requireTenant } from '@/server/session';
 
@@ -31,8 +31,11 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
   const { slug } = await params;
   const ctx = await requireTenant(slug);
   if (!can(ctx, 'developer.manage')) notFound();
-  const { apiKeys, config, clock } = await getRuntime();
+  const { apiKeys, config, clock, plans } = await getRuntime();
   const keys = await apiKeys.list(ctx);
+  const usage = await plans.usage(ctx);
+  const apiLimit = usage.limits.apiRequests;
+  const inPlan = apiLimit !== 0;
   const tz = ctx.tenant.timezone;
   const apiBase = new URL('/api/v1', config.APP_BASE_URL).toString();
   const grantable = API_SCOPE_KEYS.filter((s) => can(ctx, API_SCOPE_INFO[s].permission));
@@ -51,6 +54,25 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4">
+          {inPlan ? (
+            <p className="text-sm">
+              {formatDate(usage.apiRequests.periodStart, tz)} to{' '}
+              {formatDate(usage.apiRequests.periodEnd, tz)}:{' '}
+              <strong>
+                {usage.apiRequests.used.toLocaleString('en-IN')}
+                {apiLimit === null ? '' : ` of ${apiLimit.toLocaleString('en-IN')}`}
+              </strong>{' '}
+              API requests
+              {apiLimit === null
+                ? '; your plan has no monthly limit.'
+                : '. When they are used up, the API refuses requests until the next period.'}
+            </p>
+          ) : (
+            <Alert tone="warning" title="The public API is not in your plan">
+              Your company’s plan does not include the public API, so requests with its keys are
+              refused and new keys cannot be created. Ask HyFib to change the plan.
+            </Alert>
+          )}
           <CopyField label="Base URL" value={apiBase} />
           <p className="text-sm">
             Send the key as{' '}
@@ -151,7 +173,7 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
                       slug={ctx.tenant.slug}
                       keyId={k.id}
                       name={k.name}
-                      rotatable={k.state === 'active' && !k.replacedByKeyId}
+                      rotatable={inPlan && k.state === 'active' && !k.replacedByKeyId}
                       revocable={k.state === 'active'}
                     />
                   </li>
@@ -171,7 +193,11 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
           </CardDescription>
         </CardHeader>
         <CardContent>
-          {hasRecentSignIn(ctx, clock.now()) ? (
+          {!inPlan ? (
+            <p className="text-sm text-muted-foreground">
+              New keys cannot be created while the plan does not include the public API.
+            </p>
+          ) : hasRecentSignIn(ctx, clock.now()) ? (
             <CreateApiKeyForm
               slug={ctx.tenant.slug}
               grantable={grantable}

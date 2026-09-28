@@ -19,6 +19,7 @@ import { recordAudit, type RequestMeta } from '../audit';
 import { assertCan, type TenantContext } from '../authz/context';
 import { assertRecentSignIn } from '../authz/step-up';
 import { TOKEN_ALPHABET, randomToken } from '../growth/model';
+import { assertApiInPlan, loadEntitlements } from '../plans/entitlements';
 import { parseInput } from '../validation';
 import {
   API_KEY_EXPIRY_DAYS,
@@ -183,7 +184,7 @@ export function createApiKeysService(deps: { db: Database; clock: Clock }) {
       );
     },
 
-    /** A new key. The token is returned once and never stored. */
+    /** A new key, unless the plan leaves the API out. The token is returned once, never stored. */
     async create(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
       assertCan(ctx, 'developer.manage');
       const now = clock.now();
@@ -194,6 +195,7 @@ export function createApiKeysService(deps: { db: Database; clock: Clock }) {
         data.expiresInDays === 0 ? null : new Date(now.getTime() + data.expiresInDays * DAY_MS);
       return db.run(ctx.scope, async (tx) => {
         await lockKeys(tx, ctx.tenant.id);
+        assertApiInPlan(await loadEntitlements(tx, ctx.tenant.id));
         if ((await activeKeyCount(tx, ctx.tenant.id, now)) >= API_KEY_LIMITS.activeKeys) {
           throw new AppError(
             'precondition_failed',
@@ -236,6 +238,7 @@ export function createApiKeysService(deps: { db: Database; clock: Clock }) {
       const data = parseInput(rotateSchema, input);
       return db.run(ctx.scope, async (tx) => {
         await lockKeys(tx, ctx.tenant.id);
+        assertApiInPlan(await loadEntitlements(tx, ctx.tenant.id));
         // Explicit columns: the runtime role cannot read the token hash.
         const [old] = await tx
           .select({

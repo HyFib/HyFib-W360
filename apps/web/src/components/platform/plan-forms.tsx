@@ -36,6 +36,7 @@ export interface PlanFormValues {
   automationRunsMonthly: string;
   runPackSize: string;
   runPackPrice: string;
+  apiRequestsMonthly: string;
   modules: string[];
 }
 
@@ -58,6 +59,7 @@ export const EMPTY_PLAN_FORM: PlanFormValues = {
   automationRunsMonthly: '',
   runPackSize: '',
   runPackPrice: '',
+  apiRequestsMonthly: '',
   modules: [],
 };
 
@@ -232,6 +234,10 @@ export function PlanForm({
             description: 'Needs a monthly run limit. Empty: not sold.',
           })}
           {text('runPackPrice', 'Run pack (₹)', { inputMode: 'decimal' })}
+          {text('apiRequestsMonthly', 'API requests a month', {
+            inputMode: 'numeric',
+            description: '0 leaves the public API out of the plan.',
+          })}
         </div>
       </fieldset>
       <fieldset className="grid gap-2">

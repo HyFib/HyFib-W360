@@ -447,6 +447,11 @@ Phase 5 rules (Public API, P5-08):
 - Only the token's SHA-256 is stored; the runtime role cannot read it. The token is shown once in
   the browser and kept only in the page's memory; it is never logged, and audit entries carry the
   public prefix only.
+- Each request that passes authentication and the rate limits is counted against the plan's
+  monthly API requests (ADR-061) in the key's company scope, atomically and never beyond the limit.
+  A plan without the API refuses every request (403, `not_in_plan`) and creating or rotating keys;
+  a month used up is refused with 429 (`quota_exceeded`) until the next period. The limit belongs to
+  the plan version and changes only with a new version or another plan, set by platform staff.
 
 Phase 5 rules (outgoing webhooks, P5-09):
 

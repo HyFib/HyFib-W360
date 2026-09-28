@@ -80,6 +80,8 @@ export interface PlanLimits {
   teams: number | null;
   liveAutomations: number | null;
   automationRuns: number | null;
+  /** Public API requests per monthly period; 0: the plan leaves the API out (ADR-061). */
+  apiRequests: number | null;
 }
 
 /** Bounds of plan versions (the database checks the same). */
@@ -94,6 +96,7 @@ export const PLAN_BOUNDS = {
   automationRuns: 100_000_000,
   runPackSize: 10_000_000,
   addOnUnits: 10_000,
+  apiRequests: 1_000_000_000,
 } as const;
 
 export const PLAN_INTERVAL_LABELS: Record<number, string> = {

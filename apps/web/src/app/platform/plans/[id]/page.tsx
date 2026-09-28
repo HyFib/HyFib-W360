@@ -56,6 +56,7 @@ export default async function PlanPage({ params }: { params: Promise<{ id: strin
     automationRunsMonthly: count(plan.automationRunsMonthly),
     runPackSize: count(plan.runPackSize),
     runPackPrice: rupees(plan.runPackPriceMinor),
+    apiRequestsMonthly: count(plan.apiRequestsMonthly),
     modules: plan.modules,
   };
   const terms: [string, string][] = [
@@ -84,6 +85,10 @@ export default async function PlanPage({ params }: { params: Promise<{ id: strin
       plan.runPackSize === null || plan.runPackPriceMinor === null
         ? 'Not sold'
         : `${plan.runPackSize.toLocaleString('en-IN')} runs for ${inr(plan.runPackPriceMinor)}`,
+    ],
+    [
+      'API requests a month',
+      plan.apiRequestsMonthly === 0 ? 'Not included' : limit(plan.apiRequestsMonthly),
     ],
     [
       'Modules',

@@ -37,6 +37,8 @@ export const plans = opsSchema.table('plans', {
   runPackSize: integer('run_pack_size'),
   runPackPriceMinor: bigint('run_pack_price_minor', { mode: 'number' }),
   modules: text('modules').array().notNull().$type<PlanModule[]>(),
+  /** Requests to the public API per monthly usage period; null: no limit; 0: no API (ADR-061). */
+  apiRequestsMonthly: integer('api_requests_monthly'),
   status: text('status', { enum: PLAN_STATUSES }).notNull().default('draft'),
   createdByUserId: text('created_by_user_id').notNull(),
   createdAt: tz('created_at').notNull().defaultNow(),
@@ -84,7 +86,7 @@ export const tenantPlans = appSchema.table('tenant_plans', {
   version: integer('version').notNull().default(1),
 });
 
-export const USAGE_METRICS = ['automation_runs'] as const;
+export const USAGE_METRICS = ['automation_runs', 'api_requests'] as const;
 export type UsageMetric = (typeof USAGE_METRICS)[number];
 
 export const usageCounters = appSchema.table('usage_counters', {

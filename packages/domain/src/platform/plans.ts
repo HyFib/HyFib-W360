@@ -6,6 +6,7 @@ import {
   auditEvents,
   desc,
   eq,
+  inArray,
   outerColumn,
   planSettings,
   plans,
@@ -150,6 +151,11 @@ const planFieldsSchema = z
       'A run pack is a whole number of runs up to 10,000,000',
     ),
     runPackPrice: optionalRupees('Enter the price of a run pack in rupees, or leave it empty'),
+    apiRequestsMonthly: optionalWhole(
+      0,
+      PLAN_BOUNDS.apiRequests,
+      'API requests are a whole number up to 1,000,000,000',
+    ),
     modules: z
       .preprocess(
         (v) => (v === undefined || v === null ? [] : typeof v === 'string' ? [v] : v),
@@ -244,6 +250,7 @@ function planValues(d: PlanFields) {
     automationRunsMonthly: d.automationRunsMonthly,
     runPackSize: d.runPackSize,
     runPackPriceMinor: d.runPackPrice,
+    apiRequestsMonthly: d.apiRequestsMonthly,
     modules: d.modules,
   };
 }
@@ -429,6 +436,7 @@ export function createPlanAdminService(deps: { platformDb: PlatformDatabase; clo
           automationRunsMonthly: source.automationRunsMonthly,
           runPackSize: source.runPackSize,
           runPackPriceMinor: source.runPackPriceMinor,
+          apiRequestsMonthly: source.apiRequestsMonthly,
           modules: source.modules,
           createdByUserId: actor.userId,
         });
@@ -607,16 +615,17 @@ export function createPlanAdminService(deps: { platformDb: PlatformDatabase; clo
           live_automations: number;
         }>(sql`select * from ops.platform_tenant_usage(${tenantId}::uuid)`);
         const period = usagePeriod(state.usageAnchor, clock.now());
-        const [runs] = await tx
-          .select({ used: usageCounters.used })
+        const counters = await tx
+          .select({ metric: usageCounters.metric, used: usageCounters.used })
           .from(usageCounters)
           .where(
             and(
               eq(usageCounters.tenantId, tenantId),
-              eq(usageCounters.metric, 'automation_runs'),
+              inArray(usageCounters.metric, ['automation_runs', 'api_requests']),
               eq(usageCounters.periodStart, period.start),
             ),
           );
+        const counted = (metric: string) => counters.find((c) => c.metric === metric)?.used ?? 0;
         const usage = counts.rows[0];
         return {
           timezone: company.timezone,
@@ -630,7 +639,8 @@ export function createPlanAdminService(deps: { platformDb: PlatformDatabase; clo
             numbers: Number(usage?.numbers ?? 0),
             teams: Number(usage?.teams ?? 0),
             liveAutomations: Number(usage?.live_automations ?? 0),
-            automationRuns: runs?.used ?? 0,
+            automationRuns: counted('automation_runs'),
+            apiRequests: counted('api_requests'),
             periodStart: period.start,
             periodEnd: period.end,
           },
