@@ -1,4 +1,5 @@
 import { EMAIL_RE, normalizeTag } from '../contacts/fields';
+import { TEMPLATE_LIMITS } from '../templates/definition';
 import {
   AUTOMATION_LIMITS,
   HTTP_BODY_METHODS,
@@ -15,6 +16,7 @@ import {
   type HttpHeaderPart,
   type HttpMethod,
   type NodeOf,
+  type OrderPlaceholderValues,
 } from './graph';
 import { normalizeRoutingText } from '../inbox/keywords';
 
@@ -73,6 +75,11 @@ export interface RunFacts {
   fields: Readonly<Record<string, string | number | boolean>>;
   /** Whether the business is open now (true when business hours are off). */
   businessOpen: boolean;
+  /**
+   * The order a run started by order messages is about, read when the step runs ({{order.<field>}});
+   * null for other runs, or when the order was deleted or redacted.
+   */
+  order?: OrderPlaceholderValues | null;
 }
 
 export type RunEffect =
@@ -83,6 +90,19 @@ export type RunEffect =
       body: string;
       footer: string | null;
       buttons: { id: string; title: string }[];
+    }
+  /**
+   * An approved template (allowed outside the service window) with its variables filled in. An
+   * asking step also gives each quick-reply button its payload, by the button's position among the
+   * template's buttons, with the text the step expects it to have.
+   */
+  | {
+      kind: 'send_template';
+      templateId: string;
+      header: string[];
+      body: string[];
+      ask: boolean;
+      buttons: { index: number; title: string; payload: string }[];
     }
   | { kind: 'add_tag'; tag: string }
   | { kind: 'remove_tag'; tag: string }
@@ -157,9 +177,13 @@ export interface AdvanceInput {
 }
 
 export const BOT_BUTTON_PREFIX = 'w360bot:';
-const BOT_BUTTON_RE = /^w360bot:([0-9a-f-]{36}):([a-z0-9_-]{1,32}):(\d{1,4}):([0-2])$/;
+/** The last part is the button's position: 0-2 for reply buttons, 0-9 among a template's buttons. */
+const BOT_BUTTON_RE = /^w360bot:([0-9a-f-]{36}):([a-z0-9_-]{1,32}):(\d{1,4}):(\d)$/;
 
-/** Reply button id: run, node, visit and button index, so a tap answers exactly one question. */
+/**
+ * Reply button id (also the payload of a template's quick-reply button): run, node, visit and button
+ * position, so a tap answers exactly one question.
+ */
 export function botButtonId(runId: string, nodeId: string, visit: number, index: number): string {
   return `${BOT_BUTTON_PREFIX}${runId}:${nodeId}:${visit}:${index}`;
 }
@@ -294,6 +318,37 @@ export function chosenButton(
 }
 
 /**
+ * The branch (position in the step's `buttons`) a reply to an asking template step chose: a tap on a
+ * quick-reply button this step and visit sent, or a button's text typed. A tap sent by another step
+ * or visit chooses nothing.
+ */
+export function chosenTemplateButton(
+  node: NodeOf<'ask_template'>,
+  reply: InboundReply,
+  runId: string,
+  visit: number,
+): number | null {
+  if (reply.buttonId) {
+    const parsed = parseBotButtonId(reply.buttonId);
+    if (parsed && parsed.runId === runId && parsed.nodeId === node.id && parsed.visit === visit) {
+      const index = node.buttons.findIndex((b) => b.index === parsed.index);
+      return index >= 0 ? index : null;
+    }
+    if (parsed) return null;
+  }
+  if (!reply.text) return null;
+  const typed = normalizeRoutingText(reply.text);
+  if (!typed) return null;
+  const index = node.buttons.findIndex((b) => normalizeRoutingText(b.title) === typed);
+  return index >= 0 ? index : null;
+}
+
+/** A template variable's value: one line (whitespace collapsed), within the parameter limit. */
+function templateParam(value: string): string {
+  return truncate(value.replace(/\s+/g, ' ').trim(), TEMPLATE_LIMITS.parameterValue);
+}
+
+/**
  * Advances a run by one step. Never throws for problems caused by the graph or the customer: a
  * missing node, an exhausted budget or an empty message ends the run as failed with a reason.
  */
@@ -305,6 +360,7 @@ export function advance(input: AdvanceInput): StepResult {
     contactName: facts.contactName,
     companyName: facts.companyName,
     variables,
+    order: facts.order ?? null,
   });
 
   const fail = (
@@ -420,6 +476,35 @@ export function advance(input: AdvanceInput): StepResult {
         const built = message(base, () => textEffect(current.text, base.variables));
         if (isResult(built)) return built;
         return waitFor('reply', current.timeoutMinutes, built.state, [built.effect], 'asked');
+      }
+      case 'send_template':
+      case 'ask_template': {
+        if (base.messages + 1 > RUN_BUDGETS.maxMessages)
+          return fail('budget_messages', 'budget_messages', base);
+        const vals = values(base.variables);
+        const header = current.header.map((t) => templateParam(renderText(t, vals)));
+        const body = current.body.map((t) => templateParam(renderText(t, vals)));
+        // Nothing is sent with a blank variable.
+        if ([...header, ...body].some((v) => !v)) return fail('error', 'missing_variable', base);
+        const ask = current.type === 'ask_template';
+        const effect: RunEffect = {
+          kind: 'send_template',
+          templateId: current.templateId,
+          header,
+          body,
+          ask,
+          buttons: ask
+            ? current.buttons.map((b) => ({
+                index: b.index,
+                title: b.title,
+                payload: botButtonId(runId, current.id, base.visit, b.index),
+              }))
+            : [],
+        };
+        const sent: RunState = { ...base, messages: base.messages + 1 };
+        return current.type === 'ask_template'
+          ? waitFor('reply', current.timeoutMinutes, sent, [effect], 'asked')
+          : moveTo(current.next, sent, [effect], 'sent', null);
       }
       case 'condition': {
         const results = current.rules.map((r) => evaluateRule(r, facts, base.variables));
@@ -577,11 +662,30 @@ export function advance(input: AdvanceInput): StepResult {
     }
     if (event.kind === 'deadline') {
       const target =
-        node.type === 'ask_buttons' || node.type === 'ask_text' ? node.timeoutNext : null;
+        node.type === 'ask_buttons' || node.type === 'ask_text' || node.type === 'ask_template'
+          ? node.timeoutNext
+          : null;
       return moveTo(target, counted, [], 'timed_out', 'no reply');
     }
     // A reply.
     const reply = event.reply;
+    if (node.type === 'ask_template') {
+      const index = chosenTemplateButton(node, reply, runId, state.visit);
+      if (index !== null) {
+        const button = node.buttons[index] as { title: string; next: string | null };
+        const variables = node.saveAs
+          ? { ...counted.variables, [node.saveAs]: button.title }
+          : counted.variables;
+        return moveTo(button.next, { ...counted, variables }, [], 'answered', button.title);
+      }
+      return moveTo(
+        node.replyNext,
+        counted,
+        [],
+        'answered',
+        node.buttons.length > 0 ? 'other reply' : 'reply',
+      );
+    }
     if (node.type === 'ask_buttons') {
       const index = chosenButton(node, reply, runId, state.visit);
       if (index !== null) {

@@ -15,6 +15,7 @@ import {
   gte,
   inArray,
   memberships,
+  messageTemplates,
   messages,
   sendIntents,
   sql,
@@ -25,10 +26,15 @@ import {
   type Tx,
 } from '@w360/db';
 import { permissionsForRoles } from '../authz/permissions';
+import { lockCampaignSends, marketingCapReached } from '../campaigns/frequency-cap';
+import { checkTemplateEligibility } from '../consent/service';
 import { MAX_TAGS_PER_CONTACT, coerceFieldValue } from '../contacts/fields';
+import { phoneFromWaId, waRecipientFromPhone } from '../contacts/phone';
 import { businessStatusAt, loadBusinessCalendar } from '../inbox/business-hours';
 import { emitTenantEvent } from '../messaging/events';
 import { STATUS_RANK } from '../messaging/status';
+import { orderPlaceholderValues } from '../stores/order-values';
+import { buildTemplateSend, sendSpecFor } from '../templates/definition';
 import { RUN_BUDGETS, graphSchema, type AutomationGraph, type AutomationNode } from './graph';
 import {
   FINISHED_HTTP_STATES,
@@ -39,6 +45,7 @@ import {
 } from './http';
 import {
   advance,
+  parseBotButtonId,
   type InboundReply,
   type RunEffect,
   type RunEvent,
@@ -65,6 +72,11 @@ import {
  *    and `message.send` job in this transaction; the send worker re-checks policy before any
  *    request leaves), contact updates, hand-off routing;
  * 6. append the step log row and store the new position, or end the run.
+ * Template steps (ADR-050) are checked again and sent through the same pipeline without the service
+ * window; their marketing frequency cap is counted under the campaign runner's company lock, which
+ * the runner only tries (it already holds the conversation's lock): when busy, the step is tried
+ * again shortly. A run started by order messages may run in the conversation it started in while
+ * that stays resolved (until the customer replies); a conversation resolved later stops it.
  * A step that queues a bot message leaves the run holding that message (`pending_message_id`): the
  * run takes no further step, and does not complete, until the send worker records Meta's
  * acceptance and signals it. A message that fails (at the send or later), is cancelled or has an
@@ -89,6 +101,8 @@ export const MAX_STEP_FAILURES = 5;
 export const SEND_WAIT_MS = 10 * 60_000;
 /** While a message is in flight the sweep re-checks the run this often (a lost signal). */
 const PENDING_RECHECK_MS = 60_000;
+/** A template step waiting for the campaign runner's company lock tries again after this. */
+export const COMPANY_LOCK_RETRY_MS = 2_000;
 const SERVICE_WINDOW_MS = 24 * 3600_000;
 
 /** Versions never change, so parsed graphs are cached by version id. */
@@ -148,11 +162,27 @@ export function replyFromMessage(message: {
     };
   }
   if (message.type === 'button') {
+    // A tap on a quick-reply button of a template: one a template step sent carries its bot button
+    // id; any other (a campaign's, an order message's) stays a text reply.
     const text = typeof content.text === 'string' ? content.text : null;
-    return { type: 'text', text, buttonId: null };
+    const payload = typeof content.payload === 'string' ? content.payload : null;
+    return payload && parseBotButtonId(payload)
+      ? { type: 'button', text, buttonId: payload }
+      : { type: 'text', text, buttonId: null };
   }
   return { type: 'other', text: null, buttonId: null };
 }
+
+/** Steps whose texts can hold placeholders. */
+const TEXT_NODE_TYPES: ReadonlySet<AutomationNode['type']> = new Set([
+  'send_text',
+  'ask_buttons',
+  'ask_text',
+  'send_template',
+  'ask_template',
+  'update_contact',
+  'http_request',
+]);
 
 async function loadFacts(
   tx: Tx,
@@ -177,12 +207,18 @@ async function loadFacts(
     const hours = await loadBusinessCalendar(tx, run.tenantId, tenant?.timezone ?? 'UTC');
     businessOpen = hours.enabled ? businessStatusAt(hours.calendar, now).open : true;
   }
+  // The order of a run started by order messages, as it is now (only for steps with texts).
+  const order =
+    run.storeOrderId && node && TEXT_NODE_TYPES.has(node.type)
+      ? await orderPlaceholderValues(tx, run.tenantId, run.storeOrderId)
+      : null;
   return {
     contactName: contact?.name ?? null,
     companyName: tenant?.name ?? '',
     tags: new Set(tagRows.map((t) => t.tag)),
     fields: contact?.attributes ?? {},
     businessOpen,
+    order,
   };
 }
 
@@ -298,6 +334,178 @@ export async function queueBotMessage(
   await tx
     .update(conversations)
     .set({ lastMessageAt: now, lastMessagePreview: preview.slice(0, 200) })
+    .where(and(eq(conversations.tenantId, run.tenantId), eq(conversations.id, conversation.id)));
+  await emitTenantEvent(tx, run.tenantId, {
+    type: 'message.created',
+    conversationId: conversation.id,
+    payload: { messageId },
+  });
+  await deps.jobs.enqueue(
+    tx,
+    QUEUES.messageSend.name,
+    deps.signer.sign({
+      kind: 'message.send',
+      tenantId: run.tenantId,
+      actorUserId: run.startedByUserId,
+      ref: intentId,
+    }),
+    { singletonKey: intentId, group: { id: conversation.channelAccountId } },
+  );
+  return { ok: true, messageId };
+}
+
+type TemplateEffect = Extract<RunEffect, { kind: 'send_template' }>;
+
+/**
+ * Queues a template step's template through the send pipeline (ADR-050), after checking again that
+ * the template is approved, still utility or marketing, with the variables and quick-reply buttons
+ * the step expects; that the number is active and of the template's account; the contact's consent
+ * for the category; and, for marketing templates, the company's frequency cap. No service window
+ * applies. `busy`: the campaign runner's company lock is taken (try again shortly; nothing written).
+ */
+export async function queueBotTemplate(
+  tx: Tx,
+  deps: RunSignalDeps,
+  input: {
+    run: AutomationRun;
+    conversation: { id: string; channelAccountId: string; contactId: string };
+    effect: TemplateEffect;
+    now: Date;
+  },
+): Promise<{ ok: true; messageId: string } | { ok: false; code: string }> {
+  const { run, conversation, effect, now } = input;
+  const [template] = await tx
+    .select()
+    .from(messageTemplates)
+    .where(
+      and(eq(messageTemplates.tenantId, run.tenantId), eq(messageTemplates.id, effect.templateId)),
+    );
+  if (
+    !template ||
+    template.status !== 'approved' ||
+    (template.category !== 'UTILITY' && template.category !== 'MARKETING')
+  ) {
+    return { ok: false, code: 'template_unavailable' };
+  }
+  const spec = sendSpecFor(template.category, template.components);
+  if (!spec.supported) return { ok: false, code: 'template_unavailable' };
+  if (effect.header.length !== spec.headerParams || effect.body.length !== spec.bodyParams) {
+    return { ok: false, code: 'template_changed' };
+  }
+  if (effect.ask) {
+    // The quick-reply buttons the step branches on, exactly as the template has them now.
+    const quickReplies = spec.definition.buttons.flatMap((b, index) =>
+      b.type === 'QUICK_REPLY' ? [{ index, title: b.text }] : [],
+    );
+    if (
+      quickReplies.length !== effect.buttons.length ||
+      quickReplies.some(
+        (q, i) => q.index !== effect.buttons[i]?.index || q.title !== effect.buttons[i]?.title,
+      )
+    ) {
+      return { ok: false, code: 'template_changed' };
+    }
+  }
+  const [channel] = await tx
+    .select({
+      status: channelAccounts.status,
+      whatsappAccountId: channelAccounts.whatsappAccountId,
+    })
+    .from(channelAccounts)
+    .where(
+      and(
+        eq(channelAccounts.tenantId, run.tenantId),
+        eq(channelAccounts.id, conversation.channelAccountId),
+      ),
+    );
+  if (
+    !channel ||
+    channel.status !== 'active' ||
+    channel.whatsappAccountId !== template.whatsappAccountId
+  ) {
+    return { ok: false, code: 'channel_unavailable' };
+  }
+  const [contact] = await tx
+    .select({ phoneE164: contacts.phoneE164, erasedAt: contacts.erasedAt })
+    .from(contacts)
+    .where(and(eq(contacts.tenantId, run.tenantId), eq(contacts.id, conversation.contactId)));
+  if (!contact || contact.erasedAt) return { ok: false, code: 'contact_erased' };
+  const [identity] = await tx
+    .select({ waId: contactIdentities.waId })
+    .from(contactIdentities)
+    .where(
+      and(
+        eq(contactIdentities.tenantId, run.tenantId),
+        eq(contactIdentities.contactId, conversation.contactId),
+        eq(contactIdentities.whatsappAccountId, channel.whatsappAccountId),
+        sql`${contactIdentities.waId} is not null`,
+      ),
+    )
+    .limit(1);
+  // The customer's WhatsApp id on this account, else the number HyFib has for them.
+  const recipient = phoneFromWaId(identity?.waId) ?? contact.phoneE164;
+  if (!recipient) return { ok: false, code: 'no_phone' };
+  const eligibility = await checkTemplateEligibility(tx, {
+    tenantId: run.tenantId,
+    contactId: conversation.contactId,
+    recipientPhones: [recipient],
+    category: template.category,
+  });
+  if (!eligibility.ok) return { ok: false, code: eligibility.code };
+  if (template.category === 'MARKETING') {
+    if (!(await lockCampaignSends(tx, run.tenantId, 'try'))) return { ok: false, code: 'busy' };
+    if (await marketingCapReached(tx, run.tenantId, conversation.contactId, now)) {
+      return { ok: false, code: 'frequency_capped' };
+    }
+  }
+  const built = buildTemplateSend(
+    template,
+    spec,
+    { header: effect.header, body: effect.body },
+    { quickReplyPayloads: new Map(effect.buttons.map((b) => [b.index, b.payload])) },
+  );
+  const messageId = uuidv7();
+  const intentId = uuidv7();
+  await tx.insert(messages).values({
+    id: messageId,
+    tenantId: run.tenantId,
+    conversationId: conversation.id,
+    channelAccountId: conversation.channelAccountId,
+    direction: 'outbound',
+    type: 'template',
+    content: {
+      template: {
+        id: template.id,
+        name: template.name,
+        language: template.language,
+        category: template.category,
+      },
+      rendered: built.rendered,
+      automationRunId: run.id,
+    },
+    status: 'queued',
+    statusRank: STATUS_RANK.queued,
+    senderType: 'bot',
+    senderMembershipId: null,
+    templateId: template.id,
+  });
+  await tx.insert(sendIntents).values({
+    id: intentId,
+    tenantId: run.tenantId,
+    messageId,
+    channelAccountId: conversation.channelAccountId,
+    request: {
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to: waRecipientFromPhone(recipient),
+      type: 'template',
+      template: built.template,
+    },
+    actorUserId: run.startedByUserId,
+  });
+  await tx
+    .update(conversations)
+    .set({ lastMessageAt: now, lastMessagePreview: built.rendered.body.slice(0, 200) })
     .where(and(eq(conversations.tenantId, run.tenantId), eq(conversations.id, conversation.id)));
   await emitTenantEvent(tx, run.tenantId, {
     type: 'message.created',
@@ -442,6 +650,7 @@ async function runStep(
         channelAccountId: conversations.channelAccountId,
         contactId: conversations.contactId,
         lastInboundAt: conversations.lastInboundAt,
+        resolvedAt: conversations.resolvedAt,
       })
       .from(conversations)
       .where(and(eq(conversations.tenantId, tenantId), eq(conversations.id, peek.conversationId)))
@@ -469,8 +678,15 @@ async function runStep(
       return { kind: 'ended' as const };
     };
 
-    // The hand-off lock and the run's limits, checked on every step.
-    if (conv.status === 'resolved') return end('stopped', 'conversation_resolved', null);
+    // The hand-off lock and the run's limits, checked on every step. A run started by order messages
+    // runs in its conversation while that stays resolved as it was when the run started (until the
+    // customer replies); one resolved after the run started stops it.
+    const closedSinceStart =
+      run.triggerType === 'store_event' &&
+      conv.resolvedAt !== null &&
+      conv.resolvedAt.getTime() <= run.startedAt.getTime();
+    if (conv.status === 'resolved' && !closedSinceStart)
+      return end('stopped', 'conversation_resolved', null);
     if (conv.assignedMembershipId && conv.assignedMembershipId !== run.startedByMembershipId)
       return end('taken_over', 'assigned', null);
     if (now.getTime() - run.startedAt.getTime() > RUN_BUDGETS.maxRunMs)
@@ -595,6 +811,30 @@ async function runStep(
     for (const effect of result.effects) {
       if (effect.kind === 'send_text' || effect.kind === 'send_buttons') {
         const sent = await queueBotMessage(tx, deps, { run, conversation: conv, effect, now });
+        if (!sent.ok) {
+          blocked = sent.code;
+          break;
+        }
+        messageId = sent.messageId;
+      } else if (effect.kind === 'send_template') {
+        const sent = await queueBotTemplate(tx, deps, { run, conversation: conv, effect, now });
+        if (!sent.ok && sent.code === 'busy') {
+          // The campaign runner holds the company lock: the step (a template step's only effect,
+          // so nothing of it was applied) runs again shortly from the same position.
+          const retryAt = new Date(now.getTime() + COMPANY_LOCK_RETRY_MS);
+          await tx
+            .update(automationRuns)
+            .set({ nextStepAt: retryAt })
+            .where(and(eq(automationRuns.tenantId, tenantId), eq(automationRuns.id, run.id)));
+          await signalAutomationRun(deps, tx, {
+            tenantId,
+            runId: run.id,
+            actorUserId: run.startedByUserId,
+            key: `l:${retryAt.getTime()}`,
+            at: retryAt,
+          });
+          return { kind: 'not_due' };
+        }
         if (!sent.ok) {
           blocked = sent.code;
           break;

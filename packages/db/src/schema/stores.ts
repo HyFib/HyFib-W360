@@ -270,6 +270,11 @@ export const commerceStoreMessageRules = appSchema.table('commerce_store_message
   enabled: boolean('enabled').notNull().default(false),
   enabledAt: tz('enabled_at'),
   channelAccountId: uuid('channel_account_id'),
+  /** Send the rule's template, or start `automationId` (order events only; migration 0022). */
+  action: text('action', { enum: ['template', 'automation'] })
+    .notNull()
+    .default('template'),
+  automationId: uuid('automation_id'),
   templateId: uuid('template_id'),
   variables: jsonb('variables').notNull().default({ header: [], body: [] }),
   delayMinutes: integer('delay_minutes').notNull().default(0),
@@ -281,7 +286,8 @@ export const commerceStoreMessageRules = appSchema.table('commerce_store_message
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });
 
-export const STORE_MESSAGE_STATES = ['pending', 'queued', 'skipped'] as const;
+/** `started`: the rule started an automation run (migration 0022). */
+export const STORE_MESSAGE_STATES = ['pending', 'queued', 'skipped', 'started'] as const;
 export type StoreMessageState = (typeof STORE_MESSAGE_STATES)[number];
 export const STORE_MESSAGE_ANSWERS = ['confirmed', 'cancelled'] as const;
 export type StoreMessageAnswer = (typeof STORE_MESSAGE_ANSWERS)[number];
@@ -300,6 +306,8 @@ export const commerceStoreMessages = appSchema.table('commerce_store_messages', 
   sendAt: tz('send_at').notNull(),
   contactId: uuid('contact_id'),
   messageId: uuid('message_id'),
+  /** The run a rule started (cleared when retention deletes the run). */
+  automationRunId: uuid('automation_run_id'),
   answer: text('answer', { enum: STORE_MESSAGE_ANSWERS }),
   answeredAt: tz('answered_at'),
   answerMessageId: uuid('answer_message_id'),

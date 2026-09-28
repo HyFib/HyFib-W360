@@ -113,6 +113,7 @@ export const STORE_MESSAGE_STATUS: Record<string, { label: string; tone: Tone }>
   read: { label: 'Read', tone: 'success' },
   failed: { label: 'Not delivered', tone: 'danger' },
   skipped: { label: 'Not sent', tone: 'neutral' },
+  started: { label: 'Automation started', tone: 'info' },
 };
 
 /** A customer's answer to a cash on delivery message. */

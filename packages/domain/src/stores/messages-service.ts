@@ -3,6 +3,9 @@ import { AppError, notFound, uuidv7, type Clock } from '@w360/core';
 import {
   and,
   asc,
+  automationRuns,
+  automationVersions,
+  automations,
   channelAccounts,
   commerceStoreCheckouts,
   commerceStoreMessageRules,
@@ -18,11 +21,14 @@ import {
   messages,
   sql,
   users,
+  type AutomationRunStatus,
   type Database,
+  type StoreMessageState,
   type Tx,
 } from '@w360/db';
 import { recordAudit, type RequestMeta } from '../audit';
 import { assertCan, can, type TenantContext } from '../authz/context';
+import { parseGraph, parseTrigger } from '../automations/graph';
 import { formatTimeOfDay, parseTimeOfDay } from '../campaigns/schedule';
 import { renderPlaceholders, sendSpecFor } from '../templates/definition';
 import { parseInput } from '../validation';
@@ -31,6 +37,8 @@ import {
   STORE_MESSAGE_EVENTS,
   STORE_MESSAGE_EVENT_INFO,
   STORE_MESSAGE_LIMITS,
+  STORE_RULE_ACTIONS,
+  canStartAutomation,
   delayRange,
   eventAvailable,
   isCartEvent,
@@ -39,6 +47,7 @@ import {
   variablesFit,
   type StoreMessageEvent,
   type StoreMessageSkipReason,
+  type StoreRuleAction,
   type StoreVariables,
 } from './messages-model';
 import { hasCustomerAccess, shopifyConsentSupported } from './model';
@@ -49,7 +58,8 @@ import { hasCustomerAccess, shopifyConsentSupported } from './model';
  * `contacts.read`); changing them needs `commerce.manage`, and a rule with a marketing template
  * also `campaigns.send`, as sending one by hand does. No rule can be switched on until a manager
  * confirms the store's customers opted in to WhatsApp messages (research M-175); cart reminders
- * need each customer's marketing opt-in as well.
+ * need each customer's marketing opt-in as well. A rule for an order event can start an automation
+ * instead of sending a template (ADR-050), which also needs `automations.read`.
  */
 
 export interface StoreMessagesServiceDeps {
@@ -76,6 +86,9 @@ const ruleSchema = z.object({
   storeId: z.uuid(),
   event: z.enum(STORE_MESSAGE_EVENTS),
   enabled: z.boolean(),
+  /** Send the template (default) or start an automation (order events only). */
+  action: z.enum(STORE_RULE_ACTIONS).default('template'),
+  automationId: z.uuid().nullable().default(null),
   channelAccountId: z.uuid().nullable(),
   templateId: z.uuid().nullable(),
   variables: storeVariablesSchema,
@@ -116,8 +129,13 @@ export interface StoreMessageRuleView {
   label: string;
   description: string;
   available: boolean;
+  /** Whether this event's rule may start an automation (ADR-050). */
+  automationAllowed: boolean;
   enabled: boolean;
   enabledAt: Date | null;
+  action: StoreRuleAction;
+  automationId: string | null;
+  automationName: string | null;
   channelAccountId: string | null;
   templateId: string | null;
   variables: StoreVariables;
@@ -129,16 +147,27 @@ export interface StoreMessageRuleView {
   problem: string | null;
 }
 
-/** How the report groups messages: waiting, handed to WhatsApp, and Meta's statuses. */
+/** An automation a rule can start: its live version starts from order messages. */
+export interface StoreAutomationOption {
+  id: string;
+  name: string;
+  status: 'active' | 'paused';
+}
+
+/**
+ * How the report groups messages: waiting, handed to WhatsApp, Meta's statuses, and automations
+ * started (their messages are the run's own).
+ */
 export type StoreMessageStatus =
-  'waiting' | 'sending' | 'sent' | 'delivered' | 'read' | 'failed' | 'skipped';
+  'waiting' | 'sending' | 'sent' | 'delivered' | 'read' | 'failed' | 'skipped' | 'started';
 
 export function storeMessageStatus(
-  state: 'pending' | 'queued' | 'skipped',
+  state: StoreMessageState,
   messageStatus: string | null,
 ): StoreMessageStatus {
   if (state === 'pending') return 'waiting';
   if (state === 'skipped') return 'skipped';
+  if (state === 'started') return 'started';
   switch (messageStatus) {
     // Accepted by the Cloud API; Meta's own `sent` status may follow.
     case 'accepted':
@@ -156,6 +185,28 @@ export function storeMessageStatus(
     default:
       return 'sending';
   }
+}
+
+/**
+ * The automation run a store message started (ADR-050): the automation's name and the run's
+ * status, and the run's id for members who can open it (`automations.read`).
+ */
+export interface StoreMessageRunStart {
+  automationName: string | null;
+  runStatus: AutomationRunStatus | null;
+  runId: string | null;
+}
+
+function runStart(
+  r: { runId: string | null; runStatus: AutomationRunStatus | null; automationName: string | null },
+  runsReader: boolean,
+): StoreMessageRunStart | null {
+  if (!r.runId) return null;
+  return {
+    automationName: r.automationName,
+    runStatus: r.runStatus,
+    runId: runsReader ? r.runId : null,
+  };
 }
 
 export function createStoreMessagesService(deps: StoreMessagesServiceDeps) {
@@ -209,6 +260,140 @@ export function createStoreMessagesService(deps: StoreMessagesServiceDeps) {
       });
     }
     return options;
+  }
+
+  /**
+   * The company's automations with whether their live version starts from order messages, for the
+   * rules' automation choice and their problems (ADR-050).
+   */
+  async function automationRows(tx: Tx, ctx: TenantContext) {
+    const rows = await tx
+      .select({
+        id: automations.id,
+        name: automations.name,
+        status: automations.status,
+        trigger: automationVersions.trigger,
+      })
+      .from(automations)
+      .leftJoin(
+        automationVersions,
+        and(
+          eq(automationVersions.tenantId, automations.tenantId),
+          eq(automationVersions.id, automations.activeVersionId),
+        ),
+      )
+      .where(eq(automations.tenantId, ctx.tenant.id))
+      .orderBy(asc(sql`lower(${automations.name})`), asc(automations.id));
+    return rows.map((r) => {
+      const trigger = r.trigger === null ? null : parseTrigger(r.trigger);
+      return {
+        id: r.id,
+        name: r.name,
+        status: r.status,
+        startsFromOrders: trigger?.ok === true && trigger.trigger.type === 'store_event',
+      };
+    });
+  }
+
+  /**
+   * Checks the automation a rule is to start (ADR-050): active, with a live version that starts
+   * from order messages and allows the rule's number, whose templates exist and belong to the
+   * number's WhatsApp account. A marketing template among them needs `campaigns.send`, as choosing
+   * one for a rule does.
+   */
+  async function checkAutomationRule(
+    tx: Tx,
+    ctx: TenantContext,
+    data: z.infer<typeof ruleSchema>,
+  ): Promise<void> {
+    if (!data.channelAccountId) throw invalid('channelAccountId', 'Choose the WhatsApp number.');
+    if (!data.automationId) throw invalid('automationId', 'Choose an automation.');
+    const [channel] = await tx
+      .select({
+        status: channelAccounts.status,
+        whatsappAccountId: channelAccounts.whatsappAccountId,
+      })
+      .from(channelAccounts)
+      .where(
+        and(
+          eq(channelAccounts.tenantId, ctx.tenant.id),
+          eq(channelAccounts.id, data.channelAccountId),
+        ),
+      );
+    if (!channel) throw invalid('channelAccountId', 'Choose the WhatsApp number.');
+    if (channel.status !== 'active') {
+      throw invalid('channelAccountId', 'This WhatsApp number is not active.');
+    }
+    const [automation] = await tx
+      .select({ status: automations.status, activeVersionId: automations.activeVersionId })
+      .from(automations)
+      .where(and(eq(automations.tenantId, ctx.tenant.id), eq(automations.id, data.automationId)));
+    if (!automation) throw invalid('automationId', 'Choose an automation.');
+    if (automation.status !== 'active' || !automation.activeVersionId) {
+      throw invalid('automationId', 'Publish the automation and keep it active first.');
+    }
+    const [version] = await tx
+      .select({
+        trigger: automationVersions.trigger,
+        graph: automationVersions.graph,
+        channelAccountId: automationVersions.channelAccountId,
+      })
+      .from(automationVersions)
+      .where(
+        and(
+          eq(automationVersions.tenantId, ctx.tenant.id),
+          eq(automationVersions.id, automation.activeVersionId),
+        ),
+      );
+    const trigger = parseTrigger(version?.trigger);
+    const graph = parseGraph(version?.graph);
+    if (!version || !trigger.ok || trigger.trigger.type !== 'store_event' || !graph.ok) {
+      throw invalid(
+        'automationId',
+        'The live version of this automation does not start from order messages. Change its trigger and publish it again.',
+      );
+    }
+    if (version.channelAccountId && version.channelAccountId !== data.channelAccountId) {
+      throw invalid('channelAccountId', 'This automation runs only on another WhatsApp number.');
+    }
+    const templateIds = [
+      ...new Set(
+        graph.graph.nodes.flatMap((n) =>
+          n.type === 'send_template' || n.type === 'ask_template' ? [n.templateId] : [],
+        ),
+      ),
+    ];
+    if (templateIds.length === 0) return;
+    const used = await tx
+      .select({
+        whatsappAccountId: messageTemplates.whatsappAccountId,
+        category: messageTemplates.category,
+      })
+      .from(messageTemplates)
+      .where(
+        and(
+          eq(messageTemplates.tenantId, ctx.tenant.id),
+          inArray(messageTemplates.id, templateIds),
+        ),
+      );
+    if (used.length !== templateIds.length) {
+      throw invalid(
+        'automationId',
+        'A template of this automation no longer exists. Fix the automation and publish it again.',
+      );
+    }
+    if (used.some((t) => t.whatsappAccountId !== channel.whatsappAccountId)) {
+      throw invalid(
+        'automationId',
+        'The automation’s templates belong to another WhatsApp account than this number.',
+      );
+    }
+    if (used.some((t) => t.category === 'MARKETING') && !can(ctx, 'campaigns.send')) {
+      throw new AppError(
+        'forbidden',
+        'This automation sends marketing templates, which needs the campaign sending permission.',
+      );
+    }
   }
 
   /**
@@ -424,24 +609,38 @@ export function createStoreMessagesService(deps: StoreMessagesServiceDeps) {
                 eq(commerceStoreMessageRules.storeId, id),
               ),
             );
+          const automationList = await automationRows(tx, ctx);
           const rules: StoreMessageRuleView[] = STORE_MESSAGE_EVENTS.map((event) => {
             const rule = saved.find((r) => r.event === event);
             const info = STORE_MESSAGE_EVENT_INFO[event];
             const template = templates.find((t) => t.id === rule?.templateId);
             const channel = channels.find((c) => c.id === rule?.channelAccountId);
+            const automation = automationList.find((a) => a.id === rule?.automationId);
             let problem: string | null = null;
             if (rule?.enabled) {
-              if (!template) problem = 'The template is no longer approved or cannot be sent.';
-              else if (channel?.status !== 'active') problem = 'The WhatsApp number is not active.';
-              else if (store.state !== 'connected') problem = 'The store is not connected.';
+              if (rule.action === 'automation') {
+                if (automation?.status !== 'active' || !automation.startsFromOrders)
+                  problem =
+                    'The automation is paused or archived, or its live version no longer starts from order messages.';
+              } else if (!template) {
+                problem = 'The template is no longer approved or cannot be sent.';
+              }
+              if (problem === null && channel?.status !== 'active')
+                problem = 'The WhatsApp number is not active.';
+              else if (problem === null && store.state !== 'connected')
+                problem = 'The store is not connected.';
             }
             return {
               event,
               label: info.label,
               description: info.description,
               available: eventAvailable(store.platform, event),
+              automationAllowed: canStartAutomation(event),
               enabled: rule?.enabled ?? false,
               enabledAt: rule?.enabledAt ?? null,
+              action: rule?.action ?? 'template',
+              automationId: rule?.automationId ?? null,
+              automationName: automation?.name ?? null,
               channelAccountId: rule?.channelAccountId ?? null,
               templateId: rule?.templateId ?? null,
               variables: readStoreVariables(rule?.variables),
@@ -473,9 +672,28 @@ export function createStoreMessagesService(deps: StoreMessagesServiceDeps) {
               checkoutCustomerName: commerceStoreCheckouts.customerName,
               messageStatus: messages.status,
               errorTitle: messages.errorTitle,
-              conversationId: messages.conversationId,
+              conversationId: sql<
+                string | null
+              >`coalesce(${messages.conversationId}, ${automationRuns.conversationId})`,
+              runId: automationRuns.id,
+              runStatus: automationRuns.status,
+              automationName: automations.name,
             })
             .from(commerceStoreMessages)
+            .leftJoin(
+              automationRuns,
+              and(
+                eq(automationRuns.tenantId, commerceStoreMessages.tenantId),
+                eq(automationRuns.id, commerceStoreMessages.automationRunId),
+              ),
+            )
+            .leftJoin(
+              automations,
+              and(
+                eq(automations.tenantId, automationRuns.tenantId),
+                eq(automations.id, automationRuns.automationId),
+              ),
+            )
             .leftJoin(
               commerceStoreOrders,
               and(
@@ -507,6 +725,7 @@ export function createStoreMessagesService(deps: StoreMessagesServiceDeps) {
             .orderBy(desc(commerceStoreMessages.createdAt), desc(commerceStoreMessages.id))
             .limit(500);
           const customers = can(ctx, 'contacts.read');
+          const runsReader = can(ctx, 'automations.read');
           const recent = recentRows.map((r) => ({
             id: r.id,
             event: r.event,
@@ -526,6 +745,7 @@ export function createStoreMessagesService(deps: StoreMessagesServiceDeps) {
               r.checkoutId === null ? null : (r.checkoutName ?? `Checkout ${r.checkoutExternalId}`),
             customerName: customers ? (r.orderCustomerName ?? r.checkoutCustomerName) : null,
             conversationId: customers ? r.conversationId : null,
+            automation: runStart(r, runsReader),
           }));
           const counts: Record<StoreMessageStatus, number> = {
             waiting: 0,
@@ -535,6 +755,7 @@ export function createStoreMessagesService(deps: StoreMessagesServiceDeps) {
             read: 0,
             failed: 0,
             skipped: 0,
+            started: 0,
           };
           for (const r of recent) counts[r.status] += 1;
           const cart = store.platform === 'shopify' ? await cartReport(tx, ctx, id, since) : null;
@@ -555,6 +776,14 @@ export function createStoreMessagesService(deps: StoreMessagesServiceDeps) {
             rules,
             channels,
             templates,
+            automations: runsReader
+              ? automationList.flatMap((a): StoreAutomationOption[] =>
+                  a.startsFromOrders && (a.status === 'active' || a.status === 'paused')
+                    ? [{ id: a.id, name: a.name, status: a.status }]
+                    : [],
+                )
+              : [],
+            canChooseAutomations: runsReader,
             counts,
             recent: recent.slice(0, 50),
             canManage: can(ctx, 'commerce.manage'),
@@ -720,6 +949,19 @@ export function createStoreMessagesService(deps: StoreMessagesServiceDeps) {
       if (!variablesFit(data.event, data.variables)) {
         throw invalid('variables', 'Choose values this message can fill.');
       }
+      // A rule that sends its template keeps no automation.
+      if (data.action === 'template') data.automationId = null;
+      if (data.action === 'automation') {
+        if (!canStartAutomation(data.event)) {
+          throw invalid('action', 'This message cannot start an automation.');
+        }
+        if (!can(ctx, 'automations.read')) {
+          throw new AppError(
+            'forbidden',
+            'Choosing an automation needs permission to see automations.',
+          );
+        }
+      }
       const now = deps.clock.now();
       return db.run(ctx.scope, async (tx) => {
         const store = await lockStore(tx, ctx, data.storeId);
@@ -742,6 +984,15 @@ export function createStoreMessagesService(deps: StoreMessagesServiceDeps) {
             'conflict',
             'Someone else changed this message meanwhile. Reload the page and try again.',
           );
+        }
+        if (data.automationId) {
+          const [automation] = await tx
+            .select({ id: automations.id })
+            .from(automations)
+            .where(
+              and(eq(automations.tenantId, ctx.tenant.id), eq(automations.id, data.automationId)),
+            );
+          if (!automation) throw invalid('automationId', 'Choose an automation.');
         }
         let category: string | null = null;
         // The two cart reminders: the second follows the first, later.
@@ -788,7 +1039,8 @@ export function createStoreMessagesService(deps: StoreMessagesServiceDeps) {
           ) {
             throw invalid('delayMinutes', 'The first reminder has to come before the second one.');
           }
-          ({ category } = await checkEnabledRule(tx, ctx, data));
+          if (data.action === 'automation') await checkAutomationRule(tx, ctx, data);
+          else ({ category } = await checkEnabledRule(tx, ctx, data));
         }
         // A rule applies from the second it is switched on (stores give whole seconds, so an
         // order placed in that second counts); editing an enabled rule keeps that time.
@@ -796,6 +1048,8 @@ export function createStoreMessagesService(deps: StoreMessagesServiceDeps) {
         const values = {
           enabled: data.enabled,
           enabledAt: data.enabled ? (existing?.enabled ? existing.enabledAt : switchedOn) : null,
+          action: data.action,
+          automationId: data.automationId,
           channelAccountId: data.channelAccountId,
           templateId: data.templateId,
           variables: data.variables,
@@ -879,6 +1133,9 @@ export function createStoreMessagesService(deps: StoreMessagesServiceDeps) {
             metadata: {
               event: data.event,
               enabled: data.enabled,
+              ...(data.action === 'automation'
+                ? { action: data.action, automationId: data.automationId }
+                : {}),
               templateId: data.templateId,
               channelAccountId: data.channelAccountId,
               ...(category ? { category } : {}),
@@ -912,7 +1169,12 @@ export function createStoreMessagesService(deps: StoreMessagesServiceDeps) {
               answeredAt: commerceStoreMessages.answeredAt,
               messageStatus: messages.status,
               errorTitle: messages.errorTitle,
-              conversationId: messages.conversationId,
+              conversationId: sql<
+                string | null
+              >`coalesce(${messages.conversationId}, ${automationRuns.conversationId})`,
+              runId: automationRuns.id,
+              runStatus: automationRuns.status,
+              automationName: automations.name,
             })
             .from(commerceStoreMessages)
             .leftJoin(
@@ -922,6 +1184,20 @@ export function createStoreMessagesService(deps: StoreMessagesServiceDeps) {
                 eq(messages.id, commerceStoreMessages.messageId),
               ),
             )
+            .leftJoin(
+              automationRuns,
+              and(
+                eq(automationRuns.tenantId, commerceStoreMessages.tenantId),
+                eq(automationRuns.id, commerceStoreMessages.automationRunId),
+              ),
+            )
+            .leftJoin(
+              automations,
+              and(
+                eq(automations.tenantId, automationRuns.tenantId),
+                eq(automations.id, automationRuns.automationId),
+              ),
+            )
             .where(
               and(
                 eq(commerceStoreMessages.tenantId, ctx.tenant.id),
@@ -929,11 +1205,13 @@ export function createStoreMessagesService(deps: StoreMessagesServiceDeps) {
               ),
             )
             .orderBy(asc(commerceStoreMessages.createdAt));
-          return rows.map((r) => ({
+          const runsReader = can(ctx, 'automations.read');
+          return rows.map(({ runId, runStatus, automationName, ...r }) => ({
             ...r,
             label: STORE_MESSAGE_EVENT_INFO[r.event].label,
             status: storeMessageStatus(r.state, r.messageStatus),
             skipReason: r.skipReason as StoreMessageSkipReason | null,
+            automation: runStart({ runId, runStatus, automationName }, runsReader),
           }));
         },
         { accessMode: 'read only' },

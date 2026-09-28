@@ -38,6 +38,8 @@ export async function saveStoreMessageRuleAction(
     storeId: string;
     event: string;
     enabled: boolean;
+    action: 'template' | 'automation';
+    automationId: string | null;
     channelAccountId: string | null;
     templateId: string | null;
     variables: StoreVariables;

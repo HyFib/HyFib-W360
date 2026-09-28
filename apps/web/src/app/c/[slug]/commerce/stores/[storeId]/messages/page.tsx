@@ -23,6 +23,7 @@ import {
   StoreMessageRuleForm,
   StoreMessageSettingsForm,
 } from '@/components/stores/store-messages';
+import { RUN_STATUS } from '@/lib/automation-labels';
 import { COD_ANSWER, STORE_MESSAGE_STATUS } from '@/lib/commerce-labels';
 import { formatDateTime } from '@/lib/format';
 import { getRuntime } from '@/server/runtime';
@@ -54,6 +55,8 @@ export default async function StoreMessagesPage({
     rules,
     channels,
     templates,
+    automations,
+    canChooseAutomations,
     counts,
     recent,
     canManage,
@@ -92,10 +95,14 @@ export default async function StoreMessagesPage({
             rule={rule}
             channels={channels}
             templates={templates}
+            automations={automations}
+            canChooseAutomations={canChooseAutomations}
           />
         ) : rule.enabled ? (
           <p className="text-sm">
-            Sends {templates.find((t) => t.id === rule.templateId)?.name ?? 'a template'}
+            {rule.action === 'automation'
+              ? `Starts the automation ${rule.automationName ?? ''}`.trimEnd()
+              : `Sends ${templates.find((t) => t.id === rule.templateId)?.name ?? 'a template'}`}
             {rule.delayMinutes > 0 ? ` ${rule.delayMinutes} minutes after the event` : ''}.
           </p>
         ) : (
@@ -118,10 +125,11 @@ export default async function StoreMessagesPage({
           <CardTitle>Order messages</CardTitle>
           <CardDescription>
             When an order in this store is placed, paid for on delivery, shipped, delivered or
-            cancelled, HyFib sends the customer the WhatsApp template you choose for it. Each order
-            gets at most one message per event, and a message never goes out about something that
-            happened before it was switched on. Customers who opted out, numbers on the suppression
-            list and erased contacts are never messaged.
+            cancelled, HyFib sends the customer the WhatsApp template you choose for it, or starts
+            an automation for it (placed, shipped, delivered and cancelled). Each order gets at most
+            one message per event, and a message never goes out about something that happened before
+            it was switched on. Customers who opted out, numbers on the suppression list and erased
+            contacts are never messaged.
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4 text-sm">
@@ -304,6 +312,23 @@ export default async function StoreMessagesPage({
                         {answer ? (
                           <span className="mt-1 block">
                             <Badge tone={answer.tone}>{answer.label}</Badge>
+                          </span>
+                        ) : null}
+                        {m.automation ? (
+                          <span className="block text-xs text-muted-foreground">
+                            {m.automation.runId ? (
+                              <Link
+                                href={`/c/${ctx.tenant.slug}/automations/runs/${m.automation.runId}`}
+                                className="text-primary underline-offset-4 hover:underline"
+                              >
+                                {m.automation.automationName ?? 'The run'}
+                              </Link>
+                            ) : (
+                              (m.automation.automationName ?? 'An automation')
+                            )}
+                            {m.automation.runStatus
+                              ? `: ${RUN_STATUS[m.automation.runStatus]?.label ?? m.automation.runStatus}`
+                              : ''}
                           </span>
                         ) : null}
                       </TD>

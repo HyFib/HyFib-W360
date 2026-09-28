@@ -30,8 +30,8 @@ import {
   type TenantScope,
   type Tx,
 } from '@w360/db';
+import { lockCampaignSends, marketingCapReached } from '../campaigns/frequency-cap';
 import { sendingWindow } from '../campaigns/schedule';
-import { loadCampaignSettings } from '../campaigns/service';
 import { checkTemplateEligibility } from '../consent/service';
 import { phoneFromWaId, waRecipientFromPhone } from '../contacts/phone';
 import { contactForPhone } from '../contacts/service';
@@ -43,6 +43,7 @@ import { buildTemplateSend, sendSpecFor } from '../templates/definition';
 import {
   STORE_MESSAGE_EVENT_INFO,
   STORE_MESSAGE_LIMITS,
+  canStartAutomation,
   checkoutValues,
   codPayload,
   detectOrderEvents,
@@ -57,6 +58,7 @@ import {
   type StoreMessageSkipReason,
   type StoreValues,
 } from './messages-model';
+import { startStoreAutomation } from './order-automations';
 
 /**
  * Order messages (P4-06c, ADR-048): recording the events a read from a store reveals, and the
@@ -280,6 +282,7 @@ export async function markOrdersTracked(
 
 export type StoreMessageOutcome =
   | { outcome: 'queued'; messageId: string }
+  | { outcome: 'started'; runId: string }
   | { outcome: 'skipped'; reason: StoreMessageSkipReason }
   | { outcome: 'rescheduled'; sendAt: Date }
   | { outcome: 'not_due' | 'not_pending' };
@@ -291,7 +294,9 @@ export type StoreMessageOutcome =
  * the template and number can be used, that every variable has a value, that the customer may
  * receive the template (suppression, erasure, opt-out, marketing opt-in) and, for a marketing
  * template, that the company's marketing frequency cap is not reached. Then it creates the chat
- * message and hands it to the send pipeline. Any failed check skips the message with its reason.
+ * message and hands it to the send pipeline. A rule that starts an automation (ADR-050) instead
+ * starts the run after the same checks up to the order and its number (see startStoreAutomation).
+ * Any failed check skips the message with its reason.
  */
 export async function processStoreMessage(
   deps: StoreMessageWorkerDeps,
@@ -354,8 +359,10 @@ export async function processStoreMessage(
       !rule?.enabled ||
       !rule.enabledAt ||
       rule.enabledAt.getTime() > row.occurredAt.getTime() ||
-      !rule.templateId ||
-      !rule.channelAccountId
+      !rule.channelAccountId ||
+      (rule.action === 'automation'
+        ? !rule.automationId || !canStartAutomation(row.event)
+        : !rule.templateId)
     ) {
       return skip('rule_disabled');
     }
@@ -492,7 +499,28 @@ export async function processStoreMessage(
         }),
       };
       subject = { orderId: order.id, orderName: order.name };
+      if (rule.action === 'automation' && rule.automationId && canStartAutomation(row.event)) {
+        const started = await startStoreAutomation(tx, deps, {
+          tenantId,
+          event: row.event,
+          orderId: order.id,
+          automationId: rule.automationId,
+          channelAccountId: rule.channelAccountId,
+          phone,
+          customerName,
+          now,
+        });
+        if (!started.ok) return skip(started.reason);
+        await tx
+          .update(commerceStoreMessages)
+          .set({ state: 'started', automationRunId: started.runId, contactId: started.contactId })
+          .where(
+            and(eq(commerceStoreMessages.tenantId, tenantId), eq(commerceStoreMessages.id, row.id)),
+          );
+        return { outcome: 'started', runId: started.runId };
+      }
     }
+    if (!rule.templateId) return skip('rule_disabled');
 
     const [template] = await tx
       .select()
@@ -694,8 +722,8 @@ export async function processStoreMessage(
 
 /**
  * Whether the contact already received the company's maximum of marketing templates in its
- * period (counted like the campaign runner does, and under its company lock so the two never race
- * past the cap).
+ * period, counted under the campaign runner's company lock so the two never race past the cap.
+ * The store message's row is the only lock held here, so waiting for the company lock is safe.
  */
 async function frequencyCapped(
   tx: Tx,
@@ -703,21 +731,8 @@ async function frequencyCapped(
   contactId: string,
   now: Date,
 ): Promise<boolean> {
-  const settings = await loadCampaignSettings(tx, tenantId);
-  if (!settings.capCount || !settings.capDays) return false;
-  await tx.execute(
-    sql`select pg_advisory_xact_lock(hashtextextended(${`campaign-runner:${tenantId}`}, 0))`,
-  );
-  const res = await tx.execute<{ n: number }>(sql`
-    select count(*)::int as n
-      from app.messages m
-      join app.conversations cv on cv.tenant_id = m.tenant_id and cv.id = m.conversation_id
-      join app.message_templates t on t.tenant_id = m.tenant_id and t.id = m.template_id
-     where m.tenant_id = ${tenantId} and cv.contact_id = ${contactId}
-       and m.direction = 'outbound' and t.category = 'MARKETING'
-       and m.status not in ('failed', 'canceled')
-       and m.created_at > ${now.toISOString()}::timestamptz - make_interval(days => ${settings.capDays})`);
-  return (res.rows[0]?.n ?? 0) >= settings.capCount;
+  await lockCampaignSends(tx, tenantId, 'wait');
+  return marketingCapReached(tx, tenantId, contactId, now);
 }
 
 /** Store messages whose send time has come, across active companies (the minute sweep). */

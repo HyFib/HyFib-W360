@@ -27,6 +27,7 @@ import {
   STORE_PLATFORM,
   statusText,
 } from '@/lib/commerce-labels';
+import { RUN_STATUS } from '@/lib/automation-labels';
 import { formatDateTime } from '@/lib/format';
 import { getRuntime } from '@/server/runtime';
 import { requireTenant } from '@/server/session';
@@ -238,6 +239,23 @@ export default async function StoreOrderPage({
                           <span className="text-xs text-muted-foreground">
                             {formatDateTime(m.answeredAt, tz)}
                           </span>
+                        </p>
+                      ) : null}
+                      {m.automation ? (
+                        <p className="text-xs text-muted-foreground">
+                          {m.automation.runId ? (
+                            <Link
+                              href={`${base}/automations/runs/${m.automation.runId}`}
+                              className="text-primary underline-offset-4 hover:underline"
+                            >
+                              {m.automation.automationName ?? 'The run'}
+                            </Link>
+                          ) : (
+                            (m.automation.automationName ?? 'An automation')
+                          )}
+                          {m.automation.runStatus
+                            ? `: ${RUN_STATUS[m.automation.runStatus]?.label ?? m.automation.runStatus}`
+                            : ''}
                         </p>
                       ) : null}
                       {m.conversationId ? (

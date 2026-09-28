@@ -6,9 +6,14 @@ import { isAppError, systemClock, type Clock } from '@w360/core';
 import { createEgressClient, DEFAULT_EGRESS_POLICY } from '@w360/core/egress';
 import { authorizedTenantScope } from '@w360/db';
 import {
+  advanceAutomationRun,
+  applyAutomationRetention,
+  botButtonId,
   codPayload,
+  createAutomationService,
   createConsentService,
   createContactsService,
+  createInboxService,
   createSegmentsService,
   createStoreMessagesService,
   createStoreService,
@@ -27,6 +32,8 @@ import {
   syncTemplates,
   type StoreMessageEvent,
   type StoreVariables,
+  type AutomationTrigger,
+  type Permission,
   type StoreWorkerDeps,
   type TemplateDefinition,
   type TenantContext,
@@ -3222,5 +3229,1098 @@ describe('Cart reminders', () => {
       storeMessages().saveStoreConsent(otherOwner, { storeId, useStoreConsent: true }),
       'not_found',
     );
+  });
+});
+
+// Store events in automations (P4-06e, ADR-050) --------------------------------------------------------
+
+const automationService = (clock: Clock = systemClock) =>
+  createAutomationService({ db: fx.dbs.app, clock, jobs: fx.jobs(), signer: fx.signer });
+const runnerDeps = (clock: Clock = systemClock) => ({
+  db: fx.dbs.app,
+  jobs: fx.jobs(),
+  signer: fx.signer,
+  clock,
+  keyring: fx.keyring,
+});
+const storeEvent: AutomationTrigger = { type: 'store_event' };
+/** A context without some permissions (as a narrower role would have). */
+const without = (ctx: TenantContext, ...removed: Permission[]): TenantContext => ({
+  ...ctx,
+  permissions: new Set([...ctx.permissions].filter((p) => !removed.includes(p))),
+});
+
+/** An order confirmation with two quick replies around a link button (positions 0 and 2). */
+const orderConfirmed: TemplateDefinition = {
+  category: 'UTILITY',
+  header: { type: 'none' },
+  body: {
+    text: 'Hi {{1}}, thanks for order {{2}} from {{3}}. Need anything?',
+    examples: ['Asha', '#1001', 'Tara Tea'],
+  },
+  footer: null,
+  buttons: [
+    { type: 'QUICK_REPLY', text: 'Track order' },
+    { type: 'URL', text: 'Shop again', url: 'https://tara-tea.example/shop' },
+    { type: 'QUICK_REPLY', text: 'Talk to us' },
+  ],
+};
+
+/** Confirms the order with the template, then answers "Track order" or hands off. */
+function orderFlow(templateId: string, overrides: Record<string, unknown> = {}) {
+  return {
+    version: 1,
+    start: 'confirm',
+    nodes: [
+      {
+        id: 'confirm',
+        type: 'ask_template',
+        templateId,
+        header: [],
+        body: ['{{order.customer_name}}', '{{order.number}}', '{{order.store}}'],
+        buttons: [
+          { index: 0, title: 'Track order', next: 'track' },
+          { index: 2, title: 'Talk to us', next: 'people' },
+        ],
+        saveAs: 'choice',
+        replyNext: 'people',
+        timeoutMinutes: 60,
+        timeoutNext: 'bye',
+        ...overrides,
+      },
+      {
+        id: 'track',
+        type: 'send_text',
+        text: 'Order {{order.number}} ({{order.items}}): {{order.status_url}}',
+        next: 'tag',
+      },
+      {
+        id: 'tag',
+        type: 'update_contact',
+        action: { kind: 'add_tag', tag: 'Order tracked' },
+        next: null,
+      },
+      { id: 'people', type: 'handoff', teamId: null },
+      { id: 'bye', type: 'end' },
+    ],
+  };
+}
+
+async function publishAutomation(
+  owner: TenantContext,
+  name: string,
+  trigger: AutomationTrigger,
+  graph: unknown,
+  channelAccountId: string | null = null,
+) {
+  const svc = automationService();
+  const { id } = await svc.createAutomation(owner, { name });
+  const saved = await svc.updateAutomation(owner, {
+    id,
+    expectedVersion: 0,
+    name,
+    description: null,
+    channelAccountId,
+    trigger,
+    graph,
+  });
+  const published = await svc.publishAutomation(owner, {
+    id,
+    expectedVersion: saved.version,
+    note: null,
+  });
+  return { id, version: published.version, issues: saved.issues };
+}
+
+async function automationRule(
+  owner: TenantContext,
+  c: Company,
+  storeId: string,
+  event: StoreMessageEvent,
+  automationId: string | null,
+  extra: Record<string, unknown> = {},
+) {
+  const view = await storeMessages().storeMessages(owner, storeId);
+  const rule = view.rules.find((r) => r.event === event);
+  return storeMessages().saveMessageRule(owner, {
+    storeId,
+    event,
+    enabled: true,
+    action: 'automation',
+    automationId,
+    channelAccountId: c.channelAccountId,
+    templateId: null,
+    variables: { header: [], body: [] },
+    delayMinutes: 0,
+    confirmButton: null,
+    cancelButton: null,
+    version: rule?.version ?? 0,
+    ...extra,
+  });
+}
+
+interface StoreRunRow extends Record<string, unknown> {
+  id: string;
+  status: string;
+  end_reason: string | null;
+  end_detail: string | null;
+  trigger_type: string;
+  store_event: string | null;
+  store_order_id: string | null;
+  conversation_id: string;
+  variables: Record<string, string>;
+  next_step_at: Date | null;
+}
+
+async function storeRun(runId: string) {
+  const [row] = await fx.query<StoreRunRow>(
+    `SELECT id, status, end_reason, end_detail, trigger_type, store_event, store_order_id,
+            conversation_id, variables, next_step_at
+       FROM app.automation_runs WHERE id = $1`,
+    [runId],
+  );
+  if (!row) throw new Error('run not found');
+  return row;
+}
+
+/**
+ * Advances a run, handing each message it queues to the send worker (the stand-in accepts it), until
+ * it waits with nothing in flight or ends (bounded). Returns the run's status.
+ */
+async function driveRun(c: Company, runId: string, clock: Clock = systemClock) {
+  for (let i = 0; i < 20; i += 1) {
+    const result = await advanceAutomationRun(runnerDeps(clock), scopeOf(c), runId, null);
+    const sent = await sendAll(c);
+    if (sent.length === 0 && result.outcome !== 'sending') return (await storeRun(runId)).status;
+  }
+  throw new Error('the run did not settle');
+}
+
+/** The customer's tap on a quick-reply button of a template message. */
+function templateTap(
+  c: Company,
+  from: string,
+  input: { payload: string; text: string; context: string },
+) {
+  return fx.deliver(
+    fx.messagesBody(c, {
+      messages: [
+        {
+          waId: from,
+          type: 'button',
+          extra: {
+            button: { payload: input.payload, text: input.text },
+            context: { from: '919000000000', id: input.context },
+          },
+        },
+      ],
+    }),
+  );
+}
+
+/** A new Shopify order from `phone`, read into the copy (its store message waits). */
+async function placeOrder(c: Company, shop: string, storeId: string, id: string, phone: string) {
+  shopify.upsertOrder(shop, {
+    id,
+    name: `#${id}`,
+    phone,
+    shippingAddress: { name: 'Asha K', phone: null },
+    total: { amount: '1499.00', currencyCode: 'INR' },
+    lineItems: [
+      {
+        name: 'Assam tea',
+        sku: 'A',
+        quantity: 1,
+        total: { amount: '999.00', currencyCode: 'INR' },
+      },
+      { name: 'Tea cups', sku: 'C', quantity: 2, total: { amount: '500.00', currencyCode: 'INR' } },
+    ],
+  });
+  await orderSignal(shop, id, 'orders/create');
+  await drain(c, storeId);
+}
+
+describe('Store events in automations', () => {
+  it('starts the chosen automation for a new order, sends its template outside the service window and follows the customer’s tap', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { shop, storeId } = await shopifyStoreForMessages(c, owner);
+    await optIn(owner, storeId);
+    const template = await approvedTemplate(c, owner, orderConfirmed);
+
+    // Until the customer replies only templates reach them: a message first is refused.
+    const svc = automationService();
+    const draft = await svc.createAutomation(owner, { name: 'Too early' });
+    const early = await svc.updateAutomation(owner, {
+      id: draft.id,
+      expectedVersion: 0,
+      name: 'Too early',
+      description: null,
+      channelAccountId: null,
+      trigger: storeEvent,
+      graph: {
+        version: 1,
+        start: 'hi',
+        nodes: [{ id: 'hi', type: 'send_text', text: 'Hi {{order.number}}', next: null }],
+      },
+    });
+    expect(early.issues.map((i) => i.message)).toEqual([
+      expect.stringContaining('only templates until the customer replies'),
+    ]);
+    await expectAppError(
+      svc.publishAutomation(owner, { id: draft.id, expectedVersion: early.version, note: null }),
+      'precondition_failed',
+      /only templates until the customer replies/,
+    );
+    // Order fields exist only in automations started by order messages.
+    const keywordDraft = await svc.createAutomation(owner, { name: 'Keyword' });
+    const keywordSaved = await svc.updateAutomation(owner, {
+      id: keywordDraft.id,
+      expectedVersion: 0,
+      name: 'Keyword',
+      description: null,
+      channelAccountId: null,
+      trigger: {
+        type: 'keyword',
+        keywords: ['order'],
+        match: 'contains',
+        hours: 'any',
+        cooldownMinutes: 0,
+      },
+      graph: {
+        version: 1,
+        start: 'hi',
+        nodes: [{ id: 'hi', type: 'send_text', text: 'Your order {{order.number}}', next: null }],
+      },
+    });
+    expect(keywordSaved.issues.map((i) => i.message)).toEqual([
+      '{{order.number}} is an order field: order fields work only in automations started by a store’s order messages.',
+    ]);
+
+    const flow = await publishAutomation(
+      owner,
+      'Order follow-up',
+      storeEvent,
+      orderFlow(template.id),
+    );
+    expect(flow.issues).toEqual([]);
+    // A rule can start it; the cash on delivery confirmation cannot start automations.
+    await expectAppError(
+      automationRule(owner, c, storeId, 'cod_confirmation', flow.id),
+      'validation_failed',
+      /cannot start an automation/,
+    );
+    await automationRule(owner, c, storeId, 'order_placed', flow.id);
+    const view = await storeMessages().storeMessages(owner, storeId);
+    expect(view.rules.find((r) => r.event === 'order_placed')).toMatchObject({
+      action: 'automation',
+      automationId: flow.id,
+      automationName: 'Order follow-up',
+      automationAllowed: true,
+      problem: null,
+    });
+    expect(view.rules.find((r) => r.event === 'cod_confirmation')?.automationAllowed).toBe(false);
+    expect(view.automations).toEqual([{ id: flow.id, name: 'Order follow-up', status: 'active' }]);
+
+    await placeOrder(c, shop, storeId, '7001', '+919812370001');
+    const [outcome] = await runMessages(c, storeId);
+    expect(outcome).toMatchObject({ outcome: 'started' });
+    const runId = (outcome as { runId: string }).runId;
+    const [started] = await messageRows(storeId);
+    expect(started).toMatchObject({
+      event: 'order_placed',
+      state: 'started',
+      automation_run_id: runId,
+      message_id: null,
+    });
+    expect(started?.contact_id).toBeTruthy();
+    // A repeated job or the sweep starts nothing more.
+    expect(await processStoreMessage(messageDeps(), scopeOf(c), started!.id)).toEqual({
+      outcome: 'not_pending',
+    });
+    const [order] = await fx.query<{ id: string }>(
+      `SELECT id FROM app.commerce_store_orders WHERE store_id = $1 AND external_id = '7001'`,
+      [storeId],
+    );
+    let run = await storeRun(runId);
+    expect(run).toMatchObject({
+      status: 'running',
+      trigger_type: 'store_event',
+      store_event: 'order_placed',
+      store_order_id: order?.id,
+    });
+    // The customer never wrote: the conversation starts resolved, out of the inbox.
+    const [thread] = await fx.query<{ status: string; last_inbound_at: Date | null }>(
+      'SELECT status, last_inbound_at FROM app.conversations WHERE id = $1',
+      [run.conversation_id],
+    );
+    expect(thread).toEqual({ status: 'resolved', last_inbound_at: null });
+
+    // The template goes out with the order's values and a bot payload per quick reply.
+    expect(await driveRun(c, runId)).toBe('waiting');
+    const [sent] = templatesTo('919812370001');
+    expect(sent?.name).toBe(template.name);
+    expect(bodyTexts(sent)).toEqual(['Asha K', '#7001', 'Tara Tea']);
+    expect(sent?.components.filter((x) => (x as { type: string }).type === 'button')).toEqual([
+      {
+        type: 'button',
+        sub_type: 'quick_reply',
+        index: '0',
+        parameters: [{ type: 'payload', payload: botButtonId(runId, 'confirm', 1, 0) }],
+      },
+      {
+        type: 'button',
+        sub_type: 'quick_reply',
+        index: '2',
+        parameters: [{ type: 'payload', payload: botButtonId(runId, 'confirm', 1, 2) }],
+      },
+    ]);
+    const [bot] = await fx.query<{
+      id: string;
+      type: string;
+      sender_type: string;
+      content: { automationRunId: string; rendered: { body: string } };
+      external_message_id: string;
+    }>(
+      `SELECT id, type, sender_type, content, external_message_id FROM app.messages
+        WHERE conversation_id = $1 ORDER BY created_at`,
+      [run.conversation_id],
+    );
+    expect(bot).toMatchObject({ type: 'template', sender_type: 'bot' });
+    expect(bot?.content.automationRunId).toBe(runId);
+    expect(bot?.content.rendered.body).toBe(
+      'Hi Asha K, thanks for order #7001 from Tara Tea. Need anything?',
+    );
+    run = await storeRun(runId);
+    expect(run).toMatchObject({ status: 'waiting' });
+
+    // The customer taps "Track order": the conversation opens and the run continues.
+    await templateTap(c, '919812370001', {
+      payload: botButtonId(runId, 'confirm', 1, 0),
+      text: 'Track order',
+      context: bot!.external_message_id,
+    });
+    expect(await driveRun(c, runId)).toBe('completed');
+    run = await storeRun(runId);
+    expect(run).toMatchObject({
+      status: 'completed',
+      end_reason: 'no_next',
+      variables: { choice: 'Track order' },
+    });
+    const texts = fx.standIn.state.requests
+      .filter(
+        (r) => r.path.endsWith('/messages') && (r.body as { to?: string }).to === '919812370001',
+      )
+      .flatMap((r) =>
+        (r.body as { text?: { body: string } }).text
+          ? [(r.body as { text: { body: string } }).text.body]
+          : [],
+      );
+    expect(texts).toEqual([
+      `Order #7001 (Assam tea and 1 more): https://${shop}/orders/status/7001`,
+    ]);
+    const [opened] = await fx.query<{ status: string; assigned_membership_id: string | null }>(
+      'SELECT status, assigned_membership_id FROM app.conversations WHERE id = $1',
+      [run.conversation_id],
+    );
+    expect(opened?.status).toBe('open');
+    expect(
+      await fx.query('SELECT tag FROM app.contact_tags WHERE contact_id = $1', [
+        started?.contact_id,
+      ]),
+    ).toEqual([{ tag: 'order tracked' }]);
+    // A customer message never starts an automation that starts from order messages.
+    await fx.deliver(fx.messagesBody(c, { messages: [{ waId: '919812370001', text: 'thanks!' }] }));
+    expect(
+      await fx.query(
+        'SELECT count(*)::int AS n FROM app.automation_runs WHERE conversation_id = $1',
+        [run.conversation_id],
+      ),
+    ).toEqual([{ n: 1 }]);
+
+    // The report, the order page, the run and the automation show where it came from.
+    const report = await storeMessages().storeMessages(owner, storeId);
+    expect(report.counts.started).toBe(1);
+    expect(report.recent[0]).toMatchObject({
+      status: 'started',
+      orderName: '#7001',
+      automation: { automationName: 'Order follow-up', runStatus: 'completed', runId },
+    });
+    const onOrder = await storeMessages().orderMessages(owner, order!.id);
+    expect(onOrder).toMatchObject([
+      { status: 'started', automation: { runId, runStatus: 'completed' } },
+    ]);
+    const detail = await svc.getRun(owner, runId);
+    expect(detail).toMatchObject({
+      triggerType: 'store_event',
+      storeEvent: 'order_placed',
+      order: { id: order?.id, name: '#7001', storeName: 'Tara Tea' },
+    });
+    expect((await svc.getAutomation(owner, flow.id)).usedBy).toEqual([
+      {
+        storeId,
+        storeName: 'Tara Tea',
+        event: 'order_placed',
+        label: 'Order placed',
+        enabled: true,
+      },
+    ]);
+    // Without automations.read the run is named, not linked; without commerce.read no order.
+    const agent = await fx.ctx(c, await member(c, 'agent'));
+    expect((await storeMessages().storeMessages(agent, storeId)).recent[0]?.automation).toEqual({
+      automationName: 'Order follow-up',
+      runStatus: 'completed',
+      runId: null,
+    });
+    const analyst = await fx.ctx(c, await member(c, 'analyst'));
+    expect((await svc.getRun(analyst, runId)).order).toBeNull();
+    expect((await svc.getAutomation(analyst, flow.id)).usedBy).toBeNull();
+
+    // A tap on a button of another visit of the step (a stale payload) is another reply, even
+    // with a button's text: the run hands the conversation to people.
+    await placeOrder(c, shop, storeId, '7002', '+919812370002');
+    const [second] = await runMessages(c, storeId);
+    const secondRun = (second as { runId: string }).runId;
+    expect(await driveRun(c, secondRun)).toBe('waiting');
+    const [secondBot] = await fx.query<{ external_message_id: string }>(
+      `SELECT m.external_message_id FROM app.messages m
+         JOIN app.automation_runs r ON r.conversation_id = m.conversation_id
+        WHERE r.id = $1 AND m.sender_type = 'bot'`,
+      [secondRun],
+    );
+    await templateTap(c, '919812370002', {
+      payload: botButtonId(secondRun, 'confirm', 2, 0),
+      text: 'Track order',
+      context: secondBot!.external_message_id,
+    });
+    expect(await driveRun(c, secondRun)).toBe('handed_off');
+    expect((await storeRun(secondRun)).variables).toEqual({});
+  });
+
+  it('skips an order when the automation, the conversation or the customer cannot take a run', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { shop, storeId } = await shopifyStoreForMessages(c, owner);
+    await optIn(owner, storeId);
+    const template = await approvedTemplate(c, owner, orderConfirmed);
+    const flow = await publishAutomation(
+      owner,
+      'Order follow-up',
+      storeEvent,
+      orderFlow(template.id),
+    );
+    await automationRule(owner, c, storeId, 'order_placed', flow.id);
+    const svc = automationService();
+    const skipOf = async (id: string, phone: string) => {
+      await placeOrder(c, shop, storeId, id, phone);
+      const outcomes = await runMessages(c, storeId);
+      expect(outcomes).toHaveLength(1);
+      return outcomes[0];
+    };
+
+    // Paused: nothing starts, and the page names the problem.
+    const detail = await svc.getAutomation(owner, flow.id);
+    await svc.setAutomationStatus(owner, {
+      id: flow.id,
+      expectedVersion: detail.version,
+      status: 'paused',
+    });
+    expect(await skipOf('7101', '+919812371001')).toEqual({
+      outcome: 'skipped',
+      reason: 'automation_unavailable',
+    });
+    expect(
+      (await storeMessages().storeMessages(owner, storeId)).rules.find(
+        (r) => r.event === 'order_placed',
+      )?.problem,
+    ).toMatch(/paused or archived/);
+    await svc.setAutomationStatus(owner, {
+      id: flow.id,
+      expectedVersion: detail.version + 1,
+      status: 'active',
+    });
+
+    // A run already handles the conversation: the next order of that customer is skipped.
+    expect(await skipOf('7102', '+919812371002')).toMatchObject({ outcome: 'started' });
+    expect(await skipOf('7103', '+919812371002')).toEqual({
+      outcome: 'skipped',
+      reason: 'automation_busy',
+    });
+
+    // Assigned to a member: nothing starts in it.
+    const [busy] = await fx.query<{ conversation_id: string; id: string }>(
+      `SELECT conversation_id, id FROM app.automation_runs WHERE tenant_id = $1 AND status IN ('running', 'waiting')`,
+      [c.tenant.id],
+    );
+    await svc.stopRun(owner, busy!.id);
+    const [conv] = await fx.query<{ version: number }>(
+      'SELECT version FROM app.conversations WHERE id = $1',
+      [busy!.conversation_id],
+    );
+    await createInboxService({ db: fx.dbs.app, clock: systemClock }).assign(owner, {
+      conversationId: busy!.conversation_id,
+      membershipId: owner.membership.id,
+      expectedVersion: conv!.version,
+    });
+    expect(await skipOf('7104', '+919812371002')).toEqual({
+      outcome: 'skipped',
+      reason: 'conversation_assigned',
+    });
+
+    // The customer's consent: suppressed numbers get no contact, opted-out contacts no run.
+    const consent = createConsentService({ db: fx.dbs.app, clock: systemClock });
+    await consent.addSuppression(owner, { phone: '+919812371005', reason: 'manual' });
+    expect(await skipOf('7105', '+919812371005')).toEqual({
+      outcome: 'skipped',
+      reason: 'suppressed',
+    });
+    expect(
+      await fx.query('SELECT 1 FROM app.contacts WHERE tenant_id = $1 AND phone_e164 = $2', [
+        c.tenant.id,
+        '+919812371005',
+      ]),
+    ).toEqual([]);
+    const optedOut = await createContactsService({
+      db: fx.dbs.app,
+      clock: systemClock,
+    }).createContact(owner, { displayName: 'No', phone: '+919812371006' });
+    await consent.recordConsent(owner, {
+      contactId: optedOut.id,
+      purpose: 'utility',
+      action: 'opt_out',
+    });
+    expect(await skipOf('7106', '+919812371006')).toEqual({
+      outcome: 'skipped',
+      reason: 'opted_out',
+    });
+
+    // Too many runs in the conversation within the hour (bot-to-bot loops): a customer whose
+    // conversation already had the hourly maximum.
+    await placeOrder(c, shop, storeId, '7107', '+919812371007');
+    const [fresh] = await runMessages(c, storeId);
+    expect(fresh).toMatchObject({ outcome: 'started' });
+    const freshRun = await storeRun((fresh as { runId: string }).runId);
+    await svc.stopRun(owner, freshRun.id);
+    for (let i = 0; i < 9; i += 1) {
+      await fx.query(
+        `INSERT INTO app.automation_runs (id, tenant_id, automation_id, version_id, conversation_id,
+           contact_id, channel_account_id, mode, trigger_type, status, started_at, ended_at, end_reason)
+         SELECT gen_random_uuid(), tenant_id, automation_id, version_id, conversation_id, contact_id,
+                channel_account_id, 'live', 'keyword', 'completed', now() - interval '10 minutes',
+                now() - interval '9 minutes', 'end_node'
+           FROM app.automation_runs WHERE id = $1`,
+        [freshRun.id],
+      );
+    }
+    expect(await skipOf('7108', '+919812371007')).toEqual({
+      outcome: 'skipped',
+      reason: 'automation_limit',
+    });
+
+    // The rule's number is no longer active.
+    await fx.query(`UPDATE app.channel_accounts SET status = 'needs_reconnect' WHERE id = $1`, [
+      c.channelAccountId,
+    ]);
+    expect(await skipOf('7110', '+919812371010')).toEqual({
+      outcome: 'skipped',
+      reason: 'channel_unavailable',
+    });
+    await fx.query(`UPDATE app.channel_accounts SET status = 'active' WHERE id = $1`, [
+      c.channelAccountId,
+    ]);
+
+    // A new live version that no longer starts from order messages.
+    const current = await svc.getAutomation(owner, flow.id);
+    const saved = await svc.updateAutomation(owner, {
+      id: flow.id,
+      expectedVersion: current.version,
+      name: 'Order follow-up',
+      description: null,
+      channelAccountId: null,
+      trigger: { type: 'any_message', hours: 'any', cooldownMinutes: 0 },
+      graph: {
+        version: 1,
+        start: 'bye',
+        nodes: [{ id: 'bye', type: 'end' }],
+      },
+    });
+    await svc.publishAutomation(owner, { id: flow.id, expectedVersion: saved.version, note: null });
+    expect(await skipOf('7109', '+919812371009')).toEqual({
+      outcome: 'skipped',
+      reason: 'automation_unavailable',
+    });
+  });
+
+  it('checks each template again when its step runs, waits for the campaign lock, and stops once the conversation is resolved later', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { shop, storeId } = await shopifyStoreForMessages(c, owner);
+    await optIn(owner, storeId);
+    const confirmTemplate = await approvedTemplate(c, owner, orderConfirmed);
+    const promo = await approvedTemplate(c, owner, {
+      category: 'MARKETING',
+      header: { type: 'none' },
+      body: { text: 'Thanks {{1}}! Here is 10% off your next order.', examples: ['Asha'] },
+      footer: null,
+      buttons: [],
+    });
+    const svc = automationService();
+    const startRun = async (id: string, phone: string) => {
+      await placeOrder(c, shop, storeId, id, phone);
+      const [started] = await runMessages(c, storeId);
+      expect(started).toMatchObject({ outcome: 'started' });
+      return (started as { runId: string }).runId;
+    };
+    const flow = await publishAutomation(
+      owner,
+      'Order follow-up',
+      storeEvent,
+      orderFlow(confirmTemplate.id),
+    );
+    await automationRule(owner, c, storeId, 'order_placed', flow.id);
+
+    // The number is no longer active when the step runs.
+    const inactive = await startRun('7209', '+919812372009');
+    await fx.query(`UPDATE app.channel_accounts SET status = 'needs_reconnect' WHERE id = $1`, [
+      c.channelAccountId,
+    ]);
+    expect(await driveRun(c, inactive)).toBe('failed');
+    expect((await storeRun(inactive)).end_detail).toBe('channel_unavailable');
+    await fx.query(`UPDATE app.channel_accounts SET status = 'active' WHERE id = $1`, [
+      c.channelAccountId,
+    ]);
+    // The template's quick replies changed at Meta after the step was set up: nothing is sent.
+    const changed = await startRun('7201', '+919812372001');
+    await fx.query(
+      `UPDATE app.message_templates SET components = (
+         SELECT jsonb_agg(CASE WHEN x->>'type' = 'BUTTONS'
+                               THEN jsonb_set(x, '{buttons,0,text}', '"Where is it?"') ELSE x END)
+           FROM jsonb_array_elements(components) x)
+        WHERE id = $1`,
+      [confirmTemplate.id],
+    );
+    expect(await driveRun(c, changed)).toBe('failed');
+    expect(await storeRun(changed)).toMatchObject({
+      end_reason: 'send_blocked',
+      end_detail: 'template_changed',
+    });
+    // It ended before the customer wrote: the conversation stays out of the inbox.
+    const [quiet] = await fx.query<{ status: string; assigned_membership_id: string | null }>(
+      'SELECT cv.status, cv.assigned_membership_id FROM app.conversations cv JOIN app.automation_runs r ON r.conversation_id = cv.id WHERE r.id = $1',
+      [changed],
+    );
+    expect(quiet).toEqual({ status: 'resolved', assigned_membership_id: null });
+    await fx.query(`UPDATE app.message_templates SET status = 'paused' WHERE id = $1`, [
+      confirmTemplate.id,
+    ]);
+    const paused = await startRun('7202', '+919812372002');
+    expect(await driveRun(c, paused)).toBe('failed');
+    expect((await storeRun(paused)).end_detail).toBe('template_unavailable');
+
+    // A marketing template: marketing opt-in, the campaign lock and the frequency cap.
+    const current = await svc.getAutomation(owner, flow.id);
+    const saved = await svc.updateAutomation(owner, {
+      id: flow.id,
+      expectedVersion: current.version,
+      name: 'Order follow-up',
+      description: null,
+      channelAccountId: null,
+      trigger: storeEvent,
+      graph: {
+        version: 1,
+        start: 'promo',
+        nodes: [
+          {
+            id: 'promo',
+            type: 'send_template',
+            templateId: promo.id,
+            header: [],
+            body: ['{{order.customer_name}}'],
+            next: null,
+          },
+        ],
+      },
+    });
+    // Publishing a marketing template needs the campaign sending permission.
+    await expectAppError(
+      svc.publishAutomation(without(owner, 'campaigns.send'), {
+        id: flow.id,
+        expectedVersion: saved.version,
+        note: null,
+      }),
+      'forbidden',
+      /marketing templates/,
+    );
+    await svc.publishAutomation(owner, { id: flow.id, expectedVersion: saved.version, note: null });
+
+    const noOptIn = await startRun('7203', '+919812372003');
+    expect(await driveRun(c, noOptIn)).toBe('failed');
+    expect((await storeRun(noOptIn)).end_detail).toBe('no_marketing_opt_in');
+
+    await marketingOptIn(owner, '+919812372004');
+    const locked = await startRun('7204', '+919812372004');
+    const client = await fx.dbs.adminPool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
+        `campaign-runner:${c.tenant.id}`,
+      ]);
+      // The runner holds the conversation's lock, so it never waits for the company lock: it
+      // tries the step again shortly, with nothing sent.
+      const before = Date.now();
+      expect(await advanceAutomationRun(runnerDeps(), scopeOf(c), locked, null)).toEqual({
+        outcome: 'not_due',
+        steps: 0,
+      });
+      const waiting = await storeRun(locked);
+      expect(waiting.status).toBe('running');
+      expect(waiting.next_step_at!.getTime()).toBeGreaterThanOrEqual(before + 1_500);
+      expect(
+        await fx.query('SELECT 1 FROM app.messages WHERE conversation_id = $1', [
+          waiting.conversation_id,
+        ]),
+      ).toEqual([]);
+    } finally {
+      await client.query('ROLLBACK');
+      client.release();
+    }
+    expect(await driveRun(c, locked, later(3_000))).toBe('completed');
+    expect(bodyTexts(templatesTo('919812372004')[0])).toEqual(['Asha K']);
+
+    // The company's cap: one marketing template per contact per week.
+    await fx.query(
+      `INSERT INTO app.messaging_settings
+         (tenant_id, opt_out_keywords, marketing_opt_out_keywords, opt_in_keywords,
+          marketing_cap_count, marketing_cap_days)
+       VALUES ($1, ARRAY['stop'], ARRAY[]::text[], ARRAY['start'], 1, 7)
+       ON CONFLICT (tenant_id) DO UPDATE SET marketing_cap_count = 1, marketing_cap_days = 7`,
+      [c.tenant.id],
+    );
+    const capped = await startRun('7205', '+919812372004');
+    expect(await driveRun(c, capped)).toBe('failed');
+    expect((await storeRun(capped)).end_detail).toBe('frequency_capped');
+
+    // The template gained a variable at Meta after the step was set up: nothing is sent.
+    await marketingOptIn(owner, '+919812372008');
+    await fx.query(
+      `UPDATE app.message_templates SET components = (
+         SELECT jsonb_agg(CASE WHEN x->>'type' = 'BODY'
+                               THEN jsonb_set(x, '{text}', '"Thanks {{1}}! {{2}} off your next order."')
+                               ELSE x END)
+           FROM jsonb_array_elements(components) x)
+        WHERE id = $1`,
+      [promo.id],
+    );
+    const moreVariables = await startRun('7208', '+919812372008');
+    expect(await driveRun(c, moreVariables)).toBe('failed');
+    expect((await storeRun(moreVariables)).end_detail).toBe('template_changed');
+
+    // A conversation resolved after the run started stops the run.
+    await fx.query(`UPDATE app.message_templates SET status = 'approved' WHERE id = $1`, [
+      confirmTemplate.id,
+    ]);
+    const latest = await svc.getAutomation(owner, flow.id);
+    const back = await svc.updateAutomation(owner, {
+      id: flow.id,
+      expectedVersion: latest.version,
+      name: 'Order follow-up',
+      description: null,
+      channelAccountId: null,
+      trigger: storeEvent,
+      graph: orderFlow(confirmTemplate.id, {
+        buttons: [
+          { index: 0, title: 'Where is it?', next: 'track' },
+          { index: 2, title: 'Talk to us', next: 'people' },
+        ],
+      }),
+    });
+    await svc.publishAutomation(owner, { id: flow.id, expectedVersion: back.version, note: null });
+    const closedLater = await startRun('7206', '+919812372006');
+    const startedRun = await storeRun(closedLater);
+    await fx.query(
+      `UPDATE app.conversations SET resolved_at = now() + interval '1 minute' WHERE id = $1`,
+      [startedRun.conversation_id],
+    );
+    expect(await driveRun(c, closedLater)).toBe('stopped');
+    expect(await storeRun(closedLater)).toMatchObject({ end_reason: 'conversation_resolved' });
+
+    // An order deleted before the step runs leaves its placeholders empty: nothing is sent.
+    const gone = await startRun('7207', '+919812372007');
+    await fx.query(
+      `UPDATE app.commerce_store_orders SET deleted_at = now() WHERE store_id = $1 AND external_id = '7207'`,
+      [storeId],
+    );
+    expect(await driveRun(c, gone)).toBe('failed');
+    expect(await storeRun(gone)).toMatchObject({
+      end_reason: 'error',
+      end_detail: 'missing_variable',
+    });
+  });
+
+  it('checks the automation a rule starts, tests with a chosen order, clears references with the order and the run, and keeps companies apart', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { shop, storeId } = await shopifyStoreForMessages(c, owner);
+    await optIn(owner, storeId);
+    const template = await approvedTemplate(c, owner, orderConfirmed);
+    const svc = automationService();
+
+    // Only an active automation whose live version starts from order messages can be chosen.
+    const keyword = await publishAutomation(
+      owner,
+      'Keyword bot',
+      { type: 'keyword', keywords: ['hi'], match: 'contains', hours: 'any', cooldownMinutes: 0 },
+      { version: 1, start: 'bye', nodes: [{ id: 'bye', type: 'end' }] },
+    );
+    await expectAppError(
+      automationRule(owner, c, storeId, 'order_placed', keyword.id),
+      'validation_failed',
+      /does not start from order messages/,
+    );
+    const flow = await publishAutomation(
+      owner,
+      'Order follow-up',
+      storeEvent,
+      orderFlow(template.id),
+    );
+    const detail = await svc.getAutomation(owner, flow.id);
+    await svc.setAutomationStatus(owner, {
+      id: flow.id,
+      expectedVersion: detail.version,
+      status: 'paused',
+    });
+    await expectAppError(
+      automationRule(owner, c, storeId, 'order_placed', flow.id),
+      'validation_failed',
+      /keep it active/,
+    );
+    // Switched off, a paused automation can be kept on the rule.
+    await automationRule(owner, c, storeId, 'order_placed', flow.id, { enabled: false });
+    await svc.setAutomationStatus(owner, {
+      id: flow.id,
+      expectedVersion: detail.version + 1,
+      status: 'active',
+    });
+    // Switched off, a rule may name a draft that was never published; deleting the draft clears
+    // the reference. A rule that sends its template keeps no automation.
+    const shippedRule = () =>
+      fx.query(
+        `SELECT action, automation_id FROM app.commerce_store_message_rules
+          WHERE store_id = $1 AND event = 'order_shipped'`,
+        [storeId],
+      );
+    const { id: draftId } = await svc.createAutomation(owner, { name: 'Shipping draft' });
+    await automationRule(owner, c, storeId, 'order_shipped', draftId, { enabled: false });
+    expect(await shippedRule()).toEqual([{ action: 'automation', automation_id: draftId }]);
+    await svc.deleteAutomation(owner, { id: draftId, expectedVersion: 0 });
+    expect(await shippedRule()).toEqual([{ action: 'automation', automation_id: null }]);
+    await automationRule(owner, c, storeId, 'order_shipped', flow.id, {
+      enabled: false,
+      action: 'template',
+    });
+    expect(await shippedRule()).toEqual([{ action: 'template', automation_id: null }]);
+    // Choosing an automation needs to see automations; a marketing template in it, to send them.
+    await expectAppError(
+      automationRule(without(owner, 'automations.read'), c, storeId, 'order_placed', flow.id),
+      'forbidden',
+      /see automations/,
+    );
+    await fx.query(`UPDATE app.message_templates SET category = 'MARKETING' WHERE id = $1`, [
+      template.id,
+    ]);
+    await expectAppError(
+      automationRule(without(owner, 'campaigns.send'), c, storeId, 'order_placed', flow.id),
+      'forbidden',
+      /marketing templates/,
+    );
+    await fx.query(`UPDATE app.message_templates SET category = 'UTILITY' WHERE id = $1`, [
+      template.id,
+    ]);
+    await automationRule(owner, c, storeId, 'order_placed', flow.id);
+
+    // Another company's automation cannot be chosen, and its pages show nothing of this one.
+    const other = await fx.company();
+    const otherOwner = await fx.ctx(other, other.owner);
+    const otherStore = await shopifyStoreForMessages(other, otherOwner, 'Other Tea');
+    await optIn(otherOwner, otherStore.storeId);
+    await expectAppError(
+      automationRule(otherOwner, other, otherStore.storeId, 'order_placed', flow.id, {
+        enabled: false,
+      }),
+      'validation_failed',
+      /Choose an automation/,
+    );
+    expect(
+      (await storeMessages().storeMessages(otherOwner, otherStore.storeId)).automations,
+    ).toEqual([]);
+
+    // A test run with a chosen order, on the tester's own conversation (inside its window).
+    await fx.deliver(fx.messagesBody(c, { messages: [{ waId: '919812373000', text: 'test' }] }));
+    const [testConv] = await fx.query<{ id: string }>(
+      `SELECT cv.id FROM app.conversations cv
+         JOIN app.contact_identities i ON i.tenant_id = cv.tenant_id AND i.contact_id = cv.contact_id
+        WHERE cv.tenant_id = $1 AND i.wa_id = '919812373000'`,
+      [c.tenant.id],
+    );
+    await placeOrder(c, shop, storeId, '7301', '+919812373001');
+    const [order] = await fx.query<{ id: string }>(
+      `SELECT id FROM app.commerce_store_orders WHERE store_id = $1 AND external_id = '7301'`,
+      [storeId],
+    );
+    expect(await svc.testOrderOptions(owner)).toEqual(
+      expect.arrayContaining([{ id: order!.id, label: '#7301 · Tara Tea' }]),
+    );
+    const current = await svc.getAutomation(owner, flow.id);
+    await expectAppError(
+      svc.startTestRun(owner, {
+        id: flow.id,
+        expectedVersion: current.version,
+        conversationId: testConv!.id,
+      }),
+      'validation_failed',
+      /Choose an order/,
+    );
+    await fx.query(`UPDATE app.message_templates SET category = 'MARKETING' WHERE id = $1`, [
+      template.id,
+    ]);
+    await expectAppError(
+      svc.startTestRun(without(owner, 'campaigns.send'), {
+        id: flow.id,
+        expectedVersion: current.version,
+        conversationId: testConv!.id,
+        storeOrderId: order!.id,
+      }),
+      'forbidden',
+      /marketing templates/,
+    );
+    await fx.query(`UPDATE app.message_templates SET category = 'UTILITY' WHERE id = $1`, [
+      template.id,
+    ]);
+    // The steps send the order's customer details, which only members who see store orders may.
+    expect(await svc.testOrderOptions(without(owner, 'contacts.read'))).toEqual([]);
+    await expectAppError(
+      svc.startTestRun(without(owner, 'contacts.read'), {
+        id: flow.id,
+        expectedVersion: current.version,
+        conversationId: testConv!.id,
+        storeOrderId: order!.id,
+      }),
+      'forbidden',
+    );
+    const { runId: testRun } = await svc.startTestRun(owner, {
+      id: flow.id,
+      expectedVersion: current.version,
+      conversationId: testConv!.id,
+      storeOrderId: order!.id,
+    });
+    expect(await driveRun(c, testRun)).toBe('waiting');
+    expect(
+      await fx.query(
+        'SELECT mode, trigger_type, store_order_id, store_event FROM app.automation_runs WHERE id = $1',
+        [testRun],
+      ),
+    ).toEqual([
+      { mode: 'test', trigger_type: 'test', store_order_id: order!.id, store_event: null },
+    ]);
+    expect(bodyTexts(templatesTo('919812373000')[0])).toEqual(['Asha K', '#7301', 'Tara Tea']);
+
+    // The order's own run: retention deletes it later, and the store message keeps its state.
+    const [started] = await runMessages(c, storeId);
+    const runId = (started as { runId: string }).runId;
+    await svc.stopRun(owner, runId);
+    const client = await fx.dbs.adminPool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(`SELECT set_config('w360.allow_retention_purge', 'on', true)`);
+      await client.query(
+        `UPDATE app.automation_runs SET started_at = started_at - interval '200 days',
+                ended_at = ended_at - interval '200 days' WHERE id = $1`,
+        [runId],
+      );
+      await client.query('COMMIT');
+    } finally {
+      client.release();
+    }
+    await applyAutomationRetention(fx.dbs.app);
+    expect(await fx.query('SELECT 1 FROM app.automation_runs WHERE id = $1', [runId])).toEqual([]);
+    expect(
+      await fx.query(
+        `SELECT state, automation_run_id FROM app.commerce_store_messages WHERE order_id = $1`,
+        [order!.id],
+      ),
+    ).toEqual([{ state: 'started', automation_run_id: null }]);
+
+    // Removing the store deletes its orders; the test run stays, without its order.
+    await service().removeStore(owner, storeId);
+    await drain(c, storeId);
+    expect(await storeRow(storeId)).toBeUndefined();
+    expect(
+      await fx.query('SELECT status, store_order_id FROM app.automation_runs WHERE id = $1', [
+        testRun,
+      ]),
+    ).toEqual([{ status: 'waiting', store_order_id: null }]);
+  });
+
+  it('follows up with a template once the service window has closed, in an automation a keyword starts', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const template = await approvedTemplate(c, owner, {
+      category: 'UTILITY',
+      header: { type: 'none' },
+      body: { text: 'Hi {{1}}, your plan is ready. Reply to see it.', examples: ['Asha'] },
+      footer: null,
+      buttons: [],
+    });
+    // A drip follow-up: an answer now, and a template a day later (templates need no window).
+    const flow = await publishAutomation(
+      owner,
+      'Plan follow-up',
+      { type: 'keyword', keywords: ['plan'], match: 'contains', hours: 'any', cooldownMinutes: 0 },
+      {
+        version: 1,
+        start: 'hello',
+        nodes: [
+          { id: 'hello', type: 'send_text', text: 'Your plan comes tomorrow.', next: 'day' },
+          { id: 'day', type: 'wait', minutes: 1440, next: 'plan' },
+          {
+            id: 'plan',
+            type: 'send_template',
+            templateId: template.id,
+            header: [],
+            body: ['{{name}}'],
+            next: null,
+          },
+        ],
+      },
+    );
+    expect(flow.issues).toEqual([]);
+    await fx.deliver(
+      fx.messagesBody(c, { messages: [{ waId: '919812374000', text: 'my plan please' }] }),
+    );
+    const [run] = await fx.query<{ id: string }>(
+      'SELECT id FROM app.automation_runs WHERE tenant_id = $1 AND automation_id = $2',
+      [c.tenant.id, flow.id],
+    );
+    expect(await driveRun(c, run!.id)).toBe('waiting');
+    // Only the text went out (the stand-in records every message to the number).
+    expect(templatesTo('919812374000').filter(Boolean)).toEqual([]);
+
+    // 25 hours later the customer has not written again: the window is closed, the template goes.
+    expect(await driveRun(c, run!.id, later(25 * 3600_000))).toBe('completed');
+    const sent = templatesTo('919812374000').filter(Boolean);
+    expect(sent.map((t) => t.name)).toEqual([template.name]);
+    expect(bodyTexts(sent[0])).toEqual(['Priya Customer']);
+    expect(
+      await fx.query<{ sender_type: string; type: string }>(
+        `SELECT sender_type, type FROM app.messages
+          WHERE tenant_id = $1 AND conversation_id = (
+            SELECT conversation_id FROM app.automation_runs WHERE id = $2)
+            AND direction = 'outbound' ORDER BY created_at, id`,
+        [c.tenant.id, run!.id],
+      ),
+    ).toEqual([
+      { sender_type: 'bot', type: 'text' },
+      { sender_type: 'bot', type: 'template' },
+    ]);
   });
 });

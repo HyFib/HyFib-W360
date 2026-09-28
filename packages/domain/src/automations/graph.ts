@@ -1,13 +1,15 @@
 import { z } from 'zod';
 import { normalizeTag } from '../contacts/fields';
 import { equalsKeyword, matchesKeyword, normalizeRoutingText } from '../inbox/keywords';
+import { TEMPLATE_LIMITS } from '../templates/definition';
 
 /**
  * The automation model: a trigger (when a run starts) and a graph of typed nodes (what it does).
  * This module has no server dependencies: the builder validates and simulates in the browser with
  * the same code the worker runs. Limits on interactive messages follow Meta's OpenAPI description
  * of the Cloud API (research M-157): at most 3 reply buttons, titles up to 20 characters, body up
- * to 1024, header and footer up to 60.
+ * to 1024, header and footer up to 60. Template steps (ADR-050) send an approved template, which
+ * WhatsApp allows outside the 24-hour service window, with the template limits of P3.
  */
 
 export const NODE_ID_RE = /^[a-z0-9_-]{1,32}$/;
@@ -336,10 +338,81 @@ const handoffNode = z.object({
 
 const endNode = z.object({ id: nodeIdSchema, type: z.literal('end'), label: labelSchema });
 
+/** A template variable's text (an empty one is a check error, so an unfinished draft can be saved). */
+const templateParamSchema = z
+  .string()
+  .trim()
+  .max(
+    TEMPLATE_LIMITS.parameterValue,
+    `Template variables are limited to ${TEMPLATE_LIMITS.parameterValue} characters.`,
+  );
+
+/** The template a step sends and the texts (with placeholders) for its variables, in order. */
+const templateFields = {
+  templateId: z.uuid('Choose a template.'),
+  header: z.array(templateParamSchema).max(1, 'A template header has at most one variable.'),
+  body: z
+    .array(templateParamSchema)
+    .max(
+      TEMPLATE_LIMITS.bodyVariables,
+      `A template has at most ${TEMPLATE_LIMITS.bodyVariables} variables.`,
+    ),
+};
+
+const sendTemplateNode = z.object({
+  id: nodeIdSchema,
+  type: z.literal('send_template'),
+  label: labelSchema,
+  ...templateFields,
+  next: nextSchema,
+});
+
+const askTemplateNode = z.object({
+  id: nodeIdSchema,
+  type: z.literal('ask_template'),
+  label: labelSchema,
+  ...templateFields,
+  /**
+   * A branch for each quick-reply button of the template: `index` is the button's position among
+   * the template's buttons, `title` its text when the step was set up.
+   */
+  buttons: z
+    .array(
+      z.object({
+        index: z
+          .number()
+          .int()
+          .min(0)
+          .max(TEMPLATE_LIMITS.buttons - 1),
+        title: z
+          .string()
+          .trim()
+          .min(1, 'Every button needs its text.')
+          .max(
+            TEMPLATE_LIMITS.buttonText,
+            `Template buttons are limited to ${TEMPLATE_LIMITS.buttonText} characters.`,
+          ),
+        next: nextSchema,
+      }),
+    )
+    .max(TEMPLATE_LIMITS.buttons, `A template has at most ${TEMPLATE_LIMITS.buttons} buttons.`)
+    .refine(
+      (buttons) => new Set(buttons.map((b) => b.index)).size === buttons.length,
+      'Each button has one branch.',
+    ),
+  saveAs: variableSchema.nullable(),
+  /** Any other reply (every reply when the template has no quick-reply buttons). */
+  replyNext: nextSchema,
+  timeoutMinutes: minutesSchema,
+  timeoutNext: nextSchema,
+});
+
 export const nodeSchema = z.discriminatedUnion('type', [
   sendTextNode,
   askButtonsNode,
   askTextNode,
+  sendTemplateNode,
+  askTemplateNode,
   conditionNode,
   updateContactNode,
   httpRequestNode,
@@ -355,6 +428,8 @@ export const NODE_TYPES: readonly NodeType[] = [
   'send_text',
   'ask_buttons',
   'ask_text',
+  'send_template',
+  'ask_template',
   'condition',
   'update_contact',
   'http_request',
@@ -367,6 +442,8 @@ export const NODE_TYPE_LABELS: Record<NodeType, string> = {
   send_text: 'Send a message',
   ask_buttons: 'Ask with buttons',
   ask_text: 'Ask a question',
+  send_template: 'Send a template',
+  ask_template: 'Ask with a template',
   condition: 'Condition',
   update_contact: 'Update contact',
   http_request: 'Call a web address',
@@ -379,7 +456,18 @@ export const NODE_TYPE_LABELS: Record<NodeType, string> = {
 export const WAITING_NODE_TYPES: ReadonlySet<NodeType> = new Set([
   'ask_buttons',
   'ask_text',
+  'ask_template',
   'wait',
+]);
+
+/**
+ * Session messages: WhatsApp delivers them only inside the 24-hour customer service window, so in an
+ * automation started by order messages they must follow a customer reply (ADR-050).
+ */
+export const SESSION_MESSAGE_NODE_TYPES: ReadonlySet<NodeType> = new Set([
+  'send_text',
+  'ask_buttons',
+  'ask_text',
 ]);
 
 export const graphSchema = z.object({
@@ -394,7 +482,12 @@ export type AutomationGraph = z.infer<typeof graphSchema>;
 
 // Trigger ----------------------------------------------------------------------------------------
 
-export const TRIGGER_TYPES = ['keyword', 'conversation_started', 'any_message'] as const;
+export const TRIGGER_TYPES = [
+  'keyword',
+  'conversation_started',
+  'any_message',
+  'store_event',
+] as const;
 export type TriggerType = (typeof TRIGGER_TYPES)[number];
 export const TRIGGER_HOURS = ['any', 'open', 'closed'] as const;
 export type TriggerHours = (typeof TRIGGER_HOURS)[number];
@@ -438,13 +531,21 @@ export const triggerSchema = z.discriminatedUnion('type', [
   }),
   z.object({ type: z.literal('conversation_started'), ...triggerCommon }),
   z.object({ type: z.literal('any_message'), ...triggerCommon }),
+  /**
+   * Started by a store's order message rule (ADR-050), never by a customer message: the rule decides
+   * when, with its delay and sending hours.
+   */
+  z.object({ type: z.literal('store_event') }),
 ]);
 export type AutomationTrigger = z.infer<typeof triggerSchema>;
+/** Triggers that start from customer messages (with business hours and cooldowns). */
+export type MessageTrigger = Exclude<AutomationTrigger, { type: 'store_event' }>;
 
 export const TRIGGER_LABELS: Record<TriggerType, string> = {
   keyword: 'A message contains a keyword',
   conversation_started: 'A customer starts a conversation',
   any_message: 'Any customer message',
+  store_event: 'An order event in a store (chosen in the store’s Order messages)',
 };
 
 /** How strongly a trigger matched; lower wins (exact keyword, keyword, new conversation, any). */
@@ -472,10 +573,13 @@ export function matchTrigger(
       return message.newCase ? 2 : null;
     case 'any_message':
       return 3;
+    case 'store_event':
+      return null;
   }
 }
 
 export function describeTrigger(trigger: AutomationTrigger): string {
+  if (trigger.type === 'store_event') return 'Started by a store’s order messages';
   const hours =
     trigger.hours === 'open'
       ? ' while the business is open'
@@ -496,24 +600,47 @@ export function describeTrigger(trigger: AutomationTrigger): string {
 
 // Text placeholders -------------------------------------------------------------------------------
 
-/** {{name}} (the contact's name), {{company}} and {{answer.<name>}} (a captured answer). */
+/**
+ * {{name}} (the contact's name), {{company}}, {{answer.<name>}} (a captured answer) and, in
+ * automations started by order messages, {{order.<field>}} (the order the run is about).
+ */
 export const PLACEHOLDER_RE = /\{\{\s*([a-zA-Z][a-zA-Z0-9_.]*)\s*\}\}/g;
+
+/**
+ * What {{order.<field>}} stands for in a run started by order messages (ADR-050): read from the
+ * order when the step runs, empty when the order has no such value (or was deleted or redacted).
+ */
+export const ORDER_PLACEHOLDERS = {
+  number: 'Order number (for example #1001)',
+  customer_name: 'Customer name',
+  total: 'Order total (for example ₹1,499.00)',
+  items: 'Items (for example "Darjeeling tea and 2 more")',
+  status_url: 'Order status page (Shopify)',
+  tracking_number: 'Tracking number (Shopify)',
+  carrier: 'Carrier (Shopify)',
+  tracking_url: 'Tracking link (Shopify)',
+  store: 'Store name',
+} as const;
+export type OrderPlaceholder = keyof typeof ORDER_PLACEHOLDERS;
+export type OrderPlaceholderValues = Readonly<Partial<Record<OrderPlaceholder, string | null>>>;
+
+const isOrderPlaceholder = (field: string): field is OrderPlaceholder =>
+  Object.hasOwn(ORDER_PLACEHOLDERS, field);
 
 export interface TextValues {
   contactName: string | null;
   companyName: string;
   variables: Readonly<Record<string, string>>;
+  /** The order of a run started by order messages (null otherwise, or when it is gone). */
+  order?: OrderPlaceholderValues | null;
 }
 
 export function renderText(template: string, values: TextValues): string {
   return template
-    .replace(PLACEHOLDER_RE, (whole, raw: string) => {
-      const name = raw.toLowerCase();
-      if (name === 'name') return values.contactName ?? '';
-      if (name === 'company') return values.companyName;
-      if (name.startsWith('answer.')) return values.variables[name.slice(7)] ?? '';
-      return whole;
-    })
+    .replace(
+      PLACEHOLDER_RE,
+      (whole, raw: string) => placeholderValue(raw.toLowerCase(), values) ?? whole,
+    )
     .trim();
 }
 
@@ -521,8 +648,9 @@ export function renderText(template: string, values: TextValues): string {
 export const SECRET_NAME_RE = /^[a-z][a-z0-9_]{0,39}$/;
 
 /**
- * Renders the address or body of an HTTP step: {{name}}, {{company}} and {{answer.<name>}} are
- * filled through `encode` (URL-encoded in the address, JSON-escaped in the body). Secrets are only
+ * Renders the address or body of an HTTP step: {{name}}, {{company}}, {{answer.<name>}} and
+ * {{order.<field>}} are filled through `encode` (URL-encoded in the address, JSON-escaped in the
+ * body). Secrets are only
  * allowed in header values (see `renderHttpHeader`); anything else stays as written.
  */
 export function renderHttpText(
@@ -540,6 +668,8 @@ function placeholderValue(name: string, values: TextValues): string | null {
   if (name === 'name') return values.contactName ?? '';
   if (name === 'company') return values.companyName;
   if (name.startsWith('answer.')) return values.variables[name.slice(7)] ?? '';
+  if (name.startsWith('order.') && isOrderPlaceholder(name.slice(6)))
+    return values.order?.[name.slice(6) as OrderPlaceholder] ?? '';
   return null;
 }
 
@@ -619,24 +749,36 @@ export function httpPathTemplate(url: string): string {
   return (path.startsWith('/') ? path : `/${path}`).slice(0, 300);
 }
 
-/** Placeholders used by a text: unknown ones, captured answers and (when allowed) secrets. */
+/**
+ * Placeholders used by a text: unknown ones, captured answers, (when allowed) secrets and order
+ * fields, and order fields used where they are not available.
+ */
 function placeholdersIn(
   text: string,
-  allowSecrets = false,
-): { unknown: string[]; answers: string[]; secrets: string[]; literal: boolean } {
+  allow: { secrets?: boolean; order?: boolean } = {},
+): {
+  unknown: string[];
+  answers: string[];
+  secrets: string[];
+  misplacedOrder: string[];
+  literal: boolean;
+} {
   const unknown: string[] = [];
   const answers: string[] = [];
   const secrets: string[] = [];
+  const misplacedOrder: string[] = [];
   for (const match of text.matchAll(PLACEHOLDER_RE)) {
     const name = (match[1] ?? '').toLowerCase();
     if (name === 'name' || name === 'company') continue;
     if (name.startsWith('answer.') && VARIABLE_RE.test(name.slice(7))) answers.push(name.slice(7));
-    else if (allowSecrets && name.startsWith('secret.') && SECRET_NAME_RE.test(name.slice(7)))
+    else if (allow.secrets && name.startsWith('secret.') && SECRET_NAME_RE.test(name.slice(7)))
       secrets.push(name.slice(7));
-    else unknown.push(match[0]);
+    else if (name.startsWith('order.') && isOrderPlaceholder(name.slice(6))) {
+      if (!allow.order) misplacedOrder.push(match[0]);
+    } else unknown.push(match[0]);
   }
   const literal = text.replace(PLACEHOLDER_RE, '').trim().length > 0;
-  return { unknown, answers, secrets, literal };
+  return { unknown, answers, secrets, misplacedOrder, literal };
 }
 
 /** Problems with an HTTP step's address and body (placeholders are checked separately). */
@@ -693,9 +835,16 @@ export interface GraphIssue {
 export function edgesOf(node: AutomationNode): { label: string; target: string | null }[] {
   switch (node.type) {
     case 'send_text':
+    case 'send_template':
     case 'update_contact':
     case 'wait':
       return [{ label: 'next', target: node.next }];
+    case 'ask_template':
+      return [
+        ...node.buttons.map((b) => ({ label: b.title, target: b.next })),
+        { label: node.buttons.length > 0 ? 'other reply' : 'reply', target: node.replyNext },
+        { label: 'no reply', target: node.timeoutNext },
+      ];
     case 'ask_buttons':
       return [
         ...node.buttons.map((b) => ({ label: b.title, target: b.next })),
@@ -724,11 +873,30 @@ export function edgesOf(node: AutomationNode): { label: string; target: string |
   }
 }
 
+/**
+ * Whether leaving `node` by the edge at `index` of `edgesOf` means the customer replied: an answer
+ * or another reply at a question or an asking template step (not a timeout).
+ */
+function replyOnEdge(node: AutomationNode, index: number): boolean {
+  switch (node.type) {
+    case 'ask_buttons':
+    case 'ask_template':
+      return index <= node.buttons.length;
+    case 'ask_text':
+      return index <= 1;
+    default:
+      return false;
+  }
+}
+
 /** Texts a node sends or stores, for placeholder checks. */
 function textsOf(node: AutomationNode): string[] {
   switch (node.type) {
     case 'send_text':
       return [node.text];
+    case 'send_template':
+    case 'ask_template':
+      return [...node.header, ...node.body];
     case 'ask_buttons':
       return [node.body, ...(node.retryText ? [node.retryText] : [])];
     case 'ask_text':
@@ -754,6 +922,29 @@ export interface GraphReferences {
   secrets?: ReadonlyMap<string, string>;
   /** http:// addresses, for local test targets only (the server decides from its configuration). */
   allowInsecureHttp?: boolean;
+  /**
+   * The automation starts from a store's order messages: {{order.<field>}} is available, and
+   * messages that need the service window must follow a customer reply (ADR-050).
+   */
+  storeEvent?: boolean;
+  /** The company's templates by id; when given, template steps must use one HyFib can send. */
+  templates?: ReadonlyMap<string, TemplateReference>;
+  /** The WhatsApp account of the automation's number, when it is limited to one. */
+  channelWhatsappAccountId?: string | null;
+}
+
+/** What the checks need to know about a template (from its latest copy synced from Meta). */
+export interface TemplateReference {
+  name: string;
+  category: string;
+  status: string;
+  whatsappAccountId: string;
+  /** Why HyFib cannot send it (for example a media header), or null. */
+  unsupported: string | null;
+  headerParams: number;
+  bodyParams: number;
+  /** Its quick-reply buttons, by their position among the template's buttons. */
+  quickReplies: readonly { index: number; title: string }[];
 }
 
 /**
@@ -778,7 +969,10 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
 
   const saved = new Set<string>();
   for (const node of graph.nodes) {
-    if ((node.type === 'ask_buttons' || node.type === 'ask_text') && node.saveAs)
+    if (
+      (node.type === 'ask_buttons' || node.type === 'ask_text' || node.type === 'ask_template') &&
+      node.saveAs
+    )
       saved.add(node.saveAs);
     if (node.type === 'http_request') for (const item of node.save) saved.add(item.saveAs);
   }
@@ -791,6 +985,19 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
       message: `An automation can save at most ${AUTOMATION_LIMITS.variables} different answers.`,
     });
   }
+
+  const known = refs.storeEvent
+    ? '{{name}}, {{company}}, {{answer.<name>}} or {{order.<field>}}'
+    : '{{name}}, {{company}} or {{answer.<name>}}';
+  const knownInHeaders = refs.storeEvent
+    ? '{{name}}, {{company}}, {{answer.<name>}}, {{order.<field>}} or {{secret.<name>}}'
+    : '{{name}}, {{company}}, {{answer.<name>}} or {{secret.<name>}}';
+  const misplacedOrder = (nodeId: string, placeholder: string) =>
+    issues.push({
+      level: 'error',
+      nodeId,
+      message: `${placeholder} is an order field: order fields work only in automations started by a store’s order messages.`,
+    });
 
   /** Errors or a warning when a step uses an answer that is not saved (on every path) before it. */
   const checkAnswerUse = (nodeId: string, a: string) => {
@@ -827,16 +1034,24 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
       }
     }
     for (const text of textsOf(node)) {
-      const found = placeholdersIn(text);
+      const found = placeholdersIn(text, { order: refs.storeEvent });
       for (const u of found.unknown) {
         issues.push({
           level: 'error',
           nodeId: node.id,
-          message: `Unknown placeholder ${u}. Use {{name}}, {{company}} or {{answer.<name>}}.`,
+          message: `Unknown placeholder ${u}. Use ${known}.`,
         });
       }
+      for (const u of found.misplacedOrder) misplacedOrder(node.id, u);
       for (const a of found.answers) checkAnswerUse(node.id, a);
-      if (!found.literal && node.type !== 'update_contact') {
+      // A template variable that is only a placeholder is usual ({{1}} = {{name}}); left empty, the
+      // step fails without sending instead.
+      if (
+        !found.literal &&
+        node.type !== 'update_contact' &&
+        node.type !== 'send_template' &&
+        node.type !== 'ask_template'
+      ) {
         issues.push({
           level: 'warning',
           nodeId: node.id,
@@ -855,18 +1070,19 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
         ...(node.body ? [{ text: node.body, headers: false }] : []),
       ];
       for (const { text, headers } of texts) {
-        const found = placeholdersIn(text, headers);
+        const found = placeholdersIn(text, { secrets: headers, order: refs.storeEvent });
         for (const u of found.unknown) {
           issues.push({
             level: 'error',
             nodeId: node.id,
             message: headers
-              ? `Unknown placeholder ${u}. Use {{name}}, {{company}}, {{answer.<name>}} or {{secret.<name>}}.`
+              ? `Unknown placeholder ${u}. Use ${knownInHeaders}.`
               : /secret\./i.test(u)
                 ? `Secrets can only be used in header values (${u}).`
-                : `Unknown placeholder ${u}. Use {{name}}, {{company}} or {{answer.<name>}}.`,
+                : `Unknown placeholder ${u}. Use ${known}.`,
           });
         }
+        for (const u of found.misplacedOrder) misplacedOrder(node.id, u);
         for (const a of found.answers) checkAnswerUse(node.id, a);
         for (const secret of found.secrets) {
           const domain = refs.secrets?.get(secret);
@@ -953,15 +1169,32 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
     if (node.type === 'handoff' && node.teamId && refs.teamIds && !refs.teamIds.has(node.teamId)) {
       issues.push({ level: 'error', nodeId: node.id, message: 'The team no longer exists.' });
     }
+    if (node.type === 'send_template' || node.type === 'ask_template') {
+      if ([...node.header, ...node.body].some((v) => !v)) {
+        issues.push({
+          level: 'error',
+          nodeId: node.id,
+          message: 'Fill in every variable of the template.',
+        });
+      }
+      if (refs.templates) {
+        for (const message of templateStepIssues(node, refs)) {
+          issues.push({ level: 'error', nodeId: node.id, message });
+        }
+      }
+    }
+    // After a day without the customer's message only templates can follow (a reply reopens it).
     if (
-      ((node.type === 'ask_buttons' || node.type === 'ask_text') && node.timeoutMinutes > 1380) ||
-      (node.type === 'wait' && node.minutes > 1380)
+      ((node.type === 'ask_buttons' || node.type === 'ask_text' || node.type === 'ask_template') &&
+        node.timeoutMinutes > 1380 &&
+        sessionMessageBeforeReply(node.timeoutNext, byId)) ||
+      (node.type === 'wait' && node.minutes > 1380 && sessionMessageBeforeReply(node.next, byId))
     ) {
       issues.push({
         level: 'warning',
         nodeId: node.id,
         message:
-          'After about 24 hours without a customer message WhatsApp allows only templates, so later messages of this run will fail.',
+          'After about 24 hours without a customer message WhatsApp allows only templates, so a later message that is not a template will fail. Send a template instead.',
       });
     }
   }
@@ -969,6 +1202,29 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
   for (const node of graph.nodes) {
     if (!reachable.has(node.id)) {
       issues.push({ level: 'warning', nodeId: node.id, message: 'No step leads here.' });
+    }
+  }
+
+  // Started by order messages: until the customer replies only templates reach them (ADR-050).
+  if (refs.storeEvent) {
+    const replied = repliedOnEveryPath(graph.start, byId, reachable);
+    for (const node of graph.nodes) {
+      if (!reachable.has(node.id) || replied.get(node.id)) continue;
+      if (SESSION_MESSAGE_NODE_TYPES.has(node.type)) {
+        issues.push({
+          level: 'error',
+          nodeId: node.id,
+          message:
+            'WhatsApp allows only templates until the customer replies, and a path reaches this step before a reply. Send a template first and continue from its reply branches.',
+        });
+      } else if (node.type === 'handoff') {
+        issues.push({
+          level: 'warning',
+          nodeId: node.id,
+          message:
+            'A path reaches this hand-off before the customer replies: it cannot open the conversation, so people see it only once the customer writes.',
+        });
+      }
     }
   }
 
@@ -981,6 +1237,105 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
     });
   }
   return issues;
+}
+
+/** Whether a path from `from` reaches a message other than a template before the customer replies. */
+function sessionMessageBeforeReply(
+  from: string | null,
+  byId: ReadonlyMap<string, AutomationNode>,
+): boolean {
+  const seen = new Set<string>();
+  const stack = from ? [from] : [];
+  while (stack.length > 0) {
+    const id = stack.pop() as string;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const node = byId.get(id);
+    if (!node) continue;
+    if (SESSION_MESSAGE_NODE_TYPES.has(node.type)) return true;
+    edgesOf(node).forEach((edge, index) => {
+      if (edge.target !== null && !replyOnEdge(node, index)) stack.push(edge.target);
+    });
+  }
+  return false;
+}
+
+/**
+ * For each reachable step, whether the customer has replied on every path from the first step to it
+ * (forward data flow over the edges, iterated to a fixed point so loops are covered).
+ */
+function repliedOnEveryPath(
+  start: string,
+  byId: ReadonlyMap<string, AutomationNode>,
+  reachable: ReadonlySet<string>,
+): Map<string, boolean> {
+  const replied = new Map<string, boolean>();
+  for (const id of reachable) replied.set(id, id !== start);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const id of reachable) {
+      const node = byId.get(id);
+      if (!node) continue;
+      edgesOf(node).forEach((edge, index) => {
+        // The first step is also entered before any reply, so it stays false.
+        if (edge.target === null || edge.target === start || !replied.has(edge.target)) return;
+        const after = (replied.get(id) ?? false) || replyOnEdge(node, index);
+        if (!after && replied.get(edge.target)) {
+          replied.set(edge.target, false);
+          changed = true;
+        }
+      });
+    }
+  }
+  return replied;
+}
+
+/** Problems with a template step's template, checked against the company's templates. */
+function templateStepIssues(
+  node: NodeOf<'send_template' | 'ask_template'>,
+  refs: GraphReferences,
+): string[] {
+  const template = refs.templates?.get(node.templateId);
+  if (!template) return ['The template no longer exists. Choose another one.'];
+  const out: string[] = [];
+  if (template.status !== 'approved') {
+    out.push(`The template “${template.name}” is not approved by Meta (${template.status}).`);
+  }
+  if (template.category !== 'UTILITY' && template.category !== 'MARKETING') {
+    out.push('Choose a utility or marketing template.');
+  } else if (template.unsupported) {
+    out.push(template.unsupported);
+  } else if (
+    node.header.length !== template.headerParams ||
+    node.body.length !== template.bodyParams
+  ) {
+    const count = template.headerParams + template.bodyParams;
+    out.push(
+      `The template “${template.name}” has ${count} variable${count === 1 ? '' : 's'}: fill in each one.`,
+    );
+  }
+  if (
+    node.type === 'ask_template' &&
+    !template.unsupported &&
+    (node.buttons.length !== template.quickReplies.length ||
+      node.buttons.some(
+        (b, i) =>
+          b.index !== template.quickReplies[i]?.index ||
+          b.title !== template.quickReplies[i]?.title,
+      ))
+  ) {
+    out.push(
+      'The template’s quick-reply buttons changed: choose the template again to update the branches.',
+    );
+  }
+  if (
+    refs.channelWhatsappAccountId &&
+    template.whatsappAccountId !== refs.channelWhatsappAccountId
+  ) {
+    out.push('The template belongs to another WhatsApp account than the automation’s number.');
+  }
+  return out;
 }
 
 /** Steps the first step leads to, directly or not (the first step included). */
@@ -1010,7 +1365,7 @@ function answersSavedOnEdge(
   index: number,
 ): { may: readonly string[]; must: readonly string[] } {
   const none = { may: [], must: [] };
-  if (node.type === 'ask_buttons') {
+  if (node.type === 'ask_buttons' || node.type === 'ask_template') {
     return index < node.buttons.length && node.saveAs
       ? { may: [node.saveAs], must: [node.saveAs] }
       : none;

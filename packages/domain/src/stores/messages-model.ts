@@ -32,6 +32,25 @@ export type CartEvent = (typeof CART_EVENTS)[number];
 export const isCartEvent = (event: StoreMessageEvent): event is CartEvent =>
   event === 'cart_reminder' || event === 'cart_second_reminder';
 
+/**
+ * The events whose rule can start an automation instead of sending a template (ADR-050): the cash
+ * on delivery confirmation records its answer from its own template, and the cart reminders' checks
+ * depend on the first reminder having been sent.
+ */
+export const AUTOMATION_EVENTS = [
+  'order_placed',
+  'order_shipped',
+  'order_delivered',
+  'order_cancelled',
+] as const;
+export type AutomationEvent = (typeof AUTOMATION_EVENTS)[number];
+export const canStartAutomation = (event: StoreMessageEvent): event is AutomationEvent =>
+  (AUTOMATION_EVENTS as readonly string[]).includes(event);
+
+/** What a rule does when its event happens. */
+export const STORE_RULE_ACTIONS = ['template', 'automation'] as const;
+export type StoreRuleAction = (typeof STORE_RULE_ACTIONS)[number];
+
 type Platform = 'shopify' | 'woocommerce';
 
 export const STORE_MESSAGE_LIMITS = {
@@ -147,6 +166,12 @@ export const STORE_MESSAGE_SKIP_REASONS = {
   not_marketing_template: 'Cart reminders need an approved marketing template.',
   frequency_capped:
     'The contact already received as many marketing messages as the company allows in this period.',
+  automation_unavailable:
+    'The automation was paused or archived, or its live version no longer starts from order messages.',
+  conversation_assigned: 'A team member was handling the conversation with the customer.',
+  automation_busy: 'Another automation was handling the conversation with the customer.',
+  automation_limit:
+    'Automations had already started too often in this conversation within the hour.',
 } as const;
 export type StoreMessageSkipReason = keyof typeof STORE_MESSAGE_SKIP_REASONS;
 

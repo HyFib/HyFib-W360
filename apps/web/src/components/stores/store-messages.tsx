@@ -1,7 +1,11 @@
 'use client';
 import { useId, useMemo, useState } from 'react';
 import { Alert, Badge, Button, Checkbox, Field, Input, Select } from '@w360/ui';
-import type { StoreMessageRuleView, StoreMessageTemplateOption } from '@w360/domain';
+import type {
+  StoreAutomationOption,
+  StoreMessageRuleView,
+  StoreMessageTemplateOption,
+} from '@w360/domain';
 import {
   CHECKOUT_VALUE_FIELDS,
   CHECKOUT_VALUE_LABELS,
@@ -167,19 +171,27 @@ function sized(
   return next;
 }
 
-/** One event's message: switched on or off, the number and template, variables, delay, buttons. */
+/**
+ * One event's message: switched on or off, the number and what happens (a template with its
+ * variables and buttons, or an automation for order events), and the delay.
+ */
 export function StoreMessageRuleForm({
   slug,
   storeId,
   rule,
   channels,
   templates,
+  automations,
+  canChooseAutomations,
 }: {
   slug: string;
   storeId: string;
   rule: StoreMessageRuleView;
   channels: ChannelOption[];
   templates: StoreMessageTemplateOption[];
+  /** Automations whose live version starts from order messages (members who can see them). */
+  automations: StoreAutomationOption[];
+  canChooseAutomations: boolean;
 }) {
   const id = useId();
   const cart = isCartEvent(rule.event);
@@ -187,6 +199,13 @@ export function StoreMessageRuleForm({
   const range = delayRange(rule.event);
   const active = channels.filter((c) => c.status === 'active' || c.id === rule.channelAccountId);
   const [enabled, setEnabled] = useState(rule.enabled);
+  const [action, setAction] = useState(rule.action);
+  const [automationId, setAutomationId] = useState(
+    rule.automationId ?? automations.find((a) => a.status === 'active')?.id ?? '',
+  );
+  const offerAutomation =
+    rule.automationAllowed && (canChooseAutomations || rule.action === 'automation');
+  const startsAutomation = offerAutomation && action === 'automation';
   const [channelId, setChannelId] = useState(rule.channelAccountId ?? active[0]?.id ?? '');
   const channel = channels.find((c) => c.id === channelId);
   const usable = useMemo(
@@ -239,6 +258,8 @@ export function StoreMessageRuleForm({
           storeId,
           event: rule.event,
           enabled,
+          action: startsAutomation ? 'automation' : 'template',
+          automationId: startsAutomation && automationId ? automationId : null,
           channelAccountId: channelId || null,
           templateId: template ? template.id : null,
           variables: { header, body },
@@ -260,8 +281,28 @@ export function StoreMessageRuleForm({
           checked={enabled}
           onChange={(e) => setEnabled(e.target.checked)}
         />
-        Send this message
+        {startsAutomation ? 'Start the automation' : 'Send this message'}
       </label>
+      {offerAutomation ? (
+        <Field
+          id={`${id}-action`}
+          label="What happens"
+          description="An automation can send a template, wait for the customer’s answer and continue from it."
+        >
+          {(aria) => (
+            <Select
+              {...aria}
+              value={action}
+              onChange={(e) =>
+                setAction(e.target.value === 'automation' ? 'automation' : 'template')
+              }
+            >
+              <option value="template">Send a template</option>
+              <option value="automation">Start an automation</option>
+            </Select>
+          )}
+        </Field>
+      ) : null}
       <div className="grid gap-3 sm:grid-cols-2">
         <Field id={`${id}-channel`} label="WhatsApp number">
           {(aria) => (
@@ -282,28 +323,64 @@ export function StoreMessageRuleForm({
             </Select>
           )}
         </Field>
-        <Field
-          id={`${id}-template`}
-          label="Template"
-          description={
-            cart
-              ? 'Approved marketing templates of this number’s account.'
-              : 'Approved utility or marketing templates of this number’s account.'
-          }
-        >
-          {(aria) => (
-            <Select {...aria} value={templateId} onChange={(e) => setTemplateId(e.target.value)}>
-              <option value="">Choose a template</option>
-              {usable.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.name} ({t.language}, {t.category === 'MARKETING' ? 'marketing' : 'utility'})
-                </option>
-              ))}
-            </Select>
-          )}
-        </Field>
+        {startsAutomation ? (
+          <Field
+            id={`${id}-automation`}
+            label="Automation"
+            description="Published automations that start from order messages. Its template steps must use this number’s account."
+          >
+            {(aria) => (
+              <Select
+                {...aria}
+                value={automationId}
+                onChange={(e) => setAutomationId(e.target.value)}
+              >
+                <option value="">Choose an automation</option>
+                {rule.automationId &&
+                !automations.some((a) => a.id === rule.automationId) &&
+                rule.automationName ? (
+                  <option value={rule.automationId}>{rule.automationName} (unavailable)</option>
+                ) : null}
+                {automations.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.name}
+                    {a.status === 'paused' ? ' (paused)' : ''}
+                  </option>
+                ))}
+              </Select>
+            )}
+          </Field>
+        ) : (
+          <Field
+            id={`${id}-template`}
+            label="Template"
+            description={
+              cart
+                ? 'Approved marketing templates of this number’s account.'
+                : 'Approved utility or marketing templates of this number’s account.'
+            }
+          >
+            {(aria) => (
+              <Select {...aria} value={templateId} onChange={(e) => setTemplateId(e.target.value)}>
+                <option value="">Choose a template</option>
+                {usable.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.name} ({t.language}, {t.category === 'MARKETING' ? 'marketing' : 'utility'})
+                  </option>
+                ))}
+              </Select>
+            )}
+          </Field>
+        )}
       </div>
-      {template ? (
+      {startsAutomation ? (
+        automations.length === 0 ? (
+          <Alert tone="info">
+            No automation starts from order messages yet. Create one under Automations with “An
+            order event in a store” as its start, publish it, then choose it here.
+          </Alert>
+        ) : null
+      ) : template ? (
         <div className="grid gap-3">
           <p className="rounded-md bg-muted p-3 text-sm whitespace-pre-wrap">{template.preview}</p>
           {template.category === 'MARKETING' ? (

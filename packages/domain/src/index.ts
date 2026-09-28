@@ -45,6 +45,7 @@ export * from './campaigns/audience';
 export * from './campaigns/attribution';
 export * from './campaigns/service';
 export * from './campaigns/runner';
+export * from './campaigns/frequency-cap';
 export * from './platform/rate-cards';
 export * from './reports/definitions';
 export * from './reports/period';

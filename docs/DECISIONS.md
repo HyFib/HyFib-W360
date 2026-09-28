@@ -868,3 +868,107 @@ one of its reminders was sent; the recovered value is its total. A reminder coun
 was handed to WhatsApp, unless WhatsApp reported it failed, it was cancelled or its outcome is
 unknown. The store's Order messages page shows, for the last 30 days, reminders sent, checkouts
 recovered and their value per currency, with these definitions.
+
+## ADR-050 Store events in automations: order rules start a published automation, template steps send outside the service window, runs read their order (2026-09-28)
+
+Decision: an order message rule (ADR-048) either sends its template or starts an automation whose
+trigger is "Started by a store's order messages" (P4-06e). Automations gain two template steps, and
+a run started this way reads the order it is about while it runs.
+
+**Where the link lives.** The rule for a store and event says what happens: send a template (as
+before) or start a chosen automation. The automation's trigger (`store_event`) never matches a
+customer message, so it starts only from rules. Keeping the choice on the rule keeps every guarantee
+of ADR-048 unchanged: at most one store message per order and event, nothing about events before the
+rule was switched on, test orders and late events recorded without sending, the delay and the
+store's sending hours, and a rule is either a template or an automation, never both. Order placed,
+shipped, delivered and cancelled can start automations, for Shopify and WooCommerce stores alike.
+The cash on delivery confirmation keeps its template, because its answer is recorded on the order,
+and the cart reminders keep theirs, because their send checks depend on the first reminder having
+been sent; both are recorded as not built for automations.
+
+**Starting a run.** At the store message's send time, under its row lock, the order message checks
+run first (store connected, opt-in confirmed, rule switched on since before the event, sending hours,
+order neither deleted, redacted nor cancelled, a number). Then: the automation is active and its
+published version starts from order messages; the rule's number is active and allowed by the
+automation (an automation limited to one number starts only from rules using it); the number is not
+on the suppression list; the contact may receive messages at all (not erased, not opted out); the
+conversation is not assigned to a member; no automation is active in it; and fewer than
+`maxRunsPerConversationPerHour` runs started there in the last hour. A failed check skips the store
+message with its reason. Otherwise the contact and the conversation are created as for a template
+(a new conversation starts resolved), the run is inserted with the order and the event, and the
+store message becomes `started` with the run's id, in one transaction: a repeated job or the sweep
+finds the store message no longer pending, so a store message starts at most one run. Choosing an
+automation on a rule needs `commerce.manage` and `automations.read`, and `campaigns.send` when its
+published version uses a marketing template; its templates must belong to the rule's number's
+WhatsApp account.
+
+**Template steps.** "Send a template" sends and continues; "Ask with a template" sends and waits:
+a branch for each of the template's quick-reply buttons, one for any other reply and one for no
+reply within the timeout (at most 24 hours). Variables are texts with placeholders, filled in when
+the step runs. Only approved utility or marketing templates HyFib can send are offered (authentication
+templates and templates with content HyFib cannot send are not). Each quick-reply button of an asking
+step carries the bot button id as its payload (research M-177, M-178): run, step, visit and the
+button's position among the template's buttons (now 0 to 9, templates have up to ten buttons; the id
+has at most 84 characters and no payload length limit was found). A tap matches only the step and
+visit that sent it, and a typed button title counts as the tap, like reply buttons; a template tap
+without a bot id stays a text reply, as before. When the step runs, the runner checks the template
+again (approved, still utility or marketing, the same number of variables and the same quick-reply
+buttons as the step expects, else `template_changed`), the number (active, of the template's
+account), a value for every variable (a variable left empty ends the run with `missing_variable`,
+nothing is sent with a blank), the contact's consent for the template's category (suppression,
+erasure, opt-out, marketing opt-in) and, for marketing templates, the company's frequency cap, then
+creates the chat message as a bot message and hands it to the send pipeline, which checks template and
+consent again at dispatch (P3). No 24-hour window applies to templates. Any failed check ends the run
+as a failed send (`send_blocked` with the reason). The frequency cap is counted under the campaign
+runner's company lock (ADR-049); the campaign runner holds that lock while it writes conversations,
+so the automation runner, which already holds the conversation's lock, only tries the lock and, when
+it is busy, tries the step again two seconds later instead of waiting (a wait would be a deadlock).
+Publishing or testing an automation that uses a marketing template needs `campaigns.send`, as
+choosing one for a store rule or a template send does.
+
+**The service window in store-event automations.** Until the customer replies WhatsApp allows only
+templates. In an automation started by order messages, `checkGraph` refuses a message, a question
+with buttons or a typed question that some path from the first step reaches before the customer has
+replied; a reply is an answer or an other reply at a question or an asking template step (no reply,
+waits and web requests are not). A hand-off reached before a reply only warns: it cannot open the
+conversation (people see it once the customer writes).
+
+**Runs in closed conversations.** A conversation created or found by a store rule stays resolved, like
+a campaign's, so the inbox holds no work until the customer writes. A store-event run may therefore
+continue while its conversation is still resolved as it was when the run started (`resolved_at` at or
+before the run's start); the customer's reply reopens it (ingestion, as before) and reaches the run.
+A conversation resolved after the run started still stops the run, and a member resolving it ends the
+run as before. A run's end routes only open conversations (routing leaves resolved ones alone), so a
+run that ends before the customer replied puts nothing in front of people.
+
+**Order data.** The run keeps the order's id, not a copy, and each step reads the order as it is now:
+`{{order.number}}`, `{{order.customer_name}}`, `{{order.total}}`, `{{order.items}}`,
+`{{order.status_url}}`, `{{order.tracking_number}}`, `{{order.carrier}}`, `{{order.tracking_url}}` and
+`{{order.store}}`, in messages, questions, template variables, contact updates and web requests. The
+reference is cleared when the order is deleted (with its store, for example), and a redacted order
+has no values: its placeholders are empty (a template variable then fails as above). No customer data
+is copied into the run. Order placeholders are refused in automations that do not start from order
+messages. Conditions on order fields and changing the order from a run are not built.
+
+**Test runs.** A test run of a store-event automation uses an order the member chooses
+(`commerce.read` and `contacts.read`, as seeing store orders needs, because its steps send the
+customer's details) on a conversation they can see, inside its service window, as other test runs
+do.
+
+**Template steps in other automations.** Template steps are available in every automation, so an
+automation a keyword starts can wait (up to 24 hours per wait step, within the run's 7 days) and then
+send a template, which the service window does not limit (drip follow-ups, W-084). The warning for a
+wait or a question timeout over 23 hours now follows the paths after it: it appears only when a
+message that is not a template can follow before the customer replies.
+
+**Records.** The store's Order messages report and the order page show automations started, with a
+link to the run for members with `automations.read`; the run page shows the order for members with
+`commerce.read`; the automation page lists the store rules that use it.
+
+**Migration 0022.** `automation_runs` gains `store_order_id` (composite foreign key, set null when the
+order is deleted) and `store_event`, and the `store_event` trigger type; order message rules gain
+`action` and `automation_id` (composite foreign key, set null when the automation is deleted, which
+only a draft never published can be, and only a switched-off rule can name one; a rule that sends
+its template keeps no automation; only the four order events may start automations); store
+messages gain the `started` state and `automation_run_id` (composite foreign
+key, set null when the run is deleted by retention).
