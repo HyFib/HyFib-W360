@@ -74,7 +74,8 @@ verification, app review, Embedded Signup configuration).
   results with denominators, CSV export. Local 10,000-recipient run: snapshot 0.6 s, all recipients
   queued in 21 ticks. **Remaining:** the 10k run in staging with real dispatch, per-recipient time
   zones, A/B variants, messaging-tier awareness (read the number's limit from Meta), campaign
-  sends through the public API (P5-08), media-header templates.
+  sends through the public API (the API sends single templates since P5-08), media-header
+  templates.
 - **P3-05 Reports** — _implemented (2026-09-26); provider data verified against the Graph stand-in
   only_: persisted, versioned metric definitions; periods of whole days in the company time zone;
   messaging outcomes with denominators; estimated Meta charges from Meta's billable flag and
@@ -289,7 +290,7 @@ verification, app review, Embedded Signup configuration).
   in permissions and workers; plan card, limit hints and banners for companies; platform plan
   screens. Remaining: paying for plans in HyFib (Razorpay Subscriptions, P5-07), self-serve plan
   changes and higher-plan trials, proration, plan invoices, usage alerts before a limit is reached,
-  plan-change emails to companies, API quotas (P5-08) and AI credits (Phase 6).
+  plan-change emails to companies, API quotas (not built with P5-08) and AI credits (Phase 6).
 - **P5-02 Ledger** **[built, locally verified]**: accounts, append-only journal balanced at commit,
   balances by trigger, holds, settlements, releases (expiry sweep), refunds and chargebacks as
   compensating postings; INR paise. Remaining: manual adjustments with dual approval, statements.
@@ -315,8 +316,15 @@ verification, app review, Embedded Signup configuration).
   charged) and AFA-required debits (not reachable while mandates are capped at ₹15,000).
 - **P5-07 Billing screens**: overview, plans, wallet & recharge, auto-recharge, payment methods,
   usage & rate card, transactions & receipts, invoices; step-up auth for sensitive changes.
-- **P5-08 Public API**: versioned REST, hashed scoped keys, rotation, quotas, idempotency keys,
-  cursor pagination, OpenAPI document.
+- **P5-08 Public API** **[built, locally verified; sends through the Graph stand-in only]**
+  (ADR-052): company API keys (SHA-256 only, scopes granted within the creator's permissions,
+  expiry, rotation with an overlap, revocation, audit), `/api/v1` with approved template sends,
+  contacts (cursor pages, create or existing), consent with evidence and message status; idempotency
+  keys, per-key, per-company and failed-authentication rate limits, 64 KB bodies, an OpenAPI 3.1
+  document from the validation schemas, Settings → API keys. Remaining: monthly quotas per plan,
+  API access as a plan module, session, media and interactive messages, conversation and message
+  lists, starting automations (W-086), bulk sends in one call, IP allowlists, key expiry reminders,
+  tests of the rate limits.
 - **P5-09 Outgoing webhooks**: signing, secret rotation, delivery history, bounded retry, replay,
   SSRF guard.
 - **P5-10 Platform ops screens**: onboarding failures, tenant health, usage, integration failures,

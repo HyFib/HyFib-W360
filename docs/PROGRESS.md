@@ -1,5 +1,91 @@
 # Progress
 
+## 2026-09-28 — Phase 5: public API (P5-08)
+
+Status: **Public API v1 implemented and locally verified; sends reach only the local Graph
+stand-in.** Companies create API keys in Settings → API keys and call `/api/v1` to send approved
+templates, create contacts, record consent and read the status of messages the API sent. Keys are
+hashed, scoped within their creator's permissions, rotated with an overlap and revoked at once;
+sends go through the members' checks and the existing send pipeline, and an `Idempotency-Key`
+makes retries safe. No request reached Meta.
+
+### Completed
+
+- **Design (ADR-052):** keys belong to the company; five scopes (`templates.read`, `contacts.read`,
+  `contacts.write`, `messages.send` for utility templates, `messages.send_marketing`), each granted
+  only by a member holding the matching permission; a request acts in its company's scope as the
+  key; template sends only (session, media and interactive messages are not in v1); idempotency
+  keys stored with the request's own transaction; keyset cursors; an OpenAPI document from the
+  validation schemas.
+- **Schema (migration 0024):** `app.api_keys` (SHA-256 of the token only, unreadable by the runtime
+  role; a guard trigger keeps token, scopes and author fixed, a revocation final and an expiry only
+  sooner; never deleted), `ops.api_key_authenticate` (SECURITY DEFINER; refuses revoked and expired
+  keys and companies being deleted; records the last use at most once a minute without waiting),
+  `app.api_idempotency_keys` and `ops.purge_api_idempotency_keys`, `app.messages.api_key_id`, and
+  `api_key` as a consent actor.
+- **Keys (`api/keys.ts`):** `w360_` + 12 base32 characters (the public prefix) + 32 random bytes;
+  creation with name, scopes and expiry (30, 90, 365 days or never), at most 20 active keys under a
+  company lock, rotation to a key with the same scopes and lifetime with 0 to 72 hours of overlap,
+  immediate revocation, all audited with the prefix only.
+- **Requests (`apps/web/src/server/api.ts`):** bearer authentication, failed attempts limited per
+  client address, token buckets per key and per company (429 with `Retry-After`), JSON content type
+  and a 64 KB body limit, `Idempotency-Key` checks, error bodies with a request id, no tokens in logs.
+  Writing scopes are refused while the company is suspended or restricted.
+- **Resources (`api/resources.ts`):** templates with their variables and numbers; contacts in pages
+  with cursors, by number and by id; create or return the existing contact (suppressed numbers
+  refused); consent with evidence; template sends with the members' checks (approval, category
+  scope, variables, number selection, consent, suppression, erasure, marketing frequency cap under
+  the campaign lock), queued through the send pipeline and re-checked before dispatch; the status of
+  API messages.
+- **Web:** Settings → API keys (owners and administrators): base URL, example, key list with state,
+  prefix, scopes, author, last use and expiry, creation with the scopes the member may grant, the
+  token shown once with a copy button, rotation with an overlap and revocation. `GET
+/api/v1/openapi.json` publishes the document (cacheable for 5 minutes).
+- **Docs:** ADR-052, ARCHITECTURE §6N, SECURITY (control, Phase 5 rules, key rotation, gaps),
+  THREAT-MODEL T67 to T70, DATA-RETENTION, RUNBOOKS §10N, RELEASE-CHECKLIST, FEATURE-MATRIX (new
+  H-033; W-058, W-086, W-134 to W-137, W-140, W-141, W-142, W-144), BACKLOG (P5-08 built).
+- **Found while building:**
+  - **Contacts list and CSV export showed no tags and no consent (fixed, own commit).** Drizzle
+    leaves the table name out of a select without joins, so the correlated subqueries for tags and
+    consent compared the subquery's own `id`. Every contact showed no tags and unknown consent in
+    the list and the export. The subqueries now use `outerColumn`; the contacts suite checks the
+    values. The API's contact queries had the same mistake before their first test run.
+  - **A test that depended on file order (fixed, own commit).** Two cart reminder assertions looked
+    contacts up by number across companies; the contacts erasure test creates the same number in
+    another company, so the assertion failed whenever that file ran first.
+  - **The Templates page scrolled sideways on phones (fixed).** Its outer grid had an automatic
+    column that grew to the table's width, so a long template name widened the whole page (the new
+    e2e test's click on "Refresh from Meta" landed on overlapping text on mobile). It now uses one
+    shrinkable column, as other pages do, and the API e2e test checks for sideways scrolling there.
+  - **Review fixes for P5-01 (own commit):** retrying a failed number's setup now checks the number
+    limit; the staff plan form sends only the add-ons the chosen plan sells.
+  - **Mutation checks:** 16 API guards removed one at a time. Two survived at first: a 0-hour
+    rotation that only expired the old key (the test now requires it revoked), and removing the
+    key-limit lock (the six racing creations started after the first had committed because the pool
+    had one open connection; the test now opens six connections first, and the mutation fails the
+    test in three of three runs). Removing the outer once-a-minute check in the last-use update
+    changes nothing, because the update repeats the condition (an equivalent mutant); removing both
+    fails the test.
+
+### Test commands and results (local, 2026-09-28, fresh database)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `pnpm test` (unit)                                                          | 253 passed. New: `api/api.test.ts` 13 (token shape and hashing, bearer parsing, scopes and their permissions, key states, the idempotency key format, error mapping without internals, the OpenAPI document against the route handlers and its references); `plans/model.test.ts` +1 (add-ons a plan sells).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 317 passed, including the new `api.test.ts` 20 (key creation, validation and granting within permissions, the 20-key limit under six concurrent creations, authentication and last use, suspended, restricted and deleting companies, rotation with and without overlap, key guards, scopes, contacts create and upsert with suppression, cursor pages, consent with evidence, idempotent replays, reuse refused, failures stored nothing, recycling after 24 hours, templates list, sends through the Graph stand-in with concurrent retries and delivery status, template, variable, number and suppression checks, marketing scope, opt-in and cap, opt-out after queueing, status of API messages only, isolation, the sweep), a retry test in `plans.test.ts`, list and export checks in `contacts.test.ts`, and the API function grants in the isolation suite. |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 60 passed (30 × 2) in one full run (10.1 min). New `api.spec.ts` on both projects: a key created in Settings → API keys (token shown once, only its prefix listed afterwards), the OpenAPI document without a key, 401 without one, templates, 403 without the contacts scope, a contact created, 400 without an `Idempotency-Key`, a template sent with a retry replayed, the worker's send to the Graph stand-in read back as `accepted`, exactly one request at the stand-in, the revoked key refused; no sideways scrolling on the Templates and API keys pages.                                                                                                                                                                                                                                                                                   |
+| Mutation checks                                                             | 16 API guards and 3 fixes (contact tags, contact consent, the retry limit) broken one at a time; each makes a test fail, apart from the equivalent mutant above                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+
+### Known gaps
+
+- Not built: monthly API quotas per plan, API access as a plan module, session, media and
+  interactive messages through the API, conversation and message lists, starting automations,
+  bulk sends in one call, outgoing webhooks (P5-09), IP allowlists per key and reminders before keys
+  expire.
+- The rate limits are not exercised by automated tests.
+- Firefox and WebKit run in CI only; sends reach the Graph stand-in only.
+
 ## 2026-09-28 — Phase 5: plans and entitlements (P5-01)
 
 Status: **Plans and entitlements implemented and locally verified; paying for a plan in HyFib is not

@@ -816,6 +816,43 @@ every existing company as `w360_definer` (companies are behind forced RLS). A fa
 the bootstrap roles are missing (`infra/db/bootstrap-roles.sql`) or a lookup function was changed
 by hand.
 
+## 10N. Public API
+
+**A company's API key leaked.** In Settings → API keys (owners and administrators), revoke it: the
+next request with it gets 401. If the integration must keep working, rotate instead with no overlap
+and give the new key to the integration; do not keep an overlap for a leaked key. The audit log
+shows who created, rotated and revoked keys (`api_key.*`, with the key's public prefix) and the
+contacts and consent a key recorded (actor `api_key`); messages a key sent carry its id
+(`messages.api_key_id`) and show in their conversations. "Last used" shows when a key was last
+presented (updated at most once a minute).
+
+**"Send a valid API key" (401).** The key is unknown, revoked or expired, the header is not
+`Authorization: Bearer <key>`, or the company is being deleted. Keys are shown once: a lost key is
+rotated, never recovered. Many failed attempts from one address answer 429 for a while (one attempt
+every 5 seconds after a burst of 20).
+
+**429 "Too many requests".** Each key allows bursts of 50 requests and 10 a second, each company 200
+and 30 a second; wait for `Retry-After` and retry with the same `Idempotency-Key`. Monthly quotas
+are not built.
+
+**"This Idempotency-Key was already used with a different request" (422).** The integration reused
+a key for another message; each new message needs a new key (for example a UUID), and only retries
+of the same request reuse one. Keys are kept 24 hours.
+
+**An API send failed or never arrived.** `GET /api/v1/messages/{id}` shows the status (`queued`,
+`accepted`, `sent`, `delivered`, `read`, `failed` with WhatsApp's error, `unknown_outcome` when the
+send was interrupted and is not retried). A 412 at send time names the reason (no marketing opt-in,
+suppression, frequency cap, template not approved). The send pipeline is the members' (§6): the
+message appears in the conversation, which is created resolved.
+
+**The company is suspended or its plan ended.** Keys keep reading; creating contacts, recording
+consent and sending answer 423 until the company is active again.
+
+**Migration 0024 failed.** It runs in one transaction. It creates the two tables, the guard trigger,
+the two SECURITY DEFINER functions (granted to `w360_app` before their ownership moves to
+`w360_definer`), adds `messages.api_key_id` and widens the consent actor check. A failure usually
+means the bootstrap roles are missing (`infra/db/bootstrap-roles.sql`).
+
 ## 11. Compromised company (tenant) or account
 
 1. Suspend the company in `/platform` with a reason (stops outbound activity; ingestion continues).

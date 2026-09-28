@@ -120,6 +120,10 @@ made. This checklist records the evidence required per gate; unchecked items blo
       for new companies decided on purpose); a test company taken through a trial ending, a paid
       period, grace and renewal on a staging deployment, with the billing managers' emails received
       through the production SMTP provider
+- [ ] Public API on a staging deployment: `APP_BASE_URL` gives the right base URL in Settings → API
+      keys and the OpenAPI document, the proxy passes the client address so failed-authentication
+      limits apply per client (`TRUSTED_PROXIES`), a key created, used, rotated and revoked, and an
+      approved template sent through the API to a test recipient
 - [ ] Tenant-isolation and security gates passing in CI on the release commit
 - [ ] Measured load behaviour against the test envelope (k6 results)
 - [ ] Backup restoration drill performed and timings recorded (RPO/RTO)

@@ -1054,3 +1054,67 @@ function the services, the platform and `app.accept_invitation` use, the sweep f
 platform's usage counts (`ops.platform_tenant_usage`, with the definer role reading automation
 statuses), `app.accept_invitation` and seven lookup functions replaced to know the restricted
 status, and grants and policies for the platform and definer roles.
+
+## ADR-052 Public API v1: company API keys with scopes, templates-only sends, idempotency keys and an OpenAPI document (2026-09-28)
+
+Decision: companies integrate with HyFib through a versioned REST API under `/api/v1`, authenticated
+by company API keys (P5-08). Version 1 covers what integrations need first: reading approved
+templates, finding and creating contacts, recording consent, sending approved templates and reading
+the status of what the API sent. Outgoing webhooks are P5-09.
+
+**Keys.** A member with `developer.manage` creates a key for the company with a name, scopes and an
+expiry (30, 90 or 365 days, or none). The token (`w360_<key id>_<secret>`, 256 random bits in the
+secret) is shown once; only its SHA-256 is stored (`app.api_keys.token_hash`, not readable by the
+runtime role through column grants), and a key is found by that hash through a SECURITY DEFINER
+function that also refuses revoked and expired keys and records when it was last used (at most once
+a minute). Keys belong to the company, not the member: they keep working when the member leaves,
+and any member with `developer.manage` can revoke them. Creating a key needs each permission its
+scopes stand for, so nobody grants more than they hold. Rotation creates a new key with the same
+name and scopes and lets the old one expire after an overlap of up to 72 hours (or at once). At most
+20 keys are active per company. Tokens never appear in logs, URLs or pages after creation.
+
+**Scopes.** `templates.read` (needs `templates.read`), `contacts.read` (`contacts.read`),
+`contacts.write` (`contacts.write`: contacts and consent), `messages.send` (`inbox.reply`: utility
+templates and reading what the API sent) and `messages.send_marketing` (`campaigns.send`: marketing
+templates, which also need the contact's marketing opt-in and respect the frequency cap). A key
+without the scope an endpoint needs gets 403.
+
+**The API context.** A request acts for the company as its key, not as a member: data access runs in
+the company's scope without a user, audit rows have `actor_type = 'api_key'` and the key id, API
+contacts have source `api`, consent events source `api` with the key as actor, and messages
+`sender_type = 'api'` with the key's id. Suspended and restricted companies keep read scopes and lose
+writing and sending, as in the app; plan modules do not apply to these endpoints (templates,
+contacts and sending are in every plan).
+
+**Sending.** `POST /api/v1/messages` sends an approved utility or marketing template to a phone
+number (the contact is created when new) from a chosen active number (optional when the company has
+exactly one), with the template's variables, through the same send intents and checks as members'
+template sends: erasure, suppression, consent for the template's category, the marketing frequency
+cap, the template's and number's state. A message is `queued` when the API answers; its status
+follows Meta's webhooks and is read with `GET /api/v1/messages/{id}`. Session (free-text) messages,
+media and interactive messages are not in version 1.
+
+**Idempotency.** `POST /api/v1/messages` requires an `Idempotency-Key` header and
+`POST /api/v1/contacts` accepts one. The key, a hash of the request and the response are stored in
+the same transaction as the work (`app.api_idempotency_keys`, unique per API key and idempotency
+key), so a retried request returns the first response (`Idempotent-Replayed: true`) and never sends
+twice; the same idempotency key with a different request is refused (422). Stored responses expire
+after 24 hours. This is exactly-once creation of the send, not exactly-once delivery: delivery
+follows the send pipeline (ARCHITECTURE §6).
+
+**Limits.** Each key has a token bucket (burst 50, 10 requests a second) and each company another
+(burst 200, 30 a second), in `ops.rate_limit_buckets`; failed authentication is limited per client
+address. Exceeding them answers 429 with `Retry-After`. Monthly API quotas per plan are not built.
+
+**Shape.** JSON bodies up to 64 KB; errors as `{"error": {"code", "message", "reason"?,
+"issues"?}, "requestId"}` with HTTP statuses from the error codes; lists use keyset cursors (`limit` up to 100,
+`cursor` from the previous page); ids are UUIDs; times are ISO 8601 in UTC. Breaking changes need a
+new version path. `GET /api/v1/openapi.json` publishes an OpenAPI 3.1 document generated from the
+same zod schemas that validate requests, so the document cannot drift from the checks.
+
+**Not built.** Outgoing webhooks (P5-09), session, media and interactive messages, listing
+conversations and messages, OAuth apps for third parties, IP allowlists per key, monthly API quotas
+per plan, and API access as a plan module.
+
+**Migration 0024.** `app.api_keys`, `app.api_idempotency_keys`, `ops.api_key_authenticate`,
+`app.messages.api_key_id`, and `api_key` as a consent event actor.

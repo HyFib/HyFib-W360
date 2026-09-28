@@ -778,6 +778,60 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 - **Not built yet:** cash on delivery confirmations and cart reminders in automations, conditions on
   order fields, changing the order from a run, messages per shipment or on tracking changes.
 
+## 6N. Public API **[built — sends verified against the local Graph stand-in only; no live WhatsApp traffic]**
+
+- **Model** (migration 0024, ADR-052): `app.api_keys` (name, public prefix, the token's SHA-256,
+  scopes, author, expiry, last use, revocation, the key that replaced it) is never deleted; a guard
+  trigger keeps the token, scopes and author fixed, a revocation final, an expiry only sooner and a
+  replacement single. The runtime role cannot read `token_hash` (column grants) or write
+  `last_used_at`. `ops.api_key_authenticate` (SECURITY DEFINER) finds a key by its token's hash and
+  returns nothing for unknown, revoked or expired keys or companies being deleted; it records the
+  last use at most once a minute without waiting (`FOR UPDATE SKIP LOCKED`).
+  `app.api_idempotency_keys` stores successful responses per key and `Idempotency-Key` for 24 hours;
+  `ops.purge_api_idempotency_keys` deletes expired rows (the messaging retention sweep). Messages the
+  API sends have `sender_type = 'api'` and `api_key_id`; consent it records has the actor `api_key`.
+- **Keys** (`api/keys.ts`): tokens are `w360_` + 12 base32 characters (the prefix shown in lists) +
+  `_` + 32 random bytes in base64url; only the hash is stored and the token is shown once. Members
+  with `developer.manage` create keys (name, scopes, expiry of 30, 90 or 365 days or none) and may
+  grant a scope only when they hold its permission (`templates.read`, `contacts.read`,
+  `contacts.write`, `inbox.reply` for `messages.send`, `campaigns.send` for
+  `messages.send_marketing`); at most 20 active keys per company, counted under an advisory lock.
+  Rotation creates a key with the same name, scopes and lifetime and lets the old one work for 0 to
+  72 hours (0 revokes it); revocation is immediate. Each change is audited without the token.
+- **Requests** (`apps/web/src/server/api.ts`): the bearer token is checked by shape, then through
+  the definer function; the request acts in its company's scope as the key (`ApiContext`, no user),
+  so no company id is ever read from the request. Failed authentication is limited per client
+  address (bursts of 20, one every 5 seconds), then each key (bursts of 50, 10 a second) and each
+  company (bursts of 200, 30 a second) have token buckets; over the limit answers 429 with
+  `Retry-After`. JSON bodies need `Content-Type: application/json` and at most 64 KB. Writing scopes
+  are refused while the company is suspended or restricted (reading continues). Errors are
+  `{"error": {"code", "message", "reason"?, "issues"?}, "requestId"}` with the status of the
+  application error; other failures are a generic 500 logged with the request id. Tokens are never
+  logged; responses are `private, no-store`.
+- **Resources** (`api/resources.ts`): approved utility and marketing templates with their variables
+  and numbers; contacts listed newest first with keyset cursors (or by number), read, and created
+  (201) or returned when the number exists (200, filling an empty name or email and adding tags;
+  suppressed numbers refused); consent recorded with its evidence (source `api`); template sends
+  with the members' checks (an approved template; its category's scope; the variables; the number
+  given as `from`, or the only active one; the template's account; erasure, suppression, consent and
+  the marketing frequency cap under the campaign runner's lock), a conversation created resolved,
+  a send intent without a user and the `message.send` job, re-checked before dispatch like every
+  template send; the status of messages the API sent.
+- **Idempotency** (`api/idempotency.ts`): `POST /messages` needs an `Idempotency-Key` (optional on
+  `POST /contacts`). The key's row is inserted in the request's own transaction, so a concurrent
+  retry waits on the unique index and then replays the stored response (`Idempotent-Replayed:
+true`); the same key with another request (method, path and body hashed) answers 422
+  `idempotency_key_reused`; a failed request stores nothing; an expired key is reused.
+- **OpenAPI** (`api/openapi.ts`): `GET /api/v1/openapi.json` (no key; cacheable 5 minutes) is built
+  from the zod schemas that validate requests; a unit test checks it against the route handlers.
+- **Web:** Settings → API keys (`developer.manage`): the base URL and an example, the keys with state,
+  prefix, scopes, author, last use and expiry; creation with the scopes the member may grant; the new
+  token shown once with a copy button (kept only in the page's memory); rotation with an overlap;
+  revocation.
+- **Not built yet:** outgoing webhooks (P5-09), session, media and interactive messages, listing
+  conversations and messages, starting automations, OAuth apps, IP allowlists per key, monthly API
+  quotas per plan and API access as a plan module.
+
 ## 7. Commercial model and billing **[built: plans and entitlements, wallet, top-ups, auto-recharge — verified against a local Razorpay stand-in only; paying for plans in HyFib planned]**
 
 - **Who pays Meta:** as a Meta Tech Provider HyFib has no credit line; each customer adds its own
