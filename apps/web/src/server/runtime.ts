@@ -47,6 +47,7 @@ import {
   createPlatformService,
   createPlatformBillingService,
   createPlatformReconciliationService,
+  createBillingUsageService,
   createPlatformOpsService,
   pgBossQueueInspector,
   createRateCardsService,
@@ -84,6 +85,7 @@ import {
   type PlatformService,
   type PlatformBillingService,
   type PlatformReconciliationService,
+  type BillingUsageService,
   type PlatformOpsService,
   type RateCardsService,
   type SavedRepliesService,
@@ -135,6 +137,8 @@ export interface Runtime {
   platformBilling: PlatformBillingService;
   /** Daily settlement reconciliation with Razorpay, for platform staff (ADR-059). */
   platformReconciliation: PlatformReconciliationService;
+  /** Billing → Usage and rates: Meta's rates and this month's estimate (ADR-060). */
+  billingUsage: BillingUsageService;
   inbox: InboxService;
   teams: TeamsService;
   businessHours: BusinessHoursService;
@@ -270,6 +274,7 @@ async function init(): Promise<Runtime> {
   });
   const platformBilling = createPlatformBillingService({ platformDb });
   const platformReconciliation = createPlatformReconciliationService({ platformDb });
+  const billingUsage = createBillingUsageService({ db, clock: systemClock });
   const inbox = createInboxService({ db, clock: systemClock, jobs, signer });
   const teams = createTeamsService({ db, clock: systemClock });
   const businessHours = createBusinessHoursService({ db, clock: systemClock });
@@ -412,6 +417,7 @@ async function init(): Promise<Runtime> {
     platformOps,
     platformBilling,
     platformReconciliation,
+    billingUsage,
     inbox,
     teams,
     businessHours,

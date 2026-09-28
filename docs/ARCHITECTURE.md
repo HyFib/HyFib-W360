@@ -254,8 +254,9 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   (`packages/domain/src/reports/definitions.ts`); clicks and conversions are reported as not
   measured. Per-recipient CSV export is formula-safe and audited.
 - **Rate cards** (`ops.rate_cards`, `rate_card_prefixes`, `rate_card_prices`): entered by platform
-  staff from Meta's published cards (platform console), immutable once published; companies read
-  published cards only.
+  staff from Meta's published cards (platform console), immutable once published; the app role reads
+  published and withdrawn cards, and estimates use published cards only. Companies see the cards
+  for their currency under Billing → Usage and rates (§7).
 
 ## 6C. Reports **[built — numbers come from HyFib's own records; provider data verified against a local Graph stand-in only]**
 
@@ -984,7 +985,7 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   (ADR-056).
 - **Not built yet:** staff-started deletion, stored exports and other formats.
 
-## 7. Commercial model and billing **[built: plans and entitlements, wallet, top-ups, auto-recharge, statements and receipts, staff refunds of unused credit, daily settlement reconciliation — verified against a local Razorpay stand-in only; paying for plans in HyFib and tax invoices planned]**
+## 7. Commercial model and billing **[built: plans and entitlements, wallet, top-ups, auto-recharge, statements and receipts, usage and rates, staff refunds of unused credit, daily settlement reconciliation — verified against a local Razorpay stand-in only; paying for plans in HyFib and tax invoices planned]**
 
 - **Who pays Meta:** as a Meta Tech Provider HyFib has no credit line; each customer adds its own
   payment method and Meta bills them directly (`tenants.billing_mode = 'direct_meta'`, the default).
@@ -1137,6 +1138,22 @@ payment_requested → succeeded`; before each provider call it is written as `un
   `ops.platform_request_settlement_recon` and `ops.platform_resolve_settlement_item` (platform
   owners, audited with a reason or note). Items keep provider ids, amounts, fees and HyFib's match;
   never notes, descriptions, receipts or card fields.
+
+- **Usage and rates (ADR-060) [built]:** Billing → Usage and rates
+  (`packages/domain/src/billing/usage.ts`) shows owners, administrators and billing managers
+  (`billing.read`) Meta's rates for the company's billing currency (Settings → Messaging) and this
+  month's estimate, read in one repeatable-read, read-only transaction in the company's RLS scope:
+  - the published card in force (the latest effective time not after now): list prices at volume
+    tier 0 by market and pricing category, a missing price shown as not priced, never as zero;
+  - the next published card (the earliest effective time after now) with every price it changes,
+    adds or no longer lists, and the difference;
+  - this month so far in the company's time zone: delivered, billable, free and not-yet-priced
+    messages and the estimate by pricing category, from `estimateMetaCharges`, the function behind
+    Reports → Estimated Meta charges (§6C), so each message is priced with the card in force when it
+    was recorded and the two pages agree.
+
+  Drafts and withdrawn cards are never shown. Nothing is stored, posted to the ledger or taken from
+  service credit; Meta bills the company directly (ADR-011).
 
 - **Browser security:** the billing and WhatsApp-channels pages get their own CSP allowing only
   that provider's script and frame. Because a CSP belongs to the loaded document, links to these

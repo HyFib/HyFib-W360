@@ -340,8 +340,11 @@ verification, app review, Embedded Signup configuration).
   endpoints, new owners and turning off required two-factor); **[statements and receipts built,
   locally verified]** (ADR-057: Billing → Statements with every month since the first payment in
   the company's time zone, opening and closing balances, every ledger line with running balances,
-  a printable page and an audited CSV; a receipt per paid top-up, emailed to billing managers).
-  Remaining: usage & rate card view, invoices (tax review), paying for plans in HyFib.
+  a printable page and an audited CSV; a receipt per paid top-up, emailed to billing managers);
+  **[usage and rates built, locally verified]** (ADR-060: Billing → Usage and rates with Meta's
+  rates in force for the billing currency, the next published change and what it changes, and
+  this month's estimated Meta charges by pricing category, read-only, for billing managers too).
+  Remaining: invoices (tax review), paying for plans in HyFib, alerts before a rate change.
 - **P5-08 Public API** **[built, locally verified; sends through the Graph stand-in only]**
   (ADR-052): company API keys (SHA-256 only, scopes granted within the creator's permissions,
   expiry, rotation with an overlap, revocation, audit), `/api/v1` with approved template sends,

@@ -1653,3 +1653,43 @@ functions that check the attempt, and cannot read them back.
 **Not built:** alerts and emails, a CSV export of a run, reconciling settlements with bank
 statements (UTR), fee and tax accounting, companies' own Razorpay accounts, automatic handling of
 adjustments, disputes and transfers, and instant settlements.
+
+## ADR-060 Usage and rates for companies: Meta's rates in force, the next change and this month's estimate, read-only (2026-09-28)
+
+Context: companies are billed by Meta directly (ADR-011), and HyFib estimates those charges from
+the rate cards platform staff enter from Meta's published cards (ADR-028). Estimates already use
+the card in force at the time they price: a campaign's at its scheduled time, the campaign runner's
+at sending, Reports' at each message's time. But a company could not see which rates apply, or that
+Meta's rates change on a given day (Meta's cards change on 2026-10-01, research M-075, and M-067
+records service messages as free until 2026-09-30), and billing managers, who have `billing.read`
+but not `reports.read`, could not see any estimate.
+
+Decision: Billing → Usage and rates, for owners, administrators and billing managers
+(`billing.read`), read in one repeatable-read, read-only snapshot:
+
+- **The billing currency** chosen in Settings → Messaging (the currency Meta bills the company's
+  WhatsApp account in). Without it the page says where to choose it and shows no rates.
+- **Rates in force:** the published card for that currency with the latest effective time not after
+  now: its effective time, the source staff copied it from (Meta's rate card page), and the list
+  price (volume tier 0) of each market and pricing category. A category a market has no price for is
+  shown as not priced, never as zero.
+- **The next change:** the published card with the earliest effective time after now, with the date,
+  every price that changes (old and new, and the difference), prices that appear and prices that go
+  away. When no card is in force yet, the next card is shown as the rates from its date.
+- **This month so far:** in the company's time zone, the delivered messages, how many Meta marked
+  billable, free and not yet priced, and the estimated charges by category and in total, computed
+  by the same function as Reports → Estimated Meta charges (ADR-028), with the same reasons for
+  messages that cannot be priced. Members who can read reports get a link to the full report.
+
+Drafts and withdrawn cards are never shown (a withdrawal corrects a card; the correction is a new
+published card). The page is read-only: nothing is stored, and nothing is posted to the ledger or
+taken from service credit. It says that Meta bills the company directly and that estimates are upper
+bounds (list price, every billable message counted, volume tiers not applied).
+
+Access: billing managers see aggregate counts and estimates of delivered messages by pricing
+category, without any message, number, contact or market breakdown: a subset of what Reports shows
+`reports.read` holders.
+
+Not built: alerts or emails about an upcoming change, estimates per number or campaign on this page
+(campaigns show their own), a history of past cards, and exact charges (Meta's invoice is
+authoritative; reconciling with `pricing_analytics` stays in the backlog, ADR-028).

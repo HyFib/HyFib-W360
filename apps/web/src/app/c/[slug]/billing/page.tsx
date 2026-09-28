@@ -116,6 +116,16 @@ export default async function BillingPage({ params }: { params: Promise<{ slug: 
         description="Your HyFib plan, and prepaid service credit for HyFib W360 services. Meta bills your WhatsApp account directly for conversations."
       />
       <div className="grid grid-cols-1 gap-6">
+        <p className="text-sm text-muted-foreground">
+          <Link
+            href={`/c/${ctx.tenant.slug}/billing/usage`}
+            className="text-primary underline-offset-4 hover:underline"
+          >
+            Usage and rates
+          </Link>{' '}
+          shows Meta’s rates for your billing currency, the next change to them, and this month’s
+          estimated Meta charges.
+        </p>
         <PlanCard overview={plan} timeZone={tz} />
         {!payments.configured ? (
           <Alert tone="warning" title="Card payments are not available yet">

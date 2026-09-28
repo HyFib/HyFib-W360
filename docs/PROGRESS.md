@@ -1,5 +1,75 @@
 # Progress
 
+## 2026-09-28 — Phase 5: usage and rates for companies (P5-07, part)
+
+Status: **Billing → Usage and rates implemented and locally verified with test data only.**
+Companies see Meta's rates in force for their billing currency, the next published change and what
+it changes, and this month's estimated Meta charges. The page is read-only: Meta bills companies
+directly, and nothing is stored or charged. No card has been entered from Meta's published rate
+cards yet; platform staff do that.
+
+### Completed
+
+- **Design (ADR-060):** for owners, administrators and billing managers (`billing.read`; billing
+  managers have no `reports.read`, so they could not see any estimate before). One repeatable-read,
+  read-only snapshot in the company's scope: the billing currency from Settings → Messaging, the
+  published card in force (the latest effective time not after now), the next published card (the
+  earliest after now) and what it changes, and this month so far from the Reports estimate. Drafts
+  and withdrawn cards are never shown; nothing is written.
+- **Domain:** `billing/usage.ts` (`createBillingUsageService`, `compareRateCards`,
+  `chargesByCategory`, `formatRateChange`, and the category labels, now shared with Reports).
+  Reports' estimate is exported as `estimateMetaCharges`, so both pages compute the same numbers.
+- **Web:** Billing links to Usage and rates. The page:
+  - warns when the rates change, with how many prices change (or that no rates apply until then);
+  - shows this month's statistics and the estimate by pricing category, the reasons messages could
+    not be priced and, for members who can read reports, a link to the estimate by market;
+  - lists the rates in force, with a missing price read as "not priced", never as zero;
+  - lists what changes on the next card's date: old and new prices, the difference with a real
+    minus sign and its percentage, new prices and prices no longer listed.
+
+  Without a billing currency it says where to choose one, with a link for members who can change
+  settings.
+
+- **Found while building:** `formatUnitPrice` showed a whole price in a currency without minor
+  units with a trailing point ("2. JPY"); it now shows "2 JPY" (unit test).
+- **CI:** the end-to-end job now has 70 minutes and its test step 60 (were 60 and 50). On a66f64e
+  the step took 39.9 minutes for 152 tests, all passing on the first attempt, where 148 tests had
+  taken 33.5 on b2b7614: runners vary more than the new spec's minute, and 10 minutes of room was
+  too little for one retry of the 5-minute cart reminder test on a slow runner.
+- **Docs:** ADR-060; ARCHITECTURE §6B and §7; SECURITY (controls, the rate card rule, Phase 5
+  rules); THREAT-MODEL T84; BACKLOG P5-07; FEATURE-MATRIX W-013 (planned → locally verified) and
+  H-038.
+- **Mutation checks:** 26 guards broken one at a time; all 26 make a test fail. They cover the
+  permission, published cards only (in force and next), the currency (in force and next), the
+  effective instant on both sides, the order of cards, list prices only, the changes, comparing
+  cards (added and dropped prices, markets only on the next card, a missing price against zero),
+  the change text (minus sign, percentage base, no percentage from zero, new and dropped prices),
+  category totals and their order, the month, the company's time zone, the currency of the
+  estimate, and whole prices in currencies without minor units.
+
+### Test commands and results (local, 2026-09-28)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `pnpm test` (unit)                                                          | 313 passed. New: `billing/usage.test.ts` 5 (the changes between two cards market by market, identical cards, a zero price against no price, the change text, category totals and ties) and two lines in `campaigns/variables.test.ts` (whole prices in a currency without minor units).                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 401 passed, including the new `billing-usage.test.ts` 3: no currency (nothing to estimate) and who may read it (owners and billing managers; agents, marketers and supervisors refused); the card in force and the next one among withdrawn and draft cards before and after, a volume tier's price and another currency's cards, with what changes, and the switch at the next card's effective instant (not a millisecond before); this month's estimate equal to Reports' (priced, free, not yet priced and unknown-market messages), for this company only, the same for billing managers, with no ledger or wallet rows written.                                                                                                                |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 401 passed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 78 passed (39 × 2) in one full run (15.6 min), including the new `billing-usage.spec.ts` on both projects (8.2 s and 10.0 s): a company chooses the currency Meta bills it in; platform staff's cards for it are in force since yesterday and change in two days; a customer writes and the reply is delivered, reported free by Meta; Billing links to Usage and rates, which announces the change and how many prices change, shows the rates in force (a price the card does not have read as not priced), what changes (a higher price with its difference and percentage, a new price, a price no longer listed), one delivered message counted free and an estimate of nothing to pay, with no sideways scrolling on the phone. |
+| Mutation checks                                                             | 26 guards broken one at a time; all 26 make a test fail                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+
+### Known gaps
+
+- No card has been entered from Meta's published rate cards: platform staff enter the cards taking
+  effect on 2026-10-01 from Meta's own rate card pages, which this environment cannot reach
+  (research M-075).
+- No alert or email before a change. The page has no per-number or per-campaign figures, no
+  history of past cards and no exact charges: Meta's invoice is authoritative, and reconciling with
+  `pricing_analytics` stays in the backlog (ADR-028).
+- On a phone the two rate tables scroll sideways inside their cards, like every table in the app;
+  the page itself does not.
+- Firefox and WebKit run the new spec in CI only; only Chromium is installed locally.
+
 ## 2026-09-28 — Phase 5: daily settlement reconciliation (P5-05, part)
 
 Status: **Daily settlement reconciliation with Razorpay implemented and locally verified with test

@@ -77,10 +77,11 @@ jobs:
   e2e:
     name: End-to-end (Chromium, Firefox, WebKit, mobile)
     runs-on: ubuntu-24.04
-    # 152 tests run one at a time across four browser projects: about 4 minutes of set-up and 34 of
-    # tests on b2b7614 (148 tests), plus about 4 for the settlement reconciliation spec, so one retry
-    # of a long test (the cart reminder test allows 5 minutes) must still fit.
-    timeout-minutes: 60
+    # 156 tests run one at a time across four browser projects: about 3 minutes of set-up and 40 of
+    # tests on a66f64e (152 tests, all passing on the first attempt), plus about a minute for the
+    # usage and rates spec. Runners vary (148 tests took 33.5 minutes on b2b7614), and one retry of
+    # a long test (the cart reminder test allows 5 minutes) must still fit on a slow runner.
+    timeout-minutes: 70
     services:
       postgres:
         image: postgres:18-alpine
@@ -167,7 +168,7 @@ jobs:
       - run: pnpm exec playwright install --with-deps chromium firefox webkit
       # Stops before the job's limit, so a run that overruns still gets the steps below.
       - run: pnpm test:e2e
-        timeout-minutes: 50
+        timeout-minutes: 60
       - if: failure() || cancelled()
         run: cat "$RUNNER_TEMP/web.log" "$RUNNER_TEMP/worker.log"
       # Test data only: what the job queues and the stores held when the suite failed.
