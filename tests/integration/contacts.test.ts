@@ -174,6 +174,8 @@ describe('contacts', () => {
     }
     const first = await contactsSvc.listContacts(ctx, { tag: 'paged', limit: 3 });
     expect(first.items).toHaveLength(3);
+    // Each row carries its own tags (correlated with the listed contact, not the tag rows).
+    expect(first.items.map((i) => i.tags)).toEqual([['paged'], ['paged'], ['paged']]);
     const second = await contactsSvc.listContacts(ctx, {
       tag: 'paged',
       limit: 3,
@@ -316,6 +318,11 @@ describe('CSV import and export', () => {
     expect(out).toContain('+919811100004,"\'=HYPERLINK(""http://evil.test"")"');
     const parsed = parseCsv(out);
     expect(parsed.rows.length).toBe(3);
+    // Tags and consent are the contact's own (imported above).
+    const anil = parsed.rows.find((r) => r[0] === '+919811100001');
+    const bina = parsed.rows.find((r) => r[0] === '+919811100002');
+    expect(anil?.slice(3, 6)).toEqual(['gold; import-1; north', 'opted_in', '']);
+    expect(bina?.slice(4, 6)).toEqual(['opted_out', '']);
     const agent = await fx.ctx(c, c.agent);
     const denied = contactsSvc.exportContacts(agent, {});
     await expectAppError(denied.next(), 'forbidden');
