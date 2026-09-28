@@ -984,7 +984,7 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   (ADR-056).
 - **Not built yet:** staff-started deletion, stored exports and other formats.
 
-## 7. Commercial model and billing **[built: plans and entitlements, wallet, top-ups, auto-recharge, statements and receipts — verified against a local Razorpay stand-in only; paying for plans in HyFib and tax invoices planned]**
+## 7. Commercial model and billing **[built: plans and entitlements, wallet, top-ups, auto-recharge, statements and receipts, staff refunds of unused credit — verified against a local Razorpay stand-in only; paying for plans in HyFib and tax invoices planned]**
 
 - **Who pays Meta:** as a Meta Tech Provider HyFib has no credit line; each customer adds its own
   payment method and Meta bills them directly (`tenants.billing_mode = 'direct_meta'`, the default).
@@ -1080,6 +1080,37 @@ payment_requested → succeeded`; before each provider call it is written as `un
   keeps a new top-up from carrying one. Each credit emails the billing managers a link to its
   receipt, in the credit's transaction. Nothing is stored for statements; a statement viewed again
   shows the same postings.
+
+- **Staff refunds of unused credit (0032, ADR-058) [built]:** the platform company page shows the
+  company's balances, its latest paid top-ups and refunds (`ops.platform_company_billing`: payments
+  to HyFib, no company content, no support grant needed). A platform owner refunds part or all of a
+  paid top-up with a reason. `ops.platform_request_credit_refund` (definer, platform role only)
+  checks the owner, the reason, that the company is not being deleted, the top-up (paid or partly
+  refunded, no refund of it open), the amount (at most what is left of the payment) and, under the
+  wallet account's row lock, the available credit. In one transaction it places a hold
+  (`credit_refund`, 90 days), records `app.credit_refunds` (`requested`) and writes the platform
+  audit log with the reason. The minute billing sweep queues a signed `billing.credit-refund` job
+  for each due request (`ops.credit_refunds_due`). The job writes the attempt down first, then calls
+  `POST /v1/payments/:id/refund` with speed `normal` and `X-Refund-Idempotency: crf_<id>`, the same
+  body on every try:
+  - a refund returned: `submitted` with the refund id, audited, and the billing managers emailed;
+  - a 4xx other than 401 and 409: `failed` through `app.billing_fail_credit_refund`, which releases
+    the hold;
+  - a 401, 409, 429, 5xx, timeout or lost response: tried again after 1, 5, 15 and 60 minutes,
+    then hourly.
+
+  A submitted refund is checked every 15 minutes, then hourly after an hour and every 6 hours
+  after a day. `refund.processed` (webhook) or the job's check calls `app.billing_record_refund`
+  (replaced in 0032). It releases the hold of an open request for the same refund id, or of one
+  with no id stored yet and the same amount, and marks it `processed`, in the transaction that
+  posts the refund: the credit the hold set aside is taken exactly once, even when the webhook
+  arrives before the job stored the refund id. `refund.failed`, or a failed refund found by the
+  check, fails the request and releases the hold. The company role reads its requests but not the
+  staff reason or who asked (column grants). It may move an open request only between `requested`
+  and `submitted` (a restrictive policy): `processed` and `failed` are reachable only through the
+  definer functions that settle the hold. A due company deletion waits until no refund is open
+  (the worker checks before it starts). Statements label the hold "Reserved for a refund" and its
+  release "Refund reservation released"; the Billing page and the receipt show refunds in progress.
 
 - **Browser security:** the billing and WhatsApp-channels pages get their own CSP allowing only
   that provider's script and frame. Because a CSP belongs to the loaded document, links to these

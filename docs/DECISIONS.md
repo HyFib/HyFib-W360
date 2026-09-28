@@ -1502,3 +1502,74 @@ browser saves them as PDF), stored or emailed monthly statements, staff views of
 statements, tax invoices, and credit notes for refunds. Monthly rollups are not built either: the
 months list sums the wallet's whole ledger on each view. That is fine while only top-ups, refunds
 and chargebacks post, but a high-volume charging service (holds per request) will need rollups.
+
+## ADR-058 Refunds of unused service credit started by platform owners: a hold while Razorpay processes, the refund recorded from what Razorpay reports (2026-09-28)
+
+Decision: a platform owner can refund part or all of a paid top-up from the company's platform
+page, with a written reason. The amount is capped by two things: the top-up's unrefunded amount,
+and the company's available credit when the refund is asked for. Credit already spent is never
+refunded from the console, because that would leave the company owing money. Only one refund per
+top-up can be open at a time. Refunds made in the Razorpay Dashboard keep working as before
+(recorded from `refund.processed`).
+
+**Flow.**
+
+1. **Request.** `ops.platform_request_credit_refund` is SECURITY DEFINER and only the platform role
+   can execute it. It refuses anyone but a platform owner, a reason shorter than 10 characters, a
+   top-up that is not paid or partly refunded, and an amount outside ₹0.01 to the unrefunded
+   amount. Under the wallet's row lock it also refuses an amount above the available credit. Then,
+   in one transaction, it:
+   - places a hold for the amount (reference `credit_refund`, kept for 90 days);
+   - records the request in `app.credit_refunds` as `requested`;
+   - writes the platform audit log (`platform.credit_refund_requested`, with the reason).
+2. **Submit.** The minute billing sweep finds due requests (`ops.credit_refunds_due`) and queues one
+   signed `billing.credit-refund` job for each. The job runs in the company's scope and writes the
+   attempt down first. It then calls `POST /v1/payments/:id/refund` with the amount, speed
+   `normal`, and `X-Refund-Idempotency: crf_<request id>`, so a repeated call after a lost
+   response returns the same refund (R-076, R-086). The outcome:
+   - Razorpay returns a refund: the request becomes `submitted` with the refund id, the billing
+     managers are emailed, and a refund that is already `processed` is recorded at once.
+   - Razorpay refuses (a 4xx other than 401, and other than 409, which means a call with this key
+     is still being processed): the request becomes `failed`, the hold is released and the error
+     code is kept.
+   - A transient failure: the same call, with the same body, is retried after 1, 5, 15 and 60
+     minutes, then hourly.
+3. **Recording.** `refund.processed` (R-023), or the job's own check of a submitted refund (every 15
+   minutes, backing off to 6 hours), fetches the refund and its payment from Razorpay. It then calls
+   `app.billing_record_refund`, which is replaced in 0032. When the refund is for a top-up with an
+   open request (the same refund id, or no refund id stored yet and the same amount), the function
+   releases the request's hold and marks the request `processed`, in the same transaction as the
+   refund posting. So the refund takes the credit the hold set aside, exactly once.
+4. **Failure.** `refund.failed` (R-023), or a fetched refund that failed, marks the request
+   `failed` and releases the hold, so the credit is available again. The billing managers are
+   emailed.
+
+**On statements** a staff refund shows as "Reserved for a refund" when asked. When Razorpay
+completes it, "Refund reservation released" and "Refund to card" appear at the same moment. Total
+credit drops only when the refund is processed.
+
+**Why a hold and not a debit at request time:** a debit before Razorpay accepts would take credit
+the company keeps if the refund fails. The hold keeps the credit aside and is released either way,
+and the company cannot spend it meanwhile. A hold left open for 90 days is released by the
+expired-holds sweep; a refund processed after that is recorded as a plain refund.
+
+**Why platform owners only:** money leaves the platform. Operators see refunds but cannot start
+them, and every request is in the platform audit log with its reason. Staff see a company's
+balances, top-ups and refunds without a support grant: these are payments to HyFib, not the
+company's content (`ops.platform_company_billing` returns amounts, statuses, dates and the payment
+method, nothing else). The company sees its refunds on the Billing page and the receipt, but not
+the staff reason or who asked (column grants).
+
+**Company deletion:** no refund can be asked for once the company is pending deletion, and a
+deletion that is due waits until no refund is open: the worker checks before it starts, because
+nothing runs for a deleted company. For a company being deleted, a refund is made in the Razorpay
+Dashboard and recorded from `refund.processed`, as before. Refund requests are billing records and
+are kept after the deletion (ADR-055).
+
+**Fees and timing:** Razorpay does not reverse its fee on a refund (R-079). The company gets the
+full amount and the platform bears the fee. Refunds are paid from the platform's Razorpay balance
+and normally take 5–7 working days (R-077, R-079). The email and the pages say so.
+
+**Not built:** refunds asked for by companies, refunds of spent credit, refunds started here for a
+company being deleted, instant refunds (`optimum`), several refunds of one top-up at once, a
+platform-wide refunds list, and the daily reconciliation report (P5-05).

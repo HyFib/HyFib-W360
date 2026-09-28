@@ -4,6 +4,7 @@ import {
   autoRechargeAttempts,
   autoRechargeSettings,
   billingCustomers,
+  creditRefunds,
   desc,
   eq,
   gt,
@@ -12,6 +13,7 @@ import {
   paymentMandates,
   sql,
   topups,
+  type CreditRefundStatus,
   type Database,
   type MandateStatus,
   type TopupStatus,
@@ -84,9 +86,18 @@ export interface BillingOverview {
   transactions: {
     id: string;
     kind: string;
+    referenceType: string | null;
     description: string | null;
     availableEffectMinor: number;
     createdAt: Date;
+  }[];
+  /** Refunds of unused credit HyFib started that are not complete yet (ADR-058). */
+  refunds: {
+    id: string;
+    topupId: string;
+    amountMinor: number;
+    status: CreditRefundStatus;
+    requestedAt: Date;
   }[];
   mandate: {
     id: string;
@@ -199,11 +210,12 @@ export function createBillingService(deps: BillingServiceDeps) {
           const txRows = await tx.execute<{
             id: string;
             kind: string;
+            reference_type: string | null;
             description: string | null;
             created_at: Date | string;
             effect: string | number;
           }>(sql`
-            select t.id, t.kind, t.description, t.created_at,
+            select t.id, t.kind, t.reference_type, t.description, t.created_at,
                    coalesce(sum(case when e.direction = 'credit' then e.amount_minor else -e.amount_minor end)
                             filter (where a.code = 'wallet_available'), 0) as effect
               from app.ledger_transactions t
@@ -211,7 +223,7 @@ export function createBillingService(deps: BillingServiceDeps) {
               join app.ledger_accounts a on a.tenant_id = e.tenant_id and a.id = e.account_id
              where t.tenant_id = ${scope.tenantId}
              group by t.id
-             order by t.created_at desc, t.id desc
+             order by t.created_at desc, min(e.id) desc
              limit 50`);
           const [mandate] = await tx
             .select({
@@ -248,6 +260,21 @@ export function createBillingService(deps: BillingServiceDeps) {
             })
             .from(autoRechargeSettings)
             .where(eq(autoRechargeSettings.tenantId, scope.tenantId));
+          const refunds = await tx
+            .select({
+              id: creditRefunds.id,
+              topupId: creditRefunds.topupId,
+              amountMinor: creditRefunds.amountMinor,
+              status: creditRefunds.status,
+              requestedAt: creditRefunds.requestedAt,
+            })
+            .from(creditRefunds)
+            .where(
+              and(
+                eq(creditRefunds.tenantId, scope.tenantId),
+                inArray(creditRefunds.status, ['requested', 'submitted']),
+              ),
+            );
           const attempts = await tx
             .select({
               id: autoRechargeAttempts.id,
@@ -272,10 +299,12 @@ export function createBillingService(deps: BillingServiceDeps) {
             transactions: txRows.rows.map((r) => ({
               id: r.id,
               kind: r.kind,
+              referenceType: r.reference_type,
               description: r.description,
               availableEffectMinor: Number(r.effect),
               createdAt: new Date(r.created_at),
             })),
+            refunds,
             mandate: mandate ?? null,
             billingContact: customer ?? null,
             autoRecharge: settings ?? null,

@@ -147,6 +147,13 @@ made. This checklist records the evidence required per gate; unchecked items blo
       that receipt, and a month's statement and CSV match the Razorpay Dashboard's payments for the
       month; before live payments, a tax adviser decides what HyFib must issue for prepaid credit
       (receipts are payment confirmations only; GST receipt vouchers or invoices are not built)
+- [ ] Staff refunds of unused credit in Razorpay test mode on a staging deployment: `refund.failed`
+      added to the webhook's events; a platform owner refunds part of a test payment; the refund
+      appears in the Razorpay Dashboard with the note `hyfib_refund` and the request's
+      `X-Refund-Idempotency` key once; the company's credit is held, then taken once when
+      `refund.processed` arrives (and by the worker's check with the webhook disabled); a refusal
+      (refunds not enabled or no balance) gives the credit back; confirm with Razorpay how long a
+      normal refund takes and that its fee is not returned (R-077, R-079)
 - [ ] Tenant-isolation and security gates passing in CI on the release commit
 - [ ] Measured load behaviour against the test envelope (k6 results)
 - [ ] Backup restoration drill performed and timings recorded (RPO/RTO)

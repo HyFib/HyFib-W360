@@ -16,10 +16,12 @@ import {
   createCompanyDeletionService,
   createContactsService,
   createGrowthService,
+  createPlatformBillingService,
   createPlatformService,
   createStoreService,
   findDueTenantDeletions,
   outboxAad,
+  processCreditRefund,
   processStoreJob,
   queueTextMessage,
   runTenantDeletion,
@@ -51,6 +53,7 @@ const RZP_KEY_SECRET = randomBytes(16).toString('hex');
 const KEPT = [
   'app.auto_recharge_attempts',
   'app.billing_customers',
+  'app.credit_refunds',
   'app.ledger_accounts',
   'app.ledger_entries',
   'app.ledger_transactions',
@@ -349,9 +352,8 @@ async function connectShopify(c: Company, owner: TenantContext) {
   return { shop, storeId };
 }
 
-/** Registers HyFib's card mandate through the Razorpay stand-in (₹1 authorisation). */
-async function addCardMandate(owner: TenantContext) {
-  const billing = createBillingService({
+const billingService = () =>
+  createBillingService({
     db: fx.dbs.app,
     clock: systemClock,
     razorpay,
@@ -365,6 +367,10 @@ async function addCardMandate(owner: TenantContext) {
     },
     notices: { outbox: outbox(), appBaseUrl: APP_BASE },
   });
+
+/** Registers HyFib's card mandate through the Razorpay stand-in (₹1 authorisation). */
+async function addCardMandate(owner: TenantContext) {
+  const billing = billingService();
   const setup = await billing.startMandateSetup(owner, {
     maxAmountMinor: 1_500_000,
     email: 'billing@example.test',
@@ -756,6 +762,83 @@ describe('running a deletion', () => {
     expect(await runTenantDeletion(runDeps(), c.tenant.id)).toEqual({ outcome: 'not_due' });
     expect(await tenantRow(c.tenant.id)).toMatchObject({ status: 'active' });
     expect(fx.standIn.state.requests.filter((r) => r.path.includes(c.wabaId))).toEqual([]);
+  });
+
+  it('waits for a refund of service credit in progress, and no refund starts once deletion is asked for', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const billing = billingService();
+    const topup = await billing.startTopup(owner, { amountMinor: 50_000 });
+    const payment = rzp.pay(topup.orderId);
+    await billing.confirmTopupCheckout(owner, {
+      topupId: topup.topupId,
+      paymentId: payment.id,
+      signature: createHmac('sha256', RZP_KEY_SECRET)
+        .update(`${topup.orderId}|${payment.id}`)
+        .digest('hex'),
+    });
+    const platformOwner = await createUser(fx.dbs, { twoFactor: true });
+    await fx.dbs.ownerPool.query(
+      `INSERT INTO ops.platform_admins (user_id, role) VALUES ($1, 'platform_owner')`,
+      [platformOwner.id],
+    );
+    const actor: PlatformActor = {
+      userId: platformOwner.id,
+      role: 'platform_owner',
+      correlationId: uuidv7(),
+    };
+    const refunds = createPlatformBillingService({ platformDb: fx.dbs.platform });
+    const ask = {
+      tenantId: c.tenant.id,
+      topupId: topup.topupId,
+      reason: 'Leaving HyFib, ticket 4471',
+    };
+    const { refundId } = await refunds.requestRefund(actor, { ...ask, amount: '100' });
+    const scope = authorizedTenantScope(c.tenant.id, null);
+    const refundDeps = {
+      db: fx.dbs.app,
+      razorpay,
+      clock: systemClock,
+      notices: { outbox: outbox(), appBaseUrl: APP_BASE },
+    };
+    rzp.state.refundStatusOnCreate = 'pending';
+    try {
+      expect(await processCreditRefund(refundDeps, scope, refundId)).toBe('submitted');
+    } finally {
+      rzp.state.refundStatusOnCreate = 'processed';
+    }
+
+    await deletions().request(owner, { confirm: c.tenant.slug });
+    await makeDue(c.tenant.id);
+    await expectAppError(
+      refunds.requestRefund(actor, { ...ask, amount: '50' }),
+      'precondition_failed',
+      /being deleted/,
+    );
+    expect(await runTenantDeletion(runDeps(), c.tenant.id)).toEqual({
+      outcome: 'waiting_for_refund',
+    });
+    expect(await deletionRow(c.tenant.id)).toMatchObject({ started_at: null, attempts: 0 });
+    expect(await tenantRow(c.tenant.id)).toMatchObject({ status: 'pending_deletion' });
+
+    // Razorpay completes the refund; the deletion then runs and keeps the refund record.
+    const refund = [...rzp.state.refunds.values()].find(
+      (r) => r.idempotencyKey === `crf_${refundId}`,
+    );
+    rzp.setRefundStatus(refund!.id, 'processed');
+    expect(await processCreditRefund(refundDeps, scope, refundId)).toBe('processed');
+    expect((await runTenantDeletion(runDeps(), c.tenant.id)).outcome).toBe('finished');
+    const [kept] = await fx.query<{ status: string; amount_minor: number }>(
+      'SELECT status, amount_minor::int AS amount_minor FROM app.credit_refunds WHERE id = $1',
+      [refundId],
+    );
+    expect(kept).toEqual({ status: 'processed', amount_minor: 10_000 });
+    expect(await tenantRow(c.tenant.id)).toMatchObject({ status: 'deleted' });
+    await expectAppError(
+      refunds.requestRefund(actor, { ...ask, amount: '50' }),
+      'precondition_failed',
+      /being deleted/,
+    );
   });
 
   it('removes HyFib from the providers, deletes every company row, keeps the records and leaves a tombstone', async () => {

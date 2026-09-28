@@ -6,6 +6,7 @@ import {
   autoRechargeSettings,
   billingCustomers,
   commerceStores,
+  creditRefunds,
   eq,
   inArray,
   paymentMandates,
@@ -54,6 +55,8 @@ export interface DeletionRunOptions {
 export type DeletionRunResult =
   /** Not pending deletion, cancelled, or not due (nothing was done). */
   | { outcome: 'not_due' }
+  /** A refund of service credit is still with Razorpay (ADR-058): the deletion starts after it. */
+  | { outcome: 'waiting_for_refund' }
   | { outcome: 'continue'; rowsDeleted: number }
   | { outcome: 'finished'; rowsDeleted: number; cleanup: TenantDeletionCleanup[] };
 
@@ -310,6 +313,30 @@ async function notifyDeleted(
   }
 }
 
+/**
+ * Whether a refund of service credit started by platform staff is still open (ADR-058). The
+ * deletion waits for it: nothing runs for a deleted company, and no new refund can be asked for
+ * once the company is pending deletion, so none is left open after the deletion starts.
+ */
+async function hasOpenCreditRefund(db: Database, tenantId: string): Promise<boolean> {
+  const rows = await db.run(
+    authorizedTenantScope(tenantId, null),
+    (tx) =>
+      tx
+        .select({ id: creditRefunds.id })
+        .from(creditRefunds)
+        .where(
+          and(
+            eq(creditRefunds.tenantId, tenantId),
+            inArray(creditRefunds.status, ['requested', 'submitted']),
+          ),
+        )
+        .limit(1),
+    { accessMode: 'read only' },
+  );
+  return rows.length > 0;
+}
+
 /** One run of a company's deletion; see `DeletionRunResult`. */
 export async function runTenantDeletion(
   deps: DeletionRunDeps,
@@ -318,6 +345,7 @@ export async function runTenantDeletion(
 ): Promise<DeletionRunResult> {
   const budgetMs = options.budgetMs ?? 5 * 60_000;
   const batchSize = options.batchSize ?? 2_000;
+  if (await hasOpenCreditRefund(deps.db, tenantId)) return { outcome: 'waiting_for_refund' };
   const started = await startDeletion(deps.db, tenantId);
   if (!started) return { outcome: 'not_due' };
   const scope = authorizedTenantScope(tenantId, null);

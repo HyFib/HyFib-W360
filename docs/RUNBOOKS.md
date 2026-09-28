@@ -148,7 +148,8 @@ app.auto_recharge_attempts WHERE tenant_id = … ORDER BY created_at DESC`. `unk
    owners and billing members; the company turns it back on after fixing the card.
 6. **Refunds and chargebacks.** Refunds made in the Razorpay Dashboard are recorded from
    `refund.processed`; lost disputes from `payment.dispute.lost`. Both reduce available credit and
-   may make it negative, which blocks billable services until credit is added.
+   may make it negative, which blocks billable services until credit is added. Prefer refunding
+   unused credit from the company's platform page (step 10): it never takes spent credit.
 7. **Enabling card mandates.** Only after Razorpay confirms Recurring Payments (card) for the
    merchant: set `RAZORPAY_RECURRING_CARDS_ENABLED=true` on web and worker. Turning it off again
    stops new mandates and new auto-recharge settings; attempts already requested still complete.
@@ -171,6 +172,26 @@ app.auto_recharge_attempts WHERE tenant_id = … ORDER BY created_at DESC`. `unk
    - **Migrations 0030 and 0031 failed.** They build `ledger_entries_account_time_idx` and
      `ledger_transactions_reference_idx` concurrently outside a transaction. Drop the invalid index
      (`DROP INDEX CONCURRENTLY IF EXISTS app.<index>`) and run the migrations again.
+10. **Refunds of unused credit** (the company's platform page → Service credit, platform owners,
+    ADR-058). The request holds the credit at once; the worker sends it to Razorpay within a
+    minute or two and the company's billing managers are emailed when Razorpay accepts it.
+    Razorpay normally completes it in 5–7 working days and keeps its fee.
+    `SELECT status, attempts, provider_refund_id, last_error, next_attempt_at FROM app.credit_refunds
+WHERE tenant_id = … ORDER BY requested_at DESC`:
+    - **`requested` with attempts rising:** Razorpay did not answer or was busy; the same call
+      (same idempotency key, so never a second refund) is repeated after 1, 5, 15 and 60 minutes,
+      then hourly. A 401 means the API keys are wrong: fix them, and the next try goes through.
+    - **`submitted` for days:** normal up to about 7 working days. Look the refund up in the
+      Dashboard; if Razorpay shows it processed, redeliver `refund.processed` (or wait for the
+      worker's check, every 6 hours after the first day). Never mark it processed by hand.
+    - **`failed`:** `last_error` is Razorpay's code and description (for example refunds not
+      enabled, or not enough balance); the credit is back with the company. Fix the cause and ask
+      for a new refund.
+    - **The company asked for deletion:** new refunds are refused; refund from the Dashboard, which
+      is recorded from `refund.processed`. A due deletion waits for a refund in progress (the
+      deletion card on the platform page says so).
+    - A refund still open after 90 days loses its hold to the expired-holds sweep; if Razorpay
+      processes it later, it is recorded as a plain refund.
 
 ## 10. Contacts, consent and templates
 

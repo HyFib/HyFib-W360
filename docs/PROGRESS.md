@@ -1,5 +1,92 @@
 # Progress
 
+## 2026-09-28 — Phase 5: staff refunds of unused service credit (P5-05, part)
+
+Status: **Staff refunds of unused service credit implemented and locally verified with test data
+only.** A platform owner refunds part or all of a paid top-up from the company's platform page; the
+credit is held at once, the worker asks Razorpay, and the refund is recorded from what Razorpay
+reports. Razorpay traffic comes from the test-only stand-in; nothing reached Razorpay.
+
+### Completed
+
+- **Design (ADR-058):** a hold while Razorpay processes the refund, never a debit at request time
+  (a debit would take credit the company keeps if the refund fails). Only unused credit is refunded,
+  at most what is left of the payment, one open refund per top-up, platform owners only, with a
+  reason in the platform audit log. Staff see a company's balances, top-ups and refunds without a
+  support grant: payments to HyFib, not company content.
+- **Schema (migration 0032):**
+  - `app.credit_refunds` (requested, submitted, processed, failed): company RLS, column grants that
+    keep the staff reason and who asked from the company role, and a restrictive policy that lets
+    the company role move an open request only between requested and submitted.
+  - `ops.platform_request_credit_refund` (definer, platform role only): checks the owner, the
+    reason, that the company is not being deleted, the payment and, under the wallet's row lock,
+    the unused credit; holds the credit (90 days), records the request and writes the platform
+    audit log in one transaction.
+  - `ops.platform_company_billing` (balances, the latest 50 paid top-ups and refunds, for staff)
+    and `ops.credit_refunds_due` (the sweep's input).
+  - `app.billing_fail_credit_refund` fails a request and releases its hold together.
+  - `app.billing_record_refund` is replaced: a refund of a top-up with an open request (the same
+    refund id, or no id stored yet and the same amount) releases the request's hold and marks it
+    processed in the transaction that posts the refund.
+- **Domain:** `billing/credit-refunds.ts` (the worker's step: the attempt written down first,
+  `X-Refund-Idempotency: crf_<id>` with the same body every try, retries for anything uncertain,
+  checks every 15 minutes, then hourly, then every 6 hours; emails and audit), `refund.failed`
+  handling in the Razorpay receipt processor (fetched first), `platform/billing.ts` (the staff
+  service and the form's refund limits), refunds in progress in the Billing overview and on
+  receipts, statement labels ("Reserved for a refund", "Refund reservation released") with their
+  receipt links. A due company deletion waits for refunds in progress.
+- **Worker:** the `billing.credit-refund` queue and handler; the minute billing sweep queues one
+  signed job per due request.
+- **Web:** a Service credit card on the platform company page (balances, top-ups, refunds with
+  their reason and who asked, and the refund form for platform owners); refunds in progress on the
+  company's Billing page and receipts; a note on the deletion card when a due deletion waits.
+- **Found while building:**
+  - Postings made in one transaction share its time, and statements broke that tie by the posting's
+    random id, so a refund could be listed before the release of its reservation, with a
+    misleading balance in between. Statements, the latest changes on Billing and receipts now keep
+    the order the postings were made in (their first ledger entry's id).
+  - A refund still open when a company's deletion ran would have been stranded: the worker drops
+    jobs for deleted companies. New refunds are refused once deletion is asked for, and a due
+    deletion waits for refunds in progress.
+  - The operations console could list a quarantined webhook event without its Retry control (from
+    P5-10): Meta and Razorpay receipt processing wrote the quarantine entry and the receipt's
+    `quarantined` status in two transactions, and a page rendered between them saw the entry with
+    the receipt still processing. The local e2e run caught it once (`platform-ops.spec.ts` waited
+    for Retry on such a page). Both processors now write the entries with the receipt's outcome in
+    one transaction.
+- **Tests:** the Razorpay stand-in can create refunds pending and finish them (in tests and through
+  two test-only control routes for e2e).
+- **Docs:** ADR-058; ARCHITECTURE §7; SECURITY (controls, Phase 5 rules, platform roles);
+  THREAT-MODEL T82; RUNBOOKS §9 (refunds); DEPLOYMENT (`refund.failed` webhook event);
+  DATA-RETENTION; RELEASE-CHECKLIST (a Razorpay test-mode run on staging); BACKLOG P5-05;
+  FEATURE-MATRIX H-036.
+- **Mutation checks:** 31 guards broken one at a time; all 31 make a test fail. They cover the
+  request function's checks (owner, reason, deletion, spent credit, what is left of the payment,
+  paid top-ups, the hold, the audit), staff reads, the due list, recording (the request completed,
+  the match before the refund id is stored), failing (the hold released, never after processing),
+  the company role's policy and column grants, the idempotency key, 409 and lost responses, the
+  write-ahead attempt, recording an immediate refund, late failures, `refund.failed` trusted
+  without a fetch, the deletion wait, statement order, labels and receipt links, the overview and
+  receipt lists, and the form's refund limits.
+
+### Test commands and results (local, 2026-09-28)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `pnpm test` (unit)                                                          | 298 passed. New: `billing/credit-refunds.test.ts` 2 (check intervals; labels for a refund's reservation and its release) and `platform/billing.test.ts` 3 (the form's limits: what is left of each payment, capped by the unused credit; refunded top-ups, ones with nothing left and ones with a refund in progress left out).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 388 passed, including the new `credit-refunds.test.ts` 11: the hold, audit and staff and company views; owners only, checked by the database too; a short reason, bad amounts, more than what is left of the payment or than the unused credit, an unpaid payment and a second open refund refused; one Razorpay call with the idempotency key and the processed webhook recording it once; a refund processed at once and one found by the worker's check; a lost response, a 409 and a 503 never making a second refund; the webhook arriving before the refund id is stored; a refusal and a failed refund giving the credit back (webhook and check), and a failed Dashboard refund changing nothing; a processed request never failed; company isolation. `company-data.test.ts` 15 (new: a due deletion waits for a refund in progress, and no refund starts once deletion is asked for). |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 74 passed (37 × 2) in one full run (14.9 min), including the new `credit-refunds.spec.ts` on both projects: a platform owner's refund with a reason and the confirmation; the worker's submission after the minute billing sweep; the company's Billing page (the refund in progress, the credit set aside, the note on the payment), the receipt and the email while it is in progress; the processed webhook recording it once; staff seeing it refunded. The first full run (72 passed, 2 failed) caught the confirmation disappearing on phones and the console's quarantine race, both fixed above.                                                                                                                                                                                                                                                                         |
+| Mutation checks                                                             | 31 guards broken one at a time; all 31 make a test fail                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+
+### Known gaps
+
+- Not run against Razorpay test mode yet (staging, RELEASE-CHECKLIST). Refunds asked for by
+  companies, refunds of spent credit, instant refunds, several open refunds of one top-up, a
+  platform-wide refunds list and the daily reconciliation report are not built.
+- A refund Razorpay processes after its hold expired (90 days) is recorded as a plain refund.
+- Firefox and WebKit run the new spec in CI only; only Chromium is installed locally.
+
 ## 2026-09-28 — Phase 5: billing statements and receipts (P5-07, part)
 
 Status: **Monthly statements and payment receipts implemented and locally verified with test

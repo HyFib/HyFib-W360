@@ -5,9 +5,10 @@ import {
   assertCan,
   can,
   hasRecentSignIn,
-  LEDGER_KIND_LABELS,
+  ledgerLineLabel,
   MANDATE_MAX_MINOR,
   RECENT_SIGN_IN_MINUTES,
+  REFUND_DAYS_NOTE,
   type BillingOverview,
   type LedgerKind,
 } from '@w360/domain';
@@ -103,6 +104,9 @@ export default async function BillingPage({ params }: { params: Promise<{ slug: 
   const { payments, wallet, mandate } = overview;
   const tz = ctx.tenant.timezone;
   const activeMandate = mandate?.status === 'active' ? mandate : null;
+  // Refunds HyFib started that Razorpay has not completed (ADR-058), by the payment they refund.
+  const refundsByTopup = new Map(overview.refunds.map((r) => [r.topupId, r]));
+  const refundingMinor = overview.refunds.reduce((sum, r) => sum + r.amountMinor, 0);
 
   return (
     <>
@@ -141,10 +145,20 @@ export default async function BillingPage({ params }: { params: Promise<{ slug: 
                 </dd>
               </div>
               <div className="rounded-md border border-border p-4">
-                <dt className="text-sm text-muted-foreground">Reserved for running services</dt>
+                <dt className="text-sm text-muted-foreground">
+                  {refundingMinor > 0
+                    ? 'Reserved for running services and refunds'
+                    : 'Reserved for running services'}
+                </dt>
                 <dd className="text-2xl font-semibold">{inr(wallet.heldMinor)}</dd>
               </div>
             </dl>
+            {refundingMinor > 0 ? (
+              <Alert tone="info" title="A refund is in progress">
+                HyFib is refunding {inr(refundingMinor)} of your service credit, set aside until the
+                refund is complete. {REFUND_DAYS_NOTE}
+              </Alert>
+            ) : null}
             {wallet.availableMinor < 0 ? (
               <Alert tone="danger" title="Your balance is negative">
                 A refund or chargeback exceeded your remaining credit. Add credit to use billable
@@ -306,6 +320,11 @@ export default async function BillingPage({ params }: { params: Promise<{ slug: 
                             {t.failureReason}
                           </span>
                         ) : null}
+                        {refundsByTopup.has(t.id) ? (
+                          <span className="block text-xs text-muted-foreground">
+                            Refund of {inr(refundsByTopup.get(t.id)?.amountMinor ?? 0)} in progress
+                          </span>
+                        ) : null}
                       </TD>
                       <TD className="whitespace-nowrap">
                         {RECEIPT_STATUSES.has(t.status) ? (
@@ -357,7 +376,7 @@ export default async function BillingPage({ params }: { params: Promise<{ slug: 
                       <TD className="whitespace-nowrap">
                         {formatDateTime(t.createdAt.toISOString(), tz)}
                       </TD>
-                      <TD>{LEDGER_KIND_LABELS[t.kind as LedgerKind] ?? t.description ?? t.kind}</TD>
+                      <TD>{ledgerLineLabel(t.kind as LedgerKind, t.referenceType)}</TD>
                       <TD className="text-right tabular-nums">{signed(t.availableEffectMinor)}</TD>
                     </TR>
                   ))}

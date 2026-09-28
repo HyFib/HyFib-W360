@@ -4,6 +4,7 @@ import {
   autoRechargeAttempts,
   autoRechargeSettings,
   authorizedTenantScope,
+  creditRefunds,
   eq,
   inArray,
   lt,
@@ -21,6 +22,7 @@ import {
 import { recordSystemAudit } from '../audit';
 import { receiptAad } from '../messaging/receipts';
 import { cancelPendingAutoRecharge, failTopup } from './attempts';
+import { failCreditRefund } from './credit-refunds';
 import { notifyBillingManagers, type BillingNoticeDeps } from './notices';
 import type { RazorpayClient, RazorpayPayment, RazorpayResult, RazorpayToken } from './razorpay';
 
@@ -436,6 +438,51 @@ async function applyRefund(deps: BillingProviderDeps, paymentId: string, refundI
   });
 }
 
+/**
+ * A refund Razorpay failed (R-023): when it is a refund a platform owner asked for (ADR-058), the
+ * request fails and its hold is released so the credit is available again. The refund is fetched
+ * first; a failed refund nobody asked for through HyFib (a Dashboard refund) changes nothing.
+ */
+async function applyRefundFailure(deps: BillingProviderDeps, paymentId: string, refundId: string) {
+  const refund = await deps.razorpay.fetchRefund(paymentId, refundId);
+  if (!refund.ok) {
+    if (refund.kind === 'permanent') return 'unknown_refund' as const;
+    throw transient(refund, 'refund fetch');
+  }
+  if (refund.data.status !== 'failed') return 'refund_not_failed' as const;
+  const payment = await deps.razorpay.fetchPayment(paymentId);
+  if (!payment.ok) {
+    if (payment.kind === 'permanent') return 'unknown_refund' as const;
+    throw transient(payment, 'payment fetch');
+  }
+  if (!payment.data.orderId) return 'unknown_refund' as const;
+  const binding = await resolveProviderOrder(deps.db, payment.data.orderId);
+  if (!binding || binding.subject !== 'topup') return 'unknown_refund' as const;
+  const scope = authorizedTenantScope(binding.tenantId, null);
+  const [request] = await deps.db.run(
+    scope,
+    (tx) =>
+      tx
+        .select({ id: creditRefunds.id })
+        .from(creditRefunds)
+        .where(
+          and(
+            eq(creditRefunds.tenantId, binding.tenantId),
+            eq(creditRefunds.providerRefundId, refundId),
+          ),
+        ),
+    { accessMode: 'read only' },
+  );
+  if (!request) return 'refund_failed_not_requested' as const;
+  const outcome = await failCreditRefund(
+    deps,
+    scope,
+    request.id,
+    'failed: Razorpay failed the refund',
+  );
+  return outcome === 'failed' ? ('credit_refund_failed' as const) : ('already_settled' as const);
+}
+
 async function applyDispute(deps: BillingProviderDeps, disputeId: string) {
   const dispute = await deps.razorpay.fetchDispute(disputeId);
   if (!dispute.ok) {
@@ -512,30 +559,27 @@ export async function processRazorpayReceipt(
   });
   if (!claimed) return 'not_claimable';
 
+  /**
+   * The receipt's outcome, with its quarantine entry in the same transaction, so the operations
+   * console never lists an entry whose receipt is still being processed.
+   */
   const finish = async (
     status: 'processed' | 'ignored' | 'quarantined',
     summary: Record<string, unknown>,
+    quarantine?: { reason: 'unknown_asset' | 'malformed'; externalIds: Record<string, unknown> },
   ) => {
-    await deps.db.run(systemScope, (tx) =>
-      tx
+    await deps.db.run(systemScope, async (tx) => {
+      if (quarantine) {
+        await tx
+          .insert(webhookQuarantine)
+          .values({ id: uuidv7(), receiptId, provider: 'razorpay', ...quarantine })
+          .onConflictDoNothing();
+      }
+      await tx
         .update(webhookReceipts)
         .set({ status, summary, processedAt: deps.clock.now(), leaseUntil: null, lastError: null })
-        .where(eq(webhookReceipts.id, receiptId)),
-    );
-  };
-  const quarantine = async (externalIds: Record<string, unknown>) => {
-    await deps.db.run(systemScope, (tx) =>
-      tx
-        .insert(webhookQuarantine)
-        .values({
-          id: uuidv7(),
-          receiptId,
-          provider: 'razorpay',
-          reason: 'unknown_asset',
-          externalIds,
-        })
-        .onConflictDoNothing(),
-    );
+        .where(eq(webhookReceipts.id, receiptId));
+    });
   };
 
   try {
@@ -546,19 +590,11 @@ export async function processRazorpayReceipt(
         deps.keyring.decryptString(claimed.bodyCiphertext, receiptAad(claimed.id)),
       ) as typeof event;
     } catch {
-      await deps.db.run(systemScope, (tx) =>
-        tx
-          .insert(webhookQuarantine)
-          .values({
-            id: uuidv7(),
-            receiptId,
-            provider: 'razorpay',
-            reason: 'malformed',
-            externalIds: {},
-          })
-          .onConflictDoNothing(),
+      await finish(
+        'quarantined',
+        { error: 'unreadable body' },
+        { reason: 'malformed', externalIds: {} },
       );
-      await finish('quarantined', { error: 'unreadable body' });
       return 'quarantined';
     }
     const name = typeof event.event === 'string' ? event.event.slice(0, 64) : '';
@@ -576,8 +612,14 @@ export async function processRazorpayReceipt(
         }
         const applied = await applyPaymentById(deps, paymentId);
         if (applied.outcome === 'unknown_order') {
-          await quarantine({ paymentId, orderId: 'orderId' in applied ? applied.orderId : null });
-          await finish('quarantined', { event: name });
+          await finish(
+            'quarantined',
+            { event: name },
+            {
+              reason: 'unknown_asset',
+              externalIds: { paymentId, orderId: 'orderId' in applied ? applied.orderId : null },
+            },
+          );
           return 'quarantined';
         }
         result = applied.outcome;
@@ -588,6 +630,15 @@ export async function processRazorpayReceipt(
         const paymentId = entityField(payload, 'refund', 'payment_id');
         result =
           refundId && paymentId ? await applyRefund(deps, paymentId, refundId) : 'no refund id';
+        break;
+      }
+      case 'refund.failed': {
+        const refundId = entityId(payload, 'refund');
+        const paymentId = entityField(payload, 'refund', 'payment_id');
+        result =
+          refundId && paymentId
+            ? await applyRefundFailure(deps, paymentId, refundId)
+            : 'no refund id';
         break;
       }
       case 'payment.dispute.lost': {

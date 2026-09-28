@@ -45,6 +45,7 @@ import {
   createPlanAdminService,
   createPlansService,
   createPlatformService,
+  createPlatformBillingService,
   createPlatformOpsService,
   pgBossQueueInspector,
   createRateCardsService,
@@ -80,6 +81,7 @@ import {
   type PlanAdminService,
   type PlansService,
   type PlatformService,
+  type PlatformBillingService,
   type PlatformOpsService,
   type RateCardsService,
   type SavedRepliesService,
@@ -127,6 +129,8 @@ export interface Runtime {
   platform: PlatformService;
   /** The platform operations console (/platform/ops): content-free facts and two audited repairs. */
   platformOps: PlatformOpsService;
+  /** Companies' service credit for platform staff, and refunds of unused credit (ADR-058). */
+  platformBilling: PlatformBillingService;
   inbox: InboxService;
   teams: TeamsService;
   businessHours: BusinessHoursService;
@@ -260,6 +264,7 @@ async function init(): Promise<Runtime> {
     queues: pgBossQueueInspector(boss),
     clock: systemClock,
   });
+  const platformBilling = createPlatformBillingService({ platformDb });
   const inbox = createInboxService({ db, clock: systemClock, jobs, signer });
   const teams = createTeamsService({ db, clock: systemClock });
   const businessHours = createBusinessHoursService({ db, clock: systemClock });
@@ -400,6 +405,7 @@ async function init(): Promise<Runtime> {
     companyExport,
     platform,
     platformOps,
+    platformBilling,
     inbox,
     teams,
     businessHours,

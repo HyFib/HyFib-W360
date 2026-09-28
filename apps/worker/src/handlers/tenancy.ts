@@ -48,6 +48,10 @@ export function tenantDeleteHandler(rt: WorkerRuntime) {
       rt.logger.info({ jobId: job.id, tenantId }, 'company deletion not due');
       return;
     }
+    if (result.outcome === 'waiting_for_refund') {
+      rt.logger.info({ jobId: job.id, tenantId }, 'company deletion waits for a credit refund');
+      return;
+    }
     if (result.outcome === 'continue') {
       rt.logger.info(
         { jobId: job.id, tenantId, rowsDeleted: result.rowsDeleted },

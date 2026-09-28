@@ -5,6 +5,7 @@ import {
   autoRechargeHandler,
   billingEventProcessHandler,
   billingSweepHandler,
+  creditRefundHandler,
 } from './handlers/billing';
 import { automationHttpHandler, automationRunHandler } from './handlers/automations';
 import { campaignRunHandler } from './handlers/campaigns';
@@ -178,6 +179,12 @@ async function main(): Promise<void> {
     QUEUES.autoRecharge.name,
     { localConcurrency: 2, batchSize: 1 },
     logFailures(rt, QUEUES.autoRecharge.name, autoRechargeHandler(rt)),
+  );
+  // Refunds of unused credit started by platform owners (ADR-058), queued by the billing sweep.
+  await rt.boss.work(
+    QUEUES.billingCreditRefund.name,
+    { localConcurrency: 2, batchSize: 1 },
+    logFailures(rt, QUEUES.billingCreditRefund.name, creditRefundHandler(rt)),
   );
   await rt.boss.work(
     QUEUES.billingSweep.name,

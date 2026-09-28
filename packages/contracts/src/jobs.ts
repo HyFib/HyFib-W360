@@ -111,6 +111,22 @@ export const QUEUES = {
     deadLetter: 'dead-letter',
     deleteAfterHours: 168,
   },
+  /**
+   * Asks Razorpay for a refund a platform owner requested (ADR-058), or checks one Razorpay is
+   * processing. Provider failures leave the request due again for the minute sweep; the job itself
+   * retries only unexpected errors.
+   */
+  billingCreditRefund: {
+    name: 'billing.credit-refund',
+    policy: 'exclusive',
+    retryLimit: 5,
+    retryDelaySeconds: 60,
+    retryBackoff: true,
+    retryDelayMaxSeconds: 1800,
+    expireInSeconds: 300,
+    deadLetter: 'dead-letter',
+    deleteAfterHours: 168,
+  },
   billingSweep: {
     name: 'ops.billing-sweep',
     policy: 'exclusive',

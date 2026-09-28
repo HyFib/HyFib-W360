@@ -3,13 +3,16 @@ import {
   and,
   autoRechargeAttempts,
   billingCustomers,
+  creditRefunds,
   eq,
   inArray,
   paymentMandates,
   sql,
   topups,
   wallets,
+  type CreditRefundStatus,
   type Database,
+  type LedgerKind,
   type TopupStatus,
   type Tx,
 } from '@w360/db';
@@ -30,15 +33,7 @@ import { parseInput } from '../validation';
  * tax invoice.
  */
 
-export const LEDGER_KINDS = [
-  'topup_credit',
-  'hold',
-  'hold_release',
-  'hold_settle',
-  'refund',
-  'dispute_loss',
-] as const;
-export type LedgerKind = (typeof LEDGER_KINDS)[number];
+export type { LedgerKind };
 
 export const LEDGER_KIND_LABELS: Record<LedgerKind, string> = {
   topup_credit: 'Credit added',
@@ -48,6 +43,15 @@ export const LEDGER_KIND_LABELS: Record<LedgerKind, string> = {
   refund: 'Refund to card',
   dispute_loss: 'Chargeback',
 };
+
+/** A ledger line's label; the hold of a staff refund (ADR-058) says what it is for. */
+export function ledgerLineLabel(kind: LedgerKind, referenceType: string | null): string {
+  if (referenceType === 'credit_refund') {
+    if (kind === 'hold') return 'Reserved for a refund';
+    if (kind === 'hold_release') return 'Refund reservation released';
+  }
+  return LEDGER_KIND_LABELS[kind] ?? kind;
+}
 
 /** Razorpay's documented payment methods; anything else is shown as Razorpay reported it. */
 const PAYMENT_METHOD_LABELS: Record<string, string> = {
@@ -209,6 +213,17 @@ export interface PaymentReceipt {
   providerOrderId: string | null;
   refundedMinor: number;
   adjustments: ReceiptAdjustment[];
+  /**
+   * Refunds HyFib started for this payment that did not complete (ADR-058): in progress or
+   * failed. Completed ones are in `adjustments`.
+   */
+  refundRequests: {
+    id: string;
+    amountMinor: number;
+    status: CreditRefundStatus;
+    requestedAt: Date;
+    failedAt: Date | null;
+  }[];
   companyName: string;
   billingEmail: string | null;
   timezone: string;
@@ -341,7 +356,9 @@ type RawLine = {
 
 /**
  * Lines of [start, end) in time order from line `offset` (0-based), with running sums of the
- * changes from the period's first line, so balances carry across pages.
+ * changes from the period's first line, so balances carry across pages. Postings made in one
+ * transaction share its time and keep the order they were made in (their first entry's id), such
+ * as a refund reservation released before the refund it pays for.
  */
 async function periodLines(
   tx: Tx,
@@ -358,7 +375,8 @@ async function periodLines(
              coalesce(sum(case when e.direction = a.normal_side then e.amount_minor else -e.amount_minor end)
                       filter (where a.code = 'wallet_available'), 0) as available_change,
              coalesce(sum(case when e.direction = a.normal_side then e.amount_minor else -e.amount_minor end)
-                      filter (where a.code = 'wallet_held'), 0) as reserved_change
+                      filter (where a.code = 'wallet_held'), 0) as reserved_change,
+             min(e.id) as first_entry
         from app.ledger_transactions t
         join app.ledger_entries e on e.tenant_id = t.tenant_id and e.transaction_id = t.id
         join app.ledger_accounts a on a.tenant_id = e.tenant_id and a.id = e.account_id
@@ -372,7 +390,7 @@ async function periodLines(
              sum(l.available_change) over w as available_cum,
              sum(l.reserved_change) over w as reserved_cum
         from lines l
-      window w as (order by l.created_at, l.id rows between unbounded preceding and current row)
+      window w as (order by l.created_at, l.first_entry rows between unbounded preceding and current row)
     )
     select id, kind, reference_type, reference_id, actor_id, created_at, available_change,
            reserved_change, available_cum, reserved_cum
@@ -383,43 +401,58 @@ async function periodLines(
   return res.rows;
 }
 
-/** Receipt numbers and payment ids of the top-ups the lines refer to. */
-async function topupsFor(
-  tx: Tx,
-  tenantId: string,
-  lines: RawLine[],
-): Promise<Map<string, { receipt: string; paymentId: string | null }>> {
-  const ids = [
-    ...new Set(
-      lines
-        .filter(
-          (l) => l.reference_type === 'topup' && l.reference_id && UUID_RE.test(l.reference_id),
-        )
-        .map((l) => l.reference_id as string),
-    ),
-  ];
-  if (ids.length === 0) return new Map();
+interface LineTopups {
+  /** Top-up id → its receipt number and Razorpay payment. */
+  topups: Map<string, { receipt: string; paymentId: string | null }>;
+  /** Staff refund request id → the top-up it refunds (holds of staff refunds, ADR-058). */
+  refundTopups: Map<string, string>;
+}
+
+const referenced = (lines: RawLine[], type: string) => [
+  ...new Set(
+    lines
+      .filter((l) => l.reference_type === type && l.reference_id && UUID_RE.test(l.reference_id))
+      .map((l) => l.reference_id as string),
+  ),
+];
+
+/** Receipt numbers and payment ids of the top-ups the lines refer to, directly or by a refund. */
+async function topupsFor(tx: Tx, tenantId: string, lines: RawLine[]): Promise<LineTopups> {
+  const refundIds = referenced(lines, 'credit_refund');
+  const refundTopups = new Map<string, string>();
+  if (refundIds.length > 0) {
+    const rows = await tx
+      .select({ id: creditRefunds.id, topupId: creditRefunds.topupId })
+      .from(creditRefunds)
+      .where(and(eq(creditRefunds.tenantId, tenantId), inArray(creditRefunds.id, refundIds)));
+    for (const r of rows) refundTopups.set(r.id, r.topupId);
+  }
+  const ids = [...new Set([...referenced(lines, 'topup'), ...refundTopups.values()])];
+  if (ids.length === 0) return { topups: new Map(), refundTopups };
   const rows = await tx
     .select({ id: topups.id, receipt: topups.receipt, paymentId: topups.providerPaymentId })
     .from(topups)
     .where(and(eq(topups.tenantId, tenantId), inArray(topups.id, ids)));
-  return new Map(rows.map((r) => [r.id, { receipt: r.receipt, paymentId: r.paymentId }]));
+  return {
+    topups: new Map(rows.map((r) => [r.id, { receipt: r.receipt, paymentId: r.paymentId }])),
+    refundTopups,
+  };
 }
 
-function toLines(
-  raw: RawLine[],
-  opening: Balances,
-  topupRefs: Map<string, { receipt: string; paymentId: string | null }>,
-): StatementLine[] {
+function toLines(raw: RawLine[], opening: Balances, refs: LineTopups): StatementLine[] {
   return raw.map((r) => {
-    const topupId =
-      r.reference_type === 'topup' && r.reference_id && topupRefs.has(r.reference_id)
-        ? r.reference_id
+    const directTopup = r.reference_type === 'topup' ? r.reference_id : null;
+    const refundTopup =
+      r.reference_type === 'credit_refund' && r.reference_id
+        ? (refs.refundTopups.get(r.reference_id) ?? null)
         : null;
-    const topup = topupId ? topupRefs.get(topupId) : undefined;
+    const candidate = directTopup ?? refundTopup;
+    const topupId = candidate && refs.topups.has(candidate) ? candidate : null;
+    const topup = topupId ? refs.topups.get(topupId) : undefined;
     let reference: string | null;
     if (r.kind === 'topup_credit') reference = topup?.paymentId ?? null;
     else if (r.kind === 'refund' || r.kind === 'dispute_loss') reference = r.actor_id;
+    else if (r.reference_type === 'credit_refund') reference = topup?.paymentId ?? null;
     else
       reference =
         r.reference_type && r.reference_id ? `${r.reference_type} ${r.reference_id}` : null;
@@ -427,7 +460,7 @@ function toLines(
       id: r.id,
       at: new Date(r.created_at),
       kind: r.kind,
-      label: LEDGER_KIND_LABELS[r.kind] ?? r.kind,
+      label: ledgerLineLabel(r.kind, r.reference_type),
       reference,
       topupId,
       receiptNumber: topup?.receipt ?? null,
@@ -745,7 +778,7 @@ export function createBillingHistoryService(deps: BillingHistoryDeps) {
              where t.tenant_id = ${ctx.tenant.id} and t.reference_type = 'topup'
                and t.reference_id = ${topup.id} and t.kind in ('refund', 'dispute_loss')
              group by t.id
-             order by t.created_at, t.id`);
+             order by t.created_at, min(e.id)`);
           let card: PaymentReceipt['card'] = null;
           if (topup.kind === 'auto_recharge') {
             const [mandate] = await tx
@@ -766,6 +799,23 @@ export function createBillingHistoryService(deps: BillingHistoryDeps) {
               );
             card = mandate ?? null;
           }
+          const refundRequests = await tx
+            .select({
+              id: creditRefunds.id,
+              amountMinor: creditRefunds.amountMinor,
+              status: creditRefunds.status,
+              requestedAt: creditRefunds.requestedAt,
+              failedAt: creditRefunds.failedAt,
+            })
+            .from(creditRefunds)
+            .where(
+              and(
+                eq(creditRefunds.tenantId, ctx.tenant.id),
+                eq(creditRefunds.topupId, topup.id),
+                inArray(creditRefunds.status, ['requested', 'submitted', 'failed']),
+              ),
+            )
+            .orderBy(creditRefunds.requestedAt);
           const [customer] = await tx
             .select({ email: billingCustomers.email })
             .from(billingCustomers)
@@ -794,6 +844,7 @@ export function createBillingHistoryService(deps: BillingHistoryDeps) {
               at: new Date(r.created_at),
               reference: r.actor_id,
             })),
+            refundRequests,
             companyName: ctx.tenant.name,
             billingEmail: customer?.email ?? null,
             timezone: ctx.tenant.timezone,

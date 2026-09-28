@@ -2,7 +2,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { displayMoney, isAppError } from '@w360/core';
-import { assertCan, type PaymentReceipt } from '@w360/domain';
+import { assertCan, REFUND_DAYS_NOTE, type PaymentReceipt } from '@w360/domain';
 import {
   Badge,
   Card,
@@ -153,6 +153,43 @@ export default async function ReceiptPage({
                   ))}
                 </TBody>
               </Table>
+            </div>
+          ) : null}
+          {receipt.refundRequests.length > 0 ? (
+            <div className="grid gap-2">
+              <h2 className="text-sm font-medium">Refunds started by HyFib</h2>
+              <Table>
+                <THead>
+                  <TR>
+                    <TH>Started</TH>
+                    <TH>Status</TH>
+                    <TH className="text-right">Amount</TH>
+                  </TR>
+                </THead>
+                <TBody>
+                  {receipt.refundRequests.map((r) => (
+                    <TR key={r.id}>
+                      <TD className="whitespace-nowrap">{formatDateTime(r.requestedAt, tz)}</TD>
+                      <TD>
+                        {r.status === 'failed' ? (
+                          <>
+                            <Badge tone="danger">Could not be completed</Badge>
+                            <span className="block text-xs text-muted-foreground">
+                              The amount is back in your available credit.
+                            </span>
+                          </>
+                        ) : (
+                          <Badge tone="info">In progress</Badge>
+                        )}
+                      </TD>
+                      <TD className="text-right tabular-nums">{inr(r.amountMinor)}</TD>
+                    </TR>
+                  ))}
+                </TBody>
+              </Table>
+              {receipt.refundRequests.some((r) => r.status !== 'failed') ? (
+                <p className="text-xs text-muted-foreground">{REFUND_DAYS_NOTE}</p>
+              ) : null}
             </div>
           ) : null}
           <p className="text-xs text-muted-foreground">

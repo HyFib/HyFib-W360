@@ -15,6 +15,7 @@ import {
   TenantStatusForm,
 } from '@/components/platform/platform-forms';
 import { IssueList, LevelBadge, Utc } from '@/components/platform/ops';
+import { ServiceCredit } from '@/components/platform/service-credit';
 import { formatDate, formatDateTime } from '@/lib/format';
 import { getRuntime } from '@/server/runtime';
 import { requirePlatformActor } from '@/server/session';
@@ -25,17 +26,25 @@ export const dynamic = 'force-dynamic';
 export default async function PlatformTenantPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const actor = await requirePlatformActor();
-  const { platform, planAdmin, platformOps } = await getRuntime();
+  const { platform, planAdmin, platformOps, platformBilling, clock } = await getRuntime();
   const company = await platform.getTenant(actor, id);
   if (!company) notFound();
-  const [owners, planView, published, ops, deletion] = await Promise.all([
+  const [owners, planView, published, ops, deletion, credit] = await Promise.all([
     platform.tenantOwners(actor, id),
     planAdmin.tenantPlan(actor, id),
     planAdmin.assignablePlans(actor),
     platformOps.companyHealth(actor, id),
     platform.tenantDeletion(actor, id),
+    platformBilling.companyBilling(actor, id),
   ]);
   const { state, usage, limits } = planView;
+  const waitsForRefund = Boolean(
+    deletion &&
+    !deletion.startedAt &&
+    !deletion.cancelledAt &&
+    deletion.dueAt.getTime() <= clock.now().getTime() &&
+    credit.refunds.some((r) => r.status === 'requested' || r.status === 'submitted'),
+  );
   const tz = planView.timezone;
   const option = (p: (typeof published)[number] | NonNullable<typeof planView.plan>) => ({
     id: p.id,
@@ -95,6 +104,9 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
               <CardDescription>
                 Asked for by an owner (ADR-055). Staff cannot start, speed up or cancel it; owners
                 can cancel until it starts.
+                {waitsForRefund
+                  ? ' It is due and waits for the refund of service credit in progress (ADR-058).'
+                  : ''}
               </CardDescription>
             </CardHeader>
             <CardContent className="grid gap-4 text-sm">
@@ -279,6 +291,29 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
                 runPacks: state.runPacks,
               }}
               options={options}
+            />
+          </CardContent>
+        </Card>
+        <Card className="lg:col-span-2">
+          <CardHeader>
+            <CardTitle>Service credit</CardTitle>
+            <CardDescription>
+              Payments to HyFib and refunds of unused credit (ADR-058). A refund reserves the credit
+              at once; Razorpay returns the money to where it came from, usually in 5–7 working
+              days.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <ServiceCredit
+              tenantId={company.id}
+              billing={credit}
+              refundBlocked={
+                actor.role !== 'platform_owner'
+                  ? 'Only platform owners can refund service credit.'
+                  : company.status === 'pending_deletion' || company.status === 'deleted'
+                    ? 'The company is being deleted, so refunds are not started here. Refund the payment in the Razorpay Dashboard; HyFib records it from Razorpay’s refund event.'
+                    : null
+              }
             />
           </CardContent>
         </Card>

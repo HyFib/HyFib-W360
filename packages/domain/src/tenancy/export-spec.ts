@@ -842,6 +842,29 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
     ],
   },
   {
+    table: 'app.credit_refunds',
+    columns: [
+      'id',
+      'topup_id',
+      'hold_id',
+      'amount_minor',
+      'status',
+      'provider_refund_id',
+      'attempts',
+      'next_attempt_at',
+      'last_error',
+      'requested_at',
+      'submitted_at',
+      'processed_at',
+      'failed_at',
+      'updated_at',
+    ],
+    omitted: {
+      reason: "The platform owner's note on why HyFib refunded; platform-only.",
+      requested_by_user_id: 'The HyFib staff member who asked for the refund; platform-only.',
+    },
+  },
+  {
     table: 'app.crm_activities',
     columns: [
       'id',
