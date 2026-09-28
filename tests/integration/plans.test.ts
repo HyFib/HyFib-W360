@@ -154,7 +154,13 @@ const activePlan = (
 async function ctxOf(tenantSlug: string, user: TestUser): Promise<TenantContext> {
   return resolveTenantContext(
     { db: fx.dbs.app, clock: systemClock, mfaGracePeriodHours: 72 },
-    { userId: user.id, sessionId: null, tenantSlug, correlationId: uuidv7() },
+    {
+      userId: user.id,
+      sessionId: `sess_${user.id}`,
+      sessionCreatedAt: new Date(),
+      tenantSlug,
+      correlationId: uuidv7(),
+    },
   );
 }
 

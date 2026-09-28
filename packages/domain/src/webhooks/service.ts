@@ -19,6 +19,7 @@ import {
 } from '@w360/db';
 import { recordAudit, type RequestMeta } from '../audit';
 import { assertCan, type TenantContext } from '../authz/context';
+import { assertRecentSignIn } from '../authz/step-up';
 import { parseInput } from '../validation';
 import { WEBHOOK_EVENT_KEYS, WEBHOOK_LIMITS, webhookHost } from './model';
 
@@ -244,6 +245,7 @@ export function createWebhooksService(deps: {
     /** A new endpoint; its secret is returned once. */
     async create(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
       assertCan(ctx, 'developer.manage');
+      assertRecentSignIn(ctx, clock.now());
       const data = parseInput(endpointSchema, input);
       const { url, host } = checkedUrl(data.url, deps.egressPolicy);
       const id = uuidv7();
@@ -286,6 +288,7 @@ export function createWebhooksService(deps: {
 
     async update(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
       assertCan(ctx, 'developer.manage');
+      assertRecentSignIn(ctx, clock.now());
       const data = parseInput(updateSchema, input);
       const { url, host } = checkedUrl(data.url, deps.egressPolicy);
       await db.run(ctx.scope, async (tx) => {
@@ -365,8 +368,9 @@ export function createWebhooksService(deps: {
      */
     async rotateSecret(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
       assertCan(ctx, 'developer.manage');
-      const { endpointId } = parseInput(endpointIdSchema, input);
       const now = clock.now();
+      assertRecentSignIn(ctx, now);
+      const { endpointId } = parseInput(endpointIdSchema, input);
       const secret = generateWebhookSecret();
       await db.run(ctx.scope, async (tx) => {
         const endpoint = await lockEndpoint(tx, ctx.tenant.id, endpointId);

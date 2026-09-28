@@ -46,6 +46,8 @@ describe('permission matrix', () => {
     }
     expect(ALLOWED_WHEN_SUSPENDED.has('billing.manage')).toBe(true);
     expect(ALLOWED_WHEN_SUSPENDED.has('tenant.export')).toBe(true);
+    // Leaving must not depend on paying: deletion can be asked for (and cancelled) while suspended.
+    expect(ALLOWED_WHEN_SUSPENDED.has('tenant.delete')).toBe(true);
   });
 
   it('only owners can assign the owner role', () => {

@@ -204,6 +204,25 @@ describe('database roles', () => {
     for (const role of ['w360_app', 'w360_auth', 'w360_platform']) {
       expect(await can(role, 'ops.url_host(text)'), role).toBe(false);
     }
+    // Company deletion (0028): requesting, cancelling and running it for the runtime role only;
+    // the helper naming the company being deleted for the definer functions only.
+    for (const fn of [
+      'app.request_tenant_deletion(text)',
+      'app.cancel_tenant_deletion()',
+      'ops.tenant_deletions_due(integer)',
+      'ops.start_tenant_deletion(uuid)',
+      'ops.record_tenant_deletion_cleanup(uuid,jsonb)',
+      'ops.delete_tenant_data(uuid,integer)',
+      'ops.finish_tenant_deletion(uuid)',
+    ]) {
+      expect(await can('w360_app', fn), fn).toBe(true);
+      expect(await can('w360_auth', fn), fn).toBe(false);
+      expect(await can('w360_platform', fn), fn).toBe(false);
+    }
+    expect(await can('w360_definer', 'ops.deleting_tenant_id()')).toBe(true);
+    for (const role of ['w360_app', 'w360_auth', 'w360_platform']) {
+      expect(await can(role, 'ops.deleting_tenant_id()'), role).toBe(false);
+    }
     await expect(
       dbs.appPool.query(
         `SELECT ops.platform_reset_user_mfa('usr_x', 'Verified identity by phone')`,

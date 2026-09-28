@@ -137,6 +137,7 @@ function ctxFor(company: Company, user: TestUser): Promise<TenantContext> {
     {
       userId: user.id,
       sessionId: `sess_${user.id}`,
+      sessionCreatedAt: new Date(),
       tenantSlug: company.tenant.slug,
       correlationId: uuidv7(),
     },

@@ -52,7 +52,9 @@ export function CompanySwitcher({
           >
             <span className="flex-1 truncate">{c.name}</span>
             {c.status !== 'active' ? (
-              <span className="text-xs text-warning">{c.status}</span>
+              <span className="text-xs text-warning">
+                {c.status === 'pending_deletion' ? 'being deleted' : c.status}
+              </span>
             ) : null}
             {c.slug === current.slug ? (
               <Check aria-label="Current company" className="size-4" />

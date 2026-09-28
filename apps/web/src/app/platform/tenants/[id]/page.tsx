@@ -15,6 +15,7 @@ import {
   TenantStatusForm,
 } from '@/components/platform/platform-forms';
 import { IssueList, LevelBadge, Utc } from '@/components/platform/ops';
+import { ServiceCredit } from '@/components/platform/service-credit';
 import { formatDate, formatDateTime } from '@/lib/format';
 import { getRuntime } from '@/server/runtime';
 import { requirePlatformActor } from '@/server/session';
@@ -25,16 +26,25 @@ export const dynamic = 'force-dynamic';
 export default async function PlatformTenantPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const actor = await requirePlatformActor();
-  const { platform, planAdmin, platformOps } = await getRuntime();
+  const { platform, planAdmin, platformOps, platformBilling, clock } = await getRuntime();
   const company = await platform.getTenant(actor, id);
   if (!company) notFound();
-  const [owners, planView, published, ops] = await Promise.all([
+  const [owners, planView, published, ops, deletion, credit] = await Promise.all([
     platform.tenantOwners(actor, id),
     planAdmin.tenantPlan(actor, id),
     planAdmin.assignablePlans(actor),
     platformOps.companyHealth(actor, id),
+    platform.tenantDeletion(actor, id),
+    platformBilling.companyBilling(actor, id),
   ]);
   const { state, usage, limits } = planView;
+  const waitsForRefund = Boolean(
+    deletion &&
+    !deletion.startedAt &&
+    !deletion.cancelledAt &&
+    deletion.dueAt.getTime() <= clock.now().getTime() &&
+    credit.refunds.some((r) => r.status === 'requested' || r.status === 'submitted'),
+  );
   const tz = planView.timezone;
   const option = (p: (typeof published)[number] | NonNullable<typeof planView.plan>) => ({
     id: p.id,
@@ -66,6 +76,114 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
         <p className="text-sm text-muted-foreground">Last status reason: {company.statusReason}</p>
       ) : null}
       <div className="grid gap-6 lg:grid-cols-2">
+        {deletion ? (
+          <Card className="lg:col-span-2">
+            <CardHeader>
+              <div className="flex flex-wrap items-center gap-2">
+                <CardTitle>Deletion</CardTitle>
+                <Badge
+                  tone={
+                    deletion.completedAt
+                      ? 'neutral'
+                      : deletion.cancelledAt
+                        ? 'info'
+                        : deletion.startedAt
+                          ? 'danger'
+                          : 'warning'
+                  }
+                >
+                  {deletion.completedAt
+                    ? 'Deleted'
+                    : deletion.cancelledAt
+                      ? 'Cancelled'
+                      : deletion.startedAt
+                        ? 'Deleting'
+                        : 'Scheduled'}
+                </Badge>
+              </div>
+              <CardDescription>
+                Asked for by an owner (ADR-055). Staff cannot start, speed up or cancel it; owners
+                can cancel until it starts.
+                {waitsForRefund
+                  ? ' It is due and waits for the refund of service credit in progress (ADR-058).'
+                  : ''}
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-4 text-sm">
+              <dl className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                <div>
+                  <dt className="text-muted-foreground">Requested</dt>
+                  <dd>
+                    <Utc at={deletion.requestedAt} />
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-muted-foreground">Due</dt>
+                  <dd>
+                    <Utc at={deletion.dueAt} />
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-muted-foreground">
+                    {deletion.cancelledAt ? 'Cancelled' : 'Started'}
+                  </dt>
+                  <dd>
+                    <Utc at={deletion.cancelledAt ?? deletion.startedAt} />
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-muted-foreground">Finished</dt>
+                  <dd>
+                    <Utc at={deletion.completedAt} />
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-muted-foreground">Status before the request</dt>
+                  <dd>{deletion.previousStatus}</dd>
+                </div>
+                <div>
+                  <dt className="text-muted-foreground">Runs</dt>
+                  <dd>{deletion.attempts}</dd>
+                </div>
+                <div>
+                  <dt className="text-muted-foreground">Rows deleted</dt>
+                  <dd>{deletion.rowsDeleted}</dd>
+                </div>
+                <div>
+                  <dt className="text-muted-foreground">Providers visited</dt>
+                  <dd>
+                    <Utc at={deletion.providerCleanupAt} />
+                  </dd>
+                </div>
+              </dl>
+              {deletion.providerCleanup.length > 0 ? (
+                <ul className="grid gap-1">
+                  {deletion.providerCleanup.map((item, index) => (
+                    <li key={index} className="flex flex-wrap items-center gap-2">
+                      <Badge
+                        tone={
+                          item.outcome === 'done'
+                            ? 'success'
+                            : item.outcome === 'failed'
+                              ? 'danger'
+                              : 'neutral'
+                        }
+                      >
+                        {item.outcome}
+                      </Badge>
+                      <span className="min-w-0 break-words">{item.label}</span>
+                      {item.code ? (
+                        <code className="text-xs text-muted-foreground">{item.code}</code>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              ) : deletion.providerCleanupAt ? (
+                <p className="text-muted-foreground">No provider connections to remove.</p>
+              ) : null}
+            </CardContent>
+          </Card>
+        ) : null}
         <Card>
           <CardHeader>
             <CardTitle>Account status</CardTitle>
@@ -173,6 +291,29 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
                 runPacks: state.runPacks,
               }}
               options={options}
+            />
+          </CardContent>
+        </Card>
+        <Card className="lg:col-span-2">
+          <CardHeader>
+            <CardTitle>Service credit</CardTitle>
+            <CardDescription>
+              Payments to HyFib and refunds of unused credit (ADR-058). A refund reserves the credit
+              at once; Razorpay returns the money to where it came from, usually in 5–7 working
+              days.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <ServiceCredit
+              tenantId={company.id}
+              billing={credit}
+              refundBlocked={
+                actor.role !== 'platform_owner'
+                  ? 'Only platform owners can refund service credit.'
+                  : company.status === 'pending_deletion' || company.status === 'deleted'
+                    ? 'The company is being deleted, so refunds are not started here. Refund the payment in the Razorpay Dashboard; HyFib records it from Razorpay’s refund event.'
+                    : null
+              }
             />
           </CardContent>
         </Card>

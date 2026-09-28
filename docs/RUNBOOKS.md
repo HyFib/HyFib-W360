@@ -103,7 +103,15 @@ audited. Never paste tokens, message content or card data into tickets or chat.
 2. Restore the managed PostgreSQL to a new instance at the chosen point in time (PITR).
 3. Verify: row counts, latest audit events, migration table (`w360_migrations.applied`), pg-boss
    version; run the isolation test suite against the restored instance if time permits.
-4. Re-apply pending deletions recorded after the restore point (deletion log, phase 5).
+4. Re-apply company deletions completed after the restore point before reopening access. List
+   them from the old database's register (`SELECT * FROM ops.tenant_deletions WHERE completed_at >
+'<restore point>'`) or, if it is lost, from the worker's `company deleted` log lines
+   (`tenantId`). On the restored database, as the migration role with `SET ROLE w360_definer`: if
+   the company's deletion is still open there, set its `due_at` to now; if the request came after
+   the restore point, insert the old register row (same id, requester, request time, previous
+   status and name, `due_at` now, no start or completion) and set the company's status to
+   `pending_deletion`. The minute sweep then deletes it again (section 10Q). Contact erasures after
+   the restore point are repeated from the old database's audit log (`contact.erased`).
 5. Switch connection strings (secret manager) and roll web/worker. Record timings (RPO/RTO achieved)
    in the release evidence. **A restore drill has not been performed yet.**
 
@@ -140,13 +148,50 @@ app.auto_recharge_attempts WHERE tenant_id = … ORDER BY created_at DESC`. `unk
    owners and billing members; the company turns it back on after fixing the card.
 6. **Refunds and chargebacks.** Refunds made in the Razorpay Dashboard are recorded from
    `refund.processed`; lost disputes from `payment.dispute.lost`. Both reduce available credit and
-   may make it negative, which blocks billable services until credit is added.
+   may make it negative, which blocks billable services until credit is added. Prefer refunding
+   unused credit from the company's platform page (step 10): it never takes spent credit.
 7. **Enabling card mandates.** Only after Razorpay confirms Recurring Payments (card) for the
    merchant: set `RAZORPAY_RECURRING_CARDS_ENABLED=true` on web and worker. Turning it off again
    stops new mandates and new auto-recharge settings; attempts already requested still complete.
 8. **Integrity check** (read-only, any time):
    `SELECT tenant_id FROM app.ledger_accounts GROUP BY tenant_id HAVING sum(CASE WHEN normal_side =
 'debit' THEN balance_minor ELSE -balance_minor END) <> 0` must return no rows.
+9. **Statements and receipts** (Billing → Statements, and Receipt links, ADR-057). They are computed
+   from the ledger each time: nothing to regenerate or repair.
+   - **"A statement changed."** Statements follow the company's current time zone, and changing it
+     moves every month boundary. Otherwise a posting only appears afterwards if it committed after
+     the statement was generated, just after midnight (each statement shows when it was
+     generated).
+   - **"No receipt."** Only a top-up credited from a captured payment has one; a top-up still
+     awaiting payment shows none (see step 3).
+   - **"The method is missing."** Top-ups credited before 0029 have no recorded method. It is filled
+     in the next time Razorpay reports the payment (a redelivered `payment.captured` webhook
+     does it); never set it by hand.
+   - **"We need a tax invoice."** Receipts are payment confirmations, not tax invoices. GST
+     documents are not issued yet (tax review, RELEASE-CHECKLIST).
+   - **Migrations 0030 and 0031 failed.** They build `ledger_entries_account_time_idx` and
+     `ledger_transactions_reference_idx` concurrently outside a transaction. Drop the invalid index
+     (`DROP INDEX CONCURRENTLY IF EXISTS app.<index>`) and run the migrations again.
+10. **Refunds of unused credit** (the company's platform page → Service credit, platform owners,
+    ADR-058). The request holds the credit at once; the worker sends it to Razorpay within a
+    minute or two and the company's billing managers are emailed when Razorpay accepts it.
+    Razorpay normally completes it in 5–7 working days and keeps its fee.
+    `SELECT status, attempts, provider_refund_id, last_error, next_attempt_at FROM app.credit_refunds
+WHERE tenant_id = … ORDER BY requested_at DESC`:
+    - **`requested` with attempts rising:** Razorpay did not answer or was busy; the same call
+      (same idempotency key, so never a second refund) is repeated after 1, 5, 15 and 60 minutes,
+      then hourly. A 401 means the API keys are wrong: fix them, and the next try goes through.
+    - **`submitted` for days:** normal up to about 7 working days. Look the refund up in the
+      Dashboard; if Razorpay shows it processed, redeliver `refund.processed` (or wait for the
+      worker's check, every 6 hours after the first day). Never mark it processed by hand.
+    - **`failed`:** `last_error` is Razorpay's code and description (for example refunds not
+      enabled, or not enough balance); the credit is back with the company. Fix the cause and ask
+      for a new refund.
+    - **The company asked for deletion:** new refunds are refused; refund from the Dashboard, which
+      is recorded from `refund.processed`. A due deletion waits for a refund in progress (the
+      deletion card on the platform page says so).
+    - A refund still open after 90 days loses its hold to the expired-holds sweep; if Razorpay
+      processes it later, it is recorded as a plain refund.
 
 ## 10. Contacts, consent and templates
 
@@ -384,8 +429,8 @@ that section.
 
 **A chat link shows "This chat link is not available".** The short link answers 404 when the link
 is archived (restore it on its page), its number is not active (Settings → Channels; a number that
-needs reconnecting stops its links until it is active again), or the company is being deleted. A
-suspended company's links keep working. The link page shows a warning in the first two cases.
+needs reconnecting stops its links until it is active again), or the company was deleted. A
+suspended company's links keep working, as do those of a company waiting for deletion (ADR-055). The link page shows a warning in the first two cases.
 Unknown or mistyped addresses answer the same page. Nothing is logged about the visitor.
 
 **Clicks look too high.** Counts include every open of the short link and its QR code: repeated
@@ -950,15 +995,59 @@ transaction; if it fails, drop the invalid index
 (`DROP INDEX CONCURRENTLY IF EXISTS app.consent_events_tenant_occurred_idx`) and run the
 migrations again.
 
+## 10Q. Company export and deletion
+
+Owners use Settings → Company data (ADR-055). Nothing here is done by staff: staff cannot start,
+speed up or cancel a deletion, and the export is only for the company's owners.
+
+**An export fails or is cut short.** The file is complete only if its last line is
+`{"end":true,...}`. A second export while one runs answers 409; each start is audited
+(`tenant.exported`) and emailed to owners and administrators, even when it then fails. A failure
+after the download started is logged by the web as `company export stopped` (with the company id).
+Large companies stream for as long as the read takes; `idle_in_transaction_session_timeout` (60 s)
+ends an export whose reader stops reading for a minute.
+
+**A deletion is scheduled.** The company is `pending_deletion` until `due_at` (14 days) and works as
+suspended. Any owner cancels in Settings → Company data until the run starts; after that the page
+says it can no longer be cancelled. The register is `ops.tenant_deletions` (the company's platform
+page shows it). A company that asks HyFib to stop a deletion before it starts: an owner cancels; if
+no owner can, suspend handling of the request and escalate (there is no staff cancellation).
+
+**A deletion is running or stuck.** The minute billing sweep queues a `tenant.delete` job for every
+due or unfinished deletion (`company deletions due` in the worker log); each run deletes for up to
+five minutes (`company deletion continues` with the rows deleted) until `company deleted`. A run that
+keeps failing shows in the job log and dead letters (section 3); the register's `attempts` counts
+runs. `finish_tenant_deletion` returns false while any deletable row remains, so a run that ends
+with rows written meanwhile simply runs again. The providers are visited once per deletion
+(`provider_cleanup_at`); their outcomes are in `provider_cleanup` and in the final email. A
+`failed` outcome (for example Meta refusing an expired token) is not retried: the email asks the
+owners to remove HyFib's access there; WooCommerce stores are always listed because their keys can
+only be revoked in the store.
+
+**After a deletion.** The company row is a tombstone (`deleted`, "Deleted company",
+`deleted-<id>`); its old address is free. Billing records, plan history, the register, support
+grants and security events stay. Meta events for its numbers are quarantined as `unknown_asset`
+(section 4). If the business connects the same numbers to another company, they bind normally.
+
+**Migration 0028 failed.** It runs in one transaction and needs the bootstrap roles; fix the cause
+and run the migrations again.
+
 ## 11. Compromised company (tenant) or account
 
 1. Suspend the company in `/platform` with a reason (stops outbound activity; ingestion continues).
 2. For a compromised user: reset MFA via platform recovery (verified out of band), which signs out
    all their sessions; require a password reset.
 3. Rotate company-level provider credentials (reconnect WhatsApp), API keys and webhook secrets
-   (phase 5).
+   (phase 5). A stolen session alone could not export the company, ask for its deletion, change
+   payment settings or the company's Razorpay keys, create API keys or webhook endpoints, add an
+   owner or turn off required two-factor: those need a sign-in within the last 15 minutes
+   (ADR-056). Check the audit log for them anyway (a stolen password is enough to sign in).
 4. Review the company audit log and security events; export evidence; notify the owner.
 5. Reactivate with a reason once clean.
+
+**"Sign in again to continue".** Members see it when an action needs a sign-in within the last 15
+minutes (ADR-056) and theirs is older. It signs them out and brings them back to the page after
+they sign in. It is not an error and cannot be switched off for a company.
 
 ## 12. Migration failure
 

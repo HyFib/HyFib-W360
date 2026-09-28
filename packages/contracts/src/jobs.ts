@@ -111,6 +111,22 @@ export const QUEUES = {
     deadLetter: 'dead-letter',
     deleteAfterHours: 168,
   },
+  /**
+   * Asks Razorpay for a refund a platform owner requested (ADR-058), or checks one Razorpay is
+   * processing. Provider failures leave the request due again for the minute sweep; the job itself
+   * retries only unexpected errors.
+   */
+  billingCreditRefund: {
+    name: 'billing.credit-refund',
+    policy: 'exclusive',
+    retryLimit: 5,
+    retryDelaySeconds: 60,
+    retryBackoff: true,
+    retryDelayMaxSeconds: 1800,
+    expireInSeconds: 300,
+    deadLetter: 'dead-letter',
+    deleteAfterHours: 168,
+  },
   billingSweep: {
     name: 'ops.billing-sweep',
     policy: 'exclusive',
@@ -307,6 +323,23 @@ export const QUEUES = {
     expireInSeconds: 120,
     deadLetter: 'dead-letter',
     deleteAfterHours: 72,
+  },
+  /**
+   * Deletes a company whose 14-day grace period has ended (ADR-055): cleans up at providers,
+   * deletes its rows a batch per transaction and leaves a tombstone. A run stops after a few
+   * minutes of work; the next signal (a retry or the minute billing sweep) continues from where it
+   * stopped, because every step is recorded in the database.
+   */
+  tenantDelete: {
+    name: 'tenant.delete',
+    policy: 'exclusive',
+    retryLimit: 10,
+    retryDelaySeconds: 60,
+    retryBackoff: true,
+    retryDelayMaxSeconds: 1800,
+    expireInSeconds: 900,
+    deadLetter: 'dead-letter',
+    deleteAfterHours: 24 * 7,
   },
   // Jobs that failed all their retries. The worker records each one in ops.dead_letters (ADR-054);
   // a recording that fails is retried, and the job stays in pg-boss for its retention either way.

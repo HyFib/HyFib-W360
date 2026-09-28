@@ -124,3 +124,28 @@ export async function rememberCompanyAction(slug: string): Promise<ActionResult>
     return null;
   });
 }
+
+/** Schedules the company's deletion (owners; the company address is typed to confirm). */
+export async function requestCompanyDeletionAction(
+  slug: string,
+  input: unknown,
+): Promise<ActionResult<{ dueAt: string }>> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { companyDeletion } = await getRuntime();
+    const { dueAt } = await companyDeletion.request(ctx, input, await requestMeta());
+    refresh();
+    return { dueAt: dueAt.toISOString() };
+  });
+}
+
+/** Cancels a scheduled deletion that has not started (owners). */
+export async function cancelCompanyDeletionAction(slug: string): Promise<ActionResult> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { companyDeletion } = await getRuntime();
+    await companyDeletion.cancel(ctx, await requestMeta());
+    refresh();
+    return null;
+  });
+}

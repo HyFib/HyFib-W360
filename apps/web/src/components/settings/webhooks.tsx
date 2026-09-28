@@ -17,8 +17,9 @@ import {
   setWebhookEndpointEnabledAction,
   updateWebhookEndpointAction,
 } from '@/app/actions/webhooks';
+import { ActionFailure, type ActionFailureState } from '@/components/action-failure';
 import { ClientButton, ClientForm } from '@/components/client-form';
-import { FormError, FormSuccess } from '@/components/form-status';
+import { FormSuccess } from '@/components/form-status';
 import { CopyField } from '@/components/growth/copy-field';
 
 /**
@@ -111,7 +112,7 @@ export function WebhookEndpointForm({
   const [url, setUrl] = useState(endpoint?.url ?? '');
   const [description, setDescription] = useState(endpoint?.description ?? '');
   const [eventTypes, setEventTypes] = useState<WebhookEventType[]>(endpoint?.eventTypes ?? []);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ActionFailureState | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [secret, setSecret] = useState<string | null>(null);
@@ -136,9 +137,9 @@ export function WebhookEndpointForm({
         setError(null);
         setSaved(null);
         const input = { url, description, eventTypes };
-        const done = (r: { ok: true } | { ok: false; message: string }) => {
+        const done = (r: { ok: true } | { ok: false; code: string; message: string }) => {
           setBusy(false);
-          if (!r.ok) setError(r.message);
+          if (!r.ok) setError(r);
         };
         if (endpoint) {
           void updateWebhookEndpointAction(slug, { ...input, endpointId: endpoint.id }).then(
@@ -160,7 +161,7 @@ export function WebhookEndpointForm({
         }
       }}
     >
-      <FormError message={error} />
+      <ActionFailure failure={error} />
       <FormSuccess message={saved} />
       <div className="grid gap-4 sm:grid-cols-2">
         <Field
@@ -223,18 +224,21 @@ export function WebhookEndpointActions({
   host: string;
   active: boolean;
 }) {
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ActionFailureState | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [secret, setSecret] = useState<string | null>(null);
 
-  const run = (task: Promise<{ ok: true } | { ok: false; message: string }>, done?: string) => {
+  const run = (
+    task: Promise<{ ok: true } | { ok: false; code: string; message: string }>,
+    done?: string,
+  ) => {
     setBusy(true);
     setError(null);
     setNotice(null);
     void task.then((r) => {
       setBusy(false);
-      if (!r.ok) setError(r.message);
+      if (!r.ok) setError(r);
       else if (done) setNotice(done);
     });
   };
@@ -279,7 +283,7 @@ export function WebhookEndpointActions({
             setNotice(null);
             void rotateWebhookSecretAction(slug, endpointId).then((r) => {
               setBusy(false);
-              if (!r.ok) setError(r.message);
+              if (!r.ok) setError(r);
               else setSecret(r.data.secret);
             });
           }}
@@ -323,7 +327,7 @@ export function WebhookEndpointActions({
           onConfirm={() => run(deleteWebhookEndpointAction(slug, endpointId))}
         />
       </div>
-      <FormError message={error} />
+      <ActionFailure failure={error} />
       <FormSuccess message={notice} />
     </div>
   );
@@ -339,7 +343,7 @@ export function ReplayDeliveryButton({
   deliveryId: string;
   label: string;
 }) {
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ActionFailureState | null>(null);
   const [busy, setBusy] = useState(false);
   return (
     <div className="grid gap-1">
@@ -353,14 +357,14 @@ export function ReplayDeliveryButton({
             setError(null);
             void replayWebhookDeliveryAction(slug, deliveryId).then((r) => {
               setBusy(false);
-              if (!r.ok) setError(r.message);
+              if (!r.ok) setError(r);
             });
           }}
         >
           Replay<span className="sr-only"> {label}</span>
         </ClientButton>
       </div>
-      <FormError message={error} />
+      <ActionFailure failure={error} />
     </div>
   );
 }

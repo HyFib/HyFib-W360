@@ -52,6 +52,18 @@ export async function resetUserMfaAction(input: unknown): Promise<ActionResult> 
   });
 }
 
+/** Refunds unused service credit from a paid top-up (platform owners, ADR-058). */
+export async function requestCreditRefundAction(
+  input: unknown,
+): Promise<ActionResult<{ refundId: string }>> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    const result = await runtime.platformBilling.requestRefund(actor, input);
+    refresh();
+    return result;
+  });
+}
+
 export async function createRateCardAction(input: unknown): Promise<ActionResult<{ id: string }>> {
   return runAction(async () => {
     const { actor, runtime } = await actorForAction();

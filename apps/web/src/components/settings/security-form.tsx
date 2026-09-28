@@ -2,7 +2,8 @@
 import { useState } from 'react';
 import { Checkbox, Label } from '@w360/ui';
 import { updateCompanySecurityAction } from '@/app/actions/tenancy';
-import { FormError, FormSuccess } from '@/components/form-status';
+import { ActionFailure, type ActionFailureState } from '@/components/action-failure';
+import { FormSuccess } from '@/components/form-status';
 import { ClientButton } from '@/components/client-form';
 
 export function CompanySecurityForm({
@@ -15,7 +16,7 @@ export function CompanySecurityForm({
   canEdit: boolean;
 }) {
   const [value, setValue] = useState(requireMfaAllMembers);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ActionFailureState | null>(null);
   const [saved, setSaved] = useState(false);
   const [busy, setBusy] = useState(false);
 
@@ -25,13 +26,13 @@ export function CompanySecurityForm({
     setSaved(false);
     const result = await updateCompanySecurityAction(slug, { requireMfaAllMembers: value });
     setBusy(false);
-    if (!result.ok) setError(result.message);
+    if (!result.ok) setError(result);
     else setSaved(true);
   }
 
   return (
     <div className="grid gap-4">
-      <FormError message={error} />
+      <ActionFailure failure={error} />
       <FormSuccess message={saved ? 'Security settings saved.' : null} />
       <div className="flex items-start gap-3">
         <Checkbox

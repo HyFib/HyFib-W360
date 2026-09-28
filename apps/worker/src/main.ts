@@ -5,6 +5,7 @@ import {
   autoRechargeHandler,
   billingEventProcessHandler,
   billingSweepHandler,
+  creditRefundHandler,
 } from './handlers/billing';
 import { automationHttpHandler, automationRunHandler } from './handlers/automations';
 import { campaignRunHandler } from './handlers/campaigns';
@@ -29,6 +30,7 @@ import {
   templateSyncHandler,
 } from './handlers/templates';
 import { deadLetterHandler } from './handlers/dead-letters';
+import { tenantDeleteHandler } from './handlers/tenancy';
 import { webhookDeliverHandler } from './handlers/webhooks';
 import { logFailures } from './job-log';
 import { createWorkerRuntime } from './runtime';
@@ -178,6 +180,12 @@ async function main(): Promise<void> {
     { localConcurrency: 2, batchSize: 1 },
     logFailures(rt, QUEUES.autoRecharge.name, autoRechargeHandler(rt)),
   );
+  // Refunds of unused credit started by platform owners (ADR-058), queued by the billing sweep.
+  await rt.boss.work(
+    QUEUES.billingCreditRefund.name,
+    { localConcurrency: 2, batchSize: 1 },
+    logFailures(rt, QUEUES.billingCreditRefund.name, creditRefundHandler(rt)),
+  );
   await rt.boss.work(
     QUEUES.billingSweep.name,
     { localConcurrency: 1, batchSize: 1 },
@@ -186,6 +194,12 @@ async function main(): Promise<void> {
   await rt.boss.schedule(QUEUES.billingSweep.name, '* * * * *', null, {
     singletonKey: 'billing-sweep',
   });
+  // Company deletions (ADR-055): one run per company at a time, started by the billing sweep.
+  await rt.boss.work(
+    QUEUES.tenantDelete.name,
+    { localConcurrency: 1, batchSize: 1 },
+    logFailures(rt, QUEUES.tenantDelete.name, tenantDeleteHandler(rt)),
+  );
   // Jobs that failed all their retries: recorded for the platform operations console (ADR-054).
   await rt.boss.work(
     QUEUES.deadLetter.name,

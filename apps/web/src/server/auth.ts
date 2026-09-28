@@ -7,7 +7,12 @@ import { drizzle } from 'drizzle-orm/node-postgres';
 import type pg from 'pg';
 import type { Logger, WebConfig } from '@w360/core';
 import { betterAuthSchema, systemScope, type Database } from '@w360/db';
-import { enqueueEmail, recordSecurityEvent, type OutboxDeps } from '@w360/domain';
+import {
+  enqueueEmail,
+  RECENT_SIGN_IN_MINUTES,
+  recordSecurityEvent,
+  type OutboxDeps,
+} from '@w360/domain';
 
 /**
  * Identity: email/password with mandatory email verification, TOTP two-factor with backup codes,
@@ -90,7 +95,8 @@ export function createAuth(deps: {
     session: {
       expiresIn: 60 * 60 * 24 * 7,
       updateAge: 60 * 60 * 24,
-      freshAge: 60 * 15,
+      // The step-up window (ADR-056): the library's own sensitive endpoints and HyFib's agree.
+      freshAge: RECENT_SIGN_IN_MINUTES * 60,
       cookieCache: { enabled: false },
     },
     account: { accountLinking: { enabled: false } },

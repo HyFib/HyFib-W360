@@ -417,6 +417,9 @@ export async function startGraphStandIn(options: {
       if (req.method === 'POST' && first && second === 'subscribed_apps') {
         return json(res, 200, { success: true });
       }
+      if (req.method === 'DELETE' && first && second === 'subscribed_apps') {
+        return json(res, 200, { success: true });
+      }
       if (req.method === 'POST' && first && second === 'register') {
         if (state.registerError) {
           const e = state.registerError;

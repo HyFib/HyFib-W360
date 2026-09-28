@@ -10,8 +10,8 @@ import {
   type ApiScope,
 } from '@w360/domain/api-model';
 import { createApiKeyAction, revokeApiKeyAction, rotateApiKeyAction } from '@/app/actions/api-keys';
+import { ActionFailure, type ActionFailureState } from '@/components/action-failure';
 import { ClientButton, ClientForm } from '@/components/client-form';
-import { FormError } from '@/components/form-status';
 import { CopyField } from '@/components/growth/copy-field';
 
 const EXPIRY_LABELS: Record<(typeof API_KEY_EXPIRY_DAYS)[number], string> = {
@@ -72,7 +72,7 @@ export function CreateApiKeyForm({
   const [name, setName] = useState('');
   const [scopes, setScopes] = useState<ApiScope[]>([]);
   const [expiresInDays, setExpiresInDays] = useState<number>(90);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ActionFailureState | null>(null);
   const [busy, setBusy] = useState(false);
   const [created, setCreated] = useState<{ token: string; name: string } | null>(null);
 
@@ -103,7 +103,7 @@ export function CreateApiKeyForm({
         setError(null);
         void createApiKeyAction(slug, { name, scopes, expiresInDays }).then((r) => {
           setBusy(false);
-          if (!r.ok) setError(r.message);
+          if (!r.ok) setError(r);
           else {
             setCreated({ token: r.data.token, name: name.trim() });
             setName('');
@@ -112,7 +112,7 @@ export function CreateApiKeyForm({
         });
       }}
     >
-      <FormError message={error} />
+      <ActionFailure failure={error} />
       <div className="grid gap-4 sm:grid-cols-2">
         <Field
           id={`${prefix}-name`}
@@ -211,7 +211,7 @@ export function ApiKeyActions({
 }) {
   const prefix = useId();
   const [overlapHours, setOverlapHours] = useState<number>(24);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ActionFailureState | null>(null);
   const [busy, setBusy] = useState(false);
   const [token, setToken] = useState<string | null>(null);
 
@@ -237,7 +237,7 @@ export function ApiKeyActions({
                 setError(null);
                 void rotateApiKeyAction(slug, { keyId, overlapHours }).then((r) => {
                   setBusy(false);
-                  if (!r.ok) setError(r.message);
+                  if (!r.ok) setError(r);
                   else setToken(r.data.token);
                 });
               }}
@@ -280,14 +280,14 @@ export function ApiKeyActions({
                 setError(null);
                 void revokeApiKeyAction(slug, keyId).then((r) => {
                   setBusy(false);
-                  if (!r.ok) setError(r.message);
+                  if (!r.ok) setError(r);
                 });
               }}
             />
           ) : null}
         </div>
       ) : null}
-      <FormError message={error} />
+      <ActionFailure failure={error} />
     </div>
   );
 }

@@ -1,5 +1,311 @@
 # Progress
 
+## 2026-09-28 — Phase 5: staff refunds of unused service credit (P5-05, part)
+
+Status: **Staff refunds of unused service credit implemented and locally verified with test data
+only.** A platform owner refunds part or all of a paid top-up from the company's platform page; the
+credit is held at once, the worker asks Razorpay, and the refund is recorded from what Razorpay
+reports. Razorpay traffic comes from the test-only stand-in; nothing reached Razorpay.
+
+### Completed
+
+- **Design (ADR-058):** a hold while Razorpay processes the refund, never a debit at request time
+  (a debit would take credit the company keeps if the refund fails). Only unused credit is refunded,
+  at most what is left of the payment, one open refund per top-up, platform owners only, with a
+  reason in the platform audit log. Staff see a company's balances, top-ups and refunds without a
+  support grant: payments to HyFib, not company content.
+- **Schema (migration 0032):**
+  - `app.credit_refunds` (requested, submitted, processed, failed): company RLS, column grants that
+    keep the staff reason and who asked from the company role, and a restrictive policy that lets
+    the company role move an open request only between requested and submitted.
+  - `ops.platform_request_credit_refund` (definer, platform role only): checks the owner, the
+    reason, that the company is not being deleted, the payment and, under the wallet's row lock,
+    the unused credit; holds the credit (90 days), records the request and writes the platform
+    audit log in one transaction.
+  - `ops.platform_company_billing` (balances, the latest 50 paid top-ups and refunds, for staff)
+    and `ops.credit_refunds_due` (the sweep's input).
+  - `app.billing_fail_credit_refund` fails a request and releases its hold together.
+  - `app.billing_record_refund` is replaced: a refund of a top-up with an open request (the same
+    refund id, or no id stored yet and the same amount) releases the request's hold and marks it
+    processed in the transaction that posts the refund.
+- **Domain:** `billing/credit-refunds.ts` (the worker's step: the attempt written down first,
+  `X-Refund-Idempotency: crf_<id>` with the same body every try, retries for anything uncertain,
+  checks every 15 minutes, then hourly, then every 6 hours; emails and audit), `refund.failed`
+  handling in the Razorpay receipt processor (fetched first), `platform/billing.ts` (the staff
+  service and the form's refund limits), refunds in progress in the Billing overview and on
+  receipts, statement labels ("Reserved for a refund", "Refund reservation released") with their
+  receipt links. A due company deletion waits for refunds in progress.
+- **Worker:** the `billing.credit-refund` queue and handler; the minute billing sweep queues one
+  signed job per due request.
+- **Web:** a Service credit card on the platform company page (balances, top-ups, refunds with
+  their reason and who asked, and the refund form for platform owners); refunds in progress on the
+  company's Billing page and receipts; a note on the deletion card when a due deletion waits.
+- **Found while building:**
+  - Postings made in one transaction share its time, and statements broke that tie by the posting's
+    random id, so a refund could be listed before the release of its reservation, with a
+    misleading balance in between. Statements, the latest changes on Billing and receipts now keep
+    the order the postings were made in (their first ledger entry's id).
+  - A refund still open when a company's deletion ran would have been stranded: the worker drops
+    jobs for deleted companies. New refunds are refused once deletion is asked for, and a due
+    deletion waits for refunds in progress.
+  - The operations console could list a quarantined webhook event without its Retry control (from
+    P5-10): Meta and Razorpay receipt processing wrote the quarantine entry and the receipt's
+    `quarantined` status in two transactions, and a page rendered between them saw the entry with
+    the receipt still processing. The local e2e run caught it once (`platform-ops.spec.ts` waited
+    for Retry on such a page). Both processors now write the entries with the receipt's outcome in
+    one transaction.
+- **Tests:** the Razorpay stand-in can create refunds pending and finish them (in tests and through
+  two test-only control routes for e2e).
+- **Docs:** ADR-058; ARCHITECTURE §7; SECURITY (controls, Phase 5 rules, platform roles);
+  THREAT-MODEL T82; RUNBOOKS §9 (refunds); DEPLOYMENT (`refund.failed` webhook event);
+  DATA-RETENTION; RELEASE-CHECKLIST (a Razorpay test-mode run on staging); BACKLOG P5-05;
+  FEATURE-MATRIX H-036.
+- **Mutation checks:** 31 guards broken one at a time; all 31 make a test fail. They cover the
+  request function's checks (owner, reason, deletion, spent credit, what is left of the payment,
+  paid top-ups, the hold, the audit), staff reads, the due list, recording (the request completed,
+  the match before the refund id is stored), failing (the hold released, never after processing),
+  the company role's policy and column grants, the idempotency key, 409 and lost responses, the
+  write-ahead attempt, recording an immediate refund, late failures, `refund.failed` trusted
+  without a fetch, the deletion wait, statement order, labels and receipt links, the overview and
+  receipt lists, and the form's refund limits.
+
+### Test commands and results (local, 2026-09-28)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `pnpm test` (unit)                                                          | 298 passed. New: `billing/credit-refunds.test.ts` 2 (check intervals; labels for a refund's reservation and its release) and `platform/billing.test.ts` 3 (the form's limits: what is left of each payment, capped by the unused credit; refunded top-ups, ones with nothing left and ones with a refund in progress left out).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 388 passed, including the new `credit-refunds.test.ts` 11: the hold, audit and staff and company views; owners only, checked by the database too; a short reason, bad amounts, more than what is left of the payment or than the unused credit, an unpaid payment and a second open refund refused; one Razorpay call with the idempotency key and the processed webhook recording it once; a refund processed at once and one found by the worker's check; a lost response, a 409 and a 503 never making a second refund; the webhook arriving before the refund id is stored; a refusal and a failed refund giving the credit back (webhook and check), and a failed Dashboard refund changing nothing; a processed request never failed; company isolation. `company-data.test.ts` 15 (new: a due deletion waits for a refund in progress, and no refund starts once deletion is asked for). |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 74 passed (37 × 2) in one full run (14.9 min), including the new `credit-refunds.spec.ts` on both projects: a platform owner's refund with a reason and the confirmation; the worker's submission after the minute billing sweep; the company's Billing page (the refund in progress, the credit set aside, the note on the payment), the receipt and the email while it is in progress; the processed webhook recording it once; staff seeing it refunded. The first full run (72 passed, 2 failed) caught the confirmation disappearing on phones and the console's quarantine race, both fixed above.                                                                                                                                                                                                                                                                         |
+| Mutation checks                                                             | 31 guards broken one at a time; all 31 make a test fail                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+
+### Known gaps
+
+- Not run against Razorpay test mode yet (staging, RELEASE-CHECKLIST). Refunds asked for by
+  companies, refunds of spent credit, instant refunds, several open refunds of one top-up, a
+  platform-wide refunds list and the daily reconciliation report are not built.
+- A refund Razorpay processes after its hold expired (90 days) is recorded as a plain refund.
+- Firefox and WebKit run the new spec in CI only; only Chromium is installed locally.
+
+## 2026-09-28 — Phase 5: billing statements and receipts (P5-07, part)
+
+Status: **Monthly statements and payment receipts implemented and locally verified with test
+data only.** Companies read their service credit month by month and download each month as CSV.
+Every paid top-up has a receipt, and the billing managers are emailed a link to it. Payments come
+from the Razorpay stand-in only. Receipts are payment confirmations, not tax invoices.
+
+### Completed
+
+- **Design (ADR-057):** statements are calendar months in the company's time zone, computed on
+  request from the append-only ledger in one repeatable-read, read-only snapshot. Opening balances
+  are the entries before the month, and closing balances are the opening plus every line. Receipts
+  confirm payments and say they are not tax invoices; GST documents wait for tax review. The
+  payment method Razorpay reported is recorded with the credit. Each credit is emailed with its
+  receipt link.
+- **Schema:**
+  - Migration 0029 adds `app.topups.payment_method`, the definer function
+    `app.billing_record_payment_method` (sets it once, only for the payment id that credited the
+    top-up), and an insert policy that keeps a new top-up from carrying a method.
+  - Migrations 0030 and 0031 build `ledger_entries_account_time_idx` (covering, for opening
+    balances) and `ledger_transactions_reference_idx` (a top-up's refunds and chargebacks)
+    concurrently, one statement per file: the runner sends a no-transaction file as one query,
+    which would put two concurrent builds in one implicit transaction.
+- **Domain (`billing/history.ts`):**
+  - month helpers (calendar months in a time zone, daylight-saving safe through campaigns/schedule);
+  - `statementMonths` (every month since the wallet was created, with totals and closing balances);
+  - `statement` (100 lines per page, balances carried across pages);
+  - `statementCsv` (opening and closing rows, exact rupees, audited as
+    `billing.statement_exported`);
+  - `receipt` (references, method, the saved card for automatic top-ups, refunds and chargebacks);
+  - `creditFromPayment` now records the method (also when a payment is seen again) and emails every
+    credit with its receipt link;
+  - the CSV guard lets plain negative numbers through as numbers.
+- **Web:** Billing → Statements (months), a month's statement (summary, lines, pages, print, CSV
+  download), a receipt page per paid top-up, Receipt links in the Payments table and on statement
+  lines, and a link to the statements from the credit history. The page chrome is hidden when
+  printing.
+- **Found while building:**
+  - Billing scrolled sideways on phones. Screen-reader-only text in table cells escaped the
+    table's scroll box, which was not positioned, and widened the page. The shared `Table` now
+    positions its box, fixing every table, and the billing pages constrain their grid columns.
+  - A stale "Plans: subscription plans are planned" card on Billing is removed; the plan card above
+    it already explains plans.
+  - One-time payments were labelled "Card payment", but Checkout also takes UPI and net banking.
+    They now read "One-time payment".
+- **Tests:**
+  - The Razorpay stand-in can report a payment method.
+  - The e2e fake Checkout moved into `tests/e2e/razorpay-checkout.ts`, shared by the billing specs.
+- **Docs:** ADR-057; ARCHITECTURE §7; SECURITY (controls and Phase 5 rules); THREAT-MODEL T81;
+  RUNBOOKS §9; DATA-RETENTION; RELEASE-CHECKLIST (statements and receipts on staging, tax
+  decision); BACKLOG (P5-02, P5-03, P5-05, P5-07); FEATURE-MATRIX H-035.
+- **Mutation checks:** 29 guards broken one at a time; all 29 make a test fail. They cover:
+  - month boundaries in both queries;
+  - line order and running balances;
+  - each total;
+  - months outside the wallet's life;
+  - page clamping and months carried forward;
+  - the CSV audit and the CSV number rule;
+  - receipts for unpaid top-ups and receipt contents;
+  - `billing.read`;
+  - recording the method, and the definer function's three conditions;
+  - the insert policy;
+  - the emails.
+
+### Test commands and results (local, 2026-09-28)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `pnpm test` (unit)                                                          | 293 passed. New: `billing/history.test.ts` 6 (month parsing, labels and steps, months in a time zone, Kolkata and London bounds, a midnight removed in Asunción and doubled in Havana, method labels) and 1 in `contacts/csv.test.ts` (plain negative numbers stay numbers, nothing longer does).                                                                                                                                                                                                                                                                                    |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 376 passed, including the new `billing-history.test.ts` 9: a UPI payment's receipt and its email with the receipt link; a redelivered payment adding nothing; a method filled in later; a refund on the receipt; no receipt for an unpaid top-up; runtime code unable to set a method (update, insert, another payment id or company, a recorded method); four fixture months that carry balances forward and reconcile; a time-zone change; 205 lines over three pages; the CSV rows and audit entry; this month matching the wallet balance; `billing.read` and company isolation. |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 72 passed (36 × 2) in one full run (12.9 min). New `billing-history.spec.ts` on both projects: a Checkout payment; Billing without sideways scrolling on a phone; the receipt (amount, "not a tax invoice", card through Razorpay, the payment id, the print button); the payment-received email linking to the receipt; the statements list with the month to date; the statement's credit line with its receipt link; the CSV download with the opening row, the credit line in exact rupees and the month-to-date row.                                             |
+| Mutation checks                                                             | 29 guards broken one at a time; all 29 make a test fail                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+
+### Known gaps
+
+- Tax invoices and GST documents (tax review), PDF files, statements for custom ranges, stored or
+  emailed monthly statements, staff views of statements and monthly rollups for high posting
+  volumes are not built.
+- The usage and rate card view and paying for plans in HyFib (other P5-07 screens) are not built.
+- Firefox and WebKit run the new spec in CI only; only Chromium is installed locally.
+
+## 2026-09-28 — Phase 5: step-up re-authentication (P5-07, part)
+
+Status: **Step-up re-authentication implemented and locally verified.** Actions a stolen session
+could use to take a company's data or money, or to keep access after the session is gone, now need
+a sign-in within the last 15 minutes; the member signs in again (with two-factor when it is on) and
+comes back to the page.
+
+### Completed
+
+- **Design (ADR-056):** a new sign-in instead of a password or code prompt, because re-entering the
+  password alone skips two-factor and the library checks a signed-in user's two-factor code without
+  its attempt limit; the window is the library's `freshAge` (15 minutes), now set from the domain's
+  `RECENT_SIGN_IN_MINUTES`. SEC-8's verification endpoint is settled by it.
+- **Domain:** `signedInAt` in the tenant context (the session's creation time passed by the web to
+  `resolveTenantContext`; null without a browser session); `authz/step-up.ts`
+  (`recentSignInUntil`, `hasRecentSignIn`, `assertRecentSignIn` with the existing
+  `step_up_required` error). Enforced in: the company export and the deletion request, card
+  mandate setup, auto-recharge settings unless turning them off, the company's Razorpay keys, API
+  key creation and rotation, webhook endpoint creation, changes and secret rotation, invitations
+  and role changes that make someone an owner, and turning off the company-wide two-factor
+  requirement. Revoking, cancelling, turning off and deleting never ask.
+- **Web:** `SignInAgain` (signs out and returns to the page after sign-in) and `ActionFailure` (the
+  prompt when an action answers `step_up_required`, otherwise the error) in nine forms; the Company
+  data page, adding a card on Billing and creating a key show the prompt instead of the action when
+  the sign-in is older; the export route answers 403 with the message.
+- **Docs:** ADR-056 (and ADR-055's "not built" list), ARCHITECTURE §3.4 and §6Q, SECURITY (sessions,
+  payments, known gaps), THREAT-MODEL T2, T9, T77 and T78 (T77 and T78 now mitigated), RUNBOOKS §11,
+  BACKLOG (P5-04, P5-07, P5-11, SEC-8), FEATURE-MATRIX (W-148, H-015).
+- **Mutation checks:** 21 guards broken one at a time (each of the protected service functions,
+  the safe-direction conditions for auto-recharge, owners, invitations and the two-factor
+  requirement, the window's boundary and length, a context without a sign-in time, and the context
+  taking the session's time); all 21 make a test fail.
+
+### Test commands and results (local, 2026-09-28)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `pnpm test` (unit)                                                          | 286 passed. New: `authz/step-up.test.ts` 3 (the 15-minute window and its boundary, contexts without a sign-in time, the refusal and its message).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 367 passed, including the new `step-up.test.ts` 3 (every protected action refused to a member who signed in 16 minutes ago before any audit entry, key, endpoint, payment account, invitation, role or setting changes, and a context without a sign-in time refused; the same actions allowed a minute after signing in again; revoking a key, turning automatic top-ups or an endpoint off, deleting an endpoint, inviting an agent, changing to a role other than owner, turning the two-factor requirement on or keeping it off, and cancelling a deletion allowed 90 minutes after signing in). Test helpers now pass the session's start. |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 70 passed (35 × 2) in one full run (13.7 min). New `step-up.spec.ts` on both projects: right after signing up the export and a new key are offered; with the session aged an hour (a fixture step as the auth role) the Company data and API keys pages show "Sign in again" instead of the export link, the deletion form and the key form, and rotating a key from the page is refused with the same prompt; signing in again returns to the API keys page, where the key rotates.                                                                                                                                             |
+| Mutation checks                                                             | 21 guards broken one at a time; all 21 make a test fail                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+
+### Known gaps
+
+- WebAuthn or passkeys as the step-up factor, per-action windows, and a step-up for platform staff
+  actions (their MFA is checked on every platform request) are not built.
+- The remaining P5-07 screens (full transaction history and statements, usage and rate card,
+  receipts and invoices) are not built; invoices need a tax review.
+
+## 2026-09-28 — Phase 5: company export and deletion (P5-11)
+
+Status: **Company export and deletion implemented and locally verified with test data only.**
+Owners download a full copy of their company's data and can have the company deleted: 14 days as
+suspended and cancellable, then a resumable worker job that removes HyFib from the company's
+providers, deletes every company row and keeps only billing records, plan history and platform
+evidence. Provider calls were verified against the Graph, Shopify and Razorpay stand-ins only.
+
+### Completed
+
+- **Design (ADR-055):** a streamed export with every table and column classified; deletion typed
+  with the company address, due after 14 days, cancellable by owners until it starts; a worker job
+  in bounded, resumable steps through SECURITY DEFINER functions; provider clean-up once with every
+  outcome recorded; a tombstone company row; what is kept and why; backups and restores.
+- **Schema (migration 0028):** the register `ops.tenant_deletions`, the step order
+  `ops.tenant_deletion_steps` (86 steps over 87 tables, children before parents), the definer
+  role's per-table `SELECT (tenant_id, id)`/`DELETE` grants with policies matching
+  `ops.deleting_tenant_id()`, and `app.request_tenant_deletion`, `app.cancel_tenant_deletion`,
+  `ops.tenant_deletions_due`, `ops.start_tenant_deletion`, `ops.record_tenant_deletion_cleanup`,
+  `ops.delete_tenant_data` and `ops.finish_tenant_deletion` (executable by the runtime role only).
+- **Domain:** `tenancy/export-spec.ts` (85 exported tables with their columns, 15 excluded tables
+  and every omitted column with a reason), `tenancy/export.ts` (keyset pages from one read-only,
+  repeatable-read transaction, an advisory lock per company, audit and emails first),
+  `tenancy/deletion.ts` (status, request, cancel, with audit entries and emails to owners and
+  administrators), `tenancy/deletion-run.ts` (start, provider clean-up, batches for up to five
+  minutes, finish with the final emails), Graph `unsubscribeApp`, the store worker's removal for a
+  deletion, a `tenant.notice` email, `tenant.delete` allowed while suspended and a pending-deletion
+  message in the permission layer.
+- **Worker:** the `tenant.delete` queue (`exclusive`, one run per company) and handler; the minute
+  billing sweep queues a run for every due or unfinished deletion.
+- **Web:** Settings → Company data (the export download, the deletion form with the typed address,
+  the scheduled state with its due date and a cancel button, the started state), the streaming
+  export route, a "being deleted" banner in the company layout and the company switcher, and a
+  Deletion card on the platform company page.
+- **Docs:** ADR-055, ARCHITECTURE §6Q, SECURITY (control, matrix, rules), THREAT-MODEL T77–T80,
+  DATA-RETENTION (export and deletion semantics now built), RUNBOOKS §8 and §10Q,
+  RELEASE-CHECKLIST, FEATURE-MATRIX (H-015), BACKLOG (P5-11 built).
+- **Found while building:**
+  - **Contact erasure left the number and text in past send requests** (`app.send_intents.request`);
+    erasure now redacts them (fixed in 0028; the erasure test checks it).
+  - **Public entry points treated a company pending deletion as unknown,** so a Shopify redaction or
+    a payment received during the grace period would have been dropped. The six lookups now treat
+    it like a suspended company. The growth suite had asserted that a company "being deleted"
+    opens nothing (a P4-05 choice from before pending deletion had a meaning); it now expects the
+    suspended behaviour, and that a deleted company's links open nothing (ADR-044's text notes the
+    change).
+  - **The ended-run guard no longer froze `pending_message_id` and `http_call_count`** (lost when
+    0022 replaced the function); both are frozen again and tested.
+  - **Every deletion request would have failed:** the email's date formatting combined
+    `dateStyle`/`timeStyle` with `timeZoneName`, which `Intl.DateTimeFormat` rejects. The new
+    integration suite caught it; the parts are spelled out and unit-tested.
+  - **The export email said "downloaded"** although it is sent before the first line and also for
+    a refused or interrupted export; it now says the export was started.
+  - **Mutation checks:** 33 guards broken one at a time (the owner check, the typed address, a
+    second request, cancelling after the start, the restored suspension and restriction, the due
+    date, releasing the bindings, who is notified, recording the clean-up once and only known
+    keys, deleting only for a started deletion, the definer's delete policy, finishing while rows
+    remain, the step order, a table left out, each of the six lookups, the send-request redaction,
+    both frozen run columns, visiting providers once, cancelling the card mandate, the Graph
+    method, one export at a time, the export's audit entry, members' accounts in the export,
+    administrators emailed, cancelling while pending). All 33 make a test fail.
+
+### Test commands and results (local, 2026-09-28)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `pnpm test` (unit)                                                          | 283 passed. New: `tenancy/company-data.test.ts` 4 (dates in the company's time zone, the export spec's tables, columns, omitted-column reasons and member columns).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 364 passed, including the new `company-data.test.ts` 14 (every company table deleted or kept on purpose, each once; children deleted before parents and nothing kept pointing at deleted rows; the definer's read and delete policies on every step table and the functions refusing companies not being deleted or not started; every table and column of the export classified, secrets omitted and readable by the runtime role; a busy company's export with row counts, members' accounts, no other company, no tokens, the audit entry and emails; owners only, one at a time, available while pending; requests needing an owner and the typed address, the company then suspended with emails and audit; cancellation restoring active, suspended with HyFib's reason, or restricted after a lapsed plan, and refused once started; runs not due; a full run with WhatsApp, Shopify and a card mandate at the stand-ins (tombstone, kept records, each provider called once, final emails without the company, the other company untouched, jobs refused, the address reusable, later webhooks quarantined, the platform record); a resumed run; a refused Meta token recorded and the deletion finished; cleanup outcomes validated and recorded once; the six public lookups while pending), the erasure test checking send requests, the ended-run guard's two columns, the growth test's new expectation and the new function grants in the isolation suite. |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 68 passed (34 × 2) in one full run (12.2 min). New `company-data.spec.ts` on both projects: an owner downloads the export (file name, gzip JSON Lines with the header, the owner as the only member and the end line, no `tenant_id`), the email arrives; the delete button stays disabled until the address is typed exactly; the deletion is scheduled (banner, due date, requester, email) with the export still available, then cancelled (banner gone, email); and a due deletion (moved on by a fixture step as the definer role) is run by the real worker from the minute sweep, the owner gets "Company deleted" and the company's pages answer 404.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Mutation checks                                                             | 33 guards broken one at a time; all 33 make a test fail                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+
+### Known gaps
+
+- Not built: step-up re-authentication before exporting or deleting, deletion started by platform
+  staff, stored exports with a download link, other formats, a shorter grace period.
+- Provider clean-up was verified against stand-ins only; `DELETE /{WABA-ID}/subscribed_apps`,
+  Shopify's `appUninstall` and Razorpay token deletion still need a staging run
+  (RELEASE-CHECKLIST).
+- The kept records (billing, plan history, the register) and their periods need a legal and tax
+  review; the Razorpay customer record is not deleted.
+- Deleted data stays in backups until they expire; re-applying deletions after a restore is a
+  manual runbook step (RUNBOOKS §8), not yet drilled.
+- A very large company's export holds one read-only transaction for as long as the download takes;
+  a reader that stops for a minute ends it (`idle_in_transaction_session_timeout`).
+- Firefox and WebKit run in CI only.
+
 ## 2026-09-28 — CI: the Firefox stall in the cart reminder test
 
 Status: **Cause found and worked around in the test browser; verified locally and in CI.**

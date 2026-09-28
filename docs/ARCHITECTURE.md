@@ -91,7 +91,10 @@ session-level value. Scopes are branded TypeScript types created only by authori
    minus suspended-blocked permissions, minus MFA-blocked permissions). Non-members and missing
    companies both get 404.
 3. The domain service asserts a permission, validates input with zod, and runs `db.run(ctx.scope)`.
-   Audit rows are written in the same transaction.
+   Audit rows are written in the same transaction. Actions that hand out credentials, move money,
+   take or destroy the whole company's data, or weaken account security also assert a recent
+   sign-in (`assertRecentSignIn`: the session started within 15 minutes, carried in the context as
+   `signedInAt`), refusing with `step_up_required`; the page then offers "Sign in again" (ADR-056).
 4. Server actions additionally require an exact trusted `Origin` (on top of Next.js's own check).
 
 Company switching is URL-based (`/c/{slug}`) with a full page load so no client state crosses
@@ -505,7 +508,8 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   script from `ops.chat_widget_config` (`Cache-Control: public, max-age=300`,
   `Cross-Origin-Resource-Policy: cross-origin`), or a 404 script comment. Both definer functions
   return only what the response needs and nothing for archived links, inactive numbers, disabled
-  widgets or companies being deleted.
+  widgets or deleted companies (a company waiting for deletion works like a suspended one,
+  ADR-055).
 - **Widget script** (`growth/widget-script.ts`): configuration embedded as JSON escaped for a script
   context; guards against a second copy on the same page; draws a fixed-position greeting and link
   in an open shadow root with `textContent` and CSSOM styles (text colour chosen for contrast);
@@ -939,7 +943,48 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
 - **Not built yet:** alerts, trends, quality updates from Meta's quality webhook, API request counts,
   exports, the age of the oldest waiting job, redrive from the console, and acknowledging issues.
 
-## 7. Commercial model and billing **[built: plans and entitlements, wallet, top-ups, auto-recharge — verified against a local Razorpay stand-in only; paying for plans in HyFib planned]**
+## 6Q. Company export and deletion **[built — providers verified against the local Graph, Shopify and Razorpay stand-ins only]**
+
+- **Purpose** (P5-11, ADR-055): owners take a full copy of the company's data at any time and can
+  have the company deleted, after 14 days of grace, by a job that survives restarts.
+- **Export** (`tenancy/export.ts`, `tenancy/export-spec.ts`): the route
+  `/c/<slug>/settings/data/export` bridges `writeCompanyExport` into a response stream (text →
+  `TextEncoderStream` → `CompressionStream('gzip')`), answering an error instead of a file until
+  the first line is written. The export reads every table in `EXPORT_TABLES` keyset-paged by id,
+  1,000 rows a page, in one read-only, repeatable-read transaction in the company's scope, after an
+  advisory lock per company; members are joined with their account's name and email. The spec
+  lists each exported table's columns and each omitted column's reason; `EXPORT_EXCLUDED_TABLES`
+  gives each left-out table's reason.
+- **Request and grace** (`tenancy/deletion.ts`): `app.request_tenant_deletion` (owner, typed
+  address) writes the register `ops.tenant_deletions` (previous status, due in 14 days) and puts the
+  company in `pending_deletion`, which the permission layer treats like a suspension; the company
+  layout shows a banner. `app.cancel_tenant_deletion` restores the status (a suspension stays, a
+  lapsed plan restricts) until the run starts.
+- **Run** (`tenancy/deletion-run.ts`, worker `handlers/tenancy.ts`): the minute billing sweep calls
+  `ops.tenant_deletions_due` and queues a signed `tenant.delete` job per company (`exclusive`,
+  singleton per company, retried with backoff). A run calls `ops.start_tenant_deletion` (first time:
+  records who to notify, releases the company's number bindings), cleans up at providers once and
+  records the outcomes (`ops.record_tenant_deletion_cleanup`), then calls `ops.delete_tenant_data`
+  in its own transaction per batch (2,000 rows of the first step that has rows, or a whole step for
+  the cycle and self-references) for up to five minutes, and finally `ops.finish_tenant_deletion`
+  with the final emails in the same transaction. The step order `ops.tenant_deletion_steps` lists
+  every deletable table; the definer role's delete policies match `ops.deleting_tenant_id()`, set
+  only inside the functions.
+- **Provider clean-up:** Graph `DELETE /{WABA-ID}/subscribed_apps` with the account's stored token;
+  the store worker's removal (Shopify `appUninstall`, WooCommerce webhook deletion) with the removal
+  deadline already past; Razorpay token deletion for HyFib's card mandate, with the mandate cancelled
+  and auto-recharge turned off either way. Missing configuration or credentials are recorded as
+  skipped, errors as failed; neither stops the deletion.
+- **Kept:** the company row as a tombstone, billing tables, plan history, the register, support
+  grants and security events (the catalog tests list them); people's accounts.
+- **Web:** Settings → Company data (owners: export link, deletion form with the typed address, the
+  pending state with the due date and a cancel button, the started state); the platform company page
+  shows the register (dates, runs, rows deleted, provider outcomes).
+- **Step-up:** exporting and asking for the deletion need a sign-in within the last 15 minutes
+  (ADR-056).
+- **Not built yet:** staff-started deletion, stored exports and other formats.
+
+## 7. Commercial model and billing **[built: plans and entitlements, wallet, top-ups, auto-recharge, statements and receipts, staff refunds of unused credit — verified against a local Razorpay stand-in only; paying for plans in HyFib and tax invoices planned]**
 
 - **Who pays Meta:** as a Meta Tech Provider HyFib has no credit line; each customer adds its own
   payment method and Meta bills them directly (`tenants.billing_mode = 'direct_meta'`, the default).
@@ -1012,6 +1057,61 @@ payment_requested → succeeded`; before each provider call it is written as `un
   request (pre-debit notice), so the UI asks for thresholds with headroom. Declines fail the attempt
   (audit + email to owners and billing members), three consecutive failures turn auto-recharge off,
   and turning it off or removing the card cancels attempts that have not requested a debit.
+- **Statements and receipts (0029–0031, ADR-057) [built]:** Billing → Statements lists every month
+  from the wallet's creation to the current one, in the company's time zone, with money in and out
+  and closing balances. A month's statement is computed on request from the ledger in one
+  repeatable-read, read-only transaction:
+  - opening balances are the available and reserved accounts' entries before local midnight on the
+    1st (the first real instant on daylight-saving days, using the covering index
+    `ledger_entries_account_time_idx`);
+  - the lines are the month's transactions in time order, 100 per page, with running balances from
+    a window over the month;
+  - the closing balances are the opening balances plus every line.
+
+  The CSV adds an opening-balance and a closing-balance row, with exact rupees built from paise. It
+  is audited as `billing.statement_exported`. Plain negative numbers stay numbers under the CSV
+  formula guard (contacts/csv).
+
+  A paid top-up has a receipt page with the receipt number `tu_…`, the Razorpay payment and order
+  ids, the method Razorpay reported, the saved card for an automatic top-up, and its refunds and
+  chargebacks (`ledger_transactions_reference_idx`). A receipt is a payment confirmation, not a tax
+  invoice. The method is recorded with the credit by `app.billing_record_payment_method`: a definer
+  function that sets it once, only when the same payment id credited the top-up. The insert policy
+  keeps a new top-up from carrying one. Each credit emails the billing managers a link to its
+  receipt, in the credit's transaction. Nothing is stored for statements; a statement viewed again
+  shows the same postings.
+
+- **Staff refunds of unused credit (0032, ADR-058) [built]:** the platform company page shows the
+  company's balances, its latest paid top-ups and refunds (`ops.platform_company_billing`: payments
+  to HyFib, no company content, no support grant needed). A platform owner refunds part or all of a
+  paid top-up with a reason. `ops.platform_request_credit_refund` (definer, platform role only)
+  checks the owner, the reason, that the company is not being deleted, the top-up (paid or partly
+  refunded, no refund of it open), the amount (at most what is left of the payment) and, under the
+  wallet account's row lock, the available credit. In one transaction it places a hold
+  (`credit_refund`, 90 days), records `app.credit_refunds` (`requested`) and writes the platform
+  audit log with the reason. The minute billing sweep queues a signed `billing.credit-refund` job
+  for each due request (`ops.credit_refunds_due`). The job writes the attempt down first, then calls
+  `POST /v1/payments/:id/refund` with speed `normal` and `X-Refund-Idempotency: crf_<id>`, the same
+  body on every try:
+  - a refund returned: `submitted` with the refund id, audited, and the billing managers emailed;
+  - a 4xx other than 401 and 409: `failed` through `app.billing_fail_credit_refund`, which releases
+    the hold;
+  - a 401, 409, 429, 5xx, timeout or lost response: tried again after 1, 5, 15 and 60 minutes,
+    then hourly.
+
+  A submitted refund is checked every 15 minutes, then hourly after an hour and every 6 hours
+  after a day. `refund.processed` (webhook) or the job's check calls `app.billing_record_refund`
+  (replaced in 0032). It releases the hold of an open request for the same refund id, or of one
+  with no id stored yet and the same amount, and marks it `processed`, in the transaction that
+  posts the refund: the credit the hold set aside is taken exactly once, even when the webhook
+  arrives before the job stored the refund id. `refund.failed`, or a failed refund found by the
+  check, fails the request and releases the hold. The company role reads its requests but not the
+  staff reason or who asked (column grants). It may move an open request only between `requested`
+  and `submitted` (a restrictive policy): `processed` and `failed` are reachable only through the
+  definer functions that settle the hold. A due company deletion waits until no refund is open
+  (the worker checks before it starts). Statements label the hold "Reserved for a refund" and its
+  release "Refund reservation released"; the Billing page and the receipt show refunds in progress.
+
 - **Browser security:** the billing and WhatsApp-channels pages get their own CSP allowing only
   that provider's script and frame. Because a CSP belongs to the loaded document, links to these
   pages are full page loads and the pages reload once if reached by client-side navigation.

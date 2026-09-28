@@ -477,7 +477,8 @@ unique across companies because the public route has no company context), that r
 address. Following a link runs `ops.follow_chat_link` (SECURITY DEFINER), which adds one to the
 link's count for the company's current day and returns nothing for an archived link, a number
 that is not active or a company being deleted; a suspended company's links keep working, because
-the customer writes to the company and nothing is sent. Nothing about the visitor is stored: no
+the customer writes to the company and nothing is sent. (Since ADR-055 a company waiting for
+deletion is treated like a suspended one, and only a deleted company's links stop.) Nothing about the visitor is stored: no
 address, user agent, referrer, cookie or time of the click; the redirect sends no referrer to
 WhatsApp. Counts therefore include repeated clicks and automated visits such as link previews, and
 the pages say so: removing them would need an identifier for the visitor, which we do not keep.
@@ -1302,3 +1303,273 @@ acknowledging or snoozing an issue.
 **Migrations 0026 and 0027.** 0026 adds `ops.dead_letters`, `ops.purge_dead_letters`, the four read
 functions, `ops.platform_retry_webhook_receipt` and the definer policies and column grants they
 need; 0027 builds an index on consent events by company and time concurrently.
+
+## ADR-055 Company export and deletion: a streamed export with listed columns, deletion after 14 days by a resumable worker job, billing records kept (2026-09-28)
+
+Decision: owners can take a full copy of their company's data at any time and can have the company
+deleted (P5-11). Deletion is delayed 14 days so it can be cancelled, then runs in the worker in
+bounded steps that survive restarts, and ends with a company row that holds nothing but what the
+law or HyFib's own accounting needs.
+
+**Export.** Owners (`tenant.export`, also while the company is suspended, restricted or pending
+deletion) download a gzip-compressed JSON Lines file that the web streams from one read-only,
+repeatable-read transaction in the company's scope:
+
+- a header line (format `hyfib-w360-company-export`, version 1, company, export time, tables), one
+  line per row (`{"table": ..., "row": {...}}`) and an end line with the row count of every table.
+  A file without the end line is incomplete (the download broke).
+- Every table with a `tenant_id` is either exported with named columns, or excluded with a reason
+  (delivery queues, stored API responses, bindings, the email outbox, platform records). Within an
+  exported table every column is either exported or named as omitted with a reason: credentials,
+  secrets, token hashes, the registration PIN and Flow tokens are never exported. Tests fail when a
+  table or a column is not classified, so new ones must be decided.
+- Members are exported with their name and email; `tenant_id` is left out of rows (the header names
+  the company); 64-bit integers (money in minor units) are strings.
+- Nothing is stored: no object storage exists, and a stored copy of a whole company would be one
+  more thing to protect and expire. One export runs at a time per company (an advisory lock), each
+  start is audited (`tenant.exported`) and every owner and administrator is emailed, before the
+  first line is written (so an export that is then refused or cut short is still reported).
+
+**Deletion request and grace period.** An owner (`tenant.delete`, now also allowed while the
+company is suspended or restricted: leaving must not depend on paying) types the company's address.
+`app.request_tenant_deletion` records the current status in the deletion register
+`ops.tenant_deletions`, sets the company to `pending_deletion` due in 14 days, writes the company
+audit log, and the service emails every active owner and administrator. While pending, the company
+works as if suspended (read, export, cancel), outbound work waits, public links and webhooks behave
+as for a suspended company, and API keys are refused (as before). Owners cancel until the job
+starts (`app.cancel_tenant_deletion`), which restores the recorded status, re-applying the plan
+state (a lapsed plan restricts, a current one lifts a restriction; a suspension stays).
+
+**Deletion run.** The minute billing sweep lists due deletions (`ops.tenant_deletions_due`,
+including ones already running) and queues one signed `tenant.delete` job per company (singleton
+per company, so one run at a time). A run deletes for up to five minutes and stops; the next sweep
+starts the next run until the company is finished. A run:
+
+1. starts the deletion (`ops.start_tenant_deletion`): records the owners and administrators to
+   notify and releases the company's WhatsApp number bindings, so new Meta events are no longer
+   routed to it;
+2. cleans up at providers, recording every outcome (a failure is recorded, and named in the final
+   email, but does not stop the deletion): unsubscribes HyFib's app from each WhatsApp Business
+   Account (`DELETE /{WABA-ID}/subscribed_apps`, in Meta's official OpenAPI description), uninstalls
+   HyFib's Shopify app (`appUninstall`) and deletes HyFib's WooCommerce webhooks, and deletes
+   HyFib's card mandate token at Razorpay;
+3. deletes the company's rows through `ops.delete_tenant_data`, a batch at a time, each batch its
+   own transaction, following a fixed order (`ops.tenant_deletion_steps`: children before parents;
+   the two tables of the one foreign-key cycle, automations and their versions, in one statement;
+   the two self-referencing tables in one statement each). Guard triggers let these deletes through
+   because the function sets the retention-purge and erasure flags; its delete policies only match
+   the company being deleted.
+4. finishes (`ops.finish_tenant_deletion`) only when no row is left in any deletable table: the
+   company row becomes a tombstone (status `deleted`, name "Deleted company", address
+   `deleted-<id>` so the old address can be used again) and the register is completed. The
+   owners and administrators recorded at the start get an email (addressed to them, not stored
+   with the company). Platform staff see the register's dates, runs, row count and provider
+   outcomes on the company's platform page; they cannot start, speed up or cancel a deletion.
+
+**Kept after deletion:** the tombstone company row; billing and tax records (wallet, ledger,
+top-ups, card mandates with only safe card metadata, auto-recharge attempts, the Razorpay customer
+reference and billing contact); plan history (`app.tenant_plans`); the deletion register; platform evidence (platform
+audit log, support grants, security events); and people's own accounts, which may belong to other
+companies. Everything else is deleted, including members, invitations, the company audit log,
+contacts, consent history, conversations, messages, templates, campaigns, automations, CRM, growth,
+Flows, commerce, stores, API keys, webhooks and queued emails. Consent history and the audit log
+are the company's records: they are in the export.
+
+**Not done at providers:** numbers are not deregistered (the business keeps its numbers and may use
+them with another provider; deregistering could break another app on the same account); templates
+and Flows stay in the business's WhatsApp account; Payment Links stay in the company's own Razorpay
+account; WooCommerce keys cannot be revoked through the API (the email asks the owner to revoke
+them); HyFib's Razorpay customer record is not deleted (the client has no such call).
+
+**Backups:** deleted data stays in encrypted backups until they expire. After a restore, deletions
+completed after the restore point are applied again, found in the old database's register or the
+worker's `company deleted` log lines (RUNBOOKS §8).
+
+**Found while building (fixed in the same migration):**
+
+- Contact erasure left the number and message text in the requests of past sends
+  (`app.send_intents.request`); erasure now redacts them.
+- Shopify's redaction webhooks, payment webhooks of the company's own Razorpay account, chat links,
+  the website button and the Flows data endpoint treated a company pending deletion as unknown, so a
+  redaction received during the grace period was dropped; they now treat it like a suspended one.
+- The ended-run guard no longer froze `pending_message_id` and `http_call_count` (lost in migration
+  0022); both are frozen again.
+
+**Not built:** a shorter grace period,
+deletion started by platform staff, deleting media files (no media storage exists), a stored export
+with a download link, and other export formats.
+
+**Migration 0028** adds the register and the step order, the deletion functions with their scoped
+grants and policies, and the three fixes above.
+
+## ADR-056 Step-up re-authentication: a sign-in within the last 15 minutes for actions that hand out credentials, move money or take the whole company (2026-09-28)
+
+Decision: a few actions need the member to have signed in within the last 15 minutes. A member who
+signed in earlier signs in again (password and, when it is on, two-factor), and the page they were
+on comes back. The window is `RECENT_SIGN_IN_MINUTES` in the domain, and the authentication
+library's own `session.freshAge` is set from it, so HyFib's check and the library's sensitive
+endpoints agree.
+
+**What needs it.** Actions a stolen session could use to take the company's data or money, or to
+keep access after the session is gone:
+
+- exporting the company's data and asking for its deletion (cancelling does not need it);
+- adding a card for automatic top-ups, and turning automatic top-ups on or changing them (turning
+  them off does not);
+- saving the company's own Razorpay keys (payments for its orders go to that account);
+- creating and rotating API keys (revoking does not);
+- adding a webhook endpoint, changing one, or rotating its secret (turning one off, deleting it,
+  test events and replays do not);
+- making someone an owner, by invitation or by a role change (other roles do not);
+- turning off the company-wide two-factor requirement (turning it on does not).
+
+**How.** The web passes the session's creation time to `resolveTenantContext`, which puts it in the
+tenant context (`signedInAt`); `assertRecentSignIn` in each of those service functions refuses with
+`step_up_required` before anything is read, written or sent. A context without a sign-in time (not
+from a browser session) never counts as recent. Pages that would otherwise offer the action (the
+export link, the deletion form, adding a card, creating a key) show "Sign in again" instead; any
+form whose action is refused shows the same prompt, which signs the member out and returns them to
+the page after they sign in.
+
+**Why a new sign-in rather than a password or code prompt** (SEC-8 had proposed a verification
+endpoint): re-entering only the password would skip two-factor, and the library checks a two-factor
+code for a signed-in user without its sign-in attempt limit, so a code prompt would need HyFib's own
+attempt counting and storage. Signing in again reuses the whole protected flow: rate limits per
+address, the two-factor attempt limit and lockout, trusted devices, and the security events and
+emails the sign-in already produces. The cost is one more sign-in for rare actions.
+
+**Not built:** WebAuthn or passkeys as the step-up factor, a step-up for platform staff actions
+(their MFA is checked on every platform request), and per-action windows.
+
+## ADR-057 Billing history: monthly statements computed from the ledger, payment receipts that are not tax invoices (2026-09-28)
+
+Decision: companies read their service-credit history as **monthly statements**. Each paid top-up
+has a **payment receipt**, and the billing managers get it by email. Both are computed on request
+from the append-only ledger (0004_billing); nothing is stored or rewritten, so a statement viewed
+twice shows the same postings. Reading needs `billing.read` (owners, administrators and the billing
+role). Downloading a statement as CSV is audited like the report exports.
+
+**Statements.** A statement covers one calendar month in the company's time zone, from local
+midnight on the 1st to local midnight on the 1st of the next month. Where a daylight-saving change
+removes or doubles midnight, the day starts at its first real instant (campaigns/schedule). Months
+run from the month the wallet was created to the current month, which is shown as "month to date".
+Everything on a statement comes from one repeatable-read, read-only snapshot:
+
+- **Opening balances** of available and reserved credit are the sums of those accounts' entries
+  before the month starts.
+- **Lines** are the month's ledger transactions in time order, each with its change to available
+  and to reserved credit and both balances after it.
+- **Totals** per kind are credit added, service charges, refunds to card and chargebacks.
+- **Closing balances** equal the opening balances plus the lines.
+
+Holds and releases only move credit between available and reserved, so they change neither the
+total nor any "money" total. The web shows 100 lines per page, with the running balance carried
+across pages. The CSV has every line of the month (at most 100,000) between an opening-balance row
+and a closing-balance row. Amounts are exact decimal rupees built from integer paise, and cells are
+formula-safe (contacts/csv).
+
+**Times.** Statements use the company's current time zone. Changing it moves the month boundaries
+of every statement, including past ones, and each statement names the time zone it used. A posting
+is dated when its database transaction started. In theory, a posting that starts just before
+midnight and commits just after can appear in a statement viewed after it committed but not in one
+viewed a moment earlier, so every statement shows when it was generated.
+
+**Receipts.** A top-up credited from a captured Razorpay payment has a receipt page showing:
+
+- the receipt number (the order receipt `tu_…`, which also appears in Razorpay);
+- the payment date, amount and method as Razorpay reported it (card, UPI, net banking, …), plus the
+  saved card's network and last four digits for an automatic top-up;
+- the Razorpay payment and order ids;
+- when the credit was added, and any refunds or chargebacks against the payment.
+
+The method is recorded with the credit by `app.billing_record_payment_method`. It is a definer
+function that sets the method once, and only on the top-up that the same payment id credited:
+runtime code still cannot change a paid top-up. Top-ups credited before 0029 show no method.
+Receipts never show or store card numbers.
+
+**Not a tax invoice.** A receipt confirms a payment for prepaid service credit. Each receipt says it
+is not a tax invoice. HyFib does not claim that it is a GST receipt voucher, which has prescribed
+particulars (supplier GSTIN, place of supply, tax breakdown). Tax invoices and GST treatment of
+prepaid credit wait for tax review (RELEASE-CHECKLIST, P5-05). The operator's legal name, address
+and GSTIN are not configured anywhere yet.
+
+**Emails.** When a top-up is credited, the company's billing managers get a payment-received email
+with a link to its receipt, in the same transaction as the credit. An automatic top-up's email,
+which already existed, now links to the receipt too.
+
+**Not built:** statements for custom ranges or years, PDF files (the pages print cleanly, and the
+browser saves them as PDF), stored or emailed monthly statements, staff views of a company's
+statements, tax invoices, and credit notes for refunds. Monthly rollups are not built either: the
+months list sums the wallet's whole ledger on each view. That is fine while only top-ups, refunds
+and chargebacks post, but a high-volume charging service (holds per request) will need rollups.
+
+## ADR-058 Refunds of unused service credit started by platform owners: a hold while Razorpay processes, the refund recorded from what Razorpay reports (2026-09-28)
+
+Decision: a platform owner can refund part or all of a paid top-up from the company's platform
+page, with a written reason. The amount is capped by two things: the top-up's unrefunded amount,
+and the company's available credit when the refund is asked for. Credit already spent is never
+refunded from the console, because that would leave the company owing money. Only one refund per
+top-up can be open at a time. Refunds made in the Razorpay Dashboard keep working as before
+(recorded from `refund.processed`).
+
+**Flow.**
+
+1. **Request.** `ops.platform_request_credit_refund` is SECURITY DEFINER and only the platform role
+   can execute it. It refuses anyone but a platform owner, a reason shorter than 10 characters, a
+   top-up that is not paid or partly refunded, and an amount outside ₹0.01 to the unrefunded
+   amount. Under the wallet's row lock it also refuses an amount above the available credit. Then,
+   in one transaction, it:
+   - places a hold for the amount (reference `credit_refund`, kept for 90 days);
+   - records the request in `app.credit_refunds` as `requested`;
+   - writes the platform audit log (`platform.credit_refund_requested`, with the reason).
+2. **Submit.** The minute billing sweep finds due requests (`ops.credit_refunds_due`) and queues one
+   signed `billing.credit-refund` job for each. The job runs in the company's scope and writes the
+   attempt down first. It then calls `POST /v1/payments/:id/refund` with the amount, speed
+   `normal`, and `X-Refund-Idempotency: crf_<request id>`, so a repeated call after a lost
+   response returns the same refund (R-076, R-086). The outcome:
+   - Razorpay returns a refund: the request becomes `submitted` with the refund id, the billing
+     managers are emailed, and a refund that is already `processed` is recorded at once.
+   - Razorpay refuses (a 4xx other than 401, and other than 409, which means a call with this key
+     is still being processed): the request becomes `failed`, the hold is released and the error
+     code is kept.
+   - A transient failure: the same call, with the same body, is retried after 1, 5, 15 and 60
+     minutes, then hourly.
+3. **Recording.** `refund.processed` (R-023), or the job's own check of a submitted refund (every 15
+   minutes, backing off to 6 hours), fetches the refund and its payment from Razorpay. It then calls
+   `app.billing_record_refund`, which is replaced in 0032. When the refund is for a top-up with an
+   open request (the same refund id, or no refund id stored yet and the same amount), the function
+   releases the request's hold and marks the request `processed`, in the same transaction as the
+   refund posting. So the refund takes the credit the hold set aside, exactly once.
+4. **Failure.** `refund.failed` (R-023), or a fetched refund that failed, marks the request
+   `failed` and releases the hold, so the credit is available again. The billing managers are
+   emailed.
+
+**On statements** a staff refund shows as "Reserved for a refund" when asked. When Razorpay
+completes it, "Refund reservation released" and "Refund to card" appear at the same moment. Total
+credit drops only when the refund is processed.
+
+**Why a hold and not a debit at request time:** a debit before Razorpay accepts would take credit
+the company keeps if the refund fails. The hold keeps the credit aside and is released either way,
+and the company cannot spend it meanwhile. A hold left open for 90 days is released by the
+expired-holds sweep; a refund processed after that is recorded as a plain refund.
+
+**Why platform owners only:** money leaves the platform. Operators see refunds but cannot start
+them, and every request is in the platform audit log with its reason. Staff see a company's
+balances, top-ups and refunds without a support grant: these are payments to HyFib, not the
+company's content (`ops.platform_company_billing` returns amounts, statuses, dates and the payment
+method, nothing else). The company sees its refunds on the Billing page and the receipt, but not
+the staff reason or who asked (column grants).
+
+**Company deletion:** no refund can be asked for once the company is pending deletion, and a
+deletion that is due waits until no refund is open: the worker checks before it starts, because
+nothing runs for a deleted company. For a company being deleted, a refund is made in the Razorpay
+Dashboard and recorded from `refund.processed`, as before. Refund requests are billing records and
+are kept after the deletion (ADR-055).
+
+**Fees and timing:** Razorpay does not reverse its fee on a refund (R-079). The company gets the
+full amount and the platform bears the fee. Refunds are paid from the platform's Razorpay balance
+and normally take 5–7 working days (R-077, R-079). The email and the pages say so.
+
+**Not built:** refunds asked for by companies, refunds of spent credit, refunds started here for a
+company being deleted, instant refunds (`optimum`), several refunds of one top-up at once, a
+platform-wide refunds list, and the daily reconciliation report (P5-05).

@@ -9,7 +9,9 @@ import {
   deferAutoRechargeAttempt,
   findAutoRechargeCandidates,
   findBillingReconciliationDue,
+  findDueCreditRefunds,
   findStaleReceipts,
+  processCreditRefund,
   processRazorpayReceipt,
   reconcileTopup,
   releaseExpiredHolds,
@@ -18,6 +20,7 @@ import {
 } from '@w360/domain';
 import type { WorkerRuntime } from '../runtime';
 import { RetryableJobError } from './email';
+import { sweepTenantDeletions } from './tenancy';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -110,11 +113,38 @@ export function autoRechargeHandler(rt: WorkerRuntime) {
 }
 
 /**
+ * `billing.credit-refund`: one step of a refund a platform owner asked for (ADR-058): ask Razorpay
+ * for it, or check a refund Razorpay is processing. Provider failures leave the request due again
+ * for the minute sweep; only unexpected errors fail the job (and are retried).
+ */
+export function creditRefundHandler(rt: WorkerRuntime) {
+  return async ([job]: Job<unknown>[]): Promise<void> => {
+    if (!job) return;
+    const auth = await authorizeJob(rt, job.data, {
+      expectedKind: 'billing.credit-refund',
+      requireActiveTenant: false,
+      requireActiveActor: false,
+    });
+    if (auth.outcome !== 'authorized' || !auth.scope || !UUID_RE.test(auth.envelope.ref)) {
+      rt.logger.warn({ jobId: job.id, outcome: auth.outcome }, 'credit refund job dropped');
+      return;
+    }
+    const deps = providerDeps(rt);
+    if (!deps) throw new RetryableJobError('Razorpay is not configured');
+    const outcome = await processCreditRefund(deps, auth.scope, auth.envelope.ref);
+    rt.logger.info(
+      { jobId: job.id, tenantId: auth.scope.tenantId, refundId: auth.envelope.ref, outcome },
+      'credit refund step',
+    );
+  };
+}
+
+/**
  * Every minute: move plans whose trial, paid period or grace period ended to their next state and
  * announce reached automation run limits (ADR-051); re-signal Razorpay receipts whose signal was
  * lost, reconcile open manual top-ups and due auto-recharge attempts with Razorpay (the backstop
- * for missed webhooks), start auto-recharge checks for companies below their threshold, and
- * release expired holds.
+ * for missed webhooks), queue due steps of staff credit refunds (ADR-058), start auto-recharge
+ * checks for companies below their threshold, and release expired holds.
  */
 export function billingSweepHandler(rt: WorkerRuntime) {
   return async (): Promise<void> => {
@@ -131,6 +161,9 @@ export function billingSweepHandler(rt: WorkerRuntime) {
         'plan sweep',
       );
     }
+    // Company deletions run whether or not Razorpay is configured (ADR-055).
+    const deletions = await sweepTenantDeletions(rt);
+    if (deletions > 0) rt.logger.info({ deletions }, 'company deletions due');
     const released = await releaseExpiredHolds(rt.db);
     const deps = providerDeps(rt);
     if (!deps) {
@@ -183,6 +216,21 @@ export function billingSweepHandler(rt: WorkerRuntime) {
         );
       }
     }
+    // Staff refunds of unused credit (ADR-058): one job per request that is due.
+    const refunds = await findDueCreditRefunds(rt.db);
+    for (const item of refunds) {
+      await rt.jobs.enqueue(
+        null,
+        QUEUES.billingCreditRefund.name,
+        rt.signer.sign({
+          kind: 'billing.credit-refund',
+          tenantId: item.tenantId,
+          actorUserId: null,
+          ref: item.refundId,
+        }),
+        { singletonKey: item.refundId },
+      );
+    }
     const candidates = await findAutoRechargeCandidates(rt.db);
     for (const tenantId of candidates) {
       await rt.jobs.enqueue(
@@ -197,12 +245,13 @@ export function billingSweepHandler(rt: WorkerRuntime) {
         { singletonKey: `check:${tenantId}` },
       );
     }
-    if (receipts.length + due.length + candidates.length + released > 0) {
+    if (receipts.length + due.length + refunds.length + candidates.length + released > 0) {
       rt.logger.info(
         {
           receipts: receipts.length,
           due: due.length,
           reconciled,
+          refunds: refunds.length,
           candidates: candidates.length,
           released,
         },

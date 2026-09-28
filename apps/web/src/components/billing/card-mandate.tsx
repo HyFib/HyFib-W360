@@ -7,8 +7,9 @@ import {
   confirmMandateAction,
   startMandateSetupAction,
 } from '@/app/actions/billing';
+import { ActionFailure, type ActionFailureState } from '@/components/action-failure';
 import { ClientButton, ClientForm } from '@/components/client-form';
-import { FormError, FormSuccess } from '@/components/form-status';
+import { FormSuccess } from '@/components/form-status';
 import { CheckoutClosedError, openCheckout } from './razorpay-checkout';
 
 /**
@@ -28,7 +29,7 @@ export function CardMandateSetup({
   const [maxAmount, setMaxAmount] = useState('15000');
   const [email, setEmail] = useState(defaultEmail);
   const [contact, setContact] = useState(defaultContact);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ActionFailureState | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
@@ -42,7 +43,7 @@ export function CardMandateSetup({
     try {
       const started = await startMandateSetupAction(slug, { maxAmount, email, contact });
       if (!started.ok) {
-        setError(started.message);
+        setError(started);
         setFieldErrors(Object.fromEntries((started.issues ?? []).map((i) => [i.path, i.message])));
         return;
       }
@@ -59,7 +60,10 @@ export function CardMandateSetup({
           customerId: setup.customerId,
           recurring: true,
           onAttemptFailed: (message) =>
-            setError(`${message} You can try again in the payment window.`),
+            setError({
+              code: 'provider_rejected',
+              message: `${message} You can try again in the payment window.`,
+            }),
         });
       } catch (checkoutError) {
         if (checkoutError instanceof CheckoutClosedError) {
@@ -75,7 +79,7 @@ export function CardMandateSetup({
         signature: response.razorpay_signature,
       });
       if (!confirmed.ok) {
-        setError(confirmed.message);
+        setError(confirmed);
         return;
       }
       setNotice(
@@ -84,7 +88,10 @@ export function CardMandateSetup({
           : 'Your bank is still confirming the card. This page updates when it is done.',
       );
     } catch (unexpected) {
-      setError(unexpected instanceof Error ? unexpected.message : 'The card could not be set up.');
+      setError({
+        code: 'internal',
+        message: unexpected instanceof Error ? unexpected.message : 'The card could not be set up.',
+      });
     } finally {
       setBusy(false);
     }
@@ -92,7 +99,7 @@ export function CardMandateSetup({
 
   return (
     <ClientForm onSubmit={submit} className="grid gap-3 sm:max-w-md">
-      <FormError message={error} />
+      <ActionFailure failure={error} />
       <FormSuccess message={notice} />
       <Field
         id="mandate-max"
@@ -147,11 +154,11 @@ export function CardMandateSetup({
 }
 
 export function RemoveCard({ slug, mandateId }: { slug: string; mandateId: string }) {
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ActionFailureState | null>(null);
   const [busy, setBusy] = useState(false);
   return (
     <div className="grid gap-2">
-      <FormError message={error} />
+      <ActionFailure failure={error} />
       <ConfirmDialog
         trigger={
           <ClientButton variant="outline" size="sm" disabled={busy}>
@@ -167,7 +174,7 @@ export function RemoveCard({ slug, mandateId }: { slug: string; mandateId: strin
           setError(null);
           const result = await cancelMandateAction(slug, mandateId);
           setBusy(false);
-          if (!result.ok) setError(result.message);
+          if (!result.ok) setError(result);
         }}
       />
     </div>
