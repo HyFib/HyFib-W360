@@ -308,6 +308,23 @@ export const QUEUES = {
     deadLetter: 'dead-letter',
     deleteAfterHours: 72,
   },
+  /**
+   * Deletes a company whose 14-day grace period has ended (ADR-055): cleans up at providers,
+   * deletes its rows a batch per transaction and leaves a tombstone. A run stops after a few
+   * minutes of work; the next signal (a retry or the minute billing sweep) continues from where it
+   * stopped, because every step is recorded in the database.
+   */
+  tenantDelete: {
+    name: 'tenant.delete',
+    policy: 'exclusive',
+    retryLimit: 10,
+    retryDelaySeconds: 60,
+    retryBackoff: true,
+    retryDelayMaxSeconds: 1800,
+    expireInSeconds: 900,
+    deadLetter: 'dead-letter',
+    deleteAfterHours: 24 * 7,
+  },
   // Jobs that failed all their retries. The worker records each one in ops.dead_letters (ADR-054);
   // a recording that fails is retried, and the job stays in pg-boss for its retention either way.
   deadLetter: {

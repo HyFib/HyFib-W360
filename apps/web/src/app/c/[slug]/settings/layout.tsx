@@ -42,6 +42,9 @@ export default async function SettingsLayout({
         ]
       : []),
     ...(ctx.permissions.has('audit.read') ? [{ href: `${base}/audit`, label: 'Audit log' }] : []),
+    ...(ctx.permissions.has('tenant.export') || ctx.permissions.has('tenant.delete')
+      ? [{ href: `${base}/data`, label: 'Company data' }]
+      : []),
     { href: `${base}/modules`, label: 'Modules' },
   ];
   return (

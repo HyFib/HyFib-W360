@@ -697,6 +697,20 @@ export class GraphClient {
     );
   }
 
+  /**
+   * DELETE /{waba-id}/subscribed_apps: stops this app's webhooks for the account (operation
+   * `unsubscribeFromWabaWebhooks` in Meta's official OpenAPI description). Used when a company is
+   * deleted (ADR-055).
+   */
+  unsubscribeApp(wabaId: string, token: string) {
+    return this.request(
+      'DELETE',
+      `/${encodeURIComponent(wabaId)}/subscribed_apps`,
+      { token },
+      (json) => (json.success === true ? { unsubscribed: true } : null),
+    );
+  }
+
   /** POST /{phone-number-id}/register with a six-digit two-step verification PIN. */
   registerNumber(phoneNumberId: string, token: string, pin: string) {
     if (!/^\d{6}$/.test(pin)) throw new Error('PIN must be six digits');

@@ -12,6 +12,7 @@ import {
   plans,
   sql,
   supportAccessGrants,
+  tenantDeletions,
   tenantPlans,
   tenants,
   users,
@@ -361,6 +362,32 @@ export function createPlatformService(deps: PlatformDeps) {
           status: r.membership_status,
           twoFactorEnabled: r.two_factor_enabled,
         }));
+      });
+    },
+
+    /** The company's latest deletion request, if any (ADR-055): dates, state and provider cleanup. */
+    async tenantDeletion(actor: PlatformActor, tenantId: string) {
+      if (!z.uuid().safeParse(tenantId).success) throw notFound('Company');
+      return platformDb.run(actor.userId, async (tx) => {
+        const [row] = await tx
+          .select({
+            id: tenantDeletions.id,
+            requestedAt: tenantDeletions.requestedAt,
+            dueAt: tenantDeletions.dueAt,
+            previousStatus: tenantDeletions.previousStatus,
+            cancelledAt: tenantDeletions.cancelledAt,
+            startedAt: tenantDeletions.startedAt,
+            attempts: tenantDeletions.attempts,
+            providerCleanup: tenantDeletions.providerCleanup,
+            providerCleanupAt: tenantDeletions.providerCleanupAt,
+            rowsDeleted: tenantDeletions.rowsDeleted,
+            completedAt: tenantDeletions.completedAt,
+          })
+          .from(tenantDeletions)
+          .where(eq(tenantDeletions.tenantId, tenantId))
+          .orderBy(desc(tenantDeletions.requestedAt), desc(tenantDeletions.id))
+          .limit(1);
+        return row ?? null;
       });
     },
 

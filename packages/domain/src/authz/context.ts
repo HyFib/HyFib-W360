@@ -201,6 +201,12 @@ export function assertCan(ctx: TenantContext, permission: Permission): void {
         "This company's plan has ended, so this action is unavailable. Ask HyFib to renew the plan; you can still review and export your data.",
       );
     }
+    if (ctx.tenant.status === 'pending_deletion') {
+      throw new AppError(
+        'tenant_suspended',
+        'This company is being deleted, so this action is unavailable. An owner can cancel the deletion in Settings, Company data; you can still review and export your data.',
+      );
+    }
     if (ctx.tenant.status !== 'active') {
       throw new AppError(
         'tenant_suspended',

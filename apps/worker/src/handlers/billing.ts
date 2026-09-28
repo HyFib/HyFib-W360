@@ -18,6 +18,7 @@ import {
 } from '@w360/domain';
 import type { WorkerRuntime } from '../runtime';
 import { RetryableJobError } from './email';
+import { sweepTenantDeletions } from './tenancy';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -131,6 +132,9 @@ export function billingSweepHandler(rt: WorkerRuntime) {
         'plan sweep',
       );
     }
+    // Company deletions run whether or not Razorpay is configured (ADR-055).
+    const deletions = await sweepTenantDeletions(rt);
+    if (deletions > 0) rt.logger.info({ deletions }, 'company deletions due');
     const released = await releaseExpiredHolds(rt.db);
     const deps = providerDeps(rt);
     if (!deps) {

@@ -103,7 +103,15 @@ audited. Never paste tokens, message content or card data into tickets or chat.
 2. Restore the managed PostgreSQL to a new instance at the chosen point in time (PITR).
 3. Verify: row counts, latest audit events, migration table (`w360_migrations.applied`), pg-boss
    version; run the isolation test suite against the restored instance if time permits.
-4. Re-apply pending deletions recorded after the restore point (deletion log, phase 5).
+4. Re-apply company deletions completed after the restore point before reopening access. List
+   them from the old database's register (`SELECT * FROM ops.tenant_deletions WHERE completed_at >
+'<restore point>'`) or, if it is lost, from the worker's `company deleted` log lines
+   (`tenantId`). On the restored database, as the migration role with `SET ROLE w360_definer`: if
+   the company's deletion is still open there, set its `due_at` to now; if the request came after
+   the restore point, insert the old register row (same id, requester, request time, previous
+   status and name, `due_at` now, no start or completion) and set the company's status to
+   `pending_deletion`. The minute sweep then deletes it again (section 10Q). Contact erasures after
+   the restore point are repeated from the old database's audit log (`contact.erased`).
 5. Switch connection strings (secret manager) and roll web/worker. Record timings (RPO/RTO achieved)
    in the release evidence. **A restore drill has not been performed yet.**
 
@@ -384,8 +392,8 @@ that section.
 
 **A chat link shows "This chat link is not available".** The short link answers 404 when the link
 is archived (restore it on its page), its number is not active (Settings → Channels; a number that
-needs reconnecting stops its links until it is active again), or the company is being deleted. A
-suspended company's links keep working. The link page shows a warning in the first two cases.
+needs reconnecting stops its links until it is active again), or the company was deleted. A
+suspended company's links keep working, as do those of a company waiting for deletion (ADR-055). The link page shows a warning in the first two cases.
 Unknown or mistyped addresses answer the same page. Nothing is logged about the visitor.
 
 **Clicks look too high.** Counts include every open of the short link and its QR code: repeated
@@ -949,6 +957,43 @@ retried.
 transaction; if it fails, drop the invalid index
 (`DROP INDEX CONCURRENTLY IF EXISTS app.consent_events_tenant_occurred_idx`) and run the
 migrations again.
+
+## 10Q. Company export and deletion
+
+Owners use Settings → Company data (ADR-055). Nothing here is done by staff: staff cannot start,
+speed up or cancel a deletion, and the export is only for the company's owners.
+
+**An export fails or is cut short.** The file is complete only if its last line is
+`{"end":true,...}`. A second export while one runs answers 409; each start is audited
+(`tenant.exported`) and emailed to owners and administrators, even when it then fails. A failure
+after the download started is logged by the web as `company export stopped` (with the company id).
+Large companies stream for as long as the read takes; `idle_in_transaction_session_timeout` (60 s)
+ends an export whose reader stops reading for a minute.
+
+**A deletion is scheduled.** The company is `pending_deletion` until `due_at` (14 days) and works as
+suspended. Any owner cancels in Settings → Company data until the run starts; after that the page
+says it can no longer be cancelled. The register is `ops.tenant_deletions` (the company's platform
+page shows it). A company that asks HyFib to stop a deletion before it starts: an owner cancels; if
+no owner can, suspend handling of the request and escalate (there is no staff cancellation).
+
+**A deletion is running or stuck.** The minute billing sweep queues a `tenant.delete` job for every
+due or unfinished deletion (`company deletions due` in the worker log); each run deletes for up to
+five minutes (`company deletion continues` with the rows deleted) until `company deleted`. A run that
+keeps failing shows in the job log and dead letters (section 3); the register's `attempts` counts
+runs. `finish_tenant_deletion` returns false while any deletable row remains, so a run that ends
+with rows written meanwhile simply runs again. The providers are visited once per deletion
+(`provider_cleanup_at`); their outcomes are in `provider_cleanup` and in the final email. A
+`failed` outcome (for example Meta refusing an expired token) is not retried: the email asks the
+owners to remove HyFib's access there; WooCommerce stores are always listed because their keys can
+only be revoked in the store.
+
+**After a deletion.** The company row is a tombstone (`deleted`, "Deleted company",
+`deleted-<id>`); its old address is free. Billing records, plan history, the register, support
+grants and security events stay. Meta events for its numbers are quarantined as `unknown_asset`
+(section 4). If the business connects the same numbers to another company, they bind normally.
+
+**Migration 0028 failed.** It runs in one transaction and needs the bootstrap roles; fix the cause
+and run the migrations again.
 
 ## 11. Compromised company (tenant) or account
 

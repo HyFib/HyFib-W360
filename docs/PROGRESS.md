@@ -1,5 +1,92 @@
 # Progress
 
+## 2026-09-28 — Phase 5: company export and deletion (P5-11)
+
+Status: **Company export and deletion implemented and locally verified with test data only.**
+Owners download a full copy of their company's data and can have the company deleted: 14 days as
+suspended and cancellable, then a resumable worker job that removes HyFib from the company's
+providers, deletes every company row and keeps only billing records, plan history and platform
+evidence. Provider calls were verified against the Graph, Shopify and Razorpay stand-ins only.
+
+### Completed
+
+- **Design (ADR-055):** a streamed export with every table and column classified; deletion typed
+  with the company address, due after 14 days, cancellable by owners until it starts; a worker job
+  in bounded, resumable steps through SECURITY DEFINER functions; provider clean-up once with every
+  outcome recorded; a tombstone company row; what is kept and why; backups and restores.
+- **Schema (migration 0028):** the register `ops.tenant_deletions`, the step order
+  `ops.tenant_deletion_steps` (86 steps over 87 tables, children before parents), the definer
+  role's per-table `SELECT (tenant_id, id)`/`DELETE` grants with policies matching
+  `ops.deleting_tenant_id()`, and `app.request_tenant_deletion`, `app.cancel_tenant_deletion`,
+  `ops.tenant_deletions_due`, `ops.start_tenant_deletion`, `ops.record_tenant_deletion_cleanup`,
+  `ops.delete_tenant_data` and `ops.finish_tenant_deletion` (executable by the runtime role only).
+- **Domain:** `tenancy/export-spec.ts` (85 exported tables with their columns, 15 excluded tables
+  and every omitted column with a reason), `tenancy/export.ts` (keyset pages from one read-only,
+  repeatable-read transaction, an advisory lock per company, audit and emails first),
+  `tenancy/deletion.ts` (status, request, cancel, with audit entries and emails to owners and
+  administrators), `tenancy/deletion-run.ts` (start, provider clean-up, batches for up to five
+  minutes, finish with the final emails), Graph `unsubscribeApp`, the store worker's removal for a
+  deletion, a `tenant.notice` email, `tenant.delete` allowed while suspended and a pending-deletion
+  message in the permission layer.
+- **Worker:** the `tenant.delete` queue (`exclusive`, one run per company) and handler; the minute
+  billing sweep queues a run for every due or unfinished deletion.
+- **Web:** Settings → Company data (the export download, the deletion form with the typed address,
+  the scheduled state with its due date and a cancel button, the started state), the streaming
+  export route, a "being deleted" banner in the company layout and the company switcher, and a
+  Deletion card on the platform company page.
+- **Docs:** ADR-055, ARCHITECTURE §6Q, SECURITY (control, matrix, rules), THREAT-MODEL T77–T80,
+  DATA-RETENTION (export and deletion semantics now built), RUNBOOKS §8 and §10Q,
+  RELEASE-CHECKLIST, FEATURE-MATRIX (H-015), BACKLOG (P5-11 built).
+- **Found while building:**
+  - **Contact erasure left the number and text in past send requests** (`app.send_intents.request`);
+    erasure now redacts them (fixed in 0028; the erasure test checks it).
+  - **Public entry points treated a company pending deletion as unknown,** so a Shopify redaction or
+    a payment received during the grace period would have been dropped. The six lookups now treat
+    it like a suspended company. The growth suite had asserted that a company "being deleted"
+    opens nothing (a P4-05 choice from before pending deletion had a meaning); it now expects the
+    suspended behaviour, and that a deleted company's links open nothing (ADR-044's text notes the
+    change).
+  - **The ended-run guard no longer froze `pending_message_id` and `http_call_count`** (lost when
+    0022 replaced the function); both are frozen again and tested.
+  - **Every deletion request would have failed:** the email's date formatting combined
+    `dateStyle`/`timeStyle` with `timeZoneName`, which `Intl.DateTimeFormat` rejects. The new
+    integration suite caught it; the parts are spelled out and unit-tested.
+  - **The export email said "downloaded"** although it is sent before the first line and also for
+    a refused or interrupted export; it now says the export was started.
+  - **Mutation checks:** 33 guards broken one at a time (the owner check, the typed address, a
+    second request, cancelling after the start, the restored suspension and restriction, the due
+    date, releasing the bindings, who is notified, recording the clean-up once and only known
+    keys, deleting only for a started deletion, the definer's delete policy, finishing while rows
+    remain, the step order, a table left out, each of the six lookups, the send-request redaction,
+    both frozen run columns, visiting providers once, cancelling the card mandate, the Graph
+    method, one export at a time, the export's audit entry, members' accounts in the export,
+    administrators emailed, cancelling while pending). All 33 make a test fail.
+
+### Test commands and results (local, 2026-09-28)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `pnpm test` (unit)                                                          | 283 passed. New: `tenancy/company-data.test.ts` 4 (dates in the company's time zone, the export spec's tables, columns, omitted-column reasons and member columns).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 364 passed, including the new `company-data.test.ts` 14 (every company table deleted or kept on purpose, each once; children deleted before parents and nothing kept pointing at deleted rows; the definer's read and delete policies on every step table and the functions refusing companies not being deleted or not started; every table and column of the export classified, secrets omitted and readable by the runtime role; a busy company's export with row counts, members' accounts, no other company, no tokens, the audit entry and emails; owners only, one at a time, available while pending; requests needing an owner and the typed address, the company then suspended with emails and audit; cancellation restoring active, suspended with HyFib's reason, or restricted after a lapsed plan, and refused once started; runs not due; a full run with WhatsApp, Shopify and a card mandate at the stand-ins (tombstone, kept records, each provider called once, final emails without the company, the other company untouched, jobs refused, the address reusable, later webhooks quarantined, the platform record); a resumed run; a refused Meta token recorded and the deletion finished; cleanup outcomes validated and recorded once; the six public lookups while pending), the erasure test checking send requests, the ended-run guard's two columns, the growth test's new expectation and the new function grants in the isolation suite. |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 68 passed (34 × 2) in one full run (12.2 min). New `company-data.spec.ts` on both projects: an owner downloads the export (file name, gzip JSON Lines with the header, the owner as the only member and the end line, no `tenant_id`), the email arrives; the delete button stays disabled until the address is typed exactly; the deletion is scheduled (banner, due date, requester, email) with the export still available, then cancelled (banner gone, email); and a due deletion (moved on by a fixture step as the definer role) is run by the real worker from the minute sweep, the owner gets "Company deleted" and the company's pages answer 404.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Mutation checks                                                             | 33 guards broken one at a time; all 33 make a test fail                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+
+### Known gaps
+
+- Not built: step-up re-authentication before exporting or deleting, deletion started by platform
+  staff, stored exports with a download link, other formats, a shorter grace period.
+- Provider clean-up was verified against stand-ins only; `DELETE /{WABA-ID}/subscribed_apps`,
+  Shopify's `appUninstall` and Razorpay token deletion still need a staging run
+  (RELEASE-CHECKLIST).
+- The kept records (billing, plan history, the register) and their periods need a legal and tax
+  review; the Razorpay customer record is not deleted.
+- Deleted data stays in backups until they expire; re-applying deletions after a restore is a
+  manual runbook step (RUNBOOKS §8), not yet drilled.
+- A very large company's export holds one read-only transaction for as long as the download takes;
+  a reader that stops for a minute ends it (`idle_in_transaction_session_timeout`).
+- Firefox and WebKit run in CI only.
+
 ## 2026-09-28 — Phase 5: platform operations console (P5-10)
 
 Status: **Operations console implemented and locally verified with test data only.** Platform staff

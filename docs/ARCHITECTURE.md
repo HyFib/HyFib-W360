@@ -505,7 +505,8 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   script from `ops.chat_widget_config` (`Cache-Control: public, max-age=300`,
   `Cross-Origin-Resource-Policy: cross-origin`), or a 404 script comment. Both definer functions
   return only what the response needs and nothing for archived links, inactive numbers, disabled
-  widgets or companies being deleted.
+  widgets or deleted companies (a company waiting for deletion works like a suspended one,
+  ADR-055).
 - **Widget script** (`growth/widget-script.ts`): configuration embedded as JSON escaped for a script
   context; guards against a second copy on the same page; draws a fixed-position greeting and link
   in an open shadow root with `textContent` and CSSOM styles (text colour chosen for contrast);
@@ -938,6 +939,46 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   precomputed rollups come with growth.
 - **Not built yet:** alerts, trends, quality updates from Meta's quality webhook, API request counts,
   exports, the age of the oldest waiting job, redrive from the console, and acknowledging issues.
+
+## 6Q. Company export and deletion **[built — providers verified against the local Graph, Shopify and Razorpay stand-ins only]**
+
+- **Purpose** (P5-11, ADR-055): owners take a full copy of the company's data at any time and can
+  have the company deleted, after 14 days of grace, by a job that survives restarts.
+- **Export** (`tenancy/export.ts`, `tenancy/export-spec.ts`): the route
+  `/c/<slug>/settings/data/export` bridges `writeCompanyExport` into a response stream (text →
+  `TextEncoderStream` → `CompressionStream('gzip')`), answering an error instead of a file until
+  the first line is written. The export reads every table in `EXPORT_TABLES` keyset-paged by id,
+  1,000 rows a page, in one read-only, repeatable-read transaction in the company's scope, after an
+  advisory lock per company; members are joined with their account's name and email. The spec
+  lists each exported table's columns and each omitted column's reason; `EXPORT_EXCLUDED_TABLES`
+  gives each left-out table's reason.
+- **Request and grace** (`tenancy/deletion.ts`): `app.request_tenant_deletion` (owner, typed
+  address) writes the register `ops.tenant_deletions` (previous status, due in 14 days) and puts the
+  company in `pending_deletion`, which the permission layer treats like a suspension; the company
+  layout shows a banner. `app.cancel_tenant_deletion` restores the status (a suspension stays, a
+  lapsed plan restricts) until the run starts.
+- **Run** (`tenancy/deletion-run.ts`, worker `handlers/tenancy.ts`): the minute billing sweep calls
+  `ops.tenant_deletions_due` and queues a signed `tenant.delete` job per company (`exclusive`,
+  singleton per company, retried with backoff). A run calls `ops.start_tenant_deletion` (first time:
+  records who to notify, releases the company's number bindings), cleans up at providers once and
+  records the outcomes (`ops.record_tenant_deletion_cleanup`), then calls `ops.delete_tenant_data`
+  in its own transaction per batch (2,000 rows of the first step that has rows, or a whole step for
+  the cycle and self-references) for up to five minutes, and finally `ops.finish_tenant_deletion`
+  with the final emails in the same transaction. The step order `ops.tenant_deletion_steps` lists
+  every deletable table; the definer role's delete policies match `ops.deleting_tenant_id()`, set
+  only inside the functions.
+- **Provider clean-up:** Graph `DELETE /{WABA-ID}/subscribed_apps` with the account's stored token;
+  the store worker's removal (Shopify `appUninstall`, WooCommerce webhook deletion) with the removal
+  deadline already past; Razorpay token deletion for HyFib's card mandate, with the mandate cancelled
+  and auto-recharge turned off either way. Missing configuration or credentials are recorded as
+  skipped, errors as failed; neither stops the deletion.
+- **Kept:** the company row as a tombstone, billing tables, plan history, the register, support
+  grants and security events (the catalog tests list them); people's accounts.
+- **Web:** Settings → Company data (owners: export link, deletion form with the typed address, the
+  pending state with the due date and a cancel button, the started state); the platform company page
+  shows the register (dates, runs, rows deleted, provider outcomes).
+- **Not built yet:** step-up re-authentication before exporting or deleting, staff-started
+  deletion, stored exports and other formats.
 
 ## 7. Commercial model and billing **[built: plans and entitlements, wallet, top-ups, auto-recharge — verified against a local Razorpay stand-in only; paying for plans in HyFib planned]**
 

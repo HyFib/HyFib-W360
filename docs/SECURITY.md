@@ -38,6 +38,7 @@ security operations. It is not a compliance claim; see `docs/THREAT-MODEL.md` fo
 | Public API         | Company API keys store only the token's SHA-256, which the runtime role cannot read (column grants); keys are found through a SECURITY DEFINER function that refuses revoked and expired keys and companies being deleted. Scopes are granted only by members holding the matching permission; a request acts in its key's company scope as the key (audit actor `api_key`), never from a company id in the request; writing scopes stop while the company is suspended or restricted. Template sends apply the members' checks and are re-checked before dispatch; an `Idempotency-Key` stored in the request's transaction replays the first response instead of sending twice. Per-key, per-company and per-address (failed authentication) rate limits, 64 KB bodies, no tokens in logs, `no-store` responses; keys expire, rotate with an overlap of up to 72 hours and are revoked at once, all audited. |
 | Outgoing webhooks  | Endpoints are managed with `developer.manage` (at most 10, checked by the egress guard's URL rules); events are captured by triggers in the company's own scope and hold ids and non-personal facts only, and payloads are built when delivered, so an erased contact is sent without personal data. Requests go only through the egress guard (public addresses only, DNS pinned, no redirects, 10 s, 64 KB), signed with HMAC-SHA256 over the timestamp and body with a per-endpoint secret shown once and stored encrypted (bound to company, endpoint and version); the worker never takes a company id from a notification. Bounded retries, at-least-once delivery with a stable event id, automatic disabling after 72 hours of failures with an email, 30-day retention; audit entries name only the host.                                                                                             |
 | Operations console | Platform staff see counts, states, error codes, labels and times only, through four SECURITY DEFINER functions that refuse anyone but a platform administrator and read named columns; URLs are cut to their host inside the database; dead letters keep an error's name and code, never its message, and name a company only when the job's signature verifies; retrying a receipt and resolving a quarantine entry need a reason and are written to the platform audit log.                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Company data       | Owners only (`tenant.export`, `tenant.delete`, re-checked in SQL for deletion). The export streams listed columns from one read-only transaction in the company's scope (credentials, secrets, token hashes, PIN and Flow tokens never exported; catalog tests fail on unclassified tables or columns), is not stored, runs once at a time and is audited and emailed before it starts. Deletion needs the company address typed, waits 14 days (cancellable, emails to owners and administrators), then runs as a signed worker job through SECURITY DEFINER functions whose delete policies match only the company being deleted; providers are cleaned up once; billing records, plan history and platform evidence are kept (ADR-055).                                                                                                                                                                     |
 | Templates          | Created, deleted and listed only by the worker with the stored WABA token (never in the browser); webhooks for templates are signals routed through verified WABA bindings and never change status on their own; submission is write-ahead so a lost response cannot create a duplicate.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | Supply chain       | Exact pins + lockfile, pnpm minimum release age, explicit install-script allowlist, `pnpm audit` and gitleaks in CI, GitHub Actions pinned by SHA, Trivy image scanning, Dependabot.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 
@@ -47,9 +48,9 @@ Generated from `packages/domain/src/authz/permissions.ts` with `pnpm tsx scripts
 Members can hold several roles; effective permissions are the union, minus the write permissions of
 modules the company's plan leaves out (`automations.write`, `automations.publish`, `flows.write`,
 `flows.publish`, `crm.write`, `commerce.manage`; ADR-051), minus permissions blocked while the
-company is suspended or restricted (its plan expired or was canceled: the same "allowed while
-suspended" column) or while required MFA is overdue (only `tenant.read` and `members.read`
-remain).
+company is suspended, restricted (its plan expired or was canceled) or pending deletion (the same
+"allowed while suspended" column) or while required MFA is overdue (only `tenant.read` and
+`members.read` remain).
 
 | Permission               | owner | admin | supervisor | agent | marketer | analyst | billing | Allowed while suspended |
 | ------------------------ | :---: | :---: | :--------: | :---: | :------: | :-----: | :-----: | :---------------------: |
@@ -57,7 +58,7 @@ remain).
 | `tenant.settings.manage` |   ✓   |   ✓   |            |       |          |         |         |                         |
 | `tenant.security.manage` |   ✓   |   ✓   |            |       |          |         |         |                         |
 | `tenant.export`          |   ✓   |       |            |       |          |         |         |            ✓            |
-| `tenant.delete`          |   ✓   |       |            |       |          |         |         |                         |
+| `tenant.delete`          |   ✓   |       |            |       |          |         |         |            ✓            |
 | `members.read`           |   ✓   |   ✓   |     ✓      |   ✓   |    ✓     |    ✓    |    ✓    |            ✓            |
 | `members.invite`         |   ✓   |   ✓   |            |       |          |         |         |                         |
 | `members.manage`         |   ✓   |   ✓   |            |       |          |         |         |            ✓            |
@@ -491,6 +492,26 @@ message text, contact details, payloads, email addresses, secrets or full URLs:
   `failed` or `quarantined`, only while its body is kept) and resolving a quarantine entry each
   need a written reason and write `ops.platform_audit_events` in the same transaction. Neither
   reads or changes company data.
+
+Company export and deletion (Settings → Company data, ADR-055):
+
+- `tenant.export` and `tenant.delete` are owners' only (administrators hold neither) and stay
+  available while the company is suspended, restricted or pending deletion: leaving, and taking
+  the data along, must not depend on paying. `app.request_tenant_deletion` and
+  `app.cancel_tenant_deletion` check again that the caller is an active owner.
+- The export reads as the runtime role in the company's scope, so row security and column grants
+  apply; the tests check that the runtime role can read every exported column and that the export
+  spec classifies every table and column.
+- The deletion functions (`ops.start_tenant_deletion`, `ops.record_tenant_deletion_cleanup`,
+  `ops.delete_tenant_data`, `ops.finish_tenant_deletion`, `ops.tenant_deletions_due`) are owned by
+  `w360_definer` and executable only by `w360_app`. The definer holds, on each deletable table,
+  `SELECT (tenant_id, id)` and `DELETE` with policies matching `ops.deleting_tenant_id()`, which the
+  functions set only while they run and only to a company with a started, due deletion; the helper
+  is executable by the definer only. The functions also set the retention-purge and erasure flags
+  for the deletes, so guard triggers let them through only there.
+- Provider outcomes are stored as kind, label (an account name and id, a shop domain, a store host
+  or a card's network and last four digits), outcome and a short code; no token, response body or
+  address.
 
 ## Secret and key rotation
 

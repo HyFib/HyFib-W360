@@ -134,6 +134,14 @@ made. This checklist records the evidence required per gate; unchecked items blo
       queue counts refresh, a quarantined test event is retried and resolved with both actions in
       the platform audit log, and pages stay fast enough with the staging company count (the
       functions read every company on each view)
+- [ ] Company export and deletion on a staging deployment: an owner downloads the export of a
+      test company with realistic data through the production proxy (the whole file arrives, its
+      last line is the end line, the time it takes is recorded); a deletion scheduled, cancelled
+      and scheduled again; then, with the due date moved on the staging database, the worker
+      deletes the test company: HyFib's app unsubscribed from a sandbox WhatsApp Business Account
+      (`DELETE /{WABA-ID}/subscribed_apps` answered by Meta, and no more webhooks for its numbers),
+      a development Shopify store uninstalled, a Razorpay test card token deleted, the final email
+      received, and the kept billing records reviewed with a tax adviser (legal basis and periods)
 - [ ] Tenant-isolation and security gates passing in CI on the release commit
 - [ ] Measured load behaviour against the test envelope (k6 results)
 - [ ] Backup restoration drill performed and timings recorded (RPO/RTO)

@@ -562,6 +562,15 @@ describe('erasure', () => {
       clientKey: `ck_${uuidv7()}`,
     });
 
+    // The send requests hold the text (and the number) until erasure.
+    const requestsOf = () =>
+      fx.query<{ request: unknown }>(
+        `SELECT s.request FROM app.send_intents s
+           JOIN app.messages m ON m.tenant_id = s.tenant_id AND m.id = s.message_id
+          WHERE m.conversation_id = $1 ORDER BY s.created_at`,
+        [conv!.id],
+      );
+    expect(JSON.stringify(await requestsOf())).toContain('Thanks, noted');
     await expectAppError(
       contactsSvc.eraseContact(agent, { contactId, suppress: true }),
       'forbidden',
@@ -585,6 +594,10 @@ describe('erasure', () => {
       [queued.messageId],
     );
     expect(queuedIntent).toEqual({ state: 'canceled', last_error_code: 'contact_erased' });
+    // Past and cancelled sends alike lose their requests (P5-11 fix).
+    const requests = await requestsOf();
+    expect(requests).toHaveLength(2);
+    expect(requests.every((r) => JSON.stringify(r.request) === '{"redacted":true}')).toBe(true);
     const statusEvents = await fx.query<{ recipient_wa_id: string | null }>(
       'SELECT recipient_wa_id FROM app.message_status_events WHERE tenant_id = $1',
       [c.tenant.id],

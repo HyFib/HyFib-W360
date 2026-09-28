@@ -52,7 +52,12 @@ import {
   createTeamsService,
   createTemplatesService,
   createTenancyService,
+  createCompanyDeletionService,
   createWebRequestService,
+  writeCompanyExport,
+  type CompanyDeletionService,
+  type RequestMeta,
+  type TenantContext,
   type ApiKeysService,
   type WebhooksService,
   type AutomationService,
@@ -109,6 +114,14 @@ export interface Runtime {
   signer: JobSigner;
   auth: Auth;
   tenancy: TenancyService;
+  /** Deleting the company after its grace period (Settings → Company data). */
+  companyDeletion: CompanyDeletionService;
+  /** Streams the company export through `write` (Settings → Company data). */
+  companyExport: (
+    ctx: TenantContext,
+    write: (chunk: string) => Promise<void>,
+    meta?: RequestMeta,
+  ) => Promise<{ counts: Record<string, number> }>;
   platform: PlatformService;
   /** The platform operations console (/platform/ops): content-free facts and two audited repairs. */
   platformOps: PlatformOpsService;
@@ -229,6 +242,15 @@ async function init(): Promise<Runtime> {
     appBaseUrl: config.APP_BASE_URL,
     invitationTtlHours: config.INVITATION_TTL_HOURS,
   });
+  const companyDeletion = createCompanyDeletionService({
+    ...outbox,
+    db,
+    clock: systemClock,
+    appBaseUrl: config.APP_BASE_URL,
+  });
+  const exportDeps = { ...outbox, db, clock: systemClock, appBaseUrl: config.APP_BASE_URL };
+  const companyExport: Runtime['companyExport'] = (ctx, write, meta) =>
+    writeCompanyExport(exportDeps, ctx, write, meta);
   const platform = createPlatformService({ db, platformDb, clock: systemClock });
   const platformOps = createPlatformOpsService({
     platformDb,
@@ -370,6 +392,8 @@ async function init(): Promise<Runtime> {
     signer,
     auth,
     tenancy,
+    companyDeletion,
+    companyExport,
     platform,
     platformOps,
     inbox,

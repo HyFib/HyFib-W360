@@ -344,7 +344,19 @@ verification, app review, Embedded Signup configuration).
   card on each company's platform page; audited receipt retry and quarantine resolution. Remaining:
   alerts, trends, Meta's quality webhook, API request counts, exports, the oldest waiting job,
   redrive from the console, acknowledging issues, paging and rollups for many companies.
-- **P5-11 Account export/deletion workflow.**
+- **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**
+  (ADR-055): Settings → Company data for owners. A streamed, gzip-compressed JSON Lines export of
+  every company table from one read-only transaction (each table and column exported or excluded
+  with a reason, secrets never exported, one export at a time, audited, owners and administrators
+  emailed). Deletion typed with the company address, 14 days of grace working as suspended and
+  cancellable by any owner, then a resumable `tenant.delete` worker job: provider clean-up once
+  (WhatsApp app unsubscribed, Shopify app uninstalled, WooCommerce webhooks deleted, card token
+  deleted at Razorpay), batched deletion in foreign-key order, a tombstone company row, billing
+  records and plan history kept, final emails. Also fixed: erasure now redacts past send requests,
+  public entry points serve companies pending deletion, and the ended-run guard freezes two columns
+  again. Remaining: step-up re-authentication before exporting or deleting, staff-started
+  deletion, stored exports, other formats, a deletion job run on staging, legal review of the kept
+  records.
 
 ## Phase 6 — AI, calling, channels, connectors, enterprise
 

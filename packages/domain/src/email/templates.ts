@@ -33,6 +33,14 @@ export const emailPayloadSchema = z.discriminatedUnion('kind', [
     url: z.url().optional(),
   }),
   z.object({
+    kind: z.literal('tenant.notice'),
+    companyName: z.string().max(120),
+    subject: z.string().max(200),
+    lines: z.array(z.string().max(600)).max(12),
+    url: z.url().optional(),
+    actionLabel: z.string().max(60).optional(),
+  }),
+  z.object({
     kind: z.literal('webhook.endpoint_disabled'),
     companyName: z.string().max(120),
     /** The endpoint's host only, never its full URL. */
@@ -164,6 +172,19 @@ export function renderEmail(payload: EmailPayload): RenderedEmail {
           payload.subject,
           payload.lines,
           payload.url ? { label: 'Open billing', url: payload.url } : undefined,
+        ),
+      };
+    }
+    case 'tenant.notice': {
+      return {
+        subject: `${payload.subject} · ${payload.companyName}`,
+        text: `${payload.lines.join('\n\n')}${payload.url ? `\n\n${payload.url}` : ''}`,
+        html: layout(
+          payload.subject,
+          payload.lines,
+          payload.url
+            ? { label: payload.actionLabel ?? 'Open HyFib W360', url: payload.url }
+            : undefined,
         ),
       };
     }

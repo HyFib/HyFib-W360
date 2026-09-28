@@ -28,11 +28,12 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
   const { platform, planAdmin, platformOps } = await getRuntime();
   const company = await platform.getTenant(actor, id);
   if (!company) notFound();
-  const [owners, planView, published, ops] = await Promise.all([
+  const [owners, planView, published, ops, deletion] = await Promise.all([
     platform.tenantOwners(actor, id),
     planAdmin.tenantPlan(actor, id),
     planAdmin.assignablePlans(actor),
     platformOps.companyHealth(actor, id),
+    platform.tenantDeletion(actor, id),
   ]);
   const { state, usage, limits } = planView;
   const tz = planView.timezone;
@@ -66,6 +67,111 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
         <p className="text-sm text-muted-foreground">Last status reason: {company.statusReason}</p>
       ) : null}
       <div className="grid gap-6 lg:grid-cols-2">
+        {deletion ? (
+          <Card className="lg:col-span-2">
+            <CardHeader>
+              <div className="flex flex-wrap items-center gap-2">
+                <CardTitle>Deletion</CardTitle>
+                <Badge
+                  tone={
+                    deletion.completedAt
+                      ? 'neutral'
+                      : deletion.cancelledAt
+                        ? 'info'
+                        : deletion.startedAt
+                          ? 'danger'
+                          : 'warning'
+                  }
+                >
+                  {deletion.completedAt
+                    ? 'Deleted'
+                    : deletion.cancelledAt
+                      ? 'Cancelled'
+                      : deletion.startedAt
+                        ? 'Deleting'
+                        : 'Scheduled'}
+                </Badge>
+              </div>
+              <CardDescription>
+                Asked for by an owner (ADR-055). Staff cannot start, speed up or cancel it; owners
+                can cancel until it starts.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-4 text-sm">
+              <dl className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                <div>
+                  <dt className="text-muted-foreground">Requested</dt>
+                  <dd>
+                    <Utc at={deletion.requestedAt} />
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-muted-foreground">Due</dt>
+                  <dd>
+                    <Utc at={deletion.dueAt} />
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-muted-foreground">
+                    {deletion.cancelledAt ? 'Cancelled' : 'Started'}
+                  </dt>
+                  <dd>
+                    <Utc at={deletion.cancelledAt ?? deletion.startedAt} />
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-muted-foreground">Finished</dt>
+                  <dd>
+                    <Utc at={deletion.completedAt} />
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-muted-foreground">Status before the request</dt>
+                  <dd>{deletion.previousStatus}</dd>
+                </div>
+                <div>
+                  <dt className="text-muted-foreground">Runs</dt>
+                  <dd>{deletion.attempts}</dd>
+                </div>
+                <div>
+                  <dt className="text-muted-foreground">Rows deleted</dt>
+                  <dd>{deletion.rowsDeleted}</dd>
+                </div>
+                <div>
+                  <dt className="text-muted-foreground">Providers visited</dt>
+                  <dd>
+                    <Utc at={deletion.providerCleanupAt} />
+                  </dd>
+                </div>
+              </dl>
+              {deletion.providerCleanup.length > 0 ? (
+                <ul className="grid gap-1">
+                  {deletion.providerCleanup.map((item, index) => (
+                    <li key={index} className="flex flex-wrap items-center gap-2">
+                      <Badge
+                        tone={
+                          item.outcome === 'done'
+                            ? 'success'
+                            : item.outcome === 'failed'
+                              ? 'danger'
+                              : 'neutral'
+                        }
+                      >
+                        {item.outcome}
+                      </Badge>
+                      <span className="min-w-0 break-words">{item.label}</span>
+                      {item.code ? (
+                        <code className="text-xs text-muted-foreground">{item.code}</code>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              ) : deletion.providerCleanupAt ? (
+                <p className="text-muted-foreground">No provider connections to remove.</p>
+              ) : null}
+            </CardContent>
+          </Card>
+        ) : null}
         <Card>
           <CardHeader>
             <CardTitle>Account status</CardTitle>

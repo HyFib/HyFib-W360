@@ -477,7 +477,8 @@ unique across companies because the public route has no company context), that r
 address. Following a link runs `ops.follow_chat_link` (SECURITY DEFINER), which adds one to the
 link's count for the company's current day and returns nothing for an archived link, a number
 that is not active or a company being deleted; a suspended company's links keep working, because
-the customer writes to the company and nothing is sent. Nothing about the visitor is stored: no
+the customer writes to the company and nothing is sent. (Since ADR-055 a company waiting for
+deletion is treated like a suspended one, and only a deleted company's links stop.) Nothing about the visitor is stored: no
 address, user agent, referrer, cookie or time of the click; the redirect sends no referrer to
 WhatsApp. Counts therefore include repeated clicks and automated visits such as link previews, and
 the pages say so: removing them would need an identifier for the visitor, which we do not keep.
@@ -1302,3 +1303,101 @@ acknowledging or snoozing an issue.
 **Migrations 0026 and 0027.** 0026 adds `ops.dead_letters`, `ops.purge_dead_letters`, the four read
 functions, `ops.platform_retry_webhook_receipt` and the definer policies and column grants they
 need; 0027 builds an index on consent events by company and time concurrently.
+
+## ADR-055 Company export and deletion: a streamed export with listed columns, deletion after 14 days by a resumable worker job, billing records kept (2026-09-28)
+
+Decision: owners can take a full copy of their company's data at any time and can have the company
+deleted (P5-11). Deletion is delayed 14 days so it can be cancelled, then runs in the worker in
+bounded steps that survive restarts, and ends with a company row that holds nothing but what the
+law or HyFib's own accounting needs.
+
+**Export.** Owners (`tenant.export`, also while the company is suspended, restricted or pending
+deletion) download a gzip-compressed JSON Lines file that the web streams from one read-only,
+repeatable-read transaction in the company's scope:
+
+- a header line (format `hyfib-w360-company-export`, version 1, company, export time, tables), one
+  line per row (`{"table": ..., "row": {...}}`) and an end line with the row count of every table.
+  A file without the end line is incomplete (the download broke).
+- Every table with a `tenant_id` is either exported with named columns, or excluded with a reason
+  (delivery queues, stored API responses, bindings, the email outbox, platform records). Within an
+  exported table every column is either exported or named as omitted with a reason: credentials,
+  secrets, token hashes, the registration PIN and Flow tokens are never exported. Tests fail when a
+  table or a column is not classified, so new ones must be decided.
+- Members are exported with their name and email; `tenant_id` is left out of rows (the header names
+  the company); 64-bit integers (money in minor units) are strings.
+- Nothing is stored: no object storage exists, and a stored copy of a whole company would be one
+  more thing to protect and expire. One export runs at a time per company (an advisory lock), each
+  start is audited (`tenant.exported`) and every owner and administrator is emailed, before the
+  first line is written (so an export that is then refused or cut short is still reported).
+
+**Deletion request and grace period.** An owner (`tenant.delete`, now also allowed while the
+company is suspended or restricted: leaving must not depend on paying) types the company's address.
+`app.request_tenant_deletion` records the current status in the deletion register
+`ops.tenant_deletions`, sets the company to `pending_deletion` due in 14 days, writes the company
+audit log, and the service emails every active owner and administrator. While pending, the company
+works as if suspended (read, export, cancel), outbound work waits, public links and webhooks behave
+as for a suspended company, and API keys are refused (as before). Owners cancel until the job
+starts (`app.cancel_tenant_deletion`), which restores the recorded status, re-applying the plan
+state (a lapsed plan restricts, a current one lifts a restriction; a suspension stays).
+
+**Deletion run.** The minute billing sweep lists due deletions (`ops.tenant_deletions_due`,
+including ones already running) and queues one signed `tenant.delete` job per company (singleton
+per company, so one run at a time). A run deletes for up to five minutes and stops; the next sweep
+starts the next run until the company is finished. A run:
+
+1. starts the deletion (`ops.start_tenant_deletion`): records the owners and administrators to
+   notify and releases the company's WhatsApp number bindings, so new Meta events are no longer
+   routed to it;
+2. cleans up at providers, recording every outcome (a failure is recorded, and named in the final
+   email, but does not stop the deletion): unsubscribes HyFib's app from each WhatsApp Business
+   Account (`DELETE /{WABA-ID}/subscribed_apps`, in Meta's official OpenAPI description), uninstalls
+   HyFib's Shopify app (`appUninstall`) and deletes HyFib's WooCommerce webhooks, and deletes
+   HyFib's card mandate token at Razorpay;
+3. deletes the company's rows through `ops.delete_tenant_data`, a batch at a time, each batch its
+   own transaction, following a fixed order (`ops.tenant_deletion_steps`: children before parents;
+   the two tables of the one foreign-key cycle, automations and their versions, in one statement;
+   the two self-referencing tables in one statement each). Guard triggers let these deletes through
+   because the function sets the retention-purge and erasure flags; its delete policies only match
+   the company being deleted.
+4. finishes (`ops.finish_tenant_deletion`) only when no row is left in any deletable table: the
+   company row becomes a tombstone (status `deleted`, name "Deleted company", address
+   `deleted-<id>` so the old address can be used again) and the register is completed. The
+   owners and administrators recorded at the start get an email (addressed to them, not stored
+   with the company). Platform staff see the register's dates, runs, row count and provider
+   outcomes on the company's platform page; they cannot start, speed up or cancel a deletion.
+
+**Kept after deletion:** the tombstone company row; billing and tax records (wallet, ledger,
+top-ups, card mandates with only safe card metadata, auto-recharge attempts, the Razorpay customer
+reference and billing contact); plan history (`app.tenant_plans`); the deletion register; platform evidence (platform
+audit log, support grants, security events); and people's own accounts, which may belong to other
+companies. Everything else is deleted, including members, invitations, the company audit log,
+contacts, consent history, conversations, messages, templates, campaigns, automations, CRM, growth,
+Flows, commerce, stores, API keys, webhooks and queued emails. Consent history and the audit log
+are the company's records: they are in the export.
+
+**Not done at providers:** numbers are not deregistered (the business keeps its numbers and may use
+them with another provider; deregistering could break another app on the same account); templates
+and Flows stay in the business's WhatsApp account; Payment Links stay in the company's own Razorpay
+account; WooCommerce keys cannot be revoked through the API (the email asks the owner to revoke
+them); HyFib's Razorpay customer record is not deleted (the client has no such call).
+
+**Backups:** deleted data stays in encrypted backups until they expire. After a restore, deletions
+completed after the restore point are applied again, found in the old database's register or the
+worker's `company deleted` log lines (RUNBOOKS §8).
+
+**Found while building (fixed in the same migration):**
+
+- Contact erasure left the number and message text in the requests of past sends
+  (`app.send_intents.request`); erasure now redacts them.
+- Shopify's redaction webhooks, payment webhooks of the company's own Razorpay account, chat links,
+  the website button and the Flows data endpoint treated a company pending deletion as unknown, so a
+  redaction received during the grace period was dropped; they now treat it like a suspended one.
+- The ended-run guard no longer froze `pending_message_id` and `http_call_count` (lost in migration
+  0022); both are frozen again.
+
+**Not built:** step-up re-authentication before exporting or deleting, a shorter grace period,
+deletion started by platform staff, deleting media files (no media storage exists), a stored export
+with a download link, and other export formats.
+
+**Migration 0028** adds the register and the step order, the deletion functions with their scoped
+grants and policies, and the three fixes above.

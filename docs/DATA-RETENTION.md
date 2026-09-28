@@ -63,29 +63,53 @@ they are not a statement of legal compliance. Retention jobs are phase 5–7 unl
 | Ad referral objects on messages             | `app.messages.referral`                                                                      | No longer written (since migration 0016); values stored before are cleared by contact erasure **[built]**                                                                                                                                                          | The raw webhook stays in the encrypted receipt, erased after 7 days like every webhook payload.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | Report exports                              | Not stored                                                                                   | Generated per request; each export is recorded in the audit log (`report.exported`)                                                                                                                                                                                | Aggregates and member names; no message content or contact details.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | Templates                                   | `app.message_templates`, `app.template_status_events`                                        | Until the company is deleted (deleted templates stay as `deleted` with their history)                                                                                                                                                                              | Company content, not personal data.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| Plans and company plan state                | `ops.plans`, `ops.plan_settings`, `app.tenant_plans`, `app.usage_counters`                   | Plan versions are kept (never deleted, so every company's terms stay explainable); one plan state per company for the company's life; monthly usage counters kept with the plan state.                                                                             | No personal data: plan terms, the company's plan, periods and add-on quantities, and counts of automation runs per month. Changes are in the platform and company audit logs (ADR-051). Company deletion (not built, H-015) must decide whether plan history is kept with billing records.                                                                                                                                                                                                                                                                                               |
+| Plans and company plan state                | `ops.plans`, `ops.plan_settings`, `app.tenant_plans`, `app.usage_counters`                   | Plan versions are kept (never deleted, so every company's terms stay explainable); one plan state per company for the company's life; monthly usage counters kept with the plan state.                                                                             | No personal data: plan terms, the company's plan, periods and add-on quantities, and counts of automation runs per month. Changes are in the platform and company audit logs (ADR-051). Plan history is kept after company deletion with the billing records (ADR-055).                                                                                                                                                                                                                                                                                                                  |
 | API keys and idempotency keys               | `app.api_keys`, `app.api_idempotency_keys`                                                   | Keys are never deleted (revoked and expired keys stay, so the audit log and the messages they sent stay explainable) until the company is deleted; idempotency keys and their stored responses 24 hours, then deleted by the messaging retention sweep **[built]** | Key name, public prefix, the token's SHA-256 (never the token), scopes, author and times. A stored response holds what the API answered, which can include a contact's number, name and email; it expires with the key.                                                                                                                                                                                                                                                                                                                                                                  |
 | Outgoing webhooks                           | `app.webhook_endpoints`, `app.webhook_events`, `app.webhook_deliveries`                      | Endpoints until a member deletes them (their deliveries go with them) or the company is deleted; events and deliveries 30 days after they were created, then deleted by the messaging retention sweep (`ops.purge_webhook_data`) **[built]**                       | An endpoint's URL, description, event types and encrypted signing secrets. Events hold ids, the status reached and small non-personal facts (a consent's purpose, action and source; an error code; a template's rejection reason); payloads with the contact's number, name and text are built only when delivered and never stored. Deliveries keep the attempts, status code, error code and duration, never the body sent or received.                                                                                                                                               |
 | Billing ledger, top-ups, mandates, attempts | `app.ledger_*`, `app.topups`, `app.payment_mandates`, `app.auto_recharge_*`                  | As required by tax law (e.g. 8 years for Indian GST records — verify with a tax adviser) **[built: append-only, no purge yet]**                                                                                                                                    | Retained even after company deletion (legal basis to be confirmed). Mandates hold only provider references and card network, issuer, last four digits and expiry; no card number or CVV is ever received. Razorpay webhook bodies follow the webhook-receipt rule above.                                                                                                                                                                                                                                                                                                                 |
 
 ## Export
 
-- Company export (owners, `tenant.export`): members, settings, audit log, and later contacts,
-  conversations and campaigns, delivered as a time-limited private download (phase 5).
+- Company export (owners, `tenant.export`, also while suspended, restricted or pending deletion)
+  **[built, ADR-055]**: Settings → Company data streams one gzip-compressed JSON Lines file (a
+  header, one line per row, an end line with the row counts) from one read-only, repeatable-read
+  transaction. Every company table is exported with listed columns or excluded with a reason, and
+  every column of an exported table is listed or omitted with a reason: credentials, secrets, token
+  hashes, the registration PIN and Flow tokens are never exported (tests fail on an unclassified
+  table or column). Members come with their name and email. Nothing is stored; one export runs at a
+  time per company; each start is audited (`tenant.exported`) and emailed to owners and
+  administrators.
 - Contact export (`contacts.export`) **[built]**: streaming CSV. Cells starting with `=`, `+`, `-`,
   `@`, tab or carriage return are prefixed with an apostrophe (formula injection), except validated
   E.164 numbers; every export is audited.
 
 ## Deletion semantics (distinguish clearly in UI and contracts)
 
-1. **Application deletion:** rows removed or anonymised in our primary database by a deletion job
-   after a grace period (company status `pending_deletion` → `deleted`).
-2. **Provider-side deletion:** data held by Meta (WhatsApp) or Razorpay is governed by their terms;
-   we request deletion where APIs exist and document where they do not.
+Company deletion is built (ADR-055): an owner types the company address; the company is
+`pending_deletion` for 14 days (works as suspended; any owner can cancel until the job starts);
+then the worker deletes it.
+
+1. **Application deletion** **[built]:** the `tenant.delete` job deletes every row of the
+   company's deletable tables (`ops.tenant_deletion_steps`, children before parents, a batch per
+   transaction, resumable) and leaves a tombstone company row (status `deleted`, name "Deleted
+   company", address `deleted-<id>`). Deleted: members and invitations, the company audit log,
+   contacts and consent history, conversations and messages, templates, campaigns, automations,
+   CRM, growth, Flows, commerce and store copies, API keys, webhooks, queued emails. People's own
+   accounts are not deleted (they may belong to other companies).
+2. **Provider-side deletion** **[built]:** once per deletion, every outcome recorded: HyFib's app
+   is unsubscribed from each WhatsApp Business Account (numbers stay registered in the business's
+   account, and its templates and Flows stay there), HyFib's Shopify app is uninstalled, HyFib's
+   WooCommerce webhooks are deleted (the store owner is asked to revoke the key, which the API
+   cannot do), and HyFib's card token is deleted at Razorpay. Payment Links stay in the company's
+   own Razorpay account; HyFib's Razorpay customer record is kept (no delete call is used).
 3. **Backup expiry:** deleted data persists in encrypted backups until they expire (PITR window and
-   backup retention, e.g. 7–35 days); restores re-apply pending deletions before reopening access.
-4. **Legally retained records:** billing and tax records and security audit evidence are retained
-   for their statutory period with personal data minimised.
+   backup retention, e.g. 7–35 days); after a restore, deletions completed after the restore point
+   are applied again before access reopens (RUNBOOKS §8).
+4. **Legally retained records** **[built]:** kept after deletion: the tombstone, the wallet,
+   ledger, top-ups, holds, card mandates (safe card metadata only), auto-recharge attempts, the
+   Razorpay customer reference with its billing contact, plan history, the deletion register,
+   support grants and security events, and the platform audit log. The legal basis and periods
+   still need a tax and legal adviser's review.
 
 ## Contact erasure **[built]**
 

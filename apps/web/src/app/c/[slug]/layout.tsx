@@ -6,6 +6,7 @@ import { AppNav } from '@/components/app-nav';
 import { Brand } from '@/components/brand';
 import { CompanySwitcher } from '@/components/company-switcher';
 import { UserMenu } from '@/components/user-menu';
+import { formatDateTime } from '@/lib/format';
 import { visibleModules } from '@/lib/modules';
 import { getRuntime } from '@/server/runtime';
 import { correlationId, requireTenant } from '@/server/session';
@@ -29,6 +30,8 @@ export default async function TenantLayout({
   ]);
   const base = `/c/${ctx.tenant.slug}`;
   const nav = visibleModules(ctx.permissions);
+  const deletion =
+    ctx.tenant.status === 'pending_deletion' ? await runtime.companyDeletion.status(ctx) : null;
 
   return (
     <div className="flex min-h-dvh flex-col md:flex-row">
@@ -72,7 +75,23 @@ export default async function TenantLayout({
           />
         </header>
         <div className="grid gap-3 px-4 pt-4 md:px-8">
-          {ctx.tenant.status === 'restricted' ? (
+          {ctx.tenant.status === 'pending_deletion' ? (
+            <Alert
+              tone="danger"
+              title="This company is being deleted"
+              action={
+                can(ctx, 'tenant.export') || can(ctx, 'tenant.delete') ? (
+                  <Button asChild size="sm" variant="outline">
+                    <Link href={`/c/${ctx.tenant.slug}/settings/data`}>Company data</Link>
+                  </Button>
+                ) : undefined
+              }
+            >
+              {deletion?.started
+                ? 'The deletion has started and can no longer be cancelled.'
+                : `It will be deleted on ${deletion ? formatDateTime(deletion.dueAt, ctx.tenant.timezone) : 'the date its owners were emailed'}. Until then nothing is sent; members can still review its data, and an owner can export it or cancel the deletion.`}
+            </Alert>
+          ) : ctx.tenant.status === 'restricted' ? (
             <Alert
               tone="warning"
               title="This company's plan has ended"
