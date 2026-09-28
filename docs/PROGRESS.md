@@ -49,6 +49,11 @@ once, never claimed exactly once. No request reached a customer's system.
   - **A normalised URL longer than the column allows (fixed before commit).** Percent-encoding can
     lengthen an entered URL past 2048 characters; the service now refuses it as a form error instead
     of failing on the table's check.
+  - **The CI end-to-end job reached its 30-minute limit (limit raised to 45).** The suite now has
+    124 tests run one at a time across four browsers; green runs already took 27 to 29 minutes
+    including set-up, and on 0251ce1 the existing Firefox cart reminder test stalled in
+    `page.goto` until its 5-minute timeout, passed on retry, and the job was cancelled at 30
+    minutes. The stall was not reproduced locally (Firefox runs in CI only) and remains open.
   - **The loopback allowance also lifts the port rule.** A privileged-port URL passes the URL check
     wherever `W360_EGRESS_ALLOW_LOOPBACK` is set (local and test only); the test for that rule uses
     the production policy.
