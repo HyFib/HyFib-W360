@@ -129,3 +129,14 @@ export async function turnOnTwoFactor(page: Page, password: string) {
   await page.getByRole('button', { name: 'Turn on two-factor' }).click();
   await expect(page.getByText('Backup codes', { exact: true })).toBeVisible();
 }
+
+/**
+ * Opens a module from the main navigation. Tests leave pages that refresh themselves (the inbox
+ * updates live) this way: a page load (`page.goto`, `page.reload`) cancels a refresh in flight,
+ * Firefox and WebKit as soon as the load starts, and Next.js answers the cancelled refresh by
+ * loading the current page again, which aborts the test's navigation (`NS_BINDING_ABORTED`, or
+ * "interrupted by another navigation"). Navigation inside the app does not cancel the refresh.
+ */
+export async function openFromNav(page: Page, name: string) {
+  await page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name }).click();
+}

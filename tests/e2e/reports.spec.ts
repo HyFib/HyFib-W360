@@ -7,7 +7,7 @@ import {
   randomWaId,
   sendSignedWebhook,
 } from './messaging-support';
-import { expectNoHorizontalOverflow, signUpAndVerify, uniqueEmail } from './support';
+import { expectNoHorizontalOverflow, openFromNav, signUpAndVerify, uniqueEmail } from './support';
 
 const PASSWORD = 'correct horse battery staple 42';
 
@@ -63,13 +63,11 @@ test('reports show response times against the target, member activity and a CSV 
   await page.getByRole('button', { name: 'Send' }).click();
   const thread = page.getByRole('list', { name: /^Messages with/ });
   await expect(thread.getByText('Yes, we do.')).toBeVisible();
-  // Leave only once the reply was handed to WhatsApp and the thread refreshed, so no refresh of
-  // this page is still in flight when the next one is opened.
   await expect(thread.getByText('Sent to WhatsApp')).toBeVisible({ timeout: 20_000 });
 
-  // Reports is in the navigation now that the module is available.
-  await expect(page.getByRole('link', { name: 'Reports' }).first()).toBeAttached();
-  await page.goto(`/c/${slug}/reports`);
+  // Reports is in the navigation now that the module is available. Later live events can still
+  // refresh the inbox, so it is left through the navigation (see openFromNav).
+  await openFromNav(page, 'Reports');
   await expect(page.getByRole('heading', { name: 'Reports', level: 1 })).toBeVisible();
   await expect(stat(page, 'Customer messages')).toContainText('2');
   await expect(stat(page, 'Waiting for a reply')).toContainText('1');

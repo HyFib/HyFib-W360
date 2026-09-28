@@ -38,6 +38,8 @@ test('a campaign is drafted, reviewed, started by the worker and reported per re
   await expect(page.getByRole('heading', { name: 'spring_sale', level: 1 })).toBeVisible();
   await page.getByRole('button', { name: 'Submit to Meta' }).click();
   await page.getByRole('button', { name: 'Submit for review' }).click();
+  // Submitted (no draft buttons) before reloading, which could cancel the submission's request.
+  await expect(page.getByRole('button', { name: /^Submit/ })).toHaveCount(0);
   await expect(async () => {
     await page.reload();
     await expect(page.getByText('In review', { exact: true }).first()).toBeVisible({
@@ -50,6 +52,7 @@ test('a campaign is drafted, reviewed, started by the worker and reported per re
   expect(approved.status()).toBe(200);
   await page.goto(`/c/${slug}/templates`);
   await page.getByRole('button', { name: 'Refresh from Meta' }).click();
+  await expect(page.getByText(/Refresh requested/)).toBeVisible();
   await expect(async () => {
     await page.reload();
     await expect(page.getByText('Approved', { exact: true }).first()).toBeVisible({

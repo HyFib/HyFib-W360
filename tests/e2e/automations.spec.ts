@@ -8,21 +8,11 @@ import {
   sendSignedWebhook,
   standInRequests,
 } from './messaging-support';
-import { expectNoHorizontalOverflow, signUpAndVerify, uniqueEmail } from './support';
+import { expectNoHorizontalOverflow, openFromNav, signUpAndVerify, uniqueEmail } from './support';
 
 const PASSWORD = 'correct horse battery staple 42';
 
 test.skip(!messagingConfigured, 'Meta test configuration (stand-in, app secret) not provided');
-
-/**
- * Opens a module from the main navigation. Used to leave inbox pages: their live updates refresh
- * the page, and a page load started while such a refresh is in flight is cancelled by Firefox;
- * Next.js answers the cancelled refresh by loading the current page again, which aborts the
- * navigation (NS_BINDING_ABORTED). Navigation inside the app does not cancel the refresh.
- */
-async function openFromNav(page: Page, name: string) {
-  await page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name }).click();
-}
 
 /** The value box of a report statistic, found by its label. */
 function stat(page: Page, label: string) {
