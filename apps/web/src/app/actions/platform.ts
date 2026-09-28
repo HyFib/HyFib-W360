@@ -143,3 +143,25 @@ export async function setTenantPlanAction(input: unknown): Promise<ActionResult>
     return null;
   });
 }
+
+/** Sends a failed or quarantined Meta or Razorpay webhook receipt back to processing (audited). */
+export async function retryWebhookReceiptAction(
+  input: unknown,
+): Promise<ActionResult<{ previousStatus: string }>> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    const result = await runtime.platformOps.retryReceipt(actor, input);
+    refresh();
+    return result;
+  });
+}
+
+/** Records how a quarantined webhook event was resolved (audited). */
+export async function resolveQuarantineAction(input: unknown): Promise<ActionResult> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    await runtime.platformOps.resolveQuarantine(actor, input);
+    refresh();
+    return null;
+  });
+}

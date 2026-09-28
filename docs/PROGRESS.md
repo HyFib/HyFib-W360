@@ -1,5 +1,101 @@
 # Progress
 
+## 2026-09-28 — Phase 5: platform operations console (P5-10)
+
+Status: **Operations console implemented and locally verified with test data only.** Platform staff
+see where companies are stuck or failing, what the job system is doing and whose sending needs a
+review under `/platform/ops`, from counts, states, error codes, labels and times. No message text,
+contact, payload, email address, secret or full URL reaches the console. Dead-lettered jobs are now
+recorded by the worker instead of sitting unread in pg-boss. Nothing ran against a production
+company.
+
+### Completed
+
+- **Design (ADR-054):** four SECURITY DEFINER read functions that refuse anyone but a platform
+  administrator; direct reads only of what the platform role could already read; queue counts from
+  pg-boss's `getQueues()`; dead letters recorded by the worker without error messages; no redrive
+  button (the minute sweeps re-signal durable rows); two audited repairs; health and signal rules
+  that are HyFib's own heuristics, never automatic suspension.
+- **Schema (migrations 0026 and 0027):** `ops.dead_letters` (the worker role may only insert, the
+  platform role reads, `ops.purge_dead_letters` deletes after 30 days), `ops.url_host`,
+  `ops.platform_ops_health`, `ops.platform_ops_activity` (at most 93 days back),
+  `ops.platform_ops_signup_sessions`, `ops.platform_ops_integration_failures`,
+  `ops.platform_retry_webhook_receipt`, the definer role's column grants and a read policy on
+  signup sessions; 0027 indexes consent events by company and time, built concurrently.
+- **Domain:** `platform/ops-model.ts` (health issues and levels, review signals, quarantine ids
+  allowed on screen, labels), `platform/ops.ts` (overview, company health, onboarding,
+  integrations, queues, signals, usage, receipt retry, quarantine resolution with a platform audit
+  entry), `jobs/dead-letters.ts` (the recorded row: a company, kind and reference only when the
+  envelope's signature verifies; an error's name and code only; idempotent recording that returns
+  the rows actually added; the purge) and a pg-boss queue inspector.
+- **Worker:** consumes `dead-letter` (batches of 20 with pg-boss metadata; recording retried three
+  times with backoff), purges old dead letters in the messaging sweep, and logs every failed job
+  attempt with its queue and job ids (added while chasing the Firefox stall below).
+- **Web:** `/platform/ops` with Overview, Onboarding, Integrations, Queues, Signals and Usage (7, 30
+  or 90 days), a Health card on each company's platform page, Retry and Resolve forms (a reason is
+  required) and an Operations link on `/platform`.
+- **Docs:** ADR-054, ARCHITECTURE §4, §6P and §8, SECURITY (control and platform rules),
+  THREAT-MODEL T75 and T76 (and a broken table cell in T71 fixed), DATA-RETENTION (dead-letter
+  records), RUNBOOKS §1, §3, §4 and §10P (the owner-role receipt reset becomes a fallback),
+  RELEASE-CHECKLIST, FEATURE-MATRIX (H-034), BACKLOG (P5-10 built).
+- **Found while building:**
+  - **The dead-letter queue had no consumer.** Jobs that used their last retry sat in pg-boss for
+    30 days, visible only with SQL, and pg-boss cannot list them with a limit. The worker now
+    records them (above).
+  - **Handler errors were never logged by the worker** (pg-boss kept them only in the job's
+    output), which hid why the Firefox cart reminder test stalled. Every failed attempt is now
+    logged with its queue and job ids (pushed first, in 7b62ff0).
+  - **A quarantined receipt was offered for retry in two tables,** and once its quarantine entry was
+    resolved the receipt stayed "needing attention" for good. The receipts table now leaves
+    quarantined receipts to the quarantine table, matching the overview's count.
+  - **The security events table appeared on both Integrations and Signals;** it is on Signals only.
+  - **Tables made the pages wider than a phone.** A grid with implicit `auto` columns grows to its
+    widest table; `grid-cols-1` lets each table scroll inside its card. A table cell styled as a
+    grid now holds a grid inside it instead.
+  - **The first refusal test reached only the first function a page calls,** so removing the
+    administrator check from any later function would have passed. Each function is now called
+    directly by a non-administrator.
+  - **Recording dead letters reported the batch size,** so a repeated batch was logged as recorded
+    again; it now returns the rows actually added (the worker role cannot use `RETURNING`).
+  - **A dead letter from an undeclared queue was shown with an invented policy** ("no retries, then
+    dead-lettered"); it now reads "Not declared by this release".
+  - **The end-to-end test's own race:** reloading right after clicking a tab cancelled the
+    client-side navigation, so the test waits for the page before reloading until the worker's
+    quarantine shows.
+  - **Firefox stall (open since P5-09):** CI on 7b62ff0 ran all 124 end-to-end tests green on the
+    first attempt, with no retries. The stall was not reproduced and its cause is still unknown;
+    when it happens again, the worker's attempt logs and the new CI step (job, store and database
+    state after a failure) will show where it stops.
+  - **Mutation checks:** 21 guards broken one at a time (the administrator check in each of the
+    five functions, the host-only label, retrying from another status or without a body, the audit
+    entry, the purge age, imported opt-outs, completed signups, the activity window, attribution
+    without a verified signature, error messages kept, duplicate recording, resolving twice, the
+    quarantine id allow-list, the minimum message count for send failures, the usage windows, and
+    offering a retry for an erased receipt). On the first run 20 made a test fail; the survivor
+    (an erased receipt still offered for retry, which the database would refuse) now has a test,
+    and all 21 fail a test.
+
+### Test commands and results (local, 2026-09-28)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `pnpm test` (unit)                                                          | 279 passed. New: `platform/ops-model.test.ts` 11 (health issues and levels at each threshold, the worst quality of active numbers, integration failure wording, review signals at their thresholds, quarantine ids), `jobs/dead-letters.test.ts` 4 (only the error's name and code, pg-boss timeouts, attribution only with a verified signature, malformed metadata).                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 350 passed, including the new `platform-ops.test.ts` 11 (each function refusing a non-administrator and the runtime role refused; a company's numbers, sending, endpoints, quality and 30-day activity counted without its message text; the overview, signals and usage; the activity window; failed and abandoned signups but not completed ones; a failing endpoint labelled by its host only; an exhausted receipt retried with its audit entry, and refusals for a processed receipt, an erased or old body, an unknown receipt and a non-administrator; a quarantined event resolved once, audited; a job dead-lettered by real pg-boss recorded once with its company only through its verified signature and without its error message; the 30-day purge) and the new function grants in the isolation suite. |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 64 passed (32 × 2) in one full run (10.6 min). New `platform-ops.spec.ts` on both projects: staff with two-factor authentication open Operations from `/platform`; the new company is listed without an active number; a signed event from an unknown WhatsApp account is quarantined by the worker, shown without its text, retried and resolved with reasons; queue policies (`commerce.store`: 5 retries, then dead-lettered; `billing.auto-recharge`: no retries); signals; usage over 7 days; both repairs in the platform audit log; the company's Health card; no sideways scrolling on any of these pages.                                                                                                                                                                                     |
+| Mutation checks                                                             | 21 guards broken one at a time; all 21 make a test fail (one needed the new erased-receipt test)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+
+### Known gaps
+
+- Not built: alerts (email or pager) on these conditions, trends over time, number quality from
+  Meta's `phone_number_quality_update` webhook (quality is as of the last health check), API
+  request counts, exports, the age of the oldest waiting job, redrive from the console,
+  acknowledging or snoozing an issue.
+- Every page reads every company: fine for the test envelope (100 companies), not for thousands;
+  paging and precomputed rollups come with growth.
+- The health and signal thresholds are HyFib's own heuristics and have not met real traffic.
+- Firefox and WebKit run in CI only; no production company has been seen in the console.
+
 ## 2026-09-28 — Phase 5: outgoing webhooks (P5-09)
 
 Status: **Outgoing webhooks implemented and locally verified; delivered only to local test

@@ -1,4 +1,5 @@
 import { createHmac, randomBytes } from 'node:crypto';
+import pg from 'pg';
 import { expect, type Page } from '@playwright/test';
 
 const MAILPIT = process.env.E2E_MAILPIT_URL ?? 'http://localhost:8025';
@@ -86,4 +87,45 @@ export async function expectNoHorizontalOverflow(page: Page) {
     document.documentElement.clientWidth,
   ]);
   expect(scrollWidth, 'page is wider than the viewport').toBeLessThanOrEqual(viewportWidth);
+}
+
+/** Platform staff steps need the owner and auth database connections (fixture steps only). */
+export const platformConfigured = Boolean(
+  process.env.DATABASE_URL_MIGRATE && process.env.E2E_DATABASE_URL_AUTH,
+);
+
+/** Makes the user a platform owner (a fixture step: staff are added by operators, not in the UI). */
+export async function makePlatformOwner(email: string) {
+  const auth = new pg.Client({ connectionString: process.env.E2E_DATABASE_URL_AUTH });
+  await auth.connect();
+  let userId: string;
+  try {
+    const res = await auth.query<{ id: string }>('SELECT id FROM auth.users WHERE email = $1', [
+      email.toLowerCase(),
+    ]);
+    userId = res.rows[0]!.id;
+  } finally {
+    await auth.end();
+  }
+  const owner = new pg.Client({ connectionString: process.env.DATABASE_URL_MIGRATE });
+  await owner.connect();
+  try {
+    await owner.query(
+      `INSERT INTO ops.platform_admins (user_id, role) VALUES ($1, 'platform_owner')`,
+      [userId],
+    );
+  } finally {
+    await owner.end();
+  }
+}
+
+/** Turns on two-factor for the signed-in user (platform staff need it). */
+export async function turnOnTwoFactor(page: Page, password: string) {
+  await page.goto('/account');
+  await page.getByLabel('Current password').first().fill(password);
+  await page.getByRole('button', { name: 'Set up two-factor' }).click();
+  const secret = (await page.locator('code').first().textContent())?.trim() ?? '';
+  await page.getByLabel('Code from your app').fill(totp(secret));
+  await page.getByRole('button', { name: 'Turn on two-factor' }).click();
+  await expect(page.getByText('Backup codes', { exact: true })).toBeVisible();
 }

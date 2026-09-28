@@ -11,6 +11,7 @@ import {
   processMetaWebhookReceipt,
   processSendIntent,
   purgeApiIdempotencyKeys,
+  purgeDeadLetters,
   recoverExpiredSend,
   routeDueConversations,
 } from '@w360/domain';
@@ -203,6 +204,8 @@ export function messagingSweepHandler(rt: WorkerRuntime) {
     const idempotencyKeys = await purgeApiIdempotencyKeys(rt.db);
     if (idempotencyKeys > 0)
       rt.logger.info({ idempotencyKeys }, 'expired API idempotency keys deleted');
+    const deadLettersPurged = await purgeDeadLetters(rt.db);
+    if (deadLettersPurged > 0) rt.logger.info({ deadLettersPurged }, 'old dead letters deleted');
     const webhooks = await sweepWebhooks(rt);
     if (webhooks.woken + webhooks.purged > 0) rt.logger.info(webhooks, 'webhook sweep');
     if (receipts.length > 0 || intents.length > 0) {

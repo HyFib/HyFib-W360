@@ -308,12 +308,15 @@ export const QUEUES = {
     deadLetter: 'dead-letter',
     deleteAfterHours: 72,
   },
+  // Jobs that failed all their retries. The worker records each one in ops.dead_letters (ADR-054);
+  // a recording that fails is retried, and the job stays in pg-boss for its retention either way.
   deadLetter: {
     name: 'dead-letter',
     policy: 'standard',
-    retryLimit: 0,
-    retryDelaySeconds: 0,
-    retryBackoff: false,
+    retryLimit: 3,
+    retryDelaySeconds: 30,
+    retryBackoff: true,
+    retryDelayMaxSeconds: 600,
     expireInSeconds: 60,
     deleteAfterHours: 24 * 30,
   },

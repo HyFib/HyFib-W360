@@ -44,6 +44,8 @@ import {
   createPlanAdminService,
   createPlansService,
   createPlatformService,
+  createPlatformOpsService,
+  pgBossQueueInspector,
   createRateCardsService,
   createSavedRepliesService,
   createSegmentsService,
@@ -71,6 +73,7 @@ import {
   type PlanAdminService,
   type PlansService,
   type PlatformService,
+  type PlatformOpsService,
   type RateCardsService,
   type SavedRepliesService,
   type SegmentsService,
@@ -107,6 +110,8 @@ export interface Runtime {
   auth: Auth;
   tenancy: TenancyService;
   platform: PlatformService;
+  /** The platform operations console (/platform/ops): content-free facts and two audited repairs. */
+  platformOps: PlatformOpsService;
   inbox: InboxService;
   teams: TeamsService;
   businessHours: BusinessHoursService;
@@ -225,6 +230,11 @@ async function init(): Promise<Runtime> {
     invitationTtlHours: config.INVITATION_TTL_HOURS,
   });
   const platform = createPlatformService({ db, platformDb, clock: systemClock });
+  const platformOps = createPlatformOpsService({
+    platformDb,
+    queues: pgBossQueueInspector(boss),
+    clock: systemClock,
+  });
   const inbox = createInboxService({ db, clock: systemClock, jobs, signer });
   const teams = createTeamsService({ db, clock: systemClock });
   const businessHours = createBusinessHoursService({ db, clock: systemClock });
@@ -361,6 +371,7 @@ async function init(): Promise<Runtime> {
     auth,
     tenancy,
     platform,
+    platformOps,
     inbox,
     teams,
     businessHours,

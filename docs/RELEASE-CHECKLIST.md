@@ -129,6 +129,11 @@ made. This checklist records the evidence required per gate; unchecked items blo
       rotation keeps both secrets verifying, the worker's LISTEN connection works through the
       production database path (no transaction-pooling proxy in front of `DATABASE_URL_APP`), and
       egress to private addresses is refused (`W360_EGRESS_ALLOW_LOOPBACK` unset)
+- [ ] Operations console on a staging deployment: a platform operator with MFA sees every
+      company's health, the worker records a deliberately dead-lettered test job within a minute,
+      queue counts refresh, a quarantined test event is retried and resolved with both actions in
+      the platform audit log, and pages stay fast enough with the staging company count (the
+      functions read every company on each view)
 - [ ] Tenant-isolation and security gates passing in CI on the release commit
 - [ ] Measured load behaviour against the test envelope (k6 results)
 - [ ] Backup restoration drill performed and timings recorded (RPO/RTO)

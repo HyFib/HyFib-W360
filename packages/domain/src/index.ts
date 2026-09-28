@@ -86,3 +86,6 @@ export * from './growth/widget-script';
 export * from './flows';
 export * from './commerce';
 export * from './stores';
+export * from './jobs/dead-letters';
+export * from './platform/ops-model';
+export * from './platform/ops';

@@ -1,35 +1,14 @@
-import pg from 'pg';
 import { expect, test } from './fixtures';
-import { expectNoHorizontalOverflow, signUpAndVerify, totp, uniqueEmail } from './support';
+import {
+  expectNoHorizontalOverflow,
+  makePlatformOwner,
+  platformConfigured as configured,
+  signUpAndVerify,
+  turnOnTwoFactor,
+  uniqueEmail,
+} from './support';
 
 const PASSWORD = 'correct horse battery staple 42';
-
-const configured = Boolean(process.env.DATABASE_URL_MIGRATE && process.env.E2E_DATABASE_URL_AUTH);
-
-/** Makes the user a platform owner (a fixture step: staff are added by operators, not in the UI). */
-async function makePlatformOwner(email: string) {
-  const auth = new pg.Client({ connectionString: process.env.E2E_DATABASE_URL_AUTH });
-  await auth.connect();
-  let userId: string;
-  try {
-    const res = await auth.query<{ id: string }>('SELECT id FROM auth.users WHERE email = $1', [
-      email.toLowerCase(),
-    ]);
-    userId = res.rows[0]!.id;
-  } finally {
-    await auth.end();
-  }
-  const owner = new pg.Client({ connectionString: process.env.DATABASE_URL_MIGRATE });
-  await owner.connect();
-  try {
-    await owner.query(
-      `INSERT INTO ops.platform_admins (user_id, role) VALUES ($1, 'platform_owner')`,
-      [userId],
-    );
-  } finally {
-    await owner.end();
-  }
-}
 
 test('staff publish a plan and put a company on it; the company sees its plan, limits and restriction', async ({
   page,
@@ -46,13 +25,7 @@ test('staff publish a plan and put a company on it; the company sees its plan, l
   await expect(page.getByRole('heading', { name: companyName })).toBeVisible();
 
   // Platform staff need two-factor authentication.
-  await page.goto('/account');
-  await page.getByLabel('Current password').first().fill(PASSWORD);
-  await page.getByRole('button', { name: 'Set up two-factor' }).click();
-  const secret = (await page.locator('code').first().textContent())?.trim() ?? '';
-  await page.getByLabel('Code from your app').fill(totp(secret));
-  await page.getByRole('button', { name: 'Turn on two-factor' }).click();
-  await expect(page.getByText('Backup codes', { exact: true })).toBeVisible();
+  await turnOnTwoFactor(page, PASSWORD);
   await makePlatformOwner(email);
 
   // A plan with one seat and only the CRM module.

@@ -28,6 +28,7 @@ import {
   templateSubmitHandler,
   templateSyncHandler,
 } from './handlers/templates';
+import { deadLetterHandler } from './handlers/dead-letters';
 import { webhookDeliverHandler } from './handlers/webhooks';
 import { logFailures } from './job-log';
 import { createWorkerRuntime } from './runtime';
@@ -185,6 +186,12 @@ async function main(): Promise<void> {
   await rt.boss.schedule(QUEUES.billingSweep.name, '* * * * *', null, {
     singletonKey: 'billing-sweep',
   });
+  // Jobs that failed all their retries: recorded for the platform operations console (ADR-054).
+  await rt.boss.work(
+    QUEUES.deadLetter.name,
+    { localConcurrency: 1, batchSize: 20, includeMetadata: true },
+    logFailures(rt, QUEUES.deadLetter.name, deadLetterHandler(rt)),
+  );
   const webhookListener = startWebhookListener(rt);
   rt.logger.info({ concurrency }, 'worker started');
 

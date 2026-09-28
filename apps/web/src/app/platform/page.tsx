@@ -41,6 +41,9 @@ export default async function PlatformHome({
       <div className="flex flex-wrap items-end justify-between gap-3">
         <h1 className="text-2xl font-semibold tracking-tight">Platform administration</h1>
         <nav className="flex flex-wrap gap-4 text-sm" aria-label="Platform">
+          <Link href="/platform/ops" className="text-primary underline-offset-4 hover:underline">
+            Operations
+          </Link>
           <Link href="/platform/plans" className="text-primary underline-offset-4 hover:underline">
             Plans
           </Link>

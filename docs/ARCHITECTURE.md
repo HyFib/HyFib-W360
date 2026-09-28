@@ -121,6 +121,9 @@ so grants issued after the transfer would silently grant nothing (migration 0002
   call `authorizeJob`: verify HMAC, check company status (defer outbound work while suspended),
   check the actor's membership is still active, then load the referenced row under that company's
   RLS scope.
+- A work job that fails its last retry moves to the `dead-letter` queue (the sweeps, which run
+  again within a minute, have none); the worker records it in `ops.dead_letters` without its error
+  message (§6P).
 - Workers stop gracefully on SIGTERM (stop fetching, wait up to 30 s, close pools).
 
 ## 5. Email **[built]**
@@ -891,6 +894,51 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   egress addresses for receivers' allowlists, endpoints per number, and events for conversations,
   campaigns, automations, contact changes or orders.
 
+## 6P. Platform operations console **[built — verified with local test data only; no production companies yet]**
+
+- **Purpose** (P5-10, ADR-054): platform staff see where companies are stuck or failing, what the
+  job system is doing and whose sending needs a review, from counts, states, error codes, labels
+  and times. No message text, contact, payload, email address, secret or full URL is read into the
+  console.
+- **Reads:** four SECURITY DEFINER functions (migration 0026), owned by `w360_definer`, executable
+  only by `w360_platform`, refusing to run unless the session user is a platform administrator
+  (`W3403`): `ops.platform_ops_health` (per company: numbers by state, worst quality rating of its
+  active numbers, accounts needing reconnection, last-24-hour outbound, failed and inbound counts,
+  failing webhook endpoints, failed stores, payment account checks, catalog and Flow syncs, dead
+  letters in 7 days), `ops.platform_ops_activity` (per company since a time at most 93 days back:
+  outbound by sender, failures, inbound, marketing templates sent and delivered, errors `131049` and
+  `131050`, marketing opt-outs by contacts, complaint suppressions, webhook deliveries, automation
+  runs, members and numbers), `ops.platform_ops_signup_sessions` (Embedded Signup sessions that
+  failed or expired unfinished) and `ops.platform_ops_integration_failures` (current failures with a
+  label: a display number, an account name or only the host of a URL, via `ops.url_host`). The
+  definer role has column grants for exactly the columns these read. Failed, stuck and quarantined
+  Meta and Razorpay receipts, numbers, companies, failed emails (counts by kind) and security
+  events (counts by type) are read directly by the platform role, which could already read them.
+- **Queues:** `pgBossQueueInspector` (`jobs/queue.ts`) reads pg-boss's `getQueues()` through the
+  web's producer instance: ready, deferred, active and retained failed jobs per queue, as cached by
+  the worker's supervisor about once a minute. Each declared queue is listed with its retry policy.
+- **Dead letters:** the worker consumes `dead-letter` (batches of 20, one at a time, with pg-boss
+  metadata) and writes `ops.dead_letters` (`jobs/dead-letters.ts`): source queue and job, the
+  envelope's kind, company and reference only when its signature verifies, retries used, the
+  error's name and code (never its message, stack or details, which can quote data) and times. The
+  worker role may only insert (a repeated recording is ignored); the messaging sweep deletes rows
+  30 days after the job failed through `ops.purge_dead_letters`. Recording is retried three times
+  with backoff; the job itself stays in pg-boss for its own retention.
+- **Health and signals** (`platform/ops-model.ts`) are pure functions over those facts with HyFib's
+  own thresholds (ADR-054): a company is `critical`, `warning` or `ok`, and a signal asks for a
+  review; nothing is suspended automatically.
+- **Repairs:** retrying a Meta or Razorpay receipt that failed all attempts or was quarantined, while
+  its body is still kept (`ops.platform_retry_webhook_receipt`: back to pending with no attempts;
+  the minute sweep processes it again, idempotently), and resolving a quarantine entry with a
+  written resolution. Both need a reason and write `ops.platform_audit_events` in the same
+  transaction.
+- **Web:** `/platform/ops` (Overview, Onboarding, Integrations, Queues, Signals, Usage over 7, 30 or
+  90 days) and a health card on each company's platform page. Every page re-checks the platform
+  actor. The functions read every company on each view, which suits the test envelope; paging and
+  precomputed rollups come with growth.
+- **Not built yet:** alerts, trends, quality updates from Meta's quality webhook, API request counts,
+  exports, the age of the oldest waiting job, redrive from the console, and acknowledging issues.
+
 ## 7. Commercial model and billing **[built: plans and entitlements, wallet, top-ups, auto-recharge — verified against a local Razorpay stand-in only; paying for plans in HyFib planned]**
 
 - **Who pays Meta:** as a Meta Tech Provider HyFib has no credit line; each customer adds its own
@@ -970,9 +1018,11 @@ payment_requested → succeeded`; before each provider call it is written as `un
 
 ## 8. Observability
 
-Structured JSON logs (pino) with redaction and correlation ids **[built]**; audit and security
-events in the database **[built]**; OpenTelemetry traces/metrics with one hosted backend, queue lag
-and dead-letter alerts **[designed]**.
+Structured JSON logs (pino) with redaction and correlation ids **[built]**; every failed job
+attempt logged by the worker with its queue and job ids **[built]**; audit and security events in
+the database **[built]**; queue counts and recorded dead letters in the platform operations
+console (§6P) **[built]**; OpenTelemetry traces/metrics with one hosted backend, queue lag and
+dead-letter alerts **[designed]**.
 
 ## 9. Topology
 

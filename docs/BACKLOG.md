@@ -335,8 +335,15 @@ verification, app review, Embedded Signup configuration).
   delivery history, replays, test events, 30-day retention, the OpenAPI `webhooks` section.
   Remaining: filters beyond the event type, custom headers, mutual TLS, fixed egress addresses,
   events for conversations, campaigns, automations, contact changes and orders, load tests.
-- **P5-10 Platform ops screens**: onboarding failures, tenant health, usage, integration failures,
-  queues and dead letters, abuse signals.
+- **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
+  `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
+  setups, new companies without a number), Integrations (current failures with host-only labels,
+  Meta and Razorpay receipts needing attention, quarantine, email delivery counts), Queues (pg-boss
+  counts per queue with retry policy, dead letters recorded by the worker without error messages),
+  Signals (7-day review flags and security event counts) and Usage (7, 30 or 90 days); a health
+  card on each company's platform page; audited receipt retry and quarantine resolution. Remaining:
+  alerts, trends, Meta's quality webhook, API request counts, exports, the oldest waiting job,
+  redrive from the console, acknowledging issues, paging and rollups for many companies.
 - **P5-11 Account export/deletion workflow.**
 
 ## Phase 6 — AI, calling, channels, connectors, enterprise

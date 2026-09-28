@@ -1188,3 +1188,117 @@ events for conversations, campaigns, automations, contacts created or orders.
 
 **Migration 0025.** `app.webhook_endpoints`, `app.webhook_events`, `app.webhook_deliveries`, the
 capture triggers, `ops.webhook_dispatch_due` and `ops.purge_webhook_data`.
+
+## ADR-054 Platform operations console: content-free facts through narrow definer functions, dead letters recorded by the worker, two audited repairs (2026-09-28)
+
+Decision: platform staff get an operations console under `/platform/ops` (P5-10) that shows where
+companies are stuck or failing, what the job system is doing and which companies' sending needs a
+review. It is built from counts, states, error codes, labels and times, never from customer
+content (messages, contacts, payloads, email addresses, secrets or full URLs).
+
+**Reads through definer functions.** Four SECURITY DEFINER functions, owned by `w360_definer`,
+executable only by `w360_platform` and refusing to run unless `app.user_id` is a platform
+administrator (`W3403`), like `ops.platform_tenant_usage` (ADR-051):
+
+- `ops.platform_ops_health(p_tenant_id)`: one row per company (every company not deleted, or one):
+  status, plan status, numbers by state, the worst quality rating of its active numbers and when it
+  was checked, WhatsApp accounts needing reconnection, outbound messages and failures and inbound
+  messages in the last 24 hours, the last message time, failing or recently auto-disabled webhook
+  endpoints, failed store connections, payment account checks, catalog and Flow syncs, and dead
+  letters in the last 7 days.
+- `ops.platform_ops_activity(p_since, p_tenant_id)`: one row per company (every company not
+  deleted, or one) since a time at most 93 days back: outbound messages by sender (agent, bot,
+  campaign, API, system), failed, inbound, marketing templates sent and delivered, Meta errors
+  `131049` and `131050` (official codes, research M-062), opt-outs from marketing made by or for
+  contacts (keyword, Meta, agent, API; imports and erasure excluded), complaint suppressions,
+  webhook deliveries, this period's automation runs (the plan counter), active members and numbers.
+- `ops.platform_ops_signup_sessions(p_since, p_limit)`: Embedded Signup sessions that failed or
+  were abandoned (still started or exchanging after they expired) with the stored failure reason
+  and whether the company has an active number now. Numbers whose setup failed or has run for over
+  30 minutes (with the step and error) and companies created since then without an active number
+  are read directly: the platform role already reads `app.channel_accounts` and `app.tenants`.
+- `ops.platform_ops_integration_failures(p_limit)`: current failures, each with its company, a
+  label (a display phone number, the business account name, or the host of a store or endpoint
+  URL; the rest of a URL, which can carry tokens, never leaves the database), the state, the error
+  text HyFib stored from the provider's answer and since when: numbers needing reconnection or
+  whose setup failed, WhatsApp accounts needing reconnection, failed store connections and store
+  sync or webhook errors, failed payment account checks, failed catalog and Flow syncs, failing or
+  auto-disabled webhook endpoints.
+
+The platform role reads directly only what it could already read, plus the new dead-letter
+records: failed, stuck and quarantined Meta and Razorpay receipts (`ops.webhook_receipts`,
+`ops.webhook_quarantine`), failed emails by kind (`ops.email_outbox`, counts only: SMTP errors can
+quote addresses) and security events by type
+and severity (`ops.security_events`, counts only: details can hold addresses). Queue counts (ready,
+deferred, active, failed jobs still retained) come from pg-boss's `getQueues()` through the web's
+producer instance; they are the counts the worker refreshes about once a minute, and job payloads
+are signed envelopes with ids only.
+
+**Dead letters.** The dead-letter queue had no consumer: dead-lettered jobs stayed in pg-boss for
+30 days, readable only with SQL, and a list of them cannot be read with a limit through pg-boss's
+API. The worker now consumes it and records each job in `ops.dead_letters`: the source queue and
+job, the envelope's kind, reference and company only if its signature verifies (otherwise none of
+the three), the retries used, the error's name and code (an application error code or a SQLSTATE)
+and the times. Error messages and stacks are not copied because they can quote data; the job,
+with its output, stays in pg-boss for its 30-day retention and the worker's redacted logs have the
+rest. The worker role may only insert rows (duplicates from a retried recording are ignored); rows
+are purged 30 days after the job failed. Recording a batch is retried three times.
+
+There is no redrive button. Every queue's work is a durable row that the minute sweeps re-signal,
+so a redrive repeats what the sweep does, and `billing.auto-recharge` deliberately has no retries
+(an attempt is reconciled before anything is charged again). The runbook's `boss.redrive` stays
+available to engineers who fixed a cause.
+
+**Two repairs**, open to both platform roles and written to the platform audit log (actor, reason,
+result) in the same transaction:
+
+- Retry a Meta or Razorpay webhook receipt that failed all 12 attempts or was quarantined, while
+  its body is still kept (7 days): `ops.platform_retry_webhook_receipt` sets it back to pending
+  with no attempts, and the sweep processes it again (processing is idempotent). This replaces the
+  owner-role SQL in RUNBOOKS §4.
+- Resolve a quarantine entry with a written resolution.
+
+Neither reads or changes company data, so neither is written to a company's audit log.
+
+**Health and signals** are derived in domain code from those facts, with thresholds that are
+HyFib's own review heuristics, not Meta rules:
+
+| Health issue                                                           | Severity |
+| ---------------------------------------------------------------------- | -------- |
+| Numbers, none active, some needing reconnection or failed              | critical |
+| A WhatsApp account needs reconnection                                  | critical |
+| An active number rated `RED` at its last check                         | critical |
+| Last 24 hours: at least 20 outbound and at least 50% failed            | critical |
+| A number needing reconnection or failed while others are active        | warning  |
+| An active number rated `YELLOW` at its last check                      | warning  |
+| Last 24 hours: at least 20 outbound and at least 10% failed            | warning  |
+| A webhook endpoint failing, or turned off for failing in 7 days        | warning  |
+| A failed store connection, payment account check, catalog or Flow sync | warning  |
+| Dead letters in 7 days                                                 | warning  |
+| Plan past due                                                          | warning  |
+
+| Signal (7 days)                            | Flagged when                                                   |
+| ------------------------------------------ | -------------------------------------------------------------- |
+| Send failures                              | at least 100 outbound and at least 20% failed                  |
+| Marketing opt-outs                         | at least 100 marketing templates delivered and opt-outs of 2%+ |
+| `131050` (user stopped marketing messages) | at least 20                                                    |
+| `131049` (Meta's per-user marketing limit) | at least 100                                                   |
+| Complaint suppressions                     | at least 5                                                     |
+| Number quality                             | an active number rated `RED` or `YELLOW` at its last check     |
+
+A signal asks for a review; nothing is suspended automatically. Suspension stays a reasoned,
+audited action on the company page.
+
+**Pages.** Overview (totals and the companies needing attention), Onboarding, Integrations, Queues,
+Signals and Usage; the company page gains a health card. Every page re-checks the platform actor.
+The functions read every company on each view, which suits the test envelope (100 companies);
+precomputed rollups and paging come with growth.
+
+**Not built.** Alerts (email or pager) on these conditions, trends over time, number quality
+updates from Meta's `phone_number_quality_update` webhook (quality is as of the last health
+check), API request counts (not recorded), exports, the age of the oldest waiting job, and
+acknowledging or snoozing an issue.
+
+**Migrations 0026 and 0027.** 0026 adds `ops.dead_letters`, `ops.purge_dead_letters`, the four read
+functions, `ops.platform_retry_webhook_receipt` and the definer policies and column grants they
+need; 0027 builds an index on consent events by company and time concurrently.

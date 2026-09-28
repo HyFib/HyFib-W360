@@ -14,6 +14,7 @@ import {
   SupportGrantForm,
   TenantStatusForm,
 } from '@/components/platform/platform-forms';
+import { IssueList, LevelBadge, Utc } from '@/components/platform/ops';
 import { formatDate, formatDateTime } from '@/lib/format';
 import { getRuntime } from '@/server/runtime';
 import { requirePlatformActor } from '@/server/session';
@@ -24,13 +25,14 @@ export const dynamic = 'force-dynamic';
 export default async function PlatformTenantPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const actor = await requirePlatformActor();
-  const { platform, planAdmin } = await getRuntime();
+  const { platform, planAdmin, platformOps } = await getRuntime();
   const company = await platform.getTenant(actor, id);
   if (!company) notFound();
-  const [owners, planView, published] = await Promise.all([
+  const [owners, planView, published, ops] = await Promise.all([
     platform.tenantOwners(actor, id),
     planAdmin.tenantPlan(actor, id),
     planAdmin.assignablePlans(actor),
+    platformOps.companyHealth(actor, id),
   ]);
   const { state, usage, limits } = planView;
   const tz = planView.timezone;
@@ -174,6 +176,86 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
             />
           </CardContent>
         </Card>
+        {ops ? (
+          <Card className="lg:col-span-2">
+            <CardHeader>
+              <div className="flex flex-wrap items-center gap-2">
+                <CardTitle>Health</CardTitle>
+                <LevelBadge level={ops.health.level} />
+              </div>
+              <CardDescription>
+                Counts and states only (ADR-054).{' '}
+                <Link
+                  href="/platform/ops"
+                  className="text-primary underline-offset-4 hover:underline"
+                >
+                  Operations
+                </Link>
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-4 text-sm lg:grid-cols-2">
+              <div className="grid content-start gap-3">
+                {ops.health.issues.length > 0 ? (
+                  <IssueList issues={ops.health.issues} />
+                ) : (
+                  <p className="text-muted-foreground">No issues found.</p>
+                )}
+                <dl className="grid gap-2 sm:grid-cols-2">
+                  <div>
+                    <dt className="text-muted-foreground">WhatsApp numbers</dt>
+                    <dd>
+                      {ops.health.facts.numbersActive} active of {ops.health.facts.numbersTotal}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-muted-foreground">Worst quality rating</dt>
+                    <dd>
+                      {ops.health.facts.qualityRating ?? 'Not rated'}
+                      {ops.health.facts.qualityCheckedAt ? (
+                        <div className="text-xs text-muted-foreground">
+                          checked <Utc at={ops.health.facts.qualityCheckedAt} />
+                        </div>
+                      ) : null}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-muted-foreground">Last 24 hours</dt>
+                    <dd>
+                      {ops.health.facts.outbound24h} sent, {ops.health.facts.failed24h} failed,{' '}
+                      {ops.health.facts.inbound24h} received
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-muted-foreground">Last message</dt>
+                    <dd>
+                      <Utc at={ops.health.facts.lastMessageAt} />
+                    </dd>
+                  </div>
+                </dl>
+              </div>
+              {ops.activity ? (
+                <dl className="grid content-start gap-2 sm:grid-cols-2">
+                  <div>
+                    <dt className="text-muted-foreground">Sent in 30 days</dt>
+                    <dd>{ops.activity.outbound}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-muted-foreground">Received in 30 days</dt>
+                    <dd>{ops.activity.inbound}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-muted-foreground">Marketing opt-outs in 30 days</dt>
+                    <dd>{ops.activity.marketingOptOuts}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-muted-foreground">Webhook deliveries in 30 days</dt>
+                    <dd>{ops.activity.webhookDeliveries}</dd>
+                  </div>
+                </dl>
+              ) : null}
+            </CardContent>
+          </Card>
+        ) : null}
         <Card className="lg:col-span-2">
           <CardHeader>
             <CardTitle>Owners and account recovery</CardTitle>

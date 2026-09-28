@@ -15,6 +15,9 @@ audited. Never paste tokens, message content or card data into tickets or chat.
   SELECT name, count(*) FROM pgboss.job WHERE name = 'dead-letter' GROUP BY 1;
   ```
 - Email backlog: `SELECT status, count(*) FROM ops.email_outbox GROUP BY 1;`
+- Without SQL: `/platform/ops` (platform staff, section 10P) shows the companies needing attention,
+  integration failures, Meta and Razorpay receipts needing attention, quarantine, queue counts and
+  recent dead letters.
 
 ## 2. Email not arriving
 
@@ -31,9 +34,12 @@ audited. Never paste tokens, message content or card data into tickets or chat.
 
 1. Identify the queue (`pgboss.job` counts by `name` and `state='created'`).
 2. Check worker health and logs; scale worker replicas horizontally (safe).
-3. If a poison job fails repeatedly, it moves to `dead-letter` after its retry limit. Inspect its
-   data (ids only), fix the cause, then re-drive with `boss.redrive('dead-letter', …)` or re-signal
-   the durable row.
+3. If a poison job fails repeatedly, it moves to `dead-letter` after its retry limit, and the
+   worker records it in `ops.dead_letters` (Operations → Queues: queue, kind, company when its
+   signature verified, retries, error name and code, never the message). The worker log's
+   `job attempt failed` entries carry the error for each attempt; the job itself (ids only, with its
+   output) stays in pg-boss for 30 days. Fix the cause; the minute sweeps re-signal durable rows, so
+   re-driving is rarely needed (`boss.redrive('dead-letter', …)` as the owner when it is).
 4. Index bloat warnings (`index_bloat`) → run `getReindexCommands()` output as the owner role during
    low traffic (runtime roles cannot reindex).
 
@@ -46,12 +52,15 @@ audited. Never paste tokens, message content or card data into tickets or chat.
    the app. A spike from unknown sources is an attack — keep rejecting, alert security.
 3. Backlog: `SELECT status, count(*) FROM ops.webhook_receipts GROUP BY 1`. The messaging sweep
    re-signals `pending`/`failed` receipts older than 2 minutes and expired `processing` leases, up to
-   12 attempts. Receipts at 12 attempts stay `failed` for you: read `last_error`, fix the cause, then
-   reset with `UPDATE ops.webhook_receipts SET status = 'failed', attempts = 0 WHERE id = …` (owner
-   role); processing is idempotent.
+   12 attempts. Receipts at 12 attempts stay `failed` for you: read `last_error` under Operations →
+   Integrations, fix the cause, then **Retry** it there with the fix as the reason (platform audit
+   log; it goes back to pending and the sweep processes it again; processing is idempotent). If the
+   web is down, the owner role can reset it with
+   `UPDATE ops.webhook_receipts SET status = 'failed', attempts = 0 WHERE id = …`.
 4. Unknown or mismatched assets land in `ops.webhook_quarantine` (`unknown_asset`,
-   `asset_mismatch`, `malformed`). Map an asset only after verifying ownership with the company
-   (never by guess), then reset the receipt as above. Record the decision in `resolution`.
+   `asset_mismatch`, `malformed`), listed under Operations → Integrations. Map an asset only after
+   verifying ownership with the company (never by guess; it reconnects through Embedded Signup),
+   then **Retry** the receipt, and **Resolve** the entry with the decision either way.
 5. Raw bodies are erased after 7 days; replay is impossible after that (by design).
 
 ## 5. Provider outage (Meta, Razorpay, SMTP)
@@ -895,6 +904,51 @@ row-level security and grants, the capture triggers on `app.messages`, `app.cons
 `app.template_status_events`, the notification trigger and the two SECURITY DEFINER sweep functions
 (granted to `w360_app` before their ownership moves to `w360_definer`). A failure usually means the
 bootstrap roles are missing (`infra/db/bootstrap-roles.sql`).
+
+## 10P. Platform operations console
+
+`/platform/ops` is for platform owners and operators (MFA). It shows counts, states, error codes,
+labels and times, never message text, contacts, payloads, email addresses, secrets or full URLs. A
+question it cannot answer from those needs a support grant (section 11) or the logs.
+
+**A company is "critical" or "warning".** The company's platform page lists why (Health). Numbers
+down or an account needing reconnection: the company reconnects through Embedded Signup (section 6);
+quality `RED`/`YELLOW`: point them at their templates and opt-outs before Meta limits the number;
+send failures: the error codes are on their Reports page; failing webhook endpoints, stores, payment
+account checks, catalog or Flow syncs: the Integrations page names the error HyFib stored; dead
+letters: section 3; plan past due: section 10M. Quality is as of the number's last health check.
+
+**Signals (7 days).** A flag asks for a review of that company's sending, not an action: look at its
+campaigns, templates and opt-out keywords (support grant if content is needed). Suspension stays a
+reasoned, audited action on the company page. The thresholds are HyFib's own heuristics
+(ADR-054), not Meta's rules.
+
+**Onboarding.** Failed signups show the reason Meta returned; abandoned ones expired before the
+popup finished (the person can start again). A number setup stuck for over 30 minutes: check the
+`channel.onboard` queue and dead letters; companies without an active number after signup may need
+help with Embedded Signup.
+
+**Queues.** Counts are pg-boss's, refreshed by the worker about once a minute; failed counts include
+jobs retained after their last attempt. `billing.auto-recharge` has no retries on purpose
+(section 9). A row "Not declared by this release" is a queue named by a dead letter that this
+release does not declare (an older or newer deploy); "No such queue in the database" means pg-boss
+has no queue by that name (for a declared queue: the migrations have not run).
+
+**Dead letters.** Recorded by the worker within seconds of the move; if the list stays empty while
+`SELECT count(*) FROM pgboss.job WHERE name = 'dead-letter' AND state = 'created'` grows, the worker
+is not consuming (`dead letters recorded` and `job attempt failed` in its log). Rows are deleted 30
+days after the job failed.
+
+**Repairs.** Retry and Resolve (section 4) both need a reason of at least 10 characters and appear
+in the platform audit log as `platform.webhook_receipt_retried` and
+`platform.webhook_quarantine_resolved`. A receipt whose body was erased (after 7 days) cannot be
+retried.
+
+**Migrations 0026 and 0027 failed.** 0026 runs in one transaction: it needs the bootstrap roles
+(`w360_definer`, `w360_platform`, `w360_app`). 0027 builds an index concurrently outside a
+transaction; if it fails, drop the invalid index
+(`DROP INDEX CONCURRENTLY IF EXISTS app.consent_events_tenant_occurred_idx`) and run the
+migrations again.
 
 ## 11. Compromised company (tenant) or account
 
