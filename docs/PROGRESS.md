@@ -2,7 +2,7 @@
 
 ## 2026-09-28 — CI: the Firefox stall in the cart reminder test
 
-Status: **Cause found and worked around in the test browser; verified locally, CI results below.**
+Status: **Cause found and worked around in the test browser; verified locally and in CI.**
 The stall came from Playwright's Firefox driver, not from HyFib: no page, worker or database code
 changed.
 
@@ -40,8 +40,13 @@ changed.
   then three round trips to another origin without COOP) left a `goto` pending in 125 of 150
   contexts with COOP enforced and in none of 1,050 navigations with enforcement off; a driver build
   instrumented to log messages answered from that cache showed the lost `pageNavigationCommitted`
-  behind a stuck `goto`. The CI stall itself was not reproduced with the full test locally: the cart
-  test passed 8 of 8 times under CPU load and 4 of 4 with the instrumented driver.
+  behind a stuck `goto`. In the cart test itself, the instrumented driver saw the page's browsing
+  context replaced 3 times in a run with COOP enforced (each a new driver channel under the old
+  identifier: the first page and the two round trips through the stand-in) and never with
+  enforcement off. The CI stall itself was not reproduced with the full test locally, where
+  contexts run one at a time and the race is much rarer (0 stalls in 280 such navigations in the
+  test runner): the cart test passed 8 of 8 times under CPU load and 5 of 5 with the instrumented
+  driver.
 - Found alongside, not the cause: Firefox fails `page.reload` and `page.goto` with
   `NS_BINDING_ABORTED` when a test navigates while the page's router is still fetching
   (`templates.spec.ts` in 6 of the last 39 CI runs, `automations.spec.ts` in 3, all passing on
@@ -59,19 +64,19 @@ changed.
 - **Navigations are bounded:** `navigationTimeout: 30_000`, so a navigation that never settles, for
   any reason, fails within 30 seconds and is retried in CI instead of holding its test until the
   test's own timeout (5 minutes for the cart reminder test).
-- **CI keeps evidence:** the end-to-end step stops at 40 minutes (the job has 45), the server logs
-  are printed on failure or cancellation, and the Playwright report with `test-results` and the web
-  and worker logs are uploaded for every run, so a test that passed on retry keeps its failed
-  attempt's trace.
+- **CI keeps evidence:** the end-to-end step stops at 40 minutes (the job has 45); the server logs and
+  the job, store and database state (from 7b62ff0) are printed on failure or cancellation; and the
+  Playwright report with `test-results` and the web and worker logs are uploaded for every run, one
+  artifact per attempt, so a test that passed on retry keeps its failed attempt's trace.
 
-### Test commands and results (local, 2026-09-28)
+### Test commands and results (2026-09-28)
 
-| Command                                              | Result                                                                                                                                                  |
-| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pnpm lint` / `pnpm format:check` / `pnpm typecheck` | 0 problems / all files formatted / all workspace packages pass                                                                                          |
-| `pnpm test:e2e stores.spec.ts` (all four projects)   | 20 passed (7.8 min)                                                                                                                                     |
-| `pnpm test:e2e --project=firefox`                    | 28 passed, 3 skipped: the web request, webhook and Flows data endpoint tests call a target through `E2E_HTTP_HOST`, which needs the hosts entry CI adds |
-| CI                                                   | PENDING                                                                                                                                                 |
+| Command                                                                                          | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                             | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `pnpm test:e2e` (all four projects, on the P5-10 tree)                                           | 116 passed, 12 skipped: in each project the web request, webhook and Flows data endpoint tests call a target through `E2E_HTTP_HOST`, which needs the hosts entry CI adds                                                                                                                                                                                                                                                                                           |
+| `pnpm test:e2e --project=firefox --repeat-each=5 --retries=0 stores.spec.ts -g "cart reminders"` | 5 passed                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| CI, run 36411204063 on 86dad15 (the fix plus a temporary job, since reverted)                    | lint, types and unit tests, integration on PostgreSQL 17 and 18, build and security scans passed. The temporary Firefox job measured the round trips on HyFib's sign-in page (COOP enforced: 51 of 60 contexts left a `goto` pending; enforcement off: none in 420 navigations), then ran `stores.spec.ts` 6 times (30 passed) and the cart reminder test 10 more times (10 passed), without retries. The four-project e2e job: 128 passed (28.6 min), none retried |
 
 ### Known gaps
 
