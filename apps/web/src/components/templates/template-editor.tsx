@@ -1,5 +1,5 @@
 'use client';
-import { useId, useState } from 'react';
+import { useId, useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   COMMON_TEMPLATE_LANGUAGES,
@@ -56,7 +56,7 @@ export function TemplateEditor({
   const [def, setDef] = useState<TemplateDefinition>(existing?.definition ?? EMPTY);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const [busy, startTransition] = useTransition();
 
   const update = (patch: Partial<TemplateDefinition>) => {
     setSaved(false);
@@ -68,39 +68,44 @@ export function TemplateEditor({
   const setButton = (index: number, button: TemplateButton) =>
     update({ buttons: def.buttons.map((b, i) => (i === index ? button : b)) });
 
-  async function submit(event: React.FormEvent) {
+  function submit(event: React.FormEvent) {
     event.preventDefault();
-    setBusy(true);
     setError(null);
     setSaved(false);
     const definition = {
       ...def,
       body: { ...def.body, examples: def.body.examples.slice(0, bodyVars) },
     };
-    try {
-      if (existing) {
-        const result = await updateTemplateDraftAction(slug, existing.id, {
-          expectedVersion: existing.version,
-          definition,
-        });
-        if (!result.ok) setError(result.message);
-        else {
-          setSaved(true);
-          router.refresh();
+    // The actions refresh the page on the server: their response carries the new render, so no
+    // client refresh follows. State set after the await is wrapped again to stay in the
+    // transition, so the message appears together with that render, not before it.
+    startTransition(async () => {
+      try {
+        if (existing) {
+          const result = await updateTemplateDraftAction(slug, existing.id, {
+            expectedVersion: existing.version,
+            definition,
+          });
+          startTransition(() => {
+            if (!result.ok) setError(result.message);
+            else setSaved(true);
+          });
+        } else {
+          const result = await createTemplateDraftAction(slug, {
+            whatsappAccountId: accountId,
+            name,
+            language,
+            definition,
+          });
+          if (!result.ok) startTransition(() => setError(result.message));
+          else router.push(`/c/${slug}/templates/${result.data.id}`);
         }
-      } else {
-        const result = await createTemplateDraftAction(slug, {
-          whatsappAccountId: accountId,
-          name,
-          language,
-          definition,
-        });
-        if (!result.ok) setError(result.message);
-        else router.push(`/c/${slug}/templates/${result.data.id}`);
+      } catch {
+        startTransition(() =>
+          setError('The draft could not be saved because the connection failed. Try again.'),
+        );
       }
-    } finally {
-      setBusy(false);
-    }
+    });
   }
 
   return (

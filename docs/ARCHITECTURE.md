@@ -100,6 +100,15 @@ session-level value. Scopes are branded TypeScript types created only by authori
 Company switching is URL-based (`/c/{slug}`) with a full page load so no client state crosses
 companies (ADR-006).
 
+Server actions that change what a page shows call `refresh()` (`next/cache`), so the action's
+response carries the re-rendered page. Client components do not follow such an action with
+`router.refresh()`, and forms set their result inside `startTransition` after the `await`, so the
+message appears together with that render. Client refreshes remain only where no action refreshed:
+live updates, a sending campaign's polling, refused actions (conflicts) and the auth client. A page
+load cancels a client refresh in flight (Firefox and WebKit at once), and Next.js answers by loading
+the current page again over it; filter forms on live pages therefore navigate with `next/form`
+(PROGRESS, 2026-09-28).
+
 ### 3.5 Structural rules enforced by tests
 
 `tests/integration/tenant-isolation.test.ts` fails if any `app` table with `tenant_id` lacks FORCE RLS
