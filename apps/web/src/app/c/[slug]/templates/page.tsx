@@ -55,7 +55,8 @@ export default async function TemplatesPage({ params }: { params: Promise<{ slug
           ) : null
         }
       />
-      <div className="grid gap-6">
+      {/* One shrinkable column: a wide template table scrolls inside its card on phones. */}
+      <div className="grid grid-cols-1 gap-6">
         {accounts.length === 0 ? (
           <Alert tone="info" title="No WhatsApp account connected">
             Connect a WhatsApp number in Settings → Channels to create and sync templates.
