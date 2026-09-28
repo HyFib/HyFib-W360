@@ -676,8 +676,57 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   cash on delivery buttons); the report with reasons. Order pages show payment, shipping, tracking and
   the order's messages with the customer's answer; the inbox labels the message with its store and
   event.
-- **Not built yet:** abandoned carts and store events as automation triggers (P4-06d), messages per
-  shipment or on tracking changes, changing orders in the store from a customer's answer.
+- **Not built yet:** store events as automation triggers (P4-06e), messages per shipment or on
+  tracking changes, changing orders in the store from a customer's answer. Cart reminders are §6L.
+
+## 6L. Cart reminders **[built — verified against the local Shopify and Graph stand-ins only; no live store or WhatsApp traffic]**
+
+- **Model** (migration 0021, ADR-049): stores gain the checkout read (cursor, Shopify's page cursor
+  while a read continues, when the next read is due, the last read's error), customer access (when a
+  manager asked for `read_customers`, the sealed authorization code for the worker, the last
+  refusal) and the store consent setting (who turned it on and when). `commerce_store_checkouts`
+  holds the checkouts read: number, name, Shopify's consent for that number, total in minor units,
+  up to ten items, the https recovery address, when it was completed and a sticky `redacted_at`
+  (a constraint keeps the customer's details off redacted rows). Store messages are about an order
+  or a checkout (a constraint ties the cart events to checkouts; unique per checkout and event).
+  Rules gain `cart_reminder` (30 minutes to 24 hours) and `cart_second_reminder` (1 hour to 3 days).
+  Consent events gain the `store` source (a store's events are unique per contact, purpose, action
+  and time).
+  `ops.commerce_store_work_due` also returns stores whose checkout read is due; `app.erase_contact`
+  redacts the contact's checkouts.
+- **Rules** (`stores/messages-model.ts`, browser-safe): which checkouts call for a reminder (not
+  completed, not redacted, with a number, updated at or after the rule was switched on), the delay
+  ranges, the checkout values (customer, total, items, recovery address, store name) and the consent
+  action a Shopify consent state stands for.
+- **Reading** (`stores/worker.ts`, `stores/cart-reminders.ts`): while a cart reminder is on, the store
+  job reads `abandonedCheckouts` updated since the cursor every 15 minutes, up to ten pages per run,
+  and with the customer's default phone and consent only while store consent is on and the store
+  allowed customer access. Each page is saved (an older copy never replaces a newer one; redaction
+  sticks), then its reminders are recorded (a waiting reminder moves when the checkout is updated
+  again) and its consent imported (never creating a contact for a suppressed number), in one
+  transaction. A read's errors stay on the store (`checkouts_error`) and never fail the order sync;
+  throttling waits as Shopify asks. The job also exchanges a customer access code: the new token
+  replaces the old one (Shopify keeps one current token per store, SH-007), bound to the
+  credentials version read; without the connector's own scopes the store fails and must be
+  connected again. Checkouts are deleted 30 days after their last update.
+- **Sending** (`stores/order-messages.ts`): the `commerce.store-message` job runs every order message
+  check plus the cart checks (checkout still there, not redacted, not completed; no order with the
+  number since the checkout began; a marketing template; the second reminder only after the first
+  was sent, waiting while the first waits; at most three days after the checkout was left), then the
+  marketing frequency cap under the campaign runner's company lock (for every store message with a
+  marketing template).
+- **Service** (`stores/messages-service.ts`, `stores/service.ts`): cart rules (marketing templates,
+  delay ranges, the second after the first; switching the first off switches the second off;
+  switching the first reminder on starts the read cursor), the store consent setting
+  (`commerce.manage` and `contacts.write`; needs customer access and Shopify 2026-07), customer access
+  (`commerce.manage`; a new authorization for a connected store, accepted by the Shopify callback
+  like a connection), and the 30-day report (reminders sent, checkouts recovered and their value per
+  currency). "Read the store now" also makes a pending checkout read due.
+- **Web** (`/c/{slug}/commerce/stores/{id}/messages`): a Cart reminders card for Shopify stores
+  (customer access, the store consent setting, the report and read errors) and a form per reminder;
+  the report table names the checkout. The contact page labels consent the store recorded.
+- **Not built yet:** WooCommerce carts (no API, WC-023), checkout webhooks, writing consent back to
+  Shopify, store events as automation triggers (P4-06e).
 
 ## 7. Commercial model and billing **[built: wallet, top-ups, auto-recharge — verified against a local Razorpay stand-in only; subscriptions planned]**
 

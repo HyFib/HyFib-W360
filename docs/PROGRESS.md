@@ -1,5 +1,110 @@
 # Progress
 
+## 2026-09-27 — Phase 4: cart reminders (P4-06d)
+
+Status: **Cart reminders implemented and locally verified; production blocked on checks with a
+Shopify development store, an approved marketing template on a sandbox number and a test
+recipient, and on the Shopify app approvals of P4-06b (protected customer data including phone).**
+A connected Shopify store reminds customers about a checkout they left, with up to two approved
+marketing templates a manager chose, only to customers with marketing opt-in: from HyFib's own
+records or, when a manager allows customer access, from the WhatsApp consent Shopify records. No
+request reached Shopify or Meta: both were the test-only stand-ins in `tests/support/`. Store events
+in automations are the next slice (P4-06e).
+
+### Completed
+
+- **Research (`docs/research/store-connectors.md` §4, SH-037 to SH-043):** `abandonedCheckouts` is
+  readable with `read_orders` offline (SH-037; whether the staff permission for abandoned checkouts
+  also applies to an offline token is unconfirmed), filtered by `updated_at` with no sort by update
+  time (SH-038); a checkout has no phone of its own, only the customer and the addresses (SH-039,
+  SH-040); Shopify 2026-07 records WhatsApp marketing consent per phone number, readable with
+  `read_customers` (SH-041); more access means authorizing again (SH-042); `completedAt` says a
+  checkout was completed, and orders cannot be joined to checkouts (SH-043).
+- **GraphQL checked:** the checkout query validates with graphql-js against the 2026-07 and 2025-10
+  Admin schemas, the query with customers and consent against 2026-07 (it is used only from that
+  version), and a deliberately wrong field is refused.
+- **Schema (migration 0021, ADR-049):** the checkout read, customer access and store consent on
+  stores; `commerce_store_checkouts` (number, name, Shopify's consent, total in minor units, ten
+  items, https recovery address, completion, sticky redaction enforced by a constraint), with FORCE
+  RLS, composite foreign keys and column grants; store messages about a checkout (unique per
+  checkout and event) and the two cart rules with their delay ranges; consent events from a
+  `store`, unique per contact, purpose, action and time; `ops.commerce_store_by_connect` and
+  `ops.commerce_store_work_due` replaced; `app.erase_contact` replaced to redact checkouts too.
+- **Reading and reminders (`cart-reminders.ts`, the store job):** while a cart reminder is on, every
+  15 minutes (and at once from "Read the store now"), the checkouts updated since the cursor, paged
+  in full over runs of ten pages; the cursor moves to the read's start less two minutes and never
+  back, and starts when the first reminder is switched on. Each page is saved (an older copy never
+  replaces a newer one), its reminders recorded (a waiting one moves when the customer comes back; a
+  sent one never changes) and its consent imported, in one transaction. Read errors stay on the store
+  and never fail the order sync; checkouts are deleted 30 days after their last update.
+- **Sending:** every order message check again, plus the checkout still open, no order from the
+  number since it began, at most three days, the second reminder only after a sent first one (and
+  waiting while the first waits), a marketing template, and the company's marketing frequency cap
+  under the campaign runner's company lock, now for every store message with a marketing template.
+- **Customer access and store consent:** "Allow customer access in Shopify" authorizes the store
+  again with `read_customers` (the same checks as connecting); the worker exchanges the code, and the
+  new token replaces the old one because Shopify keeps one per store (SH-007): without
+  `read_customers` the store keeps working without it, and without the connector's own scopes it
+  fails and asks to be connected again. With the store consent setting on (`commerce.manage` and
+  `contacts.write`, Shopify 2026-07), `SUBSCRIBED` and `UNSUBSCRIBED` states with their time become
+  consent events (source `store`, actor the shop), once, never for a suppressed number, and only while
+  the setting is on as each page is saved.
+- **Pages:** a Cart reminders card on the store's Order messages page (customer access, the store
+  consent setting, read errors, a 30-day report of reminders sent, checkouts recovered after a
+  reminder and their value per currency, leaving out failed or unconfirmed reminders), a form per
+  reminder (marketing templates only, checkout variables, the delay ranges), the checkout named in
+  the report table, a confirmation on "Read the store now", and consent a store recorded labelled on
+  the contact page.
+- **Docs:** ADR-049, ARCHITECTURE §6L, SECURITY (cart reminder controls and Phase 4 rules),
+  THREAT-MODEL T57 to T59 (and the missing status of T54 to T56), DATA-RETENTION, RUNBOOKS §10K,
+  DEPLOYMENT (Shopify step 9), RELEASE-CHECKLIST, FEATURE-MATRIX (W-116, W-118, H-022, H-030),
+  BACKLOG (P4-06d built, P4-06e).
+- **Found while building:**
+  - **Customer access exchange (fixed before commit).** The first version kept the old token when
+    Shopify granted fewer scopes than the store connector needs. Shopify keeps one current token per
+    store (SH-007), so the exchange had already retired the old one and the store would have failed
+    later with a misleading message. The new token is now stored, and the store fails at once with a
+    request to connect it again.
+  - **Consent setting turned off during a read (fixed before commit).** The import checked the
+    setting as the job loaded it, so consent read after a manager turned it off was still recorded.
+    Each page now reads the setting again under a share lock.
+  - **"Read the store now"** did not read checkouts until the next 15-minute read; it now makes that
+    read due too, and says the store will be read in a moment.
+  - **Report:** reminders WhatsApp failed or never confirmed counted as sent (and could make a
+    checkout "recovered"); they are left out.
+  - **Mutation checks:** 52 guards were broken one at a time. 16 survived at first, each for want of
+    a test: an older copy from Shopify, a sent reminder when the customer comes back, the setting
+    turned off during a read, suppressed numbers in the consent import, reads without the setting,
+    a checkout left inside the clock margin, a grant without the connector's scopes, an exchange
+    racing a credential change, reads after the opt-in was withdrawn, an older order from the same
+    number, a template recategorised at Meta, the API version and `contacts.write` for the setting,
+    a checkout completed just before its reminder, customer access for a store that is not
+    connected, and `customers/redact` by customer id. New checks now make all 52 fail.
+  - **e2e:** the first run reloaded the store page while the browser was still navigating to the
+    Order messages page; the test now waits for the page before polling.
+
+### Test commands and results (local, 2026-09-27, fresh database)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `pnpm test` (unit)                                                          | 209 passed. New: 6 cart reminder tests (which checkouts call for reminders, delay ranges apart from the order messages, checkout values and variables of the other subject refused, the store's consent states, the checkout parser's number and consent)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 277 passed, including `stores.test.ts` 24 (4 new: reminders recorded, moved while waiting and unchanged once sent, an older copy from Shopify, the clock margin, completed checkouts and orders from the number (and an older order that is not), "Read the store now", the recovery report without failed reminders; the second reminder, marketing opt-in, three days, the frequency cap and a template recategorised at Meta; customer access requested, refused, granted without the connector's scopes and exchanged while credentials changed, the store's consent imported once, never for suppressed numbers and not after the setting was turned off, reads without the setting, the API version and `contacts.write`, `customers/redact` by customer id; read errors kept on the store, erasure, pruning, paging past one run, the opt-in withdrawn, a store that is not connected, WooCommerce, permissions and isolation). The tenant-isolation suite covers the new table |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 54 passed (27 × 2) in one full run (9.4 min) on the final code. New in `stores.spec.ts`, on both projects: customer access approved in Shopify (the stand-in approves at once) and exchanged by the worker, the store consent setting saved, the first cart reminder set up with a marketing template and checkout variables, a checkout with Shopify's subscribed consent read after "Read the store now", the waiting reminder brought forward in the database and sent by the minute sweep through the Graph stand-in with the customer's name, the items and the recovery address, the opt-in "Recorded by the store" on the contact page, and the checkout counted as recovered with its total. The first run of the new test failed on its own page navigation (see above); earlier the new test passed on both projects on its own                                                                                                                               |
+| GraphQL check (graphql-js, the Admin introspection schemas)                 | all ten operations validate against 2026-07; the checkout query without customers also against 2025-10 (the query with customers and consent exists from 2026-07 only, and is used only then); deliberately wrong checkout and consent fields are refused                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| Mutation checks                                                             | 52 guards broken one at a time; each makes the unit or integration tests fail (16 only after the new checks above)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+
+### Known gaps
+
+- Not built: store events as automation triggers (P4-06e), WooCommerce carts (no API, WC-023),
+  checkout webhooks, discount codes, writing consent back to Shopify, revenue attribution.
+- Verified against the stand-ins only. Reading checkouts with a real offline token (the staff
+  permission, SH-037), customer access on an installed store (SH-042), Shopify's consent at a real
+  checkout (SH-041), an approved marketing template on a sandbox number, and Firefox and WebKit
+  locally (they run in CI) are release checklist items.
+- The e2e test brings a waiting reminder's send time forward in the database (the shortest wait is
+  30 minutes); the waiting itself is covered by the integration tests with a fixed clock.
+
 ## 2026-09-27 — Phase 4: order messages (P4-06c)
 
 Status: **Order messages implemented and locally verified; production blocked on checks with a

@@ -50,6 +50,7 @@ export async function connectTestChannel(opts: { ownerEmail: string; slug: strin
   const channelAccountId = randomUUID();
   const app = new pg.Client({ connectionString: process.env.DATABASE_URL_APP });
   await app.connect();
+  let tenantId: string;
   try {
     await app.query('BEGIN');
     await app.query(
@@ -59,7 +60,7 @@ export async function connectTestChannel(opts: { ownerEmail: string; slug: strin
     const tenant = await app.query<{ id: string }>('SELECT id FROM app.tenants WHERE slug = $1', [
       opts.slug,
     ]);
-    const tenantId = tenant.rows[0]!.id;
+    tenantId = tenant.rows[0]!.id;
     await app.query("SELECT set_config('app.tenant_id', $1, true)", [tenantId]);
     // Same associated data as credentialAad() in @w360/domain.
     const credential = keyring.encrypt(
@@ -92,7 +93,7 @@ export async function connectTestChannel(opts: { ownerEmail: string; slug: strin
   } finally {
     await app.end();
   }
-  return { wabaId, phoneNumberId };
+  return { tenantId, wabaId, phoneNumberId };
 }
 
 export function randomWaId(): string {

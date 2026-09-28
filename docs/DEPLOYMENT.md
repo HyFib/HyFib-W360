@@ -209,6 +209,16 @@ Optional: without it, the Stores page says Shopify is not set up and WooCommerce
    every three hours. Each message is a `commerce.store-message` job scheduled for its send time
    (the queue is created by `pnpm db:migrate` with the others), and the worker's minute sweep
    queues again any message that is due but lost its job.
+9. Cart reminders (P4-06d) read checkouts with `read_orders` (research SH-037). Customer access is
+   optional and per store: the app must be allowed to request `read_customers` (declare it among
+   the app's optional access if the Partner Dashboard asks for it), HyFib requests it only when a
+   manager allows customer access for a store; if Shopify does not grant it, the store keeps working
+   without it (a grant without `read_orders` or `read_products` fails the store until it is
+   connected again). The
+   customer's default phone is protected customer data like the address phones (SH-040), so the
+   protected customer data request of step 4 must include phone. The store consent setting needs
+   `SHOPIFY_API_VERSION` 2026-07 or later (SH-041). Checkouts are read every 15 minutes by the store
+   job while a reminder is on; nothing else runs for them.
 
 ## WooCommerce stores
 

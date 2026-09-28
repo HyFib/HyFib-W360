@@ -649,6 +649,63 @@ means the bootstrap roles are missing (`infra/db/bootstrap-roles.sql`). It also 
 `contacts.source` check to allow `store`. The `commerce.store-message` queue is created by
 `pnpm db:migrate`.
 
+## 10K. Cart reminders (Shopify checkouts)
+
+**A customer who left a checkout got no reminder.** Open the store's Order messages page: the Cart
+reminders card shows read errors and the report table lists each reminder with its checkout,
+status and reason. The reasons specific to cart reminders:
+
+- "The customer completed the checkout", "An order with the same number was placed…" — the customer
+  bought; nothing is sent (an order counts from when the checkout began).
+- "More than 3 days passed since the checkout was left" — the reminder could not go out in time (the
+  store was disconnected, the company suspended, or the sending hours and delays added up).
+- "The first reminder was not sent, so the second one is not either" — the second reminder follows
+  only a sent first reminder.
+- "has not opted in" — cart reminders are marketing: the customer needs a marketing opt-in in HyFib
+  (Settings → Consent decides whether it is required), or the store consent setting must be on and
+  Shopify must record the customer as subscribed.
+- "as many marketing messages as the company allows" — the company's marketing frequency cap
+  (campaign settings), shared with campaigns.
+- "Cart reminders need an approved marketing template" — the template's category changed at Meta;
+  choose a marketing template again.
+
+No row at all means HyFib never saw the checkout with a number: checkouts are read every 15 minutes
+while a cart reminder is on ("Read the store now" reads them at once), only those updated since the
+first reminder was switched on, and only checkouts with a phone (the customer's default phone needs
+customer access and the store consent setting; otherwise the shipping or billing phone). Shopify
+may withhold phones (protected customer data, SH-040).
+
+**"Reading checkouts: …" on the card.** The read failed and is tried again every 15 minutes; orders
+keep syncing. An access error may mean that the staff account that approved HyFib lacks Shopify's
+"manage abandoned checkouts" permission (research SH-037 says so for staff calls; whether it applies
+to HyFib's offline token is unconfirmed) or that the app's protected customer data access is not
+approved: fix it in Shopify, then "Read the store now".
+
+**Customer access.** "Allow customer access in Shopify" asks Shopify for `read_customers` for that
+store only; the manager approves it in Shopify and returns to the store's page, and the worker
+exchanges the approval within a minute. If Shopify does not grant customer access, the store keeps
+working without it and the card
+says why (for example "Shopify did not grant access to customers"). The store consent setting
+needs that access, Shopify's 2026-07 API (`SHOPIFY_API_VERSION`) and a manager with
+`contacts.write`.
+
+**Consent looks wrong.** Consent a store recorded appears on the contact page as "Recorded by the
+store" with Shopify's time; the newest consent from any source counts, so a later STOP keyword or a
+member's opt-out wins, and a later Shopify unsubscription wins over an earlier opt-in. Only
+subscribed and unsubscribed states with a time are imported; HyFib never writes consent to Shopify.
+Turning the setting off stops future imports and keeps what was recorded.
+
+**The recovery numbers look low or high.** A checkout counts as recovered only when Shopify reports
+it completed after one of its reminders was handed to WhatsApp (failed or unconfirmed reminders do
+not count), within the last 30 days; the value is the checkout's total. It is not revenue
+attribution: the customer may have come back anyway.
+
+**Migration 0021 failed.** It runs in one transaction, so a failure applies nothing. It replaces
+`app.erase_contact`, `ops.commerce_store_by_connect` and `ops.commerce_store_work_due` through
+`SET ROLE w360_definer` (ADR-039), with column grants and a policy for `w360_definer` on
+`commerce_store_checkouts`; a failure there usually means the bootstrap roles are missing
+(`infra/db/bootstrap-roles.sql`). It also redefines the consent source and store message event checks.
+
 ## 11. Compromised company (tenant) or account
 
 1. Suspend the company in `/platform` with a reason (stops outbound activity; ingestion continues).

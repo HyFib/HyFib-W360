@@ -235,10 +235,27 @@ verification, app review, Embedded Signup configuration).
   with its button payloads, the customer's tap on the order page). **Remaining:** checks with a
   real store, approved templates and a WhatsApp test number (release checklist), Shopify's delivery
   timing (research SH-034).
-- **P4-06d Abandoned carts and store events in automations**: abandoned checkout reminders (Shopify
-  checkouts need `read_customers` or protected address data for a number, research SH-035;
-  WooCommerce has no carts, WC-023) as marketing templates with marketing opt-in (M-176); store
-  events as automation triggers; messages per shipment or on tracking changes.
+- **P4-06d Cart reminders (Shopify)** — _implemented and locally verified (2026-09-27) against the
+  Shopify and Graph stand-ins; no live store or WhatsApp traffic yet_ (ADR-049): up to two approved
+  marketing templates per store remind customers about a checkout they left; checkouts read every
+  15 minutes with `read_orders` (SH-037, SH-038), only those updated since the first reminder was
+  switched on, with a cursor that never goes back; the number from the customer (with customer
+  access and the store consent setting) or the addresses; marketing opt-in from HyFib's records or,
+  when a manager allows customer access (`read_customers`, asked for only then) and turns the
+  setting on, from the WhatsApp consent Shopify records (SH-041); never after the checkout was
+  completed or an order with the same number was placed, never more than three days later; the
+  company's marketing frequency cap for every store message with a marketing template; reminders
+  sent, checkouts recovered and their value on the store's Order messages page. WooCommerce has no
+  carts (WC-023). T: `stores.test.ts` (4 cart reminder tests; 52 deliberate regressions caught),
+  unit tests (reminders, delays, checkout values, consent states), e2e `stores.spec.ts` (customer
+  access approved in Shopify, the store consent setting, a reminder sent to a customer whose opt-in
+  the store recorded, the recovery counted). **Remaining:** checks with a development store, an
+  approved marketing template and a WhatsApp test number (release checklist): the staff permission
+  for checkouts (SH-037), customer access on an installed store (SH-042), Shopify's consent at a
+  real checkout (SH-041).
+- **P4-06e Store events in automations**: store events as automation triggers, which needs a
+  template step for messages outside the service window and order data given to a run when it
+  starts (P4-01 remaining work); messages per shipment or on tracking changes.
 
 ## Phase 5 — billing, wallet, platform, public API
 

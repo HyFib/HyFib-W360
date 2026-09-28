@@ -1,4 +1,5 @@
 import type { APIRequestContext, Page } from '@playwright/test';
+import pg from 'pg';
 import { expect, test } from './fixtures';
 import {
   connectTestChannel,
@@ -15,7 +16,7 @@ import { expectNoHorizontalOverflow, signUpAndVerify, uniqueEmail } from './supp
  * Store connectors through the browser, against the TEST-ONLY Shopify and WooCommerce stand-ins
  * started by the global setup: the approval in the store's own admin (the stand-ins approve at
  * once), the first read by the worker, orders next to the customer's chat, webhooks that make HyFib
- * read again, and removal.
+ * read again, removal, order messages and cart reminders.
  */
 const PASSWORD = 'correct horse battery staple 42';
 const SHOPIFY = `http://127.0.0.1:${process.env.E2E_SHOPIFY_PORT ?? ''}`;
@@ -229,18 +230,24 @@ test('a WooCommerce store is connected with keys approved in WordPress, and its 
   await expectNoHorizontalOverflow(page);
 });
 
-/** An approved utility template, created in the Templates pages and approved by the stand-in. */
+/** An approved template, created in the Templates pages and approved by the stand-in. */
 async function approvedTemplate(
   page: Page,
   request: APIRequestContext,
   slug: string,
   wabaId: string,
-  t: { name: string; body: string; examples: string[]; quickReplies: string[] },
+  t: {
+    name: string;
+    category?: 'UTILITY' | 'MARKETING';
+    body: string;
+    examples: string[];
+    quickReplies: string[];
+  },
 ) {
   await page.goto(`/c/${slug}/templates/new`);
   await page.getByLabel('Name').fill(t.name);
   await page.getByLabel('Language code').fill('en');
-  await page.getByLabel('Category').selectOption('UTILITY');
+  await page.getByLabel('Category').selectOption(t.category ?? 'UTILITY');
   await page.getByLabel('Body').fill(t.body);
   for (const [i, example] of t.examples.entries()) {
     await page.getByLabel(`{{${i + 1}}}`).fill(example);
@@ -365,5 +372,184 @@ test('order messages are set up per store, sent for a new order, and the custome
   await expect(page.getByRole('heading', { name: 'Order #1101' })).toBeVisible();
   await reloadUntil(page, () => page.getByText('Customer asked to cancel'));
   await expect(page.getByText('Cash on delivery', { exact: true })).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+});
+
+/**
+ * TEST-ONLY: brings the company's waiting store messages forward to now. A cart reminder waits at
+ * least 30 minutes after the checkout was left, longer than an end-to-end test should wait; the
+ * worker's minute sweep then sends the message like any other whose time has come.
+ */
+async function bringWaitingMessagesForward(tenantId: string) {
+  const app = new pg.Client({ connectionString: process.env.DATABASE_URL_APP });
+  await app.connect();
+  try {
+    await app.query('BEGIN');
+    await app.query("SELECT set_config('app.tenant_id', $1, true)", [tenantId]);
+    const moved = await app.query(
+      "UPDATE app.commerce_store_messages SET send_at = now() WHERE state = 'pending'",
+    );
+    await app.query('COMMIT');
+    return moved.rowCount;
+  } catch (error) {
+    await app.query('ROLLBACK');
+    throw error;
+  } finally {
+    await app.end();
+  }
+}
+
+/** "Read the store now" on the store's page (it also reads checkouts while a reminder is on). */
+async function readStoreNow(page: Page, storeUrl: string) {
+  await page.goto(storeUrl);
+  await page.getByRole('button', { name: 'Read the store now' }).click();
+  await expect(page.getByText('The store will be read in a moment.')).toBeVisible();
+  await page.getByRole('link', { name: 'Order messages' }).click();
+  await expect(page.getByRole('heading', { name: 'Cart reminders' })).toBeVisible();
+}
+
+test('cart reminders use the consent the store records and remind a customer who left a checkout', async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(300_000);
+  const { slug, tenantId, wabaId } = await newCompany(page, 'cart', 'Cora Candles');
+  await approvedTemplate(page, request, slug, wabaId, {
+    name: 'cart_nudge',
+    category: 'MARKETING',
+    body: 'Hi {{1}}, you left {{2}} in your cart. Finish your order here: {{3}}',
+    examples: ['Asha', 'Lavender candle', 'https://cora.example/checkouts/1/recover'],
+    quickReplies: [],
+  });
+  const shopName = `cora-${Date.now().toString(36)}`;
+  const shop = `${shopName}.myshopify.com`;
+  await openStores(page);
+  await page.getByLabel('Shopify store').fill(shop);
+  await page.getByRole('button', { name: 'Connect with Shopify' }).click();
+  await expect(page).toHaveURL(/\/commerce\/stores\/[0-9a-f-]{36}$/);
+  await reloadUntil(page, () => page.getByText('Connected', { exact: true }));
+  const storeUrl = page.url();
+
+  // The manager confirms the customers' opt-in to messages from the store.
+  await page.getByRole('link', { name: 'Order messages' }).click();
+  await expect(page.getByRole('heading', { name: 'Cart reminders' })).toBeVisible();
+  const settings = page.getByRole('form', { name: 'Message settings' });
+  await settings.getByLabel(/customers agreed to receive order messages/).check();
+  await settings.getByRole('button', { name: 'Save settings' }).click();
+  await expect(settings.getByText('Settings saved.')).toBeVisible();
+
+  // The store's consent records need customer access, which HyFib asks Shopify for only now: the
+  // manager approves it in Shopify (the stand-in approves at once) and returns to the store's page.
+  const consent = page.getByRole('form', { name: 'Store consent' });
+  const useConsent = consent.getByLabel(/Use the WhatsApp marketing consent this store records/);
+  await expect(page.getByText('Customer access in Shopify: not allowed')).toBeVisible();
+  await expect(useConsent).toBeDisabled();
+  await page.getByRole('button', { name: 'Allow customer access in Shopify' }).click();
+  await expect(page).toHaveURL(storeUrl);
+  await page.getByRole('link', { name: 'Order messages' }).click();
+  await expect(page.getByRole('heading', { name: 'Cart reminders' })).toBeVisible();
+  // The worker exchanges the approval for a token that can read customers.
+  await reloadUntil(page, () => page.getByText('Customer access in Shopify: allowed'));
+  await useConsent.check();
+  await consent.getByRole('button', { name: 'Save consent setting' }).click();
+  await expect(consent.getByText('Consent setting saved.')).toBeVisible();
+
+  // The first cart reminder: the marketing template with the checkout's values, 30 minutes after
+  // the checkout was left.
+  const reminder = page.getByRole('form', { name: 'Cart reminder', exact: true });
+  await reminder.getByLabel('Send this message').check();
+  await reminder.getByLabel('Template').selectOption({ label: 'cart_nudge (en, marketing)' });
+  await reminder.getByLabel('Variable {{1}}').selectOption('customer_name');
+  await reminder.getByLabel('Variable {{2}}').selectOption('cart_items');
+  await reminder.getByLabel('Variable {{3}}').selectOption('checkout_url');
+  await reminder.getByLabel('Wait after the checkout was left (minutes)').fill('30');
+  await reminder.getByRole('button', { name: 'Save' }).click();
+  await expect(reminder.getByText('Saved.')).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+
+  // A customer leaves a checkout; Shopify records that they subscribed to WhatsApp marketing.
+  const customer = randomWaId();
+  const subscribedAt = new Date(Date.now() - 3_600_000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  await control(request, `${SHOPIFY}/__stand-in/checkout`, {
+    shop,
+    checkout: {
+      id: '8101',
+      name: '#C8101',
+      total: { amount: '2499.00', currencyCode: 'INR' },
+      lineItems: [
+        { title: 'Lavender candle', variantTitle: 'Large', quantity: 2 },
+        { title: 'Wick trimmer', variantTitle: null, quantity: 1 },
+      ],
+      shippingAddress: { name: 'Nila Customer', phone: null },
+      customer: {
+        id: '66001',
+        displayName: 'Nila Customer',
+        phone: `+${customer}`,
+        consent: {
+          state: 'SUBSCRIBED',
+          optInLevel: 'SINGLE_OPT_IN',
+          collectedFrom: 'SHOPIFY',
+          updatedAt: subscribedAt,
+        },
+      },
+    },
+  });
+
+  // HyFib reads the store's checkouts every 15 minutes; "Read the store now" reads them at once.
+  // The reminder waits for its time.
+  await readStoreNow(page, storeUrl);
+  await reloadUntil(page, () => page.getByText('#C8101'), 45_000);
+  const row = page.getByRole('row').filter({ hasText: '#C8101' });
+  await expect(row).toContainText('Cart reminder');
+  await expect(row).toContainText('Waiting');
+  await expect(row).toContainText('Due ');
+
+  // The shortest wait is 30 minutes, so the test brings the reminder forward; the worker sends it.
+  expect(await bringWaitingMessagesForward(tenantId)).toBe(1);
+  let sent: { wamid?: string; body: unknown } | undefined;
+  await expect(async () => {
+    sent = (await standInRequests(request)).find(
+      (r) => r.path.endsWith('/messages') && (r.body as { to?: string }).to === customer,
+    );
+    expect(sent?.wamid).toBeTruthy();
+  }).toPass({ timeout: 120_000 });
+  const template = (sent?.body as { template: { name: string; components: unknown[] } }).template;
+  expect(template.name).toBe('cart_nudge');
+  expect(template.components).toEqual([
+    {
+      type: 'body',
+      parameters: [
+        { type: 'text', text: 'Nila Customer' },
+        { type: 'text', text: 'Lavender candle (Large) and 1 more' },
+        { type: 'text', text: `https://${shop}/checkouts/8101/recover?key=k8101` },
+      ],
+    },
+  ]);
+  await reloadUntil(page, () => row.getByText('Sent', { exact: true }));
+  const report = page.getByLabel('Cart reminders in the last 30 days');
+  await expect(report).toContainText('Reminders sent (30 days): 1');
+  await expect(report).toContainText('Checkouts recovered: 0');
+  const messagesUrl = page.url();
+
+  // The customer's contact carries the opt-in the store recorded, with Shopify's time.
+  await page.goto(`/c/${slug}/contacts`);
+  await page.getByRole('link', { name: 'Nila Customer' }).click();
+  await expect(page.getByRole('heading', { name: 'Nila Customer', level: 1 })).toBeVisible();
+  await expect(page.getByText('Marketing: opted in').first()).toBeVisible();
+  await expect(page.getByRole('cell', { name: /Recorded by the store/ })).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+  await page.goto(messagesUrl);
+
+  // The customer completes the checkout after the reminder: recovered, with the checkout's total.
+  const completedAt = new Date(Math.floor(Date.now() / 1000) * 1000 + 2000)
+    .toISOString()
+    .replace(/\.\d{3}Z$/, 'Z');
+  await control(request, `${SHOPIFY}/__stand-in/checkout`, {
+    shop,
+    checkout: { id: '8101', completedAt, updatedAt: completedAt },
+  });
+  await readStoreNow(page, storeUrl);
+  await reloadUntil(page, () => report.getByText('Checkouts recovered: 1'), 45_000);
+  await expect(report).toContainText('Recovered value: ₹2,499.00');
   await expectNoHorizontalOverflow(page);
 });
