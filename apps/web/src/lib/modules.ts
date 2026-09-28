@@ -93,8 +93,9 @@ export const MODULES: ModuleDefinition[] = [
     label: 'Commerce',
     path: '/commerce',
     permission: 'commerce.read',
-    status: 'planned',
-    reason: 'Phase 4: catalog, orders and store connectors.',
+    status: 'available',
+    reason:
+      'Catalogs read from Meta, products sent in conversations, orders customers send from WhatsApp, and Payment Links from the company’s own Razorpay account, recorded as paid only when Razorpay reports it. Shopify and WooCommerce connectors, stock updates and refunds from HyFib are not available yet.',
   },
   {
     key: 'ai',

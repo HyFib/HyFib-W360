@@ -117,11 +117,12 @@ describe('database roles', () => {
     expect(await can('w360_platform', resetMfa)).toBe(true);
     expect(await can('w360_app', resetMfa)).toBe(false);
     expect(await can('w360_auth', resetMfa)).toBe(false);
-    // Contact erasure and the template and campaign sweeps: runtime app role only.
+    // Contact erasure and the template, campaign and order message sweeps: runtime app role only.
     for (const fn of [
       'app.erase_contact(uuid,boolean)',
       'ops.template_sync_due(integer)',
       'ops.campaigns_due(integer)',
+      'ops.commerce_store_messages_due(integer)',
     ]) {
       expect(await can('w360_app', fn), fn).toBe(true);
       expect(await can('w360_auth', fn), fn).toBe(false);

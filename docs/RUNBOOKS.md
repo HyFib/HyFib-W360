@@ -1,6 +1,6 @@
 # Runbooks
 
-Last updated 2026-09-26. Procedures marked **(phase N)** apply once that capability ships. Every
+Last updated 2026-09-28. Procedures marked **(phase N)** apply once that capability ships. Every
 action on customer data requires a support grant (`/platform`) with a reason; every platform action is
 audited. Never paste tokens, message content or card data into tickets or chat.
 
@@ -462,6 +462,307 @@ definer function `app.erase_contact` through `SET ROLE w360_definer` (ADR-039) l
 grants for `w360_definer` on the flow tables and `app.channel_accounts`; a failure there usually
 means the bootstrap roles are missing (`infra/db/bootstrap-roles.sql`). The `flow.sync` and
 `flow.keys` queues are created by `pnpm db:migrate` with the other pg-boss queues.
+
+## 10H. Commerce
+
+**A catalog read failed or shows no products.** Commerce → Catalogs shows the read state and the
+error. "Meta refused access to the catalog" (Graph errors #10 and #200–#299) usually means HyFib's
+Meta app lacks catalog access for the account (`catalog_management` is expected but not confirmed,
+research M-173): check the app's permissions and the account's Login for Business grant, then use
+"Read from Meta". "Meta reported no catalog connected" means no catalog is connected to the
+WhatsApp account in Commerce Manager. A read that waits more than five minutes is signalled again
+by the minute sweep and fails after 30 minutes; the worker log has `commerce job` lines with the
+account id and outcome. Catalogs are read again every day. Only the first 5,000 products of a
+catalog are read (the page says so).
+
+**An order shows "Product not in your catalog copy" or no total.** Names come from HyFib's copy of
+the catalog: read it again. The total is unknown when a price in the webhook had more decimals than
+its currency, the items were in different currencies, or HyFib could not read an item of the cart
+(the order page says how many; ask the customer to send the cart again); payment cannot be requested for such an
+order (the amounts WhatsApp sent are shown per item).
+
+**"Your Razorpay account has not been checked successfully".** Commerce → Payments shows the check.
+"Razorpay rejected the key id or secret" means the keys are wrong, revoked or from the other mode:
+the company saves them again. Checks that could not reach Razorpay are retried three times; saving
+the keys again starts a new check.
+
+**A Payment Link stays "Being created".** The `commerce.link` worker creates it with the company's
+keys and retries while Razorpay cannot be reached (five attempts over about 15 minutes); the sweep
+signals due links every minute. A create whose answer was lost is found again by its reference, so
+it never creates a second link. "Not created" shows Razorpay's reason (for example keys rejected).
+
+**The customer paid but the order is still waiting.** HyFib records a payment only from the link as
+Razorpay reports it: every 15 minutes on the link's first day, then every six hours, and at once
+when the company's Razorpay account notifies HyFib. Check the link at Razorpay (Dashboard →
+Payment Links): partly paid links do not mark the order paid (HyFib asks for the full amount). If
+notifications do not arrive, the web log shows `payment link webhook` lines with the outcome:
+`bad_signature` (the webhook secret in Razorpay differs from the one saved in HyFib; the company
+saves the same secret in both), `unknown_account` (the address is wrong), `no_open_link` (the link
+is already settled) or `duplicate` (a redelivery). Payments are still recorded by the scheduled
+checks.
+
+**"Razorpay returned no https address".** The link exists at Razorpay but HyFib had nothing to
+send: cancel it on the order page and request payment again.
+
+**"The link was created but not sent".** The customer service window had closed, the number was not
+active or the contact has no phone number: the order page shows the link's address to copy and send
+another way (a template, or a reply after the customer writes again).
+
+**Cancelling did not cancel.** Razorpay refuses to cancel paid or partly paid links (research R-109);
+HyFib then records what Razorpay reports (the order becomes paid when the link is paid in full).
+Refunds are made in the company's Razorpay Dashboard; HyFib does not change the order for them.
+
+**Migration 0018 failed.** It runs in one transaction, so a failure applies nothing. It replaces
+`app.erase_contact` through `SET ROLE w360_definer` (ADR-039) like 0011 and 0015–0017 and adds two
+definer functions (`ops.commerce_payment_webhook_target`, `ops.commerce_work_due`) with column
+grants for `w360_definer`; a failure there usually means the bootstrap roles are missing
+(`infra/db/bootstrap-roles.sql`). The `commerce.sync`, `commerce.link` and `commerce.account` queues
+are created by `pnpm db:migrate`.
+
+## 10I. Store connectors (Shopify, WooCommerce)
+
+**"Shopify is not set up for HyFib yet".** The web has no `SHOPIFY_CLIENT_ID`,
+`SHOPIFY_CLIENT_SECRET` and `SHOPIFY_API_VERSION` (both web and worker need them; the worker logs
+"Shopify is not configured" at start). See `docs/DEPLOYMENT.md` "Shopify app".
+
+**Connecting a Shopify store ends on "could not be verified or has expired".** The web log has a
+`shopify callback refused` line with the reason: `bad_signature` (the app secret in HyFib differs
+from the app's, or the callback is older than 90 seconds: check both servers' clocks),
+`unknown_state` (the approval took over 15 minutes, or the page was used twice) or `bad_request`.
+"Only the member who started connecting a store can finish it" means another account was signed in
+when Shopify sent the member back. In each case the member starts again.
+
+**A store is stuck on "Waiting for approval".** The owner never finished the approval (Shopify or
+WordPress). The handshake is deleted an hour after it expired (15 minutes) when the store was never
+connected; "Connect again" starts a new one. For WooCommerce, the web log has
+`woocommerce key handover` lines: `not_read_write` (the owner approved without write access, or the
+site sent other permissions) or `unknown_handshake` (too late, or already used). WooCommerce
+deletes keys HyFib did not accept.
+
+**A store is stuck on "Connecting".** The `commerce.store` worker finishes the connection (worker
+log `store job` lines with the store id and outcome). It retries while the store cannot be reached
+and fails the store after 30 minutes with "HyFib could not reach the store to finish connecting".
+Other messages name the cause: "Shopify did not grant read_orders and read_products" (the merchant
+declined some access), "WooCommerce refused the keys", "No WooCommerce REST API answered at this
+address" (wrong address, or the site lacks pretty permalinks), "HyFib cannot connect to this
+address" (the egress client refused it: private addresses, redirects, http outside local and test).
+
+**A store "Needs attention".** The store page shows why. "Shopify refused HyFib's access" or "no
+longer accepts HyFib's access" means the token or refresh token stopped working (uninstalled,
+access revoked, or the refresh token expired after about 90 days without a read, research SH-007):
+connect again. "WooCommerce refused the keys (they may have been revoked or lack Read/Write
+access)" means the key was revoked or its WordPress user lost rights: connect again with new keys.
+
+**Orders stop updating.** The store page shows the last read and the next one (hourly), changes
+waiting to be read, and "Webhooks last checked" (six-hourly). A read error is shown as "The last
+read did not finish" and retried in five minutes; Shopify throttling (research SH-011) only delays
+the next read. "Read the store now" asks for a read at once. The web log has `shopify webhook` or
+`woocommerce webhook` lines with the outcome: `bad_signature` (Shopify: the app secret differs;
+WooCommerce: the webhook was not created by HyFib or its secret was edited — remove the store and
+connect it again), `no_store`, `duplicate` or `fetch_signalled`. WooCommerce disables a webhook after
+more than five failed deliveries and never retries it (WC-018): the six-hourly check re-enables it,
+and the hourly read catches up meanwhile. "The keys cannot manage webhooks" means Read-only keys:
+reads still run hourly.
+
+**Orders show no customer name, number or email.** Shopify did not share protected customer data
+(the store page says so, research SH-020): HyFib's Shopify app needs Shopify's approval for those
+fields. Or the details were removed: a customer's redaction request or a contact erasure (the orders
+page shows "Details removed"). Numbers without a country code are linked to contacts only after the
+company sets a calling code on the store page.
+
+**Only part of the products are there.** HyFib keeps the first 20,000 products of a store (the
+store page says when a copy is incomplete); orders are not limited.
+
+**The merchant uninstalled HyFib in Shopify.** The store shows "Uninstalled in Shopify": reads stop
+and the access is dropped; the orders stay until Shopify's `shop/redact` (about 48 hours later,
+research SH-027) or until the company removes the store. "Connect again" installs HyFib again.
+
+**A Shopify data request arrived.** The store page lists it with the customer's email or number and
+the orders Shopify named. Answer the customer within 30 days with what HyFib holds (the orders page
+searches by email or number), then mark the request answered; the customer's details on the request
+are cleared.
+
+**Removing a store did not finish.** Removal waits up to 30 minutes for the store (Shopify
+uninstall, or deleting HyFib's WooCommerce webhooks), then deletes the store anyway; the audit entry
+`commerce.store_removed` says `remote: done`, `no_access` or `unreachable`. For WooCommerce, the
+owner must also revoke the key in WooCommerce → Settings → Advanced → REST API (the API cannot).
+
+**Migration 0019 failed.** It runs in one transaction, so a failure applies nothing. It replaces
+`app.erase_contact` through `SET ROLE w360_definer` (ADR-039) like 0011 and 0015–0018 and adds four
+definer functions (`ops.commerce_store_by_shop`, `ops.commerce_store_by_webhook`,
+`ops.commerce_store_by_connect`, `ops.commerce_store_work_due`) with column grants for
+`w360_definer`; a failure there usually means the bootstrap roles are missing
+(`infra/db/bootstrap-roles.sql`). The `commerce.store` queue is created by `pnpm db:migrate`.
+
+## 10J. Order messages (messages on store events)
+
+**A customer did not get an order message.** Open the store's Messages page (Commerce → Stores → the
+store → Order messages): the report lists the last 30 days with the status and, for "Not sent", the
+reason; the order page lists the order's messages. The reasons:
+
+- "saw this more than 48 hours after it happened" — the store was disconnected, failing or its
+  webhooks were lost and the event was found late (by the hourly read); HyFib does not send stale
+  updates.
+- "A test order" — Shopify test orders are messaged only when the store's setting allows it.
+- "The message for this event was switched off" — the rule was off at send time, or was switched off
+  and on again after the event (a rule never messages about what happened before it was switched on).
+- "Nobody has confirmed that this store's customers agreed" — the opt-in confirmation was withdrawn.
+- "The order has no phone number" — the store gave no number, it had no country code and the store
+  has no calling code set (store page), or Shopify withheld customer data (protected customer data,
+  research SH-020).
+- "opted out", "suppression list", "erased", "has not opted in" (marketing templates) — consent, as
+  for any business-initiated message.
+- "The template is not approved", "The WhatsApp number is not active", "The template's variables or
+  buttons changed" — fix the template or number, then set the rule up again.
+- "A template variable had no value" — the order had no value for a field chosen without a fallback
+  (for example the tracking number of an order shipped without one).
+
+A message shown as "Not delivered" was sent to WhatsApp and failed there: Meta's error is shown in
+the report and in the conversation, as for any failed message. Worker logs have `store message`
+lines with the outcome and reason.
+
+**Nothing is recorded for new orders.** Check that the rule is on (the Messages page), that the store
+reads orders (store page: last read, webhooks), and that orders reach HyFib: an order placed before
+the rule was switched on, or already in the copy, never gets a placed message. Order messages are
+found when HyFib reads an order, so a webhook outage delays them until the hourly read (and the
+48-hour limit applies).
+
+**Messages wait.** "Waiting" messages show when they are due: the rule's delay after the event, moved
+to the start of the store's sending hours when outside them (company time zone). The minute sweep
+signals due messages whose job was lost; a suspended company's messages wait until it is reactivated.
+
+**Delivered messages come late or not at all (Shopify).** Deliveries are found by reading orders in
+transit again every three hours for 14 days after shipping (research SH-034); the store job must be
+running (store page: last read). Only fully shipped orders whose shipments are all delivered count.
+WooCommerce has no delivered status.
+
+**A customer's cash on delivery answer is missing.** Only taps on the message's own buttons, from the
+same customer and conversation, count; the newest answer wins. The template's two chosen buttons
+must be quick replies (the rule says which confirms and which cancels). HyFib does not change the
+order in the store: cancel it there. A cancellation reopens the conversation; a confirmation does
+not.
+
+**Migration 0020 failed.** It runs in one transaction, so a failure applies nothing. It replaces
+`app.erase_contact` through `SET ROLE w360_definer` (ADR-039) and adds
+`ops.commerce_store_messages_due` with column grants for `w360_definer`; a failure there usually
+means the bootstrap roles are missing (`infra/db/bootstrap-roles.sql`). It also redefines the
+`contacts.source` check to allow `store`. The `commerce.store-message` queue is created by
+`pnpm db:migrate`.
+
+## 10K. Cart reminders (Shopify checkouts)
+
+**A customer who left a checkout got no reminder.** Open the store's Order messages page: the Cart
+reminders card shows read errors and the report table lists each reminder with its checkout,
+status and reason. The reasons specific to cart reminders:
+
+- "The customer completed the checkout", "An order with the same number was placed…" — the customer
+  bought; nothing is sent (an order counts from when the checkout began).
+- "More than 3 days passed since the checkout was left" — the reminder could not go out in time (the
+  store was disconnected, the company suspended, or the sending hours and delays added up).
+- "The first reminder was not sent, so the second one is not either" — the second reminder follows
+  only a sent first reminder.
+- "has not opted in" — cart reminders are marketing: the customer needs a marketing opt-in in HyFib
+  (Settings → Consent decides whether it is required), or the store consent setting must be on and
+  Shopify must record the customer as subscribed.
+- "as many marketing messages as the company allows" — the company's marketing frequency cap
+  (campaign settings), shared with campaigns.
+- "Cart reminders need an approved marketing template" — the template's category changed at Meta;
+  choose a marketing template again.
+
+No row at all means HyFib never saw the checkout with a number: checkouts are read every 15 minutes
+while a cart reminder is on ("Read the store now" reads them at once), only those updated since the
+first reminder was switched on, and only checkouts with a phone (the customer's default phone needs
+customer access and the store consent setting; otherwise the shipping or billing phone). Shopify
+may withhold phones (protected customer data, SH-040).
+
+**"Reading checkouts: …" on the card.** The read failed and is tried again every 15 minutes; orders
+keep syncing. An access error may mean that the staff account that approved HyFib lacks Shopify's
+"manage abandoned checkouts" permission (research SH-037 says so for staff calls; whether it applies
+to HyFib's offline token is unconfirmed) or that the app's protected customer data access is not
+approved: fix it in Shopify, then "Read the store now".
+
+**Customer access.** "Allow customer access in Shopify" asks Shopify for `read_customers` for that
+store only; the manager approves it in Shopify and returns to the store's page, and the worker
+exchanges the approval within a minute. If Shopify does not grant customer access, the store keeps
+working without it and the card
+says why (for example "Shopify did not grant access to customers"). The store consent setting
+needs that access, Shopify's 2026-07 API (`SHOPIFY_API_VERSION`) and a manager with
+`contacts.write`.
+
+**Consent looks wrong.** Consent a store recorded appears on the contact page as "Recorded by the
+store" with Shopify's time; the newest consent from any source counts, so a later STOP keyword or a
+member's opt-out wins, and a later Shopify unsubscription wins over an earlier opt-in. Only
+subscribed and unsubscribed states with a time are imported; HyFib never writes consent to Shopify.
+Turning the setting off stops future imports and keeps what was recorded.
+
+**The recovery numbers look low or high.** A checkout counts as recovered only when Shopify reports
+it completed after one of its reminders was handed to WhatsApp (failed or unconfirmed reminders do
+not count), within the last 30 days; the value is the checkout's total. It is not revenue
+attribution: the customer may have come back anyway.
+
+**Migration 0021 failed.** It runs in one transaction, so a failure applies nothing. It replaces
+`app.erase_contact`, `ops.commerce_store_by_connect` and `ops.commerce_store_work_due` through
+`SET ROLE w360_definer` (ADR-039), with column grants and a policy for `w360_definer` on
+`commerce_store_checkouts`; a failure there usually means the bootstrap roles are missing
+(`infra/db/bootstrap-roles.sql`). It also redefines the consent source and store message event checks.
+
+## 10L. Store events in automations
+
+**An order rule set to start an automation started nothing.** The store's Order messages report
+shows "Automation started" with a link to the run, or "Not sent" with the reason; the order page
+lists the same. The reasons specific to automations:
+
+- "The automation was paused or archived, or its live version no longer starts from order
+  messages" — publish a version whose trigger is "An order event in a store" and keep the
+  automation active. The rule keeps pointing at the automation meanwhile.
+- "The WhatsApp number is not active or does not match the template" — also shown when the live
+  version is limited to another number than the rule's.
+- "A team member was handling the conversation with the customer" — the conversation was assigned;
+  automations never interrupt members.
+- "Another automation was handling the conversation with the customer" — one run per
+  conversation; the order is not queued behind it.
+- "Automations had already started too often in this conversation within the hour" — at most 10
+  runs per conversation per hour, whatever started them.
+- "suppression list", "opted out", "erased" — checked before the run starts; each template step
+  checks consent for its own template's category again.
+
+**The run started but the customer got nothing, or not everything.** Open the run (from the report,
+or Automations → Runs). A template step that cannot be sent ends the run as "A message could not be
+sent" with the reason:
+
+- "the template's variables or quick-reply buttons changed after the step was set up" — choose the
+  template again in the step (the automation lists the problem) and publish a new version.
+- "the template is no longer approved…", "the WhatsApp number is not active or does not match the
+  template" — fix the template or the number; the automation lists the problem too.
+- "a template variable was empty after filling in placeholders" — an order field had no value (a
+  tracking number before shipping, for example), the order was deleted, or its customer was
+  redacted or erased. Use the fields the event always has.
+- "has not opted in", "as many marketing messages as the company allows" — marketing templates
+  follow the campaign rules: marketing opt-in and the company's frequency cap.
+
+A template step whose company lock is held by the campaign runner tries again every 2 seconds until
+the lock is free; during a large campaign send the run's next step time moves forward without new
+step log lines. That is expected.
+
+**The customer's tap did nothing, or went to "Other reply".** A tap counts only on the template
+message of the step the run is waiting on, in the same visit of that step; taps on older messages,
+of another run or of another step follow the step's "Other reply" path (or end the run when it has
+none). Typing a button's title counts as tapping it. After the step's timeout the run has followed
+the timeout path, and once the conversation is assigned, taken over or resolved again, the run has
+stopped.
+
+**Publishing is refused with "WhatsApp allows only templates until the customer replies".** An
+automation started by order messages begins outside the 24-hour window, so every path must send a
+template (and get the customer's reply) before any other message; continue from the reply branches
+of an "Ask with a template" step. The hand-off warning means people see the conversation only once
+the customer writes.
+
+**Migration 0022 failed.** It runs in one transaction, so a failure applies nothing. It replaces
+the trigger function `app.guard_automation_run` (an ordinary trigger function, not SECURITY DEFINER),
+adds the run's order reference and event, the rule's action and automation, the store message's run,
+their checks and foreign keys, and column grants for `w360_app`. The new columns start empty, so the
+new checks hold for existing rows; a failure usually means the bootstrap roles are missing
+(`infra/db/bootstrap-roles.sql`).
 
 ## 11. Compromised company (tenant) or account
 

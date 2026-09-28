@@ -1,3 +1,4 @@
+import { formatMinor } from '@w360/domain/crm-money';
 import { cn } from '@w360/ui/cn';
 import { formatDateTime } from '@/lib/format';
 import { flowAnswerText } from '@/lib/flow-labels';
@@ -15,6 +16,14 @@ export interface ThreadMessage {
   senderName: string | null;
   createdAt: string;
   providerTimestamp: string | null;
+}
+
+/** An order message's label ("Order shipped · Tara Tea") from its content (order messages). */
+function storeMessageLabel(content: unknown): string | null {
+  if (typeof content !== 'object' || content === null) return null;
+  const store = (content as { store?: { label?: unknown; name?: unknown } }).store;
+  if (!store || typeof store.label !== 'string') return null;
+  return typeof store.name === 'string' ? `${store.label} · ${store.name}` : store.label;
 }
 
 const STATUS_LABELS: Record<string, string> = {
@@ -46,7 +55,16 @@ function Body({ type, content }: { type: string; content: unknown }) {
   }
   switch (type) {
     case 'text':
-      return <p className="whitespace-pre-wrap break-words">{text(c.text) ?? ''}</p>;
+      return (
+        <div className="grid gap-1">
+          {text(c.paymentLinkId) ? (
+            <p className="text-xs font-medium uppercase tracking-wide opacity-70">
+              Payment request
+            </p>
+          ) : null}
+          <p className="whitespace-pre-wrap break-words">{text(c.text) ?? ''}</p>
+        </div>
+      );
     case 'image':
     case 'video':
     case 'audio':
@@ -120,6 +138,38 @@ function Body({ type, content }: { type: string; content: unknown }) {
           </div>
         );
       }
+      const products = (
+        typeof c.products === 'object' && c.products !== null ? c.products : null
+      ) as Record<string, unknown> | null;
+      if (products) {
+        // Products sent from the inbox (a product, a product list or the catalog).
+        const names = Array.isArray(products.names)
+          ? (products.names as unknown[]).map((n) => text(n) ?? 'Unnamed product')
+          : [];
+        const title =
+          products.kind === 'catalog'
+            ? 'Catalog'
+            : products.kind === 'product_list'
+              ? `${names.length} products`
+              : 'Product';
+        return (
+          <div className="grid gap-1">
+            <p className="text-xs font-medium uppercase tracking-wide opacity-70">{title}</p>
+            {text(products.header) ? (
+              <p className="font-semibold">{text(products.header)}</p>
+            ) : null}
+            {text(products.body) ? (
+              <p className="whitespace-pre-wrap break-words">{text(products.body)}</p>
+            ) : null}
+            {products.kind !== 'catalog' && names.length > 0 ? (
+              <p className="text-xs opacity-80">{names.slice(0, 10).join(' · ')}</p>
+            ) : null}
+            {text(products.footer) ? (
+              <p className="text-xs opacity-80">{text(products.footer)}</p>
+            ) : null}
+          </div>
+        );
+      }
       if (c.csat === true) {
         const buttons = Array.isArray(c.buttons)
           ? (c.buttons as unknown[]).map(text).filter(Boolean)
@@ -167,8 +217,40 @@ function Body({ type, content }: { type: string; content: unknown }) {
       return <p>{text(c.text) ?? 'Button reply'}</p>;
     case 'contacts':
       return <p>Shared a contact card</p>;
-    case 'order':
-      return <p>Sent an order{text(c.text) ? `: ${text(c.text)}` : ''}</p>;
+    case 'order': {
+      // A cart from the catalog (amounts in minor units, read when the webhook arrived).
+      const order = (typeof c.order === 'object' && c.order !== null ? c.order : null) as Record<
+        string,
+        unknown
+      > | null;
+      if (!order) return <p>Sent an order that could not be read.</p>;
+      const items = Array.isArray(order.items) ? (order.items as Record<string, unknown>[]) : [];
+      const units = items.reduce(
+        (n, i) => n + (typeof i.quantity === 'number' ? i.quantity : 0),
+        0,
+      );
+      const subtotal =
+        typeof order.subtotalMinor === 'number' && text(order.currency)
+          ? formatMinor(order.subtotalMinor, order.currency as string)
+          : null;
+      return (
+        <div className="grid gap-1">
+          <p className="text-xs font-medium uppercase tracking-wide opacity-70">Order</p>
+          <p>
+            {units} item{units === 1 ? '' : 's'}
+            {subtotal ? ` · ${subtotal}` : ''}
+          </p>
+          {typeof order.dropped === 'number' && order.dropped > 0 ? (
+            <p className="text-xs opacity-80">
+              {order.dropped} item{order.dropped === 1 ? '' : 's'} could not be read
+            </p>
+          ) : null}
+          {text(order.note) ? (
+            <p className="whitespace-pre-wrap break-words">{text(order.note)}</p>
+          ) : null}
+        </div>
+      );
+    }
     case 'system':
       return <p className="italic">WhatsApp account update</p>;
     case 'template': {
@@ -237,7 +319,9 @@ export function MessageBubble({
         <Body type={message.type} content={message.content} />
         <p className="mt-1 flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
           <time dateTime={message.providerTimestamp ?? message.createdAt}>{at}</time>
-          {outbound && message.senderType === 'system' ? <span>· Sent automatically</span> : null}
+          {outbound && message.senderType === 'system' ? (
+            <span>· {storeMessageLabel(message.content) ?? 'Sent automatically'}</span>
+          ) : null}
           {outbound && message.senderType === 'bot' ? <span>· Automation</span> : null}
           {outbound && message.senderName && message.senderType !== 'system' ? (
             <span>· {message.senderName}</span>

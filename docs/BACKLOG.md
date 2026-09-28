@@ -1,7 +1,7 @@
 # Backlog
 
 Dependency-ordered. Each item lists acceptance criteria (AC), tests (T) and prerequisites (PR).
-Status values follow the feature matrix. Last updated 2026-09-26.
+Status values follow the feature matrix. Last updated 2026-09-28.
 
 ## Phase 1 — foundation (done; CI green on PR #1)
 
@@ -108,8 +108,11 @@ verification, app review, Embedded Signup configuration).
   runs of the draft on a real conversation; the bot/human hand-off lock with Take over; step logs,
   captured answers with retention; an automation report section; a builder with a generated diagram
   and an in-browser simulator. T: restart and lost signals resume from the stored position; bot and
-  person never answer at once. **Remaining:** Flow and catalog steps (sending a WhatsApp Flow from a run, P4-06), starting runs from the public API or campaigns, template follow-ups outside the service
-  window, fuzzy keyword matching, a drag-and-drop canvas (ADR-034), run export, usage billing for
+  person never answer at once. Template steps (send a template, ask with a template's quick replies)
+  and the order-event trigger came with P4-06e. **Remaining:** Flow and catalog steps (sending a
+  WhatsApp Flow or products from a run), starting runs from the public API or campaigns, enrolling
+  contacts or segments in a sequence without a customer message or order event, fuzzy keyword
+  matching, a drag-and-drop canvas (ADR-034), run export, usage billing for
   automation steps, a real sandbox run (release checklist).
 - **P4-02 HTTP node + egress guard** — _implemented and locally verified (2026-09-27) against a
   local target server only_: "Call a web address" steps (method, address with URL-encoded
@@ -173,9 +176,107 @@ verification, app review, Embedded Signup configuration).
   approved sandbox number (release checklist), connecting ad accounts (ad sync, spend, cost per
   conversation) and conversion reporting to Meta (W-072), campaign parameters on links, a free
   public link generator for people without an account.
-- **P4-06 Commerce**: catalog connection, product messages, order capture, payment links with verified
-  status; Shopify and WooCommerce connectors (authenticated setup, webhook verification, dedupe, sync
-  recovery, uninstall).
+- **P4-06a Commerce on WhatsApp** — _implemented and locally verified (2026-09-27) against the Graph
+  and Razorpay stand-ins and signed test webhooks; no live Meta or Razorpay traffic yet_: catalogs
+  connected to each WhatsApp account read from Meta by the worker (up to 10 catalogs and 5,000
+  products each, removed and disconnected marked, daily re-read, Meta's permission refusals shown in
+  plain words); products with search; single-product, multi-product and catalog messages from a
+  conversation in the service window; orders captured from the webhook with exact minor-unit
+  prices, product names from the catalog copy, member statuses and visibility with the
+  conversation; Payment Links in the company's own Razorpay account (write-only keys, live keys only
+  in production, keys checked), written ahead and created once per single-use reference (a lost
+  response looked up, never repeated), sent in the chat, checked on a schedule and on signed
+  notifications, paid only from Razorpay's own report, cancelled on request, expiry returning the
+  order; erasure of order notes and cancellation of open links. T: `commerce.test.ts` (catalog reads
+  and refusals, product messages, orders and amounts, visibility, Payment Links end to end, busy
+  lease, not-sent reason, erasure, isolation; 15 deliberate regressions caught), unit tests (prices,
+  order parsing, message shapes, limits, references, the Payment Link client), e2e
+  `commerce.spec.ts` (catalog read, products sent, order, keys, payment request, forged and signed
+  notifications, paid and fulfilled). **Remaining:** checks on an approved sandbox number and with a
+  company's Razorpay test keys (release checklist), product enquiries (`referred_product`), payments
+  inside WhatsApp (`order_details`, needs Meta payment configuration), writing to catalogs and stock,
+  refunds from HyFib, order reports and exports, sending products from automations.
+- **P4-06b Store connectors** — _implemented and locally verified (2026-09-27) against the Shopify
+  and WooCommerce stand-ins; no live store traffic yet_: companies connect Shopify stores through
+  HyFib's Shopify app (a signed callback bound to the member who started it, `read_orders` and
+  `read_products` only, expiring offline tokens refreshed by the worker and stored only if the
+  access was not changed meanwhile) and WooCommerce stores with Read/Write keys (the approval page
+  or pasted keys, proven against the entered address, sent only in the Authorization header over
+  https); orders of the last 60 days and products (at most 20,000) are read into a copy kept in
+  step by verified, deduplicated webhooks that only signal reads, an hourly read of what changed
+  (a cursor on whole seconds with a page token within a second), six-hourly checks that re-create
+  or re-enable HyFib's webhooks, one job at a time per store; amounts exact in minor units;
+  customers' numbers linked to contacts in E.164 or with the company's calling code; store orders
+  next to the customer's conversation; Shopify's uninstall and privacy requests (sticky
+  redaction, data requests for the company to answer, shop redaction); removal that uninstalls
+  HyFib or deletes its webhooks; erasure. T: `stores.test.ts` (13 tests: handshakes and their
+  forgeries, webhooks, a 130-order burst in one second, lost subscriptions, token refresh and a
+  refresh racing a credential change, throttling, withheld data, a signal during a read, uninstall
+  and privacy requests, removal, key handover refusals, erasure, the product limit, isolation; 20
+  deliberate regressions caught), unit tests (addresses, signatures, amounts, numbers, dates,
+  parsers, HTTP errors), e2e `stores.spec.ts` (both platforms: approval, first read, orders and
+  products, the chat panel, a webhook-driven update, removal). The GraphQL operations were
+  checked against Shopify's 2026-07 and 2025-10 Admin schemas. **Remaining:** checks on a Shopify
+  development store and a WooCommerce test site (release checklist), Shopify's public app review
+  and protected customer data approval (docs/DEPLOYMENT.md), store customers, other platforms.
+- **P4-06c Order messages** — _implemented and locally verified (2026-09-27) against the Shopify,
+  WooCommerce and Graph stand-ins; no live store or WhatsApp traffic yet_ (ADR-048): per store and
+  event (order placed, cash on delivery confirmation, shipped, delivered (Shopify), cancelled) a
+  manager chooses an approved utility or marketing template, the number, variables filled from the
+  order (number, customer, total, items, status page, tracking, store name) with fallbacks, a delay
+  and, for cash on delivery, the confirm and cancel buttons; no rule can be switched on before a
+  manager confirms the customers' opt-in; events come from the store copy (Shopify shipments and
+  gateways read with `read_orders`, WooCommerce payment method and completion), never about the
+  past and at most once per order and event; test orders and events seen over 48 hours late are
+  recorded, not sent; sending hours in the company's time zone; every check again at send time
+  (rule, opt-in, order, number, template, variables, suppression, erasure, opt-out, marketing
+  opt-in); Shopify deliveries found by reading orders in transit again every three hours; the
+  customer's cash on delivery tap recorded from that message only; a report per store, the messages
+  on the order page, and contacts from store orders as a segment source. T: `stores.test.ts` (7 new
+  tests; 30 deliberate regressions caught), unit tests (detection, send time, variables, payloads,
+  parsers), e2e `stores.spec.ts` (a rule set up after the opt-in, a cash on delivery order sent
+  with its button payloads, the customer's tap on the order page). **Remaining:** checks with a
+  real store, approved templates and a WhatsApp test number (release checklist), Shopify's delivery
+  timing (research SH-034).
+- **P4-06d Cart reminders (Shopify)** — _implemented and locally verified (2026-09-27) against the
+  Shopify and Graph stand-ins; no live store or WhatsApp traffic yet_ (ADR-049): up to two approved
+  marketing templates per store remind customers about a checkout they left; checkouts read every
+  15 minutes with `read_orders` (SH-037, SH-038), only those updated since the first reminder was
+  switched on, with a cursor that never goes back; the number from the customer (with customer
+  access and the store consent setting) or the addresses; marketing opt-in from HyFib's records or,
+  when a manager allows customer access (`read_customers`, asked for only then) and turns the
+  setting on, from the WhatsApp consent Shopify records (SH-041); never after the checkout was
+  completed or an order with the same number was placed, never more than three days later; the
+  company's marketing frequency cap for every store message with a marketing template; reminders
+  sent, checkouts recovered and their value on the store's Order messages page. WooCommerce has no
+  carts (WC-023). T: `stores.test.ts` (4 cart reminder tests; 52 deliberate regressions caught),
+  unit tests (reminders, delays, checkout values, consent states), e2e `stores.spec.ts` (customer
+  access approved in Shopify, the store consent setting, a reminder sent to a customer whose opt-in
+  the store recorded, the recovery counted). **Remaining:** checks with a development store, an
+  approved marketing template and a WhatsApp test number (release checklist): the staff permission
+  for checkouts (SH-037), customer access on an installed store (SH-042), Shopify's consent at a
+  real checkout (SH-041).
+- **P4-06e Store events in automations** — _implemented and locally verified (2026-09-28) against
+  the Shopify and Graph stand-ins; no live store or WhatsApp traffic yet_ (ADR-050): an order rule
+  (placed, shipped, delivered on Shopify, cancelled) can start a published automation instead of
+  sending its template; the "An order event in a store" trigger never matches a customer message;
+  the rule's checks, then the automation, number, consent, conversation (not assigned, no other run)
+  and the hourly run limit before a run starts with a reference to the order; template steps ("Send
+  a template", "Ask with a template" whose quick replies are branches, with payloads bound to the
+  run, step and visit) with order fields, checked again when they run (template, number, consent,
+  marketing opt-in, the frequency cap under the campaign runner's company lock, tried so a busy
+  lock retries the step); only templates before the customer replies, checked on every path; the
+  long-wait warning only when a message that is not a template follows; the store's report, the
+  order page and the run page link each other; tests with a chosen order. T: `stores.test.ts`
+  (5 tests, including a keyword automation that follows up with a template after the window
+  closed), unit tests `automations/templates.test.ts`, e2e `stores.spec.ts` (an order starting an
+  automation whose template the customer taps); 76 deliberate regressions caught. **Remaining:**
+  checks with a development store, approved templates and a WhatsApp test number (release
+  checklist).
+- **P4-06f Store follow-ups not built yet**: messages per shipment or on tracking changes (a rule
+  fires once per order and event); cash on delivery confirmations and cart reminders starting
+  automations (their answers and checks depend on their own templates); order data other than the
+  fields listed (for example addresses or discount codes).
 
 ## Phase 5 — billing, wallet, platform, public API
 

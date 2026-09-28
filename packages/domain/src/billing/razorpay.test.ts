@@ -113,3 +113,116 @@ describe('RazorpayClient result classification', () => {
     expect(() => client.createRefund('pay_1', { amount: 100, idempotencyKey: 'short' })).toThrow();
   });
 });
+
+describe('RazorpayClient Payment Links', () => {
+  const json = (status: number, body: unknown) =>
+    new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+  const link = (over: Record<string, unknown> = {}) => ({
+    id: 'plink_Abc123Def456',
+    reference_id: 'w360_abcdefghijklmnopqrst',
+    status: 'created',
+    amount: 15000,
+    amount_paid: 0,
+    currency: 'INR',
+    short_url: 'https://rzp.io/i/abc123',
+    ...over,
+  });
+  function clientReturning(response: () => Response) {
+    const seen: { method: string; url: string; body: unknown }[] = [];
+    const client = new RazorpayClient({
+      baseUrl: 'https://api.razorpay.test',
+      keyId: 'rzp_test_unit',
+      keySecret: 'unit-secret',
+      fetchImpl: async (input, init) => {
+        seen.push({
+          method: init?.method ?? 'GET',
+          url: String(input),
+          body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined,
+        });
+        return response();
+      },
+    });
+    return { client, seen };
+  }
+
+  it('creates links without partial payments, SMS, email or reminders from Razorpay', async () => {
+    const { client, seen } = clientReturning(() => json(200, link()));
+    const result = await client.createPaymentLink({
+      amount: 15000,
+      currency: 'INR',
+      referenceId: 'w360_abcdefghijklmnopqrst',
+      description: 'Order ABCDEFGH',
+      expireBy: 1_900_000_000,
+    });
+    expect(result).toEqual({
+      ok: true,
+      data: {
+        id: 'plink_Abc123Def456',
+        referenceId: 'w360_abcdefghijklmnopqrst',
+        status: 'created',
+        amount: 15000,
+        amountPaid: 0,
+        currency: 'INR',
+        shortUrl: 'https://rzp.io/i/abc123',
+      },
+    });
+    expect(seen[0]).toEqual({
+      method: 'POST',
+      url: 'https://api.razorpay.test/v1/payment_links',
+      body: {
+        amount: 15000,
+        currency: 'INR',
+        accept_partial: false,
+        reference_id: 'w360_abcdefghijklmnopqrst',
+        description: 'Order ABCDEFGH',
+        expire_by: 1_900_000_000,
+        notify: { sms: false, email: false },
+        reminder_enable: false,
+      },
+    });
+  });
+
+  it('refuses responses that are not Payment Links and addresses that are not https', async () => {
+    const wrongId = await clientReturning(() =>
+      json(200, link({ id: 'pay_123456' })),
+    ).client.fetchPaymentLink('plink_Abc123Def456');
+    expect(wrongId.ok || wrongId.kind).toBe('unknown');
+    const insecure = await clientReturning(() =>
+      json(200, link({ short_url: 'http://rzp.io/i/abc123' })),
+    ).client.fetchPaymentLink('plink_Abc123Def456');
+    expect(insecure.ok && insecure.data.shortUrl).toBeNull();
+  });
+
+  it('finds a link by its reference in either list shape, and only that reference', async () => {
+    for (const key of ['payment_links', 'items']) {
+      const { client, seen } = clientReturning(() =>
+        json(200, {
+          [key]: [link(), link({ id: 'plink_Other123456', reference_id: 'w360_other' })],
+        }),
+      );
+      const found = await client.findPaymentLinksByReference('w360_abcdefghijklmnopqrst');
+      expect(found.ok && found.data.map((l) => l.id)).toEqual(['plink_Abc123Def456']);
+      expect(new URL(seen[0]!.url).searchParams.get('reference_id')).toBe(
+        'w360_abcdefghijklmnopqrst',
+      );
+    }
+    const unknownShape = await clientReturning(() =>
+      json(200, { count: 0 }),
+    ).client.findPaymentLinksByReference('w360_abcdefghijklmnopqrst');
+    expect(unknownShape.ok || unknownShape.kind).toBe('unknown');
+  });
+
+  it('cancels by id and reports Razorpay’s refusal as permanent', async () => {
+    const { client, seen } = clientReturning(() =>
+      json(400, {
+        error: { code: 'BAD_REQUEST_ERROR', description: 'Payment link cannot be cancelled' },
+      }),
+    );
+    const result = await client.cancelPaymentLink('plink_Abc123Def456');
+    expect(result.ok || result.kind).toBe('permanent');
+    expect(seen[0]).toMatchObject({
+      method: 'POST',
+      url: 'https://api.razorpay.test/v1/payment_links/plink_Abc123Def456/cancel',
+    });
+  });
+});

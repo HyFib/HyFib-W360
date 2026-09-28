@@ -50,6 +50,7 @@ export async function connectTestChannel(opts: { ownerEmail: string; slug: strin
   const channelAccountId = randomUUID();
   const app = new pg.Client({ connectionString: process.env.DATABASE_URL_APP });
   await app.connect();
+  let tenantId: string;
   try {
     await app.query('BEGIN');
     await app.query(
@@ -59,7 +60,7 @@ export async function connectTestChannel(opts: { ownerEmail: string; slug: strin
     const tenant = await app.query<{ id: string }>('SELECT id FROM app.tenants WHERE slug = $1', [
       opts.slug,
     ]);
-    const tenantId = tenant.rows[0]!.id;
+    tenantId = tenant.rows[0]!.id;
     await app.query("SELECT set_config('app.tenant_id', $1, true)", [tenantId]);
     // Same associated data as credentialAad() in @w360/domain.
     const credential = keyring.encrypt(
@@ -92,7 +93,7 @@ export async function connectTestChannel(opts: { ownerEmail: string; slug: strin
   } finally {
     await app.end();
   }
-  return { wabaId, phoneNumberId };
+  return { tenantId, wabaId, phoneNumberId };
 }
 
 export function randomWaId(): string {
@@ -166,6 +167,29 @@ export function buttonReply(
   });
 }
 
+/** A customer's tap on a quick-reply button of the template message `contextId` (research M-178). */
+export function templateButtonReply(
+  wabaId: string,
+  phoneNumberId: string,
+  waId: string,
+  button: { payload: string; text: string },
+  contextId: string,
+) {
+  return envelope(wabaId, phoneNumberId, {
+    contacts: [{ profile: { name: 'Priya Customer' }, wa_id: waId }],
+    messages: [
+      {
+        from: waId,
+        id: `wamid.e2e.${randomUUID()}`,
+        timestamp: String(Math.floor(Date.now() / 1000)),
+        type: 'button',
+        button,
+        context: { from: '919000012345', id: contextId },
+      },
+    ],
+  });
+}
+
 /**
  * A completed WhatsApp Flow: an interactive `nfm_reply` whose `response_json` string holds the flow
  * token and the answers, in reply to the flow message `contextId` (research M-166).
@@ -190,6 +214,40 @@ export function flowCompletion(
           nfm_reply: { name: 'flow', body: 'Sent', response_json: JSON.stringify(response) },
         },
         context: { from: '919000012345', id: contextId },
+      },
+    ],
+  });
+}
+
+/** A cart sent from the catalog: an `order` message with prices in major units (M-170). */
+export function orderMessage(
+  wabaId: string,
+  phoneNumberId: string,
+  waId: string,
+  order: {
+    catalogId: string;
+    text?: string;
+    items: { retailerId: string; quantity: number; price: number }[];
+  },
+) {
+  return envelope(wabaId, phoneNumberId, {
+    contacts: [{ profile: { name: 'Priya Customer' }, wa_id: waId }],
+    messages: [
+      {
+        from: waId,
+        id: `wamid.e2e.${randomUUID()}`,
+        timestamp: String(Math.floor(Date.now() / 1000)),
+        type: 'order',
+        order: {
+          catalog_id: order.catalogId,
+          text: order.text ?? '',
+          product_items: order.items.map((i) => ({
+            product_retailer_id: i.retailerId,
+            quantity: i.quantity,
+            item_price: i.price,
+            currency: 'INR',
+          })),
+        },
       },
     ],
   });

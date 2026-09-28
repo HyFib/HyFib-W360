@@ -238,15 +238,19 @@ export function TestRunForm({
   automationId,
   version,
   conversations,
+  orders,
   disabledReason,
 }: {
   slug: string;
   automationId: string;
   version: number;
   conversations: { id: string; label: string }[];
+  /** For an automation started by order messages: orders the test can read (null otherwise). */
+  orders: { id: string; label: string }[] | null;
   disabledReason: string | null;
 }) {
   const [conversationId, setConversationId] = useState(conversations[0]?.id ?? '');
+  const [storeOrderId, setStoreOrderId] = useState(orders?.[0]?.id ?? '');
   const [error, setError] = useState<string | null>(null);
   const [runId, setRunId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -257,6 +261,14 @@ export function TestRunForm({
         No conversation can be used right now. Send a WhatsApp message to your number from a test
         phone; conversations with a customer message in the last 24 hours that are unassigned or
         assigned to you appear here.
+      </p>
+    );
+  }
+  if (orders && orders.length === 0) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        A test of an automation started by order messages reads a store order, and no order can be
+        used (it needs permission to see store orders, and a connected store with orders).
       </p>
     );
   }
@@ -272,6 +284,7 @@ export function TestRunForm({
           id: automationId,
           expectedVersion: version,
           conversationId,
+          storeOrderId: orders ? storeOrderId : null,
         }).then((r) => {
           setBusy(false);
           if (!r.ok) setError(r.message);
@@ -302,8 +315,33 @@ export function TestRunForm({
           </Select>
         )}
       </Field>
+      {orders ? (
+        <Field
+          id="test-order"
+          label="Order"
+          description="The steps read this order’s details, as a run started by the order would."
+        >
+          {(aria) => (
+            <Select
+              {...aria}
+              value={storeOrderId}
+              onChange={(e) => setStoreOrderId(e.target.value)}
+            >
+              {orders.map((o) => (
+                <option key={o.id} value={o.id}>
+                  {o.label}
+                </option>
+              ))}
+            </Select>
+          )}
+        </Field>
+      ) : null}
       <div className="flex flex-wrap items-center gap-3">
-        <Button type="submit" variant="outline" disabled={busy || !conversationId}>
+        <Button
+          type="submit"
+          variant="outline"
+          disabled={busy || !conversationId || (orders !== null && !storeOrderId)}
+        >
           {busy ? 'Starting…' : 'Start test run'}
         </Button>
         {runId ? (

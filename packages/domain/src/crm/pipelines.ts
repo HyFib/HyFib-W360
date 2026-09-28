@@ -9,6 +9,7 @@ import {
   eq,
   isNull,
   isUniqueViolation,
+  outerColumn,
   sql,
   type Database,
   type Tx,
@@ -95,7 +96,8 @@ export async function loadPipelines(
       position: crmStages.position,
       archivedAt: crmStages.archivedAt,
       openDeals: sql<number>`(select count(*)::int from app.crm_deals d
-        where d.tenant_id = ${crmStages.tenantId} and d.stage_id = ${crmStages.id} and d.status = 'open')`,
+        where d.tenant_id = ${outerColumn(crmStages.tenantId)}
+          and d.stage_id = ${outerColumn(crmStages.id)} and d.status = 'open')`,
     })
     .from(crmStages)
     .where(eq(crmStages.tenantId, tenantId))

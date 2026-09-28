@@ -48,6 +48,9 @@ import {
 import { receiptAad } from './receipts';
 import { recordConversationSource } from '../growth/sources';
 import { parseFlowCompletion, recordFlowCompletion } from '../flows/responses';
+import type { ParsedOrder } from '../commerce/model';
+import { recordOrder } from '../commerce/orders';
+import { recordStoreMessageAnswer } from '../stores/order-messages';
 import { STATUS_RANK, providerStatusToMessageStatus, shouldAdvance } from './status';
 
 /**
@@ -449,6 +452,24 @@ async function ingestMessagesChange(
       });
     }
 
+    // An order from the customer's cart (research M-170) is recorded with its items and amounts.
+    const order =
+      type === 'order' && typeof content.order === 'object' && content.order !== null
+        ? (content.order as ParsedOrder)
+        : null;
+    if (order) {
+      await recordOrder(tx, {
+        tenantId: ctx.tenantId,
+        conversationId: conversation.id,
+        contactId,
+        channelAccountId: channel.id,
+        whatsappAccountId: channel.whatsappAccountId,
+        messageId,
+        order,
+        receivedAt: providerAt,
+      });
+    }
+
     // A tap on a CSAT button answers the survey: it is not a new question, so it neither reopens
     // the conversation nor counts as unread, a keyword, a campaign reply or a routing trigger.
     const csatTap = isCsatTap(type, content);
@@ -463,7 +484,24 @@ async function ingestMessagesChange(
         answeredAt: providerAt,
       });
     }
-    const keywordText = csatTap ? null : consentText(type, content);
+    // A tap on a cash on delivery message's button answers it (order messages). Like a survey
+    // answer it is not a keyword, a campaign reply or an automation trigger; a confirmation stays
+    // quiet, while a cancellation reopens the conversation for the team, who cancel the order in
+    // the store (HyFib does not write to stores).
+    const codAnswer =
+      type === 'button'
+        ? await recordStoreMessageAnswer(tx, {
+            tenantId: ctx.tenantId,
+            conversationId: conversation.id,
+            payload: content.payload,
+            contextExternalId: m.context?.id ?? null,
+            messageId,
+            answeredAt: providerAt,
+          })
+        : null;
+    const answerTap = csatTap || codAnswer !== null;
+    const quietTap = csatTap || codAnswer === 'confirmed';
+    const keywordText = answerTap ? null : consentText(type, content);
     let consent: Awaited<ReturnType<typeof applyInboundConsentKeyword>> = null;
     if (keywordText) {
       settings ??= await loadMessagingSettings(tx, ctx.tenantId);
@@ -480,7 +518,7 @@ async function ingestMessagesChange(
       if (matched) ctx.summary.consentKeywords += 1;
     }
 
-    if (type !== 'system' && type !== 'reaction' && !csatTap) {
+    if (type !== 'system' && type !== 'reaction' && !answerTap) {
       await attributeCampaignReply(tx, {
         tenantId: ctx.tenantId,
         contactId,
@@ -490,11 +528,11 @@ async function ingestMessagesChange(
     }
 
     const newer = !conversation.lastMessageAt || providerAt >= conversation.lastMessageAt;
-    const reopened = conversation.status === 'resolved' && !csatTap;
+    const reopened = conversation.status === 'resolved' && !quietTap;
     await tx
       .update(conversations)
       .set({
-        ...(csatTap ? {} : { unreadCount: sql`${conversations.unreadCount} + 1` }),
+        ...(quietTap ? {} : { unreadCount: sql`${conversations.unreadCount} + 1` }),
         lastInboundAt: sql`greatest(${conversations.lastInboundAt}, ${providerAt.toISOString()}::timestamptz)`,
         ...(newer ? { lastMessageAt: providerAt, lastMessagePreview: preview.slice(0, 200) } : {}),
         ...(reopened
@@ -512,12 +550,12 @@ async function ingestMessagesChange(
       assignedMembershipId: conversation.assignedMembershipId,
       payload: { messageId, reopened },
     });
-    if (type !== 'system' && type !== 'reaction' && !csatTap) {
+    if (type !== 'system' && type !== 'reaction' && !quietTap) {
       const newCase = conversation.created || reopened;
       // Automations first: a waiting run receives the reply, or a matching automation starts.
-      // Routing (below) leaves a conversation alone while a run is active. A completed form is
-      // not an answer to a bot question and starts no automation.
-      if (!flowCompletion) {
+      // Routing (below) leaves a conversation alone while a run is active. A completed form or an
+      // answer to an order message is not an answer to a bot question and starts no automation.
+      if (!flowCompletion && !order && !answerTap) {
         const dispatched = await dispatchInboundToAutomation(tx, deps, {
           tenantId: ctx.tenantId,
           conversationId: conversation.id,

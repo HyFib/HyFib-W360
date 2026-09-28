@@ -14,8 +14,9 @@ specified here but not yet implemented.
                         │   └── LISTEN/NOTIFY + event table       │
                         ▼                                         │
                    worker (pg-boss consumers, ≥1 replica) ────────┘
-                        │            │             │
-                     SMTP provider  Object storage  Razorpay (designed)
+                        │            │             │            │
+                     SMTP provider  Object storage  Razorpay   Companies' stores
+                                                               (Shopify, WooCommerce)
 ```
 
 - **web** serves the UI, server actions, auth endpoints, provider webhooks, health probes, two
@@ -24,8 +25,9 @@ specified here but not yet implemented.
   endpoints through the egress guard while WhatsApp waits, section 6H). Node.js runtime only.
   **[built]**
 - **worker** processes durable jobs: email delivery, webhook processing, outbound sends, campaign
-  ticks, automation runs, flow operations at Meta and flow keys, billing events, auto-recharge and
-  the minute sweepers. **[built]**
+  ticks, automation runs, flow operations at Meta and flow keys, billing events, auto-recharge,
+  catalog reads and Payment Links, reads from companies' Shopify and WooCommerce stores (section 6J),
+  order messages (section 6K) and the minute sweepers. **[built]**
 - **PostgreSQL** is the system of record, the job queue (pg-boss) and the durable event log. There is
   no Redis, Kafka or search cluster (ADR-015).
 
@@ -346,18 +348,28 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 
 - **Model** (`packages/domain/src/automations/graph.ts`, browser-safe): a trigger (a message is or
   contains a keyword; a customer starts a conversation; any customer message; optionally only while
-  the business is open or closed; a cooldown per conversation) and a graph of typed steps: send a
-  message, ask with reply buttons (Meta's limits: 1–3 buttons, titles ≤ 20, body ≤ 1024, header and
-  footer ≤ 60; research M-157/M-159), ask a question (any text, a number or an email; retries;
-  answer saved under a name), condition (answers, contact fields, tags, business hours), update
-  contact (tags, custom fields), wait (≤ 24 h), hand off to people (a team, or routed like a new
-  case), end. Texts may use `{{name}}`, `{{company}}` and `{{answer.<name>}}`. `checkGraph` rejects
-  missing targets, unsaved answers, unknown placeholders, missing teams or fields, and loops that
-  never pass through a question or a wait.
+  the business is open or closed; a cooldown per conversation; or started by a store's order
+  messages, §6M) and a graph of typed steps: send a message, ask with reply buttons (Meta's limits:
+  1–3 buttons, titles ≤ 20, body ≤ 1024, header and footer ≤ 60; research M-157/M-159), ask a
+  question (any text, a number or an email; retries; answer saved under a name), send a template and
+  ask with a template (an approved utility or marketing template with its variables as texts; the
+  asking step branches on each quick-reply button, any other reply and no reply; ADR-050), condition
+  (answers, contact fields, tags, business hours), update contact (tags, custom fields), wait
+  (≤ 24 h), hand off to people (a team, or routed like a new case), end. Texts may use `{{name}}`,
+  `{{company}}`, `{{answer.<name>}}` and, in automations started by order messages,
+  `{{order.<field>}}`. `checkGraph` rejects missing targets, unsaved answers, unknown or misplaced
+  placeholders, missing teams or fields, loops that never pass through a question or a wait, empty
+  template variables, templates HyFib cannot send or whose variables, buttons or account no longer
+  match (checked against the company's synced templates), and, in automations started by order
+  messages, a message or question that some path reaches before the customer replied. A wait or a
+  question timeout over 23 hours warns only when a message that is not a template can follow it
+  before a reply (templates need no window, so a run can follow up a day or more later).
 - **Interpreter** (`automations/interpreter.ts`): a pure function (graph, run state, event, facts)
-  → new state, effects, log entry; one call is one step. Reply buttons carry
-  `w360bot:<run>:<step>:<visit>:<index>`, so a tap answers exactly the question it belongs to; a
-  typed reply equal to a button title counts as that button. Budgets end runaway runs.
+  → new state, effects, log entry; one call is one step. Reply buttons, and the quick-reply buttons
+  of an asking template step (as their payload), carry `w360bot:<run>:<step>:<visit>:<position>`
+  (position 0–9), so a tap answers exactly the question it belongs to; a typed reply equal to a
+  button title counts as that button. A template variable left empty after filling in placeholders
+  fails the run without sending. Budgets end runaway runs.
 - **Versions** (migration 0011): drafts are edited freely (`automations.write`); publishing
   (`automations.publish`) checks the draft and freezes trigger, graph and number into a numbered,
   immutable `automation_versions` row that new runs use. Test runs use immutable test snapshots of
@@ -372,8 +384,13 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   conversation lock then run lock; checks the hand-off lock, resolve and the 7-day age; loads the
   pinned version's graph (cached: versions never change) and the contact facts; applies effects —
   bot messages through the send pipeline (active number, open window and a WhatsApp id checked
-  first; a blocked send fails the run), contact updates as single statements, hand-off routing —
-  appends the step log row and stores the position. A queued bot message holds the run
+  first; a blocked send fails the run), template steps through the same pipeline without the window
+  (template approved and still utility or marketing, the variables and quick-reply buttons the step
+  expects, the number of the template's account, consent for the category, and for marketing the
+  frequency cap under the campaign runner's company lock, which the runner only tries: busy, the step
+  runs again two seconds later), contact updates as single statements, hand-off routing — appends
+  the step log row and stores the position. A run started by order messages reads its order for
+  each step with texts and may run while its conversation stays resolved as it was at the start. A queued bot message holds the run
   (`pending_message_id`) until the send worker records Meta's acceptance and signals the run; a
   rejected, cancelled, unknown or late (10 minutes) send, or a failure Meta reports later, fails the
   run (`send_failed`) and hands the conversation to people, so a run never moves on or completes on
@@ -406,8 +423,8 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   requests manages domains and secrets (`integrations.manage`); run pages list each call (method,
   host, path, outcome).
 - **Not built yet:** WhatsApp Flows steps (P4-03), catalog steps (P4-06), starting a run through the
-  public API (P5), fuzzy keyword matching, template follow-ups outside the service window, usage
-  billing.
+  public API (P5), fuzzy keyword matching, templates with media headers or variable buttons in
+  template steps, usage billing.
 
 ## 6F. CRM **[built — reminder emails verified through Mailpit only]**
 
@@ -545,6 +562,221 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   ends their tokens (expiry set to now).
 - **Not built yet:** a visual form builder, sending flows from automations, campaigns or templates,
   flows that start with `data_exchange`, Meta's flow metrics, and `flow_token_signature`.
+
+## 6I. Commerce **[built — verified against the local Graph and Razorpay stand-ins and signed test webhooks only; no live Meta or Razorpay traffic]**
+
+- **Model** (migration 0018, ADR-046): `commerce_syncs` (one catalog read per WhatsApp account:
+  state, error, times, version); `commerce_catalogs` (the catalogs Meta reported: Meta id, name,
+  product count, whether the read was truncated, disconnected); `commerce_products` (retailer id,
+  Meta id, name, description, price text, currency, availability, review status, removed);
+  `commerce_orders` (reference, conversation, contact, message, Meta catalog id, currency, subtotal
+  in minor units, item count, items that could not be read, customer note, status, version) and `commerce_order_items` (retailer
+  id, name when matched, quantity, unit price in minor units); `commerce_payment_accounts` (one per
+  company: key id, key and webhook secrets as keyring ciphertexts, webhook address id, check
+  status); `commerce_payment_links` (written ahead: order, amount, single-use reference, Razorpay id
+  and address, status, amount paid, lease, cancel request, errors, the chat message, next check);
+  `commerce_payment_events` (event ids of notifications, for deduplication). Composite foreign keys
+  keep every reference inside the company; `ops.commerce_payment_webhook_target` and
+  `ops.commerce_work_due` are the only cross-company lookups.
+- **Service** (`packages/domain/src/commerce`): catalogs and products with search and paging;
+  catalog read requests (`commerce.manage`); products a member can send in a conversation and
+  sending them (`inbox.reply`); orders and an order's items, links and allowed actions (`commerce.read`,
+  limited to conversations the member can see); order statuses, payment requests and cancelling a
+  link (`inbox.reply`); the payment account (`commerce.manage` to see the key id and webhook address,
+  save or remove keys). All changes are version-checked where members edit and audited.
+- **Worker** (`commerce/worker.ts`, queues `commerce.sync`, `commerce.link`, `commerce.account`):
+  reads catalogs and products (M-172); creates each Payment Link once (lookup by reference after a
+  lost response, R-106, R-107), cancels on request, fetches status on schedule or when signalled,
+  applies paid, expired and cancelled links to orders, and queues the chat message with the link;
+  checks the company's keys. The messaging sweep calls `sweepCommerceWork`, which re-signals reads
+  and links that are due and queues the daily catalog re-read.
+- **Webhooks**: orders arrive with the Meta webhook (`messaging/meta-webhook.ts` → `ingest.ts` →
+  `commerce/orders.ts`) in the same transaction as their message. Companies' Razorpay accounts
+  notify `/api/webhooks/razorpay-links/<address id>` (256 KB limit) → `commerce/webhook.ts`, which
+  verifies the company's signature, records the event id and signals a fetch of the link.
+- **Web** (`/c/{slug}/commerce`): orders with status filters and paging; an order page with items,
+  total, note, status buttons, Payment Links (status, address, not-sent reason) and the request and
+  cancel actions; catalogs per WhatsApp account with the read state and a "Read from Meta" button;
+  products with search; payment settings (write-only secrets, webhook address, events to select).
+  The inbox conversation page has a "Send products" card while the window is open, an Orders panel,
+  and message bubbles for orders, product messages and payment requests.
+- **Erasure** (`app.erase_contact`, replaced in 0018): clears the customer's note on their orders
+  and requests cancellation of their open links; orders and amounts stay as business records.
+- **Not built yet:** writing to catalogs, stock updates, product enquiries (`referred_product`,
+  M-171), payments inside WhatsApp (`order_details`, M-174), refunds from HyFib, and order reports.
+  Shopify and WooCommerce stores are §6J.
+
+## 6J. Store connectors **[built — verified against the local Shopify and WooCommerce stand-ins only; no live store traffic]**
+
+- **Model** (migration 0019, ADR-047): `commerce_stores` (platform, shop domain or site address,
+  name, currency, the state machine authorizing → connecting → connected, failed, uninstalled or
+  removing; sealed and versioned access, token expiry and granted scopes; the handshake's token hash,
+  member and deadline; the per-store webhook address id and sealed secret; read cursors and page
+  tokens, due times, errors, a lease); `commerce_store_orders` (external id, name, statuses,
+  currency, total in minor units, customer name, E.164 number and email, status page, redaction and
+  deletion times, the store's own update time) and `commerce_store_order_items`;
+  `commerce_store_products` (title, status, SKU, address, price range in minor units, stock,
+  variants); `commerce_store_fetches` (what signed webhooks asked the worker to read);
+  `commerce_store_events` (delivery ids, 30 days); `commerce_store_privacy_requests` (Shopify's
+  customer requests). Everything cascades from the store. `ops.commerce_store_by_shop`,
+  `ops.commerce_store_by_webhook`, `ops.commerce_store_by_connect` and
+  `ops.commerce_store_work_due` are the only cross-company lookups.
+- **Service** (`packages/domain/src/stores/service.ts`): stores and a store's detail
+  (`commerce.read`); connecting (Shopify handshake, WooCommerce approval or pasted keys), the calling
+  code setting, "read now", removal and answering data requests (`commerce.manage`); store orders
+  with search and keyset paging, an order with items and the matching contact, products, and the
+  orders next to a conversation (`commerce.read` and `contacts.read`; the conversation panel also
+  needs the conversation to be visible). Changes are audited.
+- **Clients**: `stores/shopify.ts` (the code exchange and refresh, Admin GraphQL with named
+  operations checked against the 2026-07 and 2025-10 schemas, cost-based throttling, withheld
+  customer data, subscriptions, `appUninstall`) and `stores/woocommerce.ts` (REST v3 with Basic
+  authentication: currency, orders and products by `modified_after` or ids, webhooks), both through
+  the egress client.
+- **Worker** (`stores/worker.ts`, queue `commerce.store`, one job at a time per store under a row
+  lease): finishes connecting (code exchange, scopes, shop details, webhooks), reads signalled items,
+  reads what changed since the cursor, refreshes Shopify tokens, checks webhooks every six hours,
+  prunes delivery ids and removes stores. The messaging sweep calls `sweepStoreWork`.
+- **Webhooks**: `/api/webhooks/shopify` (256 KB; HyFib's app secret; order, product,
+  `app/uninstalled` and compliance topics) and `/api/webhooks/woocommerce/<address id>` (1 MB; the
+  store's secret) → `stores/webhook.ts`: verify, dedupe, then mark deletions or signal a fetch.
+  `/api/stores/shopify/callback` (GET, signed query, the signed-in member) and
+  `/api/stores/woocommerce/callback` (the key handover, 16 KB) finish the handshakes.
+- **Web** (`/c/{slug}/commerce/stores`): the stores with status and counts; connect forms for both
+  platforms; a store page (status and errors, facts, read now, connect again, remove with a
+  confirmation, privacy requests, the calling code); orders with search, an order page (items,
+  customer, the matching contact, status page) and products. The inbox conversation page has a
+  "Store orders" panel for the contact's number.
+- **Erasure** (`app.erase_contact`, replaced in 0019): redacts the store orders with the contact's
+  number or email for good; new orders from a number suppressed as erased are kept without the
+  customer's details.
+- **Not built yet:** store customers, discount codes, writing to stores, other platforms. Messages on
+  store events are §6K.
+
+## 6K. Order messages **[built — verified against the local Shopify, WooCommerce and Graph stand-ins only; no live store or WhatsApp traffic]**
+
+- **Model** (migration 0020, ADR-048): store orders gain their payment names, whether they are paid
+  on delivery, when they shipped and were delivered, the latest shipment's tracking (redacted with
+  the customer's details; a constraint ties them to `redacted_at`) and when an order in transit was
+  last read. Stores gain the manager's opt-in confirmation (who and when), sending hours (minutes in
+  the company's time zone) and whether test orders are messaged.
+  `commerce_store_message_rules` holds one rule per store and event (`order_placed`,
+  `cod_confirmation`, `order_shipped`, `order_delivered`, `order_cancelled`): on or off, when it was
+  switched on, the number, the template, the variables, the delay and the cash on delivery buttons.
+  `commerce_store_messages` holds at most one message per order and event: pending, queued (with the
+  chat message and contact) or skipped (with the reason), the event's time, the send time and the
+  cash on delivery answer. `ops.commerce_store_messages_due` is the only cross-company lookup.
+  `contacts.source` gains `store`.
+- **Rules** (`stores/messages-model.ts`, browser-safe): event detection from an order's milestones
+  before and after a read (never about the past, never twice, test orders and events seen more than
+  48 hours late recorded as skipped, cancelled orders never shipped or delivered), the send time
+  (delay, sending hours via `sendingWindow`), variables (fixed text or order fields: number,
+  customer, total, items, status page, tracking, store name) and the cash on delivery payloads.
+- **Worker**: the store job (`stores/worker.ts`) records events in the transaction that saves the
+  orders, and reads Shopify orders in transit again every three hours while the delivered message
+  is on. `stores/order-messages.ts` runs the `commerce.store-message` job: every check again under
+  the row lock, then the contact, conversation, message (`sender_type = system`) and send intent;
+  the send pipeline checks consent once more and records delivery. The messaging sweep calls
+  `sweepStoreMessages`.
+- **Answers**: webhook ingestion hands `button` messages to `recordStoreMessageAnswer`, which accepts
+  a cash on delivery tap only from the message's own contact, conversation and (when named) message,
+  keeps the newest answer, and tells ingestion to treat it as an answer (no keyword, campaign reply
+  or automation; a confirmation stays quiet, a cancellation reopens the conversation).
+- **Service** (`stores/messages-service.ts`): a store's Messages page (settings, one rule per event,
+  numbers, sendable templates, the last 30 days by status; `commerce.read`, customer names with
+  `contacts.read`), saving settings and rules (`commerce.manage`; marketing templates also
+  `campaigns.send`; optimistic versions; audited), and an order's messages (`commerce.read` and
+  `contacts.read`).
+- **Web** (`/c/{slug}/commerce/stores/{id}/messages`): the opt-in confirmation, sending hours and test
+  orders; a form per event (number, template with its text, variables with fallbacks, delay, the
+  cash on delivery buttons); the report with reasons. Order pages show payment, shipping, tracking and
+  the order's messages with the customer's answer; the inbox labels the message with its store and
+  event.
+- **Not built yet:** messages per shipment or on tracking changes, changing orders in the store from a
+  customer's answer. Cart reminders are §6L; rules that start automations are §6M.
+
+## 6L. Cart reminders **[built — verified against the local Shopify and Graph stand-ins only; no live store or WhatsApp traffic]**
+
+- **Model** (migration 0021, ADR-049): stores gain the checkout read (cursor, Shopify's page cursor
+  while a read continues, when the next read is due, the last read's error), customer access (when a
+  manager asked for `read_customers`, the sealed authorization code for the worker, the last
+  refusal) and the store consent setting (who turned it on and when). `commerce_store_checkouts`
+  holds the checkouts read: number, name, Shopify's consent for that number, total in minor units,
+  up to ten items, the https recovery address, when it was completed and a sticky `redacted_at`
+  (a constraint keeps the customer's details off redacted rows). Store messages are about an order
+  or a checkout (a constraint ties the cart events to checkouts; unique per checkout and event).
+  Rules gain `cart_reminder` (30 minutes to 24 hours) and `cart_second_reminder` (1 hour to 3 days).
+  Consent events gain the `store` source (a store's events are unique per contact, purpose, action
+  and time).
+  `ops.commerce_store_work_due` also returns stores whose checkout read is due; `app.erase_contact`
+  redacts the contact's checkouts.
+- **Rules** (`stores/messages-model.ts`, browser-safe): which checkouts call for a reminder (not
+  completed, not redacted, with a number, updated at or after the rule was switched on), the delay
+  ranges, the checkout values (customer, total, items, recovery address, store name) and the consent
+  action a Shopify consent state stands for.
+- **Reading** (`stores/worker.ts`, `stores/cart-reminders.ts`): while a cart reminder is on, the store
+  job reads `abandonedCheckouts` updated since the cursor every 15 minutes, up to ten pages per run,
+  and with the customer's default phone and consent only while store consent is on and the store
+  allowed customer access. Each page is saved (an older copy never replaces a newer one; redaction
+  sticks), then its reminders are recorded (a waiting reminder moves when the checkout is updated
+  again) and its consent imported (never creating a contact for a suppressed number), in one
+  transaction. A read's errors stay on the store (`checkouts_error`) and never fail the order sync;
+  throttling waits as Shopify asks. The job also exchanges a customer access code: the new token
+  replaces the old one (Shopify keeps one current token per store, SH-007), bound to the
+  credentials version read; without the connector's own scopes the store fails and must be
+  connected again. Checkouts are deleted 30 days after their last update.
+- **Sending** (`stores/order-messages.ts`): the `commerce.store-message` job runs every order message
+  check plus the cart checks (checkout still there, not redacted, not completed; no order with the
+  number since the checkout began; a marketing template; the second reminder only after the first
+  was sent, waiting while the first waits; at most three days after the checkout was left), then the
+  marketing frequency cap under the campaign runner's company lock (for every store message with a
+  marketing template).
+- **Service** (`stores/messages-service.ts`, `stores/service.ts`): cart rules (marketing templates,
+  delay ranges, the second after the first; switching the first off switches the second off;
+  switching the first reminder on starts the read cursor), the store consent setting
+  (`commerce.manage` and `contacts.write`; needs customer access and Shopify 2026-07), customer access
+  (`commerce.manage`; a new authorization for a connected store, accepted by the Shopify callback
+  like a connection), and the 30-day report (reminders sent, checkouts recovered and their value per
+  currency). "Read the store now" also makes a pending checkout read due.
+- **Web** (`/c/{slug}/commerce/stores/{id}/messages`): a Cart reminders card for Shopify stores
+  (customer access, the store consent setting, the report and read errors) and a form per reminder;
+  the report table names the checkout. The contact page labels consent the store recorded.
+- **Not built yet:** WooCommerce carts (no API, WC-023), checkout webhooks, writing consent back to
+  Shopify, cart reminders that start automations.
+
+## 6M. Store events in automations **[built — verified against the local Shopify and Graph stand-ins only; no live store or WhatsApp traffic]**
+
+- **Model** (migration 0022, ADR-050): an order message rule has an `action` (send its template, or
+  start `automation_id`; only order placed, shipped, delivered and cancelled may start one). Runs
+  gain `store_order_id` (the order they read; set null when it is deleted) and `store_event`, and
+  the `store_event` trigger type; store messages gain the `started` state and `automation_run_id`
+  (set null when retention deletes the run). The run guard keeps `store_event` fixed and lets
+  `store_order_id` only be cleared.
+- **Starting** (`stores/order-automations.ts`, from the `commerce.store-message` job): after the order
+  message checks (store, opt-in, rule start, sending hours, order, number), the automation must be
+  active with a live version that starts from order messages and allows the rule's number; the
+  number active and not suppressed; the contact not erased or opted out; the conversation (created
+  resolved when new) not assigned and without an active run; fewer than 10 runs there in the last
+  hour. The run and the store message's `started` state are written in the store message's
+  transaction, so one store message starts at most one run. Automations with this trigger never
+  match customer messages (`dispatch.ts`).
+- **Running** (`automations/runner.ts`, §6E): each step with texts reads the order as it is now
+  (`stores/order-values.ts`; a deleted or redacted order gives empty values); template steps send
+  outside the window; the run continues while its conversation stays resolved as it was at its
+  start, the customer's reply reopens it, and a conversation resolved later stops the run; routing at
+  the end touches only open conversations.
+- **Service** (`stores/messages-service.ts`, `automations/service.ts`): choosing an automation on a rule
+  needs `commerce.manage` and `automations.read` (and `campaigns.send` for one with a marketing
+  template), and its templates must belong to the rule's number's account; publishing or testing an
+  automation with a marketing template needs `campaigns.send`; a test run of a store-event
+  automation reads an order the member chooses (`commerce.read`). The Order messages report and the
+  order page show automations started and their outcome (the run linked for `automations.read`), the
+  run page the order (`commerce.read`), the automation page the rules that start it.
+- **Web**: the builder's "An order event in a store" trigger with the order fields, the template step
+  fields (template, variables, a branch per quick reply, other reply, no reply), the simulator's
+  sample order and quick replies, the test form's order choice; "What happens" on the store's rule
+  forms.
+- **Not built yet:** cash on delivery confirmations and cart reminders in automations, conditions on
+  order fields, changing the order from a run, messages per shipment or on tracking changes.
 
 ## 7. Commercial model and billing **[built: wallet, top-ups, auto-recharge — verified against a local Razorpay stand-in only; subscriptions planned]**
 

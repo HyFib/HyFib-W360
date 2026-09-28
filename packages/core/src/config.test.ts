@@ -5,6 +5,7 @@ import {
   loadWorkerConfig,
   metaConfigFrom,
   razorpayConfigFrom,
+  shopifyConfigFrom,
 } from './config';
 
 const base = {
@@ -148,6 +149,46 @@ describe('Razorpay configuration', () => {
     expect(() =>
       razorpayConfigFrom(loadWebConfig({ ...production, ...razorpay, ...standIn })),
     ).toThrow(/RAZORPAY_API_BASE_URL/);
+  });
+});
+
+describe('Shopify app configuration', () => {
+  const local = { ...base, APP_ENV: 'local', APP_BASE_URL: 'http://localhost:3000' };
+  const production = { ...base, APP_ENV: 'production', APP_BASE_URL: 'https://w360.example.net' };
+  const shopify = {
+    SHOPIFY_CLIENT_ID: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6',
+    SHOPIFY_CLIENT_SECRET: 's'.repeat(32),
+    SHOPIFY_API_VERSION: '2026-07',
+  };
+
+  it('is optional and needs the client id, secret and API version together', () => {
+    expect(shopifyConfigFrom(loadWebConfig(local))).toBeNull();
+    const { SHOPIFY_API_VERSION: _version, ...withoutVersion } = shopify;
+    expect(shopifyConfigFrom(loadWebConfig({ ...local, ...withoutVersion }))).toBeNull();
+    const config = shopifyConfigFrom(
+      loadWebConfig({ ...production, ...shopify, SHOPIFY_CLIENT_SECRET_PREVIOUS: 'p'.repeat(32) }),
+    );
+    expect(config).toMatchObject({ apiVersion: '2026-07', testBaseUrl: null });
+    expect(config?.secrets).toEqual(['s'.repeat(32), 'p'.repeat(32)]);
+  });
+
+  it('rejects malformed API versions and short secrets', () => {
+    expect(() => loadWebConfig({ ...local, ...shopify, SHOPIFY_API_VERSION: '2026-05' })).toThrow(
+      ConfigError,
+    );
+    expect(() => loadWebConfig({ ...local, ...shopify, SHOPIFY_CLIENT_SECRET: 'short' })).toThrow(
+      ConfigError,
+    );
+  });
+
+  it('allows a shop stand-in only for local and test environments', () => {
+    const standIn = { SHOPIFY_TEST_BASE_URL: 'http://127.0.0.1:4030/' };
+    expect(
+      shopifyConfigFrom(loadWebConfig({ ...local, ...shopify, ...standIn }))?.testBaseUrl,
+    ).toBe('http://127.0.0.1:4030');
+    expect(() =>
+      shopifyConfigFrom(loadWebConfig({ ...production, ...shopify, ...standIn })),
+    ).toThrow(/SHOPIFY_TEST_BASE_URL/);
   });
 });
 

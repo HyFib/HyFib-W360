@@ -191,6 +191,17 @@
 
 ---
 
+## 11. Payment Links for companies' own Razorpay accounts (fetched 2026-09-27 for P4-06)
+
+Read from Razorpay's official documentation repository and Node SDK on 2026-09-27. HyFib creates these links with the keys of the company's own Razorpay account, never with HyFib's billing account.
+
+| ID | Topic | Claim (paraphrased) | Exact identifiers (if shown) | Source URL | Evidence type | Confidence |
+|---|---|---|---|---|---|---|
+| R-106 | Reference ids are single-use | Creating a Payment Link with a `reference_id` that was already used fails with HTTP 400 and the description "payment link creation with reference ID already attempted". | `reference_id` | https://raw.githubusercontent.com/razorpay/markdown-docs/master/api/payments/payment-links/create-standard.md | OD | High |
+| R-107 | Find a link by reference | `GET /v1/payment_links` takes `reference_id` (and `payment_id`) as filters, so a link whose create response was lost can be found by the reference HyFib chose. The fetched pages did not show the list's response envelope, so HyFib reads either `payment_links` or `items` (unconfirmed which one Razorpay uses). | `GET /v1/payment_links?reference_id=` | https://raw.githubusercontent.com/razorpay/markdown-docs/master/api/payments/payment-links/fetch-all-standard.md ; https://github.com/razorpay/razorpay-node/blob/master/documents/paymentLink.md | OD, SDK | High |
+| R-108 | Webhook payload | `payment_link.paid` carries `payload.payment_link.entity` (`id`, `reference_id`, `status`, `amount`, `amount_paid`, `currency`, `short_url`, `order_id`) together with the order and payment entities. Events for a link: `payment_link.paid`, `.partially_paid`, `.cancelled`, `.expired`. | `payload.payment_link.entity` | https://raw.githubusercontent.com/razorpay/markdown-docs/master/webhooks/payment-links.md | OD | High |
+| R-109 | Cancelling | `POST /v1/payment_links/:id/cancel` cancels a link; a paid or partially paid link cannot be cancelled ("cannot cancel or expire an already paid/partially paid link"). | `/cancel` | https://raw.githubusercontent.com/razorpay/markdown-docs/master/api/payments/payment-links/cancel-standard.md | OD | High |
+
 ## Unconfirmed / conflicting
 
 1. **Debit latency.** For card recurring, Razorpay's own docs give three different timings:

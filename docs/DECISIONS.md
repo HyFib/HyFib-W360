@@ -574,3 +574,401 @@ anyone other than the contact the form was sent to is kept but not applied. Comp
 never consent, and completions do not start automations. Answers are shown only to members who can
 read contacts, logs carry codes and ids only, and contact erasure deletes the answers and ends the
 contact's tokens.
+
+## ADR-046 Commerce: catalogs read from Meta, orders from the webhook, Payment Links in the company's own Razorpay account (2026-09-27)
+
+Decision: the first commerce slice (P4-06a) connects WhatsApp's own commerce features to HyFib and
+takes payment through the company's own Razorpay account. Store connectors (Shopify, WooCommerce)
+are a separate slice (P4-06b): catalogs stay managed in Meta Commerce Manager.
+
+Catalogs are read, never written. The `commerce.sync` worker lists the catalogs connected to a
+WhatsApp account (`/{WABA}/product_catalogs`) and their products (`/{catalog}/products`, research
+M-172), at most 10 catalogs and 5,000 products each, and upserts them in batches of 200. A product
+Meta no longer lists is marked removed only after a complete read (never after a truncated one), a
+catalog no longer connected is marked disconnected, and both stay for the orders that name them.
+The read is one row per account (queued → running → idle or failed), requested by members with
+`commerce.manage` or by the daily re-read; the sweep re-signals reads waiting over five minutes and
+fails those older than 30 minutes. Which permission Meta requires for these edges is not confirmed
+from Meta's pages (M-173); Graph permission errors (#10, #200–#299) are reported as missing catalog
+access (`catalog_management`) rather than as a bad credential. The price text is shown as Meta
+returns it (its format is not documented, M-172) and is never used for money.
+
+Product messages (M-169) are replies: `inbox.reply` and `commerce.read`, in a conversation the
+member can see, while the customer service window is open. One message names products from one
+catalog connected to the conversation's WhatsApp account: a single product, a list (1–10 sections,
+at most 30 products, section titles when there are several) or the whole catalog with a thumbnail
+product. They go through the normal send pipeline (send intent, message row, `message.send`).
+
+Orders come from the webhook (`type` = `order`, M-170). The prices there are JSON numbers in major
+units; each is converted to minor units exactly through its shortest decimal text, and refused
+(null) when it has more decimals than its currency, is negative or uses an exponent. The order's
+subtotal is kept only when every item of the cart was read, with a readable price, in one currency;
+otherwise it is unknown and payment cannot be requested (a cart with an item HyFib could not read
+is never charged for the items it could). Items are matched to HyFib's copy of the catalog by retailer id for
+their names; unknown products are kept by retailer id. An order has an 8-character reference and is
+visible only to members who can see its conversation. Members move orders along: received →
+confirmed or cancelled, confirmed → fulfilled or cancelled, paid → fulfilled. "Waiting for payment"
+and "paid" are set only by Payment Links.
+
+Payment Links are created in the company's own Razorpay account; no money passes through HyFib and
+nothing is posted to HyFib's ledger. The company saves its key id, key secret and a webhook secret
+(`commerce.manage`); the secrets are keyring ciphertexts bound to the account row
+(`commerce-payments:<company>:<account>:<key|webhook>`), are never shown again, and live keys are
+accepted only in production. The worker checks the keys by listing links for a reference that
+cannot exist (R-107): an answer proves the keys, a 401 marks them failed. A check's result, and a
+rejection seen while creating a link, apply only to the version of the keys they used, so keys saved
+again meanwhile are never marked by an older answer.
+
+Requesting payment (`inbox.reply`) writes a link ahead in the member's transaction: the order's
+subtotal in rupees (at least ₹1; other currencies are refused), a single-use `reference_id`
+(`w360_` plus 20 random characters, R-106), 7 days to expire; HyFib's own cap on one link is ₹50
+crore. One link can be open per order. The
+`commerce.link` worker takes a two-minute lease on the row and creates the link once: after an
+attempt whose response was lost it first looks the link up by its reference, and if Razorpay
+answers that the reference was already used it adopts the link found (never a second create).
+Links ask for the whole amount (`accept_partial` false) and Razorpay's SMS, email and reminders are
+turned off, because HyFib sends the link in the chat, and only while the service window is open; if
+it cannot, the link is kept with the reason (`send_error`) for the member to copy it, or, when
+Razorpay returned no https address, to cancel it and ask again.
+
+A payment is recorded only from the link as HyFib fetches it from Razorpay with the company's keys:
+never from a browser, a chat or a webhook body. The link is fetched every 15 minutes on its first
+day, then every six hours until a day after it expires, and at once when the company's Razorpay
+account notifies `/api/webhooks/razorpay-links/<16 random characters>`. That route finds the
+company by the address, verifies the signature with that company's webhook secret, records the
+event id (a redelivery does nothing) and only signals a fetch; the body is not stored. The order
+becomes paid when Razorpay reports the link paid in full; an expired, cancelled or failed link
+returns the order to confirmed. Cancelling asks Razorpay to cancel the link; Razorpay refuses paid
+links (R-109), and then the fetched status is applied instead. A job that finds the row leased is
+retried, so a notification is never lost to a check already in flight. Links, orders and
+conversations are locked in the order conversation → order → link, the order used by replies and
+erasure.
+
+Erasure keeps an order and its amounts as a business record, clears the customer's note and asks
+Razorpay to cancel the contact's open links; the message that carried the order is redacted with the
+rest of the conversation.
+
+## ADR-047 Store connectors: read-only copies kept in step by signals, cursors and checks (2026-09-27)
+
+Decision: companies connect their own Shopify and WooCommerce stores (P4-06b, research
+`docs/research/store-connectors.md`). HyFib reads orders and products into a copy it keeps in step,
+shows orders next to the customer's conversations and never writes orders, products or customers
+to the store. Messages sent on store events (order confirmations, shipping updates) are the next
+slice (P4-06c).
+
+**Shopify** uses one HyFib app (non-embedded, authorization code grant, SH-002) configured by the
+operator (`SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET`, `SHOPIFY_API_VERSION`), with the scopes
+`read_orders,read_products` only. A member with `commerce.manage` starts a handshake: a single-use
+state (32 random bytes, stored as a hash, 15 minutes, bound to that member) and the store row in
+`authorizing`. The callback is checked before any company context exists: the HMAC with the app
+secret (current and previous), the timestamp (±90 s), the shop's shape and a handshake still waiting
+(`ops.commerce_store_by_connect`); the route then requires the same signed-in member, re-checked
+through `resolveTenantContext`. The code is exchanged by the worker for an expiring offline token
+(`expiring=1`, SH-006/SH-007). A shop can be connected to one company at a time (a unique index over
+the active states), because Shopify keeps one token per app and shop.
+
+**WooCommerce** uses REST API keys. The approval page (`/wc-auth/v1/authorize`, WC-002) asks for
+Read/Write keys (write is used only for HyFib's own webhooks, WC-004), or a member pastes keys.
+The key handover (WC-003) is unauthenticated: it is accepted only for a waiting handshake (the
+single-use id sent as `user_id`), only for `read_write` keys, and the keys are trusted only after
+they work against the address the member entered. Keys go in the Authorization header over https
+(WC-005), never in URLs; http:// addresses only where loopback egress is allowed (local and test).
+
+**Access** is sealed in the keyring, bound to the row (`commerce-store:<company>:<store>:credentials`)
+and versioned: every writer of the credentials bumps `credentials_version`, and a token refresh
+(five minutes before expiry) stores the new pair only if the version and state are unchanged, so a
+refresh never overwrites access saved meanwhile. All store traffic goes through the egress client
+(address checks, no redirects, 30 s, 4 MiB).
+
+**Webhooks only signal.** Shopify deliveries are verified with the app secret over the raw body
+(SH-024) and cut to `id`, `admin_graphql_api_id` and `updated_at` with `includeFields`; WooCommerce
+deliveries go to a per-store address (`/api/webhooks/woocommerce/<16 random characters>`) and are
+verified with that store's secret (WC-014); the unsigned creation ping (`webhook_id=N`, WC-012) is
+answered with 200 and changes nothing; anything else unsigned is refused with 401. A delivery id is
+recorded per store (a repeat does nothing; retained 30 days), deletions are marked, and everything
+else becomes a fetch row (store, kind, id) and a job: the worker reads the current state from the
+store's API. Nothing from a webhook body is stored. A fetch row is deleted only if no newer signal
+arrived during the read (each repeat moves its time forward, even within a millisecond).
+
+**Recovery.** Webhooks can be lost (Shopify drops subscriptions after failures, SH-025; WooCommerce
+disables a webhook after more than five failures, WC-018), so the worker reads what changed every
+hour, oldest first by `updated_at` (SH-016) or `modified_after` (WC-007). The cursor moves to the
+last item's whole second, so items at the boundary are read again rather than skipped, and a page
+token continues only among items sharing the cursor's second. Every six hours the worker checks
+HyFib's subscriptions and re-creates missing ones or re-enables disabled ones. The first read covers
+60 days of orders (SH-012) and the products (at most 20,000 per store; the store page says when a
+copy is incomplete).
+
+**One job at a time per store.** A job takes a five-minute lease on the store row; a busy store is
+skipped. A job reads at most five pages and 50 signalled items; when work remains (signals or a due
+read) it queues the next job in the transaction that releases the lease, so a signal arriving during
+a run is never lost to the singleton key of the running job. The minute sweep finds handshakes to
+expire, stores to finish connecting or removing and reads due (`ops.commerce_store_work_due`).
+Throttling (Shopify `THROTTLED`, HTTP 429) waits without an error; refused access fails the store
+with a reason the company can act on; other errors are shown on the store and retried in five
+minutes.
+
+**The copy.** An order or product is replaced only by a copy at least as recent
+(`remote_updated_at`). Amounts are Shopify `Decimal` strings or WooCommerce decimal strings
+converted exactly to minor units; a value with non-zero digits beyond the currency's exponent is
+unknown (never rounded); WooCommerce's float `price` is not used. Customer numbers are linked to
+contacts only in E.164; a number without a country code is read with the store's calling code only
+when the company set one (never guessed).
+
+**Privacy.** Order data needs `commerce.read` and `contacts.read`. When Shopify withholds protected
+customer data (SH-020), orders are kept without names, numbers and emails and the store says why.
+Shopify's compliance webhooks route by the shop named in the signed body (SH-027):
+`customers/redact` removes the customer's details from the named orders and orders with their
+number or email, for good (a redacted order keeps its details empty on every later read);
+`customers/data_request` is kept for the company to answer (managers see the contact details, which
+are cleared when answered); `shop/redact` deletes an uninstalled store and its copy.
+`app/uninstalled` must name the same shop in its body (the HMAC does not cover headers): the store
+stops, its access is dropped and the copy stays until `shop/redact` or removal. Contact erasure
+(`app.erase_contact`) redacts the store orders with the contact's number or email, and when the
+erasure keeps the number suppressed, new orders from it are kept without the customer's details.
+
+**Removal** by the company uninstalls HyFib from the shop (`appUninstall`, SH-028) or deletes
+HyFib's webhooks from the site (WooCommerce cannot revoke keys through its API, WC-020; the owner is
+told to revoke the key), then deletes the store and everything read from it. A store that cannot be
+reached is removed anyway after 30 minutes; the audit entry records what could not be done at the
+store.
+
+## ADR-048 Order messages: events from the store copy, one message per order and event, checked again at send time (2026-09-27)
+
+Decision: a connected store sends the approved WhatsApp template a manager chose when one of its
+orders is placed, paid for on delivery, shipped, delivered or cancelled (P4-06c, research
+`docs/research/store-connectors.md` §3 and `docs/research/meta-whatsapp.md` §16). Abandoned carts and
+store events as automation triggers are not built (P4-06d).
+
+**Events come from the copy, not from webhook bodies.** A read from the store (a signalled read, the
+hourly read or the delivery check below) upserts the order and compares its milestones before and
+after: new to the copy (placed, and cash on delivery when the payment method says so), shipped,
+delivered, cancelled. Shopify orders now carry `paymentGatewayNames` and up to ten `fulfillments`
+with `trackingInfo`, all readable with `read_orders` (SH-030, SH-031), so the app's scopes are
+unchanged. A shipment that is cancelled or failed does not count; shipped is the first real
+shipment; delivered needs a fully shipped order whose shipments are all delivered. WooCommerce
+orders carry `payment_method` (`cod` is the core cash on delivery gateway, WC-021) and
+`date_completed_gmt`; completion counts as shipped and there is no delivered event (WC-022).
+Cash on delivery on Shopify is recognised only by a gateway name containing "cash on delivery"
+(Shopify's own example is "Cash on Delivery (COD)").
+
+**Deliveries are found by reading again.** Whether a delivery changes a Shopify order or sends
+`orders/updated` is unconfirmed (SH-034), and the fulfillment topics need `read_fulfillments`
+(SH-033). While a store's delivered message is on, each store job reads again up to 100 orders
+shipped in the last 14 days, not delivered or cancelled and last read three or more hours ago.
+
+**Never about the past, never twice.** A rule applies from the second it is switched on (store
+timestamps are whole seconds); editing an enabled rule keeps that time, switching it off and on
+again resets it. An event is recorded only when it happened at or after that time: the first read of
+a store (60 days of orders) and orders already in the copy send nothing. Store messages are rows
+unique per order and event, written in the read's own transaction, so repeated webhooks, reads and
+jobs cannot send a second message. An event first seen more than 48 hours after it happened, a test
+order (unless the store allows them) and a plain confirmation of an order covered by the cash on
+delivery message are recorded as skipped with their reason. Cancelled orders get no shipped or
+delivered message.
+
+**When.** A message goes out at the event's time plus the rule's delay (0–1,440 minutes), never
+before it is seen, and inside the store's sending hours in the company's time zone
+(`sendingWindow`, the campaign scheduler's daylight-saving rules). A `commerce.store-message` job is
+queued for that time; the minute sweep (`ops.commerce_store_messages_due`, active companies only)
+signals any whose job was lost.
+
+**Checked again at send time.** Under the store message's row lock the worker checks, in order: the
+store is connected; a manager's opt-in confirmation stands; the rule is still on and was switched
+on before the event; the sending hours (a message outside them moves to their start); the order
+still exists, is not redacted, and (except for the cancellation message) is not cancelled; it has an
+E.164 number; the template is approved, utility or marketing, and sendable; the number is active
+and belongs to the template's account; the cash on delivery buttons are still quick replies; every
+variable has a value (fixed text or an order field, with an optional fallback); the number is not
+suppressed (checked before any contact is created); and the customer may receive the template
+(`checkTemplateEligibility`: erasure, opt-out, marketing opt-in). Any failed check skips the message
+with its reason. Otherwise it creates the contact from the order when needed (`source = store`),
+the conversation (a new one starts resolved, like a campaign's), the message (`sender_type =
+system`, labelled with the store and event) and a send intent without an actor; the send pipeline
+checks consent once more at dispatch and records Meta's statuses.
+
+**Opt-in.** Meta requires opt-in before business-initiated messages (M-175) and HyFib cannot see a
+store's checkout, so no rule can be switched on until a manager confirms that the store's customers
+agreed to WhatsApp messages from the business. The confirmation records who and when; withdrawing it
+switches every rule of the store off. A marketing template follows the marketing consent rules and
+needs `campaigns.send` to be chosen (cart reminders are marketing, M-176).
+
+**Cash on delivery answers.** The message's two chosen quick-reply buttons carry payloads
+`w360-cod:<store message id>:confirm|cancel` (M-177). A tap (a `button` message with the payload and
+`context.id`, M-178) is recorded as the store message's answer only from that message's own contact
+and conversation, only when the reply names that message (when it names one), and only if it is not
+older than the answer already kept. A tap is not a consent keyword, a campaign reply or an
+automation trigger; a confirmation stays quiet, a cancellation reopens the conversation so the team
+can cancel the order in the store. HyFib does not change orders in the store.
+
+**Privacy.** Tracking numbers and links are redacted with the customer's details (contact erasure,
+Shopify's `customers/redact`) and stay empty on later reads; a constraint ties them to
+`redacted_at`. Store messages hold ids, times, states and the answer; they are deleted with their
+order or store.
+
+## ADR-049 Cart reminders: Shopify checkouts read on a schedule, marketing templates only, consent from HyFib or the store (2026-09-27)
+
+Decision: a connected Shopify store can remind customers about a checkout they left, with up to two
+approved marketing templates a manager chose (P4-06d, research `docs/research/store-connectors.md`
+§4, SH-037 to SH-043, and `docs/research/meta-whatsapp.md` M-176). WooCommerce has no carts to read
+(WC-023), so the reminders are Shopify only. Store events as automation triggers need a template
+step outside the service window and data given to a run when it starts; they are a later slice.
+
+**Reading checkouts.** While a cart reminder is on, the store job reads, every 15 minutes, the
+checkouts updated since its cursor with `read_orders` (SH-037): `abandonedCheckouts` filtered by
+`updated_at`, paged through in full (no sort by update time exists, SH-038; a read that needs more
+than ten pages continues on the next run with Shopify's page cursor). The next cursor is when the
+read started, less two minutes for clock differences, so an update made during a read is read next
+time; checkouts read twice are kept once. Checkout webhooks are not used: their payloads were not
+read, and reminders wait at least 30 minutes. Switching a reminder on starts the cursor at that
+moment, so nothing earlier is read; "Read the store now" also reads the checkouts at once while a
+reminder is on. The copy keeps the number (the customer's default phone when the
+store allowed customer access, else the shipping or billing phone, both protected `phone` data,
+SH-040), the name, the total in minor units, up to ten items, the recovery address (https), when it
+was completed and the consent Shopify records for that number. Copies are deleted 30 days after
+their last update, and redacted for good with the customer (contact erasure, Shopify's
+`customers/redact`).
+
+**Reminders.** A checkout is left at its last update. When a read sees a checkout that is not
+completed, has a number and was updated at or after the rule was switched on, it records a pending
+reminder for each rule that is on (unique per checkout and reminder), due at the time it was left
+plus the rule's delay (first reminder 30 minutes to 24 hours; second 1 hour to 3 days, later than
+the first), inside the store's sending hours. A later update before a reminder goes out moves it
+(the customer came back); once sent, a reminder is never sent again. At send time every order
+message check runs (store, rule and its start, sending hours, number, template, number's account,
+variables, suppression, contact, consent) plus: the checkout still exists, is not redacted and not
+completed; no order with the same number was placed in the store since the checkout was created; the
+template is a marketing template; the second reminder goes only after the first was sent; nothing
+goes out more than three days after the checkout was left; and the company's marketing frequency cap
+(counted like campaigns, under the campaign runner's company lock so the two never race). The cap now
+applies to every store message with a marketing template.
+
+**Consent.** A cart reminder is marketing (M-176): it needs an approved marketing template, a member
+with `campaigns.send` to choose it, and the customer's marketing opt-in unless the company turned the
+opt-in requirement off. Opt-in can come from HyFib's own records or, when a manager allows it, from
+the store: Shopify 2026-07 records WhatsApp marketing consent per phone number (SH-041), readable
+with `read_customers`. HyFib asks for that scope only when a manager allows customer access for the
+store (least privilege; SH-042: the app authorizes again with the extra scope, and the store keeps
+syncing with its old token until the worker exchanges the new code). Shopify keeps one current token
+per app and store (SH-007), so the exchanged token always replaces the old one: without
+`read_customers` the store keeps working without customer access; without the connector's own scopes
+it can no longer sync and fails with a request to connect it again; a code Shopify refuses leaves
+the old token in place. With
+"use the WhatsApp consent the store records" on (`commerce.manage` and `contacts.write`, audited),
+each checkout read records Shopify's `SUBSCRIBED` or `UNSUBSCRIBED` state with its update time as a
+consent event (source `store`, evidence: store, state, opt-in level, where it was collected) for the
+contact with that number, created from the checkout when needed (never for a number on the
+suppression list); the newest consent event wins, as
+for every source, and the same Shopify state is never recorded twice. States without an update time,
+`PENDING`, `NEVER_SUBSCRIBED` and `REDACTED` change nothing. HyFib never writes consent back to
+Shopify.
+
+**Recovered checkouts.** A checkout counts as recovered when a read sees it completed (SH-043) after
+one of its reminders was sent; the recovered value is its total. A reminder counts as sent once it
+was handed to WhatsApp, unless WhatsApp reported it failed, it was cancelled or its outcome is
+unknown. The store's Order messages page shows, for the last 30 days, reminders sent, checkouts
+recovered and their value per currency, with these definitions.
+
+## ADR-050 Store events in automations: order rules start a published automation, template steps send outside the service window, runs read their order (2026-09-28)
+
+Decision: an order message rule (ADR-048) either sends its template or starts an automation whose
+trigger is "Started by a store's order messages" (P4-06e). Automations gain two template steps, and
+a run started this way reads the order it is about while it runs.
+
+**Where the link lives.** The rule for a store and event says what happens: send a template (as
+before) or start a chosen automation. The automation's trigger (`store_event`) never matches a
+customer message, so it starts only from rules. Keeping the choice on the rule keeps every guarantee
+of ADR-048 unchanged: at most one store message per order and event, nothing about events before the
+rule was switched on, test orders and late events recorded without sending, the delay and the
+store's sending hours, and a rule is either a template or an automation, never both. Order placed,
+shipped, delivered and cancelled can start automations, for Shopify and WooCommerce stores alike.
+The cash on delivery confirmation keeps its template, because its answer is recorded on the order,
+and the cart reminders keep theirs, because their send checks depend on the first reminder having
+been sent; both are recorded as not built for automations.
+
+**Starting a run.** At the store message's send time, under its row lock, the order message checks
+run first (store connected, opt-in confirmed, rule switched on since before the event, sending hours,
+order neither deleted, redacted nor cancelled, a number). Then: the automation is active and its
+published version starts from order messages; the rule's number is active and allowed by the
+automation (an automation limited to one number starts only from rules using it); the number is not
+on the suppression list; the contact may receive messages at all (not erased, not opted out); the
+conversation is not assigned to a member; no automation is active in it; and fewer than
+`maxRunsPerConversationPerHour` runs started there in the last hour. A failed check skips the store
+message with its reason. Otherwise the contact and the conversation are created as for a template
+(a new conversation starts resolved), the run is inserted with the order and the event, and the
+store message becomes `started` with the run's id, in one transaction: a repeated job or the sweep
+finds the store message no longer pending, so a store message starts at most one run. Choosing an
+automation on a rule needs `commerce.manage` and `automations.read`, and `campaigns.send` when its
+published version uses a marketing template; its templates must belong to the rule's number's
+WhatsApp account.
+
+**Template steps.** "Send a template" sends and continues; "Ask with a template" sends and waits:
+a branch for each of the template's quick-reply buttons, one for any other reply and one for no
+reply within the timeout (at most 24 hours). Variables are texts with placeholders, filled in when
+the step runs. Only approved utility or marketing templates HyFib can send are offered (authentication
+templates and templates with content HyFib cannot send are not). Each quick-reply button of an asking
+step carries the bot button id as its payload (research M-177, M-178): run, step, visit and the
+button's position among the template's buttons (now 0 to 9, templates have up to ten buttons; the id
+has at most 84 characters and no payload length limit was found). A tap matches only the step and
+visit that sent it, and a typed button title counts as the tap, like reply buttons; a template tap
+without a bot id stays a text reply, as before. When the step runs, the runner checks the template
+again (approved, still utility or marketing, the same number of variables and the same quick-reply
+buttons as the step expects, else `template_changed`), the number (active, of the template's
+account), a value for every variable (a variable left empty ends the run with `missing_variable`,
+nothing is sent with a blank), the contact's consent for the template's category (suppression,
+erasure, opt-out, marketing opt-in) and, for marketing templates, the company's frequency cap, then
+creates the chat message as a bot message and hands it to the send pipeline, which checks template and
+consent again at dispatch (P3). No 24-hour window applies to templates. Any failed check ends the run
+as a failed send (`send_blocked` with the reason). The frequency cap is counted under the campaign
+runner's company lock (ADR-049); the campaign runner holds that lock while it writes conversations,
+so the automation runner, which already holds the conversation's lock, only tries the lock and, when
+it is busy, tries the step again two seconds later instead of waiting (a wait would be a deadlock).
+Publishing or testing an automation that uses a marketing template needs `campaigns.send`, as
+choosing one for a store rule or a template send does.
+
+**The service window in store-event automations.** Until the customer replies WhatsApp allows only
+templates. In an automation started by order messages, `checkGraph` refuses a message, a question
+with buttons or a typed question that some path from the first step reaches before the customer has
+replied; a reply is an answer or an other reply at a question or an asking template step (no reply,
+waits and web requests are not). A hand-off reached before a reply only warns: it cannot open the
+conversation (people see it once the customer writes).
+
+**Runs in closed conversations.** A conversation created or found by a store rule stays resolved, like
+a campaign's, so the inbox holds no work until the customer writes. A store-event run may therefore
+continue while its conversation is still resolved as it was when the run started (`resolved_at` at or
+before the run's start); the customer's reply reopens it (ingestion, as before) and reaches the run.
+A conversation resolved after the run started still stops the run, and a member resolving it ends the
+run as before. A run's end routes only open conversations (routing leaves resolved ones alone), so a
+run that ends before the customer replied puts nothing in front of people.
+
+**Order data.** The run keeps the order's id, not a copy, and each step reads the order as it is now:
+`{{order.number}}`, `{{order.customer_name}}`, `{{order.total}}`, `{{order.items}}`,
+`{{order.status_url}}`, `{{order.tracking_number}}`, `{{order.carrier}}`, `{{order.tracking_url}}` and
+`{{order.store}}`, in messages, questions, template variables, contact updates and web requests. The
+reference is cleared when the order is deleted (with its store, for example), and a redacted order
+has no values: its placeholders are empty (a template variable then fails as above). No customer data
+is copied into the run. Order placeholders are refused in automations that do not start from order
+messages. Conditions on order fields and changing the order from a run are not built.
+
+**Test runs.** A test run of a store-event automation uses an order the member chooses
+(`commerce.read` and `contacts.read`, as seeing store orders needs, because its steps send the
+customer's details) on a conversation they can see, inside its service window, as other test runs
+do.
+
+**Template steps in other automations.** Template steps are available in every automation, so an
+automation a keyword starts can wait (up to 24 hours per wait step, within the run's 7 days) and then
+send a template, which the service window does not limit (drip follow-ups, W-084). The warning for a
+wait or a question timeout over 23 hours now follows the paths after it: it appears only when a
+message that is not a template can follow before the customer replies.
+
+**Records.** The store's Order messages report and the order page show automations started, with a
+link to the run for members with `automations.read`; the run page shows the order for members with
+`commerce.read`; the automation page lists the store rules that use it.
+
+**Migration 0022.** `automation_runs` gains `store_order_id` (composite foreign key, set null when the
+order is deleted) and `store_event`, and the `store_event` trigger type; order message rules gain
+`action` and `automation_id` (composite foreign key, set null when the automation is deleted, which
+only a draft never published can be, and only a switched-off rule can name one; a rule that sends
+its template keeps no automation; only the four order events may start automations); store
+messages gain the `started` state and `automation_run_id` (composite foreign
+key, set null when the run is deleted by retention).

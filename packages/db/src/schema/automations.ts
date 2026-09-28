@@ -91,6 +91,8 @@ export const AUTOMATION_TRIGGER_TYPES = [
   'conversation_started',
   'any_message',
   'test',
+  /** Started by a store's order message rule (migration 0022). */
+  'store_event',
 ] as const;
 export type AutomationRunTrigger = (typeof AUTOMATION_TRIGGER_TYPES)[number];
 
@@ -107,6 +109,14 @@ export const automationRuns = appSchema.table('automation_runs', {
     .default('live'),
   triggerType: text('trigger_type', { enum: AUTOMATION_TRIGGER_TYPES }).notNull(),
   triggerMessageId: uuid('trigger_message_id'),
+  /**
+   * The store order a run started by order messages (or a test run with a chosen order) reads
+   * while it runs, and the event that started it (migration 0022). Cleared when the order is deleted.
+   */
+  storeOrderId: uuid('store_order_id'),
+  storeEvent: text('store_event', {
+    enum: ['order_placed', 'order_shipped', 'order_delivered', 'order_cancelled'],
+  }),
   startedByMembershipId: uuid('started_by_membership_id'),
   startedByUserId: text('started_by_user_id'),
   status: text('status', { enum: AUTOMATION_RUN_STATUSES }).notNull().default('running'),

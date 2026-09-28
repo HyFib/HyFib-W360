@@ -8,6 +8,7 @@ import {
   metaConfigFrom,
   parseTrustedProxies,
   razorpayConfigFrom,
+  shopifyConfigFrom,
   systemClock,
   type Clock,
   type Logger,
@@ -23,6 +24,9 @@ import {
   PgBossJobQueue,
   RazorpayClient,
   createAutomationService,
+  createCommerceService,
+  createStoreService,
+  createStoreMessagesService,
   createCrmService,
   createBillingService,
   createBusinessHoursService,
@@ -44,6 +48,7 @@ import {
   createTenancyService,
   createWebRequestService,
   type AutomationService,
+  type CommerceService,
   type CrmService,
   type BillingService,
   type BusinessHoursService,
@@ -67,6 +72,10 @@ import {
   type WebRequestService,
   type FlowsService,
   type FlowEndpointDeps,
+  type PaymentWebhookDeps,
+  type StoreService,
+  type StoreMessagesService,
+  type StoreWebhookDeps,
 } from '@w360/domain';
 import { DEFAULT_EGRESS_POLICY, createEgressClient } from '@w360/core/egress';
 import { createAuth, type Auth } from './auth';
@@ -113,6 +122,16 @@ export interface Runtime {
   /** The Flows data endpoint (null until the Meta app is configured: requests cannot be verified). */
   flowEndpoint: FlowEndpointDeps | null;
   crm: CrmService;
+  /** Catalogs, product messages, orders and Payment Links in the company's own Razorpay account. */
+  commerce: CommerceService;
+  /** Webhooks from companies' own Razorpay accounts (only signal a fetch of the link). */
+  paymentWebhook: PaymentWebhookDeps;
+  /** Companies' own Shopify and WooCommerce stores: connections, orders and products read. */
+  stores: StoreService;
+  /** Order messages: a store's message settings, rules per event and what was sent. */
+  storeMessages: StoreMessagesService;
+  /** Store webhooks (verified, deduplicated; they only signal what the worker reads). */
+  storeWebhook: StoreWebhookDeps;
   /** Null until the Meta app is configured (WhatsApp connection is then reported unavailable). */
   meta: MetaConfig | null;
   onboarding: OnboardingService | null;
@@ -222,6 +241,42 @@ async function init(): Promise<Runtime> {
     allowInsecureHttp: config.W360_EGRESS_ALLOW_LOOPBACK ?? false,
   });
   const crm = createCrmService({ db, clock: systemClock, jobs, signer });
+  const commerce = createCommerceService({
+    db,
+    clock: systemClock,
+    jobs,
+    signer,
+    keyring,
+    appBaseUrl: config.APP_BASE_URL,
+    // Live keys move real money: only in production (like HyFib's own Razorpay keys).
+    allowLiveKeys: config.APP_ENV === 'production',
+  });
+  const paymentWebhook: PaymentWebhookDeps = { db, keyring, clock: systemClock, jobs, signer };
+  const shopify = shopifyConfigFrom(config);
+  const stores = createStoreService({
+    db,
+    clock: systemClock,
+    jobs,
+    signer,
+    keyring,
+    appBaseUrl: config.APP_BASE_URL,
+    shopify,
+    // http:// store addresses only where configuration allows loopback egress (local and test).
+    allowHttpStores: config.W360_EGRESS_ALLOW_LOOPBACK ?? false,
+  });
+  const storeMessages = createStoreMessagesService({
+    db,
+    clock: systemClock,
+    shopifyApiVersion: shopify?.apiVersion ?? null,
+  });
+  const storeWebhook: StoreWebhookDeps = {
+    db,
+    keyring,
+    clock: systemClock,
+    jobs,
+    signer,
+    shopifySecrets: shopify?.secrets ?? null,
+  };
   const meta = metaConfigFrom(config);
   // The Flows data endpoint forwards to companies' endpoints while WhatsApp waits, so it has its
   // own egress client with a shorter time limit (the only addresses chosen by companies that the
@@ -299,6 +354,11 @@ async function init(): Promise<Runtime> {
     flows,
     flowEndpoint,
     crm,
+    commerce,
+    paymentWebhook,
+    stores,
+    storeMessages,
+    storeWebhook,
     meta,
     onboarding,
     razorpay,

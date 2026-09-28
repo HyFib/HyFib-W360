@@ -72,6 +72,17 @@ export interface RazorpayDispute {
   status: 'open' | 'under_review' | 'won' | 'lost' | 'closed' | string;
 }
 
+/** A Payment Link as Razorpay reports it (research R-016, R-108). */
+export interface RazorpayPaymentLink {
+  id: string;
+  referenceId: string | null;
+  status: 'created' | 'partially_paid' | 'expired' | 'cancelled' | 'paid' | string;
+  amount: number;
+  amountPaid: number;
+  currency: string;
+  shortUrl: string | null;
+}
+
 const PRE_SEND_ERROR_CODES = new Set([
   'ECONNREFUSED',
   'ENOTFOUND',
@@ -127,6 +138,22 @@ function mapOrder(json: Record<string, unknown>): RazorpayOrder | null {
     currency: str(json.currency) ?? '',
     receipt: str(json.receipt),
     status: str(json.status) ?? 'unknown',
+  };
+}
+
+function mapPaymentLink(json: Record<string, unknown>): RazorpayPaymentLink | null {
+  const id = str(json.id);
+  const amount = num(json.amount);
+  if (!id || !/^plink_[A-Za-z0-9]{6,32}$/.test(id) || amount === null) return null;
+  const shortUrl = str(json.short_url);
+  return {
+    id,
+    referenceId: str(json.reference_id),
+    status: str(json.status) ?? 'unknown',
+    amount,
+    amountPaid: num(json.amount_paid) ?? 0,
+    currency: str(json.currency) ?? '',
+    shortUrl: shortUrl && /^https:\/\//.test(shortUrl) && shortUrl.length <= 300 ? shortUrl : null,
   };
 }
 
@@ -286,6 +313,79 @@ export class RazorpayClient {
             .map(mapPayment)
             .filter((p): p is RazorpayPayment => p !== null)
         : null,
+    );
+  }
+
+  /**
+   * POST /v1/payment_links (R-016). `referenceId` is single-use at Razorpay (R-106), so a request
+   * whose response was lost is found again with findPaymentLinksByReference instead of repeated.
+   * Razorpay sends no SMS or email for the link (HyFib sends it in the chat).
+   */
+  createPaymentLink(input: {
+    amount: number;
+    currency: 'INR';
+    referenceId: string;
+    description: string;
+    expireBy: number;
+  }) {
+    return this.request(
+      'POST',
+      '/v1/payment_links',
+      {
+        body: {
+          amount: input.amount,
+          currency: input.currency,
+          accept_partial: false,
+          reference_id: input.referenceId,
+          description: input.description,
+          expire_by: input.expireBy,
+          notify: { sms: false, email: false },
+          reminder_enable: false,
+        },
+      },
+      mapPaymentLink,
+    );
+  }
+
+  fetchPaymentLink(linkId: string) {
+    return this.request(
+      'GET',
+      `/v1/payment_links/${encodeURIComponent(linkId)}`,
+      {},
+      mapPaymentLink,
+    );
+  }
+
+  /**
+   * GET /v1/payment_links?reference_id=… (R-107). The list's response envelope was not in the
+   * documentation we could fetch, so both `payment_links` and `items` are read.
+   */
+  findPaymentLinksByReference(referenceId: string) {
+    return this.request(
+      'GET',
+      '/v1/payment_links',
+      { query: { reference_id: referenceId } },
+      (json) => {
+        const list = Array.isArray(json.payment_links)
+          ? json.payment_links
+          : Array.isArray(json.items)
+            ? json.items
+            : null;
+        if (!list) return null;
+        return (list as Record<string, unknown>[])
+          .map(mapPaymentLink)
+          .filter((l): l is RazorpayPaymentLink => l !== null && l.referenceId === referenceId);
+      },
+    );
+  }
+
+  /** POST /v1/payment_links/:id/cancel (R-109: refused for paid or partly paid links). */
+  cancelPaymentLink(linkId: string) {
+    return this.request(
+      'POST',
+      `/v1/payment_links/${encodeURIComponent(linkId)}/cancel`,
+      {},
+      mapPaymentLink,
     );
   }
 

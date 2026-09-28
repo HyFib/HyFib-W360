@@ -36,6 +36,8 @@ export default async function AutomationPage({
   const { runs } = await automations.listRuns(ctx, { automationId: detail.id });
   const testConversations =
     canWrite && can(ctx, 'inbox.reply') ? await automations.testConversationOptions(ctx) : [];
+  const storeEvent = detail.draft.trigger?.type === 'store_event';
+  const testOrders = storeEvent && canWrite ? await automations.testOrderOptions(ctx) : null;
   const errors = detail.issues.filter((i) => i.level === 'error').length;
   const status = AUTOMATION_STATUS[detail.status] ?? {
     label: detail.status,
@@ -69,6 +71,7 @@ export default async function AutomationPage({
             channelAccountId: detail.draft.channelAccountId,
           }}
           channels={detail.options.channels}
+          templates={detail.options.templates}
           teams={detail.options.teams}
           fields={detail.options.fields}
           web={{
@@ -126,6 +129,7 @@ export default async function AutomationPage({
                   automationId={detail.id}
                   version={detail.version}
                   conversations={testConversations}
+                  orders={testOrders}
                   disabledReason={
                     !can(ctx, 'inbox.reply')
                       ? 'Testing needs permission to reply in the inbox.'
@@ -136,6 +140,42 @@ export default async function AutomationPage({
                           : null
                   }
                 />
+              </CardContent>
+            </Card>
+          ) : null}
+          {detail.usedBy && (storeEvent || detail.usedBy.length > 0) ? (
+            <Card>
+              <CardHeader>
+                <CardTitle>Order messages that start it</CardTitle>
+                <CardDescription>
+                  A store’s rule for an order event can start this automation (Stores → a store →
+                  Order messages).
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                {detail.usedBy.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">No store rule starts it yet.</p>
+                ) : (
+                  <ul className="grid gap-2 text-sm">
+                    {detail.usedBy.map((u) => (
+                      <li
+                        key={`${u.storeId}-${u.event}`}
+                        className="flex flex-wrap items-center gap-2"
+                      >
+                        <Link
+                          href={`/c/${ctx.tenant.slug}/commerce/stores/${u.storeId}/messages`}
+                          className="text-primary underline-offset-4 hover:underline"
+                        >
+                          {u.storeName}
+                        </Link>
+                        <span>{u.label}</span>
+                        <Badge tone={u.enabled ? 'success' : 'neutral'}>
+                          {u.enabled ? 'On' : 'Off'}
+                        </Badge>
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </CardContent>
             </Card>
           ) : null}

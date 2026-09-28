@@ -65,6 +65,20 @@ export const STEP_DETAILS: Record<string, string> = {
   conversation_started: 'a new conversation',
   any_message: 'a customer message',
   test: 'a test started by a member',
+  'store_event:order_placed': 'a new order in a store',
+  'store_event:order_shipped': 'an order shipped by a store',
+  'store_event:order_delivered': 'an order delivered',
+  'store_event:order_cancelled': 'an order cancelled in a store',
+  // Template steps (checked again when the step runs).
+  template_unavailable: 'the template is no longer approved, or HyFib cannot send it',
+  template_changed:
+    'the template’s variables or quick-reply buttons changed after the step was set up',
+  channel_unavailable: 'the WhatsApp number is not active or does not match the template',
+  missing_variable: 'a template variable was empty after filling in placeholders',
+  suppressed: 'the number is on the company’s suppression list',
+  opted_out: 'the contact opted out of these messages',
+  no_marketing_opt_in: 'the template is a marketing template and the contact has not opted in',
+  frequency_capped: 'the contact already received as many marketing messages as the company allows',
   window_closed: 'the 24-hour customer service window had closed',
   channel_inactive: 'the WhatsApp number is not active',
   no_phone: 'the contact has no WhatsApp number on this line',
@@ -115,11 +129,20 @@ export const HTTP_CALL_STATE: Record<string, { label: string; tone: Tone }> = {
   canceled: { label: 'Not made', tone: 'neutral' },
 };
 
+/** The order event that started a run (runs started by order messages). */
+export const STORE_EVENT_LABELS: Record<string, string> = {
+  order_placed: 'Started by a new order',
+  order_shipped: 'Started when an order shipped',
+  order_delivered: 'Started when an order was delivered',
+  order_cancelled: 'Started when an order was cancelled',
+};
+
 export const TRIGGER_TYPE_LABELS: Record<string, string> = {
   keyword: 'Keyword',
   conversation_started: 'New conversation',
   any_message: 'Any message',
   test: 'Test',
+  store_event: 'Order messages',
 };
 
 /** Text for a step-log or end detail code, including send failures (`failed:<code>`). */

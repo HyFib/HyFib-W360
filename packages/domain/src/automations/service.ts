@@ -10,6 +10,9 @@ import {
   automationVersions,
   automations,
   channelAccounts,
+  commerceStoreMessageRules,
+  commerceStoreOrders,
+  commerceStores,
   contactFields,
   conversations,
   desc,
@@ -18,7 +21,9 @@ import {
   httpAllowedDomains,
   httpSecrets,
   inArray,
+  isNull,
   memberships,
+  messageTemplates,
   ne,
   sql,
   teams,
@@ -34,6 +39,8 @@ import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
 import { emitTenantEvent } from '../messaging/events';
 import { canSeeConversation, SERVICE_WINDOW_MS } from '../messaging/outbound';
+import { STORE_MESSAGE_EVENT_INFO } from '../stores/messages-model';
+import { renderPlaceholders, sendSpecFor } from '../templates/definition';
 import { parseInput } from '../validation';
 import {
   canonicalJson,
@@ -47,6 +54,7 @@ import {
   type AutomationTrigger,
   type GraphIssue,
   type GraphReferences,
+  type TemplateReference,
 } from './graph';
 import { appendRunStep, endRun, endRunForHuman, lockActiveRun, signalAutomationRun } from './runs';
 
@@ -96,7 +104,11 @@ const publishSchema = idSchema.extend({
     .transform((v) => (v ? v : null)),
 });
 const statusSchema = idSchema.extend({ status: z.enum(['active', 'paused']) });
-const testRunSchema = idSchema.extend({ conversationId: z.uuid() });
+const testRunSchema = idSchema.extend({
+  conversationId: z.uuid(),
+  /** The order a test of an automation started by order messages reads (ADR-050). */
+  storeOrderId: z.uuid().nullable().default(null),
+});
 const listRunsSchema = z.object({
   automationId: z.uuid().optional(),
   status: z
@@ -143,8 +155,13 @@ export interface AutomationDetail {
     createdByName: string | null;
     active: boolean;
   }[];
+  /** Store rules that start this automation (members with `commerce.read`; null otherwise). */
+  usedBy:
+    { storeId: string; storeName: string; event: string; label: string; enabled: boolean }[] | null;
   options: {
-    channels: { id: string; name: string; active: boolean }[];
+    channels: { id: string; name: string; active: boolean; whatsappAccountId: string }[];
+    /** The company's templates, for template steps (HyFib sends approved utility or marketing ones). */
+    templates: AutomationTemplateOption[];
     teams: { id: string; name: string }[];
     fields: { key: string; label: string; type: string }[];
     /** Domains HTTP steps may call, and the secrets they may use (never their values). */
@@ -152,6 +169,13 @@ export interface AutomationDetail {
     secrets: { name: string; domain: string }[];
     allowInsecureHttp: boolean;
   };
+}
+
+export interface AutomationTemplateOption extends TemplateReference {
+  id: string;
+  language: string;
+  /** The template's texts with their {{n}} markers (the simulator fills them in). */
+  preview: { header: string | null; body: string; footer: string | null } | null;
 }
 
 export interface RunSummary {
@@ -180,6 +204,10 @@ export interface RunDetail extends RunSummary {
   endDetail: string | null;
   endedByName: string | null;
   startedByName: string | null;
+  /** The order event that started the run (runs started by order messages). */
+  storeEvent: string | null;
+  /** The order the run reads (members with `commerce.read`; null when none or gone). */
+  order: { id: string; name: string; storeName: string } | null;
   graph: AutomationGraph | null;
   /** Answers the run captured; only for members who can see the conversation. */
   variables: Record<string, string> | null;
@@ -247,6 +275,47 @@ function decodeCursor(cursor: string): { at: Date; id: string } {
 }
 
 const RUN_PAGE = 50;
+
+type TemplateRow = Pick<
+  typeof messageTemplates.$inferSelect,
+  'id' | 'name' | 'language' | 'category' | 'status' | 'whatsappAccountId' | 'components'
+>;
+
+/** What the graph checks and the builder need to know about a template (its latest synced copy). */
+function templateOption(t: TemplateRow): AutomationTemplateOption {
+  const spec = sendSpecFor(t.category, t.components);
+  const preview = spec.supported ? renderPlaceholders(spec.definition) : null;
+  return {
+    id: t.id,
+    name: t.name,
+    language: t.language,
+    category: t.category,
+    status: t.status,
+    whatsappAccountId: t.whatsappAccountId,
+    unsupported: spec.supported ? null : spec.reason,
+    headerParams: spec.supported ? spec.headerParams : 0,
+    bodyParams: spec.supported ? spec.bodyParams : 0,
+    quickReplies: spec.supported
+      ? spec.definition.buttons.flatMap((b, index) =>
+          b.type === 'QUICK_REPLY' ? [{ index, title: b.text }] : [],
+        )
+      : [],
+    preview: preview
+      ? { header: preview.header, body: preview.body, footer: preview.footer }
+      : null,
+  };
+}
+
+/** Template ids a graph's template steps use. */
+function templatesOf(graph: AutomationGraph): string[] {
+  return [
+    ...new Set(
+      graph.nodes.flatMap((n) =>
+        n.type === 'send_template' || n.type === 'ask_template' ? [n.templateId] : [],
+      ),
+    ),
+  ];
+}
 
 /** The active run of a conversation, for the inbox. */
 export async function automationStateForConversation(
@@ -336,23 +405,87 @@ export function createAutomationService(deps: AutomationServiceDeps) {
       .from(httpSecrets)
       .where(eq(httpSecrets.tenantId, tenantId))
       .orderBy(asc(httpSecrets.name));
+    const templateRows = await tx
+      .select({
+        id: messageTemplates.id,
+        name: messageTemplates.name,
+        language: messageTemplates.language,
+        category: messageTemplates.category,
+        status: messageTemplates.status,
+        whatsappAccountId: messageTemplates.whatsappAccountId,
+        components: messageTemplates.components,
+      })
+      .from(messageTemplates)
+      .where(eq(messageTemplates.tenantId, tenantId))
+      .orderBy(asc(messageTemplates.name), asc(messageTemplates.language));
     return {
       teamRows,
       fieldRows,
       domains: domainRows.map((d) => d.domain),
       secrets: secretRows,
+      templates: templateRows.map(templateOption),
     };
   }
 
-  /** What a graph may refer to in this company (teams, fields, HTTP domains and secrets). */
-  function graphRefs(refs: Awaited<ReturnType<typeof references>>): GraphReferences {
+  /**
+   * What a graph may refer to in this company (teams, fields, HTTP domains and secrets, templates),
+   * and what its automation allows: order fields and the reply rule when it starts from order
+   * messages, templates of its number's WhatsApp account when it is limited to one.
+   */
+  function graphRefs(
+    refs: Awaited<ReturnType<typeof references>>,
+    context: { storeEvent: boolean; channelWhatsappAccountId: string | null },
+  ): GraphReferences {
     return {
       teamIds: new Set(refs.teamRows.map((t) => t.id)),
       fieldKeys: new Set(refs.fieldRows.map((f) => f.key)),
       allowedDomains: refs.domains,
       secrets: new Map(refs.secrets.map((r) => [r.name, r.domain])),
       allowInsecureHttp: deps.allowInsecureHttp ?? false,
+      templates: new Map(refs.templates.map((t) => [t.id, t])),
+      storeEvent: context.storeEvent,
+      channelWhatsappAccountId: context.channelWhatsappAccountId,
     };
+  }
+
+  /** The WhatsApp account of an automation's number (null: any number, or it is gone). */
+  async function channelAccountOf(tx: Tx, tenantId: string, channelAccountId: string | null) {
+    if (!channelAccountId) return null;
+    const [channel] = await tx
+      .select({ whatsappAccountId: channelAccounts.whatsappAccountId })
+      .from(channelAccounts)
+      .where(and(eq(channelAccounts.tenantId, tenantId), eq(channelAccounts.id, channelAccountId)));
+    return channel ?? null;
+  }
+
+  /**
+   * Publishing or testing a graph that sends marketing templates needs `campaigns.send`, as a
+   * store rule or a template send does (ADR-050).
+   */
+  async function assertMayUseTemplates(
+    tx: Tx,
+    ctx: TenantContext,
+    graph: AutomationGraph,
+    action: 'publish' | 'test',
+  ) {
+    const ids = templatesOf(graph);
+    if (ids.length === 0 || can(ctx, 'campaigns.send')) return;
+    const [marketing] = await tx
+      .select({ id: messageTemplates.id })
+      .from(messageTemplates)
+      .where(
+        and(
+          eq(messageTemplates.tenantId, ctx.tenant.id),
+          inArray(messageTemplates.id, ids),
+          eq(messageTemplates.category, 'MARKETING'),
+        ),
+      )
+      .limit(1);
+    if (marketing) {
+      throw forbidden(
+        `${action === 'publish' ? 'Publishing' : 'Testing'} an automation that sends marketing templates needs the campaign sending permission.`,
+      );
+    }
   }
 
   /** Parses and checks a draft; throws when it cannot be run. */
@@ -366,27 +499,23 @@ export function createAutomationService(deps: AutomationServiceDeps) {
         graph.issues[0]?.message ?? 'The steps are not valid.',
       );
     }
-    const errors = checkGraph(graph.graph, graphRefs(await references(tx, row.tenantId))).filter(
-      (i) => i.level === 'error',
-    );
+    const channel = await channelAccountOf(tx, row.tenantId, row.draftChannelAccountId);
+    if (row.draftChannelAccountId && !channel) {
+      throw new AppError('precondition_failed', 'Choose a WhatsApp number again.');
+    }
+    const errors = checkGraph(
+      graph.graph,
+      graphRefs(await references(tx, row.tenantId), {
+        storeEvent: trigger.trigger.type === 'store_event',
+        channelWhatsappAccountId: channel?.whatsappAccountId ?? null,
+      }),
+    ).filter((i) => i.level === 'error');
     if (errors.length > 0) {
       throw new AppError(
         'precondition_failed',
         `Fix the automation first: ${errors[0]?.message ?? 'it has errors.'}`,
         { details: { errors: errors.length } },
       );
-    }
-    if (row.draftChannelAccountId) {
-      const [channel] = await tx
-        .select({ id: channelAccounts.id })
-        .from(channelAccounts)
-        .where(
-          and(
-            eq(channelAccounts.tenantId, row.tenantId),
-            eq(channelAccounts.id, row.draftChannelAccountId),
-          ),
-        );
-      if (!channel) throw new AppError('precondition_failed', 'Choose a WhatsApp number again.');
     }
     return { trigger: trigger.trigger, graph: graph.graph };
   }
@@ -575,6 +704,7 @@ export function createAutomationService(deps: AutomationServiceDeps) {
               id: channelAccounts.id,
               name: sql<string>`coalesce(${channelAccounts.verifiedName}, ${channelAccounts.displayPhoneNumber}, ${channelAccounts.phoneNumberId})`,
               status: channelAccounts.status,
+              whatsappAccountId: channelAccounts.whatsappAccountId,
             })
             .from(channelAccounts)
             .where(eq(channelAccounts.tenantId, ctx.tenant.id))
@@ -586,7 +716,17 @@ export function createAutomationService(deps: AutomationServiceDeps) {
           const issues: GraphIssue[] = [];
           if (!trigger.ok) issues.push({ level: 'error', nodeId: null, message: trigger.message });
           if (graph.ok) {
-            issues.push(...checkGraph(graph.graph, graphRefs(refs)));
+            issues.push(
+              ...checkGraph(
+                graph.graph,
+                graphRefs(refs, {
+                  storeEvent: trigger.ok && trigger.trigger.type === 'store_event',
+                  channelWhatsappAccountId:
+                    channels.find((c) => c.id === a.draftChannelAccountId)?.whatsappAccountId ??
+                    null,
+                }),
+              ),
+            );
           } else {
             issues.push(...graph.issues.map((i) => ({ level: 'error' as const, ...i })));
           }
@@ -596,6 +736,33 @@ export function createAutomationService(deps: AutomationServiceDeps) {
             graph: a.draftGraph,
             channelAccountId: a.draftChannelAccountId,
           });
+          const usedBy = can(ctx, 'commerce.read')
+            ? (
+                await tx
+                  .select({
+                    storeId: commerceStores.id,
+                    storeName: sql<string>`coalesce(${commerceStores.name}, ${commerceStores.shopDomain}, ${commerceStores.storeUrl})`,
+                    event: commerceStoreMessageRules.event,
+                    enabled: commerceStoreMessageRules.enabled,
+                  })
+                  .from(commerceStoreMessageRules)
+                  .innerJoin(
+                    commerceStores,
+                    and(
+                      eq(commerceStores.tenantId, commerceStoreMessageRules.tenantId),
+                      eq(commerceStores.id, commerceStoreMessageRules.storeId),
+                    ),
+                  )
+                  .where(
+                    and(
+                      eq(commerceStoreMessageRules.tenantId, ctx.tenant.id),
+                      eq(commerceStoreMessageRules.automationId, a.id),
+                      eq(commerceStoreMessageRules.action, 'automation'),
+                    ),
+                  )
+                  .orderBy(asc(commerceStores.createdAt), asc(commerceStoreMessageRules.event))
+              ).map((r) => ({ ...r, label: STORE_MESSAGE_EVENT_INFO[r.event].label }))
+            : null;
           return {
             id: a.id,
             name: a.name,
@@ -610,6 +777,7 @@ export function createAutomationService(deps: AutomationServiceDeps) {
               updatedByName: row.updatedByName,
             },
             issues,
+            usedBy,
             draftChanged: active ? active.sha !== draftSha : true,
             activeVersion: active
               ? {
@@ -631,7 +799,9 @@ export function createAutomationService(deps: AutomationServiceDeps) {
                 id: c.id,
                 name: c.name,
                 active: c.status === 'active',
+                whatsappAccountId: c.whatsappAccountId,
               })),
+              templates: refs.templates,
               teams: teamRows,
               fields: fieldRows,
               allowedDomains: refs.domains,
@@ -781,9 +951,16 @@ export function createAutomationService(deps: AutomationServiceDeps) {
           { action: 'automation.draft_saved', subjectType: 'automation', subjectId: row.id },
           meta,
         );
+        const channel = await channelAccountOf(tx, ctx.tenant.id, data.channelAccountId);
         return {
           version: row.version + 1,
-          issues: checkGraph(graph.graph, graphRefs(await references(tx, ctx.tenant.id))),
+          issues: checkGraph(
+            graph.graph,
+            graphRefs(await references(tx, ctx.tenant.id), {
+              storeEvent: trigger.trigger.type === 'store_event',
+              channelWhatsappAccountId: channel?.whatsappAccountId ?? null,
+            }),
+          ),
         };
       });
     },
@@ -796,6 +973,7 @@ export function createAutomationService(deps: AutomationServiceDeps) {
         if (row.status === 'archived')
           throw new AppError('precondition_failed', 'Restore the automation before publishing it.');
         const { trigger, graph } = await runnableDraft(tx, row);
+        await assertMayUseTemplates(tx, ctx, graph, 'publish');
         const sha = definitionSha({ trigger, graph, channelAccountId: row.draftChannelAccountId });
         if (row.activeVersionId) {
           const [current] = await tx
@@ -980,7 +1158,9 @@ export function createAutomationService(deps: AutomationServiceDeps) {
     /**
      * Runs a snapshot of the draft on a conversation the member can see (real messages are sent
      * there). The conversation must be open, inside the 24-hour window, not assigned to someone
-     * else, and not handled by another automation.
+     * else, and not handled by another automation. An automation started by order messages is
+     * tested with an order the member chooses (`commerce.read` and `contacts.read`, as store
+     * orders need), whose values its steps read.
      */
     async startTestRun(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
       assertCan(ctx, 'automations.write');
@@ -991,6 +1171,29 @@ export function createAutomationService(deps: AutomationServiceDeps) {
         if (row.status === 'archived')
           throw new AppError('precondition_failed', 'Restore the automation before testing it.');
         const { trigger, graph } = await runnableDraft(tx, row);
+        await assertMayUseTemplates(tx, ctx, graph, 'test');
+        let storeOrderId: string | null = null;
+        if (trigger.type === 'store_event') {
+          // The steps send the order's customer details: seeing store orders needs both.
+          assertCan(ctx, 'commerce.read');
+          assertCan(ctx, 'contacts.read');
+          if (!data.storeOrderId) {
+            throw new AppError('validation_failed', 'Choose an order to test with.');
+          }
+          const [order] = await tx
+            .select({ id: commerceStoreOrders.id })
+            .from(commerceStoreOrders)
+            .where(
+              and(
+                eq(commerceStoreOrders.tenantId, ctx.tenant.id),
+                eq(commerceStoreOrders.id, data.storeOrderId),
+                isNull(commerceStoreOrders.deletedAt),
+                isNull(commerceStoreOrders.redactedAt),
+              ),
+            );
+          if (!order) throw notFound('Order');
+          storeOrderId = order.id;
+        }
         const [conv] = await tx
           .select({
             id: conversations.id,
@@ -1068,6 +1271,7 @@ export function createAutomationService(deps: AutomationServiceDeps) {
           channelAccountId: conv.channelAccountId,
           mode: 'test',
           triggerType: 'test',
+          storeOrderId,
           startedByMembershipId: ctx.membership.id,
           startedByUserId: ctx.user.id,
           status: 'running',
@@ -1277,6 +1481,29 @@ export function createAutomationService(deps: AutomationServiceDeps) {
             .orderBy(asc(automationHttpCalls.createdAt), asc(automationHttpCalls.id));
           const visible = inboxReader && canSeeConversation(ctx, r.assigned);
           const graph = parseGraph(r.graph);
+          const [order] =
+            r.run.storeOrderId && can(ctx, 'commerce.read')
+              ? await tx
+                  .select({
+                    id: commerceStoreOrders.id,
+                    name: commerceStoreOrders.name,
+                    storeName: sql<string>`coalesce(${commerceStores.name}, ${commerceStores.shopDomain}, ${commerceStores.storeUrl})`,
+                  })
+                  .from(commerceStoreOrders)
+                  .innerJoin(
+                    commerceStores,
+                    and(
+                      eq(commerceStores.tenantId, commerceStoreOrders.tenantId),
+                      eq(commerceStores.id, commerceStoreOrders.storeId),
+                    ),
+                  )
+                  .where(
+                    and(
+                      eq(commerceStoreOrders.tenantId, ctx.tenant.id),
+                      eq(commerceStoreOrders.id, r.run.storeOrderId),
+                    ),
+                  )
+              : [];
           return {
             id: r.run.id,
             automationId: r.run.automationId,
@@ -1298,6 +1525,8 @@ export function createAutomationService(deps: AutomationServiceDeps) {
             endDetail: r.run.endDetail,
             endedByName: nameOf(r.run.endedByMembershipId),
             startedByName: nameOf(r.run.startedByMembershipId),
+            storeEvent: r.run.storeEvent,
+            order: order ?? null,
             graph: graph.ok ? graph.graph : null,
             variables: visible ? r.run.variables : null,
             log: steps.map((s) => ({
@@ -1428,6 +1657,47 @@ export function createAutomationService(deps: AutomationServiceDeps) {
           meta,
         );
       });
+    },
+
+    /**
+     * Orders a test of an automation started by order messages can use: the latest orders of the
+     * company's stores that are neither deleted nor redacted (ADR-050), for members who may see
+     * store orders.
+     */
+    async testOrderOptions(ctx: TenantContext) {
+      assertCan(ctx, 'automations.write');
+      if (!can(ctx, 'commerce.read') || !can(ctx, 'contacts.read')) return [];
+      return db.run(
+        ctx.scope,
+        async (tx) => {
+          const rows = await tx
+            .select({
+              id: commerceStoreOrders.id,
+              name: commerceStoreOrders.name,
+              placedAt: commerceStoreOrders.placedAt,
+              storeName: sql<string>`coalesce(${commerceStores.name}, ${commerceStores.shopDomain}, ${commerceStores.storeUrl})`,
+            })
+            .from(commerceStoreOrders)
+            .innerJoin(
+              commerceStores,
+              and(
+                eq(commerceStores.tenantId, commerceStoreOrders.tenantId),
+                eq(commerceStores.id, commerceStoreOrders.storeId),
+              ),
+            )
+            .where(
+              and(
+                eq(commerceStoreOrders.tenantId, ctx.tenant.id),
+                isNull(commerceStoreOrders.deletedAt),
+                isNull(commerceStoreOrders.redactedAt),
+              ),
+            )
+            .orderBy(desc(commerceStoreOrders.placedAt), desc(commerceStoreOrders.id))
+            .limit(20);
+          return rows.map((r) => ({ id: r.id, label: `${r.name} · ${r.storeName}` }));
+        },
+        { accessMode: 'read only' },
+      );
     },
 
     /** Conversations a member may run a test on: open, visible, recent customer message. */

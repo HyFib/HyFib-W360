@@ -42,6 +42,7 @@ const SOURCE_LABEL: Record<string, string> = {
   provider: 'Reported by WhatsApp',
   api: 'API',
   erasure: 'Contact erased',
+  store: 'Recorded by the store',
 };
 
 const SUPPRESSION_REASON: Record<string, string> = {
@@ -303,6 +304,9 @@ export default async function ContactPage({
                         <TD className="text-sm text-muted-foreground">
                           {SOURCE_LABEL[e.source] ?? e.source}
                           {e.actorName ? ` · ${e.actorName}` : ''}
+                          {e.source === 'store' && typeof e.evidence.store === 'string'
+                            ? ` · ${e.evidence.store}`
+                            : ''}
                           {typeof e.evidence.note === 'string' ? (
                             <span className="block">{e.evidence.note}</span>
                           ) : null}

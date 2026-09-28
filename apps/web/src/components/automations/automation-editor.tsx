@@ -18,6 +18,7 @@ import {
   AUTOMATION_LIMITS,
   NODE_TYPES,
   NODE_TYPE_LABELS,
+  ORDER_PLACEHOLDERS,
   TRIGGER_LABELS,
   checkGraph,
   newNodeId,
@@ -37,7 +38,7 @@ import { ClientButton } from '@/components/client-form';
 import { FormError, FormSuccess } from '@/components/form-status';
 import { AutomationDiagram } from './automation-diagram';
 import { AutomationSimulator } from './automation-simulator';
-import { NodeFields, type NodeFieldOptions } from './node-fields';
+import { NodeFields, type EditorTemplate, type NodeFieldOptions } from './node-fields';
 
 /**
  * The automation builder: trigger, steps (a structured list with a generated diagram), live
@@ -65,12 +66,14 @@ function triggerForm(trigger: AutomationTrigger | null): TriggerForm {
     type: trigger.type,
     keywords: trigger.type === 'keyword' ? trigger.keywords.join(', ') : '',
     match: trigger.type === 'keyword' ? trigger.match : 'contains',
-    hours: trigger.hours,
-    cooldownMinutes: trigger.cooldownMinutes,
+    hours: trigger.type === 'store_event' ? 'any' : trigger.hours,
+    cooldownMinutes: trigger.type === 'store_event' ? 60 : trigger.cooldownMinutes,
   };
 }
 
 function triggerInput(form: TriggerForm): unknown {
+  // Started by a store's order messages: the rule decides when (delay, sending hours).
+  if (form.type === 'store_event') return { type: 'store_event' };
   const common = { hours: form.hours, cooldownMinutes: form.cooldownMinutes };
   if (form.type !== 'keyword') return { type: form.type, ...common };
   return {
@@ -89,7 +92,7 @@ function savedAnswers(graph: AutomationGraph): string[] {
   return [
     ...new Set(
       graph.nodes.flatMap((n) =>
-        (n.type === 'ask_text' || n.type === 'ask_buttons') && n.saveAs
+        (n.type === 'ask_text' || n.type === 'ask_buttons' || n.type === 'ask_template') && n.saveAs
           ? [n.saveAs]
           : n.type === 'http_request'
             ? n.save.map((item) => item.saveAs)
@@ -108,11 +111,32 @@ function defaultNode(
   type: NodeType,
   graph: AutomationGraph,
   allowedDomains: readonly string[],
+  template: EditorTemplate | undefined,
 ): AutomationNode {
   const id = newNodeId(graph, type);
   switch (type) {
     case 'send_text':
       return { id, type, label: '', text: 'Write your message.', next: null };
+    case 'send_template':
+    case 'ask_template': {
+      const fields = {
+        templateId: template?.id ?? '',
+        header: Array.from({ length: template?.headerParams ?? 0 }, () => ''),
+        body: Array.from({ length: template?.bodyParams ?? 0 }, () => ''),
+      };
+      if (type === 'send_template') return { id, type, label: '', ...fields, next: null };
+      return {
+        id,
+        type,
+        label: '',
+        ...fields,
+        buttons: (template?.quickReplies ?? []).map((q) => ({ ...q, next: null })),
+        saveAs: null,
+        replyNext: null,
+        timeoutMinutes: 1380,
+        timeoutNext: null,
+      };
+    }
     case 'ask_buttons':
       return {
         id,
@@ -188,9 +212,17 @@ function retarget(node: AutomationNode, target: string, value: string | null): A
   const t = (v: string | null) => (v === target ? value : v);
   switch (node.type) {
     case 'send_text':
+    case 'send_template':
     case 'update_contact':
     case 'wait':
       return { ...node, next: t(node.next) };
+    case 'ask_template':
+      return {
+        ...node,
+        buttons: node.buttons.map((b) => ({ ...b, next: t(b.next) })),
+        replyNext: t(node.replyNext),
+        timeoutNext: t(node.timeoutNext),
+      };
     case 'ask_buttons':
       return {
         ...node,
@@ -230,6 +262,7 @@ export function AutomationEditor({
   canWrite,
   automation,
   channels,
+  templates,
   teams,
   fields,
   web,
@@ -238,7 +271,9 @@ export function AutomationEditor({
   companyName: string;
   canWrite: boolean;
   automation: EditorAutomation;
-  channels: { id: string; name: string; active: boolean }[];
+  channels: { id: string; name: string; active: boolean; whatsappAccountId: string }[];
+  /** The company's templates (the checks need them all; steps offer the ones they can send). */
+  templates: EditorTemplate[];
   teams: { id: string; name: string }[];
   fields: { key: string; label: string; type: string }[];
   /** What web request steps may use: allowed domains and secrets (names and domains only). */
@@ -267,6 +302,22 @@ export function AutomationEditor({
     return () => window.removeEventListener('beforeunload', warn);
   }, [dirty]);
 
+  const storeEvent = trigger.type === 'store_event';
+  const channelWhatsappAccountId =
+    channels.find((c) => c.id === channelAccountId)?.whatsappAccountId ?? null;
+  // Templates a step can send: approved utility or marketing ones HyFib supports, of the number's
+  // WhatsApp account when the automation is limited to one number.
+  const usableTemplates = useMemo(
+    () =>
+      templates.filter(
+        (t) =>
+          t.status === 'approved' &&
+          !t.unsupported &&
+          (t.category === 'UTILITY' || t.category === 'MARKETING') &&
+          (!channelWhatsappAccountId || t.whatsappAccountId === channelWhatsappAccountId),
+      ),
+    [templates, channelWhatsappAccountId],
+  );
   const refs = useMemo(
     () => ({
       teamIds: new Set(teams.map((t) => t.id)),
@@ -274,8 +325,11 @@ export function AutomationEditor({
       allowedDomains: web.allowedDomains,
       secrets: new Map(web.secrets.map((s) => [s.name, s.domain])),
       allowInsecureHttp: web.allowInsecureHttp,
+      templates: new Map(templates.map((t) => [t.id, t])),
+      storeEvent,
+      channelWhatsappAccountId,
     }),
-    [teams, fields, web],
+    [teams, fields, web, templates, storeEvent, channelWhatsappAccountId],
   );
   const parsedTrigger = useMemo(() => parseTrigger(triggerInput(trigger)), [trigger]);
   const parsedGraph = useMemo(() => parseGraph(graph), [graph]);
@@ -330,7 +384,10 @@ export function AutomationEditor({
     answers,
     allowedDomains: web.allowedDomains,
     secrets: web.secrets,
+    templates: usableTemplates,
+    storeEvent,
   };
+  const templateStep = (t: NodeType) => t === 'send_template' || t === 'ask_template';
 
   const save = () => {
     setSaving(true);
@@ -370,7 +427,8 @@ export function AutomationEditor({
             <CardDescription>
               Automations start only in conversations nobody is assigned to and no other automation
               is handling. When several match, an exact keyword wins, then a keyword in the message,
-              then a new conversation, then any message.
+              then a new conversation, then any message. An automation started by order messages
+              runs when a store’s rule chooses it for an order event.
             </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-4">
@@ -431,48 +489,76 @@ export function AutomationEditor({
                   </Select>
                 )}
               </Field>
-              <Field id="trigger-hours" label="Business hours">
-                {(aria) => (
-                  <Select
-                    {...aria}
-                    value={trigger.hours}
-                    onChange={(e) =>
-                      change(() =>
-                        setTrigger({ ...trigger, hours: e.target.value as TriggerHours }),
-                      )
-                    }
-                  >
-                    <option value="any">At any time</option>
-                    <option value="open">Only while open</option>
-                    <option value="closed">Only while closed</option>
-                  </Select>
-                )}
-              </Field>
-              <Field
-                id="trigger-cooldown"
-                label="Not again for (minutes)"
-                description="In the same conversation. 0: no pause."
-              >
-                {(aria) => (
-                  <Input
-                    {...aria}
-                    type="number"
-                    inputMode="numeric"
-                    min={0}
-                    max={AUTOMATION_LIMITS.cooldownMinutes}
-                    value={Number.isFinite(trigger.cooldownMinutes) ? trigger.cooldownMinutes : ''}
-                    onChange={(e) =>
-                      change(() =>
-                        setTrigger({
-                          ...trigger,
-                          cooldownMinutes: Number.parseInt(e.target.value, 10),
-                        }),
-                      )
-                    }
-                  />
-                )}
-              </Field>
+              {storeEvent ? null : (
+                <Field id="trigger-hours" label="Business hours">
+                  {(aria) => (
+                    <Select
+                      {...aria}
+                      value={trigger.hours}
+                      onChange={(e) =>
+                        change(() =>
+                          setTrigger({ ...trigger, hours: e.target.value as TriggerHours }),
+                        )
+                      }
+                    >
+                      <option value="any">At any time</option>
+                      <option value="open">Only while open</option>
+                      <option value="closed">Only while closed</option>
+                    </Select>
+                  )}
+                </Field>
+              )}
+              {storeEvent ? null : (
+                <Field
+                  id="trigger-cooldown"
+                  label="Not again for (minutes)"
+                  description="In the same conversation. 0: no pause."
+                >
+                  {(aria) => (
+                    <Input
+                      {...aria}
+                      type="number"
+                      inputMode="numeric"
+                      min={0}
+                      max={AUTOMATION_LIMITS.cooldownMinutes}
+                      value={
+                        Number.isFinite(trigger.cooldownMinutes) ? trigger.cooldownMinutes : ''
+                      }
+                      onChange={(e) =>
+                        change(() =>
+                          setTrigger({
+                            ...trigger,
+                            cooldownMinutes: Number.parseInt(e.target.value, 10),
+                          }),
+                        )
+                      }
+                    />
+                  )}
+                </Field>
+              )}
             </div>
+            {storeEvent ? (
+              <Alert tone="info">
+                <p>
+                  Choose this automation in a store’s Order messages (Stores → a store → Order
+                  messages) for an order event: the store’s delay and sending hours decide when it
+                  starts. WhatsApp allows only templates until the customer replies, so start with a
+                  template step and continue from its reply branches.
+                </p>
+                <details className="mt-2">
+                  <summary className="cursor-pointer font-medium">Order fields for texts</summary>
+                  <ul className="mt-1 grid gap-0.5">
+                    {(Object.keys(ORDER_PLACEHOLDERS) as (keyof typeof ORDER_PLACEHOLDERS)[]).map(
+                      (field) => (
+                        <li key={field}>
+                          <code>{`{{order.${field}}}`}</code>: {ORDER_PLACEHOLDERS[field]}
+                        </li>
+                      ),
+                    )}
+                  </ul>
+                </details>
+              </Alert>
+            ) : null}
             {trigger.type === 'keyword' ? (
               <div className="grid gap-4 sm:grid-cols-[1fr_260px]">
                 <Field
@@ -674,7 +760,11 @@ export function AutomationEditor({
                       onChange={(e) => setNewType(e.target.value as NodeType)}
                     >
                       {NODE_TYPES.map((t) => (
-                        <option key={t} value={t}>
+                        <option
+                          key={t}
+                          value={t}
+                          disabled={templateStep(t) && usableTemplates.length === 0}
+                        >
                           {NODE_TYPE_LABELS[t]}
                         </option>
                       ))}
@@ -684,17 +774,27 @@ export function AutomationEditor({
                 <Button
                   type="button"
                   variant="outline"
+                  disabled={templateStep(newType) && usableTemplates.length === 0}
                   onClick={() =>
                     change(() =>
                       setGraph((g) => ({
                         ...g,
-                        nodes: [...g.nodes, defaultNode(newType, g, web.allowedDomains)],
+                        nodes: [
+                          ...g.nodes,
+                          defaultNode(newType, g, web.allowedDomains, usableTemplates[0]),
+                        ],
                       })),
                     )
                   }
                 >
                   Add step
                 </Button>
+                {usableTemplates.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">
+                    Template steps need an approved utility or marketing template
+                    {channelWhatsappAccountId ? ' of this number’s WhatsApp account' : ''}.
+                  </p>
+                ) : null}
               </div>
             ) : null}
           </CardContent>
@@ -728,6 +828,8 @@ export function AutomationEditor({
             graph={parsedGraph.ok ? parsedGraph.graph : null}
             companyName={companyName}
             teams={teams}
+            templates={templates}
+            storeEvent={storeEvent}
           />
         </CardContent>
       </Card>

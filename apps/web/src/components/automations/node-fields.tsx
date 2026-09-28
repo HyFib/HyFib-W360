@@ -23,6 +23,23 @@ export interface StepChoice {
   label: string;
 }
 
+/** A company template as the builder sees it (from the latest copy synced from Meta). */
+export interface EditorTemplate {
+  id: string;
+  name: string;
+  language: string;
+  category: string;
+  status: string;
+  whatsappAccountId: string;
+  /** Why HyFib cannot send it (for example a media header), or null. */
+  unsupported: string | null;
+  headerParams: number;
+  bodyParams: number;
+  /** Quick-reply buttons by their position among the template's buttons. */
+  quickReplies: readonly { index: number; title: string }[];
+  preview: { header: string | null; body: string; footer: string | null } | null;
+}
+
 export interface NodeFieldOptions {
   steps: StepChoice[];
   teams: { id: string; name: string }[];
@@ -32,6 +49,10 @@ export interface NodeFieldOptions {
   /** Domains web request steps may call, and the secrets they may use (names only). */
   allowedDomains: string[];
   secrets: { name: string; domain: string }[];
+  /** Templates a step can send: approved, utility or marketing, of the automation's number. */
+  templates: EditorTemplate[];
+  /** The automation starts from a store's order messages ({{order.<field>}} is available). */
+  storeEvent: boolean;
 }
 
 const COMPARISON_LABELS: Record<(typeof COMPARISONS)[number], string> = {
@@ -51,6 +72,10 @@ const FORMAT_LABELS: Record<(typeof ANSWER_FORMATS)[number], string> = {
 };
 
 const PLACEHOLDER_HINT = 'Use {{name}}, {{company}} or {{answer.<name>}} to fill in values.';
+const STORE_PLACEHOLDER_HINT =
+  'Use {{name}}, {{company}}, {{answer.<name>}} or the order’s {{order.number}}, {{order.total}}, {{order.items}} and more.';
+const hintFor = (options: NodeFieldOptions) =>
+  options.storeEvent ? STORE_PLACEHOLDER_HINT : PLACEHOLDER_HINT;
 
 function NextSelect({
   id,
@@ -349,7 +374,7 @@ export function NodeFields({
     case 'send_text':
       return (
         <div className="grid gap-4">
-          <Field id={`${p}-text`} label="Message" description={PLACEHOLDER_HINT}>
+          <Field id={`${p}-text`} label="Message" description={hintFor(options)}>
             {(aria) => (
               <Textarea
                 {...aria}
@@ -372,12 +397,15 @@ export function NodeFields({
       );
     case 'ask_buttons':
       return <AskButtonsFields node={node} options={options} onChange={onChange} />;
+    case 'send_template':
+    case 'ask_template':
+      return <TemplateFields node={node} options={options} onChange={onChange} />;
     case 'http_request':
       return <HttpRequestFields node={node} options={options} onChange={onChange} />;
     case 'ask_text':
       return (
         <div className="grid gap-4">
-          <Field id={`${p}-text`} label="Question" description={PLACEHOLDER_HINT}>
+          <Field id={`${p}-text`} label="Question" description={hintFor(options)}>
             {(aria) => (
               <Textarea
                 {...aria}
@@ -594,7 +622,7 @@ export function NodeFields({
             )}
           </div>
           {action.kind === 'set_field' ? (
-            <Field id={`${p}-value`} label="Value" description={PLACEHOLDER_HINT}>
+            <Field id={`${p}-value`} label="Value" description={hintFor(options)}>
               {(aria) => (
                 <Input
                   {...aria}
@@ -699,7 +727,7 @@ function AskButtonsFields({
           )}
         </Field>
       </div>
-      <Field id={`${p}-body`} label="Question" description={PLACEHOLDER_HINT}>
+      <Field id={`${p}-body`} label="Question" description={hintFor(options)}>
         {(aria) => (
           <Textarea
             {...aria}
@@ -826,6 +854,198 @@ function AskButtonsFields({
         value={node.timeoutMinutes}
         onChange={(timeoutMinutes) => patch({ timeoutMinutes })}
       />
+    </div>
+  );
+}
+
+/** Keeps `count` values, as many of the current ones as fit, the rest empty. */
+const resized = (values: readonly string[], count: number) =>
+  Array.from({ length: count }, (_, i) => values[i] ?? '');
+
+function TemplateFields({
+  node,
+  options,
+  onChange,
+}: {
+  node: NodeOf<'send_template' | 'ask_template'>;
+  options: NodeFieldOptions;
+  onChange: (node: AutomationNode) => void;
+}) {
+  const p = `step-${node.id}`;
+  const template = options.templates.find((t) => t.id === node.templateId) ?? null;
+  const choose = (id: string) => {
+    const next = options.templates.find((t) => t.id === id);
+    if (!next) return;
+    const header = resized(node.header, next.headerParams);
+    const body = resized(node.body, next.bodyParams);
+    if (node.type === 'ask_template') {
+      // One branch per quick-reply button, keeping where a button that stayed the same went.
+      const buttons = next.quickReplies.map((q) => ({
+        index: q.index,
+        title: q.title,
+        next: node.buttons.find((b) => b.index === q.index && b.title === q.title)?.next ?? null,
+      }));
+      onChange({ ...node, templateId: next.id, header, body, buttons });
+    } else {
+      onChange({ ...node, templateId: next.id, header, body });
+    }
+  };
+  const setParam = (part: 'header' | 'body', index: number, value: string) =>
+    onChange({ ...node, [part]: node[part].map((v, j) => (j === index ? value : v)) });
+  return (
+    <div className="grid gap-4">
+      <Field
+        id={`${p}-template`}
+        label="Template"
+        description="Approved utility and marketing templates. WhatsApp delivers templates even when the customer has not written in the last 24 hours."
+      >
+        {(aria) => (
+          <Select {...aria} value={template?.id ?? ''} onChange={(e) => choose(e.target.value)}>
+            {template ? null : <option value="">Choose a template</option>}
+            {options.templates.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.name} ({t.language}, {t.category === 'MARKETING' ? 'marketing' : 'utility'})
+              </option>
+            ))}
+          </Select>
+        )}
+      </Field>
+      {template?.preview ? (
+        <div className="grid gap-1 rounded-md bg-muted p-3 text-sm">
+          {template.preview.header ? (
+            <p className="font-medium">{template.preview.header}</p>
+          ) : null}
+          <p className="whitespace-pre-wrap">{template.preview.body}</p>
+          {template.preview.footer ? (
+            <p className="text-muted-foreground">{template.preview.footer}</p>
+          ) : null}
+        </div>
+      ) : null}
+      {template?.category === 'MARKETING' ? (
+        <p className="text-sm text-muted-foreground">
+          A marketing template goes only to contacts who opted in to marketing messages, within the
+          company’s frequency cap. Publishing it needs the campaign sending permission.
+        </p>
+      ) : null}
+      {node.header.map((value, i) => (
+        <Field
+          key={`header-${i}`}
+          id={`${p}-header-${i}`}
+          label="Header variable {{1}}"
+          description={hintFor(options)}
+        >
+          {(aria) => (
+            <Input
+              {...aria}
+              value={value}
+              maxLength={1000}
+              onChange={(e) => setParam('header', i, e.target.value)}
+            />
+          )}
+        </Field>
+      ))}
+      {node.body.map((value, i) => (
+        <Field
+          key={`body-${i}`}
+          id={`${p}-body-${i}`}
+          label={`Variable {{${i + 1}}}`}
+          description={i === 0 ? hintFor(options) : undefined}
+        >
+          {(aria) => (
+            <Input
+              {...aria}
+              value={value}
+              maxLength={1000}
+              onChange={(e) => setParam('body', i, e.target.value)}
+            />
+          )}
+        </Field>
+      ))}
+      {node.type === 'send_template' ? (
+        <NextSelect
+          id={`${p}-next`}
+          label="Then"
+          value={node.next}
+          self={node.id}
+          options={options}
+          onChange={(next) => onChange({ ...node, next })}
+        />
+      ) : (
+        <>
+          {node.buttons.length > 0 ? (
+            <fieldset className="grid gap-3">
+              <legend className="mb-1 text-sm font-medium">When the customer taps</legend>
+              {node.buttons.map((button, i) => (
+                <NextSelect
+                  key={button.index}
+                  id={`${p}-button-${button.index}`}
+                  label={`“${button.title}”`}
+                  value={button.next}
+                  self={node.id}
+                  options={options}
+                  onChange={(next) =>
+                    onChange({
+                      ...node,
+                      buttons: node.buttons.map((b, j) => (j === i ? { ...b, next } : b)),
+                    })
+                  }
+                />
+              ))}
+            </fieldset>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              This template has no quick-reply buttons: any reply continues with the step below.
+            </p>
+          )}
+          <Field
+            id={`${p}-save`}
+            label="Save the tapped button as (optional)"
+            description="Use it as {{answer.name}} or in a condition."
+          >
+            {(aria) => (
+              <Input
+                {...aria}
+                value={node.saveAs ?? ''}
+                maxLength={32}
+                onChange={(e) => onChange({ ...node, saveAs: e.target.value || null })}
+              />
+            )}
+          </Field>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <NextSelect
+              id={`${p}-reply`}
+              label={
+                node.buttons.length > 0
+                  ? 'If the reply is not a button'
+                  : 'When the customer replies'
+              }
+              value={node.replyNext}
+              self={node.id}
+              options={options}
+              onChange={(replyNext) => onChange({ ...node, replyNext })}
+              description={
+                node.buttons.length > 0
+                  ? 'A typed reply that equals a button’s text counts as that button.'
+                  : undefined
+              }
+            />
+            <NextSelect
+              id={`${p}-timeout`}
+              label="If there is no reply"
+              value={node.timeoutNext}
+              self={node.id}
+              options={options}
+              onChange={(timeoutNext) => onChange({ ...node, timeoutNext })}
+            />
+          </div>
+          <MinutesInput
+            id={`${p}-minutes`}
+            label="Wait for a reply (minutes)"
+            value={node.timeoutMinutes}
+            onChange={(timeoutMinutes) => onChange({ ...node, timeoutMinutes })}
+          />
+        </>
+      )}
     </div>
   );
 }

@@ -238,7 +238,14 @@ beforeAll(async () => {
 
 beforeEach(() => {
   offsetMs = 0;
-  standIn.state.queues = { createOrder: [], recurring: [], refund: [], fetch: [] };
+  standIn.state.queues = {
+    createOrder: [],
+    recurring: [],
+    refund: [],
+    fetch: [],
+    createPaymentLink: [],
+    paymentLinks: [],
+  };
 });
 
 afterAll(async () => {

@@ -4,13 +4,16 @@ import {
   createLogger,
   loadWorkerConfig,
   metaConfigFrom,
+  razorpayApiBaseUrl,
   razorpayConfigFrom,
+  shopifyConfigFrom,
   smtpConfigFrom,
   systemClock,
   type Clock,
   type Logger,
   type MetaConfig,
   type RazorpayConfig,
+  type ShopifyConfig,
   type WorkerConfig,
 } from '@w360/core';
 import {
@@ -48,10 +51,19 @@ export interface WorkerRuntime {
   /** Null until Razorpay is configured; billing jobs then wait (retry) instead of failing. */
   razorpayConfig: RazorpayConfig | null;
   razorpay: RazorpayClient | null;
+  /** Razorpay's API origin for companies' own accounts (Payment Links), even without HyFib's keys. */
+  razorpayBaseUrl: string;
   notices: BillingNoticeDeps;
   /** The only client for company-chosen addresses (automation HTTP steps): see core/egress. */
   egress: EgressClient;
   egressPolicy: EgressPolicy;
+  /**
+   * Egress for companies' stores (Shopify shops, WooCommerce sites): the same address checks, with
+   * larger responses (order pages) and a longer deadline.
+   */
+  storeEgress: EgressClient;
+  /** HyFib's Shopify app; null until configured (Shopify stores then cannot connect or sync). */
+  shopify: ShopifyConfig | null;
   close(): Promise<void>;
 }
 
@@ -108,6 +120,8 @@ export async function createWorkerRuntime(): Promise<WorkerRuntime> {
   if (egressPolicy.allowLoopbackForTests) {
     logger.warn('Egress to http:// and loopback addresses is allowed (local test targets only).');
   }
+  const shopify = shopifyConfigFrom(config);
+  if (!shopify) logger.warn('Shopify is not configured: Shopify stores cannot connect or sync.');
 
   return {
     config,
@@ -135,9 +149,16 @@ export async function createWorkerRuntime(): Promise<WorkerRuntime> {
           keySecret: razorpayConfig.keySecret,
         })
       : null,
+    razorpayBaseUrl: razorpayApiBaseUrl(config),
     notices: { outbox: { keyring, jobs, signer }, appBaseUrl: config.APP_BASE_URL },
     egress: createEgressClient(egressPolicy),
     egressPolicy,
+    storeEgress: createEgressClient({
+      ...egressPolicy,
+      timeoutMs: 30_000,
+      maxResponseBytes: 4 * 1024 * 1024,
+    }),
+    shopify,
     async close() {
       await pool.end();
     },

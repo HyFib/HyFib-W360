@@ -8,19 +8,39 @@ import {
   httpHeaderText,
   initialRunState,
   type AutomationGraph,
+  type OrderPlaceholderValues,
   type RunEffect,
   type RunEvent,
   type RunFacts,
   type RunState,
 } from '@w360/domain/automation-model';
 import { ClientButton, ClientForm } from '@/components/client-form';
+import type { EditorTemplate } from './node-fields';
 
 /**
  * Tries the current (unsaved) steps in the browser with the interpreter the worker uses. Nothing
- * is sent or stored; facts about the contact and the business are set here. It does not check the
- * 24-hour window, the WhatsApp number, consent or the hand-off lock: test runs do.
+ * is sent or stored; facts about the contact and the business are set here, and an automation
+ * started by order messages reads a sample order. It does not check the 24-hour window, the
+ * WhatsApp number, the template's approval, consent or the hand-off lock: test runs do.
  */
 const SIMULATION_RUN = '00000000-0000-4000-8000-000000000000';
+
+/** The order a simulated run started by order messages reads. */
+const sampleOrder = (customer: string, store: string): OrderPlaceholderValues => ({
+  number: '#1001',
+  customer_name: customer || null,
+  total: '₹1,499.00',
+  items: 'Darjeeling tea and 2 more',
+  status_url: 'https://shop.example/orders/1001',
+  tracking_number: 'AWB123456789',
+  carrier: 'Delhivery',
+  tracking_url: 'https://shop.example/track/AWB123456789',
+  store,
+});
+
+/** A template's text with its {{n}} markers filled in. */
+const fill = (text: string, values: readonly string[]) =>
+  text.replace(/\{\{\s*(\d+)\s*\}\}/g, (whole, n: string) => values[Number(n) - 1] ?? whole);
 
 type Entry =
   | { who: 'bot'; text: string }
@@ -30,6 +50,16 @@ type Entry =
       body: string;
       footer: string | null;
       buttons: { id: string; title: string }[];
+    }
+  | {
+      who: 'template';
+      name: string;
+      header: string | null;
+      body: string;
+      footer: string | null;
+      /** Tappable quick replies (an asking step), or the template's buttons shown as they are. */
+      buttons: { id: string; title: string }[];
+      staticButtons: string[];
     }
   | { who: 'customer'; text: string }
   | { who: 'note'; text: string }
@@ -54,7 +84,7 @@ interface SimFacts {
   businessOpen: boolean;
 }
 
-function toFacts(sim: SimFacts, companyName: string): RunFacts {
+function toFacts(sim: SimFacts, companyName: string, storeEvent: boolean): RunFacts {
   const fields: Record<string, string> = {};
   for (const line of sim.fields.split('\n')) {
     const i = line.indexOf('=');
@@ -71,6 +101,7 @@ function toFacts(sim: SimFacts, companyName: string): RunFacts {
     ),
     fields,
     businessOpen: sim.businessOpen,
+    order: storeEvent ? sampleOrder(sim.contactName.trim(), companyName) : null,
   };
 }
 
@@ -78,11 +109,16 @@ export function AutomationSimulator({
   graph,
   companyName,
   teams,
+  templates,
+  storeEvent,
 }: {
   /** Null when the steps have structural errors. */
   graph: AutomationGraph | null;
   companyName: string;
   teams: { id: string; name: string }[];
+  templates: EditorTemplate[];
+  /** Started by order messages: the run reads a sample order. */
+  storeEvent: boolean;
 }) {
   const [sim, setSim] = useState<SimFacts>({
     contactName: 'Asha',
@@ -126,6 +162,20 @@ export function AutomationSimulator({
             buttons: effect.buttons,
           });
           break;
+        case 'send_template': {
+          const template = templates.find((t) => t.id === effect.templateId);
+          const preview = template?.preview;
+          out.push({
+            who: 'template',
+            name: template?.name ?? 'Template',
+            header: preview?.header ? fill(preview.header, effect.header) : null,
+            body: preview ? fill(preview.body, effect.body) : effect.body.join(' · '),
+            footer: preview?.footer ?? null,
+            buttons: effect.buttons.map((b) => ({ id: b.payload, title: b.title })),
+            staticButtons: effect.ask ? [] : (template?.quickReplies.map((q) => q.title) ?? []),
+          });
+          break;
+        }
         case 'add_tag':
           facts = { ...facts, tags: [facts.tags, effect.tag].filter(Boolean).join(', ') };
           out.push({ who: 'note', text: `Tag “${effect.tag}” added to the contact.` });
@@ -175,7 +225,7 @@ export function AutomationSimulator({
         graph,
         state: current,
         event,
-        facts: toFacts(facts, companyName),
+        facts: toFacts(facts, companyName, storeEvent),
         runId: SIMULATION_RUN,
         now: new Date(),
       });
@@ -197,7 +247,9 @@ export function AutomationSimulator({
         const minutes =
           waitingNode?.type === 'wait'
             ? waitingNode.minutes
-            : waitingNode?.type === 'ask_buttons' || waitingNode?.type === 'ask_text'
+            : waitingNode?.type === 'ask_buttons' ||
+                waitingNode?.type === 'ask_text' ||
+                waitingNode?.type === 'ask_template'
               ? waitingNode.timeoutMinutes
               : 0;
         next =
@@ -319,6 +371,39 @@ export function AutomationSimulator({
                   <span className="sr-only">Customer: </span>
                   {entry.text}
                 </p>
+              );
+            if (entry.who === 'template')
+              return (
+                <div
+                  key={i}
+                  className="grid max-w-[85%] justify-self-end gap-2 rounded-md bg-primary/10 px-3 py-2 text-sm"
+                >
+                  <span className="text-xs text-muted-foreground">Template {entry.name}</span>
+                  {entry.header ? <strong>{entry.header}</strong> : null}
+                  <span className="whitespace-pre-wrap">{entry.body}</span>
+                  {entry.footer ? (
+                    <span className="text-xs text-muted-foreground">{entry.footer}</span>
+                  ) : null}
+                  {entry.buttons.length > 0 ? (
+                    <div className="flex flex-wrap gap-2">
+                      {entry.buttons.map((b) => (
+                        <ClientButton
+                          key={b.id}
+                          size="sm"
+                          variant="outline"
+                          onClick={() => reply(b.title, b.id)}
+                        >
+                          {b.title}
+                        </ClientButton>
+                      ))}
+                    </div>
+                  ) : null}
+                  {entry.staticButtons.length > 0 ? (
+                    <span className="text-xs text-muted-foreground">
+                      Buttons: {entry.staticButtons.join(', ')}
+                    </span>
+                  ) : null}
+                </div>
               );
             if (entry.who === 'bot')
               return (
@@ -502,6 +587,15 @@ export function AutomationSimulator({
           />
           Business is open
         </label>
+        {storeEvent ? (
+          <div className="grid gap-1 text-xs text-muted-foreground">
+            <p className="font-medium text-foreground">Sample order</p>
+            <p>
+              #1001 for the contact above, ₹1,499.00, “Darjeeling tea and 2 more”, sent with
+              Delhivery (AWB123456789), from {companyName}.
+            </p>
+          </div>
+        ) : null}
       </fieldset>
     </div>
   );

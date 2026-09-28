@@ -223,6 +223,73 @@ export const QUEUES = {
     deadLetter: 'dead-letter',
     deleteAfterHours: 168,
   },
+  /** Reads a WhatsApp account's catalogs and their products from Meta (reads only). */
+  commerceSync: {
+    name: 'commerce.sync',
+    policy: 'exclusive',
+    retryLimit: 5,
+    retryDelaySeconds: 30,
+    retryBackoff: true,
+    retryDelayMaxSeconds: 900,
+    expireInSeconds: 300,
+    deadLetter: 'dead-letter',
+    deleteAfterHours: 168,
+  },
+  /** Advances one Payment Link at Razorpay: create it once, cancel it, or fetch its status. */
+  commerceLink: {
+    name: 'commerce.link',
+    policy: 'exclusive',
+    retryLimit: 5,
+    retryDelaySeconds: 30,
+    retryBackoff: true,
+    retryDelayMaxSeconds: 900,
+    expireInSeconds: 120,
+    deadLetter: 'dead-letter',
+    deleteAfterHours: 168,
+  },
+  /** Checks a company's Razorpay keys against Razorpay. */
+  commerceAccount: {
+    name: 'commerce.account',
+    policy: 'exclusive',
+    retryLimit: 3,
+    retryDelaySeconds: 30,
+    retryBackoff: true,
+    retryDelayMaxSeconds: 300,
+    expireInSeconds: 60,
+    deadLetter: 'dead-letter',
+    deleteAfterHours: 72,
+  },
+  /**
+   * One store's work under a lease on its row: finishing a connection, reading what webhooks
+   * signalled, the incremental read, webhook checks and removal (store connectors).
+   */
+  commerceStore: {
+    name: 'commerce.store',
+    policy: 'exclusive',
+    retryLimit: 5,
+    retryDelaySeconds: 30,
+    retryBackoff: true,
+    retryDelayMaxSeconds: 900,
+    expireInSeconds: 300,
+    deadLetter: 'dead-letter',
+    deleteAfterHours: 72,
+  },
+  /**
+   * One order message at its send time: checks the rule, the order, the template and the
+   * customer's consent, then queues the chat message (order messages). The row is the source of
+   * truth; the minute sweep signals any message whose job was lost.
+   */
+  commerceStoreMessage: {
+    name: 'commerce.store-message',
+    policy: 'exclusive',
+    retryLimit: 5,
+    retryDelaySeconds: 30,
+    retryBackoff: true,
+    retryDelayMaxSeconds: 900,
+    expireInSeconds: 120,
+    deadLetter: 'dead-letter',
+    deleteAfterHours: 72,
+  },
   deadLetter: {
     name: 'dead-letter',
     policy: 'standard',

@@ -24,6 +24,7 @@ import {
   HTTP_CALL_STATE,
   RUN_STATUS,
   STEP_OUTCOMES,
+  STORE_EVENT_LABELS,
   TRIGGER_TYPE_LABELS,
   describeDetail,
 } from '@/lib/automation-labels';
@@ -219,6 +220,25 @@ export default async function AutomationRunPage({
                 {run.messages === 1 ? '' : 's'} sent
                 {run.endedAt ? `, ended ${formatDateTime(run.endedAt, tz)}` : ''}.
               </p>
+              {run.order ? (
+                <p>
+                  {run.storeEvent
+                    ? `${STORE_EVENT_LABELS[run.storeEvent] ?? 'Order event'}: `
+                    : 'Reads the order '}
+                  <Link
+                    href={`/c/${ctx.tenant.slug}/commerce/stores/orders/${run.order.id}`}
+                    className="text-primary underline-offset-4 hover:underline"
+                  >
+                    {run.order.name}
+                  </Link>{' '}
+                  ({run.order.storeName}).
+                </p>
+              ) : run.storeEvent ? (
+                <p>
+                  {STORE_EVENT_LABELS[run.storeEvent] ?? 'Order event'}; the order is no longer
+                  available.
+                </p>
+              ) : null}
               {run.conversationId ? (
                 <Link
                   href={`/c/${ctx.tenant.slug}/inbox/${run.conversationId}`}

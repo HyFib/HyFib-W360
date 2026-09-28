@@ -100,6 +100,11 @@ export interface StandInState {
   businessKeys: Map<string, { pem: string; status: 'VALID' | 'MISMATCH' }>;
   /** Signature status reported for keys uploaded from now on. */
   keySignatureStatus: 'VALID' | 'MISMATCH';
+  /** Catalogs connected to each WABA, and each catalog's products (research M-172). */
+  catalogs: Map<string, { id: string; name: string; product_count: number }[]>;
+  catalogProducts: Map<string, Record<string, unknown>[]>;
+  /** When set, catalog reads fail with this Graph error (for example a missing permission). */
+  catalogError: { status: number; code: number; message: string } | null;
 }
 
 export interface GraphStandIn {
@@ -204,6 +209,59 @@ function interactiveProblem(body: unknown): string | null {
   return null;
 }
 
+const PRODUCT_TYPES = new Set(['product', 'product_list', 'catalog_message']);
+
+/** Checks a product, multi-product or catalog message (research M-169) against known catalogs. */
+function productMessageProblem(
+  body: unknown,
+  products: Map<string, Record<string, unknown>[]>,
+): string | null {
+  const b = body as { type?: unknown; interactive?: Record<string, unknown> } | undefined;
+  const interactive = b?.interactive;
+  if (b?.type !== 'interactive' || !interactive || !PRODUCT_TYPES.has(String(interactive.type))) {
+    return null;
+  }
+  const action = (interactive.action ?? {}) as Record<string, unknown>;
+  const has = (catalogId: unknown, retailerId: unknown) =>
+    typeof catalogId === 'string' &&
+    typeof retailerId === 'string' &&
+    (products.get(catalogId) ?? []).some((p) => p.retailer_id === retailerId);
+  const bodyText = (interactive.body as { text?: unknown } | undefined)?.text;
+  if (interactive.type === 'product') {
+    if (interactive.header !== undefined) return 'header';
+    if (!has(action.catalog_id, action.product_retailer_id)) return 'action.product_retailer_id';
+    return null;
+  }
+  if (typeof bodyText !== 'string' || !bodyText || bodyText.length > 1024) return 'body.text';
+  if (interactive.type === 'catalog_message') {
+    const parameters = (action.parameters ?? {}) as Record<string, unknown>;
+    if (action.name !== 'catalog_message') return 'action.name';
+    if (typeof parameters.thumbnail_product_retailer_id !== 'string')
+      return 'thumbnail_product_retailer_id';
+    return null;
+  }
+  const header = interactive.header as { type?: unknown; text?: unknown } | undefined;
+  if (header?.type !== 'text' || typeof header.text !== 'string' || !header.text) return 'header';
+  const sections = Array.isArray(action.sections)
+    ? (action.sections as Record<string, unknown>[])
+    : [];
+  if (sections.length < 1 || sections.length > 10) return 'action.sections';
+  let total = 0;
+  for (const section of sections) {
+    const items = Array.isArray(section.product_items)
+      ? (section.product_items as Record<string, unknown>[])
+      : [];
+    if (items.length < 1 || items.length > 30) return 'product_items';
+    if (sections.length > 1 && (typeof section.title !== 'string' || !section.title))
+      return 'title';
+    for (const item of items) {
+      if (!has(action.catalog_id, item.product_retailer_id)) return 'product_retailer_id';
+    }
+    total += items.length;
+  }
+  return total > 30 ? 'product_items' : null;
+}
+
 /** Checks an interactive flow message (research M-165) against the flows the stand-in has. */
 function flowMessageProblem(body: unknown, flows: Map<string, FlowFixture>): string | null {
   const b = body as { type?: unknown; interactive?: Record<string, unknown> } | undefined;
@@ -260,6 +318,9 @@ export async function startGraphStandIn(options: {
     templateCounter: 0,
     flows: new Map(),
     flowCounter: 0,
+    catalogs: new Map(),
+    catalogProducts: new Map(),
+    catalogError: null,
     flowCreateQueue: [],
     flowUploadErrors: [],
     businessKeys: new Map(),
@@ -280,6 +341,20 @@ export async function startGraphStandIn(options: {
       const authorization = req.headers.authorization ?? null;
       if (req.method === 'GET' && url.pathname === '/__stand-in/requests') {
         return json(res, 200, state.requests);
+      }
+      // Test control: the catalog connected to a WhatsApp account and its products, as Commerce
+      // Manager would hold them.
+      if (req.method === 'POST' && url.pathname === '/__stand-in/catalog') {
+        const b = (body ?? {}) as {
+          wabaId?: string;
+          catalog?: { id: string; name: string; product_count: number };
+          products?: Record<string, unknown>[];
+        };
+        if (!b.wabaId || !b.catalog || !Array.isArray(b.products))
+          return json(res, 400, { ok: false });
+        state.catalogs.set(String(b.wabaId), [b.catalog]);
+        state.catalogProducts.set(b.catalog.id, b.products);
+        return json(res, 200, { ok: true });
       }
       // Test control: set a template's review status, as Meta's review would.
       if (req.method === 'POST' && url.pathname === '/__stand-in/template-status') {
@@ -353,9 +428,16 @@ export async function startGraphStandIn(options: {
         const flowInvalid = flowMessageProblem(body, state.flows);
         if (flowInvalid)
           return graphError(res, 400, 100, `(#100) Invalid parameter: ${flowInvalid}`);
-        const isFlow =
-          (body as { interactive?: { type?: unknown } } | undefined)?.interactive?.type === 'flow';
-        const invalid = isFlow ? null : interactiveProblem(body);
+        const productInvalid = productMessageProblem(body, state.catalogProducts);
+        if (productInvalid)
+          return graphError(res, 400, 100, `(#100) Invalid parameter: ${productInvalid}`);
+        const interactiveType = String(
+          (body as { interactive?: { type?: unknown } } | undefined)?.interactive?.type ?? '',
+        );
+        const invalid =
+          interactiveType === 'flow' || PRODUCT_TYPES.has(interactiveType)
+            ? null
+            : interactiveProblem(body);
         if (invalid) return graphError(res, 400, 100, `(#100) Invalid parameter: ${invalid}`);
         const behaviour = state.sendQueue.shift() ?? { kind: 'accept' };
         if (behaviour.kind === 'drop_connection') {
@@ -463,6 +545,39 @@ export async function startGraphStandIn(options: {
           list.splice(index, 1);
           return json(res, 200, { success: true });
         }
+      }
+      // Catalogs (research M-172) ---------------------------------------------------------------
+      if (
+        req.method === 'GET' &&
+        first &&
+        (second === 'product_catalogs' || second === 'products')
+      ) {
+        if (state.catalogError) {
+          return graphError(
+            res,
+            state.catalogError.status,
+            state.catalogError.code,
+            state.catalogError.message,
+          );
+        }
+        const all =
+          second === 'product_catalogs'
+            ? (state.catalogs.get(first) ?? [])
+            : (state.catalogProducts.get(first) ?? []);
+        const limit = Math.min(Number(url.searchParams.get('limit') ?? '25') || 25, 100);
+        const start = Number(url.searchParams.get('after') ?? '0') || 0;
+        const data = all.slice(start, start + limit);
+        const nextStart = start + data.length;
+        return json(res, 200, {
+          data,
+          paging:
+            nextStart < all.length
+              ? {
+                  cursors: { before: String(start), after: String(nextStart) },
+                  next: 'https://graph.stand-in/next',
+                }
+              : { cursors: { before: String(start), after: String(nextStart) } },
+        });
       }
       // WhatsApp Flows (research M-161 to M-164) ------------------------------------------------
       if (first && second === 'flows') {
