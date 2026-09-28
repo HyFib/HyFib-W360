@@ -192,6 +192,41 @@ WHERE tenant_id = … ORDER BY requested_at DESC`:
       deletion card on the platform page says so).
     - A refund still open after 90 days loses its hold to the expired-holds sweep; if Razorpay
       processes it later, it is recorded as a plain refund.
+11. **Settlement reconciliation** (`/platform/reconciliation`, ADR-059). Each day from 06:00 India
+    time the worker reads Razorpay's settlement report for the previous day and matches every
+    transaction. Look at the list once a day; "Need a person" counts what is still open.
+    - **Recorded by the check:** Razorpay settled a payment or refund HyFib had missed (its webhook
+      never arrived); the check fetched it and recorded it the usual way. Nothing to do, but a
+      series of them means webhooks are failing: see step 1 and section 4.
+    - **Does not match, needs a look, not HyFib's:** nothing was changed. Per reason:
+      - _Second payment_: the customer paid the same top-up twice. HyFib credited one payment;
+        refund the other in the Razorpay Dashboard (it shows as a refund of an uncredited payment
+        on a later day).
+      - _Amount differs_, _refund exceeds the payment_, _not captured_: compare the company's
+        platform page (Service credit) with the Dashboard and raise an incident before anyone
+        changes anything; corrections are compensating postings through a reviewed function.
+      - _Payment or refund unavailable_: Razorpay did not return it when asked. Run the day again
+        later; if it stays, ask Razorpay support.
+      - _Dispute_: a payment or refund HyFib matched or recorded has a dispute (one HyFib had
+        missed was recorded first). Check the dispute in the Dashboard. A lost chargeback is
+        recorded from `payment.dispute.lost`; if the company's credit does not show it, redeliver
+        that webhook.
+      - _Adjustment_, _transfer_, _not HyFib's_, _unknown type_, _other currency_, _unreadable_:
+        check them in the Dashboard (another integration on the account, Razorpay's own
+        corrections).
+
+      Then resolve the item with a note of what was checked or done (platform owners; audited).
+
+    - **A day failed:** the error says why. "Refused HyFib's API keys": fix `RAZORPAY_KEY_ID` and
+      `RAZORPAY_KEY_SECRET`, then run the day again (platform owners, with a reason). A day with
+      more than 50,000 transactions fails too: raise it with engineering. Failures that may pass
+      (timeouts, 5xx) are retried by themselves after 5, 15, 60, 180 and 360 minutes.
+    - **Days are missing:** the schedule creates the previous day and fills gaps of up to a week;
+      after a longer outage, reconcile the missing days from the form. Running a day again keeps
+      what an earlier run recorded and the resolutions.
+    - **Payments not seen in a settlement:** a paid top-up whose payment no settlement showed 7
+      days after payment. Look the payment up in the Dashboard (on hold, refunded, disputed) before
+      doing anything; the list only counts days that were reconciled.
 
 ## 10. Contacts, consent and templates
 

@@ -127,6 +127,21 @@ export const QUEUES = {
     deadLetter: 'dead-letter',
     deleteAfterHours: 168,
   },
+  /**
+   * One attempt at a day's settlement reconciliation (ADR-059). The run row is the source of truth:
+   * Razorpay failures leave it due again for the minute sweep, and a job that dies leaves its lease
+   * to expire, so the job itself retries only once.
+   */
+  billingSettlementRecon: {
+    name: 'billing.settlement-recon',
+    policy: 'exclusive',
+    retryLimit: 1,
+    retryDelaySeconds: 300,
+    retryBackoff: false,
+    expireInSeconds: 900,
+    deadLetter: 'dead-letter',
+    deleteAfterHours: 168,
+  },
   billingSweep: {
     name: 'ops.billing-sweep',
     policy: 'exclusive',

@@ -202,6 +202,15 @@ Read from Razorpay's official documentation repository and Node SDK on 2026-09-2
 | R-108 | Webhook payload | `payment_link.paid` carries `payload.payment_link.entity` (`id`, `reference_id`, `status`, `amount`, `amount_paid`, `currency`, `short_url`, `order_id`) together with the order and payment entities. Events for a link: `payment_link.paid`, `.partially_paid`, `.cancelled`, `.expired`. | `payload.payment_link.entity` | https://raw.githubusercontent.com/razorpay/markdown-docs/master/webhooks/payment-links.md | OD | High |
 | R-109 | Cancelling | `POST /v1/payment_links/:id/cancel` cancels a link; a paid or partially paid link cannot be cancelled ("cannot cancel or expire an already paid/partially paid link"). | `/cancel` | https://raw.githubusercontent.com/razorpay/markdown-docs/master/api/payments/payment-links/cancel-standard.md | OD | High |
 
+## 12. Settlement reconciliation (fetched 2026-09-28 for P5-05)
+
+Read from Razorpay's official documentation repository on 2026-09-28 (razorpay.com itself was blocked by the egress proxy). HyFib reads these reports for its own billing account only.
+
+| ID | Topic | Claim (paraphrased) | Exact identifiers (if shown) | Source URL | Evidence type | Confidence |
+|---|---|---|---|---|---|---|
+| R-110 | Settlement recon request | `GET /v1/settlements/recon/combined` returns every transaction (payments, refunds, transfers, adjustments) settled to the account on a day or a month. Parameters: `year` (mandatory, 4 digits), `month` (mandatory, `MM`, 1-12), `day` (optional, 1-31), `count` (optional, 1-1000) and `skip` (optional). Invalid values answer 400 `BAD_REQUEST_ERROR` ("The month is not a valid month.", "The count must be at least 1."). | `year`, `month`, `day`, `count`, `skip` | https://raw.githubusercontent.com/razorpay/markdown-docs/master/api/settlements/fetch-recon.md | OD | High |
+| R-111 | Settlement recon items | The response is `{entity: "collection", count, items}`. Each item has `entity_id`, `type` (`payment`, `refund`, `transfer`, `adjustment`), `debit`, `credit`, `amount`, `currency`, `fee` and `tax` (subunits), `on_hold`, `settled`, `created_at` and `settled_at` (Unix seconds), `settlement_id`, `settlement_utr`, `description`, `notes`, `payment_id` (the payment of a refund or transfer; `null` for payments), `order_id`, `order_receipt`, `method`, `card_network`, `card_issuer`, `card_type` and `dispute_id` ("any dispute, if any, for this transaction"). In the sample a payment of 100000 with a fee of 2900 has `credit` 97100, a refund has `debit` equal to its amount, and a transfer's `debit` includes its fee. | fields as listed | https://raw.githubusercontent.com/razorpay/markdown-docs/master/api/settlements/fetch-recon.md | OD | High |
+
 ## Unconfirmed / conflicting
 
 1. **Debit latency.** For card recurring, Razorpay's own docs give three different timings:
@@ -231,6 +240,8 @@ Read from Razorpay's official documentation repository and Node SDK on 2026-09-2
 18. **Activation.** It is unconfirmed whether the account needs Razorpay to enable Recurring Payments (confirmed as on-demand), card recurring specifically, International card recurring, RuPay SI, and saved cards/TokenHQ (5-7 working days). The pricing of tokenisation and recurring is not documented (R-028, R-049, R-093).
 19. **Unscheduled charging.** It is unconfirmed whether `as_presented` card mandates allow unscheduled, variable, threshold-triggered debits for a SaaS MCC, and whether a token can have more than one pending pre-debit notification or order at a time (R-048).
 20. **Test mode.** Its behaviour for standalone card Recurring Payments (pre-debit timing, token confirmation) is unconfirmed (R-102).
+21. **Settlement recon days and pages (R-110).** The documentation does not say which time zone `year`/`month`/`day` use (HyFib asks for India's calendar day), in what order items are returned, or whether `skip` pages stay stable while Razorpay adds items. It also does not say when a day's report is complete after its settlements are processed.
+22. **Disputes in settlement recon (R-111).** Only the `dispute_id` field is documented: which item carries a chargeback's deduction, and with what `type` and amounts, is unknown. Whether items with `settled: false` or `on_hold: true` appear in a day's report is also undocumented.
 
 ## Implications for implementing auto-recharge (what must be verified with Razorpay account managers before launch)
 

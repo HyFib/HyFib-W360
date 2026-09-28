@@ -1,5 +1,99 @@
 # Progress
 
+## 2026-09-28 — Phase 5: daily settlement reconciliation (P5-05, part)
+
+Status: **Daily settlement reconciliation with Razorpay implemented and locally verified with test
+data only.** Every day the worker reads Razorpay's settlement report for the previous day, matches
+every settled transaction against HyFib's records, records payments and refunds HyFib had missed
+through the usual paths, and lists everything else for platform owners. Razorpay traffic comes from
+the test-only stand-in; nothing reached Razorpay.
+
+### Completed
+
+- **Design (ADR-059):** the report (`GET /v1/settlements/recon/combined`, R-110, R-111) is read a
+  page of up to 1,000 transactions at a time for India's calendar day. Its ids only look up HyFib's
+  own records (top-ups by payment and order, card mandates, recorded refunds), never a company. A
+  payment or refund HyFib missed is fetched and recorded exactly as its webhook would have been
+  (credit only from a captured payment, once); nothing else changes automatically. One run per
+  day and one item per transaction, kept with the billing records.
+- **Schema (migration 0034):**
+  - `ops.settlement_recon_runs` (pending, running, completed, failed; attempts, an attempt number
+    that never resets and fences every write, a lease, the last error, who asked, totals) and
+    `ops.settlement_recon_items` (the transaction without notes, descriptions, receipts or card
+    fields; the match; a resolution with a note). No runtime role has privileges on them.
+  - Worker functions (definer, `w360_app` only): `ops.settlement_recon_due` (creates the runs the
+    schedule owes, fails a sixth attempt whose worker stopped, returns the due runs), `_claim`,
+    `_facts`, `_record_items`, `_defer`, `_fail` and `_complete`. Each write names its attempt and
+    is refused once another attempt holds the run.
+  - Platform functions (definer, `w360_platform` only): the days, a day's items and the unsettled
+    payments for platform administrators; reconciling a day and resolving an item for platform
+    owners, with the reason or note in the platform audit log.
+- **Domain:** `billing/settlement-recon.ts` (the schedule from 06:00 India time, filling a week of
+  gaps after the first run; matching; missed payments and refunds applied through
+  `applyPaymentById` and `applyRefundById`; retries after 5, 15, 60, 180 and 360 minutes for
+  failures that may pass, failure on a refusal or after six attempts; attempts that lost their
+  claim stop writing), `platform/reconciliation.ts` (the staff service and what each reason means),
+  and the settlement report in the Razorpay client, a strict reader: an item with any field it
+  cannot read is kept as unreadable, never read partly.
+- **Worker:** the `billing.settlement-recon` queue, one attempt at a time; the minute billing sweep
+  creates the runs and queues one signed job per due run.
+- **Web:** Platform → Reconciliation lists the latest 90 days (status, counts, amounts), the paid
+  top-ups no settlement has shown and, for owners, a form to reconcile a day. A day's page lists
+  what needs a person first, with what each reason means and what to do, then what the check
+  recorded, resolutions and matches; owners run the day again and resolve items with a note.
+- **Found while building:**
+  - Running a day again reset the attempts to zero, so items from an earlier run could look seen by
+    the new attempt and survive although Razorpay no longer listed them. Writes are now fenced by an
+    attempt number that never resets.
+  - The dispute rule flagged only matched transactions, so a missed payment with a dispute was
+    credited by the check without a person hearing of it, and flagged only when the day ran again
+    (the integration test caught the change). A dispute on a transaction HyFib matched or recorded
+    now waits for a person, decided after a missed payment or refund is applied; a transaction
+    already waiting keeps its own reason and shows the dispute.
+- **Tests:** the Razorpay stand-in serves the settlement report (with Razorpay's documented
+  parameter errors) and settles payments and refunds on a day, in tests and through a test-only
+  control route for e2e; the fake Checkout can close right after paying, so HyFib never hears of
+  the payment.
+- **CI:** the end-to-end job has 60 minutes and its test step 50 (were 45 and 40). The step took
+  33.5 of its 40 minutes on b2b7614 (148 tests, all passing on the first attempt), and the new spec
+  adds about a minute per browser, which left no room for one retry of a long test.
+- **Docs:** ADR-059; ARCHITECTURE §7; SECURITY (controls, Phase 5 rules, platform roles);
+  THREAT-MODEL T83; RUNBOOKS §9 (reconciliation); DEPLOYMENT (Razorpay); DATA-RETENTION;
+  RELEASE-CHECKLIST; Razorpay research R-110, R-111 and two open questions; BACKLOG P5-05;
+  FEATURE-MATRIX H-037.
+- **Mutation checks:** 62 guards broken one at a time; all 62 make a test fail. They cover the
+  schedule (days not over, backfilling, gaps, the next attempt time, a stopped sixth attempt),
+  claims (the lease, six attempts, the attempt number), stale attempts recording, completing,
+  deferring and failing, items Razorpay no longer lists, resolutions and recorded items kept on a
+  day run again, totals, the refunded-payment lookup, the unsettled list (eight reconciled days,
+  settled payments, refunded top-ups), the owner, reason, note, date, running and audit checks, the
+  read check and grants, matching (amounts, mandates, applying missed payments and refunds,
+  transfers, adjustments, currencies, disputes before and after applying), the outcomes of applying,
+  writing what was recorded at once, paging, refusals and retries, superseded attempts, and the
+  report reader's checks.
+
+### Test commands and results (local, 2026-09-28)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `pnpm test` (unit)                                                          | 308 passed. New: `billing/settlement-recon.test.ts` 7 (India's calendar day, the schedule's latest day around 06:00, matching payments and refunds, what is left to a person, disputes decided after applying, types) and 3 settlement-report tests in `billing/razorpay.test.ts` (the documented request and fields, unreadable items never read partly, parameters Razorpay would reject refused before calling).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 398 passed, including the new `settlement-recon.test.ts` 10: the schedule (the previous day from 06:00, a week of gaps after the first run, never before it, a day not over refused); missed payments and refunds recorded once through the usual paths with the receipt email, matches for companies found through HyFib's records, totals, no notes or card fields stored; every mismatch, review and not-HyFib class changing nothing (disputes on what HyFib matched or recorded waiting for a person, a missed payment with a dispute credited first); a day run again keeping what was recorded and resolved and removing what Razorpay no longer lists; paging; retries, refusals, six attempts and a stopped sixth attempt; a failure while recording, keeping what the attempt had recorded; a superseded attempt; staff access and privileges; the unsettled payments (eight reconciled days, settled payments and refunded top-ups left out). |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 398 passed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 76 passed (38 × 2) in one full run (16.0 min), including the new `settlement-recon.spec.ts` on both projects: a customer pays and closes Checkout at once, so HyFib hears nothing and adds no credit; Razorpay settles the payment days later together with a payment of another integration; a platform owner reconciles the day and the minute billing sweep hands it to the worker; the missed payment is recorded by the check and credited with the usual receipt email; the other payment waits as not HyFib's and is resolved with a note; no page scrolls sideways on the phone.                                                                                                                                                                                                                                                                                                                                                  |
+| Mutation checks                                                             | 62 guards broken one at a time; all 62 make a test fail                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+
+### Known gaps
+
+- Not run against Razorpay test mode yet (staging, RELEASE-CHECKLIST). The documentation does not
+  say which time zone the report's day uses, in what order items come and whether pages stay stable,
+  when a day's report is complete, or how disputes and held items appear (research, open questions
+  21 and 22).
+- Alerts and emails, a CSV export of a run, matching settlements with bank statements (UTR), fee
+  and tax accounting, companies' own Razorpay accounts, automatic handling of adjustments, disputes
+  and transfers, and instant settlements are not built.
+- Firefox and WebKit run the new spec in CI only; only Chromium is installed locally.
+
 ## 2026-09-28 — Fix: the ledger's balance check under PostgreSQL 17 (migration 0033)
 
 Status: **Fixed and verified locally on PostgreSQL 17.11 and 18.6.** CI on f74a824 (staff refunds)

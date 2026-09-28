@@ -63,6 +63,7 @@ const KEPT = [
   'app.wallet_holds',
   'app.wallets',
   'ops.security_events',
+  'ops.settlement_recon_items',
   'ops.support_access_grants',
   'ops.tenant_deletions',
 ];

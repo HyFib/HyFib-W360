@@ -95,6 +95,12 @@ export interface StandInPaymentLink {
   notify: unknown;
 }
 
+/**
+ * A settled transaction as the settlement report shows it (R-111). Kept raw so tests can also add
+ * items of shapes HyFib must refuse to read.
+ */
+export type StandInReconItem = Record<string, unknown>;
+
 export interface RecordedCall {
   method: string;
   path: string;
@@ -119,6 +125,8 @@ export interface RazorpayStandInState {
   omitShortUrl: boolean;
   /** The status of refunds created from now on (default `processed`; `pending` as with normal speed). */
   refundStatusOnCreate: StandInRefund['status'];
+  /** Settlement report items by settlement day (YYYY-MM-DD), in report order. */
+  settlements: Map<string, StandInReconItem[]>;
   /** Behaviours consumed by the next calls of each kind (default: ok). */
   queues: {
     createOrder: CallBehaviour[];
@@ -127,6 +135,7 @@ export interface RazorpayStandInState {
     fetch: CallBehaviour[];
     createPaymentLink: CallBehaviour[];
     paymentLinks: CallBehaviour[];
+    recon: CallBehaviour[];
   };
   calls: RecordedCall[];
 }
@@ -154,6 +163,16 @@ export interface RazorpayStandIn {
   setLinkStatus(linkId: string, status: StandInPaymentLink['status']): StandInPaymentLink;
   /** Razorpay finishes a pending refund; a failed one no longer counts as refunded. */
   setRefundStatus(refundId: string, status: StandInRefund['status']): StandInRefund;
+  /**
+   * Razorpay settles transactions on `date` (YYYY-MM-DD): each listed captured payment and processed
+   * refund (by default every one not settled yet) becomes a report item, and `extra` raw items are
+   * appended as they are. A payment's fee is a test fixture (2% including 18% GST), not Razorpay's
+   * pricing.
+   */
+  settle(
+    date: string,
+    options?: { paymentIds?: string[]; refundIds?: string[]; extra?: StandInReconItem[] },
+  ): StandInReconItem[];
   close(): Promise<void>;
 }
 
@@ -240,6 +259,7 @@ export async function startRazorpayStandIn(options: {
     paymentLinks: new Map(),
     omitShortUrl: false,
     refundStatusOnCreate: 'processed',
+    settlements: new Map(),
     queues: {
       createOrder: [],
       recurring: [],
@@ -247,6 +267,7 @@ export async function startRazorpayStandIn(options: {
       fetch: [],
       createPaymentLink: [],
       paymentLinks: [],
+      recon: [],
     },
     calls: [],
   };
@@ -493,6 +514,86 @@ export async function startRazorpayStandIn(options: {
     return refund;
   };
 
+  const settled = new Set<string>();
+  function settle(
+    date: string,
+    options: { paymentIds?: string[]; refundIds?: string[]; extra?: StandInReconItem[] } = {},
+  ): StandInReconItem[] {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error(`stand-in: bad settlement day ${date}`);
+    const settledAt = Math.floor(Date.parse(`${date}T12:00:00Z`) / 1000);
+    const settlementId = id('setl');
+    const utr = `UTR${randomBytes(6).toString('hex').toUpperCase()}`;
+    const common = (createdAt: number) => ({
+      currency: 'INR',
+      on_hold: false,
+      settled: true,
+      created_at: createdAt,
+      settled_at: settledAt,
+      settlement_id: settlementId,
+      posted_at: null,
+      credit_type: 'default',
+      description: null,
+      notes: null,
+      settlement_utr: utr,
+      card_network: null,
+      card_issuer: null,
+      card_type: null,
+      dispute_id: null,
+    });
+    const items: StandInReconItem[] = [];
+    const paymentIds =
+      options.paymentIds ??
+      [...state.payments.values()].filter((p) => p.captured && !settled.has(p.id)).map((p) => p.id);
+    for (const paymentId of paymentIds) {
+      const payment = state.payments.get(paymentId);
+      if (!payment) throw new Error(`stand-in: unknown payment ${paymentId}`);
+      const fee = Math.floor((payment.amount * 2) / 100);
+      settled.add(payment.id);
+      items.push({
+        ...common(settledAt - 2 * 86_400),
+        entity_id: payment.id,
+        type: 'payment',
+        debit: 0,
+        credit: payment.amount - fee,
+        amount: payment.amount,
+        fee,
+        tax: Math.floor((fee * 18) / 118),
+        payment_id: null,
+        order_id: payment.orderId,
+        order_receipt: state.orders.get(payment.orderId)?.receipt ?? null,
+        method: payment.method,
+      });
+    }
+    const refundIds =
+      options.refundIds ??
+      [...state.refunds.values()]
+        .filter((r) => r.status === 'processed' && !settled.has(r.id))
+        .map((r) => r.id);
+    for (const refundId of refundIds) {
+      const refund = state.refunds.get(refundId);
+      if (!refund) throw new Error(`stand-in: unknown refund ${refundId}`);
+      const payment = state.payments.get(refund.paymentId);
+      settled.add(refund.id);
+      items.push({
+        ...common(settledAt - 86_400),
+        entity_id: refund.id,
+        type: 'refund',
+        debit: refund.amount,
+        credit: 0,
+        amount: refund.amount,
+        fee: 0,
+        tax: 0,
+        payment_id: refund.paymentId,
+        order_id: payment?.orderId ?? null,
+        order_receipt: null,
+        method: payment?.method ?? null,
+      });
+    }
+    items.push(...(options.extra ?? []));
+    state.settlements.set(date, [...(state.settlements.get(date) ?? []), ...items]);
+    return items;
+  }
+
   const server: Server = createServer((req, res) => {
     void (async () => {
       const url = new URL(req.url ?? '/', 'http://stand-in');
@@ -555,6 +656,21 @@ export async function startRazorpayStandIn(options: {
         if (status !== 'processed' && status !== 'failed')
           return rzpError(res, 400, 'BAD_REQUEST_ERROR', 'unknown refund status');
         return json(res, 200, refundJson(finishRefund(refund, status)));
+      }
+      // TEST-ONLY: Razorpay settles transactions on a day (see `settle`).
+      if (req.method === 'POST' && url.pathname === '/__stand-in/settle') {
+        try {
+          const items = settle(String(body?.date ?? ''), {
+            ...(Array.isArray(body?.payment_ids)
+              ? { paymentIds: body.payment_ids.map(String) }
+              : {}),
+            ...(Array.isArray(body?.refund_ids) ? { refundIds: body.refund_ids.map(String) } : {}),
+            ...(Array.isArray(body?.extra) ? { extra: body.extra as StandInReconItem[] } : {}),
+          });
+          return json(res, 200, { items });
+        } catch (error) {
+          return rzpError(res, 400, 'BAD_REQUEST_ERROR', String(error));
+        }
       }
       // TEST-ONLY: what the hosted payment page does when the customer pays the link in full.
       if (req.method === 'POST' && url.pathname === '/__stand-in/pay-link') {
@@ -808,6 +924,32 @@ export async function startRazorpayStandIn(options: {
           card: token.card,
         });
       }
+      // GET /v1/settlements/recon/combined (R-110): daily reports only.
+      if (method === 'GET' && url.pathname === '/v1/settlements/recon/combined') {
+        return behave(state.queues.recon, () => {
+          const q = (name: string) => url.searchParams.get(name) ?? '';
+          const invalid = (field: string, description: string) => ({
+            status: 400,
+            body: { error: { code: 'BAD_REQUEST_ERROR', description, field } },
+          });
+          if (!/^\d{4}$/.test(q('year'))) return invalid('year', 'The year must be 4 digits.');
+          const month = Number(q('month'));
+          if (!/^\d{1,2}$/.test(q('month')) || month < 1 || month > 12)
+            return invalid('month', 'The month is not a valid month.');
+          const day = Number(q('day'));
+          if (!/^\d{1,2}$/.test(q('day')) || day < 1 || day > 31)
+            return invalid('day', 'The day must be between 1 and 2 digits.');
+          const count = Number(q('count') || '10');
+          if (!Number.isInteger(count) || count < 1)
+            return invalid('count', 'The count must be at least 1.');
+          if (count > 1000) return invalid('count', 'The count may not be greater than 1000.');
+          const skip = Number(q('skip') || '0');
+          if (!Number.isInteger(skip) || skip < 0) return invalid('skip', 'The skip is invalid.');
+          const date = `${q('year')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+          const items = (state.settlements.get(date) ?? []).slice(skip, skip + count);
+          return { status: 200, body: { entity: 'collection', count: items.length, items } };
+        });
+      }
       // GET /v1/disputes/:id
       if (method === 'GET' && seg[1] === 'disputes' && seg[2]) {
         const dispute = state.disputes.get(seg[2]);
@@ -878,6 +1020,7 @@ export async function startRazorpayStandIn(options: {
       if (!refund) throw new Error(`stand-in: unknown refund ${refundId}`);
       return finishRefund(refund, status);
     },
+    settle,
     close: () =>
       new Promise<void>((resolve, reject) => {
         server.closeAllConnections();

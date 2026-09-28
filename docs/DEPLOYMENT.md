@@ -160,6 +160,10 @@ authenticated by Meta's signature and the flow's encryption key, not by a sessio
    unreachable): before launch, run a test-mode top-up, a failed payment, a refund and a card
    mandate end to end, and confirm the Checkout CSP (script `checkout.razorpay.com`, frame and
    connect `api.razorpay.com` / `checkout.razorpay.com`) is sufficient in all supported browsers.
+6. The daily settlement reconciliation (ADR-059) uses the same API keys and needs nothing else to
+   configure: the worker reads `GET /v1/settlements/recon/combined` for the previous day from
+   06:00 India time. It runs only where Razorpay is configured, and the reconciliation page says so
+   otherwise. Keep the worker's clock in sync (NTP): it decides which day is over.
 
 ## Commerce (companies' own Razorpay accounts)
 

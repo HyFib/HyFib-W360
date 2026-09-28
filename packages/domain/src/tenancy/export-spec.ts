@@ -31,6 +31,8 @@ export const EXPORT_EXCLUDED_TABLES: Readonly<Record<string, string>> = {
   'ops.email_outbox': 'The encrypted queue of emails.',
   'ops.provider_asset_bindings': 'Internal routing of WhatsApp account and number ids.',
   'ops.security_events': "HyFib's security records.",
+  'ops.settlement_recon_items':
+    "HyFib's reconciliation of its own Razorpay settlements (payments to HyFib, not company data).",
   'ops.tenant_deletions': "HyFib's register of deletion requests.",
 };
 

@@ -72,6 +72,39 @@ export interface RazorpayDispute {
   status: 'open' | 'under_review' | 'won' | 'lost' | 'closed' | string;
 }
 
+/**
+ * One transaction of a day's settlement report (R-110, R-111), with only what reconciliation needs:
+ * notes, description, order receipt and card fields are not read (they can carry another
+ * integration's customer data).
+ */
+export interface RazorpayReconItem {
+  entityId: string;
+  /** `payment`, `refund`, `transfer`, `adjustment`, or another type Razorpay adds. */
+  type: string;
+  amount: number;
+  debit: number;
+  credit: number;
+  fee: number;
+  tax: number;
+  currency: string | null;
+  onHold: boolean | null;
+  settled: boolean | null;
+  settlementId: string | null;
+  settlementUtr: string | null;
+  /** Unix seconds. */
+  createdAt: number | null;
+  settledAt: number | null;
+  paymentId: string | null;
+  orderId: string | null;
+  disputeId: string | null;
+  method: string | null;
+}
+
+/** A page of a settlement report: `null` where Razorpay returned an item HyFib cannot read. */
+export interface RazorpayReconPage {
+  items: (RazorpayReconItem | null)[];
+}
+
 /** A Payment Link as Razorpay reports it (research R-016, R-108). */
 export interface RazorpayPaymentLink {
   id: string;
@@ -138,6 +171,80 @@ function mapOrder(json: Record<string, unknown>): RazorpayOrder | null {
     currency: str(json.currency) ?? '',
     receipt: str(json.receipt),
     status: str(json.status) ?? 'unknown',
+  };
+}
+
+const RECON_ID_RE = /^[A-Za-z0-9_]{1,64}$/;
+
+/**
+ * Reads one settlement report item. Every field HyFib keeps must have the documented shape: an
+ * item with a field of another shape is unreadable as a whole (null), never read partly.
+ */
+function mapReconItem(json: Record<string, unknown>): RazorpayReconItem | null {
+  const entityId = str(json.entity_id);
+  const type = str(json.type);
+  const amount = num(json.amount);
+  if (!entityId || !RECON_ID_RE.test(entityId) || !type || !/^[a-z_]{1,32}$/.test(type))
+    return null;
+  if (amount === null || !Number.isSafeInteger(amount) || amount < 0) return null;
+  const minor = (value: unknown): number | undefined => {
+    if (value === null || value === undefined) return 0;
+    return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+      ? value
+      : undefined;
+  };
+  const debit = minor(json.debit);
+  const credit = minor(json.credit);
+  const fee = minor(json.fee);
+  const tax = minor(json.tax);
+  if (debit === undefined || credit === undefined || fee === undefined || tax === undefined) {
+    return null;
+  }
+  const text = (value: unknown, re: RegExp): string | null | undefined => {
+    if (value === null || value === undefined || value === '') return null;
+    return typeof value === 'string' && re.test(value) ? value : undefined;
+  };
+  const flag = (value: unknown): boolean | null | undefined =>
+    value === null || value === undefined ? null : typeof value === 'boolean' ? value : undefined;
+  const time = (value: unknown): number | null | undefined =>
+    value === null || value === undefined
+      ? null
+      : typeof value === 'number' && Number.isSafeInteger(value) && value > 0
+        ? value
+        : undefined;
+  const fields = {
+    currency: text(json.currency, /^[A-Z]{3}$/),
+    onHold: flag(json.on_hold),
+    settled: flag(json.settled),
+    settlementId: text(json.settlement_id, RECON_ID_RE),
+    settlementUtr: text(json.settlement_utr, /^[A-Za-z0-9]{1,64}$/),
+    createdAt: time(json.created_at),
+    settledAt: time(json.settled_at),
+    paymentId: text(json.payment_id, RECON_ID_RE),
+    orderId: text(json.order_id, RECON_ID_RE),
+    disputeId: text(json.dispute_id, RECON_ID_RE),
+    method: text(json.method, /^[a-z_]{1,32}$/),
+  };
+  if (Object.values(fields).some((value) => value === undefined)) return null;
+  return {
+    entityId,
+    type,
+    amount,
+    debit,
+    credit,
+    fee,
+    tax,
+    currency: fields.currency ?? null,
+    onHold: fields.onHold ?? null,
+    settled: fields.settled ?? null,
+    settlementId: fields.settlementId ?? null,
+    settlementUtr: fields.settlementUtr ?? null,
+    createdAt: fields.createdAt ?? null,
+    settledAt: fields.settledAt ?? null,
+    paymentId: fields.paymentId ?? null,
+    orderId: fields.orderId ?? null,
+    disputeId: fields.disputeId ?? null,
+    method: fields.method ?? null,
   };
 }
 
@@ -564,6 +671,42 @@ export class RazorpayClient {
             }
           : null;
       },
+    );
+  }
+
+  /**
+   * GET /v1/settlements/recon/combined (R-110): up to `count` (1-1000) of the transactions settled on
+   * `date` (YYYY-MM-DD, the day as Razorpay counts it), after skipping `skip`. A read: safe to repeat.
+   */
+  fetchSettlementRecon(input: { date: string; count: number; skip: number }) {
+    const parts = /^(\d{4})-(\d{2})-(\d{2})$/.exec(input.date);
+    if (!parts) throw new Error('Invalid settlement date');
+    if (!Number.isInteger(input.count) || input.count < 1 || input.count > 1000)
+      throw new Error('Invalid settlement page size');
+    if (!Number.isSafeInteger(input.skip) || input.skip < 0)
+      throw new Error('Invalid settlement page offset');
+    return this.request(
+      'GET',
+      '/v1/settlements/recon/combined',
+      {
+        query: {
+          year: parts[1] as string,
+          month: parts[2] as string,
+          day: parts[3] as string,
+          count: String(input.count),
+          skip: String(input.skip),
+        },
+      },
+      (json): RazorpayReconPage | null =>
+        Array.isArray(json.items)
+          ? {
+              items: (json.items as unknown[]).map((item) =>
+                typeof item === 'object' && item !== null && !Array.isArray(item)
+                  ? mapReconItem(item as Record<string, unknown>)
+                  : null,
+              ),
+            }
+          : null,
     );
   }
 }

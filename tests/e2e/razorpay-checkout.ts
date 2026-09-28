@@ -20,12 +20,19 @@ window.Razorpay = class {
   open() {
     fetch('https://checkout.razorpay.com/__e2e/pay?order_id=' + encodeURIComponent(this.options.order_id))
       .then((r) => r.json())
-      .then((response) => this.options.handler(response));
+      .then((response) => { if (response.razorpay_payment_id) this.options.handler(response); });
   }
 };`;
 
-/** Routes Razorpay Checkout in this page to the test-only replacement above. */
-export async function routeFakeCheckout(page: Page) {
+/**
+ * Routes Razorpay Checkout in this page to the test-only replacement above. With `closeAfterPaying`,
+ * the payment is taken but the page never hears of it (the customer closed Checkout right after
+ * paying); `onPaid` receives each payment id.
+ */
+export async function routeFakeCheckout(
+  page: Page,
+  options: { closeAfterPaying?: boolean; onPaid?: (paymentId: string) => void } = {},
+) {
   await page.route('https://checkout.razorpay.com/v1/checkout.js', (route) =>
     route.fulfill({ contentType: 'application/javascript', body: FAKE_CHECKOUT }),
   );
@@ -36,9 +43,11 @@ export async function routeFakeCheckout(page: Page) {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ order_id: orderId }),
     });
+    const response = (await res.json()) as { razorpay_payment_id?: string };
+    if (response.razorpay_payment_id) options.onPaid?.(response.razorpay_payment_id);
     await route.fulfill({
       status: res.status,
-      json: await res.json(),
+      json: options.closeAfterPaying ? { closed: true } : response,
       headers: { 'access-control-allow-origin': '*' },
     });
   });

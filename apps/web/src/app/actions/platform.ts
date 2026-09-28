@@ -64,6 +64,26 @@ export async function requestCreditRefundAction(
   });
 }
 
+export async function requestSettlementReconAction(
+  input: unknown,
+): Promise<ActionResult<{ runId: string }>> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    const result = await runtime.platformReconciliation.requestDay(actor, input);
+    refresh();
+    return result;
+  });
+}
+
+export async function resolveSettlementItemAction(input: unknown): Promise<ActionResult> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    await runtime.platformReconciliation.resolveItem(actor, input);
+    refresh();
+    return null;
+  });
+}
+
 export async function createRateCardAction(input: unknown): Promise<ActionResult<{ id: string }>> {
   return runAction(async () => {
     const { actor, runtime } = await actorForAction();

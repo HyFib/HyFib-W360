@@ -414,7 +414,16 @@ async function retireToken(deps: BillingProviderDeps, customerId: string, tokenI
   if (!deleted.ok && deleted.kind !== 'permanent') throw transient(deleted, 'token deletion');
 }
 
-async function applyRefund(deps: BillingProviderDeps, paymentId: string, refundId: string) {
+/**
+ * Records a refund Razorpay processed, fetched first (never from a payload): the refund of a payment
+ * that credited a top-up goes through app.billing_record_refund, once per refund id. Used for
+ * `refund.processed` and by the settlement reconciliation (ADR-059).
+ */
+export async function applyRefundById(
+  deps: BillingProviderDeps,
+  paymentId: string,
+  refundId: string,
+) {
   const refund = await deps.razorpay.fetchRefund(paymentId, refundId);
   if (!refund.ok) {
     if (refund.kind === 'permanent') return 'unknown_refund' as const;
@@ -629,7 +638,7 @@ export async function processRazorpayReceipt(
         const refundId = entityId(payload, 'refund');
         const paymentId = entityField(payload, 'refund', 'payment_id');
         result =
-          refundId && paymentId ? await applyRefund(deps, paymentId, refundId) : 'no refund id';
+          refundId && paymentId ? await applyRefundById(deps, paymentId, refundId) : 'no refund id';
         break;
       }
       case 'refund.failed': {

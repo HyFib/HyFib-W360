@@ -6,6 +6,7 @@ import {
   billingEventProcessHandler,
   billingSweepHandler,
   creditRefundHandler,
+  settlementReconHandler,
 } from './handlers/billing';
 import { automationHttpHandler, automationRunHandler } from './handlers/automations';
 import { campaignRunHandler } from './handlers/campaigns';
@@ -185,6 +186,12 @@ async function main(): Promise<void> {
     QUEUES.billingCreditRefund.name,
     { localConcurrency: 2, batchSize: 1 },
     logFailures(rt, QUEUES.billingCreditRefund.name, creditRefundHandler(rt)),
+  );
+  // Daily settlement reconciliation with Razorpay (ADR-059), queued by the billing sweep.
+  await rt.boss.work(
+    QUEUES.billingSettlementRecon.name,
+    { localConcurrency: 1, batchSize: 1 },
+    logFailures(rt, QUEUES.billingSettlementRecon.name, settlementReconHandler(rt)),
   );
   await rt.boss.work(
     QUEUES.billingSweep.name,

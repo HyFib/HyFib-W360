@@ -317,8 +317,15 @@ verification, app review, Embedded Signup configuration).
   all of a paid top-up from the company's platform page, with a reason in the platform audit log;
   the credit is held at once, the worker asks Razorpay with an idempotency key and checks until
   Razorpay processes or fails the refund, and the refund is recorded from what Razorpay reports.
-  Remaining: daily reconciliation reports, refunds asked for by companies, a platform-wide refunds
-  list, and GST invoices (GST treatment needs tax review).
+  **[Daily settlement reconciliation built; Razorpay traffic simulated by a test-only stand-in]**
+  (ADR-059): each day from 06:00 India time the worker reads Razorpay's settlement report for the
+  previous day and matches every transaction against HyFib's records; a captured payment or
+  processed refund HyFib had missed is fetched and recorded through the usual paths, everything
+  else that does not match waits on `/platform/reconciliation` for a platform owner to resolve with
+  a note; paid top-ups no settlement showed 7 days after payment are listed. Remaining: refunds
+  asked for by companies, a platform-wide refunds list, alerts for reconciliation findings, bank
+  statement (UTR) matching, fee and tax accounting, and GST invoices (GST treatment needs tax
+  review).
 - **P5-06 Mandatory financial tests** **[29 integration tests + 2 e2e]**: concurrent spends on last
   funds; many low-balance triggers → one attempt; repeated and out-of-order events; timeout after
   capture (reconciliation); delayed success after UI timeout; decline; mandate revocation; cap

@@ -10,11 +10,13 @@ import {
   findAutoRechargeCandidates,
   findBillingReconciliationDue,
   findDueCreditRefunds,
+  findDueSettlementRecons,
   findStaleReceipts,
   processCreditRefund,
   processRazorpayReceipt,
   reconcileTopup,
   releaseExpiredHolds,
+  runSettlementRecon,
   sweepPlanStates,
   type BillingProviderDeps,
 } from '@w360/domain';
@@ -140,11 +142,52 @@ export function creditRefundHandler(rt: WorkerRuntime) {
 }
 
 /**
+ * `billing.settlement-recon`: one attempt at a day's settlement reconciliation (ADR-059). The run
+ * row decides: a run that is not due (finished, or held by another attempt) is left alone, and
+ * Razorpay failures leave it due again for the minute sweep. Only unexpected errors fail the job.
+ */
+export function settlementReconHandler(rt: WorkerRuntime) {
+  return async ([job]: Job<unknown>[]): Promise<void> => {
+    if (!job) return;
+    const auth = await authorizeJob(rt, job.data, {
+      expectedKind: 'billing.settlement-recon',
+      requireActiveTenant: false,
+      requireActiveActor: false,
+    });
+    if (
+      auth.outcome !== 'authorized' ||
+      auth.envelope.tenantId !== null ||
+      !UUID_RE.test(auth.envelope.ref)
+    ) {
+      rt.logger.warn(
+        { jobId: job.id, outcome: auth.outcome },
+        'settlement reconciliation job dropped',
+      );
+      return;
+    }
+    const deps = providerDeps(rt);
+    if (!deps) {
+      rt.logger.warn(
+        { jobId: job.id },
+        'settlement reconciliation skipped: Razorpay is not configured',
+      );
+      return;
+    }
+    const result = await runSettlementRecon(deps, auth.envelope.ref);
+    rt.logger.info(
+      { jobId: job.id, runId: auth.envelope.ref, ...result },
+      'settlement reconciliation attempt',
+    );
+  };
+}
+
+/**
  * Every minute: move plans whose trial, paid period or grace period ended to their next state and
  * announce reached automation run limits (ADR-051); re-signal Razorpay receipts whose signal was
  * lost, reconcile open manual top-ups and due auto-recharge attempts with Razorpay (the backstop
- * for missed webhooks), queue due steps of staff credit refunds (ADR-058), start auto-recharge
- * checks for companies below their threshold, and release expired holds.
+ * for missed webhooks), queue due steps of staff credit refunds (ADR-058) and the settlement
+ * reconciliations owed (ADR-059), start auto-recharge checks for companies below their threshold,
+ * and release expired holds.
  */
 export function billingSweepHandler(rt: WorkerRuntime) {
   return async (): Promise<void> => {
@@ -231,6 +274,21 @@ export function billingSweepHandler(rt: WorkerRuntime) {
         { singletonKey: item.refundId },
       );
     }
+    // Settlement reconciliation (ADR-059): the runs the daily schedule owes, and runs due again.
+    const recons = await findDueSettlementRecons(rt.db, rt.clock.now());
+    for (const run of recons) {
+      await rt.jobs.enqueue(
+        null,
+        QUEUES.billingSettlementRecon.name,
+        rt.signer.sign({
+          kind: 'billing.settlement-recon',
+          tenantId: null,
+          actorUserId: null,
+          ref: run.runId,
+        }),
+        { singletonKey: run.runId },
+      );
+    }
     const candidates = await findAutoRechargeCandidates(rt.db);
     for (const tenantId of candidates) {
       await rt.jobs.enqueue(
@@ -245,13 +303,17 @@ export function billingSweepHandler(rt: WorkerRuntime) {
         { singletonKey: `check:${tenantId}` },
       );
     }
-    if (receipts.length + due.length + refunds.length + candidates.length + released > 0) {
+    if (
+      receipts.length + due.length + refunds.length + recons.length + candidates.length + released >
+      0
+    ) {
       rt.logger.info(
         {
           receipts: receipts.length,
           due: due.length,
           reconciled,
           refunds: refunds.length,
+          settlementRecons: recons.length,
           candidates: candidates.length,
           released,
         },

@@ -984,7 +984,7 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   (ADR-056).
 - **Not built yet:** staff-started deletion, stored exports and other formats.
 
-## 7. Commercial model and billing **[built: plans and entitlements, wallet, top-ups, auto-recharge, statements and receipts, staff refunds of unused credit — verified against a local Razorpay stand-in only; paying for plans in HyFib and tax invoices planned]**
+## 7. Commercial model and billing **[built: plans and entitlements, wallet, top-ups, auto-recharge, statements and receipts, staff refunds of unused credit, daily settlement reconciliation — verified against a local Razorpay stand-in only; paying for plans in HyFib and tax invoices planned]**
 
 - **Who pays Meta:** as a Meta Tech Provider HyFib has no credit line; each customer adds its own
   payment method and Meta bills them directly (`tenants.billing_mode = 'direct_meta'`, the default).
@@ -1111,6 +1111,32 @@ payment_requested → succeeded`; before each provider call it is written as `un
   definer functions that settle the hold. A due company deletion waits until no refund is open
   (the worker checks before it starts). Statements label the hold "Reserved for a refund" and its
   release "Refund reservation released"; the Billing page and the receipt show refunds in progress.
+
+- **Daily settlement reconciliation (0034, ADR-059) [built]:** the minute billing sweep calls
+  `ops.settlement_recon_due` with the latest day it may reconcile (the previous day in India from
+  06:00 India time). That creates the run for the day and for any of the 6 days before it without
+  one (never before the first day ever reconciled), fails runs that used their six attempts, and
+  returns the runs due; one signed `billing.settlement-recon` job is queued for each. The job claims
+  its run (`ops.settlement_recon_claim`: a 15-minute lease and a new attempt number that every
+  write of the attempt names, so an attempt whose lease expired cannot write). It reads
+  `GET /v1/settlements/recon/combined` a page of 1,000 at a time (R-110, R-111; at most 50 pages)
+  and looks each page's provider ids up in HyFib's records (`ops.settlement_recon_facts`: top-ups by
+  payment and order, card mandates by authorisation payment, order and refund, recorded refunds by
+  ledger key through the refunded payment's top-up). A payment on a top-up's order that did not
+  credit it goes through `applyPaymentById`, and a refund of a payment that credited a top-up but
+  was never recorded goes through `applyRefundById`: both fetch from Razorpay first and use the
+  functions the webhooks use, so the reconciliation is the backstop for lost webhooks and records
+  nothing twice. Everything else is classified (matched, a mismatch, for review, not HyFib's) and
+  written with `ops.settlement_recon_record_items`; `ops.settlement_recon_complete` removes items
+  Razorpay no longer lists for the day and totals the run. A Razorpay failure that may pass leaves
+  the run due again after 5, 15, 60, 180 and 360 minutes (`ops.settlement_recon_defer`); any other
+  4xx fails it (`ops.settlement_recon_fail`). The runtime roles have no privileges on
+  `ops.settlement_recon_runs` or `ops.settlement_recon_items`: the worker writes through these
+  definer functions, and `/platform/reconciliation` reads through
+  `ops.platform_settlement_recon_runs`, `…_run` and `…_unsettled` (platform staff) and acts through
+  `ops.platform_request_settlement_recon` and `ops.platform_resolve_settlement_item` (platform
+  owners, audited with a reason or note). Items keep provider ids, amounts, fees and HyFib's match;
+  never notes, descriptions, receipts or card fields.
 
 - **Browser security:** the billing and WhatsApp-channels pages get their own CSP allowing only
   that provider's script and frame. Because a CSP belongs to the loaded document, links to these

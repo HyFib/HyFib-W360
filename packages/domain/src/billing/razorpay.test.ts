@@ -226,3 +226,158 @@ describe('RazorpayClient Payment Links', () => {
     });
   });
 });
+
+describe('RazorpayClient settlement reports', () => {
+  const json = (status: number, body: unknown) =>
+    new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+  // The documented sample (R-111), trimmed.
+  const payment = {
+    entity_id: 'pay_DEXrnipqTmWVGE',
+    type: 'payment',
+    debit: 0,
+    credit: 97100,
+    amount: 100000,
+    currency: 'INR',
+    fee: 2900,
+    tax: 0,
+    on_hold: false,
+    settled: true,
+    created_at: 1567692556,
+    settled_at: 1568176960,
+    settlement_id: 'setl_DGlQ1Rj8os78Ec',
+    posted_at: null,
+    credit_type: 'default',
+    description: 'Recurring Payment via Subscription',
+    notes: 'Beam me up Scotty.',
+    payment_id: null,
+    settlement_utr: '1568176960vxp0rj',
+    order_id: 'order_DEXrnRiR3SNDHA',
+    order_receipt: null,
+    method: 'card',
+    card_network: 'MasterCard',
+    card_issuer: 'KARB',
+    card_type: 'credit',
+    dispute_id: null,
+  };
+  function clientReturning(response: () => Response) {
+    const seen: string[] = [];
+    const client = new RazorpayClient({
+      baseUrl: 'https://api.razorpay.test',
+      keyId: 'rzp_test_unit',
+      keySecret: 'unit-secret',
+      fetchImpl: async (input) => {
+        seen.push(String(input));
+        return response();
+      },
+    });
+    return { client, seen };
+  }
+
+  it('asks for one day a page at a time and keeps only what reconciliation needs', async () => {
+    const { client, seen } = clientReturning(() =>
+      json(200, { entity: 'collection', count: 1, items: [payment] }),
+    );
+    const result = await client.fetchSettlementRecon({
+      date: '2022-06-11',
+      count: 1000,
+      skip: 2000,
+    });
+    expect(seen).toEqual([
+      'https://api.razorpay.test/v1/settlements/recon/combined?year=2022&month=06&day=11&count=1000&skip=2000',
+    ]);
+    expect(result).toEqual({
+      ok: true,
+      data: {
+        items: [
+          {
+            entityId: 'pay_DEXrnipqTmWVGE',
+            type: 'payment',
+            amount: 100000,
+            debit: 0,
+            credit: 97100,
+            fee: 2900,
+            tax: 0,
+            currency: 'INR',
+            onHold: false,
+            settled: true,
+            settlementId: 'setl_DGlQ1Rj8os78Ec',
+            settlementUtr: '1568176960vxp0rj',
+            createdAt: 1567692556,
+            settledAt: 1568176960,
+            paymentId: null,
+            orderId: 'order_DEXrnRiR3SNDHA',
+            disputeId: null,
+            method: 'card',
+          },
+        ],
+      },
+    });
+  });
+
+  it('marks an item it cannot read instead of reading it partly', async () => {
+    const unreadable = [
+      { ...payment, entity_id: undefined },
+      { ...payment, entity_id: 'pay with spaces' },
+      { ...payment, type: 'Payment!' },
+      { ...payment, amount: -1 },
+      { ...payment, amount: 10.5 },
+      { ...payment, fee: '2900' },
+      { ...payment, currency: 'inr' },
+      { ...payment, on_hold: 'no' },
+      { ...payment, settled_at: 'yesterday' },
+      { ...payment, order_id: 'order/../../x' },
+      { ...payment, method: 'Card' },
+      'not an object',
+      ['nor', 'an', 'array'],
+      null,
+    ];
+    const { client } = clientReturning(() =>
+      json(200, { entity: 'collection', count: unreadable.length, items: unreadable }),
+    );
+    const result = await client.fetchSettlementRecon({ date: '2022-06-11', count: 100, skip: 0 });
+    expect(result.ok && result.data.items).toEqual(unreadable.map(() => null));
+    // Missing optional fields read as absent; missing amounts other than `amount` as zero.
+    const sparse = clientReturning(() =>
+      json(200, {
+        items: [
+          { entity_id: 'adj_EhcHONhX4ChgNC', type: 'adjustment', amount: 1012, currency: 'INR' },
+        ],
+      }),
+    );
+    const read = await sparse.client.fetchSettlementRecon({
+      date: '2022-06-11',
+      count: 1,
+      skip: 0,
+    });
+    expect(read.ok && read.data.items[0]).toMatchObject({
+      entityId: 'adj_EhcHONhX4ChgNC',
+      debit: 0,
+      credit: 0,
+      fee: 0,
+      tax: 0,
+      settlementId: null,
+      settledAt: null,
+      method: null,
+    });
+    const noItems = clientReturning(() => json(200, { entity: 'collection', count: 0 }));
+    const empty = await noItems.client.fetchSettlementRecon({
+      date: '2022-06-11',
+      count: 1,
+      skip: 0,
+    });
+    expect(empty.ok || empty.kind).toBe('unknown');
+  });
+
+  it('refuses a day, page size or offset Razorpay would reject before calling', () => {
+    const { client, seen } = clientReturning(() => json(200, { items: [] }));
+    expect(() => client.fetchSettlementRecon({ date: '11-06-2022', count: 10, skip: 0 })).toThrow();
+    expect(() => client.fetchSettlementRecon({ date: '2022-06-11', count: 0, skip: 0 })).toThrow();
+    expect(() =>
+      client.fetchSettlementRecon({ date: '2022-06-11', count: 1001, skip: 0 }),
+    ).toThrow();
+    expect(() =>
+      client.fetchSettlementRecon({ date: '2022-06-11', count: 10, skip: -1 }),
+    ).toThrow();
+    expect(seen).toEqual([]);
+  });
+});

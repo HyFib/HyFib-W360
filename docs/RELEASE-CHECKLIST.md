@@ -154,6 +154,12 @@ made. This checklist records the evidence required per gate; unchecked items blo
       `refund.processed` arrives (and by the worker's check with the webhook disabled); a refusal
       (refunds not enabled or no balance) gives the credit back; confirm with Razorpay how long a
       normal refund takes and that its fee is not returned (R-077, R-079)
+- [ ] Settlement reconciliation against Razorpay test mode or the live account: confirm with Razorpay
+      which time zone the report's `day` uses and whether `skip` pages are stable (R-110); run a day
+      with a settled test payment, a refund and a Dashboard refund and check each item's outcome;
+      confirm how a lost chargeback appears in the report (R-111) before relying on the dispute
+      items; check the page's credited, debited and fee totals against the Dashboard's settlement
+      report for the day
 - [ ] Tenant-isolation and security gates passing in CI on the release commit
 - [ ] Measured load behaviour against the test envelope (k6 results)
 - [ ] Backup restoration drill performed and timings recorded (RPO/RTO)

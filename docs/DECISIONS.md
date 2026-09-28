@@ -1573,3 +1573,83 @@ and normally take 5–7 working days (R-077, R-079). The email and the pages say
 **Not built:** refunds asked for by companies, refunds of spent credit, refunds started here for a
 company being deleted, instant refunds (`optimum`), several refunds of one top-up at once, a
 platform-wide refunds list, and the daily reconciliation report (P5-05).
+
+## ADR-059 Daily settlement reconciliation with Razorpay: every settled transaction matched against HyFib's records, missed payments and refunds recorded through the usual paths, the rest for platform owners (2026-09-28)
+
+Decision: every day the worker reads Razorpay's settlement report for the previous day
+(`GET /v1/settlements/recon/combined`, R-110, R-111), a page of up to 1,000 transactions at a
+time, and matches each transaction against HyFib's records. The result is kept as a run (one per
+day) with an item per transaction, for platform staff.
+
+**Matching.** The report's `entity_id`, `payment_id` and `order_id` are used only to look up
+HyFib's own records, like the ids in a webhook:
+
+| Transaction       | HyFib's record                                                            | Result                                                                                                                                                        |
+| ----------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| payment           | a top-up credited by this payment                                         | matched, or `amount_differs`                                                                                                                                  |
+| payment           | a card mandate's authorisation payment                                    | matched                                                                                                                                                       |
+| payment           | a top-up's order, not credited by this payment                            | fetched and applied as a webhook would be: credited now (recorded), or `second_payment` (another payment paid the top-up), `amount_differs` or `not_captured` |
+| payment           | a mandate's authorisation order, another payment                          | for review (`mandate_payment`)                                                                                                                                |
+| refund            | a refund HyFib recorded (ledger key `refund:<id>`)                        | matched, or `amount_differs`                                                                                                                                  |
+| refund            | a mandate's authorisation refund, or a refund of an authorisation payment | matched                                                                                                                                                       |
+| refund            | a refund of a payment that credited a top-up, not recorded                | fetched and recorded as `refund.processed` would be (recorded), or `refund_not_processed` or `refund_exceeds_payment`                                         |
+| refund            | a refund of another payment on a top-up's order (never credited)          | matched                                                                                                                                                       |
+| payment or refund | none                                                                      | not HyFib's                                                                                                                                                   |
+| transfer          | none (HyFib does not use Route)                                           | not HyFib's                                                                                                                                                   |
+| adjustment        | none                                                                      | for review                                                                                                                                                    |
+
+A transaction with an unknown type, another currency or fields HyFib cannot read is listed for
+review too, and so is a payment or refund HyFib matched or recorded that carries a `dispute_id`: the
+report documents only the dispute's id, not which transaction carries a chargeback's deduction
+(R-111). A missed payment or refund with a dispute is still recorded first, so the same transaction
+reads the same on every run; a transaction already waiting for a person keeps its own reason and
+shows the dispute. Lost chargebacks are still recorded from `payment.dispute.lost`, fetched first.
+
+**What the reconciliation records by itself** goes through the existing paths: `applyPaymentById`
+credits only a payment fetched as captured, through `app.billing_credit_topup` (exactly once), and
+a refund is fetched and recorded through `app.billing_record_refund`, which also completes a staff
+refund request (ADR-058). This is the backstop for webhooks that never arrived. The top-up sweep
+stops checking an order after 24 hours, and nothing checked refunds, so a lost `refund.processed`
+left refunded credit spendable. Nothing else changes automatically. A person looks at amounts that
+differ, second payments, adjustments, disputes and transactions that are not HyFib's; refunds are
+made in the Razorpay Dashboard, and HyFib's records change only through the normal paths.
+
+**The other direction.** Paid top-ups whose payment has not appeared in any settlement 7 days after
+the payment are listed, oldest first. A top-up is listed only when every day from its payment to 7
+days later has a completed run; the page counts the days without one. Seven days is HyFib's own
+threshold: settlement is normally T+2 working days (R-082).
+
+**Runs.**
+
+- The minute billing sweep creates the run for the previous day in India from 06:00 India time. It
+  also creates runs for any of the 7 days before that has none, but never for days before the first
+  day ever reconciled, so turning this on does not backfill history. The documentation does not say
+  which time zone the report's day uses (R-110); HyFib asks for India's calendar day.
+- A platform owner can reconcile an earlier day (up to a year back) or run a day again, with a
+  reason in the platform audit log.
+- One signed `billing.settlement-recon` job per run. A claim takes a 15-minute lease and a new
+  attempt number, and a stale attempt cannot write. Reading the report is safe to repeat: a failure
+  that may pass (timeout, lost response, 429, 5xx) is retried after 5, 15, 60, 180 and 360 minutes.
+  After 6 attempts, or on any other 4xx (keys, parameters), the run fails with the error and waits for a
+  platform owner.
+- Items are kept per run, type and transaction id: running a day again keeps what an earlier
+  attempt recorded and people's resolutions. Items Razorpay no longer lists for the day are removed
+  when an attempt completes.
+
+**Stored per item:** the transaction id and type, amount, debit, credit, fee and tax, currency, on
+hold, settled, the settlement id and UTR, times, the payment, order and dispute ids and the method;
+the match (company, top-up, HyFib's amount), status and reason; a resolution (who, when, a note).
+Not stored: notes, description, order receipt and card fields, which can carry another
+integration's customer data. Runs total fees and tax for information; the platform bears
+Razorpay's fee (ADR-058).
+
+**Access.** Platform owners and operators read runs: payments to HyFib (company names, amounts,
+provider ids), no company content. Platform owners run days and resolve items with a note, in the
+platform audit log. The worker has no privileges on the tables: it writes through SECURITY DEFINER
+functions that check the attempt, and cannot read them back.
+
+**Retention:** runs and items are billing records, kept with the ledger.
+
+**Not built:** alerts and emails, a CSV export of a run, reconciling settlements with bank
+statements (UTR), fee and tax accounting, companies' own Razorpay accounts, automatic handling of
+adjustments, disputes and transfers, and instant settlements.

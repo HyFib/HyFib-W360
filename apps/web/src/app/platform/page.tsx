@@ -48,6 +48,12 @@ export default async function PlatformHome({
             Plans
           </Link>
           <Link
+            href="/platform/reconciliation"
+            className="text-primary underline-offset-4 hover:underline"
+          >
+            Reconciliation
+          </Link>
+          <Link
             href="/platform/rate-cards"
             className="text-primary underline-offset-4 hover:underline"
           >
