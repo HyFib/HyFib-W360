@@ -317,6 +317,53 @@ describe('ledger integrity', () => {
     }
     expect(await balances(c.tenantId)).toMatchObject({ available: 0 });
 
+    // The check runs as its definer (0033). PostgreSQL 17 fires deferred triggers as the role that is
+    // current when they fire, so a posting a definer function makes for a role that cannot read the
+    // ledger (the platform role asking for a refund) must still be checked, and still commit.
+    const checker = await adminQuery<{ definer: boolean; owner: string }>(
+      `SELECT p.prosecdef AS definer, pg_get_userbyid(p.proowner) AS owner FROM pg_proc p
+        WHERE p.oid = 'app.assert_ledger_transaction_balanced()'::regprocedure`,
+    );
+    expect(checker).toEqual([{ definer: true, owner: 'w360_definer' }]);
+    const [clearing] = await adminQuery<{ id: string }>(
+      `SELECT id FROM app.ledger_accounts WHERE tenant_id = $1 AND code = 'payment_clearing'`,
+      [c.tenantId],
+    );
+    for (const balanced of [true, false]) {
+      const platform = await dbs.adminPool.connect();
+      try {
+        await platform.query('BEGIN');
+        await platform.query('SET LOCAL ROLE w360_definer');
+        const txId = uuidv7();
+        await platform.query(
+          `INSERT INTO app.ledger_transactions (id, tenant_id, wallet_id, kind, idempotency_key, actor_type)
+           VALUES ($1, $2, $3, 'topup_credit', $4, 'system')`,
+          [txId, c.tenantId, account!.wallet_id, `role-test-${String(balanced)}`],
+        );
+        await platform.query(
+          `INSERT INTO app.ledger_entries (tenant_id, transaction_id, account_id, direction, amount_minor)
+           VALUES ($1, $2, $3, 'credit', 700)`,
+          [c.tenantId, txId, account!.id],
+        );
+        if (balanced) {
+          await platform.query(
+            `INSERT INTO app.ledger_entries (tenant_id, transaction_id, account_id, direction, amount_minor)
+             VALUES ($1, $2, $3, 'debit', 700)`,
+            [c.tenantId, txId, clearing!.id],
+          );
+        }
+        await platform.query('SET LOCAL ROLE w360_platform');
+        // Fires the deferred checks now, as the platform role; rolled back below either way.
+        const fire = platform.query('SET CONSTRAINTS ALL IMMEDIATE');
+        if (balanced) await fire;
+        else await expect(fire).rejects.toThrow(/unbalanced/);
+      } finally {
+        await platform.query('ROLLBACK').catch(() => undefined);
+        platform.release();
+      }
+    }
+    expect(await balances(c.tenantId)).toMatchObject({ available: 0 });
+
     // Fund the wallet through the real path, then try to rewrite history as the definer role.
     const topup = await startTopup(c, 20_000);
     const paid = standIn.pay(topup.orderId);

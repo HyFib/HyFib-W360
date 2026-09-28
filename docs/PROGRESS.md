@@ -1,5 +1,42 @@
 # Progress
 
+## 2026-09-28 — Fix: the ledger's balance check under PostgreSQL 17 (migration 0033)
+
+Status: **Fixed and verified locally on PostgreSQL 17.11 and 18.6.** CI on f74a824 (staff refunds)
+failed the PostgreSQL 17 integration job: 11 tests, every one that asks for a staff refund.
+
+### Completed
+
+- **Cause:** `app.assert_ledger_transaction_balanced()`, the deferred constraint trigger that checks
+  at commit that every ledger transaction balances (0004), ran with the privileges of whichever role
+  fired it. PostgreSQL 17 fires deferred triggers as the role current at `COMMIT`. A platform
+  owner's refund request is the first posting made for the platform role, which cannot read
+  `app.ledger_entries`: `ops.platform_request_credit_refund` (definer) holds the credit, and the
+  commit failed with "permission denied for table ledger_entries". PostgreSQL 18 fires AFTER
+  triggers as the role that queued them (the definer), so the PostgreSQL 18 job and every local run
+  (18.6) passed.
+- **Fix (migration 0033):** the check is now SECURITY DEFINER, owned by `w360_definer`, with its
+  pinned search path. It reads only the entries of the transaction named by the inserted row, and a
+  trigger function cannot be called directly, so no role gains anything. Migration 0032 was already
+  pushed, so it is fixed forward.
+- **Test:** `billing.test.ts` checks the function's owner and security, and fires the deferred
+  check as the platform role after a definer posting: a balanced posting passes and an unbalanced
+  one is refused. Without the fix, both parts fail on PostgreSQL 17 (checked); on 18 the owner check
+  catches it.
+
+### Test commands and results (local, 2026-09-28)
+
+| Command                                                   | Result                                                                                        |
+| --------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`      | 0 problems / all files formatted / all workspace packages pass                                |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker) | Before the fix: `credit-refunds.test.ts` 10 of 11 failed with the CI error. After: 388 passed |
+| `pnpm test:integration` (PostgreSQL 18.6)                 | 388 passed                                                                                    |
+
+### Known gaps
+
+- Local runs use PostgreSQL 18; a change to definer functions or deferred triggers should also run
+  the integration suite against a PostgreSQL 17 container (`TEST_DATABASE_ADMIN_URL`), as CI does.
+
 ## 2026-09-28 — Phase 5: staff refunds of unused service credit (P5-05, part)
 
 Status: **Staff refunds of unused service credit implemented and locally verified with test data
