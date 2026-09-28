@@ -883,12 +883,20 @@ ones do not. The company can free one, or staff can add extra seats or numbers (
 sells them) or move it to a larger version. A lower limit never removes anything.
 
 **Automations stopped answering customers.** The month's automation runs may be used up: the
-company's billing managers were emailed once, and Billing shows the runs used and the period.
+company's billing managers were emailed when 80% were used (limits of 5 or more) and again once all
+were (ADR-062), and Billing shows the runs used and the period.
 Runs already in progress continue; runs from store events are recorded as "Not sent: the month's
 automation runs are used up". Add run packs (when the version sells them) or change the plan; the
 next customer message starts a run. The period starts on the day the current plan or trial started
 (usage anchor), whatever the billing interval. If the plan leaves out Automations, nothing starts
 ("not in the plan") and the automation pages say so.
+
+**A usage warning or used-up email did not come.** Each counter (company, automation runs or API
+requests, usage period) gets at most one warning, at 80% of the limit rounded up (none for limits of
+1 to 4, none when the limit is reached before a sweep saw 80%), and one used-up notice;
+`app.usage_counters.warned_at` and `notified_at` say when the sweep queued them. A counter of an
+earlier period is marked without an email, and a company that is suspended, restricted or being
+deleted gets none. Queued emails go out through the email outbox like every other notice.
 
 **The sweep did not move a plan on.** The billing sweep runs every minute and logs `plan sweep`
 (and `plan sweep failed for a company; will retry` with the company id and error, rolled back and

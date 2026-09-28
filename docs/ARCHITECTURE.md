@@ -839,7 +839,7 @@ true`); the same key with another request (method, path and body hashed) answers
   `forbidden` with reason `not_in_plan` (creating and rotating keys are refused too); a month used
   up answers 429 `rate_limited` with reason `quota_exceeded` and `Retry-After` until the next
   period. The minute plan sweep emails the billing managers once per period
-  (`ops.api_quota_reached`).
+  (`ops.api_quota_reached`), and once before, at 80% of the limit (ADR-062).
 - **OpenAPI** (`api/openapi.ts`): `GET /api/v1/openapi.json` (no key; cacheable 5 minutes) is built
   from the zod schemas that validate requests; a unit test checks it against the route handlers.
 - **Web:** Settings → API keys (`developer.manage`): the month's API requests and the plan's limit
@@ -1021,12 +1021,14 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   `app.accept_invitation` checks the same limit in SQL. Live automation runs started by customer
   messages or store events consume `app.usage_counters` atomically (`ON CONFLICT … DO UPDATE …
 WHERE used < limit`), per monthly period from `usage_anchor`; the sweep announces a used-up month
-  once (`notified_at`). The tenant context drops the write permissions of modules the plan leaves
-  out (`MODULE_WRITE_PERMISSIONS`); workers check the module before starting runs, order messages
-  and cart reminders (`not_in_plan`). Public API requests are counted the same way against the
-  version's monthly API requests (0035, ADR-061; §6N). Platform staff see usage as counts only
-  (`ops.platform_tenant_usage`). Charging for plans (Razorpay Subscriptions), self-serve changes,
-  proration and plan invoices are not built: staff set paid periods.
+  once (`notified_at`) and warns once at 80% of the limit (`warned_at`, 0036, ADR-062), each time
+  locking the counter and checking it against the current limit and period (a counter of an
+  earlier period is marked without an email). The tenant context drops the write permissions of
+  modules the plan leaves out (`MODULE_WRITE_PERMISSIONS`); workers check the module before
+  starting runs, order messages and cart reminders (`not_in_plan`). Public API requests are counted
+  the same way against the version's monthly API requests (0035, ADR-061; §6N). Platform staff see
+  usage as counts only (`ops.platform_tenant_usage`). Charging for plans (Razorpay Subscriptions),
+  self-serve changes, proration and plan invoices are not built: staff set paid periods.
 - **Ledger (0004_billing):** one INR wallet per company with five accounts (`wallet_available`,
   `wallet_held`, `payment_clearing`, `service_revenue`, `dispute_losses`). `ledger_transactions` and
   `ledger_entries` are append-only (trigger), balances are maintained by trigger from the entries,

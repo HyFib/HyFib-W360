@@ -96,4 +96,6 @@ export const usageCounters = appSchema.table('usage_counters', {
   periodStart: tz('period_start').notNull(),
   used: integer('used').notNull(),
   notifiedAt: tz('notified_at'),
+  /** When the billing managers were warned that 80% of the limit was used (ADR-062). */
+  warnedAt: tz('warned_at'),
 });

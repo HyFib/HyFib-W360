@@ -128,11 +128,14 @@ describe('database roles', () => {
       expect(await can('w360_auth', fn), fn).toBe(false);
       expect(await can('w360_platform', fn), fn).toBe(false);
     }
-    // Plans (0023): the sweep functions for the worker, the usage counts for platform staff, the
-    // entitlements for both, and the plan-state triggers for nobody.
+    // Plans (0023): the sweep functions for the worker (with the API request notice of 0035 and the
+    // warnings of 0036), the usage counts for platform staff, the entitlements for both, and the
+    // plan-state triggers for nobody.
     for (const fn of [
       'ops.plan_transitions_due(integer)',
       'ops.usage_limits_reached(integer)',
+      'ops.api_quota_reached(integer)',
+      'ops.usage_warnings_due(integer)',
       'app.apply_plan_transition(uuid)',
     ]) {
       expect(await can('w360_app', fn), fn).toBe(true);

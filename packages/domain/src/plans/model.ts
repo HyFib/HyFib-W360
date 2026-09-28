@@ -99,6 +99,17 @@ export const PLAN_BOUNDS = {
   apiRequests: 1_000_000_000,
 } as const;
 
+/**
+ * The count at which the billing managers are warned before a monthly limit (ADR-062): 80% of the
+ * limit, rounded up, when that is still below the limit; null for no warning (no limit, a limit of
+ * 0, and limits of 1 to 4). Integer arithmetic, so it matches `ceil(limit * 0.8)` in SQL.
+ */
+export function warningThreshold(limit: number | null): number | null {
+  if (limit === null) return null;
+  const threshold = Math.ceil((limit * 4) / 5);
+  return threshold < limit ? threshold : null;
+}
+
 export const PLAN_INTERVAL_LABELS: Record<number, string> = {
   1: 'per month',
   3: 'per quarter',

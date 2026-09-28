@@ -1725,3 +1725,33 @@ Decision: one more limit per plan version, `api_requests_monthly`:
 
 Not built: packs of extra requests, per-key or per-endpoint quotas, alerts before the limit, and
 quotas for outgoing webhooks (deliveries are not API requests).
+
+## ADR-062 A warning before a monthly limit is reached (2026-09-28)
+
+Context: automation runs (ADR-051) and public API requests (ADR-061) are limited per monthly usage
+period. The billing managers are emailed once the month's allowance is used up, when automations
+have already stopped starting or the API is already refusing requests; nothing tells them earlier.
+
+Decision:
+
+- **When:** once a counter reaches 80% of its limit (rounded up) while still below it, the billing
+  managers are emailed once for that counter, that is once per company, metric and period. A limit
+  so small that 80% rounds up to the limit itself (1 to 4) gets no warning: the used-up notice is the
+  first. A company that jumps from below 80% to the limit between two sweeps gets only the used-up
+  notice.
+- **How:** `ops.usage_warnings_due` lists counters of active companies with a limit, at or over the
+  threshold, below the limit, neither warned nor announced; the limit is read from the company's
+  current plan (with run packs for automation runs). The minute plan sweep then, in the company's
+  scope, locks each counter (`SELECT … FOR UPDATE` while `warned_at` is empty), checks it again
+  against the company's current limit and period, and sets `warned_at` in the transaction that
+  queues the email, so of two sweeps that listed a counter only one sends it.
+- **The used-up notices work the same way** (a fix to ADR-051 and ADR-061, which set `notified_at`
+  first and emailed without checking the period): a counter of an earlier usage period is marked
+  without an email, since a lowered limit or a new paid period could otherwise make last period's
+  count look like this month's; a counter no longer due under the current limit, because the limit
+  changed after the sweep listed it, is left unmarked for a later sweep to decide.
+- **Where it shows:** the email says how much is used, what happens at the limit and when the next
+  period starts; the Billing plan card marks a counter at or over the threshold as nearly used.
+
+Not built: a threshold chosen per company or per member, warnings for seats, numbers, teams or live
+automations (they refuse additions, they do not run out during the month), and in-app notices.

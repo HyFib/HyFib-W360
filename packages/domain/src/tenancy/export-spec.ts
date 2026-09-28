@@ -1341,7 +1341,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
   },
   {
     table: 'app.usage_counters',
-    columns: ['id', 'metric', 'period_start', 'used', 'notified_at'],
+    columns: ['id', 'metric', 'period_start', 'used', 'notified_at', 'warned_at'],
   },
   {
     table: 'app.wallet_holds',

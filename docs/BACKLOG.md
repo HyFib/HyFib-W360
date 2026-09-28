@@ -290,10 +290,12 @@ verification, app review, Embedded Signup configuration).
   in permissions and workers; plan card, limit hints and banners for companies; platform plan
   screens; **[monthly API requests per plan version built, locally verified]** (ADR-061: empty
   for no limit, 0 leaves the public API out; counted atomically, refused with 429 when used up and
-  403 without the API, one notice per period). Remaining: paying for plans in HyFib (Razorpay
-  Subscriptions, P5-07), self-serve plan changes and higher-plan trials, proration, plan invoices,
-  usage alerts before a limit is reached, plan-change emails to companies, packs of extra API
-  requests and AI credits (Phase 6).
+  403 without the API, one notice per period); **[a warning at 80% of the month's automation runs
+  or API requests built, locally verified]** (ADR-062: one email per counter, marked on the plan
+  card; the used-up notices now skip counters of an earlier period). Remaining: paying for plans in
+  HyFib (Razorpay Subscriptions, P5-07), self-serve plan changes and higher-plan trials, proration,
+  plan invoices, thresholds chosen per company, in-app notices, plan-change emails to companies,
+  packs of extra API requests and AI credits (Phase 6).
 - **P5-02 Ledger** **[built, locally verified]**: accounts, append-only journal balanced at commit,
   balances by trigger, holds, settlements, releases (expiry sweep), refunds and chargebacks as
   compensating postings; INR paise; monthly statements computed from the ledger (ADR-057).

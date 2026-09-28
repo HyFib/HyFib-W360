@@ -7,6 +7,7 @@ import {
   moduleOfPermission,
   planGivesAccess,
   usagePeriod,
+  warningThreshold,
 } from './model';
 
 const at = (iso: string) => new Date(iso);
@@ -107,5 +108,20 @@ describe('addOnsForPlan', () => {
       extraNumbers: '0',
       runPacks: '0',
     });
+  });
+});
+
+describe('warningThreshold', () => {
+  it('is 80% of a monthly limit rounded up, when that is still below the limit', () => {
+    expect(warningThreshold(5)).toBe(4);
+    expect(warningThreshold(7)).toBe(6);
+    expect(warningThreshold(10)).toBe(8);
+    expect(warningThreshold(11)).toBe(9);
+    expect(warningThreshold(1_000)).toBe(800);
+    expect(warningThreshold(1_000_000_000)).toBe(800_000_000);
+  });
+
+  it('gives no warning without a limit, for no allowance, or when 80% rounds up to the limit', () => {
+    for (const limit of [null, 0, 1, 2, 3, 4]) expect(warningThreshold(limit)).toBeNull();
   });
 });

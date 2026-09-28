@@ -1,5 +1,69 @@
 # Progress
 
+## 2026-09-28 — Phase 5: warnings before a monthly limit (P5-01)
+
+Status: **Implemented and locally verified with test data only.** A company's billing managers now
+hear once when the month's automation runs or API requests reach 80% of the plan's limit, before
+automations stop or the API refuses requests. The used-up notices no longer go out for a counter of
+an earlier usage period.
+
+### Completed
+
+- **Design (ADR-062):** one warning per counter (company, metric and monthly period) at 80% of the
+  limit rounded up, while still below it; none for limits of 1 to 4, where 80% rounds up to the
+  limit itself; a month that jumps to the limit between two sweeps gets only the used-up notice.
+- **Schema (migration 0036):** `app.usage_counters.warned_at` (the runtime role may update it, as
+  it may `used` and `notified_at`; the company data export includes it, as the export's
+  classification test requires) and `ops.usage_warnings_due`, which lists counters of active
+  companies at or over the threshold of their current limit (with run packs for automation runs)
+  and below it, neither warned nor announced (ids only; SECURITY DEFINER, executable by the app
+  role only).
+- **Domain:** `warningThreshold` (integer arithmetic matching `ceil(limit * 0.8)` in SQL) and the
+  minute plan sweep's `warnBeforeLimit`. The three counter notices (the warning and both used-up
+  notices) now lock the counter in the company's scope (`SELECT … FOR UPDATE` while unsent), check
+  it against the company's current limit and period, and mark it in the transaction that queues the
+  email. A counter of an earlier period is marked without an email. Before, the used-up notices set
+  `notified_at` first and emailed without checking the period, so a lowered limit or a new paid
+  period could make last period's count look like this month's. A counter no longer due, because
+  its limit changed after the sweep listed it, is left unmarked for a later sweep.
+- **Web:** the Billing plan card marks the month's automation runs or API requests at 80% or more
+  of the limit as "nearly used up".
+- **Tests:** `usage-warnings.test.ts` (7), the threshold in `plans/model.test.ts`, and the
+  isolation suite now checks that `ops.api_quota_reached` (0035) and `ops.usage_warnings_due` are
+  executable by the worker role only. `api-quota.spec.ts` now gives the company five API requests a
+  month: at four the Billing plan card shows "4 of 5 (nearly used up)" (with no sideways scrolling
+  on the phone), the fifth passes and the sixth is refused.
+- **Docs:** ADR-062; ARCHITECTURE §6N and §7; RUNBOOKS (plans: the warning, and a usage email that
+  did not come); BACKLOG P5-01; THREAT-MODEL T86 (and T85's e2e wording); FEATURE-MATRIX H-040 (and
+  H-039's e2e wording).
+- **Mutation checks:** 24 regressions tried one at a time; 23 make a test fail: the listing's
+  threshold, upper bound, limit per metric, run packs, warned and company-status filters; the
+  lock's earlier-period check and mark, the lock itself (caught by two calls waiting on a held
+  counter), the limit per metric and the unsent filter; the warning's mark, range and texts; the
+  sweep's call; both used-up notices' limit checks and marks; the threshold's rounding and bound;
+  and the plan card's mark (through the e2e test). The 24th removed a guard for a limit of 0 that
+  the general rule already covers (80% of 0 is not below 0), so the guard is gone.
+
+### Test commands and results (local, 2026-09-28)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `pnpm test` (unit)                                                          | 317 passed. New: the threshold in `plans/model.test.ts` (5 → 4, 7 → 6, 10 → 8, 11 → 9, 1,000 → 800, a billion → 800 million; none without a limit, for 0 or for 1 to 4).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 412 passed, including the new `usage-warnings.test.ts` 7: one warning at 80% for automation runs and API requests, then the used-up notice and no second warning (the listing checked directly too); none for a limit of 4 or a month that reaches the limit before a sweep sees 80%; run packs in the limit; none for a suspended company; counters of an earlier period marked without a warning or a used-up notice; a counter whose limit changed after the sweep listed it left unmarked; two sweeps waiting on a counter held by another transaction sending one warning. The isolation suite's function grants now include both notice listings, and the export classification test failed until the export spec listed `warned_at`. |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 412 passed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 80 passed (40 × 2) in one full run (17.1 min), including the changed `api-quota.spec.ts` on both projects: staff give the company five API requests a month; after four the Billing plan card shows "4 of 5 (nearly used up)" with no sideways scrolling on the phone; the fifth passes and the sixth answers 429 with reason `quota_exceeded`.                                                                                                                                                                                                                                                                                                                                                                              |
+| Mutation checks                                                             | 24 regressions tried one at a time; 23 make a test fail, the 24th removed a redundant guard (now gone)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+
+### Known gaps
+
+- One warning per counter and period: a limit raised after the warning (run packs, a larger plan
+  within the period) brings no second warning at 80% of the new limit; the used-up notice still
+  comes.
+- Thresholds chosen per company or member, in-app notices, and warnings for seats, numbers, teams
+  or live automations (which refuse additions rather than run out during the month) are not built.
+- Firefox and WebKit run the changed spec in CI only; only Chromium is installed locally.
+
 ## 2026-09-28 — Phase 5: monthly API requests and API access by plan (P5-01, P5-08)
 
 Status: **Implemented and locally verified with test data only.** Each plan version now sets how

@@ -10,7 +10,7 @@ import {
 
 const PASSWORD = 'correct horse battery staple 42';
 
-test('a plan allows two API requests a month: the third is refused until the next period', async ({
+test('a plan allows five API requests a month: nearly used up at four, the sixth is refused', async ({
   page,
   request,
 }) => {
@@ -35,7 +35,7 @@ test('a plan allows two API requests a month: the third is refused until the nex
   const token = await page.getByLabel('API key', { exact: true }).inputValue();
   await page.getByRole('button', { name: 'I have stored the key' }).click();
 
-  // Staff publish a plan with two API requests a month and put the company on it.
+  // Staff publish a plan with five API requests a month and put the company on it.
   await turnOnTwoFactor(page, PASSWORD);
   await makePlatformOwner(email);
   await page.goto('/platform/plans');
@@ -45,7 +45,7 @@ test('a plan allows two API requests a month: the third is refused until the nex
   await page.getByLabel('Price (₹)').fill('499');
   await page.getByLabel('Seats included').fill('2');
   await page.getByLabel('Numbers included').fill('1');
-  await page.getByLabel('API requests a month').fill('2');
+  await page.getByLabel('API requests a month').fill('5');
   await page.getByRole('button', { name: 'Create draft' }).click();
   await expect(page.getByRole('heading', { name: /Developer/ })).toBeVisible();
   await page.getByRole('button', { name: 'Publish' }).click();
@@ -56,7 +56,7 @@ test('a plan allows two API requests a month: the third is refused until the nex
       .locator('dt')
       .filter({ hasText: /^API requests a month$/ })
       .locator('..'),
-  ).toContainText('2');
+  ).toContainText('5');
   await page.goto(`/platform?q=${slug}`);
   await page.getByRole('link', { name: companyName }).click();
   await page.getByLabel('The company gets').selectOption('active');
@@ -69,13 +69,19 @@ test('a plan allows two API requests a month: the third is refused until the nex
   await page.getByRole('button', { name: 'Save plan' }).click();
   await expect(page.getByText('The company’s plan was changed.')).toBeVisible();
 
-  // Two requests pass; the third is refused with the reason and when to retry.
+  // Four requests: 80% of the month's, so the plan card marks them nearly used up (ADR-062).
   const auth = { Authorization: `Bearer ${token}` };
-  for (let i = 0; i < 2; i += 1) {
-    const ok = await request.get('/api/v1/contacts', { headers: auth });
-    expect(ok.status()).toBe(200);
-  }
-  const refused = await request.get('/api/v1/contacts', { headers: auth });
+  const call = () => request.get('/api/v1/contacts', { headers: auth });
+  for (let i = 0; i < 4; i += 1) expect((await call()).status()).toBe(200);
+  await page.goto(`/c/${slug}/billing`);
+  await expect(page.getByRole('row', { name: /API requests this month/ })).toContainText(
+    '4 of 5 (nearly used up)',
+  );
+  await expectNoHorizontalOverflow(page);
+
+  // The fifth passes; the sixth is refused with the reason and when to retry.
+  expect((await call()).status()).toBe(200);
+  const refused = await call();
   expect(refused.status()).toBe(429);
   expect(Number(refused.headers()['retry-after'])).toBeGreaterThan(0);
   const body = (await refused.json()) as { error: { code: string; reason: string } };
@@ -83,8 +89,8 @@ test('a plan allows two API requests a month: the third is refused until the nex
 
   // The company sees the month's use on the API keys page and its plan.
   await page.goto(`/c/${slug}/settings/api-keys`);
-  await expect(page.getByText(/2 of 2\s*API requests/)).toBeVisible();
+  await expect(page.getByText(/5 of 5\s*API requests/)).toBeVisible();
   await page.goto(`/c/${slug}/billing`);
-  await expect(page.getByRole('row', { name: /API requests this month/ })).toContainText('2 of 2');
+  await expect(page.getByRole('row', { name: /API requests this month/ })).toContainText('5 of 5');
   await expectNoHorizontalOverflow(page);
 });

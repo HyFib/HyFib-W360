@@ -4,6 +4,7 @@ import {
   PLAN_MODULE_KEYS,
   PLAN_MODULE_LABELS,
   TENANT_PLAN_STATUS_LABELS,
+  warningThreshold,
   type CompanyPlanOverview,
 } from '@w360/domain';
 import {
@@ -39,14 +40,20 @@ function UsageRow({
   used,
   limit,
   detail,
+  monthly = false,
 }: {
   label: string;
   used: number;
   limit: number | null;
   detail?: string;
+  /** A monthly allowance, which warns at 80% (ADR-062). */
+  monthly?: boolean;
 }) {
   const share = limit === null || limit === 0 ? null : Math.min(100, (used / limit) * 100);
   const full = limit !== null && used >= limit;
+  // At 80% of a monthly limit the billing managers are warned by email (ADR-062).
+  const threshold = monthly ? warningThreshold(limit) : null;
+  const nearly = !full && threshold !== null && used >= threshold;
   return (
     <TR>
       <TD className="font-medium">
@@ -54,9 +61,14 @@ function UsageRow({
         {detail ? <div className="text-xs font-normal text-muted-foreground">{detail}</div> : null}
       </TD>
       <TD>
-        <span className={full ? 'font-medium text-destructive' : ''}>
+        <span
+          className={
+            full ? 'font-medium text-destructive' : nearly ? 'font-medium text-warning' : ''
+          }
+        >
           {used.toLocaleString('en-IN')}
           {limit === null ? '' : ` of ${limit.toLocaleString('en-IN')}`}
+          {nearly ? ' (nearly used up)' : ''}
         </span>
         {share !== null ? (
           <div
@@ -64,7 +76,7 @@ function UsageRow({
             aria-hidden="true"
           >
             <div
-              className={`h-full ${full ? 'bg-destructive' : 'bg-primary'}`}
+              className={`h-full ${full ? 'bg-destructive' : nearly ? 'bg-warning' : 'bg-primary'}`}
               style={{ width: `${share}%` }}
             />
           </div>
@@ -212,6 +224,7 @@ export function PlanCard({
               label="Automation runs this month"
               used={runs.used}
               limit={usage.limits.automationRuns}
+              monthly
               detail={`${day(runs.periodStart)} to ${day(runs.periodEnd)}; test runs are not counted`}
             />
             {usage.limits.apiRequests === 0 ? (
@@ -224,6 +237,7 @@ export function PlanCard({
                 label="API requests this month"
                 used={usage.apiRequests.used}
                 limit={usage.limits.apiRequests}
+                monthly
                 detail={`${day(usage.apiRequests.periodStart)} to ${day(usage.apiRequests.periodEnd)}; requests with the company's API keys`}
               />
             )}
