@@ -34,6 +34,7 @@ export * from './plans/service';
 export * from './plans/sweep';
 export * from './platform/plans';
 export * from './api';
+export * from './webhooks';
 export * from './validation';
 export * from './contacts/phone';
 export * from './contacts/csv';

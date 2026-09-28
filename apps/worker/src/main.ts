@@ -28,7 +28,9 @@ import {
   templateSubmitHandler,
   templateSyncHandler,
 } from './handlers/templates';
+import { webhookDeliverHandler } from './handlers/webhooks';
 import { createWorkerRuntime } from './runtime';
+import { startWebhookListener } from './webhook-listener';
 
 /**
  * Worker process: consumes durable jobs. Safe to run several replicas; pg-boss claims each job
@@ -117,6 +119,13 @@ async function main(): Promise<void> {
     { localConcurrency: concurrency, batchSize: 1, pollingIntervalSeconds: 1 },
     automationHttpHandler(rt),
   );
+  // Outgoing webhooks: one job per company at a time (stately queue), woken by the listener below
+  // and the minute sweep.
+  await rt.boss.work(
+    QUEUES.webhookDeliver.name,
+    { localConcurrency: concurrency, batchSize: 1, pollingIntervalSeconds: 1 },
+    webhookDeliverHandler(rt),
+  );
   await rt.boss.work(
     QUEUES.crmReminder.name,
     { localConcurrency: 2, batchSize: 1 },
@@ -175,6 +184,7 @@ async function main(): Promise<void> {
   await rt.boss.schedule(QUEUES.billingSweep.name, '* * * * *', null, {
     singletonKey: 'billing-sweep',
   });
+  const webhookListener = startWebhookListener(rt);
   rt.logger.info({ concurrency }, 'worker started');
 
   const shutdown = async (signal: string) => {
@@ -182,6 +192,7 @@ async function main(): Promise<void> {
     stopping = true;
     rt.logger.info({ signal }, 'worker stopping');
     try {
+      await webhookListener.close();
       await rt.boss.stop({ graceful: true, timeout: 30_000 });
       await rt.close();
     } catch (error) {

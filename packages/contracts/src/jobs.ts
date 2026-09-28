@@ -12,9 +12,11 @@ export interface QueueDefinition {
   name: string;
   /**
    * 'exclusive': at most one created/retry/active job per singletonKey (used as a wake-up signal
-   * for a durable row, so duplicate signals collapse). 'standard': no key uniqueness.
+   * for a durable row, so duplicate signals collapse). 'stately': at most one queued and one active
+   * job per singletonKey, so a signal that arrives while a job runs queues one successor.
+   * 'standard': no key uniqueness.
    */
-  policy: 'standard' | 'exclusive';
+  policy: 'standard' | 'exclusive' | 'stately';
   retryLimit: number;
   retryDelaySeconds: number;
   retryBackoff: boolean;
@@ -187,6 +189,22 @@ export const QUEUES = {
     expireInSeconds: 60,
     deadLetter: 'dead-letter',
     deleteAfterHours: 72,
+  },
+  /**
+   * Delivers a company's due webhook deliveries (ADR-053). Woken by the capture triggers' notifications
+   * and by the minute sweep; one queued and one active job per company. Each attempt is recorded on
+   * its delivery, so a retried job never repeats a finished delivery.
+   */
+  webhookDeliver: {
+    name: 'webhook.deliver',
+    policy: 'stately',
+    retryLimit: 2,
+    retryDelaySeconds: 10,
+    retryBackoff: true,
+    retryDelayMaxSeconds: 60,
+    expireInSeconds: 300,
+    deadLetter: 'dead-letter',
+    deleteAfterHours: 24,
   },
   crmReminder: {
     name: 'crm.reminder',

@@ -853,6 +853,49 @@ the two SECURITY DEFINER functions (granted to `w360_app` before their ownership
 `w360_definer`), adds `messages.api_key_id` and widens the consent actor check. A failure usually
 means the bootstrap roles are missing (`infra/db/bootstrap-roles.sql`).
 
+## 10O. Outgoing webhooks
+
+**"Our endpoint gets nothing."** In Settings → Webhooks (owners and administrators) check that the
+endpoint is on and subscribed to the event, then open its deliveries. No delivery at all means no
+subscribed event happened since the endpoint was added (events are captured only while an active
+endpoint subscribes; earlier ones are not sent). "Send test event" queues a `ping`; the result
+column names what went wrong: an HTTP status, `timeout` (no complete answer within 10 seconds),
+`dns_failed`, `address_blocked` (the name resolves to a private, loopback or reserved address, which
+is never called), `connect_failed`, `response_too_large` (more than 256 KB) or `invalid_status`.
+Redirects are not followed: the endpoint must answer at the saved URL.
+
+**Deliveries wait and are not sent.** The worker is woken by the `w360_webhooks` notification and
+by the minute sweep. Check the `webhook.deliver` queue (section 3) and the worker log for
+`webhooks delivered` and `webhook dispatch failed`; a listener that cannot connect logs
+`webhook listener could not listen` and delivery then waits for the minute sweep. Suspended and
+restricted companies are not delivered to until they are active again. A delivery in `delivering`
+longer than 45 seconds belongs to a lost worker; the next run attempts it again (the receiver may see
+it twice and deduplicates on the event id).
+
+**An endpoint was turned off automatically.** It failed every attempt for 72 hours; its waiting
+deliveries were marked failed (`endpoint_disabled`), owners and administrators got the
+"Webhook endpoint turned off" email, and the audit log has `webhook.endpoint_auto_disabled`. Fix the
+receiver, turn the endpoint on (its health starts afresh), send a test event, then replay the
+failed deliveries that are still needed (within 30 days) from its deliveries page, filtered to
+failed ones.
+
+**The receiver rejects signatures.** It must compute HMAC-SHA256 over the exact raw body bytes
+prefixed with the `t` value and a dot, compare in constant time against any `v1` value, and allow a
+few minutes of clock difference (the documented tolerance is 5 minutes). After a rotation both the
+new and the previous secret sign for 24 hours. A lost secret cannot be shown again: rotate it. A
+leaked secret: delete the endpoint and add it again (rotation keeps the old secret signing for 24
+hours).
+
+**Duplicates at the receiver.** Delivery is at least once: a retry after a timeout, an interrupted
+attempt or a replay repeats the event with the same `W360-Event-Id` (and `id` in the body); the
+receiver keeps the ids it has processed. Deliveries are not ordered.
+
+**Migration 0025 failed.** It runs in one transaction. It creates the three tables with their
+row-level security and grants, the capture triggers on `app.messages`, `app.consent_events` and
+`app.template_status_events`, the notification trigger and the two SECURITY DEFINER sweep functions
+(granted to `w360_app` before their ownership moves to `w360_definer`). A failure usually means the
+bootstrap roles are missing (`infra/db/bootstrap-roles.sql`).
+
 ## 11. Compromised company (tenant) or account
 
 1. Suspend the company in `/platform` with a reason (stops outbound activity; ingestion continues).

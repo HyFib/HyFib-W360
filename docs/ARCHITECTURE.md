@@ -828,9 +828,68 @@ true`); the same key with another request (method, path and body hashed) answers
   prefix, scopes, author, last use and expiry; creation with the scopes the member may grant; the new
   token shown once with a copy button (kept only in the page's memory); rotation with an overlap;
   revocation.
-- **Not built yet:** outgoing webhooks (P5-09), session, media and interactive messages, listing
-  conversations and messages, starting automations, OAuth apps, IP allowlists per key, monthly API
-  quotas per plan and API access as a plan module.
+- **Not built yet:** session, media and interactive messages, listing conversations and messages,
+  starting automations, OAuth apps, IP allowlists per key, monthly API quotas per plan and API
+  access as a plan module. Outgoing webhooks are section 6O.
+
+## 6O. Outgoing webhooks **[built — verified with local test receivers only; no customer endpoints yet]**
+
+- **Model** (migration 0025, ADR-053): `app.webhook_endpoints` (URL, description, event types, the
+  signing secret encrypted by the keyring with its version, the previous secret and when it stops
+  signing, on/off with the reason, health: failing since, last success, last failure);
+  `app.webhook_events` (what happened: type, message, conversation, contact or template id, the
+  status reached and small non-personal facts; no foreign keys, so erasure and retention never wait
+  on webhook history); `app.webhook_deliveries` (one per event and endpoint: state `pending`,
+  `delivering` with a lease, `succeeded` or `failed`, attempts, next attempt, last status code, error
+  code and duration, the delivery it replays). Composite foreign keys cascade from the endpoint and
+  the event. The runtime role has column grants only for what the services change; it cannot move a
+  delivery to another event or endpoint, edit events, or delete history except with its endpoint.
+- **Capture:** SECURITY INVOKER triggers on `app.messages` (an inbound message from a contact; an
+  outbound message reaching `accepted`, `sent`, `delivered`, `read`, `played`, `failed`, `canceled`
+  or `unknown_outcome`, with the error code and title), `app.consent_events` (every opt-in and
+  opt-out) and `app.template_status_events` (the statuses Meta reports, and deletion) call
+  `app.capture_webhook_event`, which writes an event and its deliveries only when an active endpoint
+  of the row's company subscribes to the type. They run as the role making the change (the runtime
+  role in the company's scope, or a definer function such as `app.erase_contact`), so row security
+  keeps each event in its row's company, and a rolled-back change leaves none. A delivery insert
+  sends an empty `w360_webhooks` notification.
+- **Dispatch:** the worker's LISTEN connection (`apps/worker/src/webhook-listener.ts`) turns a
+  notification into a lookup of active companies with due deliveries (`ops.webhook_dispatch_due`,
+  SECURITY DEFINER), at most one lookup every 250 ms; the per-minute messaging sweep does the same
+  for retries, interrupted attempts and missed notifications, and applies retention. Each company
+  gets a signed `webhook.deliver` job (policy `stately`: one queued and one active per company,
+  singleton key = company id). Suspended and restricted companies are skipped (the job defers).
+- **Delivery** (`webhooks/delivery.ts`): the job claims up to 10 due deliveries (`FOR UPDATE SKIP
+LOCKED`; pending ones due now, then `delivering` ones whose lease expired), builds each payload
+  from the company's current data (`webhooks/payloads.ts`; an erased contact has no number or name,
+  a message that no longer exists ends the delivery as `event_gone`), signs it, sets the lease (the
+  10 s egress deadline plus 35 s) and commits. The POSTs go through the egress client (DNS pinned,
+  private, loopback, link-local, metadata and reserved addresses refused, no redirects, 64 KB sent,
+  responses read up to 256 KB and discarded) with no transaction open. Each outcome is recorded in
+  its own transaction, locking the endpoint before the delivery; an outcome whose attempt no longer
+  owns the delivery (lease expired and re-claimed, or the endpoint deleted) is dropped. A 2xx answer
+  succeeds; anything else is retried at 1 min, 5 min, 30 min, 2 h, 6 h, 12 h and 24 h, and the eighth
+  failure fails the delivery; an interrupted delivery with no attempt left fails as `interrupted`.
+  After 200 attempts a job queues its successor.
+- **Signing:** `W360-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256 of "<t>.<body>">`, one `v1` per
+  secret (the previous secret also signs for 24 hours after a rotation), with `W360-Event-Id`,
+  `W360-Event-Type`, `W360-Delivery-Id`, `W360-Delivery-Attempt` and `User-Agent:
+HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with the AAD
+  `webhook-secret:<company>:<endpoint>:<version>`.
+- **Health:** a success clears the failing state; a failure when the endpoint has been failing for
+  72 hours without a success turns it off (`failing`), fails its waiting deliveries as
+  `endpoint_disabled`, records a system audit entry and emails the company's active owners and
+  administrators (`webhook.endpoint_disabled`) in the same transaction.
+- **Web:** Settings → Webhooks (`developer.manage`): endpoints with state, events, last-24-hour
+  counts, last success, failing since and secret version; adding one (the secret shown once, kept
+  only in the page's memory); sending a test event (`ping`); rotating the secret; turning off and
+  on; deleting. Each endpoint's page lists its latest 100 deliveries (or only failed ones) with
+  attempts, result and timings, replays finished ones (a new delivery of the same event, audited)
+  and edits the URL, description and events. The OpenAPI document describes every event under
+  `webhooks`. Audit entries name the endpoint's host, never its full URL or secret.
+- **Not built yet:** filters beyond the event type, ordering, custom headers, mutual TLS, fixed
+  egress addresses for receivers' allowlists, endpoints per number, and events for conversations,
+  campaigns, automations, contact changes or orders.
 
 ## 7. Commercial model and billing **[built: plans and entitlements, wallet, top-ups, auto-recharge — verified against a local Razorpay stand-in only; paying for plans in HyFib planned]**
 

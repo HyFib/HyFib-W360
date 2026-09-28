@@ -32,6 +32,13 @@ export const emailPayloadSchema = z.discriminatedUnion('kind', [
     lines: z.array(z.string().max(500)).max(10),
     url: z.url().optional(),
   }),
+  z.object({
+    kind: z.literal('webhook.endpoint_disabled'),
+    companyName: z.string().max(120),
+    /** The endpoint's host only, never its full URL. */
+    host: z.string().max(253),
+    url: z.url(),
+  }),
 ]);
 
 export type EmailPayload = z.infer<typeof emailPayloadSchema>;
@@ -158,6 +165,20 @@ export function renderEmail(payload: EmailPayload): RenderedEmail {
           payload.lines,
           payload.url ? { label: 'Open billing', url: payload.url } : undefined,
         ),
+      };
+    }
+    case 'webhook.endpoint_disabled': {
+      const lines = [
+        `A webhook endpoint of ${payload.companyName} (${payload.host}) was turned off because every delivery to it failed for more than 72 hours.`,
+        'Deliveries that were waiting for it are marked failed. When the endpoint works again, turn it back on in Settings, Webhooks, and replay the deliveries you need.',
+      ];
+      return {
+        subject: `Webhook endpoint turned off · ${payload.companyName}`,
+        text: `${lines.join('\n\n')}\n\n${payload.url}`,
+        html: layout('Webhook endpoint turned off', lines, {
+          label: 'Open webhook settings',
+          url: payload.url,
+        }),
       };
     }
   }

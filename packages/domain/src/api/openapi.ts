@@ -1,5 +1,13 @@
 import { z } from 'zod';
 import type { MessageStatus } from '@w360/db';
+import { WEBHOOK_EVENT_INFO, WEBHOOK_LIMITS, WEBHOOK_RETRY_SECONDS } from '../webhooks/model';
+import {
+  consentChangedPayloadSchema,
+  messageReceivedPayloadSchema,
+  messageStatusPayloadSchema,
+  pingPayloadSchema,
+  templateStatusPayloadSchema,
+} from '../webhooks/payloads';
 import { API_LIMITS, API_SCOPE_INFO, API_SCOPE_KEYS } from './model';
 import { apiConsentSchema, apiContactCreateSchema, apiSendMessageSchema } from './resources';
 
@@ -132,6 +140,33 @@ const errors = (...statuses: number[]) =>
 
 const scopeNote = (...scopes: string[]) => `Scope: ${scopes.map((s) => `\`${s}\``).join(' or ')}.`;
 
+const retrySchedule = WEBHOOK_RETRY_SECONDS.map((seconds) =>
+  seconds < 3_600 ? `${seconds / 60} min` : `${seconds / 3_600} h`,
+).join(', ');
+
+/** One webhook the API sends (OpenAPI 3.1 `webhooks`): a signed POST to the company's endpoint. */
+const webhook = (operationId: string, summary: string, description: string, schema: string) => ({
+  post: {
+    operationId,
+    summary,
+    description: `${description} Verify \`W360-Signature\` before trusting the body, and deduplicate on the event id.`,
+    security: [],
+    parameters: [
+      { $ref: '#/components/parameters/WebhookSignature' },
+      { $ref: '#/components/parameters/WebhookEventId' },
+      { $ref: '#/components/parameters/WebhookEventType' },
+      { $ref: '#/components/parameters/WebhookDeliveryId' },
+      { $ref: '#/components/parameters/WebhookDeliveryAttempt' },
+    ],
+    requestBody: { required: true, content: json(ref(schema)) },
+    responses: {
+      '2XX': {
+        description: `Received. Any other answer, or none within 10 seconds, is retried (${retrySchedule}).`,
+      },
+    },
+  },
+});
+
 export function buildOpenApiDocument(serverUrl: string) {
   return {
     openapi: '3.1.0',
@@ -147,6 +182,8 @@ export function buildOpenApiDocument(serverUrl: string) {
         `Limits: ${API_LIMITS.keyRate.refillPerSecond} requests a second per key (bursts of ${API_LIMITS.keyRate.capacity}) and ${API_LIMITS.companyRate.refillPerSecond} per company; JSON bodies up to ${API_LIMITS.bodyBytes / 1024} KB.`,
         '',
         `POST /messages needs an \`Idempotency-Key\` header: a retry with the same key and body returns the first response (header \`Idempotent-Replayed: true\`) and never sends twice; responses are kept ${API_LIMITS.idempotencyHours} hours. Delivery itself follows WhatsApp: read the status with GET /messages/{id}.`,
+        '',
+        `Webhooks: endpoints added in Settings → Webhooks receive the events below as signed JSON POSTs. \`W360-Signature: t=<unix time>,v1=<hex HMAC-SHA256 of "<t>.<raw body>" with the endpoint secret>\` (two \`v1\` values for ${WEBHOOK_LIMITS.previousSecretHours} hours after the secret is rotated); reject a time more than 5 minutes from yours. Answer with a 2xx status within 10 seconds; anything else is retried (${retrySchedule}; ${WEBHOOK_LIMITS.attempts} attempts). Delivery is at least once and unordered: deduplicate on the event id. An endpoint failing for ${WEBHOOK_LIMITS.disableAfterHours} hours is turned off.`,
       ].join('\n'),
     },
     servers: [{ url: serverUrl }],
@@ -289,6 +326,38 @@ export function buildOpenApiDocument(serverUrl: string) {
         },
       },
     },
+    webhooks: {
+      'message.received': webhook(
+        'webhookMessageReceived',
+        WEBHOOK_EVENT_INFO['message.received'].label,
+        WEBHOOK_EVENT_INFO['message.received'].description,
+        'WebhookMessageReceived',
+      ),
+      'message.status': webhook(
+        'webhookMessageStatus',
+        WEBHOOK_EVENT_INFO['message.status'].label,
+        WEBHOOK_EVENT_INFO['message.status'].description,
+        'WebhookMessageStatus',
+      ),
+      'consent.changed': webhook(
+        'webhookConsentChanged',
+        WEBHOOK_EVENT_INFO['consent.changed'].label,
+        WEBHOOK_EVENT_INFO['consent.changed'].description,
+        'WebhookConsentChanged',
+      ),
+      'template.status_changed': webhook(
+        'webhookTemplateStatusChanged',
+        WEBHOOK_EVENT_INFO['template.status_changed'].label,
+        WEBHOOK_EVENT_INFO['template.status_changed'].description,
+        'WebhookTemplateStatusChanged',
+      ),
+      ping: webhook(
+        'webhookPing',
+        'Test event',
+        'Sent only when a member chooses "Send test event" for the endpoint.',
+        'WebhookPing',
+      ),
+    },
     components: {
       securitySchemes: {
         apiKey: { type: 'http', scheme: 'bearer', description: 'A company API key.' },
@@ -308,6 +377,41 @@ export function buildOpenApiDocument(serverUrl: string) {
           required: false,
           schema: { type: 'string', maxLength: API_LIMITS.idempotencyKeyLength },
         },
+        WebhookSignature: {
+          name: 'W360-Signature',
+          in: 'header',
+          required: true,
+          schema: { type: 'string' },
+          description:
+            '`t=<unix time>,v1=<hex HMAC-SHA256 of "<t>.<raw body>">`, with one `v1` per signing secret.',
+        },
+        WebhookEventId: {
+          name: 'W360-Event-Id',
+          in: 'header',
+          required: true,
+          schema: { type: 'string', format: 'uuid' },
+          description:
+            'The event id (also `id` in the body): the same on every attempt and replay.',
+        },
+        WebhookEventType: {
+          name: 'W360-Event-Type',
+          in: 'header',
+          required: true,
+          schema: { type: 'string' },
+        },
+        WebhookDeliveryId: {
+          name: 'W360-Delivery-Id',
+          in: 'header',
+          required: true,
+          schema: { type: 'string', format: 'uuid' },
+          description: 'This delivery; a replay is a new delivery of the same event.',
+        },
+        WebhookDeliveryAttempt: {
+          name: 'W360-Delivery-Attempt',
+          in: 'header',
+          required: true,
+          schema: { type: 'integer', minimum: 1, maximum: WEBHOOK_LIMITS.attempts },
+        },
       },
       schemas: {
         Contact: jsonSchema(apiContactSchema),
@@ -318,6 +422,11 @@ export function buildOpenApiDocument(serverUrl: string) {
         QueuedMessage: jsonSchema(apiQueuedMessageSchema),
         Message: jsonSchema(apiMessageSchema),
         Error: jsonSchema(apiErrorSchema),
+        WebhookMessageReceived: jsonSchema(messageReceivedPayloadSchema),
+        WebhookMessageStatus: jsonSchema(messageStatusPayloadSchema),
+        WebhookConsentChanged: jsonSchema(consentChangedPayloadSchema),
+        WebhookTemplateStatusChanged: jsonSchema(templateStatusPayloadSchema),
+        WebhookPing: jsonSchema(pingPayloadSchema),
       },
     },
   };

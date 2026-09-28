@@ -325,8 +325,16 @@ verification, app review, Embedded Signup configuration).
   API access as a plan module, session, media and interactive messages, conversation and message
   lists, starting automations (W-086), bulk sends in one call, IP allowlists, key expiry reminders,
   tests of the rate limits.
-- **P5-09 Outgoing webhooks**: signing, secret rotation, delivery history, bounded retry, replay,
-  SSRF guard.
+- **P5-09 Outgoing webhooks** **[built, locally verified; delivered to local test receivers only]**
+  (ADR-053): up to 10 endpoints per company (`developer.manage`) for `message.received`,
+  `message.status`, `consent.changed` and `template.status_changed`, captured by database triggers
+  in the company's scope; payloads built when delivered (erased contacts without personal data);
+  HMAC-SHA256 signatures with secrets shown once, encrypted and rotated with a 24-hour overlap;
+  delivery through the egress guard with leases, eight attempts over about 45 hours, interrupted
+  attempts retried (at least once), automatic disabling after 72 hours of failures with an email,
+  delivery history, replays, test events, 30-day retention, the OpenAPI `webhooks` section.
+  Remaining: filters beyond the event type, custom headers, mutual TLS, fixed egress addresses,
+  events for conversations, campaigns, automations, contact changes and orders, load tests.
 - **P5-10 Platform ops screens**: onboarding failures, tenant health, usage, integration failures,
   queues and dead letters, abuse signals.
 - **P5-11 Account export/deletion workflow.**
@@ -348,7 +356,7 @@ review; production rollout per RELEASE-CHECKLIST.
 - **SEC-2** Breached-password screening at sign-up/reset (k-anonymity API or offline list).
 - **SEC-3** Central SSRF-safe egress client (DNS pinning, private/metadata range blocking, redirect
   re-validation, limits) used by all outbound HTTP — _built with P4-02 (ADR-042) and used by the
-  automation HTTP step and the Flows data endpoint (P4-03); outgoing webhooks (P5-09) and imports
+  automation HTTP step, the Flows data endpoint (P4-03) and outgoing webhooks (P5-09); imports
   must use it too. Remaining: a network
   egress policy as a second layer in deployment._
 - **SEC-4** Dual-key job signing for rotation without draining.

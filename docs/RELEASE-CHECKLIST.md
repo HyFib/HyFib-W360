@@ -124,6 +124,11 @@ made. This checklist records the evidence required per gate; unchecked items blo
       keys and the OpenAPI document, the proxy passes the client address so failed-authentication
       limits apply per client (`TRUSTED_PROXIES`), a key created, used, rotated and revoked, and an
       approved template sent through the API to a test recipient
+- [ ] Outgoing webhooks on a staging deployment: an endpoint at a receiver the team controls gets a
+      test event and a `message.received` from a test recipient with signatures that verify, a
+      rotation keeps both secrets verifying, the worker's LISTEN connection works through the
+      production database path (no transaction-pooling proxy in front of `DATABASE_URL_APP`), and
+      egress to private addresses is refused (`W360_EGRESS_ALLOW_LOOPBACK` unset)
 - [ ] Tenant-isolation and security gates passing in CI on the release commit
 - [ ] Measured load behaviour against the test envelope (k6 results)
 - [ ] Backup restoration drill performed and timings recorded (RPO/RTO)

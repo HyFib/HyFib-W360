@@ -24,6 +24,7 @@ import {
   PgBossJobQueue,
   RazorpayClient,
   createApiKeysService,
+  createWebhooksService,
   createAutomationService,
   createCommerceService,
   createStoreService,
@@ -51,6 +52,7 @@ import {
   createTenancyService,
   createWebRequestService,
   type ApiKeysService,
+  type WebhooksService,
   type AutomationService,
   type CommerceService,
   type CrmService,
@@ -123,6 +125,8 @@ export interface Runtime {
   planAdmin: PlanAdminService;
   /** Company API keys for the public API (Settings → API keys). */
   apiKeys: ApiKeysService;
+  /** Company webhook endpoints and their deliveries (Settings → Webhooks). */
+  webhooks: WebhooksService;
   reports: ReportsService;
   automations: AutomationService;
   /** Domains and secrets for the automation HTTP step. */
@@ -236,6 +240,13 @@ async function init(): Promise<Runtime> {
   const plans = createPlansService({ db, clock: systemClock });
   const planAdmin = createPlanAdminService({ platformDb, clock: systemClock });
   const apiKeys = createApiKeysService({ db, clock: systemClock });
+  const webhooks = createWebhooksService({
+    db,
+    clock: systemClock,
+    keyring,
+    // http:// and loopback endpoints only where configuration allows them (local and test).
+    egressPolicy: { allowLoopbackForTests: config.W360_EGRESS_ALLOW_LOOPBACK ?? false },
+  });
   const reports = createReportsService({ db, clock: systemClock });
   const automations = createAutomationService({
     db,
@@ -365,6 +376,7 @@ async function init(): Promise<Runtime> {
     plans,
     planAdmin,
     apiKeys,
+    webhooks,
     reports,
     automations,
     webRequests,

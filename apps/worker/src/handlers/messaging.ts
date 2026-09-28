@@ -23,6 +23,7 @@ import { signalDueTemplateSyncs } from './templates';
 import { sweepCommerceWork } from './commerce';
 import { sweepStoreMessages, sweepStoreWork } from './stores';
 import { sweepFlowWork } from './flows';
+import { sweepWebhooks } from './webhooks';
 
 /** Processes one stored Meta webhook receipt (idempotent; see processMetaWebhookReceipt). */
 export function webhookProcessHandler(rt: WorkerRuntime) {
@@ -202,6 +203,8 @@ export function messagingSweepHandler(rt: WorkerRuntime) {
     const idempotencyKeys = await purgeApiIdempotencyKeys(rt.db);
     if (idempotencyKeys > 0)
       rt.logger.info({ idempotencyKeys }, 'expired API idempotency keys deleted');
+    const webhooks = await sweepWebhooks(rt);
+    if (webhooks.woken + webhooks.purged > 0) rt.logger.info(webhooks, 'webhook sweep');
     if (receipts.length > 0 || intents.length > 0) {
       rt.logger.info(
         { receipts: receipts.length, intents: intents.length, unknownOutcomes: recovered },

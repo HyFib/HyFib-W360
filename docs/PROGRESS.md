@@ -1,5 +1,67 @@
 # Progress
 
+## 2026-09-28 — Phase 5: outgoing webhooks (P5-09)
+
+Status: **Outgoing webhooks implemented and locally verified; delivered only to local test
+receivers.** Companies add HTTPS endpoints in Settings → Webhooks and receive signed JSON POSTs for
+received messages, message status, consent changes and template status. Events are captured by
+database triggers in the company's scope, payloads are built when delivered, and delivery goes
+through the egress guard with bounded retries, replays and automatic disabling. Delivery is at least
+once, never claimed exactly once. No request reached a customer's system.
+
+### Completed
+
+- **Design (ADR-053):** up to 10 endpoints per company (`developer.manage`); four event types plus
+  `ping` for tests; events hold ids and non-personal facts only and payloads are built at delivery
+  (an erased contact is sent without personal data); a per-company `webhook.deliver` job (policy
+  `stately`) woken through LISTEN and the minute sweep, which read due companies from the database
+  and never from a notification; signatures `t=<time>,v1=<HMAC-SHA256 of "<t>.<body>">`; eight
+  attempts over about 45 hours; automatic disabling after 72 hours of failures; 30-day retention.
+- **Schema (migration 0025):** `app.webhook_endpoints` (encrypted secrets with versions, the
+  previous secret's expiry, on/off with the reason, health), `app.webhook_events`,
+  `app.webhook_deliveries` (states, attempts, lease, results, replays), row-level security, column
+  grants, the capture triggers on messages, consent events and template status events
+  (`app.capture_webhook_event`, SECURITY INVOKER), the notification trigger, and the SECURITY
+  DEFINER sweeps `ops.webhook_dispatch_due` and `ops.purge_webhook_data`.
+- **Domain (`webhooks/`):** the endpoint service (create with the secret shown once, edit, turn off
+  and on, rotate with a 24-hour overlap, delete, test events, delivery history, replays; audited with
+  the host only), payload building for each event type, signing and verification, and the delivery
+  worker (claims in batches of 10 with `SKIP LOCKED` and a lease, requests with no transaction open,
+  outcomes recorded under endpoint-then-delivery locks and dropped when a newer attempt owns the
+  delivery, the retry schedule, interrupted attempts, disabling with a system audit entry and an
+  email to owners and administrators, dispatch and retention helpers). The OpenAPI document
+  describes every event under `webhooks`.
+- **Worker:** the `webhook.deliver` handler, a LISTEN connection that coalesces notifications into at
+  most one database lookup every 250 ms (reconnecting with backoff), and the sweep and retention in
+  the per-minute messaging sweep.
+- **Web:** Settings → Webhooks (owners and administrators): endpoints with state, events, last-24-hour
+  counts, health and secret version; adding one (the secret shown once, kept only in the page's
+  memory); test events; rotation; turning off and on; deletion; each endpoint's deliveries (all or
+  failed), replays and its settings.
+- **Docs:** ADR-053, ARCHITECTURE §6O, SECURITY (control, Phase 5 rules, secret rotation, gaps),
+  THREAT-MODEL T71 to T74, DATA-RETENTION, RUNBOOKS §10O, RELEASE-CHECKLIST, FEATURE-MATRIX (H-014,
+  W-138, W-139, W-144), BACKLOG (P5-09 built; SEC-3 users).
+- **Found while building:**
+  - **An unreachable notice on the API keys page (removed).** The page showed a "Reading only" alert
+    for suspended and restricted companies, but those companies lose `developer.manage`, so the page
+    answers 404 before the alert could render. The API's own behaviour for them (reading only, 423
+    for writes) is unchanged and documented in the runbook.
+  - **A normalised URL longer than the column allows (fixed before commit).** Percent-encoding can
+    lengthen an entered URL past 2048 characters; the service now refuses it as a form error instead
+    of failing on the table's check.
+  - **The loopback allowance also lifts the port rule.** A privileged-port URL passes the URL check
+    wherever `W360_EGRESS_ALLOW_LOOPBACK` is set (local and test only); the test for that rule uses
+    the production policy.
+  - **Mutation checks:** 20 guards broken one at a time (claiming deliveries not yet due, 3xx as
+    success, the retry schedule, the disabling threshold, the interrupted-attempt limit, the previous
+    secret's expiry, the lost-outcome check, claiming for a turned-off endpoint, retrying after it was
+    turned off, stopping after a batch of ended deliveries, disabling without failing waiting
+    deliveries, the notice's recipients, clearing the failing state, the lease window, the event id
+    header, test events and replays to a turned-off endpoint, the endpoint limit's lock, failing only
+    waiting deliveries). 19 make a test fail; the survivor (building an erased contact's number from
+    the row without checking `erased_at`) is equivalent, because `app.erase_contact` clears the
+    number and name in the same statement.
+
 ## 2026-09-28 — Phase 5: public API (P5-08)
 
 Status: **Public API v1 implemented and locally verified; sends reach only the local Graph

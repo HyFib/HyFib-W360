@@ -8,7 +8,7 @@ import {
   can,
   type ApiKeyView,
 } from '@w360/domain';
-import { Alert, Badge, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
+import { Badge, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
 import { ApiKeyActions, CreateApiKeyForm } from '@/components/settings/api-keys';
 import { CopyField } from '@/components/growth/copy-field';
 import { formatDateTime } from '@/lib/format';
@@ -48,13 +48,6 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4">
-          {ctx.tenant.status !== 'active' ? (
-            <Alert tone="warning" title="Reading only">
-              {ctx.tenant.status === 'restricted'
-                ? "The company's plan has ended, so the API cannot change data or send messages until it is renewed."
-                : 'The company is suspended, so the API cannot change data or send messages.'}
-            </Alert>
-          ) : null}
           <CopyField label="Base URL" value={apiBase} />
           <p className="text-sm">
             Send the key as{' '}

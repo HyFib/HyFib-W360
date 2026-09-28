@@ -1118,3 +1118,73 @@ per plan, and API access as a plan module.
 
 **Migration 0024.** `app.api_keys`, `app.api_idempotency_keys`, `ops.api_key_authenticate`,
 `app.messages.api_key_id`, and `api_key` as a consent event actor.
+
+## ADR-053 Outgoing webhooks: events captured by database triggers, payloads built at delivery, signed at-least-once delivery through the egress guard (2026-09-28)
+
+Decision: companies register HTTPS endpoints that receive signed JSON notifications of what happens
+in their account (P5-09). Delivery is at least once, never "exactly once": a receiver deduplicates by
+the event id.
+
+**Endpoints.** Members with `developer.manage` (as for API keys, ADR-052) add up to 10 endpoints,
+each with an HTTPS URL (checked by the egress guard's URL rules: https, no credentials, allowed
+ports), an optional description and the event types it receives. An endpoint can be disabled,
+enabled and deleted (its delivery history goes with it). Every change is audited; the URL is shown
+to members but only its host is logged.
+
+**Events.** `message.received` (an inbound message from a contact), `message.status` (an outbound
+message reaching `accepted`, `sent`, `delivered`, `read`, `played`, `failed`, `canceled` or
+`unknown_outcome`), `consent.changed` (an opt-in or opt-out recorded, whatever its source) and
+`template.status_changed` (a template reaching a status Meta reports, or deleted); `ping` is sent
+only by "Send test event". They are captured by triggers on `app.messages`, `app.consent_events`
+and `app.template_status_events`, in the transaction that makes the change, so every writer
+produces them (ingestion, the send worker and its recovery, campaigns, automations, erasure, the
+API, imports and store consent) and a rolled-back change produces none. A trigger writes an event
+only when an active endpoint of the company subscribes to its type, with one delivery per such
+endpoint, and wakes the worker with an empty `w360_webhooks` notification. The worker never takes a
+company id from a notification: it asks the database which active companies have due deliveries
+(`ops.webhook_dispatch_due`), so a forged or repeated notification only causes that lookup.
+
+**Payloads are built when delivered.** An event row holds ids and non-personal facts only (type,
+message, contact, conversation or template id, the status reached, an error code, a consent's
+purpose, action and source). The worker builds the JSON when it delivers, in the company's scope:
+the contact's number and name, the message's text or reply, the template's name. Nothing personal
+is stored twice, a contact erased before delivery is sent without their details, and no erasure
+hook is needed. A retry is built again, so it may carry newer data than the first attempt; the
+event id, type and the status it reports never change.
+
+**Delivery.** A per-company `webhook.deliver` job (pg-boss policy `stately`: one queued and one
+active per company) is enqueued after that lookup, which the worker's LISTEN connection runs when
+notified (bursts coalesce) and the minute sweep runs for retries, missed notifications and leases
+that expired. The job claims due deliveries in batches of 10 under row locks (`SKIP LOCKED`) with a
+lease of the request deadline plus 35 s, posts each one through the egress guard (DNS pinned,
+private and metadata addresses refused, no redirects, 10 s timeout, at most 64 KB sent) with no
+transaction open, and records each outcome, locking the endpoint before the delivery: a 2xx answer
+succeeds; anything else, including timeouts and refused addresses, is retried at 1 min, 5 min,
+30 min, 2 h, 6 h, 12 h and 24 h (eight attempts over about 45 hours), then the delivery fails. A
+delivery whose lease expired (worker lost) is attempted again (`interrupted` when no attempt is
+left); an outcome recorded after a newer attempt claimed the delivery is dropped. After 200
+attempts a job queues its successor, so one busy company cannot hold a worker. Response bodies are
+read up to the guard's limit and discarded; only the status, a short error code and the duration
+are kept. Deliveries are not ordered. Suspended and restricted companies are not delivered to
+(their events wait, within retention, until the company is active again).
+
+**Signing.** Each endpoint has a secret (`whsec_` and 32 random bytes), shown once, stored encrypted
+with the keyring (it is needed to sign) and bound to the company, the endpoint and its version.
+Requests carry `W360-Signature: t=<unix time>,v1=<hex HMAC-SHA256 of "<t>.<body>">`, plus
+`W360-Event-Id`, `W360-Event-Type`, `W360-Delivery-Id` and `W360-Delivery-Attempt`. Rotating the
+secret signs with both the new and the previous secret (two `v1` values) for 24 hours.
+
+**Health.** An endpoint that has failed without a success for 72 hours is disabled at its next
+failure; its pending deliveries fail as `endpoint_disabled` and the company's owners and
+administrators are emailed. Members can replay a finished delivery (a new delivery of the same
+event, within its retention) and send a test event.
+
+**Retention.** Events and deliveries are deleted 30 days after they were created (the messaging
+sweep); endpoints stay until deleted.
+
+**Not built.** Per-event filters beyond the type, ordering guarantees, custom headers, mutual TLS,
+IP allowlisting by receivers (HyFib has no fixed egress addresses yet), per-number endpoints, and
+events for conversations, campaigns, automations, contacts created or orders.
+
+**Migration 0025.** `app.webhook_endpoints`, `app.webhook_events`, `app.webhook_deliveries`, the
+capture triggers, `ops.webhook_dispatch_due` and `ops.purge_webhook_data`.
