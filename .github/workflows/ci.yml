@@ -77,7 +77,9 @@ jobs:
   e2e:
     name: End-to-end (Chromium, Firefox, WebKit, mobile)
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # 124 tests run one at a time across four browser projects: about 3.5 minutes of set-up and 25
+    # of tests, so one retry of a long test (the cart reminder test allows 5 minutes) must still fit.
+    timeout-minutes: 45
     services:
       postgres:
         image: postgres:18-alpine
@@ -162,14 +164,52 @@ jobs:
           for i in $(seq 1 60); do curl -sf http://localhost:3000/api/health/ready && curl -sf http://localhost:9464/ready && exit 0; sleep 1; done
           cat "$RUNNER_TEMP/web.log" "$RUNNER_TEMP/worker.log"; exit 1
       - run: pnpm exec playwright install --with-deps chromium firefox webkit
+      # Stops before the job's limit, so a run that overruns still gets the steps below.
       - run: pnpm test:e2e
-      - if: failure()
+        timeout-minutes: 40
+      - if: failure() || cancelled()
         run: cat "$RUNNER_TEMP/web.log" "$RUNNER_TEMP/worker.log"
-      - if: failure()
+      # Test data only: what the job queues and the stores held when the suite failed.
+      - name: Job, store and database state after a failure
+        if: failure() || cancelled()
+        run: |
+          psql postgres://postgres:postgres@localhost:5432/w360 -P pager=off <<'SQL'
+          SELECT name, state, count(*) FROM pgboss.job GROUP BY 1, 2 ORDER BY 1, 2;
+          SELECT name, id, state, retry_count, created_on, started_on, completed_on,
+                 output->>'name' AS error, left(output->>'message', 300) AS message
+            FROM pgboss.job
+           WHERE state IN ('retry', 'active', 'failed') AND name <> 'dead-letter'
+           ORDER BY created_on DESC LIMIT 60;
+          SELECT source_name, created_on, output->>'name' AS error, left(output->>'message', 300) AS message
+            FROM pgboss.job WHERE name = 'dead-letter' ORDER BY created_on DESC LIMIT 30;
+          SELECT id, platform, state, lease_until, next_sync_at, synced_at, checkouts_read_at,
+                 left(sync_error, 200) AS sync_error, left(checkouts_error, 200) AS checkouts_error
+            FROM app.commerce_stores ORDER BY created_at DESC LIMIT 12;
+          SELECT pid, application_name, state, wait_event_type, wait_event, now() - xact_start AS xact_age,
+                 now() - query_start AS query_age, left(query, 200) AS query
+            FROM pg_stat_activity WHERE datname = 'w360' AND state <> 'idle' AND pid <> pg_backend_pid();
+          SQL
+      # Kept for every run: a test that passed on retry leaves a green job, and its failed attempt's
+      # trace (test-results, also when the HTML report was not written) and the server logs of the
+      # same window are the only evidence of what went wrong.
+      - if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: playwright-report
-          path: tests/e2e/playwright-report
+          # A re-run is the same workflow run: one name per attempt keeps both attempts' evidence.
+          name: playwright-report-${{ github.run_attempt }}
+          path: |
+            tests/e2e/playwright-report
+            tests/e2e/test-results
+          if-no-files-found: ignore
+          retention-days: 7
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-server-logs-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/web.log
+            ${{ runner.temp }}/worker.log
+          if-no-files-found: ignore
           retention-days: 7
 
   security:

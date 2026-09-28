@@ -34,6 +34,7 @@ import {
   type Tx,
 } from '@w360/db';
 import { assertCan, can, type TenantContext } from '../authz/context';
+import { assertRecentSignIn } from '../authz/step-up';
 import { formatMinor } from '../crm/money';
 import { recordAudit, type RequestMeta } from '../audit';
 import { endRunForHuman } from '../automations/runs';
@@ -57,6 +58,7 @@ import {
   razorpayMode,
   type ResolvedProductMessage,
 } from './model';
+import { assertModule } from '../plans/entitlements';
 
 /**
  * Commerce (P4-06). Reading catalogs, products and orders needs `commerce.read`; members see an
@@ -447,6 +449,7 @@ export function createCommerceService(deps: CommerceDeps) {
     /** Sends products in a conversation (a reply: the customer service window must be open). */
     async sendProducts(ctx: TenantContext, input: unknown) {
       assertCan(ctx, 'inbox.reply');
+      assertModule(ctx.plan, 'commerce');
       assertCan(ctx, 'commerce.read');
       const data = parseInput(
         z.object({
@@ -909,6 +912,7 @@ export function createCommerceService(deps: CommerceDeps) {
     async setOrderStatus(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
       assertCan(ctx, 'commerce.read');
       assertCan(ctx, 'inbox.reply');
+      assertModule(ctx.plan, 'commerce');
       const data = parseInput(
         versioned.extend({ status: z.enum(['confirmed', 'fulfilled', 'cancelled']) }),
         input,
@@ -951,6 +955,7 @@ export function createCommerceService(deps: CommerceDeps) {
     async requestPayment(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
       assertCan(ctx, 'commerce.read');
       assertCan(ctx, 'inbox.reply');
+      assertModule(ctx.plan, 'commerce');
       const data = parseInput(versioned, input);
       const now = deps.clock.now();
       return db.run(ctx.scope, async (tx) => {
@@ -1129,6 +1134,8 @@ export function createCommerceService(deps: CommerceDeps) {
     /** Saves the company's Razorpay keys (write-only) and asks the worker to check them. */
     async savePaymentAccount(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
       assertCan(ctx, 'commerce.manage');
+      // Payments for the company's orders go to these keys' account (ADR-056).
+      assertRecentSignIn(ctx, deps.clock.now());
       const data = parseInput(accountSchema, input);
       if (razorpayMode(data.keyId) === 'live' && !deps.allowLiveKeys) {
         throw invalid(

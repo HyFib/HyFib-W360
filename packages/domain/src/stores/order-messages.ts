@@ -59,6 +59,7 @@ import {
   type StoreValues,
 } from './messages-model';
 import { startStoreAutomation } from './order-automations';
+import { loadEntitlements } from '../plans/entitlements';
 
 /**
  * Order messages (P4-06c, ADR-048): recording the events a read from a store reveals, and the
@@ -344,6 +345,8 @@ export async function processStoreMessage(
       .where(and(eq(commerceStores.tenantId, tenantId), eq(commerceStores.id, row.storeId)));
     if (!store || store.state !== 'connected') return skip('store_disconnected');
     if (!store.messagesOptInAt) return skip('no_opt_in');
+    // Order messages and cart reminders are part of commerce, which a plan may leave out.
+    if (!(await loadEntitlements(tx, tenantId)).modules.has('commerce')) return skip('not_in_plan');
     const [rule] = await tx
       .select()
       .from(commerceStoreMessageRules)

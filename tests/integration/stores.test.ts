@@ -2,7 +2,7 @@ import { createHmac } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { isAppError, systemClock, type Clock } from '@w360/core';
+import { isAppError, systemClock, uuidv7, type Clock } from '@w360/core';
 import { createEgressClient, DEFAULT_EGRESS_POLICY } from '@w360/core/egress';
 import { authorizedTenantScope } from '@w360/db';
 import {
@@ -14,6 +14,7 @@ import {
   createConsentService,
   createContactsService,
   createInboxService,
+  createPlanAdminService,
   createSegmentsService,
   createStoreMessagesService,
   createStoreService,
@@ -26,6 +27,7 @@ import {
   processStoreJob,
   processStoreMessage,
   processTemplateSubmit,
+  dayOf,
   saveStoreOrders,
   saveStoreProducts,
   STORE_LIMITS,
@@ -34,6 +36,7 @@ import {
   type StoreVariables,
   type AutomationTrigger,
   type Permission,
+  type PlatformActor,
   type StoreWorkerDeps,
   type TemplateDefinition,
   type TenantContext,
@@ -2821,7 +2824,10 @@ describe('Cart reminders', () => {
     await readCheckouts(c, storeId);
     await readCheckouts(c, storeId);
     expect(
-      await fx.query('SELECT id FROM app.contacts WHERE phone_e164 = $1', ['+919833300005']),
+      await fx.query('SELECT id FROM app.contacts WHERE tenant_id = $1 AND phone_e164 = $2', [
+        c.tenant.id,
+        '+919833300005',
+      ]),
     ).toEqual([]);
     const events = await fx.query<{
       action: string;
@@ -2854,9 +2860,10 @@ describe('Cart reminders', () => {
       },
     ]);
     expect(
-      await fx.query('SELECT source, display_name FROM app.contacts WHERE phone_e164 = $1', [
-        '+919833300001',
-      ]),
+      await fx.query(
+        'SELECT source, display_name FROM app.contacts WHERE tenant_id = $1 AND phone_e164 = $2',
+        [c.tenant.id, '+919833300001'],
+      ),
     ).toEqual([{ source: 'store', display_name: 'Nila C' }]);
     expect(await runCart(c, storeId, later(31 * MINUTE_MS))).toEqual([
       ['20', 'cart_reminder', 'queued'],
@@ -4322,5 +4329,92 @@ describe('Store events in automations', () => {
       { sender_type: 'bot', type: 'text' },
       { sender_type: 'bot', type: 'template' },
     ]);
+  });
+});
+
+let planCodes = 0;
+
+/** Puts the company on a published plan with the given terms (P5-01), as platform staff would. */
+async function onPlan(c: Company, overrides: Record<string, unknown>) {
+  const staff = await createUser(fx.dbs, { twoFactor: true });
+  await fx.dbs.ownerPool.query(
+    `INSERT INTO ops.platform_admins (user_id, role) VALUES ($1, 'platform_owner')`,
+    [staff.id],
+  );
+  const actor: PlatformActor = {
+    userId: staff.id,
+    role: 'platform_owner',
+    correlationId: uuidv7(),
+  };
+  const plans = createPlanAdminService({ platformDb: fx.dbs.platform, clock: systemClock });
+  const { id } = await plans.createPlan(actor, {
+    code: `st-${Date.now().toString(36)}-${(planCodes += 1)}`,
+    name: 'Store plan',
+    price: '999',
+    intervalMonths: '1',
+    trialDays: '0',
+    graceDays: '7',
+    seatsIncluded: '10',
+    numbersIncluded: '5',
+    modules: ['automations', 'flows', 'crm', 'commerce'],
+    ...overrides,
+  });
+  await plans.publishPlan(actor, id);
+  const view = await plans.tenantPlan(actor, c.tenant.id);
+  await plans.setTenantPlan(actor, {
+    tenantId: c.tenant.id,
+    version: view.state.version,
+    status: 'active',
+    planId: id,
+    periodStart: dayOf(new Date(), 'Asia/Kolkata'),
+    periodEnd: dayOf(new Date(Date.now() + 30 * 86_400_000), 'Asia/Kolkata'),
+    reason: 'Plan for the store tests',
+  });
+}
+
+describe('Plans and store work', () => {
+  it('skips order messages when the plan leaves out commerce, and the store keeps syncing', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { shop, storeId } = await shopifyStoreForMessages(c, owner);
+    const template = await approvedTemplate(c, owner, orderUpdate);
+    await optIn(owner, storeId);
+    await saveRule(owner, c, storeId, 'order_placed', {
+      templateId: template.id,
+      variables: update({ source: 'static', value: 'we received it' }),
+    });
+    await onPlan(c, { modules: ['automations'] });
+    await placeOrder(c, shop, storeId, '9501', '+919812379501');
+    expect((await orderRows(storeId)).map((o) => o.external_id)).toContain('9501');
+    expect(await runMessages(c, storeId)).toEqual([{ outcome: 'skipped', reason: 'not_in_plan' }]);
+    expect(templatesTo('919812379501')).toEqual([]);
+  });
+
+  it('starts store-event automations only within the month’s runs and with automations in the plan', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { shop, storeId } = await shopifyStoreForMessages(c, owner);
+    await optIn(owner, storeId);
+    const template = await approvedTemplate(c, owner, orderConfirmed);
+    const flow = await publishAutomation(
+      owner,
+      'Order follow-up',
+      storeEvent,
+      orderFlow(template.id),
+    );
+    await automationRule(owner, c, storeId, 'order_placed', flow.id);
+    await onPlan(c, { automationRunsMonthly: '1' });
+
+    await placeOrder(c, shop, storeId, '9601', '+919812379601');
+    expect(await runMessages(c, storeId)).toEqual([
+      expect.objectContaining({ outcome: 'started' }),
+    ]);
+    await placeOrder(c, shop, storeId, '9602', '+919812379602');
+    expect(await runMessages(c, storeId)).toEqual([
+      { outcome: 'skipped', reason: 'automation_quota' },
+    ]);
+    await onPlan(c, { modules: ['commerce'] });
+    await placeOrder(c, shop, storeId, '9603', '+919812379603');
+    expect(await runMessages(c, storeId)).toEqual([{ outcome: 'skipped', reason: 'not_in_plan' }]);
   });
 });

@@ -21,6 +21,7 @@ import { CreateAutomationForm } from '@/components/automations/automation-action
 import { PageHeader } from '@/components/page-header';
 import { AUTOMATION_STATUS } from '@/lib/automation-labels';
 import { formatDateTime } from '@/lib/format';
+import { ModuleNotInPlan, PlanLimitHint } from '@/components/plan-limit';
 import { getRuntime } from '@/server/runtime';
 import { requireTenant } from '@/server/session';
 
@@ -38,9 +39,12 @@ export default async function AutomationsPage({
   const { archived } = await searchParams;
   const ctx = await requireTenant(slug);
   if (!can(ctx, 'automations.read')) notFound();
-  const { automations } = await getRuntime();
+  const { automations, plans } = await getRuntime();
   const includeArchived = archived === '1';
-  const list = await automations.listAutomations(ctx, { includeArchived });
+  const [list, usage] = await Promise.all([
+    automations.listAutomations(ctx, { includeArchived }),
+    plans.usage(ctx),
+  ]);
   const base = `/c/${ctx.tenant.slug}/automations`;
   const tz = ctx.tenant.timezone;
   return (
@@ -49,6 +53,26 @@ export default async function AutomationsPage({
         title="Automations"
         description="Replies and questions that run on their own when customers write: published versions never change, and a member’s reply always takes over."
       />
+      <ModuleNotInPlan ctx={ctx} module="automations" />
+      {can(ctx, 'automations.publish') ? (
+        <div className="mb-4 grid gap-2">
+          <PlanLimitHint
+            ctx={ctx}
+            one="live automation"
+            what="live automations"
+            used={usage.liveAutomations}
+            limit={usage.limits.liveAutomations}
+          />
+          <PlanLimitHint
+            ctx={ctx}
+            one="automation run this month"
+            what="automation runs this month"
+            used={usage.automationRuns.used}
+            limit={usage.limits.automationRuns}
+            detail="new runs start again when the month renews"
+          />
+        </div>
+      ) : null}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
         <Card>
           <CardContent className="p-0">

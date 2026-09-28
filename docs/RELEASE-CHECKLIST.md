@@ -115,6 +115,45 @@ made. This checklist records the evidence required per gate; unchecked items blo
       Android and iOS (the payload returned as HyFib set it, research M-177) continuing the run, a
       later session message inside the window it opened, a marketing template step with and without
       the recipient's opt-in, and a tap on an older template message following "Other reply"
+- [ ] Plans entered by a platform owner from the commercial catalogue (prices, limits, modules,
+      trial and grace days) and published, and the default trial chosen (or complimentary access
+      for new companies decided on purpose); a test company taken through a trial ending, a paid
+      period, grace and renewal on a staging deployment, with the billing managers' emails received
+      through the production SMTP provider
+- [ ] Public API on a staging deployment: `APP_BASE_URL` gives the right base URL in Settings → API
+      keys and the OpenAPI document, the proxy passes the client address so failed-authentication
+      limits apply per client (`TRUSTED_PROXIES`), a key created, used, rotated and revoked, and an
+      approved template sent through the API to a test recipient
+- [ ] Outgoing webhooks on a staging deployment: an endpoint at a receiver the team controls gets a
+      test event and a `message.received` from a test recipient with signatures that verify, a
+      rotation keeps both secrets verifying, the worker's LISTEN connection works through the
+      production database path (no transaction-pooling proxy in front of `DATABASE_URL_APP`), and
+      egress to private addresses is refused (`W360_EGRESS_ALLOW_LOOPBACK` unset)
+- [ ] Operations console on a staging deployment: a platform operator with MFA sees every
+      company's health, the worker records a deliberately dead-lettered test job within a minute,
+      queue counts refresh, a quarantined test event is retried and resolved with both actions in
+      the platform audit log, and pages stay fast enough with the staging company count (the
+      functions read every company on each view)
+- [ ] Company export and deletion on a staging deployment: an owner downloads the export of a
+      test company with realistic data through the production proxy (the whole file arrives, its
+      last line is the end line, the time it takes is recorded); a deletion scheduled, cancelled
+      and scheduled again; then, with the due date moved on the staging database, the worker
+      deletes the test company: HyFib's app unsubscribed from a sandbox WhatsApp Business Account
+      (`DELETE /{WABA-ID}/subscribed_apps` answered by Meta, and no more webhooks for its numbers),
+      a development Shopify store uninstalled, a Razorpay test card token deleted, the final email
+      received, and the kept billing records reviewed with a tax adviser (legal basis and periods)
+- [ ] Statements and receipts on a staging deployment: a Razorpay test-mode payment's receipt shows
+      the method Razorpay reported and the payment and order ids, the payment-received email opens
+      that receipt, and a month's statement and CSV match the Razorpay Dashboard's payments for the
+      month; before live payments, a tax adviser decides what HyFib must issue for prepaid credit
+      (receipts are payment confirmations only; GST receipt vouchers or invoices are not built)
+- [ ] Staff refunds of unused credit in Razorpay test mode on a staging deployment: `refund.failed`
+      added to the webhook's events; a platform owner refunds part of a test payment; the refund
+      appears in the Razorpay Dashboard with the note `hyfib_refund` and the request's
+      `X-Refund-Idempotency` key once; the company's credit is held, then taken once when
+      `refund.processed` arrives (and by the worker's check with the webhook disabled); a refusal
+      (refunds not enabled or no balance) gives the credit back; confirm with Razorpay how long a
+      normal refund takes and that its fee is not returned (R-077, R-079)
 - [ ] Tenant-isolation and security gates passing in CI on the release commit
 - [ ] Measured load behaviour against the test envelope (k6 results)
 - [ ] Backup restoration drill performed and timings recorded (RPO/RTO)

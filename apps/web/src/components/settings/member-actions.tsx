@@ -8,17 +8,21 @@ import {
   setMemberStatusAction,
 } from '@/app/actions/tenancy';
 import { RolePicker, type RoleOption } from './role-picker';
+import type { ActionFailureState } from '@/components/action-failure';
 import { ClientButton } from '@/components/client-form';
+import { SignInAgain } from '@/components/sign-in-again';
 
 function useActionState() {
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ActionFailureState | null>(null);
   const [busy, setBusy] = useState(false);
-  async function run(fn: () => Promise<{ ok: true } | { ok: false; message: string }>) {
+  async function run(
+    fn: () => Promise<{ ok: true } | { ok: false; code: string; message: string }>,
+  ) {
     setBusy(true);
     setError(null);
     const result = await fn();
     setBusy(false);
-    if (!result.ok) setError(result.message);
+    if (!result.ok) setError(result);
     return result.ok;
   }
   return { error, busy, run };
@@ -136,9 +140,13 @@ export function MemberActions({
           ) : null}
         </div>
       )}
-      {error ? (
+      {error?.code === 'step_up_required' ? (
+        <div className="max-w-72 text-left">
+          <SignInAgain reason={error.message} />
+        </div>
+      ) : error ? (
         <p role="alert" className="max-w-72 text-right text-xs text-destructive">
-          {error}
+          {error.message}
         </p>
       ) : null}
     </div>
@@ -181,7 +189,7 @@ export function InvitationActions({
       </div>
       {error ? (
         <p role="alert" className="text-xs text-destructive">
-          {error}
+          {error.message}
         </p>
       ) : null}
     </div>

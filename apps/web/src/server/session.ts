@@ -86,6 +86,7 @@ export const requireTenant = cache(async (slug: string): Promise<TenantContext> 
       {
         userId: session.user.id,
         sessionId: session.sessionId,
+        sessionCreatedAt: session.sessionCreatedAt,
         tenantSlug: slug,
         correlationId: await correlationId(),
       },

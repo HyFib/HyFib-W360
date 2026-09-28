@@ -12,6 +12,12 @@ export function formatDateTime(
   }).format(new Date(iso));
 }
 
+/** A calendar day in the company's time zone ("1 Nov 2026"). */
+export function formatDate(iso: string | Date | null, timeZone: string, locale = 'en-IN'): string {
+  if (!iso) return '';
+  return new Intl.DateTimeFormat(locale, { timeZone, dateStyle: 'medium' }).format(new Date(iso));
+}
+
 /** Short form for lists: time for today, date otherwise. */
 export function formatShort(
   iso: string | null,

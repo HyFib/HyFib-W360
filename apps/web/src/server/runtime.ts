@@ -23,12 +23,15 @@ import {
   JobSigner,
   PgBossJobQueue,
   RazorpayClient,
+  createApiKeysService,
+  createWebhooksService,
   createAutomationService,
   createCommerceService,
   createStoreService,
   createStoreMessagesService,
   createCrmService,
   createBillingService,
+  createBillingHistoryService,
   createBusinessHoursService,
   createCampaignsService,
   createCsatService,
@@ -39,18 +42,31 @@ import {
   createContactsService,
   createInboxService,
   createOnboardingService,
+  createPlanAdminService,
+  createPlansService,
   createPlatformService,
+  createPlatformBillingService,
+  createPlatformOpsService,
+  pgBossQueueInspector,
   createRateCardsService,
   createSavedRepliesService,
   createSegmentsService,
   createTeamsService,
   createTemplatesService,
   createTenancyService,
+  createCompanyDeletionService,
   createWebRequestService,
+  writeCompanyExport,
+  type CompanyDeletionService,
+  type RequestMeta,
+  type TenantContext,
+  type ApiKeysService,
+  type WebhooksService,
   type AutomationService,
   type CommerceService,
   type CrmService,
   type BillingService,
+  type BillingHistoryService,
   type BusinessHoursService,
   type CampaignsService,
   type CsatService,
@@ -62,7 +78,11 @@ import {
   type JobQueue,
   type OnboardingService,
   type OutboundDeps,
+  type PlanAdminService,
+  type PlansService,
   type PlatformService,
+  type PlatformBillingService,
+  type PlatformOpsService,
   type RateCardsService,
   type SavedRepliesService,
   type SegmentsService,
@@ -98,7 +118,19 @@ export interface Runtime {
   signer: JobSigner;
   auth: Auth;
   tenancy: TenancyService;
+  /** Deleting the company after its grace period (Settings → Company data). */
+  companyDeletion: CompanyDeletionService;
+  /** Streams the company export through `write` (Settings → Company data). */
+  companyExport: (
+    ctx: TenantContext,
+    write: (chunk: string) => Promise<void>,
+    meta?: RequestMeta,
+  ) => Promise<{ counts: Record<string, number> }>;
   platform: PlatformService;
+  /** The platform operations console (/platform/ops): content-free facts and two audited repairs. */
+  platformOps: PlatformOpsService;
+  /** Companies' service credit for platform staff, and refunds of unused credit (ADR-058). */
+  platformBilling: PlatformBillingService;
   inbox: InboxService;
   teams: TeamsService;
   businessHours: BusinessHoursService;
@@ -111,6 +143,14 @@ export interface Runtime {
   segments: SegmentsService;
   campaigns: CampaignsService;
   rateCards: RateCardsService;
+  /** The company's plan, its limits and usage (ADR-051). */
+  plans: PlansService;
+  /** The plan catalog and companies' plans (platform staff). */
+  planAdmin: PlanAdminService;
+  /** Company API keys for the public API (Settings → API keys). */
+  apiKeys: ApiKeysService;
+  /** Company webhook endpoints and their deliveries (Settings → Webhooks). */
+  webhooks: WebhooksService;
   reports: ReportsService;
   automations: AutomationService;
   /** Domains and secrets for the automation HTTP step. */
@@ -138,6 +178,7 @@ export interface Runtime {
   /** Null until Razorpay is configured (card payments are then reported unavailable). */
   razorpay: RazorpayConfig | null;
   billing: BillingService;
+  billingHistory: BillingHistoryService;
   events: TenantEventHub;
   shutdown(): Promise<void>;
 }
@@ -208,7 +249,22 @@ async function init(): Promise<Runtime> {
     appBaseUrl: config.APP_BASE_URL,
     invitationTtlHours: config.INVITATION_TTL_HOURS,
   });
+  const companyDeletion = createCompanyDeletionService({
+    ...outbox,
+    db,
+    clock: systemClock,
+    appBaseUrl: config.APP_BASE_URL,
+  });
+  const exportDeps = { ...outbox, db, clock: systemClock, appBaseUrl: config.APP_BASE_URL };
+  const companyExport: Runtime['companyExport'] = (ctx, write, meta) =>
+    writeCompanyExport(exportDeps, ctx, write, meta);
   const platform = createPlatformService({ db, platformDb, clock: systemClock });
+  const platformOps = createPlatformOpsService({
+    platformDb,
+    queues: pgBossQueueInspector(boss),
+    clock: systemClock,
+  });
+  const platformBilling = createPlatformBillingService({ platformDb });
   const inbox = createInboxService({ db, clock: systemClock, jobs, signer });
   const teams = createTeamsService({ db, clock: systemClock });
   const businessHours = createBusinessHoursService({ db, clock: systemClock });
@@ -221,6 +277,16 @@ async function init(): Promise<Runtime> {
   const segments = createSegmentsService({ db, clock: systemClock });
   const campaigns = createCampaignsService({ db, jobs, signer, clock: systemClock });
   const rateCards = createRateCardsService({ platformDb, clock: systemClock });
+  const plans = createPlansService({ db, clock: systemClock });
+  const planAdmin = createPlanAdminService({ platformDb, clock: systemClock });
+  const apiKeys = createApiKeysService({ db, clock: systemClock });
+  const webhooks = createWebhooksService({
+    db,
+    clock: systemClock,
+    keyring,
+    // http:// and loopback endpoints only where configuration allows them (local and test).
+    egressPolicy: { allowLoopbackForTests: config.W360_EGRESS_ALLOW_LOOPBACK ?? false },
+  });
   const reports = createReportsService({ db, clock: systemClock });
   const automations = createAutomationService({
     db,
@@ -319,6 +385,7 @@ async function init(): Promise<Runtime> {
     razorpayConfig: razorpay,
     notices: { outbox, appBaseUrl: config.APP_BASE_URL },
   });
+  const billingHistory = createBillingHistoryService({ db, clock: systemClock });
   const events = createTenantEventHub({ connectionString: config.DATABASE_URL_APP, logger });
 
   logger.info({ env: config.APP_ENV }, 'web runtime initialised');
@@ -334,7 +401,11 @@ async function init(): Promise<Runtime> {
     signer,
     auth,
     tenancy,
+    companyDeletion,
+    companyExport,
     platform,
+    platformOps,
+    platformBilling,
     inbox,
     teams,
     businessHours,
@@ -347,6 +418,10 @@ async function init(): Promise<Runtime> {
     segments,
     campaigns,
     rateCards,
+    plans,
+    planAdmin,
+    apiKeys,
+    webhooks,
     reports,
     automations,
     webRequests,
@@ -363,6 +438,7 @@ async function init(): Promise<Runtime> {
     onboarding,
     razorpay,
     billing,
+    billingHistory,
     events,
     async shutdown() {
       await events.close();

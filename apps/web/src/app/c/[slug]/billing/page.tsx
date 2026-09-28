@@ -1,6 +1,17 @@
 import type { Metadata } from 'next';
+import Link from 'next/link';
 import { displayMoney } from '@w360/core';
-import { assertCan, can, MANDATE_MAX_MINOR, type BillingOverview } from '@w360/domain';
+import {
+  assertCan,
+  can,
+  hasRecentSignIn,
+  ledgerLineLabel,
+  MANDATE_MAX_MINOR,
+  RECENT_SIGN_IN_MINUTES,
+  REFUND_DAYS_NOTE,
+  type BillingOverview,
+  type LedgerKind,
+} from '@w360/domain';
 import {
   Alert,
   Badge,
@@ -20,8 +31,10 @@ import {
 import { AddCredit } from '@/components/billing/add-credit';
 import { AutoRechargeForm } from '@/components/billing/auto-recharge-form';
 import { CardMandateSetup, RemoveCard } from '@/components/billing/card-mandate';
+import { PlanCard } from '@/components/billing/plan-card';
 import { PageHeader } from '@/components/page-header';
 import { RequireOwnDocument } from '@/components/require-own-document';
+import { SignInAgain } from '@/components/sign-in-again';
 import { formatDateTime } from '@/lib/format';
 import { getRuntime } from '@/server/runtime';
 import { requireTenant } from '@/server/session';
@@ -59,14 +72,8 @@ const MANDATE_STATUS: Record<string, { label: string; tone: Tone }> = {
   paused: { label: 'Paused by your bank', tone: 'warning' },
 };
 
-const TRANSACTION_LABEL: Record<string, string> = {
-  topup_credit: 'Credit added',
-  hold: 'Reserved for a service',
-  hold_release: 'Reservation released',
-  hold_settle: 'Service charge',
-  refund: 'Refund to card',
-  dispute_loss: 'Chargeback',
-};
+/** Top-ups credited from a captured payment have a receipt (ADR-057). */
+const RECEIPT_STATUSES = new Set(['paid', 'partially_refunded', 'refunded']);
 
 function signed(paise: number): string {
   if (paise === 0) return '—';
@@ -89,21 +96,27 @@ export default async function BillingPage({ params }: { params: Promise<{ slug: 
   const { slug } = await params;
   const ctx = await requireTenant(slug);
   assertCan(ctx, 'billing.read');
-  const { billing } = await getRuntime();
-  const overview = await billing.overview(ctx);
+  const { billing, plans, clock } = await getRuntime();
+  const [overview, plan] = await Promise.all([billing.overview(ctx), plans.overview(ctx)]);
   const canManage = can(ctx, 'billing.manage');
+  // Adding a card and turning automatic top-ups on need a recent sign-in (ADR-056).
+  const recent = hasRecentSignIn(ctx, clock.now());
   const { payments, wallet, mandate } = overview;
   const tz = ctx.tenant.timezone;
   const activeMandate = mandate?.status === 'active' ? mandate : null;
+  // Refunds HyFib started that Razorpay has not completed (ADR-058), by the payment they refund.
+  const refundsByTopup = new Map(overview.refunds.map((r) => [r.topupId, r]));
+  const refundingMinor = overview.refunds.reduce((sum, r) => sum + r.amountMinor, 0);
 
   return (
     <>
       <RequireOwnDocument />
       <PageHeader
         title="Billing"
-        description="Prepaid service credit for HyFib W360 services. Meta bills your WhatsApp account directly for conversations."
+        description="Your HyFib plan, and prepaid service credit for HyFib W360 services. Meta bills your WhatsApp account directly for conversations."
       />
-      <div className="grid gap-6">
+      <div className="grid grid-cols-1 gap-6">
+        <PlanCard overview={plan} timeZone={tz} />
         {!payments.configured ? (
           <Alert tone="warning" title="Card payments are not available yet">
             This platform has not connected its Razorpay account, so credit cannot be added.
@@ -121,7 +134,7 @@ export default async function BillingPage({ params }: { params: Promise<{ slug: 
               Credit is added only after Razorpay confirms the payment was captured.
             </CardDescription>
           </CardHeader>
-          <CardContent className="grid gap-6">
+          <CardContent className="grid grid-cols-1 gap-6">
             <dl className="grid gap-4 sm:grid-cols-2">
               <div className="rounded-md border border-border p-4">
                 <dt className="text-sm text-muted-foreground">Available</dt>
@@ -132,10 +145,20 @@ export default async function BillingPage({ params }: { params: Promise<{ slug: 
                 </dd>
               </div>
               <div className="rounded-md border border-border p-4">
-                <dt className="text-sm text-muted-foreground">Reserved for running services</dt>
+                <dt className="text-sm text-muted-foreground">
+                  {refundingMinor > 0
+                    ? 'Reserved for running services and refunds'
+                    : 'Reserved for running services'}
+                </dt>
                 <dd className="text-2xl font-semibold">{inr(wallet.heldMinor)}</dd>
               </div>
             </dl>
+            {refundingMinor > 0 ? (
+              <Alert tone="info" title="A refund is in progress">
+                HyFib is refunding {inr(refundingMinor)} of your service credit, set aside until the
+                refund is complete. {REFUND_DAYS_NOTE}
+              </Alert>
+            ) : null}
             {wallet.availableMinor < 0 ? (
               <Alert tone="danger" title="Your balance is negative">
                 A refund or chargeback exceeded your remaining credit. Add credit to use billable
@@ -154,7 +177,7 @@ export default async function BillingPage({ params }: { params: Promise<{ slug: 
               Card charges complete one to three days after they are requested.
             </CardDescription>
           </CardHeader>
-          <CardContent className="grid gap-6">
+          <CardContent className="grid grid-cols-1 gap-6">
             {!payments.recurringCardsEnabled ? (
               <Alert tone="warning" title="Not available yet">
                 Auto-recharge needs Razorpay to enable card mandates (Recurring Payments) for this
@@ -188,11 +211,17 @@ export default async function BillingPage({ params }: { params: Promise<{ slug: 
                 ) : null}
               </div>
             ) : canManage && payments.configured && payments.recurringCardsEnabled ? (
-              <CardMandateSetup
-                slug={ctx.tenant.slug}
-                defaultEmail={overview.billingContact?.email ?? ctx.user.email}
-                defaultContact={overview.billingContact?.contact ?? ''}
-              />
+              recent ? (
+                <CardMandateSetup
+                  slug={ctx.tenant.slug}
+                  defaultEmail={overview.billingContact?.email ?? ctx.user.email}
+                  defaultContact={overview.billingContact?.contact ?? ''}
+                />
+              ) : (
+                <SignInAgain
+                  reason={`Adding a card for automatic top-ups needs a sign-in within the last ${RECENT_SIGN_IN_MINUTES} minutes.`}
+                />
+              )
             ) : null}
             {canManage && payments.recurringCardsEnabled ? (
               <AutoRechargeForm
@@ -262,6 +291,9 @@ export default async function BillingPage({ params }: { params: Promise<{ slug: 
                     <TH>Type</TH>
                     <TH>Amount</TH>
                     <TH>Status</TH>
+                    <TH>
+                      <span className="sr-only">Receipt</span>
+                    </TH>
                   </TR>
                 </THead>
                 <TBody>
@@ -270,7 +302,7 @@ export default async function BillingPage({ params }: { params: Promise<{ slug: 
                       <TD className="whitespace-nowrap">
                         {formatDateTime(t.createdAt.toISOString(), tz)}
                       </TD>
-                      <TD>{t.kind === 'manual' ? 'Card payment' : 'Auto-recharge'}</TD>
+                      <TD>{t.kind === 'manual' ? 'One-time payment' : 'Auto-recharge'}</TD>
                       <TD>
                         {inr(t.amountMinor)}
                         {t.refundedMinor > 0 ? (
@@ -288,6 +320,21 @@ export default async function BillingPage({ params }: { params: Promise<{ slug: 
                             {t.failureReason}
                           </span>
                         ) : null}
+                        {refundsByTopup.has(t.id) ? (
+                          <span className="block text-xs text-muted-foreground">
+                            Refund of {inr(refundsByTopup.get(t.id)?.amountMinor ?? 0)} in progress
+                          </span>
+                        ) : null}
+                      </TD>
+                      <TD className="whitespace-nowrap">
+                        {RECEIPT_STATUSES.has(t.status) ? (
+                          <Link
+                            href={`/c/${ctx.tenant.slug}/billing/receipts/${t.id}`}
+                            className="text-sm text-primary underline-offset-4 hover:underline"
+                          >
+                            Receipt<span className="sr-only"> for {inr(t.amountMinor)}</span>
+                          </Link>
+                        ) : null}
                       </TD>
                     </TR>
                   ))}
@@ -300,7 +347,16 @@ export default async function BillingPage({ params }: { params: Promise<{ slug: 
         <Card>
           <CardHeader>
             <CardTitle>Credit history</CardTitle>
-            <CardDescription>Every change to your available credit, newest first.</CardDescription>
+            <CardDescription>
+              The latest changes to your available credit, newest first. Every change is in the{' '}
+              <Link
+                href={`/c/${ctx.tenant.slug}/billing/statements`}
+                className="text-primary underline-offset-4 hover:underline"
+              >
+                monthly statements
+              </Link>
+              , which you can print or download as CSV.
+            </CardDescription>
           </CardHeader>
           <CardContent>
             {overview.transactions.length === 0 ? (
@@ -320,24 +376,13 @@ export default async function BillingPage({ params }: { params: Promise<{ slug: 
                       <TD className="whitespace-nowrap">
                         {formatDateTime(t.createdAt.toISOString(), tz)}
                       </TD>
-                      <TD>{TRANSACTION_LABEL[t.kind] ?? t.description ?? t.kind}</TD>
+                      <TD>{ledgerLineLabel(t.kind as LedgerKind, t.referenceType)}</TD>
                       <TD className="text-right tabular-nums">{signed(t.availableEffectMinor)}</TD>
                     </TR>
                   ))}
                 </TBody>
               </Table>
             )}
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Plans</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-sm text-muted-foreground">
-              Subscription plans are planned and not available yet.
-            </p>
           </CardContent>
         </Card>
       </div>

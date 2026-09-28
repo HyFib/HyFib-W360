@@ -8,7 +8,9 @@
  * Writing: every field that could be read as a spreadsheet formula (starting with =, +, -, @, tab
  * or carriage return) is prefixed with an apostrophe so spreadsheet programs show it as text
  * (CSV/formula injection). Values that are validated E.164 phone numbers are written unchanged:
- * "+" followed only by digits cannot form a formula.
+ * "+" followed only by digits cannot form a formula. Plain decimal numbers such as "-500.00" (an
+ * optional minus, digits and at most one decimal point) are written unchanged too: a constant
+ * cannot run anything, and statements need negative amounts to stay numbers.
  */
 export interface CsvLimits {
   maxBytes: number;
@@ -158,10 +160,11 @@ export function parseCsv(input: string, limits: CsvLimits = DEFAULT_CSV_LIMITS):
 
 const FORMULA_START = /^[=+\-@\t\r]/;
 const E164_ONLY = /^\+[1-9][0-9]{6,14}$/;
+const DECIMAL_ONLY = /^-[0-9]+(\.[0-9]+)?$/;
 
 /** Neutralises spreadsheet formulas (see module comment). */
 export function neutraliseCell(value: string): string {
-  if (E164_ONLY.test(value)) return value;
+  if (E164_ONLY.test(value) || DECIMAL_ONLY.test(value)) return value;
   return FORMULA_START.test(value) ? `'${value}` : value;
 }
 

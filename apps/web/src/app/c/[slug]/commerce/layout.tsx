@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import { notFound } from 'next/navigation';
 import { can } from '@w360/domain';
 import { PageHeader } from '@/components/page-header';
+import { ModuleNotInPlan } from '@/components/plan-limit';
 import { SettingsTabs } from '@/components/settings/settings-tabs';
 import { requireTenant } from '@/server/session';
 
@@ -31,7 +32,10 @@ export default async function CommerceLayout({
           { href: `${base}/stores`, label: 'Stores' },
         ]}
       />
-      <div className="mt-6">{children}</div>
+      <div className="mt-6">
+        <ModuleNotInPlan ctx={ctx} module="commerce" />
+        {children}
+      </div>
     </>
   );
 }

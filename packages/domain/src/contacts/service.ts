@@ -15,6 +15,7 @@ import {
   eq,
   inArray,
   isNull,
+  outerColumn,
   sql,
   whatsappAccounts,
   type ContactFieldType,
@@ -282,14 +283,16 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
         source: contacts.source,
         attributes: contacts.attributes,
         createdAt: contacts.createdAt,
+        // Outer columns named in full: this select has no joins, so drizzle would leave the table
+        // out and `id` would bind to the subquery's own table.
         tags: sql<string[]>`coalesce((select array_agg(t.tag order by t.tag) from app.contact_tags t
-          where t.tenant_id = ${contacts.tenantId} and t.contact_id = ${contacts.id}), '{}')`,
+          where t.tenant_id = ${outerColumn(contacts.tenantId)} and t.contact_id = ${outerColumn(contacts.id)}), '{}')`,
         marketing: sql<
           'opted_in' | 'opted_out' | null
         >`(select cc.status from app.contact_consents cc
-          where cc.tenant_id = ${contacts.tenantId} and cc.contact_id = ${contacts.id} and cc.purpose = 'marketing')`,
+          where cc.tenant_id = ${outerColumn(contacts.tenantId)} and cc.contact_id = ${outerColumn(contacts.id)} and cc.purpose = 'marketing')`,
         utility: sql<'opted_in' | 'opted_out' | null>`(select cc.status from app.contact_consents cc
-          where cc.tenant_id = ${contacts.tenantId} and cc.contact_id = ${contacts.id} and cc.purpose = 'utility')`,
+          where cc.tenant_id = ${outerColumn(contacts.tenantId)} and cc.contact_id = ${outerColumn(contacts.id)} and cc.purpose = 'utility')`,
       })
       .from(contacts)
       .where(

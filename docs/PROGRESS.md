@@ -1,5 +1,798 @@
 # Progress
 
+## 2026-09-28 — Fix: the ledger's balance check under PostgreSQL 17 (migration 0033)
+
+Status: **Fixed and verified locally on PostgreSQL 17.11 and 18.6.** CI on f74a824 (staff refunds)
+failed the PostgreSQL 17 integration job: 11 tests, every one that asks for a staff refund.
+
+### Completed
+
+- **Cause:** `app.assert_ledger_transaction_balanced()`, the deferred constraint trigger that checks
+  at commit that every ledger transaction balances (0004), ran with the privileges of whichever role
+  fired it. PostgreSQL 17 fires deferred triggers as the role current at `COMMIT`. A platform
+  owner's refund request is the first posting made for the platform role, which cannot read
+  `app.ledger_entries`: `ops.platform_request_credit_refund` (definer) holds the credit, and the
+  commit failed with "permission denied for table ledger_entries". PostgreSQL 18 fires AFTER
+  triggers as the role that queued them (the definer), so the PostgreSQL 18 job and every local run
+  (18.6) passed.
+- **Fix (migration 0033):** the check is now SECURITY DEFINER, owned by `w360_definer`, with its
+  pinned search path. It reads only the entries of the transaction named by the inserted row, and a
+  trigger function cannot be called directly, so no role gains anything. Migration 0032 was already
+  pushed, so it is fixed forward.
+- **Test:** `billing.test.ts` checks the function's owner and security, and fires the deferred
+  check as the platform role after a definer posting: a balanced posting passes and an unbalanced
+  one is refused. Without the fix, both parts fail on PostgreSQL 17 (checked); on 18 the owner check
+  catches it.
+
+### Test commands and results (local, 2026-09-28)
+
+| Command                                                   | Result                                                                                        |
+| --------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`      | 0 problems / all files formatted / all workspace packages pass                                |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker) | Before the fix: `credit-refunds.test.ts` 10 of 11 failed with the CI error. After: 388 passed |
+| `pnpm test:integration` (PostgreSQL 18.6)                 | 388 passed                                                                                    |
+
+### Known gaps
+
+- Local runs use PostgreSQL 18; a change to definer functions or deferred triggers should also run
+  the integration suite against a PostgreSQL 17 container (`TEST_DATABASE_ADMIN_URL`), as CI does.
+
+## 2026-09-28 — Phase 5: staff refunds of unused service credit (P5-05, part)
+
+Status: **Staff refunds of unused service credit implemented and locally verified with test data
+only.** A platform owner refunds part or all of a paid top-up from the company's platform page; the
+credit is held at once, the worker asks Razorpay, and the refund is recorded from what Razorpay
+reports. Razorpay traffic comes from the test-only stand-in; nothing reached Razorpay.
+
+### Completed
+
+- **Design (ADR-058):** a hold while Razorpay processes the refund, never a debit at request time
+  (a debit would take credit the company keeps if the refund fails). Only unused credit is refunded,
+  at most what is left of the payment, one open refund per top-up, platform owners only, with a
+  reason in the platform audit log. Staff see a company's balances, top-ups and refunds without a
+  support grant: payments to HyFib, not company content.
+- **Schema (migration 0032):**
+  - `app.credit_refunds` (requested, submitted, processed, failed): company RLS, column grants that
+    keep the staff reason and who asked from the company role, and a restrictive policy that lets
+    the company role move an open request only between requested and submitted.
+  - `ops.platform_request_credit_refund` (definer, platform role only): checks the owner, the
+    reason, that the company is not being deleted, the payment and, under the wallet's row lock,
+    the unused credit; holds the credit (90 days), records the request and writes the platform
+    audit log in one transaction.
+  - `ops.platform_company_billing` (balances, the latest 50 paid top-ups and refunds, for staff)
+    and `ops.credit_refunds_due` (the sweep's input).
+  - `app.billing_fail_credit_refund` fails a request and releases its hold together.
+  - `app.billing_record_refund` is replaced: a refund of a top-up with an open request (the same
+    refund id, or no id stored yet and the same amount) releases the request's hold and marks it
+    processed in the transaction that posts the refund.
+- **Domain:** `billing/credit-refunds.ts` (the worker's step: the attempt written down first,
+  `X-Refund-Idempotency: crf_<id>` with the same body every try, retries for anything uncertain,
+  checks every 15 minutes, then hourly, then every 6 hours; emails and audit), `refund.failed`
+  handling in the Razorpay receipt processor (fetched first), `platform/billing.ts` (the staff
+  service and the form's refund limits), refunds in progress in the Billing overview and on
+  receipts, statement labels ("Reserved for a refund", "Refund reservation released") with their
+  receipt links. A due company deletion waits for refunds in progress.
+- **Worker:** the `billing.credit-refund` queue and handler; the minute billing sweep queues one
+  signed job per due request.
+- **Web:** a Service credit card on the platform company page (balances, top-ups, refunds with
+  their reason and who asked, and the refund form for platform owners); refunds in progress on the
+  company's Billing page and receipts; a note on the deletion card when a due deletion waits.
+- **Found while building:**
+  - Postings made in one transaction share its time, and statements broke that tie by the posting's
+    random id, so a refund could be listed before the release of its reservation, with a
+    misleading balance in between. Statements, the latest changes on Billing and receipts now keep
+    the order the postings were made in (their first ledger entry's id).
+  - A refund still open when a company's deletion ran would have been stranded: the worker drops
+    jobs for deleted companies. New refunds are refused once deletion is asked for, and a due
+    deletion waits for refunds in progress.
+  - The operations console could list a quarantined webhook event without its Retry control (from
+    P5-10): Meta and Razorpay receipt processing wrote the quarantine entry and the receipt's
+    `quarantined` status in two transactions, and a page rendered between them saw the entry with
+    the receipt still processing. The local e2e run caught it once (`platform-ops.spec.ts` waited
+    for Retry on such a page). Both processors now write the entries with the receipt's outcome in
+    one transaction.
+- **Tests:** the Razorpay stand-in can create refunds pending and finish them (in tests and through
+  two test-only control routes for e2e).
+- **Docs:** ADR-058; ARCHITECTURE §7; SECURITY (controls, Phase 5 rules, platform roles);
+  THREAT-MODEL T82; RUNBOOKS §9 (refunds); DEPLOYMENT (`refund.failed` webhook event);
+  DATA-RETENTION; RELEASE-CHECKLIST (a Razorpay test-mode run on staging); BACKLOG P5-05;
+  FEATURE-MATRIX H-036.
+- **Mutation checks:** 31 guards broken one at a time; all 31 make a test fail. They cover the
+  request function's checks (owner, reason, deletion, spent credit, what is left of the payment,
+  paid top-ups, the hold, the audit), staff reads, the due list, recording (the request completed,
+  the match before the refund id is stored), failing (the hold released, never after processing),
+  the company role's policy and column grants, the idempotency key, 409 and lost responses, the
+  write-ahead attempt, recording an immediate refund, late failures, `refund.failed` trusted
+  without a fetch, the deletion wait, statement order, labels and receipt links, the overview and
+  receipt lists, and the form's refund limits.
+
+### Test commands and results (local, 2026-09-28)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `pnpm test` (unit)                                                          | 298 passed. New: `billing/credit-refunds.test.ts` 2 (check intervals; labels for a refund's reservation and its release) and `platform/billing.test.ts` 3 (the form's limits: what is left of each payment, capped by the unused credit; refunded top-ups, ones with nothing left and ones with a refund in progress left out).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 388 passed, including the new `credit-refunds.test.ts` 11: the hold, audit and staff and company views; owners only, checked by the database too; a short reason, bad amounts, more than what is left of the payment or than the unused credit, an unpaid payment and a second open refund refused; one Razorpay call with the idempotency key and the processed webhook recording it once; a refund processed at once and one found by the worker's check; a lost response, a 409 and a 503 never making a second refund; the webhook arriving before the refund id is stored; a refusal and a failed refund giving the credit back (webhook and check), and a failed Dashboard refund changing nothing; a processed request never failed; company isolation. `company-data.test.ts` 15 (new: a due deletion waits for a refund in progress, and no refund starts once deletion is asked for). |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 74 passed (37 × 2) in one full run (14.9 min), including the new `credit-refunds.spec.ts` on both projects: a platform owner's refund with a reason and the confirmation; the worker's submission after the minute billing sweep; the company's Billing page (the refund in progress, the credit set aside, the note on the payment), the receipt and the email while it is in progress; the processed webhook recording it once; staff seeing it refunded. The first full run (72 passed, 2 failed) caught the confirmation disappearing on phones and the console's quarantine race, both fixed above.                                                                                                                                                                                                                                                                         |
+| Mutation checks                                                             | 31 guards broken one at a time; all 31 make a test fail                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+
+### Known gaps
+
+- Not run against Razorpay test mode yet (staging, RELEASE-CHECKLIST). Refunds asked for by
+  companies, refunds of spent credit, instant refunds, several open refunds of one top-up, a
+  platform-wide refunds list and the daily reconciliation report are not built.
+- A refund Razorpay processes after its hold expired (90 days) is recorded as a plain refund.
+- Firefox and WebKit run the new spec in CI only; only Chromium is installed locally.
+
+## 2026-09-28 — Phase 5: billing statements and receipts (P5-07, part)
+
+Status: **Monthly statements and payment receipts implemented and locally verified with test
+data only.** Companies read their service credit month by month and download each month as CSV.
+Every paid top-up has a receipt, and the billing managers are emailed a link to it. Payments come
+from the Razorpay stand-in only. Receipts are payment confirmations, not tax invoices.
+
+### Completed
+
+- **Design (ADR-057):** statements are calendar months in the company's time zone, computed on
+  request from the append-only ledger in one repeatable-read, read-only snapshot. Opening balances
+  are the entries before the month, and closing balances are the opening plus every line. Receipts
+  confirm payments and say they are not tax invoices; GST documents wait for tax review. The
+  payment method Razorpay reported is recorded with the credit. Each credit is emailed with its
+  receipt link.
+- **Schema:**
+  - Migration 0029 adds `app.topups.payment_method`, the definer function
+    `app.billing_record_payment_method` (sets it once, only for the payment id that credited the
+    top-up), and an insert policy that keeps a new top-up from carrying a method.
+  - Migrations 0030 and 0031 build `ledger_entries_account_time_idx` (covering, for opening
+    balances) and `ledger_transactions_reference_idx` (a top-up's refunds and chargebacks)
+    concurrently, one statement per file: the runner sends a no-transaction file as one query,
+    which would put two concurrent builds in one implicit transaction.
+- **Domain (`billing/history.ts`):**
+  - month helpers (calendar months in a time zone, daylight-saving safe through campaigns/schedule);
+  - `statementMonths` (every month since the wallet was created, with totals and closing balances);
+  - `statement` (100 lines per page, balances carried across pages);
+  - `statementCsv` (opening and closing rows, exact rupees, audited as
+    `billing.statement_exported`);
+  - `receipt` (references, method, the saved card for automatic top-ups, refunds and chargebacks);
+  - `creditFromPayment` now records the method (also when a payment is seen again) and emails every
+    credit with its receipt link;
+  - the CSV guard lets plain negative numbers through as numbers.
+- **Web:** Billing → Statements (months), a month's statement (summary, lines, pages, print, CSV
+  download), a receipt page per paid top-up, Receipt links in the Payments table and on statement
+  lines, and a link to the statements from the credit history. The page chrome is hidden when
+  printing.
+- **Found while building:**
+  - Billing scrolled sideways on phones. Screen-reader-only text in table cells escaped the
+    table's scroll box, which was not positioned, and widened the page. The shared `Table` now
+    positions its box, fixing every table, and the billing pages constrain their grid columns.
+  - A stale "Plans: subscription plans are planned" card on Billing is removed; the plan card above
+    it already explains plans.
+  - One-time payments were labelled "Card payment", but Checkout also takes UPI and net banking.
+    They now read "One-time payment".
+- **Tests:**
+  - The Razorpay stand-in can report a payment method.
+  - The e2e fake Checkout moved into `tests/e2e/razorpay-checkout.ts`, shared by the billing specs.
+- **Docs:** ADR-057; ARCHITECTURE §7; SECURITY (controls and Phase 5 rules); THREAT-MODEL T81;
+  RUNBOOKS §9; DATA-RETENTION; RELEASE-CHECKLIST (statements and receipts on staging, tax
+  decision); BACKLOG (P5-02, P5-03, P5-05, P5-07); FEATURE-MATRIX H-035.
+- **Mutation checks:** 29 guards broken one at a time; all 29 make a test fail. They cover:
+  - month boundaries in both queries;
+  - line order and running balances;
+  - each total;
+  - months outside the wallet's life;
+  - page clamping and months carried forward;
+  - the CSV audit and the CSV number rule;
+  - receipts for unpaid top-ups and receipt contents;
+  - `billing.read`;
+  - recording the method, and the definer function's three conditions;
+  - the insert policy;
+  - the emails.
+
+### Test commands and results (local, 2026-09-28)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `pnpm test` (unit)                                                          | 293 passed. New: `billing/history.test.ts` 6 (month parsing, labels and steps, months in a time zone, Kolkata and London bounds, a midnight removed in Asunción and doubled in Havana, method labels) and 1 in `contacts/csv.test.ts` (plain negative numbers stay numbers, nothing longer does).                                                                                                                                                                                                                                                                                    |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 376 passed, including the new `billing-history.test.ts` 9: a UPI payment's receipt and its email with the receipt link; a redelivered payment adding nothing; a method filled in later; a refund on the receipt; no receipt for an unpaid top-up; runtime code unable to set a method (update, insert, another payment id or company, a recorded method); four fixture months that carry balances forward and reconcile; a time-zone change; 205 lines over three pages; the CSV rows and audit entry; this month matching the wallet balance; `billing.read` and company isolation. |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 72 passed (36 × 2) in one full run (12.9 min). New `billing-history.spec.ts` on both projects: a Checkout payment; Billing without sideways scrolling on a phone; the receipt (amount, "not a tax invoice", card through Razorpay, the payment id, the print button); the payment-received email linking to the receipt; the statements list with the month to date; the statement's credit line with its receipt link; the CSV download with the opening row, the credit line in exact rupees and the month-to-date row.                                             |
+| Mutation checks                                                             | 29 guards broken one at a time; all 29 make a test fail                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+
+### Known gaps
+
+- Tax invoices and GST documents (tax review), PDF files, statements for custom ranges, stored or
+  emailed monthly statements, staff views of statements and monthly rollups for high posting
+  volumes are not built.
+- The usage and rate card view and paying for plans in HyFib (other P5-07 screens) are not built.
+- Firefox and WebKit run the new spec in CI only; only Chromium is installed locally.
+
+## 2026-09-28 — Phase 5: step-up re-authentication (P5-07, part)
+
+Status: **Step-up re-authentication implemented and locally verified.** Actions a stolen session
+could use to take a company's data or money, or to keep access after the session is gone, now need
+a sign-in within the last 15 minutes; the member signs in again (with two-factor when it is on) and
+comes back to the page.
+
+### Completed
+
+- **Design (ADR-056):** a new sign-in instead of a password or code prompt, because re-entering the
+  password alone skips two-factor and the library checks a signed-in user's two-factor code without
+  its attempt limit; the window is the library's `freshAge` (15 minutes), now set from the domain's
+  `RECENT_SIGN_IN_MINUTES`. SEC-8's verification endpoint is settled by it.
+- **Domain:** `signedInAt` in the tenant context (the session's creation time passed by the web to
+  `resolveTenantContext`; null without a browser session); `authz/step-up.ts`
+  (`recentSignInUntil`, `hasRecentSignIn`, `assertRecentSignIn` with the existing
+  `step_up_required` error). Enforced in: the company export and the deletion request, card
+  mandate setup, auto-recharge settings unless turning them off, the company's Razorpay keys, API
+  key creation and rotation, webhook endpoint creation, changes and secret rotation, invitations
+  and role changes that make someone an owner, and turning off the company-wide two-factor
+  requirement. Revoking, cancelling, turning off and deleting never ask.
+- **Web:** `SignInAgain` (signs out and returns to the page after sign-in) and `ActionFailure` (the
+  prompt when an action answers `step_up_required`, otherwise the error) in nine forms; the Company
+  data page, adding a card on Billing and creating a key show the prompt instead of the action when
+  the sign-in is older; the export route answers 403 with the message.
+- **Docs:** ADR-056 (and ADR-055's "not built" list), ARCHITECTURE §3.4 and §6Q, SECURITY (sessions,
+  payments, known gaps), THREAT-MODEL T2, T9, T77 and T78 (T77 and T78 now mitigated), RUNBOOKS §11,
+  BACKLOG (P5-04, P5-07, P5-11, SEC-8), FEATURE-MATRIX (W-148, H-015).
+- **Mutation checks:** 21 guards broken one at a time (each of the protected service functions,
+  the safe-direction conditions for auto-recharge, owners, invitations and the two-factor
+  requirement, the window's boundary and length, a context without a sign-in time, and the context
+  taking the session's time); all 21 make a test fail.
+
+### Test commands and results (local, 2026-09-28)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `pnpm test` (unit)                                                          | 286 passed. New: `authz/step-up.test.ts` 3 (the 15-minute window and its boundary, contexts without a sign-in time, the refusal and its message).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 367 passed, including the new `step-up.test.ts` 3 (every protected action refused to a member who signed in 16 minutes ago before any audit entry, key, endpoint, payment account, invitation, role or setting changes, and a context without a sign-in time refused; the same actions allowed a minute after signing in again; revoking a key, turning automatic top-ups or an endpoint off, deleting an endpoint, inviting an agent, changing to a role other than owner, turning the two-factor requirement on or keeping it off, and cancelling a deletion allowed 90 minutes after signing in). Test helpers now pass the session's start. |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 70 passed (35 × 2) in one full run (13.7 min). New `step-up.spec.ts` on both projects: right after signing up the export and a new key are offered; with the session aged an hour (a fixture step as the auth role) the Company data and API keys pages show "Sign in again" instead of the export link, the deletion form and the key form, and rotating a key from the page is refused with the same prompt; signing in again returns to the API keys page, where the key rotates.                                                                                                                                             |
+| Mutation checks                                                             | 21 guards broken one at a time; all 21 make a test fail                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+
+### Known gaps
+
+- WebAuthn or passkeys as the step-up factor, per-action windows, and a step-up for platform staff
+  actions (their MFA is checked on every platform request) are not built.
+- The remaining P5-07 screens (full transaction history and statements, usage and rate card,
+  receipts and invoices) are not built; invoices need a tax review.
+
+## 2026-09-28 — Phase 5: company export and deletion (P5-11)
+
+Status: **Company export and deletion implemented and locally verified with test data only.**
+Owners download a full copy of their company's data and can have the company deleted: 14 days as
+suspended and cancellable, then a resumable worker job that removes HyFib from the company's
+providers, deletes every company row and keeps only billing records, plan history and platform
+evidence. Provider calls were verified against the Graph, Shopify and Razorpay stand-ins only.
+
+### Completed
+
+- **Design (ADR-055):** a streamed export with every table and column classified; deletion typed
+  with the company address, due after 14 days, cancellable by owners until it starts; a worker job
+  in bounded, resumable steps through SECURITY DEFINER functions; provider clean-up once with every
+  outcome recorded; a tombstone company row; what is kept and why; backups and restores.
+- **Schema (migration 0028):** the register `ops.tenant_deletions`, the step order
+  `ops.tenant_deletion_steps` (86 steps over 87 tables, children before parents), the definer
+  role's per-table `SELECT (tenant_id, id)`/`DELETE` grants with policies matching
+  `ops.deleting_tenant_id()`, and `app.request_tenant_deletion`, `app.cancel_tenant_deletion`,
+  `ops.tenant_deletions_due`, `ops.start_tenant_deletion`, `ops.record_tenant_deletion_cleanup`,
+  `ops.delete_tenant_data` and `ops.finish_tenant_deletion` (executable by the runtime role only).
+- **Domain:** `tenancy/export-spec.ts` (85 exported tables with their columns, 15 excluded tables
+  and every omitted column with a reason), `tenancy/export.ts` (keyset pages from one read-only,
+  repeatable-read transaction, an advisory lock per company, audit and emails first),
+  `tenancy/deletion.ts` (status, request, cancel, with audit entries and emails to owners and
+  administrators), `tenancy/deletion-run.ts` (start, provider clean-up, batches for up to five
+  minutes, finish with the final emails), Graph `unsubscribeApp`, the store worker's removal for a
+  deletion, a `tenant.notice` email, `tenant.delete` allowed while suspended and a pending-deletion
+  message in the permission layer.
+- **Worker:** the `tenant.delete` queue (`exclusive`, one run per company) and handler; the minute
+  billing sweep queues a run for every due or unfinished deletion.
+- **Web:** Settings → Company data (the export download, the deletion form with the typed address,
+  the scheduled state with its due date and a cancel button, the started state), the streaming
+  export route, a "being deleted" banner in the company layout and the company switcher, and a
+  Deletion card on the platform company page.
+- **Docs:** ADR-055, ARCHITECTURE §6Q, SECURITY (control, matrix, rules), THREAT-MODEL T77–T80,
+  DATA-RETENTION (export and deletion semantics now built), RUNBOOKS §8 and §10Q,
+  RELEASE-CHECKLIST, FEATURE-MATRIX (H-015), BACKLOG (P5-11 built).
+- **Found while building:**
+  - **Contact erasure left the number and text in past send requests** (`app.send_intents.request`);
+    erasure now redacts them (fixed in 0028; the erasure test checks it).
+  - **Public entry points treated a company pending deletion as unknown,** so a Shopify redaction or
+    a payment received during the grace period would have been dropped. The six lookups now treat
+    it like a suspended company. The growth suite had asserted that a company "being deleted"
+    opens nothing (a P4-05 choice from before pending deletion had a meaning); it now expects the
+    suspended behaviour, and that a deleted company's links open nothing (ADR-044's text notes the
+    change).
+  - **The ended-run guard no longer froze `pending_message_id` and `http_call_count`** (lost when
+    0022 replaced the function); both are frozen again and tested.
+  - **Every deletion request would have failed:** the email's date formatting combined
+    `dateStyle`/`timeStyle` with `timeZoneName`, which `Intl.DateTimeFormat` rejects. The new
+    integration suite caught it; the parts are spelled out and unit-tested.
+  - **The export email said "downloaded"** although it is sent before the first line and also for
+    a refused or interrupted export; it now says the export was started.
+  - **Mutation checks:** 33 guards broken one at a time (the owner check, the typed address, a
+    second request, cancelling after the start, the restored suspension and restriction, the due
+    date, releasing the bindings, who is notified, recording the clean-up once and only known
+    keys, deleting only for a started deletion, the definer's delete policy, finishing while rows
+    remain, the step order, a table left out, each of the six lookups, the send-request redaction,
+    both frozen run columns, visiting providers once, cancelling the card mandate, the Graph
+    method, one export at a time, the export's audit entry, members' accounts in the export,
+    administrators emailed, cancelling while pending). All 33 make a test fail.
+
+### Test commands and results (local, 2026-09-28)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `pnpm test` (unit)                                                          | 283 passed. New: `tenancy/company-data.test.ts` 4 (dates in the company's time zone, the export spec's tables, columns, omitted-column reasons and member columns).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 364 passed, including the new `company-data.test.ts` 14 (every company table deleted or kept on purpose, each once; children deleted before parents and nothing kept pointing at deleted rows; the definer's read and delete policies on every step table and the functions refusing companies not being deleted or not started; every table and column of the export classified, secrets omitted and readable by the runtime role; a busy company's export with row counts, members' accounts, no other company, no tokens, the audit entry and emails; owners only, one at a time, available while pending; requests needing an owner and the typed address, the company then suspended with emails and audit; cancellation restoring active, suspended with HyFib's reason, or restricted after a lapsed plan, and refused once started; runs not due; a full run with WhatsApp, Shopify and a card mandate at the stand-ins (tombstone, kept records, each provider called once, final emails without the company, the other company untouched, jobs refused, the address reusable, later webhooks quarantined, the platform record); a resumed run; a refused Meta token recorded and the deletion finished; cleanup outcomes validated and recorded once; the six public lookups while pending), the erasure test checking send requests, the ended-run guard's two columns, the growth test's new expectation and the new function grants in the isolation suite. |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 68 passed (34 × 2) in one full run (12.2 min). New `company-data.spec.ts` on both projects: an owner downloads the export (file name, gzip JSON Lines with the header, the owner as the only member and the end line, no `tenant_id`), the email arrives; the delete button stays disabled until the address is typed exactly; the deletion is scheduled (banner, due date, requester, email) with the export still available, then cancelled (banner gone, email); and a due deletion (moved on by a fixture step as the definer role) is run by the real worker from the minute sweep, the owner gets "Company deleted" and the company's pages answer 404.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Mutation checks                                                             | 33 guards broken one at a time; all 33 make a test fail                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+
+### Known gaps
+
+- Not built: step-up re-authentication before exporting or deleting, deletion started by platform
+  staff, stored exports with a download link, other formats, a shorter grace period.
+- Provider clean-up was verified against stand-ins only; `DELETE /{WABA-ID}/subscribed_apps`,
+  Shopify's `appUninstall` and Razorpay token deletion still need a staging run
+  (RELEASE-CHECKLIST).
+- The kept records (billing, plan history, the register) and their periods need a legal and tax
+  review; the Razorpay customer record is not deleted.
+- Deleted data stays in backups until they expire; re-applying deletions after a restore is a
+  manual runbook step (RUNBOOKS §8), not yet drilled.
+- A very large company's export holds one read-only transaction for as long as the download takes;
+  a reader that stops for a minute ends it (`idle_in_transaction_session_timeout`).
+- Firefox and WebKit run in CI only.
+
+## 2026-09-28 — CI: the Firefox stall in the cart reminder test
+
+Status: **Cause found and worked around in the test browser; verified locally and in CI.**
+The stall came from Playwright's Firefox driver, not from HyFib: no page, worker or database code
+changed.
+
+### Cause
+
+- On 0251ce1 (CI run 36392541160) `stores.spec.ts:411` waited in `page.goto` of the store page until
+  its 5-minute timeout in Firefox, passed on retry, and the job ran out of time. The server side was
+  ruled out: every database wait of web and worker is bounded (statement 15 s, lock 5 s, pool
+  checkout 10 s, idle transaction 60 s), and the store page reads with plain selects in a read-only
+  transaction, which never wait for the worker's store lease.
+- Playwright 1.63's Firefox (155.0, build 1543) can lose a protocol message after
+  Cross-Origin-Opener-Policy replaces a page's browsing context. The replacement gets a new driver
+  channel with the same identifier (`process-<pid>`) whose message ids start again at 1, while the
+  browser end still holds answers the old channel never acknowledged; a new message with a colliding
+  id is answered from that cache and never delivered. When the lost message is a navigation's
+  "committed" event, `page.goto` never settles. Upstream: microsoft/playwright#42731 (same versions)
+  and #42183. Playwright's main branch fixed it with Firefox build 1551 on 2026-09-22; no stable
+  release ships it yet (1.63.0 is the latest, 1.64 is in alpha).
+- Every HyFib page sends `Cross-Origin-Opener-Policy: same-origin`, and the cart reminder test
+  crosses that boundary on its first page (from about:blank) and in two round trips through the
+  Shopify stand-in on another origin (connecting the store, allowing customer access). The lost
+  message can be any later one on the replaced channel, so the stall can come well after the
+  crossing; here it came after a reload loop and two saves.
+- Evidence from CI: on 38796f2 (run 36395830637, whose report was uploaded because the job failed)
+  the cart test failed on both attempts in Firefox. On the retry, `page.goto` of the store page
+  never returned, although its trace shows the page's document (200 in 39 ms), all its scripts and
+  its link prefetches loading within half a second, with no request of the old page in flight, and
+  the failure screenshot shows the rendered store page. On the first attempt, a `toBeVisible` check
+  with a 1-second timeout never returned after a reload (a lost execution context message), so the
+  reload loop stopped reloading and ran out its 45 seconds; the worker had read the store 2 seconds
+  after "Read the store now", so it was not involved.
+- Evidence (local, Firefox build 1543, one fresh context per trial, four at a time): the upstream
+  reproduction page left `goto` pending 208 times in 600 with COOP enforced and 0 in 600 with
+  enforcement off; the cart test's navigation pattern on HyFib's own sign-in page (first navigation,
+  then three round trips to another origin without COOP) left a `goto` pending in 125 of 150
+  contexts with COOP enforced and in none of 1,050 navigations with enforcement off; a driver build
+  instrumented to log messages answered from that cache showed the lost `pageNavigationCommitted`
+  behind a stuck `goto`. In the cart test itself, the instrumented driver saw the page's browsing
+  context replaced 3 times in a run with COOP enforced (each a new driver channel under the old
+  identifier: the first page and the two round trips through the stand-in) and never with
+  enforcement off. The CI stall itself was not reproduced with the full test locally, where
+  contexts run one at a time and the race is much rarer (0 stalls in 280 such navigations in the
+  test runner): the cart test passed 8 of 8 times under CPU load and 5 of 5 with the instrumented
+  driver.
+- Found alongside, not the cause: Firefox fails `page.reload` and `page.goto` with
+  `NS_BINDING_ABORTED` when a test navigates while the page's router is still fetching
+  (`templates.spec.ts` in 6 of the last 39 CI runs, `automations.spec.ts` in 3, all passing on
+  retry). Firefox cancels the page's in-flight requests as soon as a navigation starts, and Next.js
+  answers a failed router request by loading the current page again, which aborts the test's
+  navigation (reproduced against a small local server). See Known gaps.
+
+### Completed
+
+- **Firefox runs without COOP enforcement** (`tests/e2e/playwright.config.ts`):
+  `browser.tabs.remote.useCrossOriginOpenerPolicy=false`, so no browsing context is replaced and no
+  driver channel restarts. Chromium and WebKit still enforce COOP, no test relies on Firefox
+  enforcing it, and the header itself is unchanged. Remove it with the Playwright upgrade that ships
+  Firefox build 1551 or later.
+- **Navigations are bounded:** `navigationTimeout: 30_000`, so a navigation that never settles, for
+  any reason, fails within 30 seconds and is retried in CI instead of holding its test until the
+  test's own timeout (5 minutes for the cart reminder test).
+- **CI keeps evidence:** the end-to-end step stops at 40 minutes (the job has 45); the server logs and
+  the job, store and database state (from 7b62ff0) are printed on failure or cancellation; and the
+  Playwright report with `test-results` and the web and worker logs are uploaded for every run, one
+  artifact per attempt, so a test that passed on retry keeps its failed attempt's trace.
+
+### Test commands and results (2026-09-28)
+
+| Command                                                                                          | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                             | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `pnpm test:e2e` (all four projects, on the P5-10 tree)                                           | 116 passed, 12 skipped: in each project the web request, webhook and Flows data endpoint tests call a target through `E2E_HTTP_HOST`, which needs the hosts entry CI adds                                                                                                                                                                                                                                                                                           |
+| `pnpm test:e2e --project=firefox --repeat-each=5 --retries=0 stores.spec.ts -g "cart reminders"` | 5 passed                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| CI, run 36411204063 on 86dad15 (the fix plus a temporary job, since reverted)                    | lint, types and unit tests, integration on PostgreSQL 17 and 18, build and security scans passed. The temporary Firefox job measured the round trips on HyFib's sign-in page (COOP enforced: 51 of 60 contexts left a `goto` pending; enforcement off: none in 420 navigations), then ran `stores.spec.ts` 6 times (30 passed) and the cart reminder test 10 more times (10 passed), without retries. The four-project e2e job: 128 passed (28.6 min), none retried |
+
+### Known gaps
+
+- Firefox end-to-end runs do not enforce COOP until the Playwright upgrade; Chromium and WebKit do.
+- The `NS_BINDING_ABORTED` failures above remain and pass on retry. `templates.spec.ts` reloads just
+  after the template editor's `router.refresh()`, which repeats the refresh its save action already
+  asked for; tests that navigate straight after an in-page refresh should wait for the page to
+  settle or move through the app's links.
+
+## 2026-09-28 — Phase 5: platform operations console (P5-10)
+
+Status: **Operations console implemented and locally verified with test data only.** Platform staff
+see where companies are stuck or failing, what the job system is doing and whose sending needs a
+review under `/platform/ops`, from counts, states, error codes, labels and times. No message text,
+contact, payload, email address, secret or full URL reaches the console. Dead-lettered jobs are now
+recorded by the worker instead of sitting unread in pg-boss. Nothing ran against a production
+company.
+
+### Completed
+
+- **Design (ADR-054):** four SECURITY DEFINER read functions that refuse anyone but a platform
+  administrator; direct reads only of what the platform role could already read; queue counts from
+  pg-boss's `getQueues()`; dead letters recorded by the worker without error messages; no redrive
+  button (the minute sweeps re-signal durable rows); two audited repairs; health and signal rules
+  that are HyFib's own heuristics, never automatic suspension.
+- **Schema (migrations 0026 and 0027):** `ops.dead_letters` (the worker role may only insert, the
+  platform role reads, `ops.purge_dead_letters` deletes after 30 days), `ops.url_host`,
+  `ops.platform_ops_health`, `ops.platform_ops_activity` (at most 93 days back),
+  `ops.platform_ops_signup_sessions`, `ops.platform_ops_integration_failures`,
+  `ops.platform_retry_webhook_receipt`, the definer role's column grants and a read policy on
+  signup sessions; 0027 indexes consent events by company and time, built concurrently.
+- **Domain:** `platform/ops-model.ts` (health issues and levels, review signals, quarantine ids
+  allowed on screen, labels), `platform/ops.ts` (overview, company health, onboarding,
+  integrations, queues, signals, usage, receipt retry, quarantine resolution with a platform audit
+  entry), `jobs/dead-letters.ts` (the recorded row: a company, kind and reference only when the
+  envelope's signature verifies; an error's name and code only; idempotent recording that returns
+  the rows actually added; the purge) and a pg-boss queue inspector.
+- **Worker:** consumes `dead-letter` (batches of 20 with pg-boss metadata; recording retried three
+  times with backoff), purges old dead letters in the messaging sweep, and logs every failed job
+  attempt with its queue and job ids (added while chasing the Firefox stall below).
+- **Web:** `/platform/ops` with Overview, Onboarding, Integrations, Queues, Signals and Usage (7, 30
+  or 90 days), a Health card on each company's platform page, Retry and Resolve forms (a reason is
+  required) and an Operations link on `/platform`.
+- **Docs:** ADR-054, ARCHITECTURE §4, §6P and §8, SECURITY (control and platform rules),
+  THREAT-MODEL T75 and T76 (and a broken table cell in T71 fixed), DATA-RETENTION (dead-letter
+  records), RUNBOOKS §1, §3, §4 and §10P (the owner-role receipt reset becomes a fallback),
+  RELEASE-CHECKLIST, FEATURE-MATRIX (H-034), BACKLOG (P5-10 built).
+- **Found while building:**
+  - **The dead-letter queue had no consumer.** Jobs that used their last retry sat in pg-boss for
+    30 days, visible only with SQL, and pg-boss cannot list them with a limit. The worker now
+    records them (above).
+  - **Handler errors were never logged by the worker** (pg-boss kept them only in the job's
+    output), which made the worker hard to rule out while the Firefox cart reminder stall was
+    chased. Every failed attempt is now logged with its queue and job ids (pushed first, in
+    7b62ff0).
+  - **A quarantined receipt was offered for retry in two tables,** and once its quarantine entry was
+    resolved the receipt stayed "needing attention" for good. The receipts table now leaves
+    quarantined receipts to the quarantine table, matching the overview's count.
+  - **The security events table appeared on both Integrations and Signals;** it is on Signals only.
+  - **Tables made the pages wider than a phone.** A grid with implicit `auto` columns grows to its
+    widest table; `grid-cols-1` lets each table scroll inside its card. A table cell styled as a
+    grid now holds a grid inside it instead.
+  - **The first refusal test reached only the first function a page calls,** so removing the
+    administrator check from any later function would have passed. Each function is now called
+    directly by a non-administrator.
+  - **Recording dead letters reported the batch size,** so a repeated batch was logged as recorded
+    again; it now returns the rows actually added (the worker role cannot use `RETURNING`).
+  - **A dead letter from an undeclared queue was shown with an invented policy** ("no retries, then
+    dead-lettered"); it now reads "Not declared by this release".
+  - **The end-to-end test's own race:** reloading right after clicking a tab cancelled the
+    client-side navigation, so the test waits for the page before reloading until the worker's
+    quarantine shows.
+  - **Firefox stall (open since P5-09):** CI on 7b62ff0 ran all 124 end-to-end tests green on the
+    first attempt, with no retries. The cause was later found in Playwright's Firefox driver, not
+    in the worker (see "CI: the Firefox stall in the cart reminder test" above); the worker's
+    attempt logs and the new CI step (job, store and database state after a failure) remain for
+    other failures.
+  - **Mutation checks:** 21 guards broken one at a time (the administrator check in each of the
+    five functions, the host-only label, retrying from another status or without a body, the audit
+    entry, the purge age, imported opt-outs, completed signups, the activity window, attribution
+    without a verified signature, error messages kept, duplicate recording, resolving twice, the
+    quarantine id allow-list, the minimum message count for send failures, the usage windows, and
+    offering a retry for an erased receipt). On the first run 20 made a test fail; the survivor
+    (an erased receipt still offered for retry, which the database would refuse) now has a test,
+    and all 21 fail a test.
+
+### Test commands and results (local, 2026-09-28)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `pnpm test` (unit)                                                          | 279 passed. New: `platform/ops-model.test.ts` 11 (health issues and levels at each threshold, the worst quality of active numbers, integration failure wording, review signals at their thresholds, quarantine ids), `jobs/dead-letters.test.ts` 4 (only the error's name and code, pg-boss timeouts, attribution only with a verified signature, malformed metadata).                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 350 passed, including the new `platform-ops.test.ts` 11 (each function refusing a non-administrator and the runtime role refused; a company's numbers, sending, endpoints, quality and 30-day activity counted without its message text; the overview, signals and usage; the activity window; failed and abandoned signups but not completed ones; a failing endpoint labelled by its host only; an exhausted receipt retried with its audit entry, and refusals for a processed receipt, an erased or old body, an unknown receipt and a non-administrator; a quarantined event resolved once, audited; a job dead-lettered by real pg-boss recorded once with its company only through its verified signature and without its error message; the 30-day purge) and the new function grants in the isolation suite. |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 64 passed (32 × 2) in one full run (10.6 min). New `platform-ops.spec.ts` on both projects: staff with two-factor authentication open Operations from `/platform`; the new company is listed without an active number; a signed event from an unknown WhatsApp account is quarantined by the worker, shown without its text, retried and resolved with reasons; queue policies (`commerce.store`: 5 retries, then dead-lettered; `billing.auto-recharge`: no retries); signals; usage over 7 days; both repairs in the platform audit log; the company's Health card; no sideways scrolling on any of these pages.                                                                                                                                                                                     |
+| Mutation checks                                                             | 21 guards broken one at a time; all 21 make a test fail (one needed the new erased-receipt test)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+
+### Known gaps
+
+- Not built: alerts (email or pager) on these conditions, trends over time, number quality from
+  Meta's `phone_number_quality_update` webhook (quality is as of the last health check), API
+  request counts, exports, the age of the oldest waiting job, redrive from the console,
+  acknowledging or snoozing an issue.
+- Every page reads every company: fine for the test envelope (100 companies), not for thousands;
+  paging and precomputed rollups come with growth.
+- The health and signal thresholds are HyFib's own heuristics and have not met real traffic.
+- Firefox and WebKit run in CI only; no production company has been seen in the console.
+
+## 2026-09-28 — Phase 5: outgoing webhooks (P5-09)
+
+Status: **Outgoing webhooks implemented and locally verified; delivered only to local test
+receivers.** Companies add HTTPS endpoints in Settings → Webhooks and receive signed JSON POSTs for
+received messages, message status, consent changes and template status. Events are captured by
+database triggers in the company's scope, payloads are built when delivered, and delivery goes
+through the egress guard with bounded retries, replays and automatic disabling. Delivery is at least
+once, never claimed exactly once. No request reached a customer's system.
+
+### Completed
+
+- **Design (ADR-053):** up to 10 endpoints per company (`developer.manage`); four event types plus
+  `ping` for tests; events hold ids and non-personal facts only and payloads are built at delivery
+  (an erased contact is sent without personal data); a per-company `webhook.deliver` job (policy
+  `stately`) woken through LISTEN and the minute sweep, which read due companies from the database
+  and never from a notification; signatures `t=<time>,v1=<HMAC-SHA256 of "<t>.<body>">`; eight
+  attempts over about 45 hours; automatic disabling after 72 hours of failures; 30-day retention.
+- **Schema (migration 0025):** `app.webhook_endpoints` (encrypted secrets with versions, the
+  previous secret's expiry, on/off with the reason, health), `app.webhook_events`,
+  `app.webhook_deliveries` (states, attempts, lease, results, replays), row-level security, column
+  grants, the capture triggers on messages, consent events and template status events
+  (`app.capture_webhook_event`, SECURITY INVOKER), the notification trigger, and the SECURITY
+  DEFINER sweeps `ops.webhook_dispatch_due` and `ops.purge_webhook_data`.
+- **Domain (`webhooks/`):** the endpoint service (create with the secret shown once, edit, turn off
+  and on, rotate with a 24-hour overlap, delete, test events, delivery history, replays; audited with
+  the host only), payload building for each event type, signing and verification, and the delivery
+  worker (claims in batches of 10 with `SKIP LOCKED` and a lease, requests with no transaction open,
+  outcomes recorded under endpoint-then-delivery locks and dropped when a newer attempt owns the
+  delivery, the retry schedule, interrupted attempts, disabling with a system audit entry and an
+  email to owners and administrators, dispatch and retention helpers). The OpenAPI document
+  describes every event under `webhooks`.
+- **Worker:** the `webhook.deliver` handler, a LISTEN connection that coalesces notifications into at
+  most one database lookup every 250 ms (reconnecting with backoff), and the sweep and retention in
+  the per-minute messaging sweep.
+- **Web:** Settings → Webhooks (owners and administrators): endpoints with state, events, last-24-hour
+  counts, health and secret version; adding one (the secret shown once, kept only in the page's
+  memory); test events; rotation; turning off and on; deletion; each endpoint's deliveries (all or
+  failed), replays and its settings.
+- **Docs:** ADR-053, ARCHITECTURE §6O, SECURITY (control, Phase 5 rules, secret rotation, gaps),
+  THREAT-MODEL T71 to T74, DATA-RETENTION, RUNBOOKS §10O, RELEASE-CHECKLIST, FEATURE-MATRIX (H-014,
+  W-138, W-139, W-144), BACKLOG (P5-09 built; SEC-3 users).
+- **Found while building:**
+  - **An unreachable notice on the API keys page (removed).** The page showed a "Reading only" alert
+    for suspended and restricted companies, but those companies lose `developer.manage`, so the page
+    answers 404 before the alert could render. The API's own behaviour for them (reading only, 423
+    for writes) is unchanged and documented in the runbook.
+  - **A normalised URL longer than the column allows (fixed before commit).** Percent-encoding can
+    lengthen an entered URL past 2048 characters; the service now refuses it as a form error instead
+    of failing on the table's check.
+  - **The CI end-to-end job reached its 30-minute limit (limit raised to 45).** The suite now has
+    124 tests run one at a time across four browsers; green runs already took 27 to 29 minutes
+    including set-up, and on 0251ce1 the existing Firefox cart reminder test stalled in
+    `page.goto` until its 5-minute timeout, passed on retry, and the job was cancelled at 30
+    minutes. The stall was a Playwright driver bug in Firefox, since worked around (see "CI: the
+    Firefox stall in the cart reminder test" above).
+  - **The loopback allowance also lifts the port rule.** A privileged-port URL passes the URL check
+    wherever `W360_EGRESS_ALLOW_LOOPBACK` is set (local and test only); the test for that rule uses
+    the production policy.
+  - **Mutation checks:** 20 guards broken one at a time (claiming deliveries not yet due, 3xx as
+    success, the retry schedule, the disabling threshold, the interrupted-attempt limit, the previous
+    secret's expiry, the lost-outcome check, claiming for a turned-off endpoint, retrying after it was
+    turned off, stopping after a batch of ended deliveries, disabling without failing waiting
+    deliveries, the notice's recipients, clearing the failing state, the lease window, the event id
+    header, test events and replays to a turned-off endpoint, the endpoint limit's lock, failing only
+    waiting deliveries). 19 make a test fail; the survivor (building an erased contact's number from
+    the row without checking `erased_at`) is equivalent, because `app.erase_contact` clears the
+    number and name in the same statement.
+
+### Test commands and results (local, 2026-09-28, fresh database)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass (on 5015970)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `pnpm test` (unit)                                                          | 264 passed. New: `webhooks/webhooks.test.ts` 11 (signature format and verification with its 5-minute tolerance, two secrets, tampering, the retry schedule, inbound summaries per message type, payload schemas for every event including erased contacts, error labels, hosts, the endpoint-disabled email escaping what it shows, the OpenAPI `webhooks` section with its headers and schemas).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 339 passed, including the new `webhooks.test.ts` 22 with a local receiver (endpoints: secret shown once and stored encrypted, the egress URL rules, the limit under twelve concurrent additions, developers only; capture per subscribed type with one delivery per active endpoint and none after a rollback; signed `message.received` with the contact and text; `message.status` for accepted, delivered and failed with its error; `template.status_changed`; an erased contact sent without number, name or text; a deleted message ending as `event_gone`; the retry schedule over eight attempts; an edited URL used for the next attempt; timeouts and redirects as failures; interrupted attempts and the attempt limit; outcomes dropped after a newer attempt, a deletion or a turn-off; ended deliveries not holding up others; automatic disabling with its emails and audit entry; turning off, replays and test events; deletion; rotation overlap and expiry; loopback, metadata and rebinding addresses refused; dispatch skipping suspended companies with one job per company; retention; isolation, row security and column grants) and the webhook function grants in the isolation suite. `webhooks.test.ts` was rerun after the last service change (URL length): 22 passed. |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 62 passed (31 × 2) in one full run (11.6 min). New `webhooks.spec.ts` on both projects: an endpoint added in Settings → Webhooks (secret shown once, not on the page after a reload), a signed test event verified with the secret, a received message from Meta's webhook delivered with the contact, the delivery history, a replay with the same event id, a rotation signing with both secrets, turning off and on, deletion; no sideways scrolling. After the last two changes (URL length, the API keys page), a rebuild of 5015970 and `api.spec.ts` plus `webhooks.spec.ts` again: 4 passed.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Mutation checks                                                             | 20 guards broken one at a time; 19 make a test fail, and the survivor is the equivalent mutant above                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+
+### Known gaps
+
+- Not built: filters beyond the event type, custom headers, mutual TLS, fixed egress addresses for
+  receivers' allowlists, endpoints per number, ending a rotated secret's overlap early, events for
+  conversations, campaigns, automations, contact changes and orders, and managing endpoints through
+  the public API (W-139).
+- Delivery throughput is not load tested; one company's job sends 10 requests at a time.
+- Firefox and WebKit run in CI only; deliveries reach local test receivers only.
+
+## 2026-09-28 — Phase 5: public API (P5-08)
+
+Status: **Public API v1 implemented and locally verified; sends reach only the local Graph
+stand-in.** Companies create API keys in Settings → API keys and call `/api/v1` to send approved
+templates, create contacts, record consent and read the status of messages the API sent. Keys are
+hashed, scoped within their creator's permissions, rotated with an overlap and revoked at once;
+sends go through the members' checks and the existing send pipeline, and an `Idempotency-Key`
+makes retries safe. No request reached Meta.
+
+### Completed
+
+- **Design (ADR-052):** keys belong to the company; five scopes (`templates.read`, `contacts.read`,
+  `contacts.write`, `messages.send` for utility templates, `messages.send_marketing`), each granted
+  only by a member holding the matching permission; a request acts in its company's scope as the
+  key; template sends only (session, media and interactive messages are not in v1); idempotency
+  keys stored with the request's own transaction; keyset cursors; an OpenAPI document from the
+  validation schemas.
+- **Schema (migration 0024):** `app.api_keys` (SHA-256 of the token only, unreadable by the runtime
+  role; a guard trigger keeps token, scopes and author fixed, a revocation final and an expiry only
+  sooner; never deleted), `ops.api_key_authenticate` (SECURITY DEFINER; refuses revoked and expired
+  keys and companies being deleted; records the last use at most once a minute without waiting),
+  `app.api_idempotency_keys` and `ops.purge_api_idempotency_keys`, `app.messages.api_key_id`, and
+  `api_key` as a consent actor.
+- **Keys (`api/keys.ts`):** `w360_` + 12 base32 characters (the public prefix) + 32 random bytes;
+  creation with name, scopes and expiry (30, 90, 365 days or never), at most 20 active keys under a
+  company lock, rotation to a key with the same scopes and lifetime with 0 to 72 hours of overlap,
+  immediate revocation, all audited with the prefix only.
+- **Requests (`apps/web/src/server/api.ts`):** bearer authentication, failed attempts limited per
+  client address, token buckets per key and per company (429 with `Retry-After`), JSON content type
+  and a 64 KB body limit, `Idempotency-Key` checks, error bodies with a request id, no tokens in logs.
+  Writing scopes are refused while the company is suspended or restricted.
+- **Resources (`api/resources.ts`):** templates with their variables and numbers; contacts in pages
+  with cursors, by number and by id; create or return the existing contact (suppressed numbers
+  refused); consent with evidence; template sends with the members' checks (approval, category
+  scope, variables, number selection, consent, suppression, erasure, marketing frequency cap under
+  the campaign lock), queued through the send pipeline and re-checked before dispatch; the status of
+  API messages.
+- **Web:** Settings → API keys (owners and administrators): base URL, example, key list with state,
+  prefix, scopes, author, last use and expiry, creation with the scopes the member may grant, the
+  token shown once with a copy button, rotation with an overlap and revocation. `GET
+/api/v1/openapi.json` publishes the document (cacheable for 5 minutes).
+- **Docs:** ADR-052, ARCHITECTURE §6N, SECURITY (control, Phase 5 rules, key rotation, gaps),
+  THREAT-MODEL T67 to T70, DATA-RETENTION, RUNBOOKS §10N, RELEASE-CHECKLIST, FEATURE-MATRIX (new
+  H-033; W-058, W-086, W-134 to W-137, W-140, W-141, W-142, W-144), BACKLOG (P5-08 built).
+- **Found while building:**
+  - **Contacts list and CSV export showed no tags and no consent (fixed, own commit).** Drizzle
+    leaves the table name out of a select without joins, so the correlated subqueries for tags and
+    consent compared the subquery's own `id`. Every contact showed no tags and unknown consent in
+    the list and the export. The subqueries now use `outerColumn`; the contacts suite checks the
+    values. The API's contact queries had the same mistake before their first test run.
+  - **A test that depended on file order (fixed, own commit).** Two cart reminder assertions looked
+    contacts up by number across companies; the contacts erasure test creates the same number in
+    another company, so the assertion failed whenever that file ran first.
+  - **The Templates page scrolled sideways on phones (fixed).** Its outer grid had an automatic
+    column that grew to the table's width, so a long template name widened the whole page (the new
+    e2e test's click on "Refresh from Meta" landed on overlapping text on mobile). It now uses one
+    shrinkable column, as other pages do, and the API e2e test checks for sideways scrolling there.
+  - **Review fixes for P5-01 (own commit):** retrying a failed number's setup now checks the number
+    limit; the staff plan form sends only the add-ons the chosen plan sells.
+  - **Mutation checks:** 16 API guards removed one at a time. Two survived at first: a 0-hour
+    rotation that only expired the old key (the test now requires it revoked), and removing the
+    key-limit lock (the six racing creations started after the first had committed because the pool
+    had one open connection; the test now opens six connections first, and the mutation fails the
+    test in three of three runs). Removing the outer once-a-minute check in the last-use update
+    changes nothing, because the update repeats the condition (an equivalent mutant); removing both
+    fails the test.
+
+### Test commands and results (local, 2026-09-28, fresh database)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `pnpm test` (unit)                                                          | 253 passed. New: `api/api.test.ts` 13 (token shape and hashing, bearer parsing, scopes and their permissions, key states, the idempotency key format, error mapping without internals, the OpenAPI document against the route handlers and its references); `plans/model.test.ts` +1 (add-ons a plan sells).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 317 passed, including the new `api.test.ts` 20 (key creation, validation and granting within permissions, the 20-key limit under six concurrent creations, authentication and last use, suspended, restricted and deleting companies, rotation with and without overlap, key guards, scopes, contacts create and upsert with suppression, cursor pages, consent with evidence, idempotent replays, reuse refused, failures stored nothing, recycling after 24 hours, templates list, sends through the Graph stand-in with concurrent retries and delivery status, template, variable, number and suppression checks, marketing scope, opt-in and cap, opt-out after queueing, status of API messages only, isolation, the sweep), a retry test in `plans.test.ts`, list and export checks in `contacts.test.ts`, and the API function grants in the isolation suite. |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 60 passed (30 × 2) in one full run (10.1 min). New `api.spec.ts` on both projects: a key created in Settings → API keys (token shown once, only its prefix listed afterwards), the OpenAPI document without a key, 401 without one, templates, 403 without the contacts scope, a contact created, 400 without an `Idempotency-Key`, a template sent with a retry replayed, the worker's send to the Graph stand-in read back as `accepted`, exactly one request at the stand-in, the revoked key refused; no sideways scrolling on the Templates and API keys pages.                                                                                                                                                                                                                                                                                   |
+| Mutation checks                                                             | 16 API guards and 3 fixes (contact tags, contact consent, the retry limit) broken one at a time; each makes a test fail, apart from the equivalent mutant above                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+
+### Known gaps
+
+- Not built: monthly API quotas per plan, API access as a plan module, session, media and
+  interactive messages through the API, conversation and message lists, starting automations,
+  bulk sends in one call, outgoing webhooks (P5-09), IP allowlists per key and reminders before keys
+  expire.
+- The rate limits are not exercised by automated tests.
+- Firefox and WebKit run in CI only; sends reach the Graph stand-in only.
+
+## 2026-09-28 — Phase 5: plans and entitlements (P5-01)
+
+Status: **Plans and entitlements implemented and locally verified; paying for a plan in HyFib is not
+built.** Platform owners keep a catalog of immutable plan versions (no prices in code), every company
+has a plan state, staff put companies on plans, time moves trials, paid periods and grace periods on,
+a lapsed plan restricts the company, and seats, WhatsApp numbers, teams, live automations and monthly
+automation runs are limited where they are added. Nothing is charged: staff set paid periods after a
+payment settled elsewhere (Razorpay Subscriptions stay in P5-07). No request reached a provider.
+
+### Completed
+
+- **Design (ADR-051):** a platform catalog of plan versions (draft → published, immutable → retired)
+  with an INR price per 1, 3 or 12 months, trial and grace days, limits (no value: no limit),
+  add-ons (extra seats and numbers up to a maximum, automation run packs) and modules (automations,
+  WhatsApp Flows, CRM, commerce; the rest is in every plan). One plan state per company:
+  complimentary, trialing, active, past_due, expired, canceled. A default trial for new companies,
+  else complimentary; companies from before plans are complimentary.
+- **Schema (migration 0023):** `ops.plans` (guarded like rate cards: drafts editable, published
+  versions immutable even for the platform role, retire only, never deleted), `ops.plan_settings`
+  (the default trial, which must be published with trial days), `app.tenant_plans` (one row per
+  company, created by a trigger with the company, backfilled complimentary as `w360_definer`,
+  guarded so only published versions are assigned and add-ons stay within what the version sells),
+  `app.usage_counters`, the `restricted` company status with a trigger that restricts an active
+  company when its plan lapses and lifts it when access returns (suspension wins),
+  `app.tenant_entitlements`, the sweep functions (`ops.plan_transitions_due`,
+  `ops.usage_limits_reached`, `app.apply_plan_transition` in the company's own scope),
+  `ops.platform_tenant_usage` (counts only), `app.accept_invitation` with the seat check, and seven
+  lookup functions that now treat restricted companies like suspended ones.
+- **Limits (`plans/entitlements.ts`):** checked where things are added, under a per-company advisory
+  lock per kind: seats (active members plus waiting invitations) when inviting, resending an expired
+  invitation and restoring a suspended member, and in SQL when an invitation is accepted; WhatsApp
+  numbers when a number is connected (or connected again); teams when created; live automations
+  when published or turned on. A lower limit removes nothing.
+- **Automation runs:** each live run started by a customer message or a store event consumes the
+  month's counter atomically (never past the limit; test runs are not counted); months start on the
+  usage anchor's day; store events beyond it are skipped as `automation_quota`. The billing sweep
+  emails billing managers once when a month is used up.
+- **Modules:** the tenant context drops the write permissions of modules the plan leaves out
+  (reading stays, with the plan's reason when refused); automation starts, order messages and cart
+  reminders (`not_in_plan`) and sending products or flows from a conversation check the module.
+- **Time (`plans/sweep.ts`, the minute billing sweep):** trials that ended expire; paid periods that
+  ended become past_due for the version's grace days, then expire; each change is audited as the
+  system and emailed to billing managers; one company's failure is logged and retried without
+  holding up the others.
+- **Platform:** plan catalog screens (list, new plan, version page with publish, new version,
+  retire or discard, draft editing), the default trial, a Plan card on each company (state, limits,
+  usage counts, assignment form with version check and reason), plan columns in the company list,
+  and reactivation that restricts a company whose plan lapsed. Only platform owners change the
+  catalog.
+- **Company pages:** a plan card on Billing (state, price, add-ons, modules, usage against limits),
+  banners for a restricted company and an overdue payment, limit hints on Members, Teams, WhatsApp
+  numbers and Automations, "not in your plan" notices on the four plan modules, a plan column in
+  Settings → Modules, and the inbox hides form and product sending when the plan leaves them out.
+- **Docs:** ADR-051, ARCHITECTURE §7, SECURITY (plans control, permission rules, platform roles),
+  THREAT-MODEL T64 to T66, DATA-RETENTION, RUNBOOKS §10M, RELEASE-CHECKLIST, FEATURE-MATRIX (W-001
+  to W-009, W-014, new H-032), BACKLOG (P5-01 built; P5-06 note), and two stale module descriptions
+  in Settings → Modules corrected (automations from store orders with templates; store connectors
+  exist).
+- **Found while building:**
+  - **The backfill wrote nothing (fixed before commit).** Forced RLS on companies applies to the
+    migration role too, so the first backfill inserted no plan states. It now runs as `w360_definer`
+    after its policies exist.
+  - **Lock order (designed out before commit).** The sweep, plan changes and status changes all
+    lock the company row before its plan state, so they cannot deadlock; the same for the default
+    trial and retiring a version.
+  - **A billing notice link (fixed).** Billing emails linked to `/c/<slug>/settings/billing`, which
+    does not exist; they now link to `/c/<slug>/billing`.
+  - **Mutation checks:** 12 guards (the counter's limit, the seat checks in the service and in SQL,
+    the module filter, the dispatch and store-event quota, reactivation, the notice claim, the
+    order-message module check, the team limit, the restriction trigger, published immutability):
+    each removed alone fails a test. The notice claim survived at first (the listing already skips
+    announced counters); it is now a function the test calls twice.
+
+### Test commands and results (local, 2026-09-28, fresh database)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `pnpm test` (unit)                                                          | 239 passed. New: `plans/model.test.ts` 5 (usage periods on the anchor day, short months and leap years, contiguous periods; module write permissions; which plan states restrict)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 296 passed, including the new `plans.test.ts` 12 (catalog immutability and owner-only changes, default trial and complimentary companies, assignment with both audit logs and version conflicts, add-on checks, restriction and plan-aware reactivation, the sweep through trial end, grace and expiry with one notice each, seat races at acceptance and invitation, teams and live automations with downgrades, numbers, the run quota from customer messages with run packs and uncounted test runs, twelve concurrent starts counting five, modules, isolation) and 2 new in `stores.test.ts` (order messages skipped without commerce; store-event starts skipped beyond the month's runs or without automations). The tenant-isolation suite covers the two new tables and checks the new functions' grants |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 58 passed (29 × 2) in one full run (9.8 min). New `plans.spec.ts` on both projects: a platform owner with two-factor publishes a plan and puts a company on it; the company's Billing page, seat hint, automation notice and Modules column; ending the plan restricts the company                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| Mutation checks                                                             | 12 guards broken one at a time; each makes a test fail (one only after the test change above)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+
+### Known gaps
+
+- Not built: paying for plans in HyFib (Razorpay Subscriptions), self-serve plan changes and trials
+  of higher plans, proration, plan invoices and receipts, usage alerts before a limit is reached,
+  emails to companies when staff change their plan, API quotas (P5-08) and AI credits (Phase 6).
+- The number limit is checked when a number finishes connecting, after Meta's signup; the channels
+  page shows the limit before the signup starts.
+- Firefox and WebKit run in CI only; plans are checked against the stand-ins only (no provider is
+  involved).
+
 ## 2026-09-28 — Phase 4: store events in automations (P4-06e)
 
 Status: **Store events in automations implemented and locally verified; production blocked on

@@ -1,10 +1,12 @@
 import Link from 'next/link';
 import type { ReactNode } from 'react';
+import { can } from '@w360/domain';
 import { Alert, Button } from '@w360/ui';
 import { AppNav } from '@/components/app-nav';
 import { Brand } from '@/components/brand';
 import { CompanySwitcher } from '@/components/company-switcher';
 import { UserMenu } from '@/components/user-menu';
+import { formatDateTime } from '@/lib/format';
 import { visibleModules } from '@/lib/modules';
 import { getRuntime } from '@/server/runtime';
 import { correlationId, requireTenant } from '@/server/session';
@@ -28,10 +30,12 @@ export default async function TenantLayout({
   ]);
   const base = `/c/${ctx.tenant.slug}`;
   const nav = visibleModules(ctx.permissions);
+  const deletion =
+    ctx.tenant.status === 'pending_deletion' ? await runtime.companyDeletion.status(ctx) : null;
 
   return (
     <div className="flex min-h-dvh flex-col md:flex-row">
-      <aside className="border-b border-border bg-sidebar md:w-64 md:shrink-0 md:border-b-0 md:border-r">
+      <aside className="border-b border-border bg-sidebar md:w-64 md:shrink-0 md:border-b-0 md:border-r print:hidden">
         <div className="md:sticky md:top-0 md:flex md:h-dvh md:flex-col">
           <div className="flex items-center justify-between gap-2 px-4 py-4">
             <Link
@@ -63,7 +67,7 @@ export default async function TenantLayout({
         </div>
       </aside>
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="hidden items-center justify-end gap-3 border-b border-border px-6 py-3 md:flex">
+        <header className="hidden items-center justify-end gap-3 border-b border-border px-6 py-3 md:flex print:hidden">
           <UserMenu
             name={ctx.user.name}
             email={ctx.user.email}
@@ -71,10 +75,53 @@ export default async function TenantLayout({
           />
         </header>
         <div className="grid gap-3 px-4 pt-4 md:px-8">
-          {ctx.tenant.status !== 'active' ? (
+          {ctx.tenant.status === 'pending_deletion' ? (
+            <Alert
+              tone="danger"
+              title="This company is being deleted"
+              action={
+                can(ctx, 'tenant.export') || can(ctx, 'tenant.delete') ? (
+                  <Button asChild size="sm" variant="outline">
+                    <Link href={`/c/${ctx.tenant.slug}/settings/data`}>Company data</Link>
+                  </Button>
+                ) : undefined
+              }
+            >
+              {deletion?.started
+                ? 'The deletion has started and can no longer be cancelled.'
+                : `It will be deleted on ${deletion ? formatDateTime(deletion.dueAt, ctx.tenant.timezone) : 'the date its owners were emailed'}. Until then nothing is sent; members can still review its data, and an owner can export it or cancel the deletion.`}
+            </Alert>
+          ) : ctx.tenant.status === 'restricted' ? (
+            <Alert
+              tone="warning"
+              title="This company's plan has ended"
+              action={
+                can(ctx, 'billing.read') ? (
+                  <Button asChild size="sm" variant="outline">
+                    <Link href={`/c/${ctx.tenant.slug}/billing`}>See the plan</Link>
+                  </Button>
+                ) : undefined
+              }
+            >
+              Sending messages, campaigns and automations is paused until HyFib renews the plan. You
+              can still review data, export it and manage members and billing.
+            </Alert>
+          ) : ctx.tenant.status !== 'active' ? (
             <Alert tone="warning" title="This company is suspended">
               Outbound messaging and changes that send data are paused. You can still review data,
               export it and manage billing.
+            </Alert>
+          ) : ctx.plan.status === 'past_due' && can(ctx, 'billing.read') ? (
+            <Alert
+              tone="warning"
+              title="The paid period of your plan has ended"
+              action={
+                <Button asChild size="sm" variant="outline">
+                  <Link href={`/c/${ctx.tenant.slug}/billing`}>See the plan</Link>
+                </Button>
+              }
+            >
+              Everything keeps working for a few days. Ask HyFib to renew the plan.
             </Alert>
           ) : null}
           {ctx.mfa.required && !ctx.mfa.satisfied ? (

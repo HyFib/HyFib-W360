@@ -1,0 +1,1163 @@
+import { randomBytes, randomInt } from 'node:crypto';
+import { once } from 'node:events';
+import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { isAppError, systemClock, uuidv7, type Clock } from '@w360/core';
+import {
+  DEFAULT_EGRESS_POLICY,
+  createEgressClient,
+  type EgressClient,
+  type ResolvedAddress,
+} from '@w360/core/egress';
+import {
+  authorizedTenantScope,
+  consentEvents,
+  sql,
+  webhookDeliveries,
+  webhookEvents,
+} from '@w360/db';
+import {
+  consentChangedPayloadSchema,
+  createConsentService,
+  createContactsService,
+  createTemplatesService,
+  createWebhooksService,
+  dispatchDueWebhooks,
+  findWebhookDispatchDue,
+  messageReceivedPayloadSchema,
+  messageStatusPayloadSchema,
+  pingPayloadSchema,
+  processSendIntent,
+  processTemplateSubmit,
+  processWebhookDeliveries,
+  purgeWebhookData,
+  queueTextMessage,
+  syncTemplates,
+  templateStatusPayloadSchema,
+  verifyWebhookSignature,
+  webhookSecretAad,
+  type WebhookEventType,
+} from '@w360/domain';
+import { acceptInvitation, createUser, invite } from './helpers';
+import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './whatsapp-fixture';
+
+/**
+ * Outgoing webhooks (P5-09, ADR-053) against real PostgreSQL, the egress client and a local
+ * receiver (reached through the loopback allowance that exists for tests only): endpoints and their
+ * secrets, capture by the database triggers for every event type, signed at-least-once delivery,
+ * the retry schedule, interrupted attempts, automatic disabling with its notice, replays and test
+ * events, secret rotation, the address guard, dispatch and retention, and isolation.
+ */
+let fx: WhatsAppFixture;
+let receiver: Server;
+let port = 0;
+
+interface Received {
+  path: string;
+  headers: IncomingHttpHeaders;
+  body: string;
+}
+const received: Received[] = [];
+
+beforeAll(async () => {
+  fx = await startWhatsAppFixture();
+  receiver = createServer((req, res) => {
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', (chunk: string) => (body += chunk));
+    req.on('end', () => {
+      const path = req.url ?? '';
+      received.push({ path, headers: req.headers, body });
+      if (path.startsWith('/ok')) {
+        res.writeHead(204);
+        res.end();
+      } else if (path.startsWith('/fail')) {
+        res.writeHead(500, { 'content-type': 'text/plain' });
+        res.end('broken');
+      } else if (path.startsWith('/redirect')) {
+        res.writeHead(302, { location: `/ok${path}` });
+        res.end();
+      } else if (path.startsWith('/hang')) {
+        // Never answers: the egress deadline ends the attempt.
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+  });
+  receiver.listen(0, '127.0.0.1');
+  await once(receiver, 'listening');
+  port = (receiver.address() as AddressInfo).port;
+});
+
+afterAll(async () => {
+  receiver?.closeAllConnections();
+  receiver?.close();
+  await fx?.close();
+});
+
+const at = (date: Date): Clock => ({ now: () => date });
+const later = (ms: number): Clock => ({ now: () => new Date(Date.now() + ms) });
+const waId = () => `91${randomInt(7_000_000_000, 9_999_999_999)}`;
+const HOST = 'hooks.receiver.test';
+const APP_BASE_URL = 'https://app.w360.test';
+
+/** The egress client used by the worker, with names resolving to the local receiver. */
+const egress = (resolveTo: ResolvedAddress[] = [{ address: '127.0.0.1', family: 4 }]) =>
+  createEgressClient(
+    { ...DEFAULT_EGRESS_POLICY, allowLoopbackForTests: true, timeoutMs: 1_000 },
+    { resolve: async () => resolveTo },
+  );
+
+function deliveryDeps(clock: Clock = systemClock, client: EgressClient = egress()) {
+  const jobs = fx.jobs();
+  return {
+    db: fx.dbs.app,
+    clock,
+    keyring: fx.keyring,
+    egress: client,
+    timeoutMs: 1_000,
+    jobs,
+    signer: fx.signer,
+    notices: { outbox: { keyring: fx.keyring, jobs, signer: fx.signer }, appBaseUrl: APP_BASE_URL },
+  };
+}
+
+const deliverDue = (c: Company, clock?: Clock, client?: EgressClient) =>
+  processWebhookDeliveries(deliveryDeps(clock, client), authorizedTenantScope(c.tenant.id, null));
+
+const webhooks = (allowLoopbackForTests = true, clock: Clock = systemClock) =>
+  createWebhooksService({
+    db: fx.dbs.app,
+    clock,
+    keyring: fx.keyring,
+    egressPolicy: { allowLoopbackForTests },
+  });
+
+async function expectAppError(promise: Promise<unknown>, code: string, message?: RegExp) {
+  try {
+    await promise;
+  } catch (error) {
+    expect(isAppError(error), String(error)).toBe(true);
+    if (isAppError(error)) {
+      expect(error.code).toBe(code);
+      if (message) expect(error.publicMessage).toMatch(message);
+    }
+    return error;
+  }
+  throw new Error(`expected ${code}`);
+}
+
+/** A statement the database refuses (privileges or row security), with PostgreSQL's reason. */
+async function expectRefused(promise: Promise<unknown>, reason: RegExp) {
+  const error = await expectAppError(promise, 'forbidden');
+  const messages: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; depth < 5 && current instanceof Error; depth += 1) {
+    messages.push(current.message);
+    current = current.cause;
+  }
+  expect(messages.join(' | ')).toMatch(reason);
+}
+
+/** An endpoint of the company on a path of the receiver unique to the caller. */
+async function addEndpoint(
+  c: Company,
+  kind: 'ok' | 'fail' | 'hang' | 'redirect',
+  eventTypes: WebhookEventType[],
+) {
+  const path = `/${kind}/${randomBytes(6).toString('hex')}`;
+  const owner = await fx.ctx(c, c.owner);
+  const created = await webhooks().create(owner, {
+    url: `http://${HOST}:${port}${path}`,
+    description: `${kind} receiver`,
+    eventTypes,
+  });
+  return { ...created, path, owner };
+}
+
+const requestsTo = (path: string) => received.filter((r) => r.path === path);
+
+/** Verifies a received request's signature at its own timestamp. */
+function signedWith(request: Received, secret: string): boolean {
+  const header = String(request.headers['w360-signature'] ?? '');
+  const t = Number(/^t=(\d+)/.exec(header)?.[1] ?? 0);
+  return verifyWebhookSignature({ header, secret, body: request.body, nowSeconds: t });
+}
+
+interface DeliveryRow extends Record<string, unknown> {
+  id: string;
+  event_id: string;
+  type: string;
+  status: string | null;
+  state: string;
+  attempts: number;
+  next_attempt_at: Date;
+  lease_until: Date | null;
+  last_attempt_at: Date | null;
+  last_status_code: number | null;
+  last_error: string | null;
+  delivered_at: Date | null;
+  replay_of: string | null;
+}
+
+const deliveriesOf = (endpointId: string) =>
+  fx.query<DeliveryRow>(
+    `SELECT d.id, d.event_id, e.type, e.status, d.state, d.attempts, d.next_attempt_at,
+            d.lease_until, d.last_attempt_at, d.last_status_code, d.last_error, d.delivered_at,
+            d.replay_of
+       FROM app.webhook_deliveries d JOIN app.webhook_events e ON e.id = d.event_id
+      WHERE d.endpoint_id = $1 ORDER BY d.created_at, d.id`,
+    [endpointId],
+  );
+
+const eventsOf = (c: Company) =>
+  fx.query<{ id: string; type: string; status: string | null; detail: Record<string, unknown> }>(
+    'SELECT id, type, status, detail FROM app.webhook_events WHERE tenant_id = $1 ORDER BY created_at, id',
+    [c.tenant.id],
+  );
+
+async function endpointRow(endpointId: string) {
+  const [row] = await fx.query<{
+    state: string;
+    disabled_reason: string | null;
+    disabled_at: Date | null;
+    failing_since: Date | null;
+    last_success_at: Date | null;
+    last_failure_at: Date | null;
+    secret_ciphertext: string;
+    secret_version: number;
+    previous_secret_expires_at: Date | null;
+  }>('SELECT * FROM app.webhook_endpoints WHERE id = $1', [endpointId]);
+  if (!row) throw new Error('endpoint missing');
+  return row;
+}
+
+/** An inbound text message from a contact, through the Meta webhook pipeline. */
+async function inbound(c: Company, from: string, text: string) {
+  await fx.deliver(fx.messagesBody(c, { messages: [{ waId: from, text }] }));
+  const [row] = await fx.query<{ id: string; conversation_id: string; contact_id: string }>(
+    `SELECT m.id, m.conversation_id, cv.contact_id
+       FROM app.messages m JOIN app.conversations cv ON cv.id = m.conversation_id
+      WHERE m.tenant_id = $1 AND m.direction = 'inbound' ORDER BY m.created_at DESC LIMIT 1`,
+    [c.tenant.id],
+  );
+  if (!row) throw new Error('inbound message not stored');
+  return row;
+}
+
+/** A text reply queued by the agent and accepted by the Graph stand-in. */
+async function sendReply(c: Company, conversationId: string, text: string) {
+  const agent = await fx.ctx(c, c.agent);
+  const deps = { db: fx.dbs.app, jobs: fx.jobs(), signer: fx.signer, clock: systemClock };
+  const { messageId } = await queueTextMessage(deps, agent, {
+    conversationId,
+    text,
+    clientKey: `ck-${randomBytes(6).toString('hex')}`,
+  });
+  const wamid = `wamid.out.${randomBytes(8).toString('hex')}`;
+  fx.standIn.state.sendQueue.push({ kind: 'accept', wamid });
+  const [intent] = await fx.query<{ id: string }>(
+    'SELECT id FROM app.send_intents WHERE message_id = $1',
+    [messageId],
+  );
+  const result = await processSendIntent(
+    {
+      ...deps,
+      keyring: fx.keyring,
+      graph: fx.graph,
+      rate: { capacity: 100, refillPerSecond: 100 },
+    },
+    authorizedTenantScope(c.tenant.id, c.agent.id),
+    intent!.id,
+  );
+  expect(result.outcome).toBe('accepted');
+  return { messageId, wamid };
+}
+
+let templateCounter = 0;
+
+/** A ping event and its delivery written straight to the tables, as a racing trigger would. */
+async function captureDirectly(c: Company, endpointId: string, nextAttemptAt?: Date) {
+  const eventId = uuidv7();
+  const deliveryId = uuidv7();
+  await fx.dbs.app.run(authorizedTenantScope(c.tenant.id, null), async (tx) => {
+    await tx.insert(webhookEvents).values({
+      id: eventId,
+      tenantId: c.tenant.id,
+      type: 'ping',
+      detail: {},
+    });
+    await tx.insert(webhookDeliveries).values({
+      id: deliveryId,
+      tenantId: c.tenant.id,
+      endpointId,
+      eventId,
+      ...(nextAttemptAt ? { nextAttemptAt } : {}),
+    });
+  });
+  return deliveryId;
+}
+
+/** An egress client that runs `during` while "the request is in flight", then answers `status`. */
+function egressDuring(during: () => Promise<unknown>, status = 500): EgressClient {
+  return {
+    async request() {
+      await during();
+      return { status, headers: {}, body: Buffer.alloc(0), address: '127.0.0.1', durationMs: 3 };
+    },
+  };
+}
+
+describe('webhook endpoints', () => {
+  it('are added with a secret shown once and stored encrypted, following the egress URL rules, up to the limit, by developers only', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const created = await webhooks().create(owner, {
+      url: `http://${HOST}:${port}/ok/first?token=abc#fragment`,
+      eventTypes: ['consent.changed', 'message.received'],
+    });
+    expect(created.secret).toMatch(/^whsec_[A-Za-z0-9_-]{43}$/);
+    const row = await endpointRow(created.id);
+    expect(row.secret_ciphertext).not.toContain(created.secret.slice(6));
+    expect(
+      fx.keyring.decryptString(row.secret_ciphertext, webhookSecretAad(c.tenant.id, created.id, 1)),
+    ).toBe(created.secret);
+    const [listed] = await webhooks().list(owner);
+    // The fragment is dropped; the events keep the catalogue's order.
+    expect(listed).toMatchObject({
+      id: created.id,
+      url: `http://${HOST}:${port}/ok/first?token=abc`,
+      eventTypes: ['message.received', 'consent.changed'],
+      state: 'active',
+      secretVersion: 1,
+      previousSecretExpiresAt: null,
+    });
+    expect(JSON.stringify(listed)).not.toContain('whsec_');
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toEqual({
+      host: HOST,
+      eventTypes: ['message.received', 'consent.changed'],
+    });
+
+    // The egress guard's URL rules, and the event list.
+    const refused = async (
+      url: string,
+      eventTypes: unknown = ['consent.changed'],
+      svc = webhooks(),
+    ) => expectAppError(svc.create(owner, { url, eventTypes }), 'validation_failed');
+    await refused('ftp://files.example.com/in');
+    await refused('https://user:secret@hooks.example.com/in');
+    // Privileged ports other than 443 (the test allowance lifts this rule, so production rules).
+    await refused('https://hooks.example.com:25/in', ['consent.changed'], webhooks(false));
+    await refused('not a url');
+    // Within the input limit, but longer than it once normalised (each space becomes %20).
+    await refused(`https://hooks.example.com/${' '.repeat(1_000)}x`);
+    await refused(`http://${HOST}:${port}/ok`, ['consent.changed'], webhooks(false));
+    await refused('https://hooks.example.com/in', []);
+    await refused('https://hooks.example.com/in', ['ping']);
+    await expectAppError(
+      webhooks().create(await fx.ctx(c, c.agent), {
+        url: 'https://hooks.example.com/in',
+        eventTypes: ['consent.changed'],
+      }),
+      'forbidden',
+    );
+
+    // Twelve concurrent additions to a company with one endpoint: ten in all, never more.
+    const results = await Promise.allSettled(
+      Array.from({ length: 12 }, (_, i) =>
+        webhooks().create(owner, {
+          url: `https://hooks-${i}.example.com/in`,
+          eventTypes: ['message.status'],
+        }),
+      ),
+    );
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(9);
+    for (const r of results) {
+      if (r.status === 'rejected') {
+        expect(isAppError(r.reason) && r.reason.code).toBe('precondition_failed');
+      }
+    }
+    expect(await webhooks().list(owner)).toHaveLength(10);
+  });
+});
+
+describe('event capture', () => {
+  it('records an event only for subscribed types, with one delivery per active subscribed endpoint, and none from a rolled-back change', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const from = waId();
+    // No endpoint yet: nothing is recorded.
+    const first = await inbound(c, from, 'Hello before any endpoint');
+    expect(await eventsOf(c)).toHaveLength(0);
+
+    const e1 = await addEndpoint(c, 'ok', ['message.received']);
+    const e2 = await addEndpoint(c, 'ok', ['message.received', 'consent.changed']);
+    const e3 = await addEndpoint(c, 'ok', ['consent.changed']);
+    await webhooks().setEnabled(owner, { endpointId: e3.id, enabled: false });
+
+    const second = await inbound(c, from, 'Is my order ready?');
+    let events = await eventsOf(c);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ type: 'message.received', status: null });
+    expect(events[0]?.detail).toEqual({ messageType: 'text' });
+    expect((await deliveriesOf(e1.id)).map((d) => d.event_id)).toEqual([events[0]?.id]);
+    expect((await deliveriesOf(e2.id)).map((d) => d.event_id)).toEqual([events[0]?.id]);
+    expect(await deliveriesOf(e3.id)).toHaveLength(0);
+
+    await createConsentService({ db: fx.dbs.app, clock: systemClock }).recordConsent(owner, {
+      contactId: second.contact_id,
+      purpose: 'marketing',
+      action: 'opt_in',
+    });
+    events = await eventsOf(c);
+    expect(events.map((e) => e.type)).toEqual(['message.received', 'consent.changed']);
+    expect(events[1]?.detail).toEqual({ purpose: 'marketing', action: 'opt_in', source: 'agent' });
+    expect(await deliveriesOf(e1.id)).toHaveLength(1);
+    expect(await deliveriesOf(e2.id)).toHaveLength(2);
+    expect(await deliveriesOf(e3.id)).toHaveLength(0);
+
+    // A change that rolls back leaves no event and no delivery.
+    await expect(
+      fx.dbs.app.run(authorizedTenantScope(c.tenant.id, c.owner.id), async (tx) => {
+        await tx.insert(consentEvents).values({
+          id: uuidv7(),
+          tenantId: c.tenant.id,
+          contactId: first.contact_id,
+          purpose: 'utility',
+          action: 'opt_out',
+          source: 'agent',
+          actorType: 'user',
+          actorId: c.owner.id,
+          occurredAt: new Date(),
+        });
+        throw new Error('rolled back');
+      }),
+    ).rejects.toThrow('rolled back');
+    expect(await eventsOf(c)).toHaveLength(2);
+    expect(await deliveriesOf(e2.id)).toHaveLength(2);
+  });
+});
+
+describe('delivery', () => {
+  it('posts message.received signed, with the contact and the text, once', async () => {
+    const c = await fx.company();
+    const e = await addEndpoint(c, 'ok', ['message.received']);
+    const from = waId();
+    const msg = await inbound(c, from, 'Where is my order?');
+    const run = await deliverDue(c);
+    expect(run).toMatchObject({ attempted: 1, succeeded: 1, retrying: 0, failed: 0 });
+
+    const [request] = requestsTo(e.path);
+    expect(requestsTo(e.path)).toHaveLength(1);
+    const [delivery] = await deliveriesOf(e.id);
+    expect(request?.headers).toMatchObject({
+      'content-type': 'application/json',
+      'user-agent': 'HyFib-W360-Webhooks/1',
+      'w360-event-type': 'message.received',
+      'w360-event-id': delivery?.event_id,
+      'w360-delivery-id': delivery?.id,
+      'w360-delivery-attempt': '1',
+    });
+    expect(signedWith(request!, e.secret)).toBe(true);
+    expect(signedWith(request!, 'whsec_wrong')).toBe(false);
+    const body = messageReceivedPayloadSchema.parse(JSON.parse(request!.body));
+    expect(body).toMatchObject({
+      id: delivery?.event_id,
+      type: 'message.received',
+      data: {
+        message: { id: msg.id, type: 'text', text: 'Where is my order?', reply: null },
+        conversation: { id: msg.conversation_id },
+        contact: { id: msg.contact_id, phone: `+${from}`, name: 'Priya Customer' },
+        channel: { id: c.channelAccountId, phone: '+91 90000 00000' },
+      },
+    });
+    expect(delivery).toMatchObject({
+      state: 'succeeded',
+      attempts: 1,
+      last_status_code: 204,
+      last_error: null,
+      lease_until: null,
+    });
+    expect(delivery?.delivered_at).toBeInstanceOf(Date);
+    const endpoint = await endpointRow(e.id);
+    expect(endpoint.last_success_at).toBeInstanceOf(Date);
+    expect(endpoint.failing_since).toBeNull();
+
+    // Nothing is due any more: another run sends nothing.
+    expect(await deliverDue(c)).toMatchObject({ attempted: 0, failed: 0 });
+    expect(requestsTo(e.path)).toHaveLength(1);
+  });
+
+  it('posts message.status for each status a receiver can act on, with the error of a failure', async () => {
+    const c = await fx.company();
+    const from = waId();
+    const msg = await inbound(c, from, 'Hi');
+    const e = await addEndpoint(c, 'ok', ['message.status']);
+    const sent = await sendReply(c, msg.conversation_id, 'It ships today.');
+    const t = Math.floor(Date.now() / 1000);
+    await fx.deliver(
+      fx.messagesBody(c, {
+        statuses: [
+          { id: sent.wamid, status: 'delivered', timestamp: String(t + 2), recipient_id: from },
+        ],
+      }),
+    );
+    const failed = await sendReply(c, msg.conversation_id, 'And a second note.');
+    await fx.deliver(
+      fx.messagesBody(c, {
+        statuses: [
+          {
+            id: failed.wamid,
+            status: 'failed',
+            timestamp: String(t + 3),
+            recipient_id: from,
+            errors: [{ code: 131026, title: 'Message undeliverable' }],
+          },
+        ],
+      }),
+    );
+    // queued and sending are internal: only accepted, delivered and failed are events.
+    const events = await eventsOf(c);
+    expect(events.map((ev) => ev.status).sort()).toEqual([
+      'accepted',
+      'accepted',
+      'delivered',
+      'failed',
+    ]);
+
+    expect(await deliverDue(c)).toMatchObject({ attempted: 4, succeeded: 4 });
+    const bodies = requestsTo(e.path).map((r) =>
+      messageStatusPayloadSchema.parse(JSON.parse(r.body)),
+    );
+    expect(bodies).toHaveLength(4);
+    const firstDelivered = bodies.find((b) => b.data.message.status === 'delivered');
+    expect(firstDelivered?.data).toMatchObject({
+      message: {
+        id: sent.messageId,
+        templateId: null,
+        templateName: null,
+        sentBy: 'agent',
+        apiKeyId: null,
+      },
+      error: null,
+      conversation: { id: msg.conversation_id },
+      contact: { id: msg.contact_id, phone: `+${from}` },
+      channel: { id: c.channelAccountId },
+    });
+    expect(bodies.find((b) => b.data.message.status === 'failed')?.data).toMatchObject({
+      message: { id: failed.messageId },
+      error: { code: '131026', title: 'Message undeliverable' },
+    });
+  });
+
+  it('posts template.status_changed for statuses Meta reports', async () => {
+    const c = await fx.company();
+    const e = await addEndpoint(c, 'ok', ['template.status_changed']);
+    const owner = await fx.ctx(c, c.owner);
+    templateCounter += 1;
+    const name = `wh_tpl_${templateCounter}_${Date.now().toString(36)}`;
+    const templateDeps = { db: fx.dbs.app, jobs: fx.jobs(), signer: fx.signer, clock: systemClock };
+    const templates = createTemplatesService(templateDeps);
+    const { id } = await templates.createDraft(owner, {
+      whatsappAccountId: c.whatsappAccountId,
+      name,
+      language: 'en',
+      definition: {
+        category: 'UTILITY',
+        header: { type: 'none' },
+        body: { text: 'Your order {{1}} has shipped.', examples: ['A-1'] },
+        footer: null,
+        buttons: [],
+      },
+    });
+    await templates.submitTemplate(owner, id);
+    const graphDeps = { ...templateDeps, keyring: fx.keyring, graph: fx.graph };
+    const scope = authorizedTenantScope(c.tenant.id, null);
+    expect(await processTemplateSubmit(graphDeps, scope, id)).toBe('done');
+    const atMeta = fx.standIn.state.templates.get(c.wabaId)?.find((x) => x.name === name);
+    if (!atMeta) throw new Error('template not at the stand-in');
+    atMeta.status = 'APPROVED';
+    await syncTemplates(graphDeps, scope, c.whatsappAccountId);
+
+    await deliverDue(c);
+    const bodies = requestsTo(e.path).map((r) =>
+      templateStatusPayloadSchema.parse(JSON.parse(r.body)),
+    );
+    // HyFib's own submission steps are not events; Meta's pending and approved are.
+    expect(bodies.map((b) => b.data.template.status).sort()).toEqual(['approved', 'pending']);
+    expect(bodies.find((b) => b.data.template.status === 'approved')?.data.template).toEqual({
+      id,
+      name,
+      language: 'en',
+      category: 'utility',
+      status: 'approved',
+      reason: null,
+    });
+  });
+
+  it('builds payloads when delivered: an erased contact is sent without their number, name or text', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const e = await addEndpoint(c, 'ok', ['message.received', 'consent.changed']);
+    const from = waId();
+    const msg = await inbound(c, from, 'Please delete my data');
+    await createContactsService({ db: fx.dbs.app, clock: systemClock }).eraseContact(owner, {
+      contactId: msg.contact_id,
+      suppress: false,
+    });
+    // Erasure ends consent with opt-outs, recorded by the definer function: events too.
+    const events = await eventsOf(c);
+    expect(
+      events.filter((ev) => ev.type === 'consent.changed').map((ev) => ev.detail.source),
+    ).toEqual(expect.arrayContaining(['erasure']));
+    await deliverDue(c);
+    const requests = requestsTo(e.path);
+    expect(requests.length).toBe(events.length);
+    for (const request of requests) {
+      const body = JSON.parse(request.body) as { type: string; data: { contact: unknown } };
+      expect(body.data.contact).toEqual({ id: msg.contact_id, phone: null, name: null });
+      expect(request.body).not.toContain(from);
+      expect(request.body).not.toContain('Priya');
+      if (body.type === 'message.received') {
+        expect(messageReceivedPayloadSchema.parse(body).data.message.text).toBeNull();
+      } else {
+        expect(consentChangedPayloadSchema.parse(body).data).toMatchObject({
+          action: 'opt_out',
+          source: 'erasure',
+        });
+      }
+    }
+  });
+
+  it('fails a delivery whose message no longer exists, without an attempt', async () => {
+    const c = await fx.company();
+    const e = await addEndpoint(c, 'ok', ['message.status']);
+    const eventId = uuidv7();
+    await fx.dbs.app.run(authorizedTenantScope(c.tenant.id, null), async (tx) => {
+      await tx.insert(webhookEvents).values({
+        id: eventId,
+        tenantId: c.tenant.id,
+        type: 'message.status',
+        messageId: uuidv7(),
+        conversationId: uuidv7(),
+        status: 'delivered',
+        detail: {},
+      });
+      await tx.insert(webhookDeliveries).values({
+        id: uuidv7(),
+        tenantId: c.tenant.id,
+        endpointId: e.id,
+        eventId,
+      });
+    });
+    expect(await deliverDue(c)).toMatchObject({ attempted: 0, failed: 1 });
+    expect(await deliveriesOf(e.id)).toMatchObject([
+      { state: 'failed', attempts: 0, last_error: 'event_gone' },
+    ]);
+    expect(requestsTo(e.path)).toHaveLength(0);
+  });
+});
+
+describe('retries', () => {
+  it('retries a failing endpoint at 1 min, 5 min, 30 min, 2 h, 6 h, 12 h and 24 h, then fails the delivery', async () => {
+    const c = await fx.company();
+    const e = await addEndpoint(c, 'fail', ['consent.changed']);
+    const { deliveryId } = await webhooks().sendTest(e.owner, { endpointId: e.id });
+    let now = new Date(Date.now() + 1_000);
+    const waits: number[] = [];
+    for (let attempt = 1; attempt <= 8; attempt += 1) {
+      const run = await deliverDue(c, at(now));
+      expect(run.attempted).toBe(1);
+      const [row] = await deliveriesOf(e.id);
+      expect(row).toMatchObject({ id: deliveryId, attempts: attempt, last_status_code: 500 });
+      expect(row?.last_attempt_at?.getTime()).toBe(now.getTime());
+      // Not due before its time.
+      expect((await deliverDue(c, at(new Date(now.getTime() + 1_000)))).attempted).toBe(0);
+      if (attempt < 8) {
+        expect(row?.state).toBe('pending');
+        waits.push((row!.next_attempt_at.getTime() - now.getTime()) / 1000);
+        now = row!.next_attempt_at;
+      } else {
+        expect(row?.state).toBe('failed');
+        expect(run.failed).toBe(1);
+      }
+    }
+    expect(waits).toEqual([60, 300, 1_800, 7_200, 21_600, 43_200, 86_400]);
+    const requests = requestsTo(e.path);
+    expect(requests.map((r) => r.headers['w360-delivery-attempt'])).toEqual([
+      '1',
+      '2',
+      '3',
+      '4',
+      '5',
+      '6',
+      '7',
+      '8',
+    ]);
+    // One event, one delivery id and one event id across attempts.
+    expect(new Set(requests.map((r) => r.headers['w360-event-id'])).size).toBe(1);
+    expect(new Set(requests.map((r) => r.headers['w360-delivery-id']))).toEqual(
+      new Set([deliveryId]),
+    );
+    expect(pingPayloadSchema.parse(JSON.parse(requests[0]!.body)).data.endpointId).toBe(e.id);
+    // About 45 hours of failures: under the 72 hours that turn an endpoint off.
+    const endpoint = await endpointRow(e.id);
+    expect(endpoint.state).toBe('active');
+    expect(endpoint.failing_since).toBeInstanceOf(Date);
+  });
+
+  it('uses an edited URL for the next attempt, and a success clears the failing state', async () => {
+    const c = await fx.company();
+    const e = await addEndpoint(c, 'fail', ['consent.changed']);
+    const { deliveryId } = await webhooks().sendTest(e.owner, { endpointId: e.id });
+    await deliverDue(c);
+    expect((await endpointRow(e.id)).failing_since).toBeInstanceOf(Date);
+    const fixed = `/ok/${randomBytes(6).toString('hex')}`;
+    await webhooks().update(e.owner, {
+      endpointId: e.id,
+      url: `http://${HOST}:${port}${fixed}`,
+      description: '',
+      eventTypes: ['consent.changed'],
+    });
+    expect(await deliverDue(c, later(61_000))).toMatchObject({ attempted: 1, succeeded: 1 });
+    expect(requestsTo(fixed).map((r) => r.headers['w360-delivery-attempt'])).toEqual(['2']);
+    expect(await deliveriesOf(e.id)).toMatchObject([{ id: deliveryId, state: 'succeeded' }]);
+    const endpoint = await endpointRow(e.id);
+    expect(endpoint.failing_since).toBeNull();
+    expect(endpoint.last_success_at).toBeInstanceOf(Date);
+    expect(endpoint.last_failure_at).toBeInstanceOf(Date);
+  });
+
+  it('counts timeouts and redirects as failed attempts and never follows a redirect', async () => {
+    const c = await fx.company();
+    const hang = await addEndpoint(c, 'hang', ['consent.changed']);
+    const redirect = await addEndpoint(c, 'redirect', ['consent.changed']);
+    await webhooks().sendTest(hang.owner, { endpointId: hang.id });
+    await webhooks().sendTest(redirect.owner, { endpointId: redirect.id });
+    expect(await deliverDue(c)).toMatchObject({ attempted: 2, retrying: 2 });
+    expect(await deliveriesOf(hang.id)).toMatchObject([
+      { state: 'pending', attempts: 1, last_status_code: null, last_error: 'timeout' },
+    ]);
+    expect(await deliveriesOf(redirect.id)).toMatchObject([
+      { state: 'pending', attempts: 1, last_status_code: 302, last_error: null },
+    ]);
+    expect(requestsTo(`/ok${redirect.path}`)).toHaveLength(0);
+  });
+
+  it('attempts again a delivery whose worker was lost, and fails one with no attempt left', async () => {
+    const c = await fx.company();
+    const e = await addEndpoint(c, 'ok', ['consent.changed']);
+    const first = await webhooks().sendTest(e.owner, { endpointId: e.id });
+    const second = await webhooks().sendTest(e.owner, { endpointId: e.id });
+    // Both were claimed by a worker that died during the request: leases expired.
+    await fx.query(
+      `UPDATE app.webhook_deliveries SET state = 'delivering', attempts = 1,
+              lease_until = now() - interval '1 second', last_attempt_at = now() - interval '1 minute'
+        WHERE id = $1`,
+      [first.deliveryId],
+    );
+    await fx.query(
+      `UPDATE app.webhook_deliveries SET state = 'delivering', attempts = 8,
+              lease_until = now() - interval '1 second' WHERE id = $1`,
+      [second.deliveryId],
+    );
+    // A lease still running is left alone.
+    const third = await webhooks().sendTest(e.owner, { endpointId: e.id });
+    await fx.query(
+      `UPDATE app.webhook_deliveries SET state = 'delivering', attempts = 1,
+              lease_until = now() + interval '1 minute' WHERE id = $1`,
+      [third.deliveryId],
+    );
+    expect(await deliverDue(c)).toMatchObject({ attempted: 1, succeeded: 1, failed: 1 });
+    const rows = new Map((await deliveriesOf(e.id)).map((d) => [d.id, d]));
+    expect(rows.get(first.deliveryId)).toMatchObject({ state: 'succeeded', attempts: 2 });
+    expect(rows.get(second.deliveryId)).toMatchObject({
+      state: 'failed',
+      attempts: 8,
+      last_error: 'interrupted',
+      lease_until: null,
+    });
+    expect(rows.get(third.deliveryId)).toMatchObject({ state: 'delivering', attempts: 1 });
+    expect(requestsTo(e.path).map((r) => r.headers['w360-delivery-attempt'])).toEqual(['2']);
+  });
+});
+
+describe('outcomes that lost their delivery', () => {
+  it('are dropped when a newer attempt owns the delivery or the endpoint was deleted', async () => {
+    const c = await fx.company();
+    const e = await addEndpoint(c, 'ok', ['consent.changed']);
+    const { deliveryId } = await webhooks().sendTest(e.owner, { endpointId: e.id });
+    // While this attempt is in flight its lease expires and another worker claims attempt 2.
+    const reclaimed = egressDuring(() =>
+      fx.query(
+        `UPDATE app.webhook_deliveries SET attempts = 2, lease_until = now() + interval '1 minute'
+          WHERE id = $1`,
+        [deliveryId],
+      ),
+    );
+    expect(await deliverDue(c, systemClock, reclaimed)).toMatchObject({
+      attempted: 1,
+      succeeded: 0,
+      retrying: 0,
+      failed: 0,
+    });
+    expect(await deliveriesOf(e.id)).toMatchObject([
+      { id: deliveryId, state: 'delivering', attempts: 2, last_status_code: null },
+    ]);
+    expect((await endpointRow(e.id)).last_failure_at).toBeNull();
+
+    // The endpoint (and with it the delivery) is deleted during the request.
+    const other = await addEndpoint(c, 'ok', ['consent.changed']);
+    await webhooks().sendTest(other.owner, { endpointId: other.id });
+    const deleted = egressDuring(() => webhooks().remove(other.owner, { endpointId: other.id }));
+    expect(await deliverDue(c, systemClock, deleted)).toMatchObject({ attempted: 1, failed: 0 });
+    expect(await deliveriesOf(other.id)).toHaveLength(0);
+  });
+
+  it('a failure after the endpoint was turned off ends the delivery instead of retrying it', async () => {
+    const c = await fx.company();
+    const e = await addEndpoint(c, 'ok', ['consent.changed']);
+    const { deliveryId } = await webhooks().sendTest(e.owner, { endpointId: e.id });
+    const turnedOff = egressDuring(() =>
+      webhooks().setEnabled(e.owner, { endpointId: e.id, enabled: false }),
+    );
+    expect(await deliverDue(c, systemClock, turnedOff)).toMatchObject({ attempted: 1, failed: 1 });
+    expect(await deliveriesOf(e.id)).toMatchObject([
+      { id: deliveryId, state: 'failed', attempts: 1, last_status_code: 500 },
+    ]);
+  });
+
+  it('deliveries that end without an attempt do not hold up the others', async () => {
+    const c = await fx.company();
+    const off = await addEndpoint(c, 'ok', ['consent.changed']);
+    const on = await addEndpoint(c, 'ok', ['consent.changed']);
+    await webhooks().setEnabled(off.owner, { endpointId: off.id, enabled: false });
+    // More than a batch of deliveries for the turned-off endpoint, due before the live one.
+    const early = new Date(Date.now() - 60_000);
+    for (let i = 0; i < 12; i += 1) await captureDirectly(c, off.id, early);
+    const live = await webhooks().sendTest(on.owner, { endpointId: on.id });
+    expect(await deliverDue(c)).toMatchObject({ attempted: 1, succeeded: 1, failed: 12 });
+    expect(await deliveriesOf(on.id)).toMatchObject([{ id: live.deliveryId, state: 'succeeded' }]);
+  });
+});
+
+describe('endpoint health', () => {
+  it('turns off an endpoint failing for 72 hours, fails its waiting deliveries and emails owners and administrators', async () => {
+    const c = await fx.company();
+    const admin = await createUser(fx.dbs, { name: 'Admin' });
+    const { token } = await invite(fx.dbs, c.tenant, c.owner, admin.email, ['admin']);
+    await acceptInvitation(fx.dbs, admin, token);
+    const e = await addEndpoint(c, 'fail', ['consent.changed']);
+    const due = await webhooks().sendTest(e.owner, { endpointId: e.id });
+    const waiting = await webhooks().sendTest(e.owner, { endpointId: e.id });
+    await fx.query(
+      `UPDATE app.webhook_deliveries SET next_attempt_at = now() + interval '1 hour' WHERE id = $1`,
+      [waiting.deliveryId],
+    );
+    await fx.query(
+      `UPDATE app.webhook_endpoints SET failing_since = now() - interval '73 hours' WHERE id = $1`,
+      [e.id],
+    );
+    expect(await deliverDue(c)).toMatchObject({ attempted: 1, failed: 1 });
+    const endpoint = await endpointRow(e.id);
+    expect(endpoint).toMatchObject({ state: 'disabled', disabled_reason: 'failing' });
+    expect(endpoint.disabled_at).toBeInstanceOf(Date);
+    const rows = new Map((await deliveriesOf(e.id)).map((d) => [d.id, d]));
+    expect(rows.get(due.deliveryId)).toMatchObject({
+      state: 'failed',
+      attempts: 1,
+      last_status_code: 500,
+    });
+    expect(rows.get(waiting.deliveryId)).toMatchObject({
+      state: 'failed',
+      attempts: 0,
+      last_error: 'endpoint_disabled',
+      last_attempt_at: null,
+    });
+    const emails = await fx.query<{ to_address: string; kind: string }>(
+      `SELECT to_address, kind FROM ops.email_outbox WHERE tenant_id = $1 AND kind = 'webhook.endpoint_disabled'`,
+      [c.tenant.id],
+    );
+    expect(emails.map((m) => m.to_address).sort()).toEqual([admin.email, c.owner.email].sort());
+    const [audit] = await fx.query<{ actor_type: string; metadata: Record<string, unknown> }>(
+      `SELECT actor_type, metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_auto_disabled'`,
+      [c.tenant.id],
+    );
+    expect(audit).toMatchObject({
+      actor_type: 'system',
+      metadata: { host: HOST, pendingDeliveriesFailed: 1 },
+    });
+
+    // Turned off: nothing more is sent or captured for it; turning it on starts health afresh.
+    expect(await deliverDue(c, later(2 * 3_600_000))).toMatchObject({ attempted: 0 });
+    await expectAppError(webhooks().sendTest(e.owner, { endpointId: e.id }), 'precondition_failed');
+    await webhooks().setEnabled(e.owner, { endpointId: e.id, enabled: true });
+    expect(await endpointRow(e.id)).toMatchObject({
+      state: 'active',
+      failing_since: null,
+      disabled_reason: null,
+    });
+  });
+
+  it('turning off fails waiting deliveries; replays and test events need the endpoint on', async () => {
+    const c = await fx.company();
+    const e = await addEndpoint(c, 'ok', ['consent.changed']);
+    const sent = await webhooks().sendTest(e.owner, { endpointId: e.id });
+    await deliverDue(c);
+    const waiting = await webhooks().sendTest(e.owner, { endpointId: e.id });
+    await expectAppError(
+      webhooks().replay(e.owner, { deliveryId: waiting.deliveryId }),
+      'conflict',
+    );
+    await webhooks().setEnabled(e.owner, { endpointId: e.id, enabled: false });
+    const afterOff = new Map((await deliveriesOf(e.id)).map((d) => [d.id, d]));
+    expect(afterOff.get(waiting.deliveryId)).toMatchObject({
+      state: 'failed',
+      last_error: 'endpoint_disabled',
+    });
+    // Finished deliveries keep their outcome.
+    expect(afterOff.get(sent.deliveryId)).toMatchObject({ state: 'succeeded', last_error: null });
+    // A delivery captured while the endpoint was being turned off ends without a request.
+    const raced = await captureDirectly(c, e.id);
+    expect(await deliverDue(c)).toMatchObject({ attempted: 0, failed: 1 });
+    expect((await deliveriesOf(e.id)).find((d) => d.id === raced)).toMatchObject({
+      state: 'failed',
+      attempts: 0,
+      last_error: 'endpoint_disabled',
+    });
+    expect(requestsTo(e.path)).toHaveLength(1);
+    await expectAppError(
+      webhooks().replay(e.owner, { deliveryId: sent.deliveryId }),
+      'precondition_failed',
+    );
+
+    await webhooks().setEnabled(e.owner, { endpointId: e.id, enabled: true });
+    const replay = await webhooks().replay(e.owner, { deliveryId: sent.deliveryId });
+    expect(await deliverDue(c)).toMatchObject({ attempted: 1, succeeded: 1 });
+    const rows = await deliveriesOf(e.id);
+    const original = rows.find((d) => d.id === sent.deliveryId);
+    expect(rows.find((d) => d.id === replay.deliveryId)).toMatchObject({
+      state: 'succeeded',
+      replay_of: sent.deliveryId,
+      event_id: original?.event_id,
+    });
+    const [first, again] = requestsTo(e.path);
+    expect(again?.headers['w360-event-id']).toBe(first?.headers['w360-event-id']);
+    expect(again?.headers['w360-delivery-id']).toBe(replay.deliveryId);
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.delivery_replayed'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toEqual({
+      deliveryId: sent.deliveryId,
+      newDeliveryId: replay.deliveryId,
+    });
+  });
+
+  it('deleting an endpoint deletes its deliveries', async () => {
+    const c = await fx.company();
+    const e = await addEndpoint(c, 'ok', ['consent.changed']);
+    await webhooks().sendTest(e.owner, { endpointId: e.id });
+    await webhooks().remove(e.owner, { endpointId: e.id });
+    expect(await deliveriesOf(e.id)).toHaveLength(0);
+    expect(await webhooks().list(e.owner)).toHaveLength(0);
+    await expectAppError(webhooks().sendTest(e.owner, { endpointId: e.id }), 'not_found');
+  });
+});
+
+describe('secret rotation', () => {
+  it('signs with the new and the previous secret for 24 hours, then with the new one only', async () => {
+    const c = await fx.company();
+    const e = await addEndpoint(c, 'ok', ['consent.changed']);
+    const { secret } = await webhooks().rotateSecret(e.owner, { endpointId: e.id });
+    expect(secret).not.toBe(e.secret);
+    const row = await endpointRow(e.id);
+    expect(row.secret_version).toBe(2);
+    expect(row.previous_secret_expires_at!.getTime() - Date.now()).toBeGreaterThan(
+      23.9 * 3_600_000,
+    );
+
+    await webhooks().sendTest(e.owner, { endpointId: e.id });
+    await deliverDue(c);
+    const [during] = requestsTo(e.path);
+    expect(String(during?.headers['w360-signature']).match(/v1=/g)).toHaveLength(2);
+    expect(signedWith(during!, secret)).toBe(true);
+    expect(signedWith(during!, e.secret)).toBe(true);
+
+    await webhooks().sendTest(e.owner, { endpointId: e.id });
+    await deliverDue(c, later(25 * 3_600_000));
+    const [, after] = requestsTo(e.path);
+    expect(String(after?.headers['w360-signature']).match(/v1=/g)).toHaveLength(1);
+    expect(signedWith(after!, secret)).toBe(true);
+    expect(signedWith(after!, e.secret)).toBe(false);
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.secret_rotated'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toEqual({ host: HOST, secretVersion: 2 });
+  });
+});
+
+describe('the address guard', () => {
+  it('refuses private, loopback and metadata addresses when delivering', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const strict = createEgressClient({ ...DEFAULT_EGRESS_POLICY, timeoutMs: 1_000 });
+    const loopback = await webhooks(false).create(owner, {
+      url: `https://127.0.0.1:${port}/ok/guard`,
+      eventTypes: ['consent.changed'],
+    });
+    const metadata = await webhooks(false).create(owner, {
+      url: 'https://169.254.169.254/latest/meta-data',
+      eventTypes: ['consent.changed'],
+    });
+    await webhooks().sendTest(owner, { endpointId: loopback.id });
+    await webhooks().sendTest(owner, { endpointId: metadata.id });
+    expect(await deliverDue(c, systemClock, strict)).toMatchObject({ attempted: 2, retrying: 2 });
+    for (const id of [loopback.id, metadata.id]) {
+      expect(await deliveriesOf(id)).toMatchObject([
+        { state: 'pending', last_status_code: null, last_error: 'address_blocked' },
+      ]);
+    }
+    // A public name that resolves to a private address is refused too.
+    const rebinding = await webhooks(false).create(owner, {
+      url: 'https://hooks.rebind.test/in',
+      eventTypes: ['consent.changed'],
+    });
+    await webhooks().sendTest(owner, { endpointId: rebinding.id });
+    const privateAnswer = createEgressClient(
+      { ...DEFAULT_EGRESS_POLICY, timeoutMs: 1_000 },
+      { resolve: async () => [{ address: '10.0.0.7', family: 4 }] },
+    );
+    await deliverDue(c, systemClock, privateAnswer);
+    expect(await deliveriesOf(rebinding.id)).toMatchObject([{ last_error: 'address_blocked' }]);
+    expect(requestsTo('/ok/guard')).toHaveLength(0);
+  });
+});
+
+describe('dispatch and retention', () => {
+  it('finds companies with due deliveries in the database, skips suspended ones, and queues one job per company', async () => {
+    const c = await fx.company();
+    const e = await addEndpoint(c, 'ok', ['consent.changed']);
+    await webhooks().sendTest(e.owner, { endpointId: e.id });
+    expect(await findWebhookDispatchDue(fx.dbs.app, 10_000)).toContain(c.tenant.id);
+    await dispatchDueWebhooks({ db: fx.dbs.app, jobs: fx.jobs(), signer: fx.signer }, 10_000);
+    await dispatchDueWebhooks({ db: fx.dbs.app, jobs: fx.jobs(), signer: fx.signer }, 10_000);
+    const jobs = await fx.query<{ state: string; data: { tenantId: string; kind: string } }>(
+      `SELECT state, data FROM pgboss.job WHERE name = 'webhook.deliver' AND singleton_key = $1`,
+      [c.tenant.id],
+    );
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]?.data).toMatchObject({ kind: 'webhook.deliver', tenantId: c.tenant.id });
+
+    await fx.query(`UPDATE app.tenants SET status = 'suspended' WHERE id = $1`, [c.tenant.id]);
+    expect(await findWebhookDispatchDue(fx.dbs.app, 10_000)).not.toContain(c.tenant.id);
+    await fx.query(`UPDATE app.tenants SET status = 'active' WHERE id = $1`, [c.tenant.id]);
+    await deliverDue(c);
+    expect(await findWebhookDispatchDue(fx.dbs.app, 10_000)).not.toContain(c.tenant.id);
+  });
+
+  it('deletes events and deliveries 30 days after they were created', async () => {
+    const c = await fx.company();
+    const e = await addEndpoint(c, 'ok', ['consent.changed']);
+    const old = await webhooks().sendTest(e.owner, { endpointId: e.id });
+    const recent = await webhooks().sendTest(e.owner, { endpointId: e.id });
+    await fx.query(
+      `UPDATE app.webhook_deliveries SET created_at = now() - interval '31 days' WHERE id = $1`,
+      [old.deliveryId],
+    );
+    await fx.query(
+      `UPDATE app.webhook_events SET created_at = now() - interval '31 days'
+        WHERE id = (SELECT event_id FROM app.webhook_deliveries WHERE id = $1)`,
+      [old.deliveryId],
+    );
+    expect(await purgeWebhookData(fx.dbs.app)).toBeGreaterThanOrEqual(2);
+    expect((await deliveriesOf(e.id)).map((d) => d.id)).toEqual([recent.deliveryId]);
+    expect(await eventsOf(c)).toHaveLength(1);
+  });
+});
+
+describe('isolation', () => {
+  it('keeps endpoints, deliveries and captured events inside their company', async () => {
+    const a = await fx.company();
+    const b = await fx.company();
+    const ownerA = await fx.ctx(a, a.owner);
+    const ownerB = await fx.ctx(b, b.owner);
+    const e = await addEndpoint(a, 'ok', ['consent.changed']);
+    const { deliveryId } = await webhooks().sendTest(ownerA, { endpointId: e.id });
+
+    expect(await webhooks().list(ownerB)).toHaveLength(0);
+    expect(await webhooks().deliveries(ownerB, { endpointId: e.id })).toHaveLength(0);
+    await expectAppError(webhooks().replay(ownerB, { deliveryId }), 'not_found');
+    await expectAppError(
+      webhooks().setEnabled(ownerB, { endpointId: e.id, enabled: false }),
+      'not_found',
+    );
+    await expectAppError(webhooks().rotateSecret(ownerB, { endpointId: e.id }), 'not_found');
+    await expectAppError(webhooks().remove(ownerB, { endpointId: e.id }), 'not_found');
+    await expectAppError(webhooks().sendTest(ownerB, { endpointId: e.id }), 'not_found');
+    // B's job scope delivers nothing of A's.
+    expect(await deliverDue(b)).toMatchObject({ attempted: 0, failed: 0 });
+    expect(await deliveriesOf(e.id)).toMatchObject([{ id: deliveryId, state: 'pending' }]);
+
+    const scopeA = authorizedTenantScope(a.tenant.id, a.owner.id);
+    // Capturing for another company from A's scope finds no endpoint of B and records nothing.
+    await addEndpoint(b, 'ok', ['consent.changed']);
+    await fx.dbs.app.run(scopeA, async (tx) => {
+      await tx.execute(
+        sql`select app.capture_webhook_event(${b.tenant.id}::uuid, 'consent.changed', null, null, null, null, null, '{}'::jsonb, now())`,
+      );
+    });
+    expect(await eventsOf(b)).toHaveLength(0);
+    // Row security refuses writing another company's rows.
+    await expectRefused(
+      fx.dbs.app.run(scopeA, async (tx) => {
+        await tx.insert(webhookEvents).values({
+          id: uuidv7(),
+          tenantId: b.tenant.id,
+          type: 'ping',
+          detail: {},
+        });
+      }),
+      /row-level security/,
+    );
+    // Column grants: the runtime role cannot move an endpoint or rewrite history.
+    await expectRefused(
+      fx.dbs.app.run(scopeA, async (tx) => {
+        await tx.execute(
+          sql`update app.webhook_endpoints set created_by_user_id = ${b.owner.id} where id = ${e.id}::uuid`,
+        );
+      }),
+      /permission denied/,
+    );
+    await expectRefused(
+      fx.dbs.app.run(scopeA, async (tx) => {
+        await tx.execute(
+          sql`update app.webhook_deliveries set event_id = gen_random_uuid() where id = ${deliveryId}::uuid`,
+        );
+      }),
+      /permission denied/,
+    );
+    await expectRefused(
+      fx.dbs.app.run(scopeA, async (tx) => {
+        await tx.execute(
+          sql`update app.webhook_events set status = 'read' where tenant_id = ${a.tenant.id}::uuid`,
+        );
+      }),
+      /permission denied/,
+    );
+    await expectRefused(
+      fx.dbs.app.run(scopeA, async (tx) => {
+        await tx.execute(sql`delete from app.webhook_deliveries where id = ${deliveryId}::uuid`);
+      }),
+      /permission denied/,
+    );
+  });
+});

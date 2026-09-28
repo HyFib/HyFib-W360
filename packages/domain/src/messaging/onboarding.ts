@@ -33,6 +33,7 @@ import type { JobQueue } from '../jobs/queue';
 import { emitTenantEvent } from './events';
 import type { GraphClient, GraphResult } from './graph';
 import { credentialAad } from './outbound';
+import { COUNTED_CHANNEL_STATUSES, assertNumberAvailable } from '../plans/entitlements';
 
 /**
  * Connecting a company's own WhatsApp Business Account through Meta Embedded Signup
@@ -329,6 +330,7 @@ export function createOnboardingService(deps: OnboardingDeps) {
             .select({
               id: channelAccounts.id,
               whatsappAccountId: channelAccounts.whatsappAccountId,
+              status: channelAccounts.status,
               pin: channelAccounts.registrationPinCiphertext,
             })
             .from(channelAccounts)
@@ -343,6 +345,13 @@ export function createOnboardingService(deps: OnboardingDeps) {
               'conflict',
               'This number is connected here under a different WhatsApp Business Account. Disconnect it first.',
             );
+          }
+          // A new number, or one connected again after it was disconnected, takes a slot of the plan.
+          if (
+            !existingChannel ||
+            !(COUNTED_CHANNEL_STATUSES as readonly string[]).includes(existingChannel.status)
+          ) {
+            await assertNumberAvailable(tx, ctx.tenant.id);
           }
           const channelAccountId = existingChannel?.id ?? uuidv7();
           const pin =
@@ -455,6 +464,8 @@ export function createOnboardingService(deps: OnboardingDeps) {
             'Only numbers with incomplete setup can be retried.',
           );
         }
+        // A failed number takes no slot of the plan; retrying its setup takes one again.
+        if (channel.status === 'failed') await assertNumberAvailable(tx, ctx.tenant.id);
         await tx
           .update(channelAccounts)
           .set({ status: 'onboarding', onboardingError: null })

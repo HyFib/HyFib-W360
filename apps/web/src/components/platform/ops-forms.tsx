@@ -1,0 +1,95 @@
+'use client';
+import { useState } from 'react';
+import { Button, Field, Textarea } from '@w360/ui';
+import { resolveQuarantineAction, retryWebhookReceiptAction } from '@/app/actions/platform';
+import { ClientForm } from '@/components/client-form';
+import { FormError, FormSuccess } from '@/components/form-status';
+
+/** Sends a failed or quarantined webhook receipt back to processing, with a reason (audited). */
+export function RetryReceiptForm({ receiptId }: { receiptId: string }) {
+  const [reason, setReason] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState(false);
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    const result = await retryWebhookReceiptAction({ receiptId, reason });
+    setBusy(false);
+    if (!result.ok) setError(result.message);
+    else setDone(true);
+  }
+  if (done) return <FormSuccess message="Sent back to processing: the minute sweep picks it up." />;
+  return (
+    <details className="group">
+      <summary className="cursor-pointer text-sm text-primary underline-offset-4 hover:underline">
+        Retry
+      </summary>
+      <ClientForm onSubmit={submit} className="mt-2 grid w-64 max-w-full gap-2">
+        <FormError message={error} />
+        <Field id={`retry-reason-${receiptId}`} label="Reason (the fix made)">
+          {(aria) => (
+            <Textarea
+              {...aria}
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              minLength={10}
+              maxLength={2000}
+              rows={2}
+              required
+            />
+          )}
+        </Field>
+        <div>
+          <Button type="submit" size="sm" disabled={busy || reason.trim().length < 10}>
+            {busy ? 'Retrying…' : 'Retry receipt'}
+          </Button>
+        </div>
+      </ClientForm>
+    </details>
+  );
+}
+
+/** Records how a quarantined webhook event was resolved (audited). */
+export function ResolveQuarantineForm({ quarantineId }: { quarantineId: string }) {
+  const [resolution, setResolution] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    const result = await resolveQuarantineAction({ quarantineId, resolution });
+    setBusy(false);
+    if (!result.ok) setError(result.message);
+  }
+  return (
+    <details className="group">
+      <summary className="cursor-pointer text-sm text-primary underline-offset-4 hover:underline">
+        Resolve
+      </summary>
+      <ClientForm onSubmit={submit} className="mt-2 grid w-64 max-w-full gap-2">
+        <FormError message={error} />
+        <Field id={`resolution-${quarantineId}`} label="Resolution">
+          {(aria) => (
+            <Textarea
+              {...aria}
+              value={resolution}
+              onChange={(e) => setResolution(e.target.value)}
+              minLength={10}
+              maxLength={1000}
+              rows={2}
+              required
+            />
+          )}
+        </Field>
+        <div>
+          <Button type="submit" size="sm" disabled={busy || resolution.trim().length < 10}>
+            {busy ? 'Saving…' : 'Mark resolved'}
+          </Button>
+        </div>
+      </ClientForm>
+    </details>
+  );
+}

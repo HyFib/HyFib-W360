@@ -128,6 +128,101 @@ describe('database roles', () => {
       expect(await can('w360_auth', fn), fn).toBe(false);
       expect(await can('w360_platform', fn), fn).toBe(false);
     }
+    // Plans (0023): the sweep functions for the worker, the usage counts for platform staff, the
+    // entitlements for both, and the plan-state triggers for nobody.
+    for (const fn of [
+      'ops.plan_transitions_due(integer)',
+      'ops.usage_limits_reached(integer)',
+      'app.apply_plan_transition(uuid)',
+    ]) {
+      expect(await can('w360_app', fn), fn).toBe(true);
+      expect(await can('w360_auth', fn), fn).toBe(false);
+      expect(await can('w360_platform', fn), fn).toBe(false);
+    }
+    expect(await can('w360_platform', 'ops.platform_tenant_usage(uuid)')).toBe(true);
+    expect(await can('w360_app', 'ops.platform_tenant_usage(uuid)')).toBe(false);
+    expect(await can('w360_app', 'app.tenant_entitlements(uuid)')).toBe(true);
+    expect(await can('w360_platform', 'app.tenant_entitlements(uuid)')).toBe(true);
+    expect(await can('w360_auth', 'app.tenant_entitlements(uuid)')).toBe(false);
+    // Public API (0024): the key lookup and the idempotency sweep, for the runtime app role only.
+    for (const fn of [
+      'ops.api_key_authenticate(text)',
+      'ops.purge_api_idempotency_keys(integer)',
+    ]) {
+      expect(await can('w360_app', fn), fn).toBe(true);
+      expect(await can('w360_auth', fn), fn).toBe(false);
+      expect(await can('w360_platform', fn), fn).toBe(false);
+    }
+    // Outgoing webhooks (0025): the dispatch and retention sweeps for the worker; capture, which
+    // the triggers call as the role making the change (the runtime role, or a definer function);
+    // the trigger functions for nobody.
+    for (const fn of ['ops.webhook_dispatch_due(integer)', 'ops.purge_webhook_data(integer)']) {
+      expect(await can('w360_app', fn), fn).toBe(true);
+      expect(await can('w360_auth', fn), fn).toBe(false);
+      expect(await can('w360_platform', fn), fn).toBe(false);
+    }
+    for (const fn of [
+      'app.webhook_subscribed(uuid,text)',
+      'app.capture_webhook_event(uuid,text,uuid,uuid,uuid,uuid,text,jsonb,timestamp with time zone)',
+    ]) {
+      expect(await can('w360_app', fn), fn).toBe(true);
+      expect(await can('w360_definer', fn), fn).toBe(true);
+      expect(await can('w360_auth', fn), fn).toBe(false);
+      expect(await can('w360_platform', fn), fn).toBe(false);
+    }
+    for (const fn of [
+      'app.notify_webhook_delivery()',
+      'app.webhook_capture_message()',
+      'app.webhook_capture_consent()',
+      'app.webhook_capture_template()',
+    ]) {
+      for (const role of ['w360_app', 'w360_auth', 'w360_platform']) {
+        expect(await can(role, fn), `${role} ${fn}`).toBe(false);
+      }
+    }
+    for (const fn of ['app.sync_tenant_plan_access()', 'app.init_tenant_plan()']) {
+      for (const role of ['w360_app', 'w360_auth', 'w360_platform']) {
+        expect(await can(role, fn), `${role} ${fn}`).toBe(false);
+      }
+    }
+    // Platform operations (0026): the read functions and the receipt retry for platform staff only;
+    // the dead-letter purge for the worker; the URL host helper for the definer functions.
+    for (const fn of [
+      'ops.platform_ops_health(uuid)',
+      'ops.platform_ops_activity(timestamp with time zone,uuid)',
+      'ops.platform_ops_signup_sessions(timestamp with time zone,integer)',
+      'ops.platform_ops_integration_failures(integer)',
+      'ops.platform_retry_webhook_receipt(uuid,text,text)',
+    ]) {
+      expect(await can('w360_platform', fn), fn).toBe(true);
+      expect(await can('w360_app', fn), fn).toBe(false);
+      expect(await can('w360_auth', fn), fn).toBe(false);
+    }
+    expect(await can('w360_app', 'ops.purge_dead_letters(integer)')).toBe(true);
+    expect(await can('w360_platform', 'ops.purge_dead_letters(integer)')).toBe(false);
+    expect(await can('w360_definer', 'ops.url_host(text)')).toBe(true);
+    for (const role of ['w360_app', 'w360_auth', 'w360_platform']) {
+      expect(await can(role, 'ops.url_host(text)'), role).toBe(false);
+    }
+    // Company deletion (0028): requesting, cancelling and running it for the runtime role only;
+    // the helper naming the company being deleted for the definer functions only.
+    for (const fn of [
+      'app.request_tenant_deletion(text)',
+      'app.cancel_tenant_deletion()',
+      'ops.tenant_deletions_due(integer)',
+      'ops.start_tenant_deletion(uuid)',
+      'ops.record_tenant_deletion_cleanup(uuid,jsonb)',
+      'ops.delete_tenant_data(uuid,integer)',
+      'ops.finish_tenant_deletion(uuid)',
+    ]) {
+      expect(await can('w360_app', fn), fn).toBe(true);
+      expect(await can('w360_auth', fn), fn).toBe(false);
+      expect(await can('w360_platform', fn), fn).toBe(false);
+    }
+    expect(await can('w360_definer', 'ops.deleting_tenant_id()')).toBe(true);
+    for (const role of ['w360_app', 'w360_auth', 'w360_platform']) {
+      expect(await can(role, 'ops.deleting_tenant_id()'), role).toBe(false);
+    }
     await expect(
       dbs.appPool.query(
         `SELECT ops.platform_reset_user_mfa('usr_x', 'Verified identity by phone')`,

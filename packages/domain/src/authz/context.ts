@@ -8,10 +8,20 @@ import {
   tenants,
   users,
   type Database,
+  type PlanModule,
+  type TenantPlanStatus,
   type TenantRole,
   type TenantScope,
   type TenantStatus,
 } from '@w360/db';
+import { loadEntitlements } from '../plans/entitlements';
+import {
+  MODULE_WRITE_PERMISSIONS,
+  PLAN_MODULE_KEYS,
+  PLAN_MODULE_LABELS,
+  moduleOfPermission,
+  type PlanLimits,
+} from '../plans/model';
 import {
   ALLOWED_WHEN_SUSPENDED,
   ALLOWED_WITHOUT_MFA,
@@ -38,7 +48,14 @@ export interface TenantContext {
   };
   readonly user: { id: string; email: string; name: string; twoFactorEnabled: boolean };
   readonly membership: { id: string; roles: TenantRole[]; joinedAt: Date };
-  /** Effective permissions after suspension and MFA restrictions. */
+  /** The company's plan (ADR-051): its state, the modules it includes and its limits. */
+  readonly plan: {
+    status: TenantPlanStatus;
+    planId: string | null;
+    modules: ReadonlySet<PlanModule>;
+    limits: PlanLimits;
+  };
+  /** Effective permissions after plan, suspension and MFA restrictions. */
   readonly permissions: ReadonlySet<Permission>;
   /** Role permissions before restrictions (used to explain why something is unavailable). */
   readonly rolePermissions: ReadonlySet<Permission>;
@@ -49,6 +66,11 @@ export interface TenantContext {
     blocking: boolean;
   };
   readonly sessionId: string | null;
+  /**
+   * When the member signed in (the session's start), for step-up checks (ADR-056); null without an
+   * interactive session.
+   */
+  readonly signedInAt: Date | null;
   readonly correlationId: string;
   readonly scope: TenantScope;
 }
@@ -56,6 +78,8 @@ export interface TenantContext {
 export interface ResolveTenantContextInput {
   userId: string;
   sessionId: string | null;
+  /** When the session started (the authentication library's session creation time). */
+  sessionCreatedAt?: Date | null;
   tenantSlug: string;
   correlationId: string;
 }
@@ -104,6 +128,13 @@ export async function resolveTenantContext(
 
   if (!row || row.membershipStatus !== 'active' || row.status === 'deleted') throw notFound;
 
+  // The plan is read in the company's scope, now that membership is established.
+  const entitlements = await deps.db.run(
+    authorizedTenantScope(row.tenantId, input.userId),
+    (tx) => loadEntitlements(tx, row.tenantId),
+    { accessMode: 'read only' },
+  );
+
   const rolePermissions = permissionsForRoles(row.roles);
   const now = deps.clock.now();
   const mfaRequired = row.requireMfaAllMembers || isPrivileged(row.roles);
@@ -115,6 +146,11 @@ export async function resolveTenantContext(
   const mfaBlocking = graceEndsAt !== null && now >= graceEndsAt;
 
   let effective = new Set(rolePermissions);
+  // A module the plan leaves out keeps read access but loses its write permissions.
+  for (const module of PLAN_MODULE_KEYS) {
+    if (entitlements.modules.has(module)) continue;
+    for (const permission of MODULE_WRITE_PERMISSIONS[module]) effective.delete(permission);
+  }
   if (row.status !== 'active')
     effective = new Set([...effective].filter((p) => ALLOWED_WHEN_SUSPENDED.has(p)));
   if (mfaBlocking) effective = new Set([...effective].filter((p) => ALLOWED_WITHOUT_MFA.has(p)));
@@ -137,10 +173,17 @@ export async function resolveTenantContext(
       twoFactorEnabled: row.twoFactorEnabled,
     },
     membership: { id: row.membershipId, roles: row.roles, joinedAt: row.joinedAt },
+    plan: {
+      status: entitlements.planStatus,
+      planId: entitlements.planId,
+      modules: entitlements.modules,
+      limits: entitlements.limits,
+    },
     permissions: effective,
     rolePermissions,
     mfa: { required: mfaRequired, satisfied: mfaSatisfied, graceEndsAt, blocking: mfaBlocking },
     sessionId: input.sessionId,
+    signedInAt: input.sessionCreatedAt ?? null,
     correlationId: input.correlationId,
     scope: authorizedTenantScope(row.tenantId, input.userId),
   };
@@ -160,10 +203,29 @@ export function assertCan(ctx: TenantContext, permission: Permission): void {
         'Set up two-factor authentication to continue using this company.',
       );
     }
+    if (ctx.tenant.status === 'restricted') {
+      throw new AppError(
+        'tenant_suspended',
+        "This company's plan has ended, so this action is unavailable. Ask HyFib to renew the plan; you can still review and export your data.",
+      );
+    }
+    if (ctx.tenant.status === 'pending_deletion') {
+      throw new AppError(
+        'tenant_suspended',
+        'This company is being deleted, so this action is unavailable. An owner can cancel the deletion in Settings, Company data; you can still review and export your data.',
+      );
+    }
     if (ctx.tenant.status !== 'active') {
       throw new AppError(
         'tenant_suspended',
         'This company is suspended; this action is unavailable.',
+      );
+    }
+    const module = moduleOfPermission(permission);
+    if (module && !ctx.plan.modules.has(module)) {
+      throw new AppError(
+        'forbidden',
+        `Your company's plan does not include ${PLAN_MODULE_LABELS[module]}. Ask HyFib to change the plan.`,
       );
     }
   }

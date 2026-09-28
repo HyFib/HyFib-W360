@@ -1,0 +1,187 @@
+import 'server-only';
+import type { NextRequest } from 'next/server';
+import { resolveClientIp, sha256Hex, toError } from '@w360/core';
+import {
+  API_LIMITS,
+  IDEMPOTENCY_KEY_RE,
+  apiErrorResponse,
+  apiRequestError,
+  authenticateApiToken,
+  bearerToken,
+  takeToken,
+  type ApiContext,
+  type ApiResponse,
+  type IdempotencyInput,
+} from '@w360/domain';
+import { getRuntime } from './runtime';
+import { readLimitedBody } from './webhook-body';
+
+type Runtime = Awaited<ReturnType<typeof getRuntime>>;
+
+/** What an API handler gets: the key's context, the runtime and the parsed request parts. */
+export interface ApiCall {
+  ctx: ApiContext;
+  runtime: Runtime;
+  /** The JSON body (POST), already parsed. */
+  body: unknown;
+  /** The Idempotency-Key header with the request's hash, when the header was sent. */
+  idempotency: IdempotencyInput | null;
+  query: Record<string, string>;
+}
+
+type HandlerResult = ApiResponse | { status: number; body: Record<string, unknown> };
+
+// Responses are never cached: next.config sets `Cache-Control: private, no-store` for them.
+const baseHeaders = (requestId: string): HeadersInit => ({
+  'Content-Type': 'application/json; charset=utf-8',
+  'X-Request-Id': requestId,
+});
+
+function respond(
+  status: number,
+  body: unknown,
+  requestId: string,
+  extra: Record<string, string> = {},
+): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...baseHeaders(requestId), ...extra },
+  });
+}
+
+/**
+ * Runs one public API request (ADR-052): authenticates the bearer key (failed attempts are limited
+ * per client address), applies the key's and the company's rate limits, reads a bounded JSON body,
+ * checks the Idempotency-Key header, and turns results and errors into JSON responses. Tokens are
+ * never logged.
+ */
+export async function handleApiRequest(
+  request: NextRequest,
+  handler: (call: ApiCall) => Promise<HandlerResult>,
+  options: { json?: boolean; idempotency?: 'required' | 'optional' } = {},
+): Promise<Response> {
+  const requestId = crypto.randomUUID();
+  const runtime = await getRuntime();
+  const log = runtime.logger;
+  const path = request.nextUrl.pathname;
+  try {
+    const token = bearerToken(request.headers.get('authorization'));
+    const ctx = token ? await authenticateApiToken(runtime.db, token, requestId) : null;
+    if (!ctx) {
+      const ip = resolveClientIp(
+        request.headers.get('x-forwarded-for'),
+        request.headers.get('x-real-ip'),
+        runtime.trustedProxies,
+      );
+      const allowed = await takeToken(
+        runtime.db,
+        `api:auth-failure:${ip ?? 'unknown'}`,
+        API_LIMITS.authFailureRate,
+      );
+      if (!allowed) {
+        const e = apiRequestError(429, 'rate_limited', 'Too many failed attempts.', requestId);
+        return respond(e.status, e.body, requestId, { 'Retry-After': '60' });
+      }
+      const e = apiRequestError(
+        401,
+        'unauthenticated',
+        'Send a valid API key as "Authorization: Bearer <key>".',
+        requestId,
+      );
+      return respond(e.status, e.body, requestId, { 'WWW-Authenticate': 'Bearer' });
+    }
+
+    const keyAllowed = await takeToken(runtime.db, `api:key:${ctx.key.id}`, API_LIMITS.keyRate);
+    const companyAllowed =
+      keyAllowed &&
+      (await takeToken(runtime.db, `api:company:${ctx.tenant.id}`, API_LIMITS.companyRate));
+    if (!keyAllowed || !companyAllowed) {
+      const e = apiRequestError(429, 'rate_limited', 'Too many requests. Slow down.', requestId);
+      return respond(e.status, e.body, requestId, { 'Retry-After': '1' });
+    }
+
+    let body: unknown = undefined;
+    let raw = '';
+    if (options.json) {
+      const type = request.headers.get('content-type') ?? '';
+      if (!/^application\/json(;|$)/i.test(type.trim())) {
+        const e = apiRequestError(
+          415,
+          'bad_request',
+          'Send the body as JSON with Content-Type: application/json.',
+          requestId,
+        );
+        return respond(e.status, e.body, requestId);
+      }
+      const bytes = await readLimitedBody(request, API_LIMITS.bodyBytes);
+      if (!bytes) {
+        const e = apiRequestError(413, 'bad_request', 'The body is larger than 64 KB.', requestId);
+        return respond(e.status, e.body, requestId);
+      }
+      raw = bytes.toString('utf8');
+      try {
+        body = JSON.parse(raw);
+      } catch {
+        const e = apiRequestError(400, 'bad_request', 'The body is not valid JSON.', requestId);
+        return respond(e.status, e.body, requestId);
+      }
+    }
+
+    let idempotency: IdempotencyInput | null = null;
+    const idempotencyKey = request.headers.get('idempotency-key');
+    if (options.idempotency && idempotencyKey !== null) {
+      if (!IDEMPOTENCY_KEY_RE.test(idempotencyKey)) {
+        const e = apiRequestError(
+          400,
+          'bad_request',
+          'The Idempotency-Key header must be 1 to 255 visible ASCII characters.',
+          requestId,
+        );
+        return respond(e.status, e.body, requestId);
+      }
+      idempotency = {
+        key: idempotencyKey,
+        requestHash: sha256Hex(`${request.method} ${path}\n${raw}`),
+      };
+    } else if (options.idempotency === 'required') {
+      const e = apiRequestError(
+        400,
+        'bad_request',
+        'Send an Idempotency-Key header (for example a UUID) so a retry never sends twice.',
+        requestId,
+      );
+      return respond(e.status, e.body, requestId);
+    }
+
+    const query = Object.fromEntries(request.nextUrl.searchParams.entries());
+    const result = await handler({ ctx, runtime, body, idempotency, query });
+    const replayed = 'replayed' in result && result.replayed;
+    log.info(
+      {
+        requestId,
+        method: request.method,
+        path,
+        status: result.status,
+        tenantId: ctx.tenant.id,
+        apiKeyId: ctx.key.id,
+        replayed,
+      },
+      'api request',
+    );
+    return respond(
+      result.status,
+      result.body,
+      requestId,
+      replayed ? { 'Idempotent-Replayed': 'true' } : {},
+    );
+  } catch (error) {
+    const mapped = apiErrorResponse(error, requestId);
+    if (mapped.internal) {
+      log.error(
+        { requestId, method: request.method, path, err: toError(error) },
+        'api request failed',
+      );
+    }
+    return respond(mapped.status, mapped.body, requestId);
+  }
+}

@@ -83,7 +83,7 @@ export interface ConsentEventInput {
   source: ConsentSource;
   channelAccountId?: string | null;
   evidence?: Record<string, unknown>;
-  actorType: 'user' | 'contact' | 'system' | 'provider';
+  actorType: 'user' | 'contact' | 'system' | 'provider' | 'api_key';
   actorId?: string | null;
   occurredAt: Date;
 }
