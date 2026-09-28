@@ -464,6 +464,8 @@ export function createOnboardingService(deps: OnboardingDeps) {
             'Only numbers with incomplete setup can be retried.',
           );
         }
+        // A failed number takes no slot of the plan; retrying its setup takes one again.
+        if (channel.status === 'failed') await assertNumberAvailable(tx, ctx.tenant.id);
         await tx
           .update(channelAccounts)
           .set({ status: 'onboarding', onboardingError: null })

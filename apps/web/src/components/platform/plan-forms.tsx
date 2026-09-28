@@ -3,7 +3,7 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button, Checkbox, Field, Input, Label, Select, Textarea } from '@w360/ui';
 import { ConfirmDialog } from '@w360/ui/client';
-import { PLAN_MODULE_KEYS, PLAN_MODULE_LABELS } from '@w360/domain/plan-model';
+import { PLAN_MODULE_KEYS, PLAN_MODULE_LABELS, addOnsForPlan } from '@w360/domain/plan-model';
 import {
   createPlanAction,
   createPlanVersionAction,
@@ -499,7 +499,7 @@ export function TenantPlanForm({
       trialEndsOn: status === 'trialing' ? trialEndsOn : '',
       periodStart: status === 'active' ? periodStart : '',
       periodEnd: status === 'active' ? periodEnd : '',
-      ...addOns,
+      ...(needsPlan ? addOnsForPlan(plan, addOns) : addOns),
       reason,
     }).then((r) => {
       if (!r.ok) setError(r.message);

@@ -1,7 +1,7 @@
 import { randomInt } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { isAppError, systemClock, uuidv7, type Clock } from '@w360/core';
-import { authorizedTenantScope, sql } from '@w360/db';
+import { authorizedTenantScope, channelAccounts, sql } from '@w360/db';
 import {
   announceRunLimit,
   assertCan,
@@ -10,6 +10,7 @@ import {
   createAutomationService,
   createCommerceService,
   createCrmService,
+  createOnboardingService,
   createPlanAdminService,
   createPlansService,
   createPlatformService,
@@ -24,7 +25,13 @@ import {
   type TenantContext,
 } from '@w360/domain';
 import { acceptInvitation, createTenant, createUser, invite, type TestUser } from './helpers';
-import { startWhatsAppFixture, type WhatsAppFixture } from './whatsapp-fixture';
+import {
+  APP_ID,
+  APP_SECRET,
+  nextExternalId,
+  startWhatsAppFixture,
+  type WhatsAppFixture,
+} from './whatsapp-fixture';
 
 /**
  * Plans and entitlements (P5-01, ADR-051) against real PostgreSQL: the catalog's immutability and
@@ -849,6 +856,64 @@ describe('limits', () => {
     const staffView = await admin().tenantPlan(operator, c.tenant.id);
     expect(staffView.usage.numbers).toBe(1);
     expect(staffView.limits.numbers).toBe(2);
+  });
+
+  it('takes a slot again when the setup of a failed number is retried', async () => {
+    const owner = await staff('platform_owner');
+    const operator = await staff('platform_operator');
+    const c = await fx.company();
+    await activePlan(operator, c.tenant.id, await publishedPlan(owner));
+    const failedId = uuidv7();
+    await fx.dbs.app.run(authorizedTenantScope(c.tenant.id, c.owner.id), (tx) =>
+      tx.insert(channelAccounts).values({
+        id: failedId,
+        tenantId: c.tenant.id,
+        whatsappAccountId: c.whatsappAccountId,
+        phoneNumberId: nextExternalId(),
+        status: 'failed',
+        displayPhoneNumber: '+91 90000 00009',
+      }),
+    );
+    const onboarding = createOnboardingService({
+      db: fx.dbs.app,
+      keyring: fx.keyring,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+      clock: systemClock,
+      graph: fx.graph,
+      meta: {
+        appId: APP_ID,
+        appSecret: APP_SECRET,
+        webhookSecrets: [APP_SECRET],
+        graphApiVersion: 'v26.0',
+        graphBaseUrl: fx.standIn.baseUrl,
+        webhookVerifyToken: 'verify',
+        embeddedSignupConfigId: '777',
+      },
+    });
+    const ctx = await fx.ctx(c, c.owner);
+    const status = async () =>
+      (
+        await fx.query<{ status: string }>(
+          'SELECT status FROM app.channel_accounts WHERE id = $1',
+          [failedId],
+        )
+      )[0]!.status;
+    // The plan's one number is the connected one.
+    await expectAppError(
+      onboarding.retrySetup(ctx, failedId),
+      'precondition_failed',
+      /allows 1 WhatsApp number/,
+    );
+    expect(await status()).toBe('failed');
+    await fx.dbs.adminPool.query(
+      `UPDATE app.channel_accounts SET status = 'disconnected' WHERE id = $1`,
+      [c.channelAccountId],
+    );
+    await onboarding.retrySetup(ctx, failedId);
+    expect(await status()).toBe('onboarding');
+    // Retrying a number that is already being set up takes no second slot.
+    await onboarding.retrySetup(ctx, failedId);
   });
 });
 

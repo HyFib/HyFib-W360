@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { PERMISSIONS } from '../authz/permissions';
 import {
+  addOnsForPlan,
   MODULE_WRITE_PERMISSIONS,
   PLAN_MODULE_KEYS,
   moduleOfPermission,
@@ -86,5 +87,25 @@ describe('plan modules', () => {
     expect(planGivesAccess('past_due')).toBe(true);
     expect(planGivesAccess('expired')).toBe(false);
     expect(planGivesAccess('canceled')).toBe(false);
+  });
+});
+
+describe('addOnsForPlan', () => {
+  const kept = { extraSeats: '4', extraNumbers: '2', runPacks: '3' };
+  it('keeps only the add-ons the chosen plan sells', () => {
+    const plan = { sellsSeats: true, sellsNumbers: false, sellsRunPacks: true };
+    expect(addOnsForPlan(plan, kept)).toEqual({
+      extraSeats: '4',
+      extraNumbers: '0',
+      runPacks: '3',
+    });
+    expect(
+      addOnsForPlan({ sellsSeats: false, sellsNumbers: false, sellsRunPacks: false }, kept),
+    ).toEqual({ extraSeats: '0', extraNumbers: '0', runPacks: '0' });
+    expect(addOnsForPlan(undefined, kept)).toEqual({
+      extraSeats: '0',
+      extraNumbers: '0',
+      runPacks: '0',
+    });
   });
 });

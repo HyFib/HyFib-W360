@@ -58,6 +58,21 @@ export const ASSIGNABLE_PLAN_STATES = ['complimentary', 'trialing', 'active', 'c
 export const planGivesAccess = (status: TenantPlanStatus): boolean =>
   status !== 'expired' && status !== 'canceled';
 
+/**
+ * The add-on quantities (as typed in the plan form) to assign with a plan: those the plan does not
+ * sell are zero, so a quantity kept from a previous plan cannot block the change.
+ */
+export function addOnsForPlan(
+  plan: { sellsSeats: boolean; sellsNumbers: boolean; sellsRunPacks: boolean } | undefined,
+  addOns: { extraSeats: string; extraNumbers: string; runPacks: string },
+): { extraSeats: string; extraNumbers: string; runPacks: string } {
+  return {
+    extraSeats: plan?.sellsSeats ? addOns.extraSeats : '0',
+    extraNumbers: plan?.sellsNumbers ? addOns.extraNumbers : '0',
+    runPacks: plan?.sellsRunPacks ? addOns.runPacks : '0',
+  };
+}
+
 /** Limits after add-ons; null means no limit. */
 export interface PlanLimits {
   seats: number | null;
