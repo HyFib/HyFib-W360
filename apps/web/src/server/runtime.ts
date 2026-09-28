@@ -23,6 +23,7 @@ import {
   JobSigner,
   PgBossJobQueue,
   RazorpayClient,
+  createApiKeysService,
   createAutomationService,
   createCommerceService,
   createStoreService,
@@ -49,6 +50,7 @@ import {
   createTemplatesService,
   createTenancyService,
   createWebRequestService,
+  type ApiKeysService,
   type AutomationService,
   type CommerceService,
   type CrmService,
@@ -119,6 +121,8 @@ export interface Runtime {
   plans: PlansService;
   /** The plan catalog and companies' plans (platform staff). */
   planAdmin: PlanAdminService;
+  /** Company API keys for the public API (Settings → API keys). */
+  apiKeys: ApiKeysService;
   reports: ReportsService;
   automations: AutomationService;
   /** Domains and secrets for the automation HTTP step. */
@@ -231,6 +235,7 @@ async function init(): Promise<Runtime> {
   const rateCards = createRateCardsService({ platformDb, clock: systemClock });
   const plans = createPlansService({ db, clock: systemClock });
   const planAdmin = createPlanAdminService({ platformDb, clock: systemClock });
+  const apiKeys = createApiKeysService({ db, clock: systemClock });
   const reports = createReportsService({ db, clock: systemClock });
   const automations = createAutomationService({
     db,
@@ -359,6 +364,7 @@ async function init(): Promise<Runtime> {
     rateCards,
     plans,
     planAdmin,
+    apiKeys,
     reports,
     automations,
     webRequests,

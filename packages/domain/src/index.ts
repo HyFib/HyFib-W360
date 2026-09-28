@@ -33,6 +33,7 @@ export * from './plans/entitlements';
 export * from './plans/service';
 export * from './plans/sweep';
 export * from './platform/plans';
+export * from './api';
 export * from './validation';
 export * from './contacts/phone';
 export * from './contacts/csv';

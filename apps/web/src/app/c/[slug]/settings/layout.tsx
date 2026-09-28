@@ -35,6 +35,9 @@ export default async function SettingsLayout({
     ...(ctx.permissions.has('automations.read') || ctx.permissions.has('integrations.read')
       ? [{ href: `${base}/web-requests`, label: 'Web requests' }]
       : []),
+    ...(ctx.permissions.has('developer.manage')
+      ? [{ href: `${base}/api-keys`, label: 'API keys' }]
+      : []),
     ...(ctx.permissions.has('audit.read') ? [{ href: `${base}/audit`, label: 'Audit log' }] : []),
     { href: `${base}/modules`, label: 'Modules' },
   ];

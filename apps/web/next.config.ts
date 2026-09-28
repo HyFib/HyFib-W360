@@ -53,6 +53,11 @@ const config: NextConfig = {
         ],
       },
       {
+        // The public API's OpenAPI document holds no private data: clients may cache it briefly.
+        source: '/api/v1/openapi.json',
+        headers: [{ key: 'Cache-Control', value: 'public, max-age=300' }],
+      },
+      {
         // Meta Embedded Signup's popup must be able to message this page back (later rules win).
         source: '/c/:slug/settings/channels',
         headers: [{ key: 'Cross-Origin-Opener-Policy', value: 'same-origin-allow-popups' }],

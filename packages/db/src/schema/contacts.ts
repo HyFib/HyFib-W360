@@ -80,7 +80,9 @@ export const consentEvents = appSchema.table('consent_events', {
     .notNull()
     .default(sql`'{}'::jsonb`)
     .$type<Record<string, unknown>>(),
-  actorType: text('actor_type', { enum: ['user', 'contact', 'system', 'provider'] }).notNull(),
+  actorType: text('actor_type', {
+    enum: ['user', 'contact', 'system', 'provider', 'api_key'],
+  }).notNull(),
   actorId: text('actor_id'),
   occurredAt: tz('occurred_at').notNull(),
   createdAt: tz('created_at').notNull().defaultNow(),

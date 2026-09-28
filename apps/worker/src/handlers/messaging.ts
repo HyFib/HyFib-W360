@@ -10,6 +10,7 @@ import {
   processChannelOnboarding,
   processMetaWebhookReceipt,
   processSendIntent,
+  purgeApiIdempotencyKeys,
   recoverExpiredSend,
   routeDueConversations,
 } from '@w360/domain';
@@ -198,6 +199,9 @@ export function messagingSweepHandler(rt: WorkerRuntime) {
     if (retention.bodiesErased + retention.receiptsDeleted + retention.eventsPruned > 0) {
       rt.logger.info(retention, 'messaging retention applied');
     }
+    const idempotencyKeys = await purgeApiIdempotencyKeys(rt.db);
+    if (idempotencyKeys > 0)
+      rt.logger.info({ idempotencyKeys }, 'expired API idempotency keys deleted');
     if (receipts.length > 0 || intents.length > 0) {
       rt.logger.info(
         { receipts: receipts.length, intents: intents.length, unknownOutcomes: recovered },
