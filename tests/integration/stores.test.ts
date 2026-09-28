@@ -2824,7 +2824,10 @@ describe('Cart reminders', () => {
     await readCheckouts(c, storeId);
     await readCheckouts(c, storeId);
     expect(
-      await fx.query('SELECT id FROM app.contacts WHERE phone_e164 = $1', ['+919833300005']),
+      await fx.query('SELECT id FROM app.contacts WHERE tenant_id = $1 AND phone_e164 = $2', [
+        c.tenant.id,
+        '+919833300005',
+      ]),
     ).toEqual([]);
     const events = await fx.query<{
       action: string;
@@ -2857,9 +2860,10 @@ describe('Cart reminders', () => {
       },
     ]);
     expect(
-      await fx.query('SELECT source, display_name FROM app.contacts WHERE phone_e164 = $1', [
-        '+919833300001',
-      ]),
+      await fx.query(
+        'SELECT source, display_name FROM app.contacts WHERE tenant_id = $1 AND phone_e164 = $2',
+        [c.tenant.id, '+919833300001'],
+      ),
     ).toEqual([{ source: 'store', display_name: 'Nila C' }]);
     expect(await runCart(c, storeId, later(31 * MINUTE_MS))).toEqual([
       ['20', 'cart_reminder', 'queued'],
