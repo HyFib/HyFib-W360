@@ -152,12 +152,15 @@ export const PRIVILEGED_ROLES: ReadonlySet<TenantRole> = new Set<TenantRole>([
 ]);
 
 /**
- * Permissions that remain available while a company is suspended: read access, exports, billing
- * recovery and owner administration. Everything that causes outbound activity is blocked.
+ * Permissions that remain available while a company is suspended, restricted or pending deletion:
+ * read access, exports, billing recovery and owner administration, including asking for the
+ * company to be deleted and cancelling that (leaving must not depend on paying). Everything that
+ * causes outbound activity is blocked.
  */
 export const ALLOWED_WHEN_SUSPENDED: ReadonlySet<Permission> = new Set<Permission>([
   'tenant.read',
   'tenant.export',
+  'tenant.delete',
   'members.read',
   'members.manage',
   'members.manage_owners',

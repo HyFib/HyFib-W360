@@ -148,8 +148,9 @@ authenticated by Meta's signature and the flow's encryption key, not by a sessio
    unless `APP_ENV=production`; `RAZORPAY_API_BASE_URL` is refused outside `APP_ENV=local|test`.
 2. Add a webhook to `https://<app host>/api/webhooks/razorpay` with a random secret
    (`RAZORPAY_WEBHOOK_SECRET`) and the events `payment.authorized`, `payment.captured`,
-   `payment.failed`, `order.paid`, `refund.processed`, `payment.dispute.lost`, `token.confirmed`,
-   `token.rejected`, `token.cancelled`, `token.paused`.
+   `payment.failed`, `order.paid`, `refund.processed`, `refund.failed`, `payment.dispute.lost`,
+   `token.confirmed`, `token.rejected`, `token.cancelled`, `token.paused`. Without `refund.failed`,
+   a failed staff refund is still found by the worker's check (ADR-058), only later.
 3. Rotate the webhook secret by setting the old value as `RAZORPAY_WEBHOOK_SECRET_PREVIOUS`, the new
    one as `RAZORPAY_WEBHOOK_SECRET`, deploying, changing it in the Dashboard, and removing the
    previous value after 24 h (Razorpay's retry window).

@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { bigint, boolean, smallint, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { bigint, boolean, integer, smallint, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 import { appSchema } from './tenancy';
 
 /**
@@ -174,6 +174,8 @@ export const topups = appSchema.table('topups', {
   refundedMinor: paise('refunded_minor').notNull().default(0),
   failureReason: text('failure_reason'),
   creditedTransactionId: uuid('credited_transaction_id'),
+  /** Razorpay's payment method for the credited payment (0029); set by a definer function. */
+  paymentMethod: text('payment_method'),
   createdByUserId: text('created_by_user_id'),
   nextCheckAt: tz('next_check_at')
     .notNull()
@@ -209,4 +211,31 @@ export const autoRechargeAttempts = appSchema.table('auto_recharge_attempts', {
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),
   resolvedAt: tz('resolved_at'),
+});
+
+export const CREDIT_REFUND_STATUSES = ['requested', 'submitted', 'processed', 'failed'] as const;
+export type CreditRefundStatus = (typeof CREDIT_REFUND_STATUSES)[number];
+
+/**
+ * Refunds of unused service credit started by platform owners (0032, ADR-058). The company role
+ * reads every column except the staff reason and who asked (column grants).
+ */
+export const creditRefunds = appSchema.table('credit_refunds', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  topupId: uuid('topup_id').notNull(),
+  holdId: uuid('hold_id').notNull(),
+  amountMinor: paise('amount_minor').notNull(),
+  status: text('status', { enum: CREDIT_REFUND_STATUSES }).notNull().default('requested'),
+  reason: text('reason').notNull(),
+  requestedByUserId: text('requested_by_user_id').notNull(),
+  providerRefundId: text('provider_refund_id'),
+  attempts: integer('attempts').notNull().default(0),
+  nextAttemptAt: tz('next_attempt_at').notNull().defaultNow(),
+  lastError: text('last_error'),
+  requestedAt: tz('requested_at').notNull().defaultNow(),
+  submittedAt: tz('submitted_at'),
+  processedAt: tz('processed_at'),
+  failedAt: tz('failed_at'),
+  updatedAt: tz('updated_at').notNull().defaultNow(),
 });

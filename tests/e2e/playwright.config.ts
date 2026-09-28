@@ -10,6 +10,17 @@ const chromiumExecutable = process.env.PW_CHROMIUM_EXECUTABLE;
 const chromiumLaunch = chromiumExecutable
   ? { launchOptions: { executablePath: chromiumExecutable } }
   : {};
+// Playwright 1.63's Firefox (build 1543) can drop a protocol message after Cross-Origin-Opener-
+// Policy replaces a page's browsing context: the replacement's message ids restart at 1 while the
+// browser end still holds unacknowledged answers under the same ids, so the colliding message
+// (often "navigation committed") is answered from that cache and never delivered, and page.goto
+// waits until the test times out (microsoft/playwright#42731, fixed in Firefox build 1551, which
+// no stable Playwright ships yet). Every HyFib page sends COOP: same-origin and the store tests
+// round-trip through stand-ins on another origin, so Firefox runs with COOP enforcement off;
+// Chromium and WebKit still enforce it. Drop this with the upgrade to Firefox 1551 or later.
+const firefoxLaunch = {
+  launchOptions: { firefoxUserPrefs: { 'browser.tabs.remote.useCrossOriginOpenerPolicy': false } },
+};
 
 export default defineConfig({
   testDir: '.',
@@ -25,10 +36,13 @@ export default defineConfig({
     baseURL,
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
+    // A navigation that never settles fails here (and is retried in CI) instead of holding the
+    // test until its own timeout; pages load in a few seconds at most.
+    navigationTimeout: 30_000,
   },
   projects: [
     { name: 'chromium', use: { ...devices['Desktop Chrome'], ...chromiumLaunch } },
-    { name: 'firefox', use: { ...devices['Desktop Firefox'] } },
+    { name: 'firefox', use: { ...devices['Desktop Firefox'], ...firefoxLaunch } },
     { name: 'webkit', use: { ...devices['Desktop Safari'] } },
     { name: 'mobile-chromium', use: { ...devices['Pixel 7'], ...chromiumLaunch } },
   ],

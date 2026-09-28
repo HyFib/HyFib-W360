@@ -117,6 +117,8 @@ export interface RazorpayStandInState {
   paymentLinks: Map<string, StandInPaymentLink>;
   /** Answers Payment Link calls without `short_url` while set (a response HyFib cannot send). */
   omitShortUrl: boolean;
+  /** The status of refunds created from now on (default `processed`; `pending` as with normal speed). */
+  refundStatusOnCreate: StandInRefund['status'];
   /** Behaviours consumed by the next calls of each kind (default: ok). */
   queues: {
     createOrder: CallBehaviour[];
@@ -139,6 +141,8 @@ export interface RazorpayStandIn {
       status?: StandInPayment['status'];
       errorDescription?: string;
       tokenStatus?: StandInToken['status'];
+      /** The payment method Razorpay reports (default `card`). */
+      method?: string;
     },
   ): StandInPayment;
   setPaymentStatus(paymentId: string, status: StandInPayment['status'], error?: string): void;
@@ -148,6 +152,8 @@ export interface RazorpayStandIn {
   /** The customer pays a Payment Link in full (what the hosted page does). */
   payLink(linkId: string): StandInPaymentLink;
   setLinkStatus(linkId: string, status: StandInPaymentLink['status']): StandInPaymentLink;
+  /** Razorpay finishes a pending refund; a failed one no longer counts as refunded. */
+  setRefundStatus(refundId: string, status: StandInRefund['status']): StandInRefund;
   close(): Promise<void>;
 }
 
@@ -233,6 +239,7 @@ export async function startRazorpayStandIn(options: {
     merchants: new Map(),
     paymentLinks: new Map(),
     omitShortUrl: false,
+    refundStatusOnCreate: 'processed',
     queues: {
       createOrder: [],
       recurring: [],
@@ -256,6 +263,7 @@ export async function startRazorpayStandIn(options: {
       status?: StandInPayment['status'];
       errorDescription?: string;
       tokenStatus?: StandInToken['status'];
+      method?: string;
     } = {},
   ): StandInPayment {
     const order = state.orders.get(orderId);
@@ -288,7 +296,7 @@ export async function startRazorpayStandIn(options: {
       captured: status === 'captured',
       customerId: order.customerId,
       tokenId,
-      method: 'card',
+      method: opts.method ?? 'card',
       errorCode: status === 'failed' ? 'BAD_REQUEST_ERROR' : null,
       errorDescription: status === 'failed' ? (opts.errorDescription ?? 'Payment failed') : null,
       amountRefunded: 0,
@@ -474,6 +482,17 @@ export async function startRazorpayStandIn(options: {
     );
   }
 
+  /** A failed refund no longer counts against the payment. */
+  const finishRefund = (refund: StandInRefund, status: StandInRefund['status']) => {
+    const payment = state.payments.get(refund.paymentId);
+    if (payment && status === 'failed' && refund.status !== 'failed') {
+      payment.amountRefunded -= refund.amount;
+      if (payment.status === 'refunded') payment.status = 'captured';
+    }
+    refund.status = status;
+    return refund;
+  };
+
   const server: Server = createServer((req, res) => {
     void (async () => {
       const url = new URL(req.url ?? '/', 'http://stand-in');
@@ -519,6 +538,23 @@ export async function startRazorpayStandIn(options: {
           .reverse()
           .map(linkJson);
         return json(res, 200, { payment_links: links });
+      }
+      // TEST-ONLY: the status refunds get when created (normal-speed refunds start pending).
+      if (req.method === 'POST' && url.pathname === '/__stand-in/refund-status') {
+        const status = String(body?.status ?? '');
+        if (status !== 'pending' && status !== 'processed' && status !== 'failed')
+          return rzpError(res, 400, 'BAD_REQUEST_ERROR', 'unknown refund status');
+        state.refundStatusOnCreate = status;
+        return json(res, 200, { ok: true });
+      }
+      // TEST-ONLY: Razorpay finishes a refund (processed or failed).
+      if (req.method === 'POST' && url.pathname === '/__stand-in/finish-refund') {
+        const refund = state.refunds.get(String(body?.id ?? ''));
+        const status = String(body?.status ?? '');
+        if (!refund) return rzpError(res, 400, 'BAD_REQUEST_ERROR', 'refund not found');
+        if (status !== 'processed' && status !== 'failed')
+          return rzpError(res, 400, 'BAD_REQUEST_ERROR', 'unknown refund status');
+        return json(res, 200, refundJson(finishRefund(refund, status)));
       }
       // TEST-ONLY: what the hosted payment page does when the customer pays the link in full.
       if (req.method === 'POST' && url.pathname === '/__stand-in/pay-link') {
@@ -705,7 +741,7 @@ export async function startRazorpayStandIn(options: {
             id: id('rfnd'),
             paymentId: payment.id,
             amount,
-            status: 'processed',
+            status: state.refundStatusOnCreate,
             idempotencyKey: key,
           };
           state.refunds.set(refund.id, refund);
@@ -836,6 +872,11 @@ export async function startRazorpayStandIn(options: {
       if (!link) throw new Error(`stand-in: unknown payment link ${linkId}`);
       link.status = status;
       return link;
+    },
+    setRefundStatus(refundId: string, status: StandInRefund['status']) {
+      const refund = state.refunds.get(refundId);
+      if (!refund) throw new Error(`stand-in: unknown refund ${refundId}`);
+      return finishRefund(refund, status);
     },
     close: () =>
       new Promise<void>((resolve, reject) => {

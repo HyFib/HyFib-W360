@@ -2,8 +2,9 @@
 import { useState } from 'react';
 import { Button, Field, Input } from '@w360/ui';
 import { updateAutoRechargeAction } from '@/app/actions/billing';
+import { ActionFailure, type ActionFailureState } from '@/components/action-failure';
 import { ClientForm } from '@/components/client-form';
-import { FormError, FormSuccess } from '@/components/form-status';
+import { FormSuccess } from '@/components/form-status';
 
 const rupees = (paise: number) => (paise / 100).toFixed(paise % 100 === 0 ? 0 : 2);
 
@@ -33,7 +34,7 @@ export function AutoRechargeForm({
   const [amount, setAmount] = useState(rupees(initial.amountMinor));
   const [dailyCap, setDailyCap] = useState(rupees(initial.dailyCapMinor));
   const [monthlyCap, setMonthlyCap] = useState(rupees(initial.monthlyCapMinor));
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ActionFailureState | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
@@ -53,7 +54,7 @@ export function AutoRechargeForm({
     });
     setBusy(false);
     if (!result.ok) {
-      setError(result.message);
+      setError(result);
       setFieldErrors(Object.fromEntries((result.issues ?? []).map((i) => [i.path, i.message])));
       return;
     }
@@ -83,7 +84,7 @@ export function AutoRechargeForm({
 
   return (
     <ClientForm onSubmit={submit} className="grid gap-3 sm:max-w-md">
-      <FormError message={error} />
+      <ActionFailure failure={error} />
       <FormSuccess message={notice} />
       <div className="flex items-start gap-3 text-sm">
         <input

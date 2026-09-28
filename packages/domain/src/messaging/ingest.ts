@@ -137,12 +137,39 @@ export async function processMetaWebhookReceipt(
   });
   if (!claimed) return 'not_claimable';
 
+  // Quarantine entries are written with the receipt's outcome, in one transaction, so the
+  // operations console never lists an entry whose receipt is still being processed (it could not
+  // offer the retry yet).
+  const quarantined: {
+    reason: 'unknown_asset' | 'asset_mismatch' | 'malformed' | 'unsupported_object';
+    externalIds: Record<string, unknown>;
+  }[] = [];
+  const quarantine = (
+    reason: (typeof quarantined)[number]['reason'],
+    externalIds: Record<string, unknown>,
+  ) => {
+    quarantined.push({ reason, externalIds });
+  };
   const finish = async (
     status: 'processed' | 'quarantined' | 'ignored',
     summary: Summary | Record<string, unknown>,
   ) => {
-    await deps.db.run(systemScope, (tx) =>
-      tx
+    await deps.db.run(systemScope, async (tx) => {
+      if (quarantined.length > 0) {
+        await tx
+          .insert(webhookQuarantine)
+          .values(
+            quarantined.map((q) => ({
+              id: uuidv7(),
+              receiptId,
+              provider: 'meta_whatsapp' as const,
+              reason: q.reason,
+              externalIds: q.externalIds,
+            })),
+          )
+          .onConflictDoNothing();
+      }
+      await tx
         .update(webhookReceipts)
         .set({
           status,
@@ -151,19 +178,8 @@ export async function processMetaWebhookReceipt(
           leaseUntil: null,
           lastError: null,
         })
-        .where(eq(webhookReceipts.id, receiptId)),
-    );
-  };
-  const quarantine = async (
-    reason: 'unknown_asset' | 'asset_mismatch' | 'malformed' | 'unsupported_object',
-    externalIds: Record<string, unknown>,
-  ) => {
-    await deps.db.run(systemScope, (tx) =>
-      tx
-        .insert(webhookQuarantine)
-        .values({ id: uuidv7(), receiptId, provider: 'meta_whatsapp', reason, externalIds })
-        .onConflictDoNothing(),
-    );
+        .where(eq(webhookReceipts.id, receiptId));
+    });
   };
 
   try {
@@ -174,13 +190,13 @@ export async function processMetaWebhookReceipt(
         deps.keyring.decryptString(claimed.bodyCiphertext, receiptAad(claimed.id)),
       );
     } catch {
-      await quarantine('malformed', {});
+      quarantine('malformed', {});
       await finish('quarantined', { error: 'unreadable body' });
       return 'quarantined';
     }
     const envelope = metaEnvelopeSchema.safeParse(envelopeJson);
     if (!envelope.success) {
-      await quarantine('malformed', {});
+      quarantine('malformed', {});
       await finish('quarantined', { error: 'invalid envelope' });
       return 'quarantined';
     }
@@ -214,7 +230,7 @@ export async function processMetaWebhookReceipt(
           if (requested) summary.templateSyncRequests += 1;
           else {
             summary.quarantined += 1;
-            await quarantine('unknown_asset', { waba: entry.id, field: change.field });
+            quarantine('unknown_asset', { waba: entry.id, field: change.field });
           }
           continue;
         }
@@ -226,7 +242,7 @@ export async function processMetaWebhookReceipt(
         if (!value.success) {
           summary.malformed += 1;
           summary.quarantined += 1;
-          await quarantine('malformed', { waba: entry.id });
+          quarantine('malformed', { waba: entry.id });
           continue;
         }
         const phoneNumberId = value.data.metadata.phone_number_id;
@@ -246,12 +262,12 @@ export async function processMetaWebhookReceipt(
         );
         if (!binding) {
           summary.quarantined += 1;
-          await quarantine('unknown_asset', { waba: entry.id, phoneNumberId });
+          quarantine('unknown_asset', { waba: entry.id, phoneNumberId });
           continue;
         }
         if (binding.parent_external_id !== entry.id) {
           summary.quarantined += 1;
-          await quarantine('asset_mismatch', { waba: entry.id, phoneNumberId });
+          quarantine('asset_mismatch', { waba: entry.id, phoneNumberId });
           continue;
         }
         await deps.db.run(authorizedTenantScope(binding.tenant_id, null), (tx) =>

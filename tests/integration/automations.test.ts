@@ -437,6 +437,18 @@ describe('automation versions', () => {
         run1.id,
       ]),
     ).rejects.toThrow(/ended automation run cannot change/);
+    // Its pending message and HTTP call count are frozen too (lost in 0022, restored in 0028).
+    for (const change of [
+      `pending_message_id = (SELECT m.id FROM app.messages m
+         WHERE m.tenant_id = r.tenant_id AND m.conversation_id = r.conversation_id LIMIT 1)`,
+      'http_call_count = r.http_call_count + 1',
+    ]) {
+      await expect(
+        fx.dbs.adminPool.query(`UPDATE app.automation_runs r SET ${change} WHERE r.id = $1`, [
+          run1.id,
+        ]),
+      ).rejects.toThrow(/ended automation run cannot change/);
+    }
   });
 
   it('saves drafts with problems but publishes only a draft without errors, with the right roles', async () => {

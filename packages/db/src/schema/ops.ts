@@ -1,5 +1,15 @@
 import { sql } from 'drizzle-orm';
-import { inet, integer, jsonb, pgSchema, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import {
+  bigint,
+  boolean,
+  inet,
+  integer,
+  jsonb,
+  pgSchema,
+  text,
+  timestamp,
+  uuid,
+} from 'drizzle-orm/pg-core';
 
 export const opsSchema = pgSchema('ops');
 
@@ -81,4 +91,62 @@ export const emailOutbox = opsSchema.table('email_outbox', {
   dedupeKey: text('dedupe_key'),
   createdAt: tz('created_at').notNull().defaultNow(),
   sentAt: tz('sent_at'),
+});
+
+/**
+ * Jobs the dead-letter queue received, recorded by the worker (ADR-054). Kind, reference and company
+ * are set only when the envelope signature verified; only the error's name and code are kept. The
+ * worker may insert only; platform staff read.
+ */
+export const deadLetters = opsSchema.table('dead_letters', {
+  id: uuid('id').primaryKey(),
+  sourceQueue: text('source_queue').notNull(),
+  sourceJobId: uuid('source_job_id'),
+  kind: text('kind'),
+  tenantId: uuid('tenant_id'),
+  ref: text('ref'),
+  verified: boolean('verified').notNull(),
+  retries: integer('retries'),
+  errorName: text('error_name'),
+  errorCode: text('error_code'),
+  firstQueuedAt: tz('first_queued_at'),
+  failedAt: tz('failed_at').notNull(),
+  recordedAt: tz('recorded_at').notNull().defaultNow(),
+});
+
+/** What happened at one provider while a company was deleted (ADR-055). */
+export interface TenantDeletionCleanup {
+  kind: 'whatsapp_account' | 'shopify_store' | 'woocommerce_store' | 'card_mandate';
+  label: string;
+  outcome: 'done' | 'failed' | 'skipped';
+  code?: string;
+}
+
+/** The deletion register: one row per request to delete a company, kept afterwards (ADR-055). */
+export const tenantDeletions = opsSchema.table('tenant_deletions', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  requestedByUserId: text('requested_by_user_id').notNull(),
+  requestedAt: tz('requested_at').notNull().defaultNow(),
+  dueAt: tz('due_at').notNull(),
+  previousStatus: text('previous_status', {
+    enum: ['active', 'suspended', 'restricted'],
+  }).notNull(),
+  previousStatusReason: text('previous_status_reason'),
+  companyName: text('company_name').notNull(),
+  cancelledAt: tz('cancelled_at'),
+  cancelledByUserId: text('cancelled_by_user_id'),
+  startedAt: tz('started_at'),
+  attempts: integer('attempts').notNull().default(0),
+  notifyUserIds: text('notify_user_ids')
+    .array()
+    .notNull()
+    .default(sql`'{}'`),
+  providerCleanup: jsonb('provider_cleanup')
+    .$type<TenantDeletionCleanup[]>()
+    .notNull()
+    .default(sql`'[]'::jsonb`),
+  providerCleanupAt: tz('provider_cleanup_at'),
+  rowsDeleted: bigint('rows_deleted', { mode: 'number' }).notNull().default(0),
+  completedAt: tz('completed_at'),
 });

@@ -25,6 +25,7 @@ import { recordAudit, type RequestMeta } from '../audit';
 import { emitTenantEvent } from '../messaging/events';
 import { parseInput } from '../validation';
 import { INBOX_WORKER_ROLES, normalizeRoutingText, routeWaitingConversations } from './routing';
+import { assertTeamAvailable } from '../plans/entitlements';
 
 /**
  * Teams (routing groups), their members and numbers, and member availability. Managing teams needs
@@ -286,6 +287,7 @@ export function createTeamsService(deps: { db: Database; clock: Clock }) {
       const teamId = uuidv7();
       try {
         return await db.run(ctx.scope, async (tx) => {
+          await assertTeamAvailable(tx, ctx.tenant.id);
           await checkMembers(tx, ctx.tenant.id, data.memberIds);
           await checkChannels(tx, ctx.tenant.id, data.channelIds);
           await tx.insert(teams).values({

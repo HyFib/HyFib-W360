@@ -385,18 +385,21 @@ describe('chat links', () => {
       growth().setLinkArchived(suspended, { id: link.id, expectedVersion: 1 }, true),
       'tenant_suspended',
     );
-    // A company being deleted opens nothing.
+    // A company waiting for deletion works like a suspended one (ADR-055); a deleted one opens
+    // nothing.
     await fx.query(`UPDATE app.tenants SET status = 'pending_deletion' WHERE id = $1`, [
       c.tenant.id,
     ]);
+    expect(await followChatLink(fx.dbs.app, link.slug)).toBe(link.waMeUrl);
+    await fx.query(`UPDATE app.tenants SET status = 'deleted' WHERE id = $1`, [c.tenant.id]);
     expect(await followChatLink(fx.dbs.app, link.slug)).toBeNull();
     await fx.query(`UPDATE app.tenants SET status = 'active' WHERE id = $1`, [c.tenant.id]);
-    expect(await clicks()).toBe(4);
+    expect(await clicks()).toBe(5);
 
     // An archived link opens nothing and is not counted.
     await growth().setLinkArchived(owner, { id: link.id, expectedVersion: 1 }, true);
     expect(await followChatLink(fx.dbs.app, link.slug)).toBeNull();
-    expect(await clicks()).toBe(4);
+    expect(await clicks()).toBe(5);
   });
 
   it('keeps a company within its limits', async () => {

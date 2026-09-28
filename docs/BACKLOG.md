@@ -74,7 +74,8 @@ verification, app review, Embedded Signup configuration).
   results with denominators, CSV export. Local 10,000-recipient run: snapshot 0.6 s, all recipients
   queued in 21 ticks. **Remaining:** the 10k run in staging with real dispatch, per-recipient time
   zones, A/B variants, messaging-tier awareness (read the number's limit from Meta), campaign
-  sends through the public API (P5-08), media-header templates.
+  sends through the public API (the API sends single templates since P5-08), media-header
+  templates.
 - **P3-05 Reports** — _implemented (2026-09-26); provider data verified against the Graph stand-in
   only_: persisted, versioned metric definitions; periods of whole days in the company time zone;
   messaging outcomes with denominators; estimated Meta charges from Meta's billable flag and
@@ -280,40 +281,101 @@ verification, app review, Embedded Signup configuration).
 
 ## Phase 5 — billing, wallet, platform, public API
 
-- **P5-01 Plans & entitlements**: platform-admin configurable plans (no hard-coded prices), trials,
-  seats, quotas, add-ons; entitlement checks in services and workers.
+- **P5-01 Plans & entitlements** **[built, locally verified]** (ADR-051): platform-owner plan
+  catalog of immutable versions (no hard-coded prices) with trials, grace days, seats, WhatsApp
+  numbers, teams, live automations, monthly automation runs, add-ons (extra seats and numbers, run
+  packs) and modules; a default trial or complimentary access for new companies; staff assignment
+  with audit; a minute sweep for trial, period and grace ends with notices; restricted companies;
+  limits checked where things are added (seats in SQL too) and an atomic run quota; module gating
+  in permissions and workers; plan card, limit hints and banners for companies; platform plan
+  screens. Remaining: paying for plans in HyFib (Razorpay Subscriptions, P5-07), self-serve plan
+  changes and higher-plan trials, proration, plan invoices, usage alerts before a limit is reached,
+  plan-change emails to companies, API quotas (not built with P5-08) and AI credits (Phase 6).
 - **P5-02 Ledger** **[built, locally verified]**: accounts, append-only journal balanced at commit,
   balances by trigger, holds, settlements, releases (expiry sweep), refunds and chargebacks as
-  compensating postings; INR paise. Remaining: manual adjustments with dual approval, statements.
+  compensating postings; INR paise; monthly statements computed from the ledger (ADR-057).
+  Remaining: manual adjustments with dual approval. A credit adjustment breaks the rule that credit
+  comes only from a captured Razorpay payment (CLAUDE.md, 0004_billing), so it needs a product decision
+  before it is built.
 - **P5-03 Manual top-up** **[built; Razorpay traffic simulated by a test-only stand-in]**: top-ups,
   Razorpay orders (unique receipt), Standard Checkout, webhook processing (signature, event-id and
   body dedupe, out-of-order), authoritative fetch, credit exactly once, reconciliation sweep, expiry,
-  refunds, lost disputes. Remaining: Razorpay sandbox verification; payment receipts (PDF/email).
+  refunds, lost disputes; a receipt page per paid top-up with the method Razorpay reported, emailed
+  to the billing managers (ADR-057; printable, not a tax invoice). Remaining: Razorpay sandbox
+  verification.
 - **P5-04 Auto-recharge** **[built; externally blocked on Razorpay Recurring Payments]**: settings
   with caps, card mandate lifecycle (₹1 authorisation refunded, token status, removal), state machine
   with write-ahead unknown states, one active attempt, caps including pending attempts,
   reconciliation before retry, cooldown, suspension after three failures, owner notices, feature
-  flag `RAZORPAY_RECURRING_CARDS_ENABLED`. Remaining: step-up re-authentication for payment
-  settings; "requires customer action" state if Razorpay reports AFA for a debit.
+  flag `RAZORPAY_RECURRING_CARDS_ENABLED`; a recent sign-in for adding a card and turning automatic
+  top-ups on or changing them (ADR-056). Remaining: "requires customer action" state if Razorpay
+  reports AFA for a debit.
 - **P5-05 Refunds, disputes, reconciliation runs, statements, receipts vs invoices.** Refunds and
-  lost disputes are recorded from webhooks; initiating refunds from the platform console, daily
-  reconciliation reports, statements and GST invoices remain (GST treatment needs tax review).
+  lost disputes are recorded from webhooks; statements and payment receipts are built (ADR-057,
+  receipts are payment confirmations, not tax invoices). **[Staff refunds of unused credit built;
+  Razorpay traffic simulated by a test-only stand-in]** (ADR-058): platform owners refund part or
+  all of a paid top-up from the company's platform page, with a reason in the platform audit log;
+  the credit is held at once, the worker asks Razorpay with an idempotency key and checks until
+  Razorpay processes or fails the refund, and the refund is recorded from what Razorpay reports.
+  Remaining: daily reconciliation reports, refunds asked for by companies, a platform-wide refunds
+  list, and GST invoices (GST treatment needs tax review).
 - **P5-06 Mandatory financial tests** **[29 integration tests + 2 e2e]**: concurrent spends on last
   funds; many low-balance triggers → one attempt; repeated and out-of-order events; timeout after
   capture (reconciliation); delayed success after UI timeout; decline; mandate revocation; cap
   exhaustion incl. in-flight; settings change during a pending charge; refund vs usage race;
   partial refunds; chargeback after spend; restart recovery; cross-company wallet access. Remaining:
-  cancelled subscription with credit (needs P5-01) and AFA-required debits (not reachable while
-  mandates are capped at ₹15,000).
+  cancelled subscription with credit (needs paid plans in HyFib; plans exist since P5-01 but are not
+  charged) and AFA-required debits (not reachable while mandates are capped at ₹15,000).
 - **P5-07 Billing screens**: overview, plans, wallet & recharge, auto-recharge, payment methods,
-  usage & rate card, transactions & receipts, invoices; step-up auth for sensitive changes.
-- **P5-08 Public API**: versioned REST, hashed scoped keys, rotation, quotas, idempotency keys,
-  cursor pagination, OpenAPI document.
-- **P5-09 Outgoing webhooks**: signing, secret rotation, delivery history, bounded retry, replay,
-  SSRF guard.
-- **P5-10 Platform ops screens**: onboarding failures, tenant health, usage, integration failures,
-  queues and dead letters, abuse signals.
-- **P5-11 Account export/deletion workflow.**
+  usage & rate card, transactions & receipts, invoices; step-up auth for sensitive changes
+  **[step-up built, locally verified]** (ADR-056: a sign-in within the last 15 minutes for the
+  company export and deletion, payment settings, the company's Razorpay keys, API keys, webhook
+  endpoints, new owners and turning off required two-factor); **[statements and receipts built,
+  locally verified]** (ADR-057: Billing → Statements with every month since the first payment in
+  the company's time zone, opening and closing balances, every ledger line with running balances,
+  a printable page and an audited CSV; a receipt per paid top-up, emailed to billing managers).
+  Remaining: usage & rate card view, invoices (tax review), paying for plans in HyFib.
+- **P5-08 Public API** **[built, locally verified; sends through the Graph stand-in only]**
+  (ADR-052): company API keys (SHA-256 only, scopes granted within the creator's permissions,
+  expiry, rotation with an overlap, revocation, audit), `/api/v1` with approved template sends,
+  contacts (cursor pages, create or existing), consent with evidence and message status; idempotency
+  keys, per-key, per-company and failed-authentication rate limits, 64 KB bodies, an OpenAPI 3.1
+  document from the validation schemas, Settings → API keys. Remaining: monthly quotas per plan,
+  API access as a plan module, session, media and interactive messages, conversation and message
+  lists, starting automations (W-086), bulk sends in one call, IP allowlists, key expiry reminders,
+  tests of the rate limits.
+- **P5-09 Outgoing webhooks** **[built, locally verified; delivered to local test receivers only]**
+  (ADR-053): up to 10 endpoints per company (`developer.manage`) for `message.received`,
+  `message.status`, `consent.changed` and `template.status_changed`, captured by database triggers
+  in the company's scope; payloads built when delivered (erased contacts without personal data);
+  HMAC-SHA256 signatures with secrets shown once, encrypted and rotated with a 24-hour overlap;
+  delivery through the egress guard with leases, eight attempts over about 45 hours, interrupted
+  attempts retried (at least once), automatic disabling after 72 hours of failures with an email,
+  delivery history, replays, test events, 30-day retention, the OpenAPI `webhooks` section.
+  Remaining: filters beyond the event type, custom headers, mutual TLS, fixed egress addresses,
+  events for conversations, campaigns, automations, contact changes and orders, load tests.
+- **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
+  `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
+  setups, new companies without a number), Integrations (current failures with host-only labels,
+  Meta and Razorpay receipts needing attention, quarantine, email delivery counts), Queues (pg-boss
+  counts per queue with retry policy, dead letters recorded by the worker without error messages),
+  Signals (7-day review flags and security event counts) and Usage (7, 30 or 90 days); a health
+  card on each company's platform page; audited receipt retry and quarantine resolution. Remaining:
+  alerts, trends, Meta's quality webhook, API request counts, exports, the oldest waiting job,
+  redrive from the console, acknowledging issues, paging and rollups for many companies.
+- **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**
+  (ADR-055): Settings → Company data for owners. A streamed, gzip-compressed JSON Lines export of
+  every company table from one read-only transaction (each table and column exported or excluded
+  with a reason, secrets never exported, one export at a time, audited, owners and administrators
+  emailed). Deletion typed with the company address, 14 days of grace working as suspended and
+  cancellable by any owner, then a resumable `tenant.delete` worker job: provider clean-up once
+  (WhatsApp app unsubscribed, Shopify app uninstalled, WooCommerce webhooks deleted, card token
+  deleted at Razorpay), batched deletion in foreign-key order, a tombstone company row, billing
+  records and plan history kept, final emails. Also fixed: erasure now redacts past send requests,
+  public entry points serve companies pending deletion, and the ended-run guard freezes two columns
+  again (step-up re-authentication for both since ADR-056). Remaining: staff-started
+  deletion, stored exports, other formats, a deletion job run on staging, legal review of the kept
+  records.
 
 ## Phase 6 — AI, calling, channels, connectors, enterprise
 
@@ -332,7 +394,7 @@ review; production rollout per RELEASE-CHECKLIST.
 - **SEC-2** Breached-password screening at sign-up/reset (k-anonymity API or offline list).
 - **SEC-3** Central SSRF-safe egress client (DNS pinning, private/metadata range blocking, redirect
   re-validation, limits) used by all outbound HTTP — _built with P4-02 (ADR-042) and used by the
-  automation HTTP step and the Flows data endpoint (P4-03); outgoing webhooks (P5-09) and imports
+  automation HTTP step, the Flows data endpoint (P4-03) and outgoing webhooks (P5-09); imports
   must use it too. Remaining: a network
   egress policy as a second layer in deployment._
 - **SEC-4** Dual-key job signing for rotation without draining.
@@ -340,8 +402,10 @@ review; production rollout per RELEASE-CHECKLIST.
 - **SEC-6** Media scanning pipeline (malware) before exposure.
 - **SEC-7** OpenTelemetry tracing/metrics, alert rules (queue lag, dead letters, error rates, auth
   anomalies).
-- **SEC-8** Step-up verification endpoint (password + TOTP) recorded in `ops.step_up_verifications`
-  for sensitive settings (billing, security).
+- **SEC-8** ~~Step-up verification endpoint (password + TOTP) recorded in
+  `ops.step_up_verifications` for sensitive settings (billing, security).~~ Settled by ADR-056: a
+  new sign-in within the last 15 minutes, which reuses the sign-in's rate limits, two-factor attempt
+  limit and lockout instead of a second verification path.
 - **SEC-9** Per-user login history view.
 - **SEC-10** Keyring re-encryption job: re-encrypt every keyring ciphertext (provider tokens, HTTP
   secrets, flow private keys, stored webhook bodies) under the primary key so an old key can be

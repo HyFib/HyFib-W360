@@ -5,6 +5,7 @@ import {
   autoRechargeHandler,
   billingEventProcessHandler,
   billingSweepHandler,
+  creditRefundHandler,
 } from './handlers/billing';
 import { automationHttpHandler, automationRunHandler } from './handlers/automations';
 import { campaignRunHandler } from './handlers/campaigns';
@@ -28,7 +29,12 @@ import {
   templateSubmitHandler,
   templateSyncHandler,
 } from './handlers/templates';
+import { deadLetterHandler } from './handlers/dead-letters';
+import { tenantDeleteHandler } from './handlers/tenancy';
+import { webhookDeliverHandler } from './handlers/webhooks';
+import { logFailures } from './job-log';
 import { createWorkerRuntime } from './runtime';
+import { startWebhookListener } from './webhook-listener';
 
 /**
  * Worker process: consumes durable jobs. Safe to run several replicas; pg-boss claims each job
@@ -45,12 +51,12 @@ async function main(): Promise<void> {
   await rt.boss.work(
     QUEUES.emailSend.name,
     { localConcurrency: concurrency, batchSize: 1 },
-    emailSendHandler(rt),
+    logFailures(rt, QUEUES.emailSend.name, emailSendHandler(rt)),
   );
   await rt.boss.work(
     QUEUES.outboxSweep.name,
     { localConcurrency: 1, batchSize: 1 },
-    outboxSweepHandler(rt),
+    logFailures(rt, QUEUES.outboxSweep.name, outboxSweepHandler(rt)),
   );
   await rt.boss.schedule(QUEUES.outboxSweep.name, '* * * * *', null, {
     singletonKey: 'outbox-sweep',
@@ -60,7 +66,7 @@ async function main(): Promise<void> {
   await rt.boss.work(
     QUEUES.webhookProcess.name,
     { localConcurrency: concurrency, batchSize: 1, pollingIntervalSeconds: 1 },
-    webhookProcessHandler(rt),
+    logFailures(rt, QUEUES.webhookProcess.name, webhookProcessHandler(rt)),
   );
   // Per-number fairness: at most two in-flight sends per business number across the cluster
   // (queued with group = channel id), so one busy number cannot starve the others.
@@ -72,17 +78,17 @@ async function main(): Promise<void> {
       groupConcurrency: 2,
       pollingIntervalSeconds: 1,
     },
-    messageSendHandler(rt),
+    logFailures(rt, QUEUES.messageSend.name, messageSendHandler(rt)),
   );
   await rt.boss.work(
     QUEUES.channelOnboard.name,
     { localConcurrency: 1, batchSize: 1 },
-    channelOnboardHandler(rt),
+    logFailures(rt, QUEUES.channelOnboard.name, channelOnboardHandler(rt)),
   );
   await rt.boss.work(
     QUEUES.messagingSweep.name,
     { localConcurrency: 1, batchSize: 1 },
-    messagingSweepHandler(rt),
+    logFailures(rt, QUEUES.messagingSweep.name, messagingSweepHandler(rt)),
   );
   await rt.boss.schedule(QUEUES.messagingSweep.name, '* * * * *', null, {
     singletonKey: 'messaging-sweep',
@@ -90,91 +96,117 @@ async function main(): Promise<void> {
   await rt.boss.work(
     QUEUES.templateSubmit.name,
     { localConcurrency: 2, batchSize: 1 },
-    templateSubmitHandler(rt),
+    logFailures(rt, QUEUES.templateSubmit.name, templateSubmitHandler(rt)),
   );
   await rt.boss.work(
     QUEUES.templateDelete.name,
     { localConcurrency: 2, batchSize: 1 },
-    templateDeleteHandler(rt),
+    logFailures(rt, QUEUES.templateDelete.name, templateDeleteHandler(rt)),
   );
   await rt.boss.work(
     QUEUES.templateSync.name,
     { localConcurrency: 2, batchSize: 1 },
-    templateSyncHandler(rt),
+    logFailures(rt, QUEUES.templateSync.name, templateSyncHandler(rt)),
   );
   await rt.boss.work(
     QUEUES.campaignRun.name,
     { localConcurrency: 2, batchSize: 1 },
-    campaignRunHandler(rt),
+    logFailures(rt, QUEUES.campaignRun.name, campaignRunHandler(rt)),
   );
   await rt.boss.work(
     QUEUES.automationRun.name,
     { localConcurrency: concurrency, batchSize: 1, pollingIntervalSeconds: 1 },
-    automationRunHandler(rt),
+    logFailures(rt, QUEUES.automationRun.name, automationRunHandler(rt)),
   );
   await rt.boss.work(
     QUEUES.automationHttp.name,
     { localConcurrency: concurrency, batchSize: 1, pollingIntervalSeconds: 1 },
-    automationHttpHandler(rt),
+    logFailures(rt, QUEUES.automationHttp.name, automationHttpHandler(rt)),
+  );
+  // Outgoing webhooks: one job per company at a time (stately queue), woken by the listener below
+  // and the minute sweep.
+  await rt.boss.work(
+    QUEUES.webhookDeliver.name,
+    { localConcurrency: concurrency, batchSize: 1, pollingIntervalSeconds: 1 },
+    logFailures(rt, QUEUES.webhookDeliver.name, webhookDeliverHandler(rt)),
   );
   await rt.boss.work(
     QUEUES.crmReminder.name,
     { localConcurrency: 2, batchSize: 1 },
-    crmReminderHandler(rt),
+    logFailures(rt, QUEUES.crmReminder.name, crmReminderHandler(rt)),
   );
   await rt.boss.work(
     QUEUES.flowSync.name,
     { localConcurrency: 2, batchSize: 1 },
-    flowSyncHandler(rt),
+    logFailures(rt, QUEUES.flowSync.name, flowSyncHandler(rt)),
   );
   await rt.boss.work(
     QUEUES.flowKeys.name,
     { localConcurrency: 1, batchSize: 1 },
-    flowKeysHandler(rt),
+    logFailures(rt, QUEUES.flowKeys.name, flowKeysHandler(rt)),
   );
   await rt.boss.work(
     QUEUES.commerceSync.name,
     { localConcurrency: 1, batchSize: 1 },
-    commerceSyncHandler(rt),
+    logFailures(rt, QUEUES.commerceSync.name, commerceSyncHandler(rt)),
   );
   await rt.boss.work(
     QUEUES.commerceLink.name,
     { localConcurrency: 2, batchSize: 1 },
-    commerceLinkHandler(rt),
+    logFailures(rt, QUEUES.commerceLink.name, commerceLinkHandler(rt)),
   );
   await rt.boss.work(
     QUEUES.commerceAccount.name,
     { localConcurrency: 1, batchSize: 1 },
-    commerceAccountHandler(rt),
+    logFailures(rt, QUEUES.commerceAccount.name, commerceAccountHandler(rt)),
   );
   await rt.boss.work(
     QUEUES.commerceStore.name,
     { localConcurrency: 2, batchSize: 1 },
-    commerceStoreHandler(rt),
+    logFailures(rt, QUEUES.commerceStore.name, commerceStoreHandler(rt)),
   );
   await rt.boss.work(
     QUEUES.commerceStoreMessage.name,
     { localConcurrency: 2, batchSize: 1 },
-    commerceStoreMessageHandler(rt),
+    logFailures(rt, QUEUES.commerceStoreMessage.name, commerceStoreMessageHandler(rt)),
   );
   await rt.boss.work(
     QUEUES.billingEventProcess.name,
     { localConcurrency: concurrency, batchSize: 1 },
-    billingEventProcessHandler(rt),
+    logFailures(rt, QUEUES.billingEventProcess.name, billingEventProcessHandler(rt)),
   );
   await rt.boss.work(
     QUEUES.autoRecharge.name,
     { localConcurrency: 2, batchSize: 1 },
-    autoRechargeHandler(rt),
+    logFailures(rt, QUEUES.autoRecharge.name, autoRechargeHandler(rt)),
+  );
+  // Refunds of unused credit started by platform owners (ADR-058), queued by the billing sweep.
+  await rt.boss.work(
+    QUEUES.billingCreditRefund.name,
+    { localConcurrency: 2, batchSize: 1 },
+    logFailures(rt, QUEUES.billingCreditRefund.name, creditRefundHandler(rt)),
   );
   await rt.boss.work(
     QUEUES.billingSweep.name,
     { localConcurrency: 1, batchSize: 1 },
-    billingSweepHandler(rt),
+    logFailures(rt, QUEUES.billingSweep.name, billingSweepHandler(rt)),
   );
   await rt.boss.schedule(QUEUES.billingSweep.name, '* * * * *', null, {
     singletonKey: 'billing-sweep',
   });
+  // Company deletions (ADR-055): one run per company at a time, started by the billing sweep.
+  await rt.boss.work(
+    QUEUES.tenantDelete.name,
+    { localConcurrency: 1, batchSize: 1 },
+    logFailures(rt, QUEUES.tenantDelete.name, tenantDeleteHandler(rt)),
+  );
+  // Jobs that failed all their retries: recorded for the platform operations console (ADR-054).
+  await rt.boss.work(
+    QUEUES.deadLetter.name,
+    { localConcurrency: 1, batchSize: 20, includeMetadata: true },
+    logFailures(rt, QUEUES.deadLetter.name, deadLetterHandler(rt)),
+  );
+  const webhookListener = startWebhookListener(rt);
   rt.logger.info({ concurrency }, 'worker started');
 
   const shutdown = async (signal: string) => {
@@ -182,6 +214,7 @@ async function main(): Promise<void> {
     stopping = true;
     rt.logger.info({ signal }, 'worker stopping');
     try {
+      await webhookListener.close();
       await rt.boss.stop({ graceful: true, timeout: 30_000 });
       await rt.close();
     } catch (error) {

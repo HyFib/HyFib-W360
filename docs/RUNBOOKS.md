@@ -15,6 +15,9 @@ audited. Never paste tokens, message content or card data into tickets or chat.
   SELECT name, count(*) FROM pgboss.job WHERE name = 'dead-letter' GROUP BY 1;
   ```
 - Email backlog: `SELECT status, count(*) FROM ops.email_outbox GROUP BY 1;`
+- Without SQL: `/platform/ops` (platform staff, section 10P) shows the companies needing attention,
+  integration failures, Meta and Razorpay receipts needing attention, quarantine, queue counts and
+  recent dead letters.
 
 ## 2. Email not arriving
 
@@ -31,9 +34,12 @@ audited. Never paste tokens, message content or card data into tickets or chat.
 
 1. Identify the queue (`pgboss.job` counts by `name` and `state='created'`).
 2. Check worker health and logs; scale worker replicas horizontally (safe).
-3. If a poison job fails repeatedly, it moves to `dead-letter` after its retry limit. Inspect its
-   data (ids only), fix the cause, then re-drive with `boss.redrive('dead-letter', …)` or re-signal
-   the durable row.
+3. If a poison job fails repeatedly, it moves to `dead-letter` after its retry limit, and the
+   worker records it in `ops.dead_letters` (Operations → Queues: queue, kind, company when its
+   signature verified, retries, error name and code, never the message). The worker log's
+   `job attempt failed` entries carry the error for each attempt; the job itself (ids only, with its
+   output) stays in pg-boss for 30 days. Fix the cause; the minute sweeps re-signal durable rows, so
+   re-driving is rarely needed (`boss.redrive('dead-letter', …)` as the owner when it is).
 4. Index bloat warnings (`index_bloat`) → run `getReindexCommands()` output as the owner role during
    low traffic (runtime roles cannot reindex).
 
@@ -46,12 +52,15 @@ audited. Never paste tokens, message content or card data into tickets or chat.
    the app. A spike from unknown sources is an attack — keep rejecting, alert security.
 3. Backlog: `SELECT status, count(*) FROM ops.webhook_receipts GROUP BY 1`. The messaging sweep
    re-signals `pending`/`failed` receipts older than 2 minutes and expired `processing` leases, up to
-   12 attempts. Receipts at 12 attempts stay `failed` for you: read `last_error`, fix the cause, then
-   reset with `UPDATE ops.webhook_receipts SET status = 'failed', attempts = 0 WHERE id = …` (owner
-   role); processing is idempotent.
+   12 attempts. Receipts at 12 attempts stay `failed` for you: read `last_error` under Operations →
+   Integrations, fix the cause, then **Retry** it there with the fix as the reason (platform audit
+   log; it goes back to pending and the sweep processes it again; processing is idempotent). If the
+   web is down, the owner role can reset it with
+   `UPDATE ops.webhook_receipts SET status = 'failed', attempts = 0 WHERE id = …`.
 4. Unknown or mismatched assets land in `ops.webhook_quarantine` (`unknown_asset`,
-   `asset_mismatch`, `malformed`). Map an asset only after verifying ownership with the company
-   (never by guess), then reset the receipt as above. Record the decision in `resolution`.
+   `asset_mismatch`, `malformed`), listed under Operations → Integrations. Map an asset only after
+   verifying ownership with the company (never by guess; it reconnects through Embedded Signup),
+   then **Retry** the receipt, and **Resolve** the entry with the decision either way.
 5. Raw bodies are erased after 7 days; replay is impossible after that (by design).
 
 ## 5. Provider outage (Meta, Razorpay, SMTP)
@@ -94,7 +103,15 @@ audited. Never paste tokens, message content or card data into tickets or chat.
 2. Restore the managed PostgreSQL to a new instance at the chosen point in time (PITR).
 3. Verify: row counts, latest audit events, migration table (`w360_migrations.applied`), pg-boss
    version; run the isolation test suite against the restored instance if time permits.
-4. Re-apply pending deletions recorded after the restore point (deletion log, phase 5).
+4. Re-apply company deletions completed after the restore point before reopening access. List
+   them from the old database's register (`SELECT * FROM ops.tenant_deletions WHERE completed_at >
+'<restore point>'`) or, if it is lost, from the worker's `company deleted` log lines
+   (`tenantId`). On the restored database, as the migration role with `SET ROLE w360_definer`: if
+   the company's deletion is still open there, set its `due_at` to now; if the request came after
+   the restore point, insert the old register row (same id, requester, request time, previous
+   status and name, `due_at` now, no start or completion) and set the company's status to
+   `pending_deletion`. The minute sweep then deletes it again (section 10Q). Contact erasures after
+   the restore point are repeated from the old database's audit log (`contact.erased`).
 5. Switch connection strings (secret manager) and roll web/worker. Record timings (RPO/RTO achieved)
    in the release evidence. **A restore drill has not been performed yet.**
 
@@ -131,13 +148,50 @@ app.auto_recharge_attempts WHERE tenant_id = … ORDER BY created_at DESC`. `unk
    owners and billing members; the company turns it back on after fixing the card.
 6. **Refunds and chargebacks.** Refunds made in the Razorpay Dashboard are recorded from
    `refund.processed`; lost disputes from `payment.dispute.lost`. Both reduce available credit and
-   may make it negative, which blocks billable services until credit is added.
+   may make it negative, which blocks billable services until credit is added. Prefer refunding
+   unused credit from the company's platform page (step 10): it never takes spent credit.
 7. **Enabling card mandates.** Only after Razorpay confirms Recurring Payments (card) for the
    merchant: set `RAZORPAY_RECURRING_CARDS_ENABLED=true` on web and worker. Turning it off again
    stops new mandates and new auto-recharge settings; attempts already requested still complete.
 8. **Integrity check** (read-only, any time):
    `SELECT tenant_id FROM app.ledger_accounts GROUP BY tenant_id HAVING sum(CASE WHEN normal_side =
 'debit' THEN balance_minor ELSE -balance_minor END) <> 0` must return no rows.
+9. **Statements and receipts** (Billing → Statements, and Receipt links, ADR-057). They are computed
+   from the ledger each time: nothing to regenerate or repair.
+   - **"A statement changed."** Statements follow the company's current time zone, and changing it
+     moves every month boundary. Otherwise a posting only appears afterwards if it committed after
+     the statement was generated, just after midnight (each statement shows when it was
+     generated).
+   - **"No receipt."** Only a top-up credited from a captured payment has one; a top-up still
+     awaiting payment shows none (see step 3).
+   - **"The method is missing."** Top-ups credited before 0029 have no recorded method. It is filled
+     in the next time Razorpay reports the payment (a redelivered `payment.captured` webhook
+     does it); never set it by hand.
+   - **"We need a tax invoice."** Receipts are payment confirmations, not tax invoices. GST
+     documents are not issued yet (tax review, RELEASE-CHECKLIST).
+   - **Migrations 0030 and 0031 failed.** They build `ledger_entries_account_time_idx` and
+     `ledger_transactions_reference_idx` concurrently outside a transaction. Drop the invalid index
+     (`DROP INDEX CONCURRENTLY IF EXISTS app.<index>`) and run the migrations again.
+10. **Refunds of unused credit** (the company's platform page → Service credit, platform owners,
+    ADR-058). The request holds the credit at once; the worker sends it to Razorpay within a
+    minute or two and the company's billing managers are emailed when Razorpay accepts it.
+    Razorpay normally completes it in 5–7 working days and keeps its fee.
+    `SELECT status, attempts, provider_refund_id, last_error, next_attempt_at FROM app.credit_refunds
+WHERE tenant_id = … ORDER BY requested_at DESC`:
+    - **`requested` with attempts rising:** Razorpay did not answer or was busy; the same call
+      (same idempotency key, so never a second refund) is repeated after 1, 5, 15 and 60 minutes,
+      then hourly. A 401 means the API keys are wrong: fix them, and the next try goes through.
+    - **`submitted` for days:** normal up to about 7 working days. Look the refund up in the
+      Dashboard; if Razorpay shows it processed, redeliver `refund.processed` (or wait for the
+      worker's check, every 6 hours after the first day). Never mark it processed by hand.
+    - **`failed`:** `last_error` is Razorpay's code and description (for example refunds not
+      enabled, or not enough balance); the credit is back with the company. Fix the cause and ask
+      for a new refund.
+    - **The company asked for deletion:** new refunds are refused; refund from the Dashboard, which
+      is recorded from `refund.processed`. A due deletion waits for a refund in progress (the
+      deletion card on the platform page says so).
+    - A refund still open after 90 days loses its hold to the expired-holds sweep; if Razorpay
+      processes it later, it is recorded as a plain refund.
 
 ## 10. Contacts, consent and templates
 
@@ -375,8 +429,8 @@ that section.
 
 **A chat link shows "This chat link is not available".** The short link answers 404 when the link
 is archived (restore it on its page), its number is not active (Settings → Channels; a number that
-needs reconnecting stops its links until it is active again), or the company is being deleted. A
-suspended company's links keep working. The link page shows a warning in the first two cases.
+needs reconnecting stops its links until it is active again), or the company was deleted. A
+suspended company's links keep working, as do those of a company waiting for deletion (ADR-055). The link page shows a warning in the first two cases.
 Unknown or mistyped addresses answer the same page. Nothing is logged about the visitor.
 
 **Clicks look too high.** Counts include every open of the short link and its QR code: repeated
@@ -764,15 +818,236 @@ their checks and foreign keys, and column grants for `w360_app`. The new columns
 new checks hold for existing rows; a failure usually means the bootstrap roles are missing
 (`infra/db/bootstrap-roles.sql`).
 
+## 10M. Plans and entitlements
+
+**Putting a company on a plan.** Platform → the company → Plan: choose a trial of a published
+version until a day, a paid period of one (from a day until a day, in the company's time zone; the
+period ends at the start of the "until" day), complimentary access, or end the plan. Give the
+invoice or ticket as the reason: it is shown in the company's audit log. A form older than the
+current plan state is refused ("The plan changed while you were editing"); reload. Nothing is
+charged in HyFib: set the period after the payment is settled elsewhere.
+
+**A new version of a plan.** Only platform owners change the catalog. Open the published version →
+"New version from this one", edit the draft, publish it, then move companies to it one by one; the
+old version can be retired (companies on it keep it). A published version never changes, even for
+the platform role; a mistake in a draft that was published is corrected by retiring it and
+publishing a new version. The default trial must be a published version with trial days; retire it
+only after choosing another default (or none: new companies are then complimentary).
+
+**A company says it cannot send anything ("This company's plan has ended").** Its trial or paid
+period ended and the grace days passed (the minute billing sweep moved it to expired and restricted
+it), or staff ended the plan. Reading, exports, members and billing still work. Put it on a plan
+(trial, paid period or complimentary): the restriction lifts at once. If the company is also
+suspended, lift the suspension separately; reactivating a suspended company whose plan has lapsed
+makes it restricted, not active.
+
+**"Your company's plan allows N seats (numbers, teams, live automations), and all are in use."**
+Waiting invitations hold seats until they are accepted, revoked or expire; suspended members do not.
+Numbers count while being connected, connected or needing reconnection; disconnected and failed
+ones do not. The company can free one, or staff can add extra seats or numbers (when the version
+sells them) or move it to a larger version. A lower limit never removes anything.
+
+**Automations stopped answering customers.** The month's automation runs may be used up: the
+company's billing managers were emailed once, and Billing shows the runs used and the period.
+Runs already in progress continue; runs from store events are recorded as "Not sent: the month's
+automation runs are used up". Add run packs (when the version sells them) or change the plan; the
+next customer message starts a run. The period starts on the day the current plan or trial started
+(usage anchor), whatever the billing interval. If the plan leaves out Automations, nothing starts
+("not in the plan") and the automation pages say so.
+
+**The sweep did not move a plan on.** The billing sweep runs every minute and logs `plan sweep`
+(and `plan sweep failed for a company; will retry` with the company id and error, rolled back and
+retried the next minute). A company being deleted is skipped. Check `app.tenant_plans` for the
+company (`status`, `trial_ends_at`, `period_end`, `grace_ends_at`): the database's clock decides
+what is due.
+
+**Migration 0023 failed.** It runs in one transaction, so a failure applies nothing. It widens the
+company status check with `restricted`, adds the plan tables, triggers (two SECURITY DEFINER trigger
+functions created before their ownership moves to `w360_definer`), the entitlement and sweep
+functions, replaces `app.accept_invitation` and seven lookup functions (dropped as `w360_definer`,
+recreated, granted, then handed to `w360_definer`), and backfills a complimentary plan state for
+every existing company as `w360_definer` (companies are behind forced RLS). A failure usually means
+the bootstrap roles are missing (`infra/db/bootstrap-roles.sql`) or a lookup function was changed
+by hand.
+
+## 10N. Public API
+
+**A company's API key leaked.** In Settings → API keys (owners and administrators), revoke it: the
+next request with it gets 401. If the integration must keep working, rotate instead with no overlap
+and give the new key to the integration; do not keep an overlap for a leaked key. The audit log
+shows who created, rotated and revoked keys (`api_key.*`, with the key's public prefix) and the
+contacts and consent a key recorded (actor `api_key`); messages a key sent carry its id
+(`messages.api_key_id`) and show in their conversations. "Last used" shows when a key was last
+presented (updated at most once a minute).
+
+**"Send a valid API key" (401).** The key is unknown, revoked or expired, the header is not
+`Authorization: Bearer <key>`, or the company is being deleted. Keys are shown once: a lost key is
+rotated, never recovered. Many failed attempts from one address answer 429 for a while (one attempt
+every 5 seconds after a burst of 20).
+
+**429 "Too many requests".** Each key allows bursts of 50 requests and 10 a second, each company 200
+and 30 a second; wait for `Retry-After` and retry with the same `Idempotency-Key`. Monthly quotas
+are not built.
+
+**"This Idempotency-Key was already used with a different request" (422).** The integration reused
+a key for another message; each new message needs a new key (for example a UUID), and only retries
+of the same request reuse one. Keys are kept 24 hours.
+
+**An API send failed or never arrived.** `GET /api/v1/messages/{id}` shows the status (`queued`,
+`accepted`, `sent`, `delivered`, `read`, `failed` with WhatsApp's error, `unknown_outcome` when the
+send was interrupted and is not retried). A 412 at send time names the reason (no marketing opt-in,
+suppression, frequency cap, template not approved). The send pipeline is the members' (§6): the
+message appears in the conversation, which is created resolved.
+
+**The company is suspended or its plan ended.** Keys keep reading; creating contacts, recording
+consent and sending answer 423 until the company is active again.
+
+**Migration 0024 failed.** It runs in one transaction. It creates the two tables, the guard trigger,
+the two SECURITY DEFINER functions (granted to `w360_app` before their ownership moves to
+`w360_definer`), adds `messages.api_key_id` and widens the consent actor check. A failure usually
+means the bootstrap roles are missing (`infra/db/bootstrap-roles.sql`).
+
+## 10O. Outgoing webhooks
+
+**"Our endpoint gets nothing."** In Settings → Webhooks (owners and administrators) check that the
+endpoint is on and subscribed to the event, then open its deliveries. No delivery at all means no
+subscribed event happened since the endpoint was added (events are captured only while an active
+endpoint subscribes; earlier ones are not sent). "Send test event" queues a `ping`; the result
+column names what went wrong: an HTTP status, `timeout` (no complete answer within 10 seconds),
+`dns_failed`, `address_blocked` (the name resolves to a private, loopback or reserved address, which
+is never called), `connect_failed`, `response_too_large` (more than 256 KB) or `invalid_status`.
+Redirects are not followed: the endpoint must answer at the saved URL.
+
+**Deliveries wait and are not sent.** The worker is woken by the `w360_webhooks` notification and
+by the minute sweep. Check the `webhook.deliver` queue (section 3) and the worker log for
+`webhooks delivered` and `webhook dispatch failed`; a listener that cannot connect logs
+`webhook listener could not listen` and delivery then waits for the minute sweep. Suspended and
+restricted companies are not delivered to until they are active again. A delivery in `delivering`
+longer than 45 seconds belongs to a lost worker; the next run attempts it again (the receiver may see
+it twice and deduplicates on the event id).
+
+**An endpoint was turned off automatically.** It failed every attempt for 72 hours; its waiting
+deliveries were marked failed (`endpoint_disabled`), owners and administrators got the
+"Webhook endpoint turned off" email, and the audit log has `webhook.endpoint_auto_disabled`. Fix the
+receiver, turn the endpoint on (its health starts afresh), send a test event, then replay the
+failed deliveries that are still needed (within 30 days) from its deliveries page, filtered to
+failed ones.
+
+**The receiver rejects signatures.** It must compute HMAC-SHA256 over the exact raw body bytes
+prefixed with the `t` value and a dot, compare in constant time against any `v1` value, and allow a
+few minutes of clock difference (the documented tolerance is 5 minutes). After a rotation both the
+new and the previous secret sign for 24 hours. A lost secret cannot be shown again: rotate it. A
+leaked secret: delete the endpoint and add it again (rotation keeps the old secret signing for 24
+hours).
+
+**Duplicates at the receiver.** Delivery is at least once: a retry after a timeout, an interrupted
+attempt or a replay repeats the event with the same `W360-Event-Id` (and `id` in the body); the
+receiver keeps the ids it has processed. Deliveries are not ordered.
+
+**Migration 0025 failed.** It runs in one transaction. It creates the three tables with their
+row-level security and grants, the capture triggers on `app.messages`, `app.consent_events` and
+`app.template_status_events`, the notification trigger and the two SECURITY DEFINER sweep functions
+(granted to `w360_app` before their ownership moves to `w360_definer`). A failure usually means the
+bootstrap roles are missing (`infra/db/bootstrap-roles.sql`).
+
+## 10P. Platform operations console
+
+`/platform/ops` is for platform owners and operators (MFA). It shows counts, states, error codes,
+labels and times, never message text, contacts, payloads, email addresses, secrets or full URLs. A
+question it cannot answer from those needs a support grant (section 11) or the logs.
+
+**A company is "critical" or "warning".** The company's platform page lists why (Health). Numbers
+down or an account needing reconnection: the company reconnects through Embedded Signup (section 6);
+quality `RED`/`YELLOW`: point them at their templates and opt-outs before Meta limits the number;
+send failures: the error codes are on their Reports page; failing webhook endpoints, stores, payment
+account checks, catalog or Flow syncs: the Integrations page names the error HyFib stored; dead
+letters: section 3; plan past due: section 10M. Quality is as of the number's last health check.
+
+**Signals (7 days).** A flag asks for a review of that company's sending, not an action: look at its
+campaigns, templates and opt-out keywords (support grant if content is needed). Suspension stays a
+reasoned, audited action on the company page. The thresholds are HyFib's own heuristics
+(ADR-054), not Meta's rules.
+
+**Onboarding.** Failed signups show the reason Meta returned; abandoned ones expired before the
+popup finished (the person can start again). A number setup stuck for over 30 minutes: check the
+`channel.onboard` queue and dead letters; companies without an active number after signup may need
+help with Embedded Signup.
+
+**Queues.** Counts are pg-boss's, refreshed by the worker about once a minute; failed counts include
+jobs retained after their last attempt. `billing.auto-recharge` has no retries on purpose
+(section 9). A row "Not declared by this release" is a queue named by a dead letter that this
+release does not declare (an older or newer deploy); "No such queue in the database" means pg-boss
+has no queue by that name (for a declared queue: the migrations have not run).
+
+**Dead letters.** Recorded by the worker within seconds of the move; if the list stays empty while
+`SELECT count(*) FROM pgboss.job WHERE name = 'dead-letter' AND state = 'created'` grows, the worker
+is not consuming (`dead letters recorded` and `job attempt failed` in its log). Rows are deleted 30
+days after the job failed.
+
+**Repairs.** Retry and Resolve (section 4) both need a reason of at least 10 characters and appear
+in the platform audit log as `platform.webhook_receipt_retried` and
+`platform.webhook_quarantine_resolved`. A receipt whose body was erased (after 7 days) cannot be
+retried.
+
+**Migrations 0026 and 0027 failed.** 0026 runs in one transaction: it needs the bootstrap roles
+(`w360_definer`, `w360_platform`, `w360_app`). 0027 builds an index concurrently outside a
+transaction; if it fails, drop the invalid index
+(`DROP INDEX CONCURRENTLY IF EXISTS app.consent_events_tenant_occurred_idx`) and run the
+migrations again.
+
+## 10Q. Company export and deletion
+
+Owners use Settings → Company data (ADR-055). Nothing here is done by staff: staff cannot start,
+speed up or cancel a deletion, and the export is only for the company's owners.
+
+**An export fails or is cut short.** The file is complete only if its last line is
+`{"end":true,...}`. A second export while one runs answers 409; each start is audited
+(`tenant.exported`) and emailed to owners and administrators, even when it then fails. A failure
+after the download started is logged by the web as `company export stopped` (with the company id).
+Large companies stream for as long as the read takes; `idle_in_transaction_session_timeout` (60 s)
+ends an export whose reader stops reading for a minute.
+
+**A deletion is scheduled.** The company is `pending_deletion` until `due_at` (14 days) and works as
+suspended. Any owner cancels in Settings → Company data until the run starts; after that the page
+says it can no longer be cancelled. The register is `ops.tenant_deletions` (the company's platform
+page shows it). A company that asks HyFib to stop a deletion before it starts: an owner cancels; if
+no owner can, suspend handling of the request and escalate (there is no staff cancellation).
+
+**A deletion is running or stuck.** The minute billing sweep queues a `tenant.delete` job for every
+due or unfinished deletion (`company deletions due` in the worker log); each run deletes for up to
+five minutes (`company deletion continues` with the rows deleted) until `company deleted`. A run that
+keeps failing shows in the job log and dead letters (section 3); the register's `attempts` counts
+runs. `finish_tenant_deletion` returns false while any deletable row remains, so a run that ends
+with rows written meanwhile simply runs again. The providers are visited once per deletion
+(`provider_cleanup_at`); their outcomes are in `provider_cleanup` and in the final email. A
+`failed` outcome (for example Meta refusing an expired token) is not retried: the email asks the
+owners to remove HyFib's access there; WooCommerce stores are always listed because their keys can
+only be revoked in the store.
+
+**After a deletion.** The company row is a tombstone (`deleted`, "Deleted company",
+`deleted-<id>`); its old address is free. Billing records, plan history, the register, support
+grants and security events stay. Meta events for its numbers are quarantined as `unknown_asset`
+(section 4). If the business connects the same numbers to another company, they bind normally.
+
+**Migration 0028 failed.** It runs in one transaction and needs the bootstrap roles; fix the cause
+and run the migrations again.
+
 ## 11. Compromised company (tenant) or account
 
 1. Suspend the company in `/platform` with a reason (stops outbound activity; ingestion continues).
 2. For a compromised user: reset MFA via platform recovery (verified out of band), which signs out
    all their sessions; require a password reset.
 3. Rotate company-level provider credentials (reconnect WhatsApp), API keys and webhook secrets
-   (phase 5).
+   (phase 5). A stolen session alone could not export the company, ask for its deletion, change
+   payment settings or the company's Razorpay keys, create API keys or webhook endpoints, add an
+   owner or turn off required two-factor: those need a sign-in within the last 15 minutes
+   (ADR-056). Check the audit log for them anyway (a stolen password is enough to sign in).
 4. Review the company audit log and security events; export evidence; notify the owner.
 5. Reactivate with a reason once clean.
+
+**"Sign in again to continue".** Members see it when an action needs a sign-in within the last 15
+minutes (ADR-056) and theirs is older. It signs them out and brings them back to the page after
+they sign in. It is not an error and cannot be switched off for a company.
 
 ## 12. Migration failure
 

@@ -15,7 +15,12 @@ export async function notifyBillingManagers(
   deps: BillingNoticeDeps,
   tx: Tx,
   scope: TenantScope,
-  notice: { subject: string; lines: string[] },
+  notice: {
+    subject: string;
+    lines: string[];
+    /** A billing page to link to (default: the billing overview), e.g. `receipts/<topup id>`. */
+    billingPath?: string;
+  },
 ): Promise<number> {
   const [company] = await tx
     .select({ name: tenants.name, slug: tenants.slug })
@@ -33,7 +38,8 @@ export async function notifyBillingManagers(
         sql`${memberships.roles} && array['owner', 'billing']::text[]`,
       ),
     );
-  const url = new URL(`/c/${company.slug}/settings/billing`, deps.appBaseUrl).toString();
+  const path = notice.billingPath ? `/billing/${notice.billingPath}` : '/billing';
+  const url = new URL(`/c/${company.slug}${path}`, deps.appBaseUrl).toString();
   for (const manager of managers) {
     await enqueueEmail(deps.outbox, tx, {
       to: manager.email,

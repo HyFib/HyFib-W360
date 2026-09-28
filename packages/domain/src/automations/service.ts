@@ -57,6 +57,7 @@ import {
   type TemplateReference,
 } from './graph';
 import { appendRunStep, endRun, endRunForHuman, lockActiveRun, signalAutomationRun } from './runs';
+import { assertLiveAutomationAvailable } from '../plans/entitlements';
 
 /**
  * Automations for the web tier. Drafts are edited freely (`automations.write`); publishing
@@ -972,6 +973,8 @@ export function createAutomationService(deps: AutomationServiceDeps) {
         const row = await lockAutomation(tx, ctx, data.id, data.expectedVersion);
         if (row.status === 'archived')
           throw new AppError('precondition_failed', 'Restore the automation before publishing it.');
+        // The first publication makes the automation live.
+        if (row.status === 'draft') await assertLiveAutomationAvailable(tx, ctx.tenant.id, row.id);
         const { trigger, graph } = await runnableDraft(tx, row);
         await assertMayUseTemplates(tx, ctx, graph, 'publish');
         const sha = definitionSha({ trigger, graph, channelAccountId: row.draftChannelAccountId });
@@ -1048,6 +1051,8 @@ export function createAutomationService(deps: AutomationServiceDeps) {
           throw new AppError('precondition_failed', 'Publish the automation first.');
         }
         if (row.status === data.status) return { version: row.version };
+        if (data.status === 'active')
+          await assertLiveAutomationAvailable(tx, ctx.tenant.id, row.id);
         await tx
           .update(automations)
           .set({ status: data.status, version: sql`${automations.version} + 1` })

@@ -56,6 +56,7 @@ import {
   newFlowPublicId,
   newFlowToken,
 } from './model';
+import { assertModule } from '../plans/entitlements';
 
 /**
  * WhatsApp Flows (P4-03). Reading needs `flows.read`; editing drafts, their settings and keys needs
@@ -1097,6 +1098,7 @@ export function createFlowsService(deps: FlowsDeps) {
     /** Sends a form in a conversation (a reply: the customer service window must be open). */
     async send(ctx: TenantContext, input: unknown) {
       assertCan(ctx, 'inbox.reply');
+      assertModule(ctx.plan, 'flows');
       const data = parseInput(sendSchema, input);
       if (data.mode === 'draft') assertCan(ctx, 'flows.write');
       const now = deps.clock.now();

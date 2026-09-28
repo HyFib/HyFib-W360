@@ -193,8 +193,47 @@ export async function processStoreJob(
   }
 }
 
+/** What removing HyFib from a store achieved at the store itself. */
+export type StoreRemoteRemoval = 'done' | 'no_access' | 'unreachable';
+
+/**
+ * Removes a store at once because its company is being deleted (ADR-055): one attempt to remove
+ * HyFib from the store (an unreachable store is not retried), then the store and everything read
+ * from it are deleted. Returns what happened at the store, or 'gone' when there was no such store.
+ */
+export async function removeStoreForDeletion(
+  deps: StoreWorkerDeps,
+  scope: TenantScope,
+  storeId: string,
+): Promise<StoreRemoteRemoval | 'gone'> {
+  const now = deps.clock.now();
+  // The removal deadline is already past, so an unreachable store is removed rather than retried.
+  const [store] = await deps.db.run(scope, (tx) =>
+    tx
+      .update(commerceStores)
+      .set({
+        state: 'removing',
+        connectExpiresAt: new Date(now.getTime() - 1),
+        leaseUntil: new Date(now.getTime() + LEASE_MS),
+      })
+      .where(where(scope, storeId))
+      .returning(),
+  );
+  if (!store) return 'gone';
+  const job = new StoreJob(deps, scope, store, now);
+  try {
+    await job.run();
+  } catch (error) {
+    if (!job.released) await job.finish({});
+    throw error;
+  }
+  return job.remote ?? 'no_access';
+}
+
 class StoreJob {
   released = false;
+  /** Set by a removal: what could be done at the store. */
+  remote: StoreRemoteRemoval | null = null;
 
   constructor(
     private readonly deps: StoreWorkerDeps,
@@ -937,7 +976,7 @@ class StoreJob {
    */
   private async remove(): Promise<StoreJobOutcome> {
     const { deps, scope, store } = this;
-    let remote: 'done' | 'no_access' | 'unreachable' = 'done';
+    let remote: StoreRemoteRemoval = 'done';
     try {
       const credentials = readStoreCredentials(deps.keyring, store);
       if (store.platform === 'shopify') {
@@ -973,6 +1012,7 @@ class StoreJob {
         ? 'unreachable'
         : 'no_access';
     }
+    this.remote = remote;
     await deps.db.run(scope, async (tx) => {
       await tx
         .delete(commerceStores)

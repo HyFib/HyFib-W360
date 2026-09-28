@@ -8,6 +8,7 @@ import { Badge, Card, CardContent, CardDescription, CardHeader, CardTitle } from
 import { NewDealForm, StageSelect } from '@/components/crm/deal-forms';
 import { CrmTabs } from '@/components/crm/crm-tabs';
 import { PageHeader } from '@/components/page-header';
+import { ModuleNotInPlan } from '@/components/plan-limit';
 import { contactLabel, DEAL_STATUS } from '@/lib/crm-labels';
 import { formatDateTime } from '@/lib/format';
 import { crmLookups } from '@/server/crm';
@@ -80,6 +81,7 @@ export default async function CrmPage({
           ) : null
         }
       />
+      <ModuleNotInPlan ctx={ctx} module="crm" />
       <CrmTabs slug={ctx.tenant.slug} active="deals" />
       <nav aria-label="Deal views" className="mt-4 flex flex-wrap gap-2 text-sm">
         {(['board', 'won', 'lost'] as const).map((v) => (

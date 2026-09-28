@@ -91,6 +91,42 @@ export class PgBossJobQueue implements JobQueue {
   }
 }
 
+/**
+ * Job counts for one queue as pg-boss keeps them: refreshed by the supervising worker about once a
+ * minute, so they can lag the table slightly. `failed` counts failed jobs still retained.
+ */
+export interface QueueSnapshot {
+  name: string;
+  ready: number;
+  deferred: number;
+  active: number;
+  failed: number;
+  total: number;
+}
+
+export interface QueueInspector {
+  snapshot(): Promise<QueueSnapshot[]>;
+}
+
+/** Reads the queue counts through pg-boss's public `getQueues()`. */
+export function pgBossQueueInspector(boss: PgBoss): QueueInspector {
+  return {
+    async snapshot() {
+      const queues = await boss.getQueues();
+      return queues
+        .map((q) => ({
+          name: q.name,
+          ready: Number(q.readyCount),
+          deferred: Number(q.deferredCount),
+          active: Number(q.activeCount),
+          failed: Number(q.failedCount),
+          total: Number(q.totalCount),
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    },
+  };
+}
+
 /** Collects enqueued jobs in memory; for unit tests of services only. */
 export class RecordingJobQueue implements JobQueue {
   readonly jobs: { queue: QueueName; envelope: JobEnvelope; options: EnqueueOptions }[] = [];

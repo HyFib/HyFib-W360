@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
 import { can } from '@w360/domain';
 import { Badge, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
+import { PlanLimitHint } from '@/components/plan-limit';
 import { AvailabilityToggle, DeleteTeamButton, TeamForm } from '@/components/settings/team-editor';
 import { canUseInbox } from '@/server/inbox';
 import { getRuntime } from '@/server/runtime';
@@ -14,17 +15,27 @@ export default async function TeamsSettingsPage({ params }: { params: Promise<{ 
   const { slug } = await params;
   const ctx = await requireTenant(slug);
   if (!canUseInbox(ctx)) notFound();
-  const { teams } = await getRuntime();
+  const { teams, plans } = await getRuntime();
   const supervise = can(ctx, 'inbox.supervise');
   const manageOthers = can(ctx, 'inbox.assign') && can(ctx, 'members.read');
-  const [list, members, channels] = await Promise.all([
+  const [list, members, channels, usage] = await Promise.all([
     teams.listTeams(ctx),
     can(ctx, 'members.read') ? teams.teamMemberOptions(ctx) : Promise.resolve([]),
     can(ctx, 'channels.read') ? teams.channelOptions(ctx) : Promise.resolve([]),
+    plans.usage(ctx),
   ]);
   const channelLabel = new Map(channels.map((c) => [c.id, c.label]));
   return (
     <div className="grid grid-cols-1 gap-6">
+      {supervise ? (
+        <PlanLimitHint
+          ctx={ctx}
+          one="team"
+          what="teams"
+          used={usage.teams}
+          limit={usage.limits.teams}
+        />
+      ) : null}
       <Card>
         <CardHeader>
           <CardTitle>How routing works</CardTitle>

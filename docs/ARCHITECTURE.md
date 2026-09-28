@@ -91,7 +91,10 @@ session-level value. Scopes are branded TypeScript types created only by authori
    minus suspended-blocked permissions, minus MFA-blocked permissions). Non-members and missing
    companies both get 404.
 3. The domain service asserts a permission, validates input with zod, and runs `db.run(ctx.scope)`.
-   Audit rows are written in the same transaction.
+   Audit rows are written in the same transaction. Actions that hand out credentials, move money,
+   take or destroy the whole company's data, or weaken account security also assert a recent
+   sign-in (`assertRecentSignIn`: the session started within 15 minutes, carried in the context as
+   `signedInAt`), refusing with `step_up_required`; the page then offers "Sign in again" (ADR-056).
 4. Server actions additionally require an exact trusted `Origin` (on top of Next.js's own check).
 
 Company switching is URL-based (`/c/{slug}`) with a full page load so no client state crosses
@@ -121,6 +124,9 @@ so grants issued after the transfer would silently grant nothing (migration 0002
   call `authorizeJob`: verify HMAC, check company status (defer outbound work while suspended),
   check the actor's membership is still active, then load the referenced row under that company's
   RLS scope.
+- A work job that fails its last retry moves to the `dead-letter` queue (the sweeps, which run
+  again within a minute, have none); the worker records it in `ops.dead_letters` without its error
+  message (§6P).
 - Workers stop gracefully on SIGTERM (stop fetching, wait up to 30 s, close pools).
 
 ## 5. Email **[built]**
@@ -502,7 +508,8 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   script from `ops.chat_widget_config` (`Cache-Control: public, max-age=300`,
   `Cross-Origin-Resource-Policy: cross-origin`), or a 404 script comment. Both definer functions
   return only what the response needs and nothing for archived links, inactive numbers, disabled
-  widgets or companies being deleted.
+  widgets or deleted companies (a company waiting for deletion works like a suspended one,
+  ADR-055).
 - **Widget script** (`growth/widget-script.ts`): configuration embedded as JSON escaped for a script
   context; guards against a second copy on the same page; draws a fixed-position greeting and link
   in an open shadow root with `textContent` and CSSOM styles (text colour chosen for contrast);
@@ -778,14 +785,235 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 - **Not built yet:** cash on delivery confirmations and cart reminders in automations, conditions on
   order fields, changing the order from a run, messages per shipment or on tracking changes.
 
-## 7. Commercial model and billing **[built: wallet, top-ups, auto-recharge — verified against a local Razorpay stand-in only; subscriptions planned]**
+## 6N. Public API **[built — sends verified against the local Graph stand-in only; no live WhatsApp traffic]**
+
+- **Model** (migration 0024, ADR-052): `app.api_keys` (name, public prefix, the token's SHA-256,
+  scopes, author, expiry, last use, revocation, the key that replaced it) is never deleted; a guard
+  trigger keeps the token, scopes and author fixed, a revocation final, an expiry only sooner and a
+  replacement single. The runtime role cannot read `token_hash` (column grants) or write
+  `last_used_at`. `ops.api_key_authenticate` (SECURITY DEFINER) finds a key by its token's hash and
+  returns nothing for unknown, revoked or expired keys or companies being deleted; it records the
+  last use at most once a minute without waiting (`FOR UPDATE SKIP LOCKED`).
+  `app.api_idempotency_keys` stores successful responses per key and `Idempotency-Key` for 24 hours;
+  `ops.purge_api_idempotency_keys` deletes expired rows (the messaging retention sweep). Messages the
+  API sends have `sender_type = 'api'` and `api_key_id`; consent it records has the actor `api_key`.
+- **Keys** (`api/keys.ts`): tokens are `w360_` + 12 base32 characters (the prefix shown in lists) +
+  `_` + 32 random bytes in base64url; only the hash is stored and the token is shown once. Members
+  with `developer.manage` create keys (name, scopes, expiry of 30, 90 or 365 days or none) and may
+  grant a scope only when they hold its permission (`templates.read`, `contacts.read`,
+  `contacts.write`, `inbox.reply` for `messages.send`, `campaigns.send` for
+  `messages.send_marketing`); at most 20 active keys per company, counted under an advisory lock.
+  Rotation creates a key with the same name, scopes and lifetime and lets the old one work for 0 to
+  72 hours (0 revokes it); revocation is immediate. Each change is audited without the token.
+- **Requests** (`apps/web/src/server/api.ts`): the bearer token is checked by shape, then through
+  the definer function; the request acts in its company's scope as the key (`ApiContext`, no user),
+  so no company id is ever read from the request. Failed authentication is limited per client
+  address (bursts of 20, one every 5 seconds), then each key (bursts of 50, 10 a second) and each
+  company (bursts of 200, 30 a second) have token buckets; over the limit answers 429 with
+  `Retry-After`. JSON bodies need `Content-Type: application/json` and at most 64 KB. Writing scopes
+  are refused while the company is suspended or restricted (reading continues). Errors are
+  `{"error": {"code", "message", "reason"?, "issues"?}, "requestId"}` with the status of the
+  application error; other failures are a generic 500 logged with the request id. Tokens are never
+  logged; responses are `private, no-store`.
+- **Resources** (`api/resources.ts`): approved utility and marketing templates with their variables
+  and numbers; contacts listed newest first with keyset cursors (or by number), read, and created
+  (201) or returned when the number exists (200, filling an empty name or email and adding tags;
+  suppressed numbers refused); consent recorded with its evidence (source `api`); template sends
+  with the members' checks (an approved template; its category's scope; the variables; the number
+  given as `from`, or the only active one; the template's account; erasure, suppression, consent and
+  the marketing frequency cap under the campaign runner's lock), a conversation created resolved,
+  a send intent without a user and the `message.send` job, re-checked before dispatch like every
+  template send; the status of messages the API sent.
+- **Idempotency** (`api/idempotency.ts`): `POST /messages` needs an `Idempotency-Key` (optional on
+  `POST /contacts`). The key's row is inserted in the request's own transaction, so a concurrent
+  retry waits on the unique index and then replays the stored response (`Idempotent-Replayed:
+true`); the same key with another request (method, path and body hashed) answers 422
+  `idempotency_key_reused`; a failed request stores nothing; an expired key is reused.
+- **OpenAPI** (`api/openapi.ts`): `GET /api/v1/openapi.json` (no key; cacheable 5 minutes) is built
+  from the zod schemas that validate requests; a unit test checks it against the route handlers.
+- **Web:** Settings → API keys (`developer.manage`): the base URL and an example, the keys with state,
+  prefix, scopes, author, last use and expiry; creation with the scopes the member may grant; the new
+  token shown once with a copy button (kept only in the page's memory); rotation with an overlap;
+  revocation.
+- **Not built yet:** session, media and interactive messages, listing conversations and messages,
+  starting automations, OAuth apps, IP allowlists per key, monthly API quotas per plan and API
+  access as a plan module. Outgoing webhooks are section 6O.
+
+## 6O. Outgoing webhooks **[built — verified with local test receivers only; no customer endpoints yet]**
+
+- **Model** (migration 0025, ADR-053): `app.webhook_endpoints` (URL, description, event types, the
+  signing secret encrypted by the keyring with its version, the previous secret and when it stops
+  signing, on/off with the reason, health: failing since, last success, last failure);
+  `app.webhook_events` (what happened: type, message, conversation, contact or template id, the
+  status reached and small non-personal facts; no foreign keys, so erasure and retention never wait
+  on webhook history); `app.webhook_deliveries` (one per event and endpoint: state `pending`,
+  `delivering` with a lease, `succeeded` or `failed`, attempts, next attempt, last status code, error
+  code and duration, the delivery it replays). Composite foreign keys cascade from the endpoint and
+  the event. The runtime role has column grants only for what the services change; it cannot move a
+  delivery to another event or endpoint, edit events, or delete history except with its endpoint.
+- **Capture:** SECURITY INVOKER triggers on `app.messages` (an inbound message from a contact; an
+  outbound message reaching `accepted`, `sent`, `delivered`, `read`, `played`, `failed`, `canceled`
+  or `unknown_outcome`, with the error code and title), `app.consent_events` (every opt-in and
+  opt-out) and `app.template_status_events` (the statuses Meta reports, and deletion) call
+  `app.capture_webhook_event`, which writes an event and its deliveries only when an active endpoint
+  of the row's company subscribes to the type. They run as the role making the change (the runtime
+  role in the company's scope, or a definer function such as `app.erase_contact`), so row security
+  keeps each event in its row's company, and a rolled-back change leaves none. A delivery insert
+  sends an empty `w360_webhooks` notification.
+- **Dispatch:** the worker's LISTEN connection (`apps/worker/src/webhook-listener.ts`) turns a
+  notification into a lookup of active companies with due deliveries (`ops.webhook_dispatch_due`,
+  SECURITY DEFINER), at most one lookup every 250 ms; the per-minute messaging sweep does the same
+  for retries, interrupted attempts and missed notifications, and applies retention. Each company
+  gets a signed `webhook.deliver` job (policy `stately`: one queued and one active per company,
+  singleton key = company id). Suspended and restricted companies are skipped (the job defers).
+- **Delivery** (`webhooks/delivery.ts`): the job claims up to 10 due deliveries (`FOR UPDATE SKIP
+LOCKED`; pending ones due now, then `delivering` ones whose lease expired), builds each payload
+  from the company's current data (`webhooks/payloads.ts`; an erased contact has no number or name,
+  a message that no longer exists ends the delivery as `event_gone`), signs it, sets the lease (the
+  10 s egress deadline plus 35 s) and commits. The POSTs go through the egress client (DNS pinned,
+  private, loopback, link-local, metadata and reserved addresses refused, no redirects, 64 KB sent,
+  responses read up to 256 KB and discarded) with no transaction open. Each outcome is recorded in
+  its own transaction, locking the endpoint before the delivery; an outcome whose attempt no longer
+  owns the delivery (lease expired and re-claimed, or the endpoint deleted) is dropped. A 2xx answer
+  succeeds; anything else is retried at 1 min, 5 min, 30 min, 2 h, 6 h, 12 h and 24 h, and the eighth
+  failure fails the delivery; an interrupted delivery with no attempt left fails as `interrupted`.
+  After 200 attempts a job queues its successor.
+- **Signing:** `W360-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256 of "<t>.<body>">`, one `v1` per
+  secret (the previous secret also signs for 24 hours after a rotation), with `W360-Event-Id`,
+  `W360-Event-Type`, `W360-Delivery-Id`, `W360-Delivery-Attempt` and `User-Agent:
+HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with the AAD
+  `webhook-secret:<company>:<endpoint>:<version>`.
+- **Health:** a success clears the failing state; a failure when the endpoint has been failing for
+  72 hours without a success turns it off (`failing`), fails its waiting deliveries as
+  `endpoint_disabled`, records a system audit entry and emails the company's active owners and
+  administrators (`webhook.endpoint_disabled`) in the same transaction.
+- **Web:** Settings → Webhooks (`developer.manage`): endpoints with state, events, last-24-hour
+  counts, last success, failing since and secret version; adding one (the secret shown once, kept
+  only in the page's memory); sending a test event (`ping`); rotating the secret; turning off and
+  on; deleting. Each endpoint's page lists its latest 100 deliveries (or only failed ones) with
+  attempts, result and timings, replays finished ones (a new delivery of the same event, audited)
+  and edits the URL, description and events. The OpenAPI document describes every event under
+  `webhooks`. Audit entries name the endpoint's host, never its full URL or secret.
+- **Not built yet:** filters beyond the event type, ordering, custom headers, mutual TLS, fixed
+  egress addresses for receivers' allowlists, endpoints per number, and events for conversations,
+  campaigns, automations, contact changes or orders.
+
+## 6P. Platform operations console **[built — verified with local test data only; no production companies yet]**
+
+- **Purpose** (P5-10, ADR-054): platform staff see where companies are stuck or failing, what the
+  job system is doing and whose sending needs a review, from counts, states, error codes, labels
+  and times. No message text, contact, payload, email address, secret or full URL is read into the
+  console.
+- **Reads:** four SECURITY DEFINER functions (migration 0026), owned by `w360_definer`, executable
+  only by `w360_platform`, refusing to run unless the session user is a platform administrator
+  (`W3403`): `ops.platform_ops_health` (per company: numbers by state, worst quality rating of its
+  active numbers, accounts needing reconnection, last-24-hour outbound, failed and inbound counts,
+  failing webhook endpoints, failed stores, payment account checks, catalog and Flow syncs, dead
+  letters in 7 days), `ops.platform_ops_activity` (per company since a time at most 93 days back:
+  outbound by sender, failures, inbound, marketing templates sent and delivered, errors `131049` and
+  `131050`, marketing opt-outs by contacts, complaint suppressions, webhook deliveries, automation
+  runs, members and numbers), `ops.platform_ops_signup_sessions` (Embedded Signup sessions that
+  failed or expired unfinished) and `ops.platform_ops_integration_failures` (current failures with a
+  label: a display number, an account name or only the host of a URL, via `ops.url_host`). The
+  definer role has column grants for exactly the columns these read. Failed, stuck and quarantined
+  Meta and Razorpay receipts, numbers, companies, failed emails (counts by kind) and security
+  events (counts by type) are read directly by the platform role, which could already read them.
+- **Queues:** `pgBossQueueInspector` (`jobs/queue.ts`) reads pg-boss's `getQueues()` through the
+  web's producer instance: ready, deferred, active and retained failed jobs per queue, as cached by
+  the worker's supervisor about once a minute. Each declared queue is listed with its retry policy.
+- **Dead letters:** the worker consumes `dead-letter` (batches of 20, one at a time, with pg-boss
+  metadata) and writes `ops.dead_letters` (`jobs/dead-letters.ts`): source queue and job, the
+  envelope's kind, company and reference only when its signature verifies, retries used, the
+  error's name and code (never its message, stack or details, which can quote data) and times. The
+  worker role may only insert (a repeated recording is ignored); the messaging sweep deletes rows
+  30 days after the job failed through `ops.purge_dead_letters`. Recording is retried three times
+  with backoff; the job itself stays in pg-boss for its own retention.
+- **Health and signals** (`platform/ops-model.ts`) are pure functions over those facts with HyFib's
+  own thresholds (ADR-054): a company is `critical`, `warning` or `ok`, and a signal asks for a
+  review; nothing is suspended automatically.
+- **Repairs:** retrying a Meta or Razorpay receipt that failed all attempts or was quarantined, while
+  its body is still kept (`ops.platform_retry_webhook_receipt`: back to pending with no attempts;
+  the minute sweep processes it again, idempotently), and resolving a quarantine entry with a
+  written resolution. Both need a reason and write `ops.platform_audit_events` in the same
+  transaction.
+- **Web:** `/platform/ops` (Overview, Onboarding, Integrations, Queues, Signals, Usage over 7, 30 or
+  90 days) and a health card on each company's platform page. Every page re-checks the platform
+  actor. The functions read every company on each view, which suits the test envelope; paging and
+  precomputed rollups come with growth.
+- **Not built yet:** alerts, trends, quality updates from Meta's quality webhook, API request counts,
+  exports, the age of the oldest waiting job, redrive from the console, and acknowledging issues.
+
+## 6Q. Company export and deletion **[built — providers verified against the local Graph, Shopify and Razorpay stand-ins only]**
+
+- **Purpose** (P5-11, ADR-055): owners take a full copy of the company's data at any time and can
+  have the company deleted, after 14 days of grace, by a job that survives restarts.
+- **Export** (`tenancy/export.ts`, `tenancy/export-spec.ts`): the route
+  `/c/<slug>/settings/data/export` bridges `writeCompanyExport` into a response stream (text →
+  `TextEncoderStream` → `CompressionStream('gzip')`), answering an error instead of a file until
+  the first line is written. The export reads every table in `EXPORT_TABLES` keyset-paged by id,
+  1,000 rows a page, in one read-only, repeatable-read transaction in the company's scope, after an
+  advisory lock per company; members are joined with their account's name and email. The spec
+  lists each exported table's columns and each omitted column's reason; `EXPORT_EXCLUDED_TABLES`
+  gives each left-out table's reason.
+- **Request and grace** (`tenancy/deletion.ts`): `app.request_tenant_deletion` (owner, typed
+  address) writes the register `ops.tenant_deletions` (previous status, due in 14 days) and puts the
+  company in `pending_deletion`, which the permission layer treats like a suspension; the company
+  layout shows a banner. `app.cancel_tenant_deletion` restores the status (a suspension stays, a
+  lapsed plan restricts) until the run starts.
+- **Run** (`tenancy/deletion-run.ts`, worker `handlers/tenancy.ts`): the minute billing sweep calls
+  `ops.tenant_deletions_due` and queues a signed `tenant.delete` job per company (`exclusive`,
+  singleton per company, retried with backoff). A run calls `ops.start_tenant_deletion` (first time:
+  records who to notify, releases the company's number bindings), cleans up at providers once and
+  records the outcomes (`ops.record_tenant_deletion_cleanup`), then calls `ops.delete_tenant_data`
+  in its own transaction per batch (2,000 rows of the first step that has rows, or a whole step for
+  the cycle and self-references) for up to five minutes, and finally `ops.finish_tenant_deletion`
+  with the final emails in the same transaction. The step order `ops.tenant_deletion_steps` lists
+  every deletable table; the definer role's delete policies match `ops.deleting_tenant_id()`, set
+  only inside the functions.
+- **Provider clean-up:** Graph `DELETE /{WABA-ID}/subscribed_apps` with the account's stored token;
+  the store worker's removal (Shopify `appUninstall`, WooCommerce webhook deletion) with the removal
+  deadline already past; Razorpay token deletion for HyFib's card mandate, with the mandate cancelled
+  and auto-recharge turned off either way. Missing configuration or credentials are recorded as
+  skipped, errors as failed; neither stops the deletion.
+- **Kept:** the company row as a tombstone, billing tables, plan history, the register, support
+  grants and security events (the catalog tests list them); people's accounts.
+- **Web:** Settings → Company data (owners: export link, deletion form with the typed address, the
+  pending state with the due date and a cancel button, the started state); the platform company page
+  shows the register (dates, runs, rows deleted, provider outcomes).
+- **Step-up:** exporting and asking for the deletion need a sign-in within the last 15 minutes
+  (ADR-056).
+- **Not built yet:** staff-started deletion, stored exports and other formats.
+
+## 7. Commercial model and billing **[built: plans and entitlements, wallet, top-ups, auto-recharge, statements and receipts, staff refunds of unused credit — verified against a local Razorpay stand-in only; paying for plans in HyFib and tax invoices planned]**
 
 - **Who pays Meta:** as a Meta Tech Provider HyFib has no credit line; each customer adds its own
   payment method and Meta bills them directly (`tenants.billing_mode = 'direct_meta'`, the default).
   The HyFib wallet funds only disclosed HyFib services (e.g. AI and automation usage), so a Meta
   charge can never be taken twice. `partner_billed` requires a verified partner agreement and is
   blocked (ADR-011).
-- **Subscriptions [planned]:** Razorpay Subscriptions for plan fees (separate from the wallet).
+- **Plans and entitlements (0023, ADR-051) [built]:** platform owners keep a catalog of plan
+  versions in `ops.plans` (never seeded, INR paise per 1, 3 or 12 months, trial and grace days,
+  limits, add-on prices and modules): drafts change, published versions never do (a trigger), and
+  retired ones stay with the companies on them. Every company has one row in `app.tenant_plans`
+  (complimentary, trialing, active, past_due, expired, canceled), created by a trigger when the
+  company is created (a trial of `ops.plan_settings.default_trial_plan_id`, else complimentary) and
+  written afterwards only by platform staff (`setTenantPlan`, with both audit logs and a version
+  check) and by `app.apply_plan_transition`, which the minute billing sweep calls in the company's
+  scope for trials, paid periods and grace periods that have ended (notices to billing managers). An
+  expired or canceled plan sets `tenants.status = 'restricted'` through a trigger; restricted
+  behaves like suspended (`ALLOWED_WHEN_SUSPENDED`, jobs deferred, sweeps skip it, public
+  lookups still resolve), suspension wins, and a plan that gives access again lifts it.
+  `app.tenant_entitlements` computes limits with add-ons (NULL: no limit) and modules; the services
+  check a limit where something is added, under a per-company advisory lock (`seats:`, `numbers:`,
+  `teams:`, `automations:`); seats count active members plus waiting invitations and
+  `app.accept_invitation` checks the same limit in SQL. Live automation runs started by customer
+  messages or store events consume `app.usage_counters` atomically (`ON CONFLICT … DO UPDATE …
+WHERE used < limit`), per monthly period from `usage_anchor`; the sweep announces a used-up month
+  once (`notified_at`). The tenant context drops the write permissions of modules the plan leaves
+  out (`MODULE_WRITE_PERMISSIONS`); workers check the module before starting runs, order messages
+  and cart reminders (`not_in_plan`). Platform staff see usage as counts only
+  (`ops.platform_tenant_usage`). Charging for plans (Razorpay Subscriptions), self-serve changes,
+  proration and plan invoices are not built: staff set paid periods.
 - **Ledger (0004_billing):** one INR wallet per company with five accounts (`wallet_available`,
   `wallet_held`, `payment_clearing`, `service_revenue`, `dispute_losses`). `ledger_transactions` and
   `ledger_entries` are append-only (trigger), balances are maintained by trigger from the entries,
@@ -829,15 +1057,72 @@ payment_requested → succeeded`; before each provider call it is written as `un
   request (pre-debit notice), so the UI asks for thresholds with headroom. Declines fail the attempt
   (audit + email to owners and billing members), three consecutive failures turn auto-recharge off,
   and turning it off or removing the card cancels attempts that have not requested a debit.
+- **Statements and receipts (0029–0031, ADR-057) [built]:** Billing → Statements lists every month
+  from the wallet's creation to the current one, in the company's time zone, with money in and out
+  and closing balances. A month's statement is computed on request from the ledger in one
+  repeatable-read, read-only transaction:
+  - opening balances are the available and reserved accounts' entries before local midnight on the
+    1st (the first real instant on daylight-saving days, using the covering index
+    `ledger_entries_account_time_idx`);
+  - the lines are the month's transactions in time order, 100 per page, with running balances from
+    a window over the month;
+  - the closing balances are the opening balances plus every line.
+
+  The CSV adds an opening-balance and a closing-balance row, with exact rupees built from paise. It
+  is audited as `billing.statement_exported`. Plain negative numbers stay numbers under the CSV
+  formula guard (contacts/csv).
+
+  A paid top-up has a receipt page with the receipt number `tu_…`, the Razorpay payment and order
+  ids, the method Razorpay reported, the saved card for an automatic top-up, and its refunds and
+  chargebacks (`ledger_transactions_reference_idx`). A receipt is a payment confirmation, not a tax
+  invoice. The method is recorded with the credit by `app.billing_record_payment_method`: a definer
+  function that sets it once, only when the same payment id credited the top-up. The insert policy
+  keeps a new top-up from carrying one. Each credit emails the billing managers a link to its
+  receipt, in the credit's transaction. Nothing is stored for statements; a statement viewed again
+  shows the same postings.
+
+- **Staff refunds of unused credit (0032, ADR-058) [built]:** the platform company page shows the
+  company's balances, its latest paid top-ups and refunds (`ops.platform_company_billing`: payments
+  to HyFib, no company content, no support grant needed). A platform owner refunds part or all of a
+  paid top-up with a reason. `ops.platform_request_credit_refund` (definer, platform role only)
+  checks the owner, the reason, that the company is not being deleted, the top-up (paid or partly
+  refunded, no refund of it open), the amount (at most what is left of the payment) and, under the
+  wallet account's row lock, the available credit. In one transaction it places a hold
+  (`credit_refund`, 90 days), records `app.credit_refunds` (`requested`) and writes the platform
+  audit log with the reason. The minute billing sweep queues a signed `billing.credit-refund` job
+  for each due request (`ops.credit_refunds_due`). The job writes the attempt down first, then calls
+  `POST /v1/payments/:id/refund` with speed `normal` and `X-Refund-Idempotency: crf_<id>`, the same
+  body on every try:
+  - a refund returned: `submitted` with the refund id, audited, and the billing managers emailed;
+  - a 4xx other than 401 and 409: `failed` through `app.billing_fail_credit_refund`, which releases
+    the hold;
+  - a 401, 409, 429, 5xx, timeout or lost response: tried again after 1, 5, 15 and 60 minutes,
+    then hourly.
+
+  A submitted refund is checked every 15 minutes, then hourly after an hour and every 6 hours
+  after a day. `refund.processed` (webhook) or the job's check calls `app.billing_record_refund`
+  (replaced in 0032). It releases the hold of an open request for the same refund id, or of one
+  with no id stored yet and the same amount, and marks it `processed`, in the transaction that
+  posts the refund: the credit the hold set aside is taken exactly once, even when the webhook
+  arrives before the job stored the refund id. `refund.failed`, or a failed refund found by the
+  check, fails the request and releases the hold. The company role reads its requests but not the
+  staff reason or who asked (column grants). It may move an open request only between `requested`
+  and `submitted` (a restrictive policy): `processed` and `failed` are reachable only through the
+  definer functions that settle the hold. A due company deletion waits until no refund is open
+  (the worker checks before it starts). Statements label the hold "Reserved for a refund" and its
+  release "Refund reservation released"; the Billing page and the receipt show refunds in progress.
+
 - **Browser security:** the billing and WhatsApp-channels pages get their own CSP allowing only
   that provider's script and frame. Because a CSP belongs to the loaded document, links to these
   pages are full page loads and the pages reload once if reached by client-side navigation.
 
 ## 8. Observability
 
-Structured JSON logs (pino) with redaction and correlation ids **[built]**; audit and security
-events in the database **[built]**; OpenTelemetry traces/metrics with one hosted backend, queue lag
-and dead-letter alerts **[designed]**.
+Structured JSON logs (pino) with redaction and correlation ids **[built]**; every failed job
+attempt logged by the worker with its queue and job ids **[built]**; audit and security events in
+the database **[built]**; queue counts and recorded dead letters in the platform operations
+console (§6P) **[built]**; OpenTelemetry traces/metrics with one hosted backend, queue lag and
+dead-letter alerts **[designed]**.
 
 ## 9. Topology
 

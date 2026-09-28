@@ -218,6 +218,8 @@ export const messages = appSchema.table('messages', {
   providerTimestamp: tz('provider_timestamp'),
   templateId: uuid('template_id'),
   campaignId: uuid('campaign_id'),
+  /** The API key that sent it (sender_type 'api', migration 0024). */
+  apiKeyId: uuid('api_key_id'),
   createdAt: tz('created_at').notNull().defaultNow(),
 });
 

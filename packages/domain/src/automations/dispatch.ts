@@ -23,6 +23,7 @@ import {
   signalAutomationRun,
   type RunSignalDeps,
 } from './runs';
+import { consumeAutomationRun } from '../plans/entitlements';
 
 /**
  * Hands a stored customer message to automations, inside the ingestion transaction (the
@@ -186,6 +187,9 @@ export async function dispatchInboundToAutomation(
       ),
     );
   if ((recentRuns?.n ?? 0) >= RUN_BUDGETS.maxRunsPerConversationPerHour) return 'none';
+  // The company's plan: automations included and a run left this month (ADR-051). Counted in this
+  // transaction, so a run that is not inserted is not counted either.
+  if (!(await consumeAutomationRun(tx, input.tenantId, now)).ok) return 'none';
 
   const runId = uuidv7();
   const triggerType = (['keyword', 'keyword', 'conversation_started', 'any_message'] as const)[
