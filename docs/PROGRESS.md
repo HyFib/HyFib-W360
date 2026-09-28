@@ -94,6 +94,43 @@ the test-only stand-in; nothing reached Razorpay.
   and transfers, and instant settlements are not built.
 - Firefox and WebKit run the new spec in CI only; only Chromium is installed locally.
 
+## 2026-09-28 — Fix: the egress fallback test on macOS
+
+Status: **Fixed and verified locally on macOS; the fallback also checked on Linux with and without
+IPv6.** The unit test "falls back to the next checked address when one cannot be reached"
+(`egress.test.ts`) failed on macOS with "No complete response within 2 seconds" and passed in CI.
+Only the test changed: the egress client and its guard are unchanged.
+
+### Cause
+
+- The test's first address, `127.0.0.2`, relied on all of 127.0.0.0/8 being loopback. On Linux it
+  is, so a connection there is refused at once and the client tries the next address. macOS
+  configures only `127.0.0.1` on `lo0`: a connection to `127.0.0.2` gets no answer, and the
+  client's 2-second attempt timeout equals the test's 2-second deadline, so the fallback never ran.
+
+### Completed
+
+- **Unreachable address:** the first address is now `::1`. It is loopback too (the guard allows it
+  for test targets), and the test server listens on `127.0.0.1` only, so the attempt fails at once:
+  refused on macOS and on Linux with IPv6, `EADDRNOTAVAIL` with IPv6 disabled by sysctl,
+  `EAFNOSUPPORT` without IPv6 sockets. A closed listener would not do: every checked address is
+  dialled on the URL's port, and on macOS the only IPv4 loopback address is the server's own.
+- **Attempts checked:** with the two addresses in different families, a response from `127.0.0.1`
+  alone no longer shows a fallback (IPv4 could have been tried first), so the test records the
+  attempts Node's address selection reports as failed (`net.client.socket` diagnostics channel) and
+  expects exactly `::1`.
+- **Mutation checks:** of 3 deliberate regressions in `egress.ts` (address selection off, only the
+  first checked address handed to Node, the addresses reordered IPv4 first), the test catches all
+  3, the reordering only through the attempt check.
+
+### Test commands and results (local, 2026-09-28)
+
+| Command                                                                | Result                                                                                                                                                                                                 |
+| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                   | 0 problems / all files formatted / all workspace packages pass                                                                                                                                         |
+| `pnpm test` (unit, macOS, Node 24.21)                                  | 298 passed; the fallback test in 6 ms (before the fix it failed after 2 s), and `egress.test.ts` passed 15 runs in a row                                                                               |
+| The egress client with `::1` then `127.0.0.1`, Linux (Docker, Node 22) | Answered from `127.0.0.1` in each setup. IPv6 on: `::1` refused (`ECONNREFUSED`), 33 ms. IPv6 disabled by sysctl: `EADDRNOTAVAIL`, 22 ms. `AF_INET6` sockets refused by seccomp: `EAFNOSUPPORT`, 14 ms |
+
 ## 2026-09-28 — Fix: the ledger's balance check under PostgreSQL 17 (migration 0033)
 
 Status: **Fixed and verified locally on PostgreSQL 17.11 and 18.6.** CI on f74a824 (staff refunds)

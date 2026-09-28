@@ -1,6 +1,7 @@
+import { subscribe, unsubscribe } from 'node:diagnostics_channel';
 import { once } from 'node:events';
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
-import type { AddressInfo } from 'node:net';
+import type { AddressInfo, Socket } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   DEFAULT_EGRESS_POLICY,
@@ -324,24 +325,37 @@ describe('egress requests', () => {
 
   it('falls back to the next checked address when one cannot be reached', async () => {
     const calls: string[] = [];
-    // 127.0.0.2 is loopback too (allowed for test targets) but nothing listens there.
+    // ::1 is loopback too (allowed for test targets), but the server listens on 127.0.0.1 only, so
+    // connecting to it fails at once: refused, or unavailable where IPv6 is off. Not 127.0.0.2:
+    // macOS has only 127.0.0.1 on loopback, so a connection to 127.0.0.2 waits out the deadline.
     const client = createEgressClient(LOCAL, {
       resolve: async (name) => {
         calls.push(name);
         return [
-          { address: '127.0.0.2', family: 4 },
+          { address: '::1', family: 6 },
           { address: '127.0.0.1', family: 4 },
         ];
       },
     });
-    const res = await client.request({
-      method: 'GET',
-      url: `http://api.test:${port}/`,
-      headers: {},
-      body: null,
-    });
+    // Node's address selection reports each failed attempt on the socket: the response alone would
+    // not show that ::1 was tried first.
+    const failed: string[] = [];
+    const onSocket = (message: unknown) => {
+      const { socket } = message as { socket: Socket };
+      socket.on('connectionAttemptFailed', (address) => failed.push(address));
+    };
+    subscribe('net.client.socket', onSocket);
+    const res = await client
+      .request({
+        method: 'GET',
+        url: `http://api.test:${port}/`,
+        headers: {},
+        body: null,
+      })
+      .finally(() => unsubscribe('net.client.socket', onSocket));
     expect(res.status).toBe(201);
     expect(res.address).toBe('127.0.0.1');
+    expect(failed).toEqual(['::1']);
     expect(calls).toEqual(['api.test']);
   });
 
