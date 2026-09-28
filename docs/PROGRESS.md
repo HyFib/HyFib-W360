@@ -36,6 +36,17 @@ an earlier usage period.
 - **Docs:** ADR-062; ARCHITECTURE §6N and §7; RUNBOOKS (plans: the warning, and a usage email that
   did not come); BACKLOG P5-01; THREAT-MODEL T86 (and T85's e2e wording); FEATURE-MATRIX H-040 (and
   H-039's e2e wording).
+- **CI fix (the e2e job on fb8efa6, API quotas):** the WebKit run of `settlement-recon.spec.ts`
+  failed on both attempts. First, `turnOnTwoFactor` typed the password into the account page's
+  two-factor card before React hydrated it: the value reached the field but not the component's
+  state, so "Set up two-factor" stayed disabled until the test timed out. The field now stays
+  disabled until hydration, as `ClientForm` controls do, and a new test in `forms.spec.ts` holds
+  back the bundles to check it (it failed before the change). Then the retry reused the project's
+  settlement day, for which the Razorpay stand-in still held the first attempt's settlement, so two
+  payments waited for a person instead of one. A retry now uses a day of its own; failing the first
+  attempt on purpose after the settlement reproduced the retry failure before the change, and the
+  retry passes after it. Four other components with the same kind of field (the automation editor
+  and its node fields, contact erasure, security settings) are left for a separate change.
 - **Mutation checks:** 24 regressions tried one at a time; 23 make a test fail: the listing's
   threshold, upper bound, limit per metric, run packs, warned and company-status filters; the
   lock's earlier-period check and mark, the lock itself (caught by two calls waiting on a held

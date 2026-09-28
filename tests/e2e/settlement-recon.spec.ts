@@ -32,19 +32,26 @@ function indiaDay(offset: number): string {
   return day.toISOString().slice(0, 10);
 }
 
-/** Each browser project reconciles its own day: they share one database and one stand-in. */
+/**
+ * Each browser project reconciles its own day, and a retry another one: they share one database and
+ * one stand-in, which keeps what an earlier attempt settled.
+ */
 const DAY_OFFSETS: Record<string, number> = {
   chromium: -5,
   'mobile-chromium': -6,
   firefox: -7,
   webkit: -8,
 };
+const PROJECTS = Object.keys(DAY_OFFSETS).length;
 
 test('a platform owner reconciles a settled day: a payment HyFib missed is credited, and a payment that is not HyFib’s waits for a person', async ({
   page,
 }) => {
   test.setTimeout(240_000);
-  const day = indiaDay(DAY_OFFSETS[test.info().project.name] ?? -9);
+  const { project, retry } = test.info();
+  const offset = DAY_OFFSETS[project.name];
+  if (offset === undefined) throw new Error(`No settlement day for the ${project.name} project`);
+  const day = indiaDay(offset - PROJECTS * retry);
   let paymentId = '';
   // The customer pays and closes Checkout at once: HyFib never hears of the payment.
   await routeFakeCheckout(page, {

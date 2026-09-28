@@ -4,7 +4,7 @@ import QRCode from 'qrcode';
 import { Alert, Field, Input } from '@w360/ui';
 import { authClient } from '@/lib/auth-client';
 import { FormError, FormSuccess } from '@/components/form-status';
-import { ClientButton } from '@/components/client-form';
+import { ClientButton, useHydrated } from '@/components/client-form';
 
 type Step =
   | { kind: 'idle' }
@@ -12,6 +12,9 @@ type Step =
   | { kind: 'codes'; backupCodes: string[] };
 
 export function TwoFactorSettings({ enabled }: { enabled: boolean }) {
+  // The password field stays disabled until React hydrates it: a password typed before would reach
+  // the field but not `password`, leaving the buttons disabled for good.
+  const hydrated = useHydrated();
   const [password, setPassword] = useState('');
   const [code, setCode] = useState('');
   const [step, setStep] = useState<Step>({ kind: 'idle' });
@@ -148,6 +151,7 @@ export function TwoFactorSettings({ enabled }: { enabled: boolean }) {
                 autoComplete="current-password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
+                disabled={!hydrated}
               />
             )}
           </Field>
