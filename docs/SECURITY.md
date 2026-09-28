@@ -1,6 +1,6 @@
 # Security
 
-Last updated 2026-09-27. This document lists implemented controls, the role/permission matrix and
+Last updated 2026-09-28. This document lists implemented controls, the role/permission matrix and
 security operations. It is not a compliance claim; see `docs/THREAT-MODEL.md` for open risks and
 `docs/RELEASE-CHECKLIST.md` for launch gates (including an independent security review).
 
@@ -33,6 +33,7 @@ security operations. It is not a compliance claim; see `docs/THREAT-MODEL.md` fo
 | Store connectors   | Companies' Shopify and WooCommerce stores are only read, by the worker, through the egress client; access (Shopify expiring tokens, WooCommerce keys) is sealed in the keyring, bound to the store row and versioned so a token refresh never overwrites access saved meanwhile; handshakes use single-use hashed tokens (Shopify: signed callback, timestamp, the member who started it; WooCommerce: Read/Write keys proven against the entered address); webhooks are verified over the raw body (Shopify with the app secret, WooCommerce with a per-store secret), deduplicated and only make the worker read from the store; Shopify's compliance and uninstall topics act only on the shop named in the signed body; redaction of store orders is sticky; order data needs `commerce.read` and `contacts.read`.                      |
 | Order messages     | Sent only by the worker after a manager confirmed the store's customers opted in; never about orders from before a rule was switched on; one message per order and event (unique); every rule, consent and suppression check repeated at send time and at dispatch; cash on delivery answers accepted only from the message's own contact and thread; tracking redacted with the customer.                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | Cart reminders     | Shopify checkouts are read by the worker only while a cart reminder is on, and only those updated since it was switched on; `read_customers` is asked for only when a manager allows customer access, and the exchanged token replaces the old one only for the credentials version read (a grant without the connector's own scopes fails the store); only approved marketing templates, to customers with marketing opt-in, within the frequency cap (counted under the campaign runner's lock); at most one reminder per checkout and kind (unique); never after the checkout was completed, after an order with the number, or three days after it was left; store consent is imported only after a manager with `contacts.write` turns it on, never for suppressed numbers; checkouts are redacted for good and deleted after 30 days. |
+| Store automations  | An order rule starts an automation only after every order message check, and only an active automation whose live version starts from order messages (never from customer messages), in a conversation nobody is assigned to and no run holds, at most one run per store message; template steps check the template, its variables and quick replies, the number, consent and the marketing frequency cap again when they run (the cap under the campaign runner's lock, only tried by the runner), and the send worker checks template and consent again at dispatch; until the customer replies only templates can be sent (refused at publish); quick-reply payloads name the run, step and visit; runs keep a reference to their order, not a copy, shown only with `commerce.read`.                                                    |
 | Templates          | Created, deleted and listed only by the worker with the stored WABA token (never in the browser); webhooks for templates are signals routed through verified WABA bindings and never change status on their own; submission is write-ahead so a lost response cannot create a duplicate.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | Supply chain       | Exact pins + lockfile, pnpm minimum release age, explicit install-script allowlist, `pnpm audit` and gitleaks in CI, GitHub Actions pinned by SHA, Trivy image scanning, Dependabot.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 
@@ -148,7 +149,8 @@ Phase 4 rules (automations, P4-01):
   who can see that conversation; analysts and marketers see outcomes and step codes only.
 - Automations start only in unassigned conversations of an active (not suspended) company, never
   after an opt-out keyword, and every bot message re-checks the channel, the 24-hour window and the
-  contact's WhatsApp number when queued. Live runs send as the company's automation (no member
+  contact's WhatsApp number when queued (a template step checks its template and the contact's
+  consent instead of the window, P4-06e). Live runs send as the company's automation (no member
   actor on the send); test runs send under the tester's authority.
 
 Phase 4 rules (automation web requests, P4-02):
@@ -382,6 +384,38 @@ Phase 4 rules (Cart reminders, P4-06d):
   HyFib never writes consent to Shopify.
 - The recovery report counts HyFib's own records only (reminders handed to WhatsApp and not failed,
   checkouts Shopify reports completed after one of them); it is not revenue attribution.
+
+Phase 4 rules (Store events in automations, P4-06e):
+
+- Choosing an automation on an order rule needs `commerce.manage` and `automations.read`, plus
+  `campaigns.send` when the automation's live version sends a marketing template; the automation
+  must exist in the company (RLS), be active, start from order messages and allow the rule's
+  number, and its templates must belong to that number's WhatsApp account. Publishing or testing an
+  automation that sends marketing templates needs `campaigns.send`, as choosing one for a rule or
+  a template send does. Rule changes are audited (`commerce.store_message_rule_saved` with the
+  action and automation).
+- An automation with the order messages trigger never starts from a customer message. A rule starts
+  it only after the order message checks, and only for a number that is not suppressed and a
+  contact who is not erased or opted out, in a conversation that is not assigned and has no active
+  run, within 10 runs per conversation per hour. The run and the store message's state are written
+  in one transaction under the store message's row lock, so a repeated job starts nothing more.
+- WhatsApp allows only templates until the customer replies: the builder refuses a message or
+  question any path reaches before a reply in such an automation, and the send worker's window check
+  still stops a session message that gets through. Each template step checks, when it runs, that the
+  template is approved and still utility or marketing, with the variables and quick-reply buttons
+  the step expects, on an active number of the template's account; the contact's consent for the
+  category; and, for marketing, the frequency cap under the campaign runner's company lock. The
+  runner holds the conversation's lock, so it only tries that lock and tries the step again later
+  when it is busy (never waiting, which could deadlock with the campaign runner). The send worker
+  checks the template and consent again at dispatch. A variable left empty sends nothing.
+- A quick-reply payload names the run, the step and the visit, and a tap counts only for that step
+  and visit of that run; the run itself is bound to its conversation, so a tap from another
+  conversation never reaches it. A tap from an older visit or another step selects nothing.
+- A run keeps its order's id, not a copy, and reads the order when a step runs; the order page,
+  report and run page show the order only with `commerce.read`, and runs only with
+  `automations.read`. Testing with an order needs `commerce.read` and `contacts.read`, as seeing
+  store orders does, because its steps send the customer's details to the tester's conversation.
+  An order deleted with its store clears the reference; a redacted order has no values.
 
 Platform roles (`ops.platform_admins`): `platform_owner` and `platform_operator`. Both require MFA;
 all actions are audited; neither can read customer content without a support grant.

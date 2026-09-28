@@ -1,5 +1,108 @@
 # Progress
 
+## 2026-09-28 — Phase 4: store events in automations (P4-06e)
+
+Status: **Store events in automations implemented and locally verified; production blocked on
+checks with a Shopify development store (and a WooCommerce test site), approved templates on a
+sandbox number and a test recipient, and on the Shopify app approvals of P4-06b.** A store's rule
+for an order event can start a published automation instead of sending its template, and every
+automation can send approved templates, including questions answered with the template's quick
+replies, outside the customer service window. Every Phase 4 slice in the backlog (P4-01 to P4-06e)
+is now built; their remaining work, the store follow-ups not built (P4-06f) and the Phase 4 gate's
+checks with real providers (release checklist) stay open. No request
+reached Shopify or Meta: both were the test-only stand-ins in `tests/support/`, and the customer's
+taps were webhooks signed by the tests.
+
+### Completed
+
+- **Design (ADR-050):** the rule for a store and event says what happens: send its template, as
+  before, or start a chosen automation whose trigger is "An order event in a store" (`store_event`),
+  which never matches a customer message. Every guarantee of ADR-048 stays: one store message per
+  order and event, nothing about the past, test orders and late events recorded without sending, the
+  delay and the sending hours. Order placed, shipped, delivered (Shopify) and cancelled can start
+  automations; the cash on delivery confirmation and the cart reminders keep their templates.
+- **Schema (migration 0022):** runs gain the order they are about (a composite foreign key, set null
+  when the order is deleted) and the event, and the `store_event` trigger type, with a check that
+  only store-event and test runs carry an order; `app.guard_automation_run` keeps the event fixed
+  and lets the order reference only be cleared. Rules gain `action` and `automation_id` (a composite
+  foreign key; only the four order events may start automations; an enabled rule needs its template
+  or its automation). Store messages gain the `started` state and the run they started (set null
+  when retention deletes the run; unique). Column grants for the two rule columns and the store
+  message's run.
+- **Starting a run (`stores/order-automations.ts`):** at the store message's send time, under its
+  row lock, the order message checks run first; then the automation (active, its live version starts
+  from order events and allows the rule's number), the number (active, not suppressed), consent, the
+  conversation (created resolved like a template's; not assigned, no active run) and fewer than 10
+  runs in it in the last hour. The run, its first step log line and the store message's `started`
+  state are written in one transaction, so a repeated job or the sweep starts nothing more.
+- **Template steps:** "Send a template" and "Ask with a template" (a branch per quick-reply button,
+  one for any other reply, one for no reply within the timeout). Variables are texts with
+  placeholders; each quick reply carries the bot button id (run, step, visit and position, now 0 to 9) as its payload, so a tap answers only the step and visit that sent it. When a step runs, the
+  runner checks again the template (approved, utility or marketing, the variables and quick replies
+  the step expects), the number (active, of the template's account), the contact (not erased, a
+  number), a value for every variable, consent for the template's category and, for marketing, the
+  company's frequency cap under the campaign runner's company lock, which the runner only tries (it
+  holds the conversation's lock; a busy lock retries the step two seconds later).
+- **Checks in the builder:** in store-event automations, a message or question that a path reaches
+  before the customer's reply is refused (templates only until then) and a hand-off there warns;
+  order fields (`{{order.number}}` and eight more) are allowed only in store-event automations;
+  template steps are checked against the company's synced templates; the warning after a wait or a
+  question timeout over 23 hours now appears only when a message that is not a template can follow.
+  Publishing or testing with a marketing template needs `campaigns.send`.
+- **Runs in closed conversations:** a store-event run continues while its conversation stays
+  resolved as it was at the start; the customer's reply reopens it and reaches the run; a
+  conversation resolved again later stops the run.
+- **Order data:** each step reads the order as it is now (`stores/order-values.ts`); a deleted or
+  redacted order gives no values and a template variable left empty fails the step without sending.
+- **Pages:** the trigger and both template steps in the builder (template choice, variables, a
+  branch per quick reply, the timeout, the order fields listed), the simulator with a sample order
+  and tappable quick replies, a test with a chosen order, "Order messages that start it" on the
+  automation page, the order on the run page; the rule form's "What happens" choice and automation,
+  and "Automation started" with a link to the run in the store's report and on the order page.
+- **Docs:** ADR-050, ARCHITECTURE §6E and §6M, SECURITY (the store automation controls, Phase 4
+  rules), THREAT-MODEL T60 to T63, DATA-RETENTION, RUNBOOKS §10L, RELEASE-CHECKLIST, FEATURE-MATRIX
+  (W-076, W-084, W-116, W-118, H-022, H-029, new H-031), BACKLOG (P4-01 and P4-06e built, P4-06f).
+- **Found while building:**
+  - **Deadlock (designed out before commit).** The campaign runner holds the company lock while it
+    writes conversations, and the automation runner holds a conversation's lock when a template step
+    counts the frequency cap, so waiting for the company lock could deadlock. The runner only tries
+    it and retries the step shortly.
+  - **Tests with an order (fixed before commit).** A test of a store-event automation needed only
+    `commerce.read`, but its steps send the customer's details to the tester's conversation. It now
+    also needs `contacts.read`, as seeing store orders does, and orders are offered only then.
+  - **The long-wait warning (fixed before commit).** It said that every later message of a run
+    would fail after a day without the customer, also when only templates follow. It now follows
+    the paths after the wait or timeout.
+  - **A deleted draft (fixed before commit).** A switched-off rule can name an automation that was
+    never published, and deleting that draft failed on the rule's foreign key. The key now clears
+    the reference, and a rule that sends its template no longer keeps an automation.
+  - **Mutation checks:** 68 guards across the graph checks, the interpreter, the runner, the start,
+    the rule checks, the store message service, the automation service and the migration's foreign
+    keys were broken one at a time. One survived at first (a quick reply added to the template after
+    the step's buttons); a new unit case catches it. With the guards added later (two permission
+    checks, four in the long-wait warning, two for the rule's automation reference), all 76 make a
+    test fail.
+
+### Test commands and results (local, 2026-09-28, fresh database)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `pnpm test` (unit)                                                          | 234 passed. New: `automations/templates.test.ts` 25 (the trigger, bot button ids up to position 9, template step parsing, order placeholders, sending and asking with templates, taps from another run, step or visit, the reply rule on every path, a hand-off before a reply, order fields, the company's copy of the template, answers saved on button branches, loops, and the warning after a day without the customer)                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 282 passed, including `stores.test.ts` 29 (5 new: an order starting its automation, the template sent outside the window with the order's values and bot payloads, a repeated job starting nothing, the customer's tap, a stale tap, a customer message starting nothing, and the report, order page, run and automation pages with their permissions; every reason not to start; every check when a step runs, including the company lock tried and retried, the frequency cap, a template changed at Meta, a conversation resolved later and a deleted order; rule checks, permissions and isolation, a test with a chosen order (refused without `contacts.read`), references cleared by the order's deletion, retention and a deleted draft; a keyword automation following up with a template after the window closed). The tenant-isolation suite passes unchanged (no new tables) |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 56 passed (28 × 2) in one full run (9.5 min) on the final code. New in `stores.spec.ts`, on both projects: an automation started by order events built around an "Ask with a template" step (the reply rule shown until it starts with the template), tried in the simulator with a sample order and a quick-reply tap, and published; the store's "Order placed" rule set to start it; a new order, the template sent through the Graph stand-in with the order's values and a bot payload per quick reply; the customer's signed tap answered with the order's details; and the report's "Automation started" row linking the run, whose page names the order. An earlier full run was stopped after 20 passing tests to rebuild with the last fixes                                                                                                                    |
+| Mutation checks                                                             | 76 guards broken one at a time; each makes the unit or integration tests fail (one only after the new unit case above)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+
+### Known gaps
+
+- Not built: messages per shipment or on tracking changes, cash on delivery confirmations and cart
+  reminders starting automations, conditions on order fields, changing the order from a run,
+  enrolling contacts or segments in a sequence without a customer message or an order event,
+  templates with media headers or variable buttons in template steps (P4-06f, P4-01 remaining).
+- Verified against the stand-ins only. Approved templates on a sandbox number, the quick-reply taps
+  on Android and iOS, a development store's order starting an automation, and Firefox and WebKit
+  locally (they run in CI) are release checklist items.
+
 ## 2026-09-27 — Phase 4: cart reminders (P4-06d)
 
 Status: **Cart reminders implemented and locally verified; production blocked on checks with a

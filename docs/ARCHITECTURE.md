@@ -348,18 +348,28 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 
 - **Model** (`packages/domain/src/automations/graph.ts`, browser-safe): a trigger (a message is or
   contains a keyword; a customer starts a conversation; any customer message; optionally only while
-  the business is open or closed; a cooldown per conversation) and a graph of typed steps: send a
-  message, ask with reply buttons (Meta's limits: 1–3 buttons, titles ≤ 20, body ≤ 1024, header and
-  footer ≤ 60; research M-157/M-159), ask a question (any text, a number or an email; retries;
-  answer saved under a name), condition (answers, contact fields, tags, business hours), update
-  contact (tags, custom fields), wait (≤ 24 h), hand off to people (a team, or routed like a new
-  case), end. Texts may use `{{name}}`, `{{company}}` and `{{answer.<name>}}`. `checkGraph` rejects
-  missing targets, unsaved answers, unknown placeholders, missing teams or fields, and loops that
-  never pass through a question or a wait.
+  the business is open or closed; a cooldown per conversation; or started by a store's order
+  messages, §6M) and a graph of typed steps: send a message, ask with reply buttons (Meta's limits:
+  1–3 buttons, titles ≤ 20, body ≤ 1024, header and footer ≤ 60; research M-157/M-159), ask a
+  question (any text, a number or an email; retries; answer saved under a name), send a template and
+  ask with a template (an approved utility or marketing template with its variables as texts; the
+  asking step branches on each quick-reply button, any other reply and no reply; ADR-050), condition
+  (answers, contact fields, tags, business hours), update contact (tags, custom fields), wait
+  (≤ 24 h), hand off to people (a team, or routed like a new case), end. Texts may use `{{name}}`,
+  `{{company}}`, `{{answer.<name>}}` and, in automations started by order messages,
+  `{{order.<field>}}`. `checkGraph` rejects missing targets, unsaved answers, unknown or misplaced
+  placeholders, missing teams or fields, loops that never pass through a question or a wait, empty
+  template variables, templates HyFib cannot send or whose variables, buttons or account no longer
+  match (checked against the company's synced templates), and, in automations started by order
+  messages, a message or question that some path reaches before the customer replied. A wait or a
+  question timeout over 23 hours warns only when a message that is not a template can follow it
+  before a reply (templates need no window, so a run can follow up a day or more later).
 - **Interpreter** (`automations/interpreter.ts`): a pure function (graph, run state, event, facts)
-  → new state, effects, log entry; one call is one step. Reply buttons carry
-  `w360bot:<run>:<step>:<visit>:<index>`, so a tap answers exactly the question it belongs to; a
-  typed reply equal to a button title counts as that button. Budgets end runaway runs.
+  → new state, effects, log entry; one call is one step. Reply buttons, and the quick-reply buttons
+  of an asking template step (as their payload), carry `w360bot:<run>:<step>:<visit>:<position>`
+  (position 0–9), so a tap answers exactly the question it belongs to; a typed reply equal to a
+  button title counts as that button. A template variable left empty after filling in placeholders
+  fails the run without sending. Budgets end runaway runs.
 - **Versions** (migration 0011): drafts are edited freely (`automations.write`); publishing
   (`automations.publish`) checks the draft and freezes trigger, graph and number into a numbered,
   immutable `automation_versions` row that new runs use. Test runs use immutable test snapshots of
@@ -374,8 +384,13 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   conversation lock then run lock; checks the hand-off lock, resolve and the 7-day age; loads the
   pinned version's graph (cached: versions never change) and the contact facts; applies effects —
   bot messages through the send pipeline (active number, open window and a WhatsApp id checked
-  first; a blocked send fails the run), contact updates as single statements, hand-off routing —
-  appends the step log row and stores the position. A queued bot message holds the run
+  first; a blocked send fails the run), template steps through the same pipeline without the window
+  (template approved and still utility or marketing, the variables and quick-reply buttons the step
+  expects, the number of the template's account, consent for the category, and for marketing the
+  frequency cap under the campaign runner's company lock, which the runner only tries: busy, the step
+  runs again two seconds later), contact updates as single statements, hand-off routing — appends
+  the step log row and stores the position. A run started by order messages reads its order for
+  each step with texts and may run while its conversation stays resolved as it was at the start. A queued bot message holds the run
   (`pending_message_id`) until the send worker records Meta's acceptance and signals the run; a
   rejected, cancelled, unknown or late (10 minutes) send, or a failure Meta reports later, fails the
   run (`send_failed`) and hands the conversation to people, so a run never moves on or completes on
@@ -408,8 +423,8 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   requests manages domains and secrets (`integrations.manage`); run pages list each call (method,
   host, path, outcome).
 - **Not built yet:** WhatsApp Flows steps (P4-03), catalog steps (P4-06), starting a run through the
-  public API (P5), fuzzy keyword matching, template follow-ups outside the service window, usage
-  billing.
+  public API (P5), fuzzy keyword matching, templates with media headers or variable buttons in
+  template steps, usage billing.
 
 ## 6F. CRM **[built — reminder emails verified through Mailpit only]**
 
@@ -676,8 +691,8 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   cash on delivery buttons); the report with reasons. Order pages show payment, shipping, tracking and
   the order's messages with the customer's answer; the inbox labels the message with its store and
   event.
-- **Not built yet:** store events as automation triggers (P4-06e), messages per shipment or on
-  tracking changes, changing orders in the store from a customer's answer. Cart reminders are §6L.
+- **Not built yet:** messages per shipment or on tracking changes, changing orders in the store from a
+  customer's answer. Cart reminders are §6L; rules that start automations are §6M.
 
 ## 6L. Cart reminders **[built — verified against the local Shopify and Graph stand-ins only; no live store or WhatsApp traffic]**
 
@@ -726,7 +741,42 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   (customer access, the store consent setting, the report and read errors) and a form per reminder;
   the report table names the checkout. The contact page labels consent the store recorded.
 - **Not built yet:** WooCommerce carts (no API, WC-023), checkout webhooks, writing consent back to
-  Shopify, store events as automation triggers (P4-06e).
+  Shopify, cart reminders that start automations.
+
+## 6M. Store events in automations **[built — verified against the local Shopify and Graph stand-ins only; no live store or WhatsApp traffic]**
+
+- **Model** (migration 0022, ADR-050): an order message rule has an `action` (send its template, or
+  start `automation_id`; only order placed, shipped, delivered and cancelled may start one). Runs
+  gain `store_order_id` (the order they read; set null when it is deleted) and `store_event`, and
+  the `store_event` trigger type; store messages gain the `started` state and `automation_run_id`
+  (set null when retention deletes the run). The run guard keeps `store_event` fixed and lets
+  `store_order_id` only be cleared.
+- **Starting** (`stores/order-automations.ts`, from the `commerce.store-message` job): after the order
+  message checks (store, opt-in, rule start, sending hours, order, number), the automation must be
+  active with a live version that starts from order messages and allows the rule's number; the
+  number active and not suppressed; the contact not erased or opted out; the conversation (created
+  resolved when new) not assigned and without an active run; fewer than 10 runs there in the last
+  hour. The run and the store message's `started` state are written in the store message's
+  transaction, so one store message starts at most one run. Automations with this trigger never
+  match customer messages (`dispatch.ts`).
+- **Running** (`automations/runner.ts`, §6E): each step with texts reads the order as it is now
+  (`stores/order-values.ts`; a deleted or redacted order gives empty values); template steps send
+  outside the window; the run continues while its conversation stays resolved as it was at its
+  start, the customer's reply reopens it, and a conversation resolved later stops the run; routing at
+  the end touches only open conversations.
+- **Service** (`stores/messages-service.ts`, `automations/service.ts`): choosing an automation on a rule
+  needs `commerce.manage` and `automations.read` (and `campaigns.send` for one with a marketing
+  template), and its templates must belong to the rule's number's account; publishing or testing an
+  automation with a marketing template needs `campaigns.send`; a test run of a store-event
+  automation reads an order the member chooses (`commerce.read`). The Order messages report and the
+  order page show automations started and their outcome (the run linked for `automations.read`), the
+  run page the order (`commerce.read`), the automation page the rules that start it.
+- **Web**: the builder's "An order event in a store" trigger with the order fields, the template step
+  fields (template, variables, a branch per quick reply, other reply, no reply), the simulator's
+  sample order and quick replies, the test form's order choice; "What happens" on the store's rule
+  forms.
+- **Not built yet:** cash on delivery confirmations and cart reminders in automations, conditions on
+  order fields, changing the order from a run, messages per shipment or on tracking changes.
 
 ## 7. Commercial model and billing **[built: wallet, top-ups, auto-recharge — verified against a local Razorpay stand-in only; subscriptions planned]**
 

@@ -1,6 +1,6 @@
 # Runbooks
 
-Last updated 2026-09-26. Procedures marked **(phase N)** apply once that capability ships. Every
+Last updated 2026-09-28. Procedures marked **(phase N)** apply once that capability ships. Every
 action on customer data requires a support grant (`/platform`) with a reason; every platform action is
 audited. Never paste tokens, message content or card data into tickets or chat.
 
@@ -705,6 +705,64 @@ attribution: the customer may have come back anyway.
 `SET ROLE w360_definer` (ADR-039), with column grants and a policy for `w360_definer` on
 `commerce_store_checkouts`; a failure there usually means the bootstrap roles are missing
 (`infra/db/bootstrap-roles.sql`). It also redefines the consent source and store message event checks.
+
+## 10L. Store events in automations
+
+**An order rule set to start an automation started nothing.** The store's Order messages report
+shows "Automation started" with a link to the run, or "Not sent" with the reason; the order page
+lists the same. The reasons specific to automations:
+
+- "The automation was paused or archived, or its live version no longer starts from order
+  messages" — publish a version whose trigger is "An order event in a store" and keep the
+  automation active. The rule keeps pointing at the automation meanwhile.
+- "The WhatsApp number is not active or does not match the template" — also shown when the live
+  version is limited to another number than the rule's.
+- "A team member was handling the conversation with the customer" — the conversation was assigned;
+  automations never interrupt members.
+- "Another automation was handling the conversation with the customer" — one run per
+  conversation; the order is not queued behind it.
+- "Automations had already started too often in this conversation within the hour" — at most 10
+  runs per conversation per hour, whatever started them.
+- "suppression list", "opted out", "erased" — checked before the run starts; each template step
+  checks consent for its own template's category again.
+
+**The run started but the customer got nothing, or not everything.** Open the run (from the report,
+or Automations → Runs). A template step that cannot be sent ends the run as "A message could not be
+sent" with the reason:
+
+- "the template's variables or quick-reply buttons changed after the step was set up" — choose the
+  template again in the step (the automation lists the problem) and publish a new version.
+- "the template is no longer approved…", "the WhatsApp number is not active or does not match the
+  template" — fix the template or the number; the automation lists the problem too.
+- "a template variable was empty after filling in placeholders" — an order field had no value (a
+  tracking number before shipping, for example), the order was deleted, or its customer was
+  redacted or erased. Use the fields the event always has.
+- "has not opted in", "as many marketing messages as the company allows" — marketing templates
+  follow the campaign rules: marketing opt-in and the company's frequency cap.
+
+A template step whose company lock is held by the campaign runner tries again every 2 seconds until
+the lock is free; during a large campaign send the run's next step time moves forward without new
+step log lines. That is expected.
+
+**The customer's tap did nothing, or went to "Other reply".** A tap counts only on the template
+message of the step the run is waiting on, in the same visit of that step; taps on older messages,
+of another run or of another step follow the step's "Other reply" path (or end the run when it has
+none). Typing a button's title counts as tapping it. After the step's timeout the run has followed
+the timeout path, and once the conversation is assigned, taken over or resolved again, the run has
+stopped.
+
+**Publishing is refused with "WhatsApp allows only templates until the customer replies".** An
+automation started by order messages begins outside the 24-hour window, so every path must send a
+template (and get the customer's reply) before any other message; continue from the reply branches
+of an "Ask with a template" step. The hand-off warning means people see the conversation only once
+the customer writes.
+
+**Migration 0022 failed.** It runs in one transaction, so a failure applies nothing. It replaces
+the trigger function `app.guard_automation_run` (an ordinary trigger function, not SECURITY DEFINER),
+adds the run's order reference and event, the rule's action and automation, the store message's run,
+their checks and foreign keys, and column grants for `w360_app`. The new columns start empty, so the
+new checks hold for existing rows; a failure usually means the bootstrap roles are missing
+(`infra/db/bootstrap-roles.sql`).
 
 ## 11. Compromised company (tenant) or account
 

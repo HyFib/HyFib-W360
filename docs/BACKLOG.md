@@ -1,7 +1,7 @@
 # Backlog
 
 Dependency-ordered. Each item lists acceptance criteria (AC), tests (T) and prerequisites (PR).
-Status values follow the feature matrix. Last updated 2026-09-26.
+Status values follow the feature matrix. Last updated 2026-09-28.
 
 ## Phase 1 — foundation (done; CI green on PR #1)
 
@@ -108,8 +108,11 @@ verification, app review, Embedded Signup configuration).
   runs of the draft on a real conversation; the bot/human hand-off lock with Take over; step logs,
   captured answers with retention; an automation report section; a builder with a generated diagram
   and an in-browser simulator. T: restart and lost signals resume from the stored position; bot and
-  person never answer at once. **Remaining:** Flow and catalog steps (sending a WhatsApp Flow or products from a run), starting runs from the public API or campaigns, template follow-ups outside the service
-  window, fuzzy keyword matching, a drag-and-drop canvas (ADR-034), run export, usage billing for
+  person never answer at once. Template steps (send a template, ask with a template's quick replies)
+  and the order-event trigger came with P4-06e. **Remaining:** Flow and catalog steps (sending a
+  WhatsApp Flow or products from a run), starting runs from the public API or campaigns, enrolling
+  contacts or segments in a sequence without a customer message or order event, fuzzy keyword
+  matching, a drag-and-drop canvas (ADR-034), run export, usage billing for
   automation steps, a real sandbox run (release checklist).
 - **P4-02 HTTP node + egress guard** — _implemented and locally verified (2026-09-27) against a
   local target server only_: "Call a web address" steps (method, address with URL-encoded
@@ -253,9 +256,27 @@ verification, app review, Embedded Signup configuration).
   approved marketing template and a WhatsApp test number (release checklist): the staff permission
   for checkouts (SH-037), customer access on an installed store (SH-042), Shopify's consent at a
   real checkout (SH-041).
-- **P4-06e Store events in automations**: store events as automation triggers, which needs a
-  template step for messages outside the service window and order data given to a run when it
-  starts (P4-01 remaining work); messages per shipment or on tracking changes.
+- **P4-06e Store events in automations** — _implemented and locally verified (2026-09-28) against
+  the Shopify and Graph stand-ins; no live store or WhatsApp traffic yet_ (ADR-050): an order rule
+  (placed, shipped, delivered on Shopify, cancelled) can start a published automation instead of
+  sending its template; the "An order event in a store" trigger never matches a customer message;
+  the rule's checks, then the automation, number, consent, conversation (not assigned, no other run)
+  and the hourly run limit before a run starts with a reference to the order; template steps ("Send
+  a template", "Ask with a template" whose quick replies are branches, with payloads bound to the
+  run, step and visit) with order fields, checked again when they run (template, number, consent,
+  marketing opt-in, the frequency cap under the campaign runner's company lock, tried so a busy
+  lock retries the step); only templates before the customer replies, checked on every path; the
+  long-wait warning only when a message that is not a template follows; the store's report, the
+  order page and the run page link each other; tests with a chosen order. T: `stores.test.ts`
+  (5 tests, including a keyword automation that follows up with a template after the window
+  closed), unit tests `automations/templates.test.ts`, e2e `stores.spec.ts` (an order starting an
+  automation whose template the customer taps); 76 deliberate regressions caught. **Remaining:**
+  checks with a development store, approved templates and a WhatsApp test number (release
+  checklist).
+- **P4-06f Store follow-ups not built yet**: messages per shipment or on tracking changes (a rule
+  fires once per order and event); cash on delivery confirmations and cart reminders starting
+  automations (their answers and checks depend on their own templates); order data other than the
+  fields listed (for example addresses or discount codes).
 
 ## Phase 5 — billing, wallet, platform, public API
 

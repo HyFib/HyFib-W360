@@ -553,3 +553,160 @@ test('cart reminders use the consent the store records and remind a customer who
   await expect(report).toContainText('Recovered value: ₹2,499.00');
   await expectNoHorizontalOverflow(page);
 });
+
+test('a store’s order starts an automation that sends a template, waits for the customer’s tap and answers with the order’s details', async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(300_000);
+  const { slug, wabaId, phoneNumberId } = await newCompany(page, 'storebot', 'Tara Tea');
+  await approvedTemplate(page, request, slug, wabaId, {
+    name: 'order_followup',
+    body: 'Hi {{1}}, thanks for order {{2}}. Need anything?',
+    examples: ['Asha', '#1001'],
+    quickReplies: ['Track order', 'Talk to us'],
+  });
+  const shop = `tara-${Date.now().toString(36)}.myshopify.com`;
+  await openStores(page);
+  await page.getByLabel('Shopify store').fill(shop);
+  await page.getByRole('button', { name: 'Connect with Shopify' }).click();
+  await expect(page).toHaveURL(/\/commerce\/stores\/[0-9a-f-]{36}$/);
+  await reloadUntil(page, () => page.getByText('Connected', { exact: true }));
+  const storeUrl = page.url();
+  await page.getByRole('link', { name: 'Order messages' }).click();
+  const settings = page.getByRole('form', { name: 'Message settings' });
+  await settings.getByLabel(/customers agreed to receive order messages/).check();
+  await settings.getByRole('button', { name: 'Save settings' }).click();
+  await expect(settings.getByText('Settings saved.')).toBeVisible();
+
+  // The automation: started by order messages, it asks with the template first (only templates
+  // reach a customer who has not written) and answers "Track order" with the order's details.
+  await openFromNav(page, 'Automations');
+  await page.getByLabel('Name', { exact: true }).fill('Order follow-up');
+  await page.getByRole('button', { name: 'Create draft' }).click();
+  await expect(page.getByRole('heading', { name: 'Order follow-up' })).toBeVisible();
+  await page.getByLabel('Start when').selectOption('store_event');
+  await expect(page.getByText(/only templates until the customer replies/).first()).toBeVisible();
+  await page.getByLabel('Add a step').selectOption('ask_template');
+  await page.getByRole('button', { name: 'Add step' }).click();
+  await expect(page.locator('#step-ask-template-1-template')).toHaveValue(/[0-9a-f-]{36}/);
+  await page.locator('#step-ask-template-1-body-0').fill('{{order.customer_name}}');
+  await page.locator('#step-ask-template-1-body-1').fill('{{order.number}}');
+  await page.getByLabel('First step', { exact: true }).selectOption('ask-template-1');
+  await page.getByRole('button', { name: 'Delete step welcome' }).click();
+  await page.getByLabel('Add a step').selectOption('send_text');
+  await page.getByRole('button', { name: 'Add step' }).click();
+  await page
+    .locator('#step-send-text-1-text')
+    .fill('Order {{order.number}} ({{order.items}}): {{order.status_url}}');
+  await page.locator('#step-ask-template-1-button-0').selectOption('send-text-1');
+  await expect(page.getByText(/to fix before publishing/)).toBeHidden();
+  await expectNoHorizontalOverflow(page);
+  // The simulator reads a sample order and offers the template's quick replies.
+  await page.getByRole('button', { name: 'Start', exact: true }).click();
+  await expect(page.getByText('Hi Asha, thanks for order #1001. Need anything?')).toBeVisible();
+  await page.getByRole('button', { name: 'Track order', exact: true }).click();
+  await expect(
+    page.getByText('Order #1001 (Darjeeling tea and 2 more): https://shop.example/orders/1001'),
+  ).toBeVisible();
+  await page.getByRole('button', { name: 'Save draft' }).click();
+  await expect(page.getByText('Draft saved.')).toBeVisible();
+  await page.getByRole('button', { name: 'Publish' }).click();
+  await page.getByRole('alertdialog').getByRole('button', { name: 'Publish' }).click();
+  await expect(page.getByText(/Version 1 is live/)).toBeVisible();
+  await expect(page.getByText('No store rule starts it yet.')).toBeVisible();
+
+  // The store's "Order placed" rule starts it.
+  await page.goto(storeUrl);
+  await page.getByRole('link', { name: 'Order messages' }).click();
+  const placed = page.getByRole('form', { name: 'Order placed' });
+  await placed.getByLabel('What happens').selectOption('automation');
+  await placed.getByLabel('Automation', { exact: true }).selectOption({ label: 'Order follow-up' });
+  await placed.getByLabel('Start the automation').check();
+  await placed.getByRole('button', { name: 'Save' }).click();
+  await expect(placed.getByText('Saved.')).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+
+  // A new order: HyFib reads it, starts the automation, and the template goes out with the order's
+  // values and a payload per quick reply, although the customer never wrote.
+  const customer = randomWaId();
+  await control(request, `${SHOPIFY}/__stand-in/order`, {
+    shop,
+    order: {
+      id: '7201',
+      name: '#1201',
+      phone: `+${customer}`,
+      total: { amount: '1499.00', currencyCode: 'INR' },
+      shippingAddress: { name: 'Meena Customer', phone: null },
+      lineItems: [
+        {
+          name: 'Assam tea',
+          sku: 'A',
+          quantity: 1,
+          total: { amount: '1499.00', currencyCode: 'INR' },
+        },
+      ],
+    },
+  });
+  await control(request, `${SHOPIFY}/__stand-in/deliver`, {
+    shop,
+    topic: 'orders/create',
+    payload: { id: 7201, admin_graphql_api_id: 'gid://shopify/Order/7201' },
+  });
+  let sent: { wamid?: string; body: unknown } | undefined;
+  await expect(async () => {
+    sent = (await standInRequests(request)).find(
+      (r) => r.path.endsWith('/messages') && (r.body as { to?: string }).to === customer,
+    );
+    expect(sent?.wamid).toBeTruthy();
+  }).toPass({ timeout: 60_000 });
+  const template = (sent?.body as { template: { name: string; components: unknown[] } }).template;
+  expect(template.name).toBe('order_followup');
+  expect(template.components).toContainEqual({
+    type: 'body',
+    parameters: [
+      { type: 'text', text: 'Meena Customer' },
+      { type: 'text', text: '#1201' },
+    ],
+  });
+  const buttons = template.components.filter((c) => (c as { type: string }).type === 'button') as {
+    index: string;
+    parameters: { payload: string }[];
+  }[];
+  expect(buttons.map((b) => b.index)).toEqual(['0', '1']);
+  const track = buttons[0]?.parameters[0]?.payload ?? '';
+  expect(track).toMatch(/^w360bot:[0-9a-f-]{36}:ask-template-1:1:0$/);
+
+  // The customer taps "Track order": the automation answers with the order's details.
+  await sendSignedWebhook(
+    request,
+    templateButtonReply(
+      wabaId,
+      phoneNumberId,
+      customer,
+      { payload: track, text: 'Track order' },
+      String(sent?.wamid),
+    ),
+  );
+  await expect
+    .poll(
+      async () =>
+        (await standInRequests(request))
+          .filter((r) => (r.body as { to?: string } | null | undefined)?.to === customer)
+          .map((r) => (r.body as { text?: { body?: string } }).text?.body ?? null)
+          .filter(Boolean),
+      { timeout: 60_000 },
+    )
+    .toEqual([`Order #1201 (Assam tea): https://${shop}/orders/status/7201`]);
+
+  // The report shows the automation it started and its outcome; the run page names the order.
+  const row = page.getByRole('row').filter({ hasText: '#1201' });
+  await reloadUntil(page, () => row.getByText('Completed'), 45_000);
+  await expect(row.getByText('Automation started', { exact: true })).toBeVisible();
+  await row.getByRole('link', { name: 'Order follow-up' }).click();
+  await expect(page.getByRole('heading', { name: 'Run of Order follow-up' })).toBeVisible();
+  await expect(page.getByText('Started by a new order:')).toBeVisible();
+  await expect(page.getByRole('link', { name: '#1201' })).toBeVisible();
+  await expect(page.getByRole('table')).toContainText('Got an answer → Track order');
+  await expectNoHorizontalOverflow(page);
+});
