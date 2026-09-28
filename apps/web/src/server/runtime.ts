@@ -31,6 +31,7 @@ import {
   createStoreMessagesService,
   createCrmService,
   createBillingService,
+  createBillingHistoryService,
   createBusinessHoursService,
   createCampaignsService,
   createCsatService,
@@ -64,6 +65,7 @@ import {
   type CommerceService,
   type CrmService,
   type BillingService,
+  type BillingHistoryService,
   type BusinessHoursService,
   type CampaignsService,
   type CsatService,
@@ -172,6 +174,7 @@ export interface Runtime {
   /** Null until Razorpay is configured (card payments are then reported unavailable). */
   razorpay: RazorpayConfig | null;
   billing: BillingService;
+  billingHistory: BillingHistoryService;
   events: TenantEventHub;
   shutdown(): Promise<void>;
 }
@@ -377,6 +380,7 @@ async function init(): Promise<Runtime> {
     razorpayConfig: razorpay,
     notices: { outbox, appBaseUrl: config.APP_BASE_URL },
   });
+  const billingHistory = createBillingHistoryService({ db, clock: systemClock });
   const events = createTenantEventHub({ connectionString: config.DATABASE_URL_APP, logger });
 
   logger.info({ env: config.APP_ENV }, 'web runtime initialised');
@@ -428,6 +432,7 @@ async function init(): Promise<Runtime> {
     onboarding,
     razorpay,
     billing,
+    billingHistory,
     events,
     async shutdown() {
       await events.close();

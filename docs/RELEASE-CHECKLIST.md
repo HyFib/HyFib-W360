@@ -142,6 +142,11 @@ made. This checklist records the evidence required per gate; unchecked items blo
       (`DELETE /{WABA-ID}/subscribed_apps` answered by Meta, and no more webhooks for its numbers),
       a development Shopify store uninstalled, a Razorpay test card token deleted, the final email
       received, and the kept billing records reviewed with a tax adviser (legal basis and periods)
+- [ ] Statements and receipts on a staging deployment: a Razorpay test-mode payment's receipt shows
+      the method Razorpay reported and the payment and order ids, the payment-received email opens
+      that receipt, and a month's statement and CSV match the Razorpay Dashboard's payments for the
+      month; before live payments, a tax adviser decides what HyFib must issue for prepaid credit
+      (receipts are payment confirmations only; GST receipt vouchers or invoices are not built)
 - [ ] Tenant-isolation and security gates passing in CI on the release commit
 - [ ] Measured load behaviour against the test envelope (k6 results)
 - [ ] Backup restoration drill performed and timings recorded (RPO/RTO)

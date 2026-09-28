@@ -70,9 +70,15 @@ export async function resolveProviderOrder(
 
 export type CreditOutcome = 'credited' | 'already_credited' | 'not_captured';
 
+/** Razorpay payment methods are lower-case words (card, upi, netbanking, ...); 0029 checks the same. */
+const PAYMENT_METHOD_RE = /^[a-z_]{1,32}$/;
+
 /**
- * Credits a top-up from a payment fetched from Razorpay. The first credit is audited, and an
- * auto-recharge credit is announced to the owners, in the same transaction as the ledger posting.
+ * Credits a top-up from a payment fetched from Razorpay. The first credit is audited and emailed to
+ * the billing managers with a link to its receipt, in the same transaction as the ledger posting.
+ * The payment method Razorpay reported is recorded for the receipt (also for a top-up credited
+ * earlier, when the same payment is seen again); an unexpected method is left out, never failing
+ * the credit.
  */
 export async function creditFromPayment(
   deps: Pick<BillingProviderDeps, 'db' | 'notices'>,
@@ -88,9 +94,14 @@ export async function creditFromPayment(
     );
     const result = res.rows[0]?.result;
     if (!result) throw new Error('credit returned no result');
+    if (payment.method && PAYMENT_METHOD_RE.test(payment.method)) {
+      await tx.execute(
+        sql`select app.billing_record_payment_method(${topupId}::uuid, ${payment.id}, ${payment.method})`,
+      );
+    }
     if (result === 'credited') {
       const [topup] = await tx
-        .select({ kind: topups.kind, amountMinor: topups.amountMinor })
+        .select({ kind: topups.kind, amountMinor: topups.amountMinor, receipt: topups.receipt })
         .from(topups)
         .where(and(eq(topups.tenantId, scope.tenantId), eq(topups.id, topupId)));
       await recordSystemAudit(
@@ -108,14 +119,31 @@ export async function creditFromPayment(
         },
         { type: 'provider', id: 'razorpay' },
       );
-      if (topup?.kind === 'auto_recharge') {
-        await notifyBillingManagers(deps.notices, tx, scope, {
-          subject: 'Auto-recharge added service credit',
-          lines: [
-            `Your card was charged ${displayMoney(BigInt(topup.amountMinor), 'INR')} through your auto-recharge mandate, and the amount was added to your service credit.`,
-            'You can change or turn off auto-recharge in billing settings.',
-          ],
-        });
+      if (topup) {
+        const amount = displayMoney(BigInt(topup.amountMinor), 'INR');
+        await notifyBillingManagers(
+          deps.notices,
+          tx,
+          scope,
+          topup.kind === 'auto_recharge'
+            ? {
+                subject: 'Auto-recharge added service credit',
+                lines: [
+                  `Your card was charged ${amount} through your auto-recharge mandate, and the amount was added to your service credit.`,
+                  `The receipt (${topup.receipt}) is in billing; it is a payment confirmation, not a tax invoice.`,
+                  'You can change or turn off auto-recharge in billing settings.',
+                ],
+                billingPath: `receipts/${topupId}`,
+              }
+            : {
+                subject: 'Payment received: service credit added',
+                lines: [
+                  `We received your payment of ${amount}, and the amount was added to your service credit.`,
+                  `The receipt (${topup.receipt}) is in billing; it is a payment confirmation, not a tax invoice.`,
+                ],
+                billingPath: `receipts/${topupId}`,
+              },
+        );
       }
     }
     return result;

@@ -1,5 +1,87 @@
 # Progress
 
+## 2026-09-28 — Phase 5: billing statements and receipts (P5-07, part)
+
+Status: **Monthly statements and payment receipts implemented and locally verified with test
+data only.** Companies read their service credit month by month and download each month as CSV.
+Every paid top-up has a receipt, and the billing managers are emailed a link to it. Payments come
+from the Razorpay stand-in only. Receipts are payment confirmations, not tax invoices.
+
+### Completed
+
+- **Design (ADR-057):** statements are calendar months in the company's time zone, computed on
+  request from the append-only ledger in one repeatable-read, read-only snapshot. Opening balances
+  are the entries before the month, and closing balances are the opening plus every line. Receipts
+  confirm payments and say they are not tax invoices; GST documents wait for tax review. The
+  payment method Razorpay reported is recorded with the credit. Each credit is emailed with its
+  receipt link.
+- **Schema:**
+  - Migration 0029 adds `app.topups.payment_method`, the definer function
+    `app.billing_record_payment_method` (sets it once, only for the payment id that credited the
+    top-up), and an insert policy that keeps a new top-up from carrying a method.
+  - Migrations 0030 and 0031 build `ledger_entries_account_time_idx` (covering, for opening
+    balances) and `ledger_transactions_reference_idx` (a top-up's refunds and chargebacks)
+    concurrently, one statement per file: the runner sends a no-transaction file as one query,
+    which would put two concurrent builds in one implicit transaction.
+- **Domain (`billing/history.ts`):**
+  - month helpers (calendar months in a time zone, daylight-saving safe through campaigns/schedule);
+  - `statementMonths` (every month since the wallet was created, with totals and closing balances);
+  - `statement` (100 lines per page, balances carried across pages);
+  - `statementCsv` (opening and closing rows, exact rupees, audited as
+    `billing.statement_exported`);
+  - `receipt` (references, method, the saved card for automatic top-ups, refunds and chargebacks);
+  - `creditFromPayment` now records the method (also when a payment is seen again) and emails every
+    credit with its receipt link;
+  - the CSV guard lets plain negative numbers through as numbers.
+- **Web:** Billing → Statements (months), a month's statement (summary, lines, pages, print, CSV
+  download), a receipt page per paid top-up, Receipt links in the Payments table and on statement
+  lines, and a link to the statements from the credit history. The page chrome is hidden when
+  printing.
+- **Found while building:**
+  - Billing scrolled sideways on phones. Screen-reader-only text in table cells escaped the
+    table's scroll box, which was not positioned, and widened the page. The shared `Table` now
+    positions its box, fixing every table, and the billing pages constrain their grid columns.
+  - A stale "Plans: subscription plans are planned" card on Billing is removed; the plan card above
+    it already explains plans.
+  - One-time payments were labelled "Card payment", but Checkout also takes UPI and net banking.
+    They now read "One-time payment".
+- **Tests:**
+  - The Razorpay stand-in can report a payment method.
+  - The e2e fake Checkout moved into `tests/e2e/razorpay-checkout.ts`, shared by the billing specs.
+- **Docs:** ADR-057; ARCHITECTURE §7; SECURITY (controls and Phase 5 rules); THREAT-MODEL T81;
+  RUNBOOKS §9; DATA-RETENTION; RELEASE-CHECKLIST (statements and receipts on staging, tax
+  decision); BACKLOG (P5-02, P5-03, P5-05, P5-07); FEATURE-MATRIX H-035.
+- **Mutation checks:** 29 guards broken one at a time; all 29 make a test fail. They cover:
+  - month boundaries in both queries;
+  - line order and running balances;
+  - each total;
+  - months outside the wallet's life;
+  - page clamping and months carried forward;
+  - the CSV audit and the CSV number rule;
+  - receipts for unpaid top-ups and receipt contents;
+  - `billing.read`;
+  - recording the method, and the definer function's three conditions;
+  - the insert policy;
+  - the emails.
+
+### Test commands and results (local, 2026-09-28)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `pnpm test` (unit)                                                          | 293 passed. New: `billing/history.test.ts` 6 (month parsing, labels and steps, months in a time zone, Kolkata and London bounds, a midnight removed in Asunción and doubled in Havana, method labels) and 1 in `contacts/csv.test.ts` (plain negative numbers stay numbers, nothing longer does).                                                                                                                                                                                                                                                                                    |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 376 passed, including the new `billing-history.test.ts` 9: a UPI payment's receipt and its email with the receipt link; a redelivered payment adding nothing; a method filled in later; a refund on the receipt; no receipt for an unpaid top-up; runtime code unable to set a method (update, insert, another payment id or company, a recorded method); four fixture months that carry balances forward and reconcile; a time-zone change; 205 lines over three pages; the CSV rows and audit entry; this month matching the wallet balance; `billing.read` and company isolation. |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 72 passed (36 × 2) in one full run (12.9 min). New `billing-history.spec.ts` on both projects: a Checkout payment; Billing without sideways scrolling on a phone; the receipt (amount, "not a tax invoice", card through Razorpay, the payment id, the print button); the payment-received email linking to the receipt; the statements list with the month to date; the statement's credit line with its receipt link; the CSV download with the opening row, the credit line in exact rupees and the month-to-date row.                                             |
+| Mutation checks                                                             | 29 guards broken one at a time; all 29 make a test fail                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+
+### Known gaps
+
+- Tax invoices and GST documents (tax review), PDF files, statements for custom ranges, stored or
+  emailed monthly statements, staff views of statements and monthly rollups for high posting
+  volumes are not built.
+- The usage and rate card view and paying for plans in HyFib (other P5-07 screens) are not built.
+- Firefox and WebKit run the new spec in CI only; only Chromium is installed locally.
+
 ## 2026-09-28 — Phase 5: step-up re-authentication (P5-07, part)
 
 Status: **Step-up re-authentication implemented and locally verified.** Actions a stolen session

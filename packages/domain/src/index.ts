@@ -33,6 +33,7 @@ export * from './billing/attempts';
 export * from './billing/auto-recharge';
 export * from './billing/holds';
 export * from './billing/service';
+export * from './billing/history';
 export * from './plans/model';
 export * from './plans/entitlements';
 export * from './plans/service';

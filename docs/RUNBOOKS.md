@@ -155,6 +155,22 @@ app.auto_recharge_attempts WHERE tenant_id = … ORDER BY created_at DESC`. `unk
 8. **Integrity check** (read-only, any time):
    `SELECT tenant_id FROM app.ledger_accounts GROUP BY tenant_id HAVING sum(CASE WHEN normal_side =
 'debit' THEN balance_minor ELSE -balance_minor END) <> 0` must return no rows.
+9. **Statements and receipts** (Billing → Statements, and Receipt links, ADR-057). They are computed
+   from the ledger each time: nothing to regenerate or repair.
+   - **"A statement changed."** Statements follow the company's current time zone, and changing it
+     moves every month boundary. Otherwise a posting only appears afterwards if it committed after
+     the statement was generated, just after midnight (each statement shows when it was
+     generated).
+   - **"No receipt."** Only a top-up credited from a captured payment has one; a top-up still
+     awaiting payment shows none (see step 3).
+   - **"The method is missing."** Top-ups credited before 0029 have no recorded method. It is filled
+     in the next time Razorpay reports the payment (a redelivered `payment.captured` webhook
+     does it); never set it by hand.
+   - **"We need a tax invoice."** Receipts are payment confirmations, not tax invoices. GST
+     documents are not issued yet (tax review, RELEASE-CHECKLIST).
+   - **Migrations 0030 and 0031 failed.** They build `ledger_entries_account_time_idx` and
+     `ledger_transactions_reference_idx` concurrently outside a transaction. Drop the invalid index
+     (`DROP INDEX CONCURRENTLY IF EXISTS app.<index>`) and run the migrations again.
 
 ## 10. Contacts, consent and templates
 

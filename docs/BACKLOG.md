@@ -293,11 +293,16 @@ verification, app review, Embedded Signup configuration).
   plan-change emails to companies, API quotas (not built with P5-08) and AI credits (Phase 6).
 - **P5-02 Ledger** **[built, locally verified]**: accounts, append-only journal balanced at commit,
   balances by trigger, holds, settlements, releases (expiry sweep), refunds and chargebacks as
-  compensating postings; INR paise. Remaining: manual adjustments with dual approval, statements.
+  compensating postings; INR paise; monthly statements computed from the ledger (ADR-057).
+  Remaining: manual adjustments with dual approval. A credit adjustment breaks the rule that credit
+  comes only from a captured Razorpay payment (CLAUDE.md, 0004_billing), so it needs a product decision
+  before it is built.
 - **P5-03 Manual top-up** **[built; Razorpay traffic simulated by a test-only stand-in]**: top-ups,
   Razorpay orders (unique receipt), Standard Checkout, webhook processing (signature, event-id and
   body dedupe, out-of-order), authoritative fetch, credit exactly once, reconciliation sweep, expiry,
-  refunds, lost disputes. Remaining: Razorpay sandbox verification; payment receipts (PDF/email).
+  refunds, lost disputes; a receipt page per paid top-up with the method Razorpay reported, emailed
+  to the billing managers (ADR-057; printable, not a tax invoice). Remaining: Razorpay sandbox
+  verification.
 - **P5-04 Auto-recharge** **[built; externally blocked on Razorpay Recurring Payments]**: settings
   with caps, card mandate lifecycle (₹1 authorisation refunded, token status, removal), state machine
   with write-ahead unknown states, one active attempt, caps including pending attempts,
@@ -306,8 +311,9 @@ verification, app review, Embedded Signup configuration).
   top-ups on or changing them (ADR-056). Remaining: "requires customer action" state if Razorpay
   reports AFA for a debit.
 - **P5-05 Refunds, disputes, reconciliation runs, statements, receipts vs invoices.** Refunds and
-  lost disputes are recorded from webhooks; initiating refunds from the platform console, daily
-  reconciliation reports, statements and GST invoices remain (GST treatment needs tax review).
+  lost disputes are recorded from webhooks; statements and payment receipts are built (ADR-057,
+  receipts are payment confirmations, not tax invoices). Initiating refunds from the platform
+  console, daily reconciliation reports and GST invoices remain (GST treatment needs tax review).
 - **P5-06 Mandatory financial tests** **[29 integration tests + 2 e2e]**: concurrent spends on last
   funds; many low-balance triggers → one attempt; repeated and out-of-order events; timeout after
   capture (reconciliation); delayed success after UI timeout; decline; mandate revocation; cap
@@ -319,8 +325,11 @@ verification, app review, Embedded Signup configuration).
   usage & rate card, transactions & receipts, invoices; step-up auth for sensitive changes
   **[step-up built, locally verified]** (ADR-056: a sign-in within the last 15 minutes for the
   company export and deletion, payment settings, the company's Razorpay keys, API keys, webhook
-  endpoints, new owners and turning off required two-factor). Remaining: full transaction history
-  and statements, usage & rate card view, receipts and invoices (tax review).
+  endpoints, new owners and turning off required two-factor); **[statements and receipts built,
+  locally verified]** (ADR-057: Billing → Statements with every month since the first payment in
+  the company's time zone, opening and closing balances, every ledger line with running balances,
+  a printable page and an audited CSV; a receipt per paid top-up, emailed to billing managers).
+  Remaining: usage & rate card view, invoices (tax review), paying for plans in HyFib.
 - **P5-08 Public API** **[built, locally verified; sends through the Graph stand-in only]**
   (ADR-052): company API keys (SHA-256 only, scopes granted within the creator's permissions,
   expiry, rotation with an overlap, revocation, audit), `/api/v1` with approved template sends,

@@ -1,9 +1,14 @@
 import type { HTMLAttributes, TdHTMLAttributes, ThHTMLAttributes } from 'react';
 import { cn } from './cn';
 
+/**
+ * A table that scrolls sideways inside its own box on narrow screens. The box is positioned so that
+ * absolutely positioned content in cells (screen-reader-only text) is clipped with the table
+ * instead of widening the page.
+ */
 export function Table({ className, ...props }: HTMLAttributes<HTMLTableElement>) {
   return (
-    <div className="w-full overflow-x-auto">
+    <div className="relative w-full overflow-x-auto">
       <table
         className={cn('w-full caption-bottom border-collapse text-sm', className)}
         {...props}

@@ -48,6 +48,14 @@ describe('CSV writing', () => {
     expect(neutraliseCell('Asha')).toBe('Asha');
   });
 
+  it('keeps plain negative numbers as numbers and nothing longer', () => {
+    expect(neutraliseCell('-500.00')).toBe('-500.00');
+    expect(neutraliseCell('-7')).toBe('-7');
+    for (const payload of ['-500.00+1', '-1e5', '-.5', '-5.', '-1,000.00', '- 5', '-5.0.0']) {
+      expect(neutraliseCell(payload)).toBe(`'${payload}`);
+    }
+  });
+
   it('quotes values that need it and round-trips through the parser', () => {
     const line = csvLine(['+919876543210', 'Rao, "Asha"', '=HYPERLINK("x")', null, 42, true]);
     expect(line).toBe('+919876543210,"Rao, ""Asha""","\'=HYPERLINK(""x"")",,42,true\r\n');

@@ -1440,3 +1440,65 @@ emails the sign-in already produces. The cost is one more sign-in for rare actio
 
 **Not built:** WebAuthn or passkeys as the step-up factor, a step-up for platform staff actions
 (their MFA is checked on every platform request), and per-action windows.
+
+## ADR-057 Billing history: monthly statements computed from the ledger, payment receipts that are not tax invoices (2026-09-28)
+
+Decision: companies read their service-credit history as **monthly statements**. Each paid top-up
+has a **payment receipt**, and the billing managers get it by email. Both are computed on request
+from the append-only ledger (0004_billing); nothing is stored or rewritten, so a statement viewed
+twice shows the same postings. Reading needs `billing.read` (owners, administrators and the billing
+role). Downloading a statement as CSV is audited like the report exports.
+
+**Statements.** A statement covers one calendar month in the company's time zone, from local
+midnight on the 1st to local midnight on the 1st of the next month. Where a daylight-saving change
+removes or doubles midnight, the day starts at its first real instant (campaigns/schedule). Months
+run from the month the wallet was created to the current month, which is shown as "month to date".
+Everything on a statement comes from one repeatable-read, read-only snapshot:
+
+- **Opening balances** of available and reserved credit are the sums of those accounts' entries
+  before the month starts.
+- **Lines** are the month's ledger transactions in time order, each with its change to available
+  and to reserved credit and both balances after it.
+- **Totals** per kind are credit added, service charges, refunds to card and chargebacks.
+- **Closing balances** equal the opening balances plus the lines.
+
+Holds and releases only move credit between available and reserved, so they change neither the
+total nor any "money" total. The web shows 100 lines per page, with the running balance carried
+across pages. The CSV has every line of the month (at most 100,000) between an opening-balance row
+and a closing-balance row. Amounts are exact decimal rupees built from integer paise, and cells are
+formula-safe (contacts/csv).
+
+**Times.** Statements use the company's current time zone. Changing it moves the month boundaries
+of every statement, including past ones, and each statement names the time zone it used. A posting
+is dated when its database transaction started. In theory, a posting that starts just before
+midnight and commits just after can appear in a statement viewed after it committed but not in one
+viewed a moment earlier, so every statement shows when it was generated.
+
+**Receipts.** A top-up credited from a captured Razorpay payment has a receipt page showing:
+
+- the receipt number (the order receipt `tu_…`, which also appears in Razorpay);
+- the payment date, amount and method as Razorpay reported it (card, UPI, net banking, …), plus the
+  saved card's network and last four digits for an automatic top-up;
+- the Razorpay payment and order ids;
+- when the credit was added, and any refunds or chargebacks against the payment.
+
+The method is recorded with the credit by `app.billing_record_payment_method`. It is a definer
+function that sets the method once, and only on the top-up that the same payment id credited:
+runtime code still cannot change a paid top-up. Top-ups credited before 0029 show no method.
+Receipts never show or store card numbers.
+
+**Not a tax invoice.** A receipt confirms a payment for prepaid service credit. Each receipt says it
+is not a tax invoice. HyFib does not claim that it is a GST receipt voucher, which has prescribed
+particulars (supplier GSTIN, place of supply, tax breakdown). Tax invoices and GST treatment of
+prepaid credit wait for tax review (RELEASE-CHECKLIST, P5-05). The operator's legal name, address
+and GSTIN are not configured anywhere yet.
+
+**Emails.** When a top-up is credited, the company's billing managers get a payment-received email
+with a link to its receipt, in the same transaction as the credit. An automatic top-up's email,
+which already existed, now links to the receipt too.
+
+**Not built:** statements for custom ranges or years, PDF files (the pages print cleanly, and the
+browser saves them as PDF), stored or emailed monthly statements, staff views of a company's
+statements, tax invoices, and credit notes for refunds. Monthly rollups are not built either: the
+months list sums the wallet's whole ledger on each view. That is fine while only top-ups, refunds
+and chargebacks post, but a high-volume charging service (holds per request) will need rollups.

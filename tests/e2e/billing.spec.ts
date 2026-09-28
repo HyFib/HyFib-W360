@@ -1,54 +1,18 @@
 import { createHmac } from 'node:crypto';
 import { expect, test } from './fixtures';
+import { razorpayConfigured, routeFakeCheckout } from './razorpay-checkout';
 import { signUpAndVerify, uniqueEmail } from './support';
 
 const PASSWORD = 'correct horse battery staple 42';
-const razorpayPort = Number(process.env.E2E_RAZORPAY_PORT ?? '0');
-const standInUrl = `http://127.0.0.1:${razorpayPort}`;
-const configured = Boolean(
-  razorpayPort && process.env.RAZORPAY_KEY_SECRET && process.env.RAZORPAY_WEBHOOK_SECRET,
-);
-
 test.skip(
-  !configured,
+  !razorpayConfigured,
   'Razorpay test configuration (stand-in, key and webhook secrets) not provided',
 );
-
-/**
- * TEST-ONLY replacement for Razorpay's checkout.js, served to this browser by Playwright. It asks
- * the local stand-in (through an intercepted URL) to do what Standard Checkout does: take a card
- * payment on the server-created order and hand back the signed handler response.
- */
-const FAKE_CHECKOUT = `
-window.Razorpay = class {
-  constructor(options) { this.options = options; }
-  on() {}
-  open() {
-    fetch('https://checkout.razorpay.com/__e2e/pay?order_id=' + encodeURIComponent(this.options.order_id))
-      .then((r) => r.json())
-      .then((response) => this.options.handler(response));
-  }
-};`;
 
 test('an owner adds service credit by card and the balance updates once the payment is verified', async ({
   page,
 }) => {
-  await page.route('https://checkout.razorpay.com/v1/checkout.js', (route) =>
-    route.fulfill({ contentType: 'application/javascript', body: FAKE_CHECKOUT }),
-  );
-  await page.route('https://checkout.razorpay.com/__e2e/pay**', async (route) => {
-    const orderId = new URL(route.request().url()).searchParams.get('order_id');
-    const res = await fetch(`${standInUrl}/__stand-in/checkout`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ order_id: orderId }),
-    });
-    await route.fulfill({
-      status: res.status,
-      json: await res.json(),
-      headers: { 'access-control-allow-origin': '*' },
-    });
-  });
+  await routeFakeCheckout(page);
 
   const email = uniqueEmail('billing');
   const slug = `bill-${Date.now().toString(36)}`;

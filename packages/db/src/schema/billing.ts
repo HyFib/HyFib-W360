@@ -174,6 +174,8 @@ export const topups = appSchema.table('topups', {
   refundedMinor: paise('refunded_minor').notNull().default(0),
   failureReason: text('failure_reason'),
   creditedTransactionId: uuid('credited_transaction_id'),
+  /** Razorpay's payment method for the credited payment (0029); set by a definer function. */
+  paymentMethod: text('payment_method'),
   createdByUserId: text('created_by_user_id'),
   nextCheckAt: tz('next_check_at')
     .notNull()

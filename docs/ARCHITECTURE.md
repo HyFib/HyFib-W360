@@ -984,7 +984,7 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   (ADR-056).
 - **Not built yet:** staff-started deletion, stored exports and other formats.
 
-## 7. Commercial model and billing **[built: plans and entitlements, wallet, top-ups, auto-recharge — verified against a local Razorpay stand-in only; paying for plans in HyFib planned]**
+## 7. Commercial model and billing **[built: plans and entitlements, wallet, top-ups, auto-recharge, statements and receipts — verified against a local Razorpay stand-in only; paying for plans in HyFib and tax invoices planned]**
 
 - **Who pays Meta:** as a Meta Tech Provider HyFib has no credit line; each customer adds its own
   payment method and Meta bills them directly (`tenants.billing_mode = 'direct_meta'`, the default).
@@ -1057,6 +1057,30 @@ payment_requested → succeeded`; before each provider call it is written as `un
   request (pre-debit notice), so the UI asks for thresholds with headroom. Declines fail the attempt
   (audit + email to owners and billing members), three consecutive failures turn auto-recharge off,
   and turning it off or removing the card cancels attempts that have not requested a debit.
+- **Statements and receipts (0029–0031, ADR-057) [built]:** Billing → Statements lists every month
+  from the wallet's creation to the current one, in the company's time zone, with money in and out
+  and closing balances. A month's statement is computed on request from the ledger in one
+  repeatable-read, read-only transaction:
+  - opening balances are the available and reserved accounts' entries before local midnight on the
+    1st (the first real instant on daylight-saving days, using the covering index
+    `ledger_entries_account_time_idx`);
+  - the lines are the month's transactions in time order, 100 per page, with running balances from
+    a window over the month;
+  - the closing balances are the opening balances plus every line.
+
+  The CSV adds an opening-balance and a closing-balance row, with exact rupees built from paise. It
+  is audited as `billing.statement_exported`. Plain negative numbers stay numbers under the CSV
+  formula guard (contacts/csv).
+
+  A paid top-up has a receipt page with the receipt number `tu_…`, the Razorpay payment and order
+  ids, the method Razorpay reported, the saved card for an automatic top-up, and its refunds and
+  chargebacks (`ledger_transactions_reference_idx`). A receipt is a payment confirmation, not a tax
+  invoice. The method is recorded with the credit by `app.billing_record_payment_method`: a definer
+  function that sets it once, only when the same payment id credited the top-up. The insert policy
+  keeps a new top-up from carrying one. Each credit emails the billing managers a link to its
+  receipt, in the credit's transaction. Nothing is stored for statements; a statement viewed again
+  shows the same postings.
+
 - **Browser security:** the billing and WhatsApp-channels pages get their own CSP allowing only
   that provider's script and frame. Because a CSP belongs to the loaded document, links to these
   pages are full page loads and the pages reload once if reached by client-side navigation.

@@ -1306,6 +1306,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'refunded_minor',
       'failure_reason',
       'credited_transaction_id',
+      'payment_method',
       'created_by_user_id',
       'next_check_at',
       'paid_at',

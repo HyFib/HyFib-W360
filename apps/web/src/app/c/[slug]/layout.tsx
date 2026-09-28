@@ -35,7 +35,7 @@ export default async function TenantLayout({
 
   return (
     <div className="flex min-h-dvh flex-col md:flex-row">
-      <aside className="border-b border-border bg-sidebar md:w-64 md:shrink-0 md:border-b-0 md:border-r">
+      <aside className="border-b border-border bg-sidebar md:w-64 md:shrink-0 md:border-b-0 md:border-r print:hidden">
         <div className="md:sticky md:top-0 md:flex md:h-dvh md:flex-col">
           <div className="flex items-center justify-between gap-2 px-4 py-4">
             <Link
@@ -67,7 +67,7 @@ export default async function TenantLayout({
         </div>
       </aside>
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="hidden items-center justify-end gap-3 border-b border-border px-6 py-3 md:flex">
+        <header className="hidden items-center justify-end gap-3 border-b border-border px-6 py-3 md:flex print:hidden">
           <UserMenu
             name={ctx.user.name}
             email={ctx.user.email}

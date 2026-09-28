@@ -139,6 +139,8 @@ export interface RazorpayStandIn {
       status?: StandInPayment['status'];
       errorDescription?: string;
       tokenStatus?: StandInToken['status'];
+      /** The payment method Razorpay reports (default `card`). */
+      method?: string;
     },
   ): StandInPayment;
   setPaymentStatus(paymentId: string, status: StandInPayment['status'], error?: string): void;
@@ -256,6 +258,7 @@ export async function startRazorpayStandIn(options: {
       status?: StandInPayment['status'];
       errorDescription?: string;
       tokenStatus?: StandInToken['status'];
+      method?: string;
     } = {},
   ): StandInPayment {
     const order = state.orders.get(orderId);
@@ -288,7 +291,7 @@ export async function startRazorpayStandIn(options: {
       captured: status === 'captured',
       customerId: order.customerId,
       tokenId,
-      method: 'card',
+      method: opts.method ?? 'card',
       errorCode: status === 'failed' ? 'BAD_REQUEST_ERROR' : null,
       errorDescription: status === 'failed' ? (opts.errorDescription ?? 'Payment failed') : null,
       amountRefunded: 0,
