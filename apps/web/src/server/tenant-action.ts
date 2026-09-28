@@ -30,6 +30,7 @@ export async function tenantForAction(slug: unknown): Promise<TenantContext> {
     {
       userId: session.user.id,
       sessionId: session.sessionId,
+      sessionCreatedAt: session.sessionCreatedAt,
       tenantSlug: slug,
       correlationId: await correlationId(),
     },

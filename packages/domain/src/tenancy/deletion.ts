@@ -12,6 +12,7 @@ import {
   type Tx,
 } from '@w360/db';
 import { assertCan, type TenantContext } from '../authz/context';
+import { assertRecentSignIn } from '../authz/step-up';
 import { recordAudit, type RequestMeta } from '../audit';
 import { enqueueEmail, type OutboxDeps } from '../email/outbox';
 import { parseInput } from '../validation';
@@ -129,6 +130,7 @@ export function createCompanyDeletionService(deps: CompanyDeletionDeps) {
       meta: RequestMeta = {},
     ): Promise<{ deletionId: string; dueAt: Date }> {
       assertCan(ctx, 'tenant.delete');
+      assertRecentSignIn(ctx, deps.clock.now());
       const data = parseInput(requestSchema, input);
       return db.run(ctx.scope, async (tx) => {
         const result = await tx.execute<{ deletion_id: string; due_at: string | Date }>(

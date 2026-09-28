@@ -91,7 +91,10 @@ session-level value. Scopes are branded TypeScript types created only by authori
    minus suspended-blocked permissions, minus MFA-blocked permissions). Non-members and missing
    companies both get 404.
 3. The domain service asserts a permission, validates input with zod, and runs `db.run(ctx.scope)`.
-   Audit rows are written in the same transaction.
+   Audit rows are written in the same transaction. Actions that hand out credentials, move money,
+   take or destroy the whole company's data, or weaken account security also assert a recent
+   sign-in (`assertRecentSignIn`: the session started within 15 minutes, carried in the context as
+   `signedInAt`), refusing with `step_up_required`; the page then offers "Sign in again" (ADR-056).
 4. Server actions additionally require an exact trusted `Origin` (on top of Next.js's own check).
 
 Company switching is URL-based (`/c/{slug}`) with a full page load so no client state crosses
@@ -977,8 +980,9 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
 - **Web:** Settings → Company data (owners: export link, deletion form with the typed address, the
   pending state with the due date and a cancel button, the started state); the platform company page
   shows the register (dates, runs, rows deleted, provider outcomes).
-- **Not built yet:** step-up re-authentication before exporting or deleting, staff-started
-  deletion, stored exports and other formats.
+- **Step-up:** exporting and asking for the deletion need a sign-in within the last 15 minutes
+  (ADR-056).
+- **Not built yet:** staff-started deletion, stored exports and other formats.
 
 ## 7. Commercial model and billing **[built: plans and entitlements, wallet, top-ups, auto-recharge — verified against a local Razorpay stand-in only; paying for plans in HyFib planned]**
 

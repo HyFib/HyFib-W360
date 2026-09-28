@@ -1,6 +1,13 @@
 import type { Metadata } from 'next';
 import { displayMoney } from '@w360/core';
-import { assertCan, can, MANDATE_MAX_MINOR, type BillingOverview } from '@w360/domain';
+import {
+  assertCan,
+  can,
+  hasRecentSignIn,
+  MANDATE_MAX_MINOR,
+  RECENT_SIGN_IN_MINUTES,
+  type BillingOverview,
+} from '@w360/domain';
 import {
   Alert,
   Badge,
@@ -23,6 +30,7 @@ import { CardMandateSetup, RemoveCard } from '@/components/billing/card-mandate'
 import { PlanCard } from '@/components/billing/plan-card';
 import { PageHeader } from '@/components/page-header';
 import { RequireOwnDocument } from '@/components/require-own-document';
+import { SignInAgain } from '@/components/sign-in-again';
 import { formatDateTime } from '@/lib/format';
 import { getRuntime } from '@/server/runtime';
 import { requireTenant } from '@/server/session';
@@ -90,9 +98,11 @@ export default async function BillingPage({ params }: { params: Promise<{ slug: 
   const { slug } = await params;
   const ctx = await requireTenant(slug);
   assertCan(ctx, 'billing.read');
-  const { billing, plans } = await getRuntime();
+  const { billing, plans, clock } = await getRuntime();
   const [overview, plan] = await Promise.all([billing.overview(ctx), plans.overview(ctx)]);
   const canManage = can(ctx, 'billing.manage');
+  // Adding a card and turning automatic top-ups on need a recent sign-in (ADR-056).
+  const recent = hasRecentSignIn(ctx, clock.now());
   const { payments, wallet, mandate } = overview;
   const tz = ctx.tenant.timezone;
   const activeMandate = mandate?.status === 'active' ? mandate : null;
@@ -190,11 +200,17 @@ export default async function BillingPage({ params }: { params: Promise<{ slug: 
                 ) : null}
               </div>
             ) : canManage && payments.configured && payments.recurringCardsEnabled ? (
-              <CardMandateSetup
-                slug={ctx.tenant.slug}
-                defaultEmail={overview.billingContact?.email ?? ctx.user.email}
-                defaultContact={overview.billingContact?.contact ?? ''}
-              />
+              recent ? (
+                <CardMandateSetup
+                  slug={ctx.tenant.slug}
+                  defaultEmail={overview.billingContact?.email ?? ctx.user.email}
+                  defaultContact={overview.billingContact?.contact ?? ''}
+                />
+              ) : (
+                <SignInAgain
+                  reason={`Adding a card for automatic top-ups needs a sign-in within the last ${RECENT_SIGN_IN_MINUTES} minutes.`}
+                />
+              )
             ) : null}
             {canManage && payments.recurringCardsEnabled ? (
               <AutoRechargeForm

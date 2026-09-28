@@ -34,6 +34,7 @@ import {
   type Tx,
 } from '@w360/db';
 import { assertCan, can, type TenantContext } from '../authz/context';
+import { assertRecentSignIn } from '../authz/step-up';
 import { formatMinor } from '../crm/money';
 import { recordAudit, type RequestMeta } from '../audit';
 import { endRunForHuman } from '../automations/runs';
@@ -1133,6 +1134,8 @@ export function createCommerceService(deps: CommerceDeps) {
     /** Saves the company's Razorpay keys (write-only) and asks the worker to check them. */
     async savePaymentAccount(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
       assertCan(ctx, 'commerce.manage');
+      // Payments for the company's orders go to these keys' account (ADR-056).
+      assertRecentSignIn(ctx, deps.clock.now());
       const data = parseInput(accountSchema, input);
       if (razorpayMode(data.keyId) === 'live' && !deps.allowLiveKeys) {
         throw invalid(

@@ -102,6 +102,8 @@ async function company(): Promise<Company> {
     {
       userId: owner.id,
       sessionId: `sess_${owner.id}`,
+      // Signed in just now: payment settings need a recent sign-in (ADR-056).
+      sessionCreatedAt: clock.now(),
       tenantSlug: tenant.slug,
       correlationId: uuidv7(),
     },

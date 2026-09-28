@@ -1001,9 +1001,16 @@ and run the migrations again.
 2. For a compromised user: reset MFA via platform recovery (verified out of band), which signs out
    all their sessions; require a password reset.
 3. Rotate company-level provider credentials (reconnect WhatsApp), API keys and webhook secrets
-   (phase 5).
+   (phase 5). A stolen session alone could not export the company, ask for its deletion, change
+   payment settings or the company's Razorpay keys, create API keys or webhook endpoints, add an
+   owner or turn off required two-factor: those need a sign-in within the last 15 minutes
+   (ADR-056). Check the audit log for them anyway (a stolen password is enough to sign in).
 4. Review the company audit log and security events; export evidence; notify the owner.
 5. Reactivate with a reason once clean.
+
+**"Sign in again to continue".** Members see it when an action needs a sign-in within the last 15
+minutes (ADR-056) and theirs is older. It signs them out and brings them back to the page after
+they sign in. It is not an error and cannot be switched off for a company.
 
 ## 12. Migration failure
 

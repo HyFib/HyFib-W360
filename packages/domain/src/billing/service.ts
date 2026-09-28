@@ -19,6 +19,7 @@ import {
 } from '@w360/db';
 import { recordAudit, type RequestMeta } from '../audit';
 import { assertCan, type TenantContext } from '../authz/context';
+import { assertRecentSignIn } from '../authz/step-up';
 import { QUEUES } from '@w360/contracts';
 import { cancelPendingAutoRecharge } from './attempts';
 import type { BillingNoticeDeps } from './notices';
@@ -436,6 +437,8 @@ export function createBillingService(deps: BillingServiceDeps) {
       meta: RequestMeta = {},
     ): Promise<CheckoutStart & { mandateId: string; customerId: string }> {
       assertCan(ctx, 'billing.manage');
+      // A mandate lets HyFib debit the card later without the card holder (ADR-056).
+      assertRecentSignIn(ctx, clock.now());
       const { razorpay, config } = provider();
       if (!config.recurringCardsEnabled) {
         throw new AppError(
@@ -779,6 +782,8 @@ export function createBillingService(deps: BillingServiceDeps) {
       meta: RequestMeta = {},
     ): Promise<{ enabled: boolean }> {
       assertCan(ctx, 'billing.manage');
+      // Turning automatic charges off never needs a fresh sign-in; anything else can charge the card.
+      if (input.enabled) assertRecentSignIn(ctx, clock.now());
       ensureWholePaise(input.thresholdMinor, 'threshold', 0, AUTO_RECHARGE_THRESHOLD_MAX_MINOR);
       ensureWholePaise(input.amountMinor, 'amount', MANDATE_MIN_MINOR, MANDATE_MAX_MINOR);
       ensureWholePaise(

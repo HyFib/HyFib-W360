@@ -1,6 +1,7 @@
 import { conflict, type Clock } from '@w360/core';
 import { sql, type Database, type Tx } from '@w360/db';
 import { assertCan, type TenantContext } from '../authz/context';
+import { assertRecentSignIn } from '../authz/step-up';
 import { recordAudit, type RequestMeta } from '../audit';
 import { enqueueEmail, type OutboxDeps } from '../email/outbox';
 import { deletionRecipients, formatCompanyTime } from './deletion';
@@ -86,6 +87,7 @@ export async function writeCompanyExport(
 ): Promise<{ counts: Record<string, number> }> {
   assertCan(ctx, 'tenant.export');
   const exportedAt = deps.clock.now();
+  assertRecentSignIn(ctx, exportedAt);
   await deps.db.run(ctx.scope, async (tx) => {
     await recordAudit(
       tx,

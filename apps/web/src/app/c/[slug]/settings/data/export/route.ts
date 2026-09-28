@@ -51,7 +51,8 @@ export async function GET(_request: Request, { params }: { params: Promise<{ slu
       const status =
         first.code === 'forbidden' ||
         first.code === 'tenant_suspended' ||
-        first.code === 'mfa_required'
+        first.code === 'mfa_required' ||
+        first.code === 'step_up_required'
           ? 403
           : first.code === 'conflict'
             ? 409

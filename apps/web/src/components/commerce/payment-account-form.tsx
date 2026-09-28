@@ -2,8 +2,9 @@
 import { useId, useState } from 'react';
 import { Button, Field, Input } from '@w360/ui';
 import { removePaymentAccountAction, savePaymentAccountAction } from '@/app/actions/commerce';
+import { ActionFailure, type ActionFailureState } from '@/components/action-failure';
 import { ClientButton, ClientForm } from '@/components/client-form';
-import { FormError, FormSuccess } from '@/components/form-status';
+import { FormSuccess } from '@/components/form-status';
 
 /**
  * Saves the company's Razorpay key id, key secret and webhook secret. The secrets are sent once
@@ -23,7 +24,7 @@ export function PaymentAccountForm({
   const [keyId, setKeyId] = useState(currentKeyId ?? '');
   const [keySecret, setKeySecret] = useState('');
   const [webhookSecret, setWebhookSecret] = useState('');
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ActionFailureState | null>(null);
   const [issues, setIssues] = useState<Record<string, string>>({});
   const [saved, setSaved] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -40,7 +41,7 @@ export function PaymentAccountForm({
         void savePaymentAccountAction(slug, { keyId, keySecret, webhookSecret }).then((r) => {
           setBusy(false);
           if (!r.ok) {
-            setError(r.message);
+            setError(r);
             setIssues(Object.fromEntries((r.issues ?? []).map((i) => [i.path, i.message])));
           } else {
             setKeySecret('');
@@ -50,7 +51,7 @@ export function PaymentAccountForm({
         });
       }}
     >
-      <FormError message={error} />
+      <ActionFailure failure={error} />
       <FormSuccess message={saved} />
       <Field
         id={`${p}-key`}
@@ -127,7 +128,7 @@ export function PaymentAccountForm({
 export function RemovePaymentAccountButton({ slug }: { slug: string }) {
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ActionFailureState | null>(null);
   return (
     <div className="grid gap-2">
       {confirming ? (
@@ -146,7 +147,7 @@ export function RemovePaymentAccountButton({ slug }: { slug: string }) {
                 void removePaymentAccountAction(slug).then((r) => {
                   setBusy(false);
                   setConfirming(false);
-                  if (!r.ok) setError(r.message);
+                  if (!r.ok) setError(r);
                 });
               }}
             >
@@ -164,7 +165,7 @@ export function RemovePaymentAccountButton({ slug }: { slug: string }) {
           </ClientButton>
         </div>
       )}
-      <FormError message={error} />
+      <ActionFailure failure={error} />
     </div>
   );
 }

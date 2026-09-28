@@ -6,11 +6,14 @@ import {
   API_SCOPE_INFO,
   API_SCOPE_KEYS,
   can,
+  hasRecentSignIn,
+  RECENT_SIGN_IN_MINUTES,
   type ApiKeyView,
 } from '@w360/domain';
 import { Badge, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
 import { ApiKeyActions, CreateApiKeyForm } from '@/components/settings/api-keys';
 import { CopyField } from '@/components/growth/copy-field';
+import { SignInAgain } from '@/components/sign-in-again';
 import { formatDateTime } from '@/lib/format';
 import { getRuntime } from '@/server/runtime';
 import { requireTenant } from '@/server/session';
@@ -28,7 +31,7 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
   const { slug } = await params;
   const ctx = await requireTenant(slug);
   if (!can(ctx, 'developer.manage')) notFound();
-  const { apiKeys, config } = await getRuntime();
+  const { apiKeys, config, clock } = await getRuntime();
   const keys = await apiKeys.list(ctx);
   const tz = ctx.tenant.timezone;
   const apiBase = new URL('/api/v1', config.APP_BASE_URL).toString();
@@ -168,11 +171,17 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <CreateApiKeyForm
-            slug={ctx.tenant.slug}
-            grantable={grantable}
-            atLimit={activeCount >= API_KEY_LIMITS.activeKeys}
-          />
+          {hasRecentSignIn(ctx, clock.now()) ? (
+            <CreateApiKeyForm
+              slug={ctx.tenant.slug}
+              grantable={grantable}
+              atLimit={activeCount >= API_KEY_LIMITS.activeKeys}
+            />
+          ) : (
+            <SignInAgain
+              reason={`Creating or rotating a key needs a sign-in within the last ${RECENT_SIGN_IN_MINUTES} minutes.`}
+            />
+          )}
         </CardContent>
       </Card>
     </div>

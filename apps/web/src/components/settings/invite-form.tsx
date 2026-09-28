@@ -11,14 +11,15 @@ import {
   Input,
 } from '@w360/ui';
 import { inviteMemberAction } from '@/app/actions/tenancy';
-import { FormError, FormSuccess } from '@/components/form-status';
+import { ActionFailure, type ActionFailureState } from '@/components/action-failure';
+import { FormSuccess } from '@/components/form-status';
 import { RolePicker, type RoleOption } from './role-picker';
 import { ClientForm } from '@/components/client-form';
 
 export function InviteForm({ slug, roleOptions }: { slug: string; roleOptions: RoleOption[] }) {
   const [email, setEmail] = useState('');
   const [roles, setRoles] = useState<string[]>(['agent']);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ActionFailureState | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [sent, setSent] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -32,7 +33,7 @@ export function InviteForm({ slug, roleOptions }: { slug: string; roleOptions: R
     const result = await inviteMemberAction(slug, { email, roles });
     setBusy(false);
     if (!result.ok) {
-      setError(result.message);
+      setError(result);
       setFieldErrors(Object.fromEntries((result.issues ?? []).map((i) => [i.path, i.message])));
       return;
     }
@@ -51,7 +52,7 @@ export function InviteForm({ slug, roleOptions }: { slug: string; roleOptions: R
       </CardHeader>
       <CardContent>
         <ClientForm onSubmit={submit} className="grid gap-4 sm:max-w-lg">
-          <FormError message={error} />
+          <ActionFailure failure={error} />
           <FormSuccess message={sent} />
           <Field id="invite-email" label="Email address" error={fieldErrors.email}>
             {(aria) => (

@@ -302,8 +302,9 @@ verification, app review, Embedded Signup configuration).
   with caps, card mandate lifecycle (₹1 authorisation refunded, token status, removal), state machine
   with write-ahead unknown states, one active attempt, caps including pending attempts,
   reconciliation before retry, cooldown, suspension after three failures, owner notices, feature
-  flag `RAZORPAY_RECURRING_CARDS_ENABLED`. Remaining: step-up re-authentication for payment
-  settings; "requires customer action" state if Razorpay reports AFA for a debit.
+  flag `RAZORPAY_RECURRING_CARDS_ENABLED`; a recent sign-in for adding a card and turning automatic
+  top-ups on or changing them (ADR-056). Remaining: "requires customer action" state if Razorpay
+  reports AFA for a debit.
 - **P5-05 Refunds, disputes, reconciliation runs, statements, receipts vs invoices.** Refunds and
   lost disputes are recorded from webhooks; initiating refunds from the platform console, daily
   reconciliation reports, statements and GST invoices remain (GST treatment needs tax review).
@@ -315,7 +316,11 @@ verification, app review, Embedded Signup configuration).
   cancelled subscription with credit (needs paid plans in HyFib; plans exist since P5-01 but are not
   charged) and AFA-required debits (not reachable while mandates are capped at ₹15,000).
 - **P5-07 Billing screens**: overview, plans, wallet & recharge, auto-recharge, payment methods,
-  usage & rate card, transactions & receipts, invoices; step-up auth for sensitive changes.
+  usage & rate card, transactions & receipts, invoices; step-up auth for sensitive changes
+  **[step-up built, locally verified]** (ADR-056: a sign-in within the last 15 minutes for the
+  company export and deletion, payment settings, the company's Razorpay keys, API keys, webhook
+  endpoints, new owners and turning off required two-factor). Remaining: full transaction history
+  and statements, usage & rate card view, receipts and invoices (tax review).
 - **P5-08 Public API** **[built, locally verified; sends through the Graph stand-in only]**
   (ADR-052): company API keys (SHA-256 only, scopes granted within the creator's permissions,
   expiry, rotation with an overlap, revocation, audit), `/api/v1` with approved template sends,
@@ -354,7 +359,7 @@ verification, app review, Embedded Signup configuration).
   deleted at Razorpay), batched deletion in foreign-key order, a tombstone company row, billing
   records and plan history kept, final emails. Also fixed: erasure now redacts past send requests,
   public entry points serve companies pending deletion, and the ended-run guard freezes two columns
-  again. Remaining: step-up re-authentication before exporting or deleting, staff-started
+  again (step-up re-authentication for both since ADR-056). Remaining: staff-started
   deletion, stored exports, other formats, a deletion job run on staging, legal review of the kept
   records.
 
@@ -383,8 +388,10 @@ review; production rollout per RELEASE-CHECKLIST.
 - **SEC-6** Media scanning pipeline (malware) before exposure.
 - **SEC-7** OpenTelemetry tracing/metrics, alert rules (queue lag, dead letters, error rates, auth
   anomalies).
-- **SEC-8** Step-up verification endpoint (password + TOTP) recorded in `ops.step_up_verifications`
-  for sensitive settings (billing, security).
+- **SEC-8** ~~Step-up verification endpoint (password + TOTP) recorded in
+  `ops.step_up_verifications` for sensitive settings (billing, security).~~ Settled by ADR-056: a
+  new sign-in within the last 15 minutes, which reuses the sign-in's rate limits, two-factor attempt
+  limit and lockout instead of a second verification path.
 - **SEC-9** Per-user login history view.
 - **SEC-10** Keyring re-encryption job: re-encrypt every keyring ciphertext (provider tokens, HTTP
   secrets, flow private keys, stored webhook bodies) under the primary key so an old key can be

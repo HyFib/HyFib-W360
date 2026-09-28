@@ -17,6 +17,7 @@ import {
 } from '@w360/db';
 import { recordAudit, type RequestMeta } from '../audit';
 import { assertCan, type TenantContext } from '../authz/context';
+import { assertRecentSignIn } from '../authz/step-up';
 import { TOKEN_ALPHABET, randomToken } from '../growth/model';
 import { parseInput } from '../validation';
 import {
@@ -185,9 +186,10 @@ export function createApiKeysService(deps: { db: Database; clock: Clock }) {
     /** A new key. The token is returned once and never stored. */
     async create(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
       assertCan(ctx, 'developer.manage');
+      const now = clock.now();
+      assertRecentSignIn(ctx, now);
       const data = parseInput(createSchema, input);
       assertMayGrant(ctx, data.scopes);
-      const now = clock.now();
       const expiresAt =
         data.expiresInDays === 0 ? null : new Date(now.getTime() + data.expiresInDays * DAY_MS);
       return db.run(ctx.scope, async (tx) => {
@@ -229,8 +231,9 @@ export function createApiKeysService(deps: { db: Database; clock: Clock }) {
      */
     async rotate(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
       assertCan(ctx, 'developer.manage');
-      const data = parseInput(rotateSchema, input);
       const now = clock.now();
+      assertRecentSignIn(ctx, now);
+      const data = parseInput(rotateSchema, input);
       return db.run(ctx.scope, async (tx) => {
         await lockKeys(tx, ctx.tenant.id);
         // Explicit columns: the runtime role cannot read the token hash.

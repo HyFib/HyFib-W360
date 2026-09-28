@@ -171,6 +171,8 @@ export async function startWhatsAppFixture(): Promise<WhatsAppFixture> {
         {
           userId: user.id,
           sessionId: `sess_${user.id}`,
+          // Signed in just now, as after a sign-in (step-up checks, ADR-056).
+          sessionCreatedAt: new Date(),
           tenantSlug: company.tenant.slug,
           correlationId: uuidv7(),
         },

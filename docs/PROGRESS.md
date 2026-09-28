@@ -1,5 +1,55 @@
 # Progress
 
+## 2026-09-28 — Phase 5: step-up re-authentication (P5-07, part)
+
+Status: **Step-up re-authentication implemented and locally verified.** Actions a stolen session
+could use to take a company's data or money, or to keep access after the session is gone, now need
+a sign-in within the last 15 minutes; the member signs in again (with two-factor when it is on) and
+comes back to the page.
+
+### Completed
+
+- **Design (ADR-056):** a new sign-in instead of a password or code prompt, because re-entering the
+  password alone skips two-factor and the library checks a signed-in user's two-factor code without
+  its attempt limit; the window is the library's `freshAge` (15 minutes), now set from the domain's
+  `RECENT_SIGN_IN_MINUTES`. SEC-8's verification endpoint is settled by it.
+- **Domain:** `signedInAt` in the tenant context (the session's creation time passed by the web to
+  `resolveTenantContext`; null without a browser session); `authz/step-up.ts`
+  (`recentSignInUntil`, `hasRecentSignIn`, `assertRecentSignIn` with the existing
+  `step_up_required` error). Enforced in: the company export and the deletion request, card
+  mandate setup, auto-recharge settings unless turning them off, the company's Razorpay keys, API
+  key creation and rotation, webhook endpoint creation, changes and secret rotation, invitations
+  and role changes that make someone an owner, and turning off the company-wide two-factor
+  requirement. Revoking, cancelling, turning off and deleting never ask.
+- **Web:** `SignInAgain` (signs out and returns to the page after sign-in) and `ActionFailure` (the
+  prompt when an action answers `step_up_required`, otherwise the error) in nine forms; the Company
+  data page, adding a card on Billing and creating a key show the prompt instead of the action when
+  the sign-in is older; the export route answers 403 with the message.
+- **Docs:** ADR-056 (and ADR-055's "not built" list), ARCHITECTURE §3.4 and §6Q, SECURITY (sessions,
+  payments, known gaps), THREAT-MODEL T2, T9, T77 and T78 (T77 and T78 now mitigated), RUNBOOKS §11,
+  BACKLOG (P5-04, P5-07, P5-11, SEC-8), FEATURE-MATRIX (W-148, H-015).
+- **Mutation checks:** 21 guards broken one at a time (each of the protected service functions,
+  the safe-direction conditions for auto-recharge, owners, invitations and the two-factor
+  requirement, the window's boundary and length, a context without a sign-in time, and the context
+  taking the session's time); all 21 make a test fail.
+
+### Test commands and results (local, 2026-09-28)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `pnpm test` (unit)                                                          | 286 passed. New: `authz/step-up.test.ts` 3 (the 15-minute window and its boundary, contexts without a sign-in time, the refusal and its message).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 367 passed, including the new `step-up.test.ts` 3 (every protected action refused to a member who signed in 16 minutes ago before any audit entry, key, endpoint, payment account, invitation, role or setting changes, and a context without a sign-in time refused; the same actions allowed a minute after signing in again; revoking a key, turning automatic top-ups or an endpoint off, deleting an endpoint, inviting an agent, changing to a role other than owner, turning the two-factor requirement on or keeping it off, and cancelling a deletion allowed 90 minutes after signing in). Test helpers now pass the session's start. |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 70 passed (35 × 2) in one full run (13.7 min). New `step-up.spec.ts` on both projects: right after signing up the export and a new key are offered; with the session aged an hour (a fixture step as the auth role) the Company data and API keys pages show "Sign in again" instead of the export link, the deletion form and the key form, and rotating a key from the page is refused with the same prompt; signing in again returns to the API keys page, where the key rotates.                                                                                                                                             |
+| Mutation checks                                                             | 21 guards broken one at a time; all 21 make a test fail                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+
+### Known gaps
+
+- WebAuthn or passkeys as the step-up factor, per-action windows, and a step-up for platform staff
+  actions (their MFA is checked on every platform request) are not built.
+- The remaining P5-07 screens (full transaction history and statements, usage and rate card,
+  receipts and invoices) are not built; invoices need a tax review.
+
 ## 2026-09-28 — Phase 5: company export and deletion (P5-11)
 
 Status: **Company export and deletion implemented and locally verified with test data only.**

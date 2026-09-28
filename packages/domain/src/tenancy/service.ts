@@ -42,6 +42,7 @@ import {
   type CreateCompanyInput,
 } from '@w360/contracts';
 import { assertCan, type TenantContext } from '../authz/context';
+import { assertRecentSignIn } from '../authz/step-up';
 import { canAssignRoles, ROLE_LABELS } from '../authz/permissions';
 import { INBOX_WORKER_ROLES, releaseMemberConversations } from '../inbox/routing';
 import { recordAudit, type RequestMeta } from '../audit';
@@ -247,6 +248,10 @@ export function createTenancyService(deps: TenancyDeps) {
     ): Promise<void> {
       assertCan(ctx, 'tenant.security.manage');
       const data = parse(updateCompanySecuritySchema, input);
+      // Dropping the two-factor requirement weakens every member's account (ADR-056).
+      if (ctx.tenant.requireMfaAllMembers && !data.requireMfaAllMembers) {
+        assertRecentSignIn(ctx, clock.now());
+      }
       await db.run(ctx.scope, async (tx) => {
         await tx
           .update(tenants)
@@ -314,6 +319,9 @@ export function createTenancyService(deps: TenancyDeps) {
         const touchesOwner = target.roles.includes('owner') || data.roles.includes('owner');
         if (touchesOwner && !ctx.permissions.has('members.manage_owners')) {
           throw forbidden('Only owners can grant, change or remove the owner role.');
+        }
+        if (data.roles.includes('owner') && !target.roles.includes('owner')) {
+          assertRecentSignIn(ctx, clock.now());
         }
         if (!canAssignRoles(ctx.membership.roles, data.roles)) throw forbidden();
         if (target.userId === ctx.user.id && !target.roles.includes('owner')) {
@@ -455,6 +463,7 @@ export function createTenancyService(deps: TenancyDeps) {
       if (!canAssignRoles(ctx.membership.roles, data.roles)) {
         throw forbidden('Only owners can invite other owners.');
       }
+      if (data.roles.includes('owner')) assertRecentSignIn(ctx, clock.now());
       const token = randomToken();
       const invitationId = uuidv7();
       const now = clock.now();

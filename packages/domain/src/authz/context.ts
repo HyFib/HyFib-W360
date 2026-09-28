@@ -66,6 +66,11 @@ export interface TenantContext {
     blocking: boolean;
   };
   readonly sessionId: string | null;
+  /**
+   * When the member signed in (the session's start), for step-up checks (ADR-056); null without an
+   * interactive session.
+   */
+  readonly signedInAt: Date | null;
   readonly correlationId: string;
   readonly scope: TenantScope;
 }
@@ -73,6 +78,8 @@ export interface TenantContext {
 export interface ResolveTenantContextInput {
   userId: string;
   sessionId: string | null;
+  /** When the session started (the authentication library's session creation time). */
+  sessionCreatedAt?: Date | null;
   tenantSlug: string;
   correlationId: string;
 }
@@ -176,6 +183,7 @@ export async function resolveTenantContext(
     rolePermissions,
     mfa: { required: mfaRequired, satisfied: mfaSatisfied, graceEndsAt, blocking: mfaBlocking },
     sessionId: input.sessionId,
+    signedInAt: input.sessionCreatedAt ?? null,
     correlationId: input.correlationId,
     scope: authorizedTenantScope(row.tenantId, input.userId),
   };

@@ -1,8 +1,9 @@
 import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
-import { can, DELETION_GRACE_DAYS } from '@w360/domain';
+import { can, DELETION_GRACE_DAYS, hasRecentSignIn, RECENT_SIGN_IN_MINUTES } from '@w360/domain';
 import { Alert, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
 import { CancelDeletionButton, RequestDeletionForm } from '@/components/settings/company-data';
+import { SignInAgain } from '@/components/sign-in-again';
 import { formatDateTime } from '@/lib/format';
 import { getRuntime } from '@/server/runtime';
 import { requireTenant } from '@/server/session';
@@ -16,8 +17,10 @@ export default async function CompanyDataPage({ params }: { params: Promise<{ sl
   const canExport = can(ctx, 'tenant.export');
   const canDelete = can(ctx, 'tenant.delete');
   if (!canExport && !canDelete) notFound();
-  const { companyDeletion } = await getRuntime();
+  const { companyDeletion, clock } = await getRuntime();
   const deletion = await companyDeletion.status(ctx);
+  // Both need a recent sign-in (ADR-056); cancelling a deletion does not.
+  const recent = hasRecentSignIn(ctx, clock.now());
   const tz = ctx.tenant.timezone;
   return (
     <div className="grid grid-cols-1 gap-6">
@@ -37,15 +40,21 @@ export default async function CompanyDataPage({ params }: { params: Promise<{ sl
               The last line of a complete file reads <code>{'{"end":true,…}'}</code>; a file without
               it was cut short and should be downloaded again.
             </p>
-            <div>
-              <a
-                href={`/c/${ctx.tenant.slug}/settings/data/export`}
-                download
-                className="inline-flex h-10 items-center rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground hover:bg-primary/90"
-              >
-                Download the export
-              </a>
-            </div>
+            {recent ? (
+              <div>
+                <a
+                  href={`/c/${ctx.tenant.slug}/settings/data/export`}
+                  download
+                  className="inline-flex h-10 items-center rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+                >
+                  Download the export
+                </a>
+              </div>
+            ) : (
+              <SignInAgain
+                reason={`Downloading the export needs a sign-in within the last ${RECENT_SIGN_IN_MINUTES} minutes.`}
+              />
+            )}
           </CardContent>
         </Card>
       ) : null}
@@ -100,7 +109,13 @@ export default async function CompanyDataPage({ params }: { params: Promise<{ sl
                     own HyFib accounts are not deleted.
                   </li>
                 </ul>
-                <RequestDeletionForm slug={ctx.tenant.slug} />
+                {recent ? (
+                  <RequestDeletionForm slug={ctx.tenant.slug} />
+                ) : (
+                  <SignInAgain
+                    reason={`Asking for the deletion needs a sign-in within the last ${RECENT_SIGN_IN_MINUTES} minutes.`}
+                  />
+                )}
               </>
             )}
           </CardContent>

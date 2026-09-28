@@ -1395,9 +1395,48 @@ worker's `company deleted` log lines (RUNBOOKS §8).
 - The ended-run guard no longer froze `pending_message_id` and `http_call_count` (lost in migration
   0022); both are frozen again.
 
-**Not built:** step-up re-authentication before exporting or deleting, a shorter grace period,
+**Not built:** a shorter grace period,
 deletion started by platform staff, deleting media files (no media storage exists), a stored export
 with a download link, and other export formats.
 
 **Migration 0028** adds the register and the step order, the deletion functions with their scoped
 grants and policies, and the three fixes above.
+
+## ADR-056 Step-up re-authentication: a sign-in within the last 15 minutes for actions that hand out credentials, move money or take the whole company (2026-09-28)
+
+Decision: a few actions need the member to have signed in within the last 15 minutes. A member who
+signed in earlier signs in again (password and, when it is on, two-factor), and the page they were
+on comes back. The window is `RECENT_SIGN_IN_MINUTES` in the domain, and the authentication
+library's own `session.freshAge` is set from it, so HyFib's check and the library's sensitive
+endpoints agree.
+
+**What needs it.** Actions a stolen session could use to take the company's data or money, or to
+keep access after the session is gone:
+
+- exporting the company's data and asking for its deletion (cancelling does not need it);
+- adding a card for automatic top-ups, and turning automatic top-ups on or changing them (turning
+  them off does not);
+- saving the company's own Razorpay keys (payments for its orders go to that account);
+- creating and rotating API keys (revoking does not);
+- adding a webhook endpoint, changing one, or rotating its secret (turning one off, deleting it,
+  test events and replays do not);
+- making someone an owner, by invitation or by a role change (other roles do not);
+- turning off the company-wide two-factor requirement (turning it on does not).
+
+**How.** The web passes the session's creation time to `resolveTenantContext`, which puts it in the
+tenant context (`signedInAt`); `assertRecentSignIn` in each of those service functions refuses with
+`step_up_required` before anything is read, written or sent. A context without a sign-in time (not
+from a browser session) never counts as recent. Pages that would otherwise offer the action (the
+export link, the deletion form, adding a card, creating a key) show "Sign in again" instead; any
+form whose action is refused shows the same prompt, which signs the member out and returns them to
+the page after they sign in.
+
+**Why a new sign-in rather than a password or code prompt** (SEC-8 had proposed a verification
+endpoint): re-entering only the password would skip two-factor, and the library checks a two-factor
+code for a signed-in user without its sign-in attempt limit, so a code prompt would need HyFib's own
+attempt counting and storage. Signing in again reuses the whole protected flow: rate limits per
+address, the two-factor attempt limit and lockout, trusted devices, and the security events and
+emails the sign-in already produces. The cost is one more sign-in for rare actions.
+
+**Not built:** WebAuthn or passkeys as the step-up factor, a step-up for platform staff actions
+(their MFA is checked on every platform request), and per-action windows.
