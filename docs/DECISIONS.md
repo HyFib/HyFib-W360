@@ -972,3 +972,85 @@ only a draft never published can be, and only a switched-off rule can name one; 
 its template keeps no automation; only the four order events may start automations); store
 messages gain the `started` state and `automation_run_id` (composite foreign
 key, set null when the run is deleted by retention).
+
+## ADR-051 Plans and entitlements: a platform catalog of immutable plan versions, one plan state per company, limits checked where things are added (2026-09-28)
+
+Decision: HyFib staff define plans in the platform area and put each company on one (P5-01).
+Companies see their plan, its limits and their usage; limits are enforced by the services and
+workers that add seats, numbers, teams, live automations and automation runs, and a company whose
+plan has lapsed is restricted like a suspended one. Charging for plans (Razorpay Subscriptions,
+ADR-012) is not part of this decision: periods are set by staff, for example after an invoice is
+paid outside HyFib.
+
+**Plans.** `ops.plans` holds one row per version of a plan code, entered by platform owners (only
+they change the catalog and the default trial; operators put companies on plans), never seeded (no
+hard-coded prices). A version is a draft (editable), published (immutable, assignable) or
+retired (kept for companies already on it, no longer assignable); a change is a new version, so a
+company's terms never change under it. A version has a name and description, a price in INR paise
+per 1, 3 or 12 months, trial days, grace days after a paid period ends, and limits: seats included,
+WhatsApp numbers included, teams, live automations and automation runs per month (no value means no
+limit). Extra seats, extra numbers and packs of automation runs are add-ons, sold only when the
+version gives their price (seats and numbers up to a maximum). Modules are the paid areas a plan may
+leave out: automations, WhatsApp Flows, CRM and commerce (catalogs, orders, payment links and store
+connectors). The inbox, contacts, templates, campaigns, growth tools, reports and billing are in
+every plan.
+
+**Default trial and complimentary access.** A platform owner may name a published version with
+trial days as the default trial: a new company starts a trial of it. Without one, a new company
+starts **complimentary** (no limits, all modules), and the platform area says so; staff may also
+grant complimentary access on purpose. Companies that existed before plans are complimentary.
+
+**Company plan state.** `app.tenant_plans` holds one row per company: the plan version, a status
+(complimentary, trialing, active, past_due, expired, canceled), the trial end, the paid period, the
+grace end, add-on quantities, the start of the current usage period and who changed it. Companies
+can read it; only SQL functions (company creation, the time sweep) and platform staff write it.
+Staff set complimentary, trialing (plan and the day the trial ends) or active (plan, the days the
+paid period starts and ends, in the company's time zone) with add-ons and a reason, or end the plan
+(canceled); past_due and expired are set only by time. A change needs the plan state's version (a
+stale form is refused), and every change is written to the platform audit log and the company's
+own. Writers lock the company row before its plan state, so the sweep, plan changes and status
+changes cannot deadlock. The minute sweep moves time forward: a trial whose end has passed
+expires; an active plan whose period has ended becomes past_due until its grace days pass, then
+expires. Lapses and exhausted automation runs are emailed to the company's billing managers.
+
+**Restricted companies.** `app.tenants.status` gains `restricted`: a company whose plan expired or
+was canceled keeps read access, exports, member management and billing, and everything that sends
+or starts work pauses, exactly as for suspension (the same permission set, deferred jobs and
+sweeps that skip it), with its own banner. A trigger on the plan state keeps the two in step: a
+lapse restricts an active company and a trial, active plan or complimentary access lifts the
+restriction. Platform suspension wins: reactivating a suspended company makes it restricted when
+its plan is not current. Inbound messages are still received.
+
+**Limits.** Checked when something is added, under a per-company lock so two concurrent additions
+cannot pass a limit together: seats (active members plus pending invitations, at invitation,
+acceptance and when a suspended member is restored), WhatsApp numbers (when a number is
+connected), teams (when one is created), live automations (when one is published or turned on) and
+automation runs (a counter per company and monthly period, incremented atomically when a live run
+starts from a customer message or a store event; test runs do not count). A lower limit never
+removes anything: after a downgrade, members, numbers, teams and live automations above the limit
+stay, and only new ones are refused. Monthly periods start on the day the current plan or trial
+started (the usage anchor), whatever the billing interval: a new trial or a new paid period restarts
+them, and a change of plan within the same period keeps the month's count. A used-up month is
+emailed to the billing managers once (a claim on the counter). Platform staff see a company's usage
+as counts only, through a definer function, because the records themselves are customer data.
+
+**Modules.** When a plan leaves a module out, the company keeps read access to what it already has
+and loses the module's write permissions (automations: write and publish; flows: write and publish;
+CRM: write; commerce: manage), so the services refuse changes and the pages hide their buttons.
+Work that runs without a member checks the module too: no automation run starts from a customer
+message or a store event, store messages and cart reminders are skipped (`not_in_plan`), and
+products and flows cannot be sent from a conversation. Runs already in progress finish, and store
+copies keep updating so the data stays visible.
+
+**Not built.** Paying for a plan in HyFib (Razorpay Subscriptions), self-serve plan changes and
+trials of higher plans, proration, plan invoices and receipts, usage alerts before a limit is
+reached, API quotas (P5-08) and AI credits (Phase 6).
+
+**Migration 0023.** `ops.plans` (guarded like rate cards: drafts editable, published versions
+immutable, retire only), `ops.plan_settings` (the default trial), `app.tenant_plans` (a row per
+company, created by a trigger on company creation and backfilled as complimentary),
+`app.usage_counters`, the `restricted` company status with the sync trigger, the entitlement
+function the services, the platform and `app.accept_invitation` use, the sweep functions, the
+platform's usage counts (`ops.platform_tenant_usage`, with the definer role reading automation
+statuses), `app.accept_invitation` and seven lookup functions replaced to know the restricted
+status, and grants and policies for the platform and definer roles.

@@ -778,14 +778,36 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 - **Not built yet:** cash on delivery confirmations and cart reminders in automations, conditions on
   order fields, changing the order from a run, messages per shipment or on tracking changes.
 
-## 7. Commercial model and billing **[built: wallet, top-ups, auto-recharge — verified against a local Razorpay stand-in only; subscriptions planned]**
+## 7. Commercial model and billing **[built: plans and entitlements, wallet, top-ups, auto-recharge — verified against a local Razorpay stand-in only; paying for plans in HyFib planned]**
 
 - **Who pays Meta:** as a Meta Tech Provider HyFib has no credit line; each customer adds its own
   payment method and Meta bills them directly (`tenants.billing_mode = 'direct_meta'`, the default).
   The HyFib wallet funds only disclosed HyFib services (e.g. AI and automation usage), so a Meta
   charge can never be taken twice. `partner_billed` requires a verified partner agreement and is
   blocked (ADR-011).
-- **Subscriptions [planned]:** Razorpay Subscriptions for plan fees (separate from the wallet).
+- **Plans and entitlements (0023, ADR-051) [built]:** platform owners keep a catalog of plan
+  versions in `ops.plans` (never seeded, INR paise per 1, 3 or 12 months, trial and grace days,
+  limits, add-on prices and modules): drafts change, published versions never do (a trigger), and
+  retired ones stay with the companies on them. Every company has one row in `app.tenant_plans`
+  (complimentary, trialing, active, past_due, expired, canceled), created by a trigger when the
+  company is created (a trial of `ops.plan_settings.default_trial_plan_id`, else complimentary) and
+  written afterwards only by platform staff (`setTenantPlan`, with both audit logs and a version
+  check) and by `app.apply_plan_transition`, which the minute billing sweep calls in the company's
+  scope for trials, paid periods and grace periods that have ended (notices to billing managers). An
+  expired or canceled plan sets `tenants.status = 'restricted'` through a trigger; restricted
+  behaves like suspended (`ALLOWED_WHEN_SUSPENDED`, jobs deferred, sweeps skip it, public
+  lookups still resolve), suspension wins, and a plan that gives access again lifts it.
+  `app.tenant_entitlements` computes limits with add-ons (NULL: no limit) and modules; the services
+  check a limit where something is added, under a per-company advisory lock (`seats:`, `numbers:`,
+  `teams:`, `automations:`); seats count active members plus waiting invitations and
+  `app.accept_invitation` checks the same limit in SQL. Live automation runs started by customer
+  messages or store events consume `app.usage_counters` atomically (`ON CONFLICT … DO UPDATE …
+WHERE used < limit`), per monthly period from `usage_anchor`; the sweep announces a used-up month
+  once (`notified_at`). The tenant context drops the write permissions of modules the plan leaves
+  out (`MODULE_WRITE_PERMISSIONS`); workers check the module before starting runs, order messages
+  and cart reminders (`not_in_plan`). Platform staff see usage as counts only
+  (`ops.platform_tenant_usage`). Charging for plans (Razorpay Subscriptions), self-serve changes,
+  proration and plan invoices are not built: staff set paid periods.
 - **Ledger (0004_billing):** one INR wallet per company with five accounts (`wallet_available`,
   `wallet_held`, `payment_clearing`, `service_revenue`, `dispute_losses`). `ledger_transactions` and
   `ledger_entries` are append-only (trigger), balances are maintained by trigger from the entries,

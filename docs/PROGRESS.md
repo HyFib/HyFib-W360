@@ -1,5 +1,98 @@
 # Progress
 
+## 2026-09-28 — Phase 5: plans and entitlements (P5-01)
+
+Status: **Plans and entitlements implemented and locally verified; paying for a plan in HyFib is not
+built.** Platform owners keep a catalog of immutable plan versions (no prices in code), every company
+has a plan state, staff put companies on plans, time moves trials, paid periods and grace periods on,
+a lapsed plan restricts the company, and seats, WhatsApp numbers, teams, live automations and monthly
+automation runs are limited where they are added. Nothing is charged: staff set paid periods after a
+payment settled elsewhere (Razorpay Subscriptions stay in P5-07). No request reached a provider.
+
+### Completed
+
+- **Design (ADR-051):** a platform catalog of plan versions (draft → published, immutable → retired)
+  with an INR price per 1, 3 or 12 months, trial and grace days, limits (no value: no limit),
+  add-ons (extra seats and numbers up to a maximum, automation run packs) and modules (automations,
+  WhatsApp Flows, CRM, commerce; the rest is in every plan). One plan state per company:
+  complimentary, trialing, active, past_due, expired, canceled. A default trial for new companies,
+  else complimentary; companies from before plans are complimentary.
+- **Schema (migration 0023):** `ops.plans` (guarded like rate cards: drafts editable, published
+  versions immutable even for the platform role, retire only, never deleted), `ops.plan_settings`
+  (the default trial, which must be published with trial days), `app.tenant_plans` (one row per
+  company, created by a trigger with the company, backfilled complimentary as `w360_definer`,
+  guarded so only published versions are assigned and add-ons stay within what the version sells),
+  `app.usage_counters`, the `restricted` company status with a trigger that restricts an active
+  company when its plan lapses and lifts it when access returns (suspension wins),
+  `app.tenant_entitlements`, the sweep functions (`ops.plan_transitions_due`,
+  `ops.usage_limits_reached`, `app.apply_plan_transition` in the company's own scope),
+  `ops.platform_tenant_usage` (counts only), `app.accept_invitation` with the seat check, and seven
+  lookup functions that now treat restricted companies like suspended ones.
+- **Limits (`plans/entitlements.ts`):** checked where things are added, under a per-company advisory
+  lock per kind: seats (active members plus waiting invitations) when inviting, resending an expired
+  invitation and restoring a suspended member, and in SQL when an invitation is accepted; WhatsApp
+  numbers when a number is connected (or connected again); teams when created; live automations
+  when published or turned on. A lower limit removes nothing.
+- **Automation runs:** each live run started by a customer message or a store event consumes the
+  month's counter atomically (never past the limit; test runs are not counted); months start on the
+  usage anchor's day; store events beyond it are skipped as `automation_quota`. The billing sweep
+  emails billing managers once when a month is used up.
+- **Modules:** the tenant context drops the write permissions of modules the plan leaves out
+  (reading stays, with the plan's reason when refused); automation starts, order messages and cart
+  reminders (`not_in_plan`) and sending products or flows from a conversation check the module.
+- **Time (`plans/sweep.ts`, the minute billing sweep):** trials that ended expire; paid periods that
+  ended become past_due for the version's grace days, then expire; each change is audited as the
+  system and emailed to billing managers; one company's failure is logged and retried without
+  holding up the others.
+- **Platform:** plan catalog screens (list, new plan, version page with publish, new version,
+  retire or discard, draft editing), the default trial, a Plan card on each company (state, limits,
+  usage counts, assignment form with version check and reason), plan columns in the company list,
+  and reactivation that restricts a company whose plan lapsed. Only platform owners change the
+  catalog.
+- **Company pages:** a plan card on Billing (state, price, add-ons, modules, usage against limits),
+  banners for a restricted company and an overdue payment, limit hints on Members, Teams, WhatsApp
+  numbers and Automations, "not in your plan" notices on the four plan modules, a plan column in
+  Settings → Modules, and the inbox hides form and product sending when the plan leaves them out.
+- **Docs:** ADR-051, ARCHITECTURE §7, SECURITY (plans control, permission rules, platform roles),
+  THREAT-MODEL T64 to T66, DATA-RETENTION, RUNBOOKS §10M, RELEASE-CHECKLIST, FEATURE-MATRIX (W-001
+  to W-009, W-014, new H-032), BACKLOG (P5-01 built; P5-06 note), and two stale module descriptions
+  in Settings → Modules corrected (automations from store orders with templates; store connectors
+  exist).
+- **Found while building:**
+  - **The backfill wrote nothing (fixed before commit).** Forced RLS on companies applies to the
+    migration role too, so the first backfill inserted no plan states. It now runs as `w360_definer`
+    after its policies exist.
+  - **Lock order (designed out before commit).** The sweep, plan changes and status changes all
+    lock the company row before its plan state, so they cannot deadlock; the same for the default
+    trial and retiring a version.
+  - **A billing notice link (fixed).** Billing emails linked to `/c/<slug>/settings/billing`, which
+    does not exist; they now link to `/c/<slug>/billing`.
+  - **Mutation checks:** 12 guards (the counter's limit, the seat checks in the service and in SQL,
+    the module filter, the dispatch and store-event quota, reactivation, the notice claim, the
+    order-message module check, the team limit, the restriction trigger, published immutability):
+    each removed alone fails a test. The notice claim survived at first (the listing already skips
+    announced counters); it is now a function the test calls twice.
+
+### Test commands and results (local, 2026-09-28, fresh database)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `pnpm test` (unit)                                                          | 239 passed. New: `plans/model.test.ts` 5 (usage periods on the anchor day, short months and leap years, contiguous periods; module write permissions; which plan states restrict)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 296 passed, including the new `plans.test.ts` 12 (catalog immutability and owner-only changes, default trial and complimentary companies, assignment with both audit logs and version conflicts, add-on checks, restriction and plan-aware reactivation, the sweep through trial end, grace and expiry with one notice each, seat races at acceptance and invitation, teams and live automations with downgrades, numbers, the run quota from customer messages with run packs and uncounted test runs, twelve concurrent starts counting five, modules, isolation) and 2 new in `stores.test.ts` (order messages skipped without commerce; store-event starts skipped beyond the month's runs or without automations). The tenant-isolation suite covers the two new tables and checks the new functions' grants |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 58 passed (29 × 2) in one full run (9.8 min). New `plans.spec.ts` on both projects: a platform owner with two-factor publishes a plan and puts a company on it; the company's Billing page, seat hint, automation notice and Modules column; ending the plan restricts the company                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| Mutation checks                                                             | 12 guards broken one at a time; each makes a test fail (one only after the test change above)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+
+### Known gaps
+
+- Not built: paying for plans in HyFib (Razorpay Subscriptions), self-serve plan changes and trials
+  of higher plans, proration, plan invoices and receipts, usage alerts before a limit is reached,
+  emails to companies when staff change their plan, API quotas (P5-08) and AI credits (Phase 6).
+- The number limit is checked when a number finishes connecting, after Meta's signup; the channels
+  page shows the limit before the signup starts.
+- Firefox and WebKit run in CI only; plans are checked against the stand-ins only (no provider is
+  involved).
+
 ## 2026-09-28 — Phase 4: store events in automations (P4-06e)
 
 Status: **Store events in automations implemented and locally verified; production blocked on

@@ -280,8 +280,16 @@ verification, app review, Embedded Signup configuration).
 
 ## Phase 5 — billing, wallet, platform, public API
 
-- **P5-01 Plans & entitlements**: platform-admin configurable plans (no hard-coded prices), trials,
-  seats, quotas, add-ons; entitlement checks in services and workers.
+- **P5-01 Plans & entitlements** **[built, locally verified]** (ADR-051): platform-owner plan
+  catalog of immutable versions (no hard-coded prices) with trials, grace days, seats, WhatsApp
+  numbers, teams, live automations, monthly automation runs, add-ons (extra seats and numbers, run
+  packs) and modules; a default trial or complimentary access for new companies; staff assignment
+  with audit; a minute sweep for trial, period and grace ends with notices; restricted companies;
+  limits checked where things are added (seats in SQL too) and an atomic run quota; module gating
+  in permissions and workers; plan card, limit hints and banners for companies; platform plan
+  screens. Remaining: paying for plans in HyFib (Razorpay Subscriptions, P5-07), self-serve plan
+  changes and higher-plan trials, proration, plan invoices, usage alerts before a limit is reached,
+  plan-change emails to companies, API quotas (P5-08) and AI credits (Phase 6).
 - **P5-02 Ledger** **[built, locally verified]**: accounts, append-only journal balanced at commit,
   balances by trigger, holds, settlements, releases (expiry sweep), refunds and chargebacks as
   compensating postings; INR paise. Remaining: manual adjustments with dual approval, statements.
@@ -303,8 +311,8 @@ verification, app review, Embedded Signup configuration).
   capture (reconciliation); delayed success after UI timeout; decline; mandate revocation; cap
   exhaustion incl. in-flight; settings change during a pending charge; refund vs usage race;
   partial refunds; chargeback after spend; restart recovery; cross-company wallet access. Remaining:
-  cancelled subscription with credit (needs P5-01) and AFA-required debits (not reachable while
-  mandates are capped at ₹15,000).
+  cancelled subscription with credit (needs paid plans in HyFib; plans exist since P5-01 but are not
+  charged) and AFA-required debits (not reachable while mandates are capped at ₹15,000).
 - **P5-07 Billing screens**: overview, plans, wallet & recharge, auto-recharge, payment methods,
   usage & rate card, transactions & receipts, invoices; step-up auth for sensitive changes.
 - **P5-08 Public API**: versioned REST, hashed scoped keys, rotation, quotas, idempotency keys,

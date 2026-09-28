@@ -115,6 +115,11 @@ made. This checklist records the evidence required per gate; unchecked items blo
       Android and iOS (the payload returned as HyFib set it, research M-177) continuing the run, a
       later session message inside the window it opened, a marketing template step with and without
       the recipient's opt-in, and a tap on an older template message following "Other reply"
+- [ ] Plans entered by a platform owner from the commercial catalogue (prices, limits, modules,
+      trial and grace days) and published, and the default trial chosen (or complimentary access
+      for new companies decided on purpose); a test company taken through a trial ending, a paid
+      period, grace and renewal on a staging deployment, with the billing managers' emails received
+      through the production SMTP provider
 - [ ] Tenant-isolation and security gates passing in CI on the release commit
 - [ ] Measured load behaviour against the test envelope (k6 results)
 - [ ] Backup restoration drill performed and timings recorded (RPO/RTO)

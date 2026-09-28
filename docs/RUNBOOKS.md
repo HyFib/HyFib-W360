@@ -764,6 +764,58 @@ their checks and foreign keys, and column grants for `w360_app`. The new columns
 new checks hold for existing rows; a failure usually means the bootstrap roles are missing
 (`infra/db/bootstrap-roles.sql`).
 
+## 10M. Plans and entitlements
+
+**Putting a company on a plan.** Platform → the company → Plan: choose a trial of a published
+version until a day, a paid period of one (from a day until a day, in the company's time zone; the
+period ends at the start of the "until" day), complimentary access, or end the plan. Give the
+invoice or ticket as the reason: it is shown in the company's audit log. A form older than the
+current plan state is refused ("The plan changed while you were editing"); reload. Nothing is
+charged in HyFib: set the period after the payment is settled elsewhere.
+
+**A new version of a plan.** Only platform owners change the catalog. Open the published version →
+"New version from this one", edit the draft, publish it, then move companies to it one by one; the
+old version can be retired (companies on it keep it). A published version never changes, even for
+the platform role; a mistake in a draft that was published is corrected by retiring it and
+publishing a new version. The default trial must be a published version with trial days; retire it
+only after choosing another default (or none: new companies are then complimentary).
+
+**A company says it cannot send anything ("This company's plan has ended").** Its trial or paid
+period ended and the grace days passed (the minute billing sweep moved it to expired and restricted
+it), or staff ended the plan. Reading, exports, members and billing still work. Put it on a plan
+(trial, paid period or complimentary): the restriction lifts at once. If the company is also
+suspended, lift the suspension separately; reactivating a suspended company whose plan has lapsed
+makes it restricted, not active.
+
+**"Your company's plan allows N seats (numbers, teams, live automations), and all are in use."**
+Waiting invitations hold seats until they are accepted, revoked or expire; suspended members do not.
+Numbers count while being connected, connected or needing reconnection; disconnected and failed
+ones do not. The company can free one, or staff can add extra seats or numbers (when the version
+sells them) or move it to a larger version. A lower limit never removes anything.
+
+**Automations stopped answering customers.** The month's automation runs may be used up: the
+company's billing managers were emailed once, and Billing shows the runs used and the period.
+Runs already in progress continue; runs from store events are recorded as "Not sent: the month's
+automation runs are used up". Add run packs (when the version sells them) or change the plan; the
+next customer message starts a run. The period starts on the day the current plan or trial started
+(usage anchor), whatever the billing interval. If the plan leaves out Automations, nothing starts
+("not in the plan") and the automation pages say so.
+
+**The sweep did not move a plan on.** The billing sweep runs every minute and logs `plan sweep`
+(and `plan sweep failed for a company; will retry` with the company id and error, rolled back and
+retried the next minute). A company being deleted is skipped. Check `app.tenant_plans` for the
+company (`status`, `trial_ends_at`, `period_end`, `grace_ends_at`): the database's clock decides
+what is due.
+
+**Migration 0023 failed.** It runs in one transaction, so a failure applies nothing. It widens the
+company status check with `restricted`, adds the plan tables, triggers (two SECURITY DEFINER trigger
+functions created before their ownership moves to `w360_definer`), the entitlement and sweep
+functions, replaces `app.accept_invitation` and seven lookup functions (dropped as `w360_definer`,
+recreated, granted, then handed to `w360_definer`), and backfills a complimentary plan state for
+every existing company as `w360_definer` (companies are behind forced RLS). A failure usually means
+the bootstrap roles are missing (`infra/db/bootstrap-roles.sql`) or a lookup function was changed
+by hand.
+
 ## 11. Compromised company (tenant) or account
 
 1. Suspend the company in `/platform` with a reason (stops outbound activity; ingestion continues).
