@@ -306,6 +306,92 @@ evidence. Provider calls were verified against the Graph, Shopify and Razorpay s
   a reader that stops for a minute ends it (`idle_in_transaction_session_timeout`).
 - Firefox and WebKit run in CI only.
 
+## 2026-09-28 — CI: the Firefox stall in the cart reminder test
+
+Status: **Cause found and worked around in the test browser; verified locally and in CI.**
+The stall came from Playwright's Firefox driver, not from HyFib: no page, worker or database code
+changed.
+
+### Cause
+
+- On 0251ce1 (CI run 36392541160) `stores.spec.ts:411` waited in `page.goto` of the store page until
+  its 5-minute timeout in Firefox, passed on retry, and the job ran out of time. The server side was
+  ruled out: every database wait of web and worker is bounded (statement 15 s, lock 5 s, pool
+  checkout 10 s, idle transaction 60 s), and the store page reads with plain selects in a read-only
+  transaction, which never wait for the worker's store lease.
+- Playwright 1.63's Firefox (155.0, build 1543) can lose a protocol message after
+  Cross-Origin-Opener-Policy replaces a page's browsing context. The replacement gets a new driver
+  channel with the same identifier (`process-<pid>`) whose message ids start again at 1, while the
+  browser end still holds answers the old channel never acknowledged; a new message with a colliding
+  id is answered from that cache and never delivered. When the lost message is a navigation's
+  "committed" event, `page.goto` never settles. Upstream: microsoft/playwright#42731 (same versions)
+  and #42183. Playwright's main branch fixed it with Firefox build 1551 on 2026-09-22; no stable
+  release ships it yet (1.63.0 is the latest, 1.64 is in alpha).
+- Every HyFib page sends `Cross-Origin-Opener-Policy: same-origin`, and the cart reminder test
+  crosses that boundary on its first page (from about:blank) and in two round trips through the
+  Shopify stand-in on another origin (connecting the store, allowing customer access). The lost
+  message can be any later one on the replaced channel, so the stall can come well after the
+  crossing; here it came after a reload loop and two saves.
+- Evidence from CI: on 38796f2 (run 36395830637, whose report was uploaded because the job failed)
+  the cart test failed on both attempts in Firefox. On the retry, `page.goto` of the store page
+  never returned, although its trace shows the page's document (200 in 39 ms), all its scripts and
+  its link prefetches loading within half a second, with no request of the old page in flight, and
+  the failure screenshot shows the rendered store page. On the first attempt, a `toBeVisible` check
+  with a 1-second timeout never returned after a reload (a lost execution context message), so the
+  reload loop stopped reloading and ran out its 45 seconds; the worker had read the store 2 seconds
+  after "Read the store now", so it was not involved.
+- Evidence (local, Firefox build 1543, one fresh context per trial, four at a time): the upstream
+  reproduction page left `goto` pending 208 times in 600 with COOP enforced and 0 in 600 with
+  enforcement off; the cart test's navigation pattern on HyFib's own sign-in page (first navigation,
+  then three round trips to another origin without COOP) left a `goto` pending in 125 of 150
+  contexts with COOP enforced and in none of 1,050 navigations with enforcement off; a driver build
+  instrumented to log messages answered from that cache showed the lost `pageNavigationCommitted`
+  behind a stuck `goto`. In the cart test itself, the instrumented driver saw the page's browsing
+  context replaced 3 times in a run with COOP enforced (each a new driver channel under the old
+  identifier: the first page and the two round trips through the stand-in) and never with
+  enforcement off. The CI stall itself was not reproduced with the full test locally, where
+  contexts run one at a time and the race is much rarer (0 stalls in 280 such navigations in the
+  test runner): the cart test passed 8 of 8 times under CPU load and 5 of 5 with the instrumented
+  driver.
+- Found alongside, not the cause: Firefox fails `page.reload` and `page.goto` with
+  `NS_BINDING_ABORTED` when a test navigates while the page's router is still fetching
+  (`templates.spec.ts` in 6 of the last 39 CI runs, `automations.spec.ts` in 3, all passing on
+  retry). Firefox cancels the page's in-flight requests as soon as a navigation starts, and Next.js
+  answers a failed router request by loading the current page again, which aborts the test's
+  navigation (reproduced against a small local server). See Known gaps.
+
+### Completed
+
+- **Firefox runs without COOP enforcement** (`tests/e2e/playwright.config.ts`):
+  `browser.tabs.remote.useCrossOriginOpenerPolicy=false`, so no browsing context is replaced and no
+  driver channel restarts. Chromium and WebKit still enforce COOP, no test relies on Firefox
+  enforcing it, and the header itself is unchanged. Remove it with the Playwright upgrade that ships
+  Firefox build 1551 or later.
+- **Navigations are bounded:** `navigationTimeout: 30_000`, so a navigation that never settles, for
+  any reason, fails within 30 seconds and is retried in CI instead of holding its test until the
+  test's own timeout (5 minutes for the cart reminder test).
+- **CI keeps evidence:** the end-to-end step stops at 40 minutes (the job has 45); the server logs and
+  the job, store and database state (from 7b62ff0) are printed on failure or cancellation; and the
+  Playwright report with `test-results` and the web and worker logs are uploaded for every run, one
+  artifact per attempt, so a test that passed on retry keeps its failed attempt's trace.
+
+### Test commands and results (2026-09-28)
+
+| Command                                                                                          | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                             | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `pnpm test:e2e` (all four projects, on the P5-10 tree)                                           | 116 passed, 12 skipped: in each project the web request, webhook and Flows data endpoint tests call a target through `E2E_HTTP_HOST`, which needs the hosts entry CI adds                                                                                                                                                                                                                                                                                           |
+| `pnpm test:e2e --project=firefox --repeat-each=5 --retries=0 stores.spec.ts -g "cart reminders"` | 5 passed                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| CI, run 36411204063 on 86dad15 (the fix plus a temporary job, since reverted)                    | lint, types and unit tests, integration on PostgreSQL 17 and 18, build and security scans passed. The temporary Firefox job measured the round trips on HyFib's sign-in page (COOP enforced: 51 of 60 contexts left a `goto` pending; enforcement off: none in 420 navigations), then ran `stores.spec.ts` 6 times (30 passed) and the cart reminder test 10 more times (10 passed), without retries. The four-project e2e job: 128 passed (28.6 min), none retried |
+
+### Known gaps
+
+- Firefox end-to-end runs do not enforce COOP until the Playwright upgrade; Chromium and WebKit do.
+- The `NS_BINDING_ABORTED` failures above remain and pass on retry. `templates.spec.ts` reloads just
+  after the template editor's `router.refresh()`, which repeats the refresh its save action already
+  asked for; tests that navigate straight after an in-page refresh should wait for the page to
+  settle or move through the app's links.
+
 ## 2026-09-28 — Phase 5: platform operations console (P5-10)
 
 Status: **Operations console implemented and locally verified with test data only.** Platform staff
@@ -349,8 +435,9 @@ company.
     30 days, visible only with SQL, and pg-boss cannot list them with a limit. The worker now
     records them (above).
   - **Handler errors were never logged by the worker** (pg-boss kept them only in the job's
-    output), which hid why the Firefox cart reminder test stalled. Every failed attempt is now
-    logged with its queue and job ids (pushed first, in 7b62ff0).
+    output), which made the worker hard to rule out while the Firefox cart reminder stall was
+    chased. Every failed attempt is now logged with its queue and job ids (pushed first, in
+    7b62ff0).
   - **A quarantined receipt was offered for retry in two tables,** and once its quarantine entry was
     resolved the receipt stayed "needing attention" for good. The receipts table now leaves
     quarantined receipts to the quarantine table, matching the overview's count.
@@ -369,9 +456,10 @@ company.
     client-side navigation, so the test waits for the page before reloading until the worker's
     quarantine shows.
   - **Firefox stall (open since P5-09):** CI on 7b62ff0 ran all 124 end-to-end tests green on the
-    first attempt, with no retries. The stall was not reproduced and its cause is still unknown;
-    when it happens again, the worker's attempt logs and the new CI step (job, store and database
-    state after a failure) will show where it stops.
+    first attempt, with no retries. The cause was later found in Playwright's Firefox driver, not
+    in the worker (see "CI: the Firefox stall in the cart reminder test" above); the worker's
+    attempt logs and the new CI step (job, store and database state after a failure) remain for
+    other failures.
   - **Mutation checks:** 21 guards broken one at a time (the administrator check in each of the
     five functions, the host-only label, retrying from another status or without a body, the audit
     entry, the purge age, imported opt-outs, completed signups, the activity window, attribution
@@ -455,7 +543,8 @@ once, never claimed exactly once. No request reached a customer's system.
     124 tests run one at a time across four browsers; green runs already took 27 to 29 minutes
     including set-up, and on 0251ce1 the existing Firefox cart reminder test stalled in
     `page.goto` until its 5-minute timeout, passed on retry, and the job was cancelled at 30
-    minutes. The stall was not reproduced locally (Firefox runs in CI only) and remains open.
+    minutes. The stall was a Playwright driver bug in Firefox, since worked around (see "CI: the
+    Firefox stall in the cart reminder test" above).
   - **The loopback allowance also lifts the port rule.** A privileged-port URL passes the URL check
     wherever `W360_EGRESS_ALLOW_LOOPBACK` is set (local and test only); the test for that rule uses
     the production policy.
