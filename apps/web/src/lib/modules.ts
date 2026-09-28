@@ -1,4 +1,4 @@
-import type { Permission } from '@w360/domain';
+import type { Permission, PlanModule } from '@w360/domain';
 
 /**
  * Product modules and their truthful availability. A module appears in navigation only when it is
@@ -14,6 +14,8 @@ export interface ModuleDefinition {
   path: string;
   permission: Permission;
   status: ModuleStatus;
+  /** The plan module that includes it (ADR-051); the rest is in every plan. */
+  planModule?: PlanModule;
   /** Why the module is not available yet (shown to administrators). */
   reason?: string;
 }
@@ -63,15 +65,17 @@ export const MODULES: ModuleDefinition[] = [
   },
   {
     key: 'automations',
+    planModule: 'automations',
     label: 'Automations',
     path: '/automations',
     permission: 'automations.read',
     status: 'available',
     reason:
-      'Keyword, new-conversation and any-message automations with messages, reply buttons, questions, conditions, contact updates, waits, hand-off and web requests to allowed domains; immutable versions, test runs and a simulator. Sending WhatsApp Flows from an automation and drag-and-drop editing are not available yet.',
+      'Keyword, new-conversation, any-message and store-order automations with messages, approved templates, reply buttons, questions, conditions, contact updates, waits, hand-off and web requests to allowed domains; immutable versions, test runs and a simulator. Sending WhatsApp Flows from an automation and drag-and-drop editing are not available yet.',
   },
   {
     key: 'flows',
+    planModule: 'flows',
     label: 'Flows',
     path: '/flows',
     permission: 'flows.read',
@@ -81,6 +85,7 @@ export const MODULES: ModuleDefinition[] = [
   },
   {
     key: 'crm',
+    planModule: 'crm',
     label: 'CRM',
     path: '/crm',
     permission: 'crm.read',
@@ -90,12 +95,13 @@ export const MODULES: ModuleDefinition[] = [
   },
   {
     key: 'commerce',
+    planModule: 'commerce',
     label: 'Commerce',
     path: '/commerce',
     permission: 'commerce.read',
     status: 'available',
     reason:
-      'Catalogs read from Meta, products sent in conversations, orders customers send from WhatsApp, and Payment Links from the company’s own Razorpay account, recorded as paid only when Razorpay reports it. Shopify and WooCommerce connectors, stock updates and refunds from HyFib are not available yet.',
+      'Catalogs read from Meta, products sent in conversations, orders customers send from WhatsApp, Payment Links from the company’s own Razorpay account (recorded as paid only when Razorpay reports it), and Shopify and WooCommerce stores with order messages and cart reminders. Stock updates and refunds from HyFib are not available yet.',
   },
   {
     key: 'ai',

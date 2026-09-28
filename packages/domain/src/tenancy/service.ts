@@ -46,6 +46,7 @@ import { canAssignRoles, ROLE_LABELS } from '../authz/permissions';
 import { INBOX_WORKER_ROLES, releaseMemberConversations } from '../inbox/routing';
 import { recordAudit, type RequestMeta } from '../audit';
 import { enqueueEmail, type OutboxDeps } from '../email/outbox';
+import { assertSeatAvailable } from '../plans/entitlements';
 
 export interface TenancyDeps extends OutboxDeps {
   db: Database;
@@ -370,6 +371,8 @@ export function createTenancyService(deps: TenancyDeps) {
           throw new AppError('precondition_failed', 'Removed members must be invited again.');
         }
         if (target.status === data.status) return;
+        // A restored member takes a seat of the plan again.
+        if (data.status === 'active') await assertSeatAvailable(tx, ctx.tenant.id, clock.now());
         await tx
           .update(memberships)
           .set({ status: data.status, statusChangedAt: clock.now(), statusChangedBy: ctx.user.id })
@@ -511,6 +514,8 @@ export function createTenancyService(deps: TenancyDeps) {
           );
         if (pending.length > 0)
           throw conflict('An invitation is already pending for this address. Resend it instead.');
+        // A waiting invitation holds a seat of the plan.
+        await assertSeatAvailable(tx, ctx.tenant.id, now);
 
         await tx.insert(invitations).values({
           id: invitationId,
@@ -565,6 +570,8 @@ export function createTenancyService(deps: TenancyDeps) {
         if (!canAssignRoles(ctx.membership.roles, inv.roles)) throw forbidden();
         if (inv.sendCount > MAX_RESENDS)
           throw new AppError('rate_limited', 'This invitation has been resent too many times.');
+        // An expired invitation held no seat; sending it again takes one.
+        if (inv.expiresAt <= now) await assertSeatAvailable(tx, ctx.tenant.id, now);
         await tx
           .update(invitations)
           .set({

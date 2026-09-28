@@ -78,3 +78,68 @@ export async function withdrawRateCardAction(id: string, input: unknown): Promis
     return null;
   });
 }
+
+export async function createPlanAction(input: unknown): Promise<ActionResult<{ id: string }>> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    const result = await runtime.planAdmin.createPlan(actor, input);
+    refresh();
+    return result;
+  });
+}
+
+export async function updatePlanDraftAction(id: string, input: unknown): Promise<ActionResult> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    await runtime.planAdmin.updateDraft(actor, String(id), input);
+    refresh();
+    return null;
+  });
+}
+
+export async function createPlanVersionAction(
+  fromPlanId: string,
+): Promise<ActionResult<{ id: string }>> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    const result = await runtime.planAdmin.createVersion(actor, String(fromPlanId));
+    refresh();
+    return result;
+  });
+}
+
+export async function publishPlanAction(id: string): Promise<ActionResult> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    await runtime.planAdmin.publishPlan(actor, String(id));
+    refresh();
+    return null;
+  });
+}
+
+export async function retirePlanAction(id: string, input: unknown): Promise<ActionResult> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    await runtime.planAdmin.retirePlan(actor, String(id), input);
+    refresh();
+    return null;
+  });
+}
+
+export async function setDefaultTrialAction(input: unknown): Promise<ActionResult> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    await runtime.planAdmin.setDefaultTrial(actor, input);
+    refresh();
+    return null;
+  });
+}
+
+export async function setTenantPlanAction(input: unknown): Promise<ActionResult> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    await runtime.planAdmin.setTenantPlan(actor, input);
+    refresh();
+    return null;
+  });
+}

@@ -15,6 +15,7 @@ import {
   TR,
   Table,
 } from '@w360/ui';
+import { PlanLimitHint } from '@/components/plan-limit';
 import { InviteForm } from '@/components/settings/invite-form';
 import { InvitationActions, MemberActions } from '@/components/settings/member-actions';
 import { getRuntime } from '@/server/runtime';
@@ -29,10 +30,11 @@ export default async function MembersPage({ params }: { params: Promise<{ slug: 
   const { slug } = await params;
   const ctx = await requireTenant(slug);
   assertCan(ctx, 'members.read');
-  const { tenancy } = await getRuntime();
-  const [members, invitations] = await Promise.all([
+  const { tenancy, plans } = await getRuntime();
+  const [members, invitations, usage] = await Promise.all([
     tenancy.listMembers(ctx),
     tenancy.listInvitations(ctx),
+    plans.usage(ctx),
   ]);
   const canManage = can(ctx, 'members.manage');
   const roleOptions = TENANT_ROLES.map((r) => ({
@@ -45,6 +47,18 @@ export default async function MembersPage({ params }: { params: Promise<{ slug: 
 
   return (
     <div className="grid grid-cols-1 gap-6">
+      <PlanLimitHint
+        ctx={ctx}
+        one="seat"
+        what="seats"
+        used={usage.seats.members + usage.seats.invitations}
+        limit={usage.limits.seats}
+        detail={
+          usage.seats.invitations > 0
+            ? `waiting invitations hold ${usage.seats.invitations === 1 ? 'a seat' : 'seats'}`
+            : undefined
+        }
+      />
       {can(ctx, 'members.invite') ? (
         <InviteForm slug={ctx.tenant.slug} roleOptions={roleOptions} />
       ) : null}

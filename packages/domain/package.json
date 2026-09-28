@@ -10,7 +10,8 @@
     "./automation-model": "./src/automations/model.ts",
     "./crm-money": "./src/crm/money.ts",
     "./flow-json": "./src/flows/flow-json.ts",
-    "./store-messages-model": "./src/stores/messages-model.ts"
+    "./store-messages-model": "./src/stores/messages-model.ts",
+    "./plan-model": "./src/plans/model.ts"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json"

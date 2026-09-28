@@ -20,6 +20,7 @@ import {
   Table,
 } from '@w360/ui';
 import { PageHeader } from '@/components/page-header';
+import { ModuleNotInPlan } from '@/components/plan-limit';
 import { FLOW_STATUS, FLOW_SYNC_OP } from '@/lib/flow-labels';
 import { formatDateTime } from '@/lib/format';
 import { getRuntime } from '@/server/runtime';
@@ -62,6 +63,7 @@ export default async function FlowsPage({
           ) : null
         }
       />
+      <ModuleNotInPlan ctx={ctx} module="flows" />
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
         <div className="grid content-start gap-6">
           {accounts.length === 0 ? (

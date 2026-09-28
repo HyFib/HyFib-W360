@@ -15,6 +15,7 @@ import {
   TR,
   Table,
 } from '@w360/ui';
+import { TENANT_PLAN_STATUS_LABELS } from '@w360/domain';
 import { RevokeGrantButton } from '@/components/platform/platform-forms';
 import { getRuntime } from '@/server/runtime';
 import { requirePlatformActor } from '@/server/session';
@@ -39,12 +40,17 @@ export default async function PlatformHome({
     <div className="grid gap-6">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <h1 className="text-2xl font-semibold tracking-tight">Platform administration</h1>
-        <Link
-          href="/platform/rate-cards"
-          className="text-sm text-primary underline-offset-4 hover:underline"
-        >
-          Meta rate cards
-        </Link>
+        <nav className="flex flex-wrap gap-4 text-sm" aria-label="Platform">
+          <Link href="/platform/plans" className="text-primary underline-offset-4 hover:underline">
+            Plans
+          </Link>
+          <Link
+            href="/platform/rate-cards"
+            className="text-primary underline-offset-4 hover:underline"
+          >
+            Meta rate cards
+          </Link>
+        </nav>
       </div>
       <p className="text-sm text-muted-foreground">
         Customer content is not visible here. Viewing company data requires a reasoned, time-boxed
@@ -72,6 +78,7 @@ export default async function PlatformHome({
               <TR>
                 <TH>Company</TH>
                 <TH>Status</TH>
+                <TH>Plan</TH>
                 <TH>Members</TH>
                 <TH>Billing mode</TH>
                 <TH>Created</TH>
@@ -91,6 +98,14 @@ export default async function PlatformHome({
                   </TD>
                   <TD>
                     <Badge tone={c.status === 'active' ? 'success' : 'warning'}>{c.status}</Badge>
+                  </TD>
+                  <TD className="text-sm">
+                    {c.planName ? `${c.planName} v${c.planVersion}` : 'None'}
+                    {c.planStatus ? (
+                      <div className="text-xs text-muted-foreground">
+                        {TENANT_PLAN_STATUS_LABELS[c.planStatus]}
+                      </div>
+                    ) : null}
                   </TD>
                   <TD>{c.activeMembers}</TD>
                   <TD>{c.billingMode}</TD>

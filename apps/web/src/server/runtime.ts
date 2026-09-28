@@ -39,6 +39,8 @@ import {
   createContactsService,
   createInboxService,
   createOnboardingService,
+  createPlanAdminService,
+  createPlansService,
   createPlatformService,
   createRateCardsService,
   createSavedRepliesService,
@@ -62,6 +64,8 @@ import {
   type JobQueue,
   type OnboardingService,
   type OutboundDeps,
+  type PlanAdminService,
+  type PlansService,
   type PlatformService,
   type RateCardsService,
   type SavedRepliesService,
@@ -111,6 +115,10 @@ export interface Runtime {
   segments: SegmentsService;
   campaigns: CampaignsService;
   rateCards: RateCardsService;
+  /** The company's plan, its limits and usage (ADR-051). */
+  plans: PlansService;
+  /** The plan catalog and companies' plans (platform staff). */
+  planAdmin: PlanAdminService;
   reports: ReportsService;
   automations: AutomationService;
   /** Domains and secrets for the automation HTTP step. */
@@ -221,6 +229,8 @@ async function init(): Promise<Runtime> {
   const segments = createSegmentsService({ db, clock: systemClock });
   const campaigns = createCampaignsService({ db, jobs, signer, clock: systemClock });
   const rateCards = createRateCardsService({ platformDb, clock: systemClock });
+  const plans = createPlansService({ db, clock: systemClock });
+  const planAdmin = createPlanAdminService({ platformDb, clock: systemClock });
   const reports = createReportsService({ db, clock: systemClock });
   const automations = createAutomationService({
     db,
@@ -347,6 +357,8 @@ async function init(): Promise<Runtime> {
     segments,
     campaigns,
     rateCards,
+    plans,
+    planAdmin,
     reports,
     automations,
     webRequests,

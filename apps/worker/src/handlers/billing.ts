@@ -13,6 +13,7 @@ import {
   processRazorpayReceipt,
   reconcileTopup,
   releaseExpiredHolds,
+  sweepPlanStates,
   type BillingProviderDeps,
 } from '@w360/domain';
 import type { WorkerRuntime } from '../runtime';
@@ -109,12 +110,27 @@ export function autoRechargeHandler(rt: WorkerRuntime) {
 }
 
 /**
- * Every minute: re-signal Razorpay receipts whose signal was lost, reconcile open manual top-ups
- * and due auto-recharge attempts with Razorpay (the backstop for missed webhooks), start
- * auto-recharge checks for companies below their threshold, and release expired holds.
+ * Every minute: move plans whose trial, paid period or grace period ended to their next state and
+ * announce reached automation run limits (ADR-051); re-signal Razorpay receipts whose signal was
+ * lost, reconcile open manual top-ups and due auto-recharge attempts with Razorpay (the backstop
+ * for missed webhooks), start auto-recharge checks for companies below their threshold, and
+ * release expired holds.
  */
 export function billingSweepHandler(rt: WorkerRuntime) {
   return async (): Promise<void> => {
+    const plans = await sweepPlanStates({ db: rt.db, clock: rt.clock, notices: rt.notices });
+    for (const failure of plans.failed) {
+      rt.logger.warn(
+        { tenantId: failure.tenantId, err: toError(failure.error).message },
+        'plan sweep failed for a company; will retry',
+      );
+    }
+    if (plans.transitioned + plans.announced > 0) {
+      rt.logger.info(
+        { transitioned: plans.transitioned, announced: plans.announced },
+        'plan sweep',
+      );
+    }
     const released = await releaseExpiredHolds(rt.db);
     const deps = providerDeps(rt);
     if (!deps) {

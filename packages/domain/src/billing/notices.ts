@@ -33,7 +33,7 @@ export async function notifyBillingManagers(
         sql`${memberships.roles} && array['owner', 'billing']::text[]`,
       ),
     );
-  const url = new URL(`/c/${company.slug}/settings/billing`, deps.appBaseUrl).toString();
+  const url = new URL(`/c/${company.slug}/billing`, deps.appBaseUrl).toString();
   for (const manager of managers) {
     await enqueueEmail(deps.outbox, tx, {
       to: manager.email,

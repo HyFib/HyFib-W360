@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import type { ReactNode } from 'react';
+import { can } from '@w360/domain';
 import { Alert, Button } from '@w360/ui';
 import { AppNav } from '@/components/app-nav';
 import { Brand } from '@/components/brand';
@@ -71,10 +72,37 @@ export default async function TenantLayout({
           />
         </header>
         <div className="grid gap-3 px-4 pt-4 md:px-8">
-          {ctx.tenant.status !== 'active' ? (
+          {ctx.tenant.status === 'restricted' ? (
+            <Alert
+              tone="warning"
+              title="This company's plan has ended"
+              action={
+                can(ctx, 'billing.read') ? (
+                  <Button asChild size="sm" variant="outline">
+                    <Link href={`/c/${ctx.tenant.slug}/billing`}>See the plan</Link>
+                  </Button>
+                ) : undefined
+              }
+            >
+              Sending messages, campaigns and automations is paused until HyFib renews the plan. You
+              can still review data, export it and manage members and billing.
+            </Alert>
+          ) : ctx.tenant.status !== 'active' ? (
             <Alert tone="warning" title="This company is suspended">
               Outbound messaging and changes that send data are paused. You can still review data,
               export it and manage billing.
+            </Alert>
+          ) : ctx.plan.status === 'past_due' && can(ctx, 'billing.read') ? (
+            <Alert
+              tone="warning"
+              title="The paid period of your plan has ended"
+              action={
+                <Button asChild size="sm" variant="outline">
+                  <Link href={`/c/${ctx.tenant.slug}/billing`}>See the plan</Link>
+                </Button>
+              }
+            >
+              Everything keeps working for a few days. Ask HyFib to renew the plan.
             </Alert>
           ) : null}
           {ctx.mfa.required && !ctx.mfa.satisfied ? (

@@ -22,6 +22,7 @@ import { RequireOwnDocument } from '@/components/require-own-document';
 import { WhatsAppConnect } from '@/components/settings/whatsapp-connect';
 import { formatDateTime } from '@/lib/format';
 import { liveEventCursor } from '@/server/inbox';
+import { PlanLimitHint } from '@/components/plan-limit';
 import { getRuntime } from '@/server/runtime';
 import { requireTenant } from '@/server/session';
 
@@ -50,9 +51,10 @@ export default async function ChannelsPage({ params }: { params: Promise<{ slug:
   const { slug } = await params;
   const ctx = await requireTenant(slug);
   assertCan(ctx, 'channels.read');
-  const { onboarding, meta } = await getRuntime();
+  const { onboarding, meta, plans } = await getRuntime();
   const since = await liveEventCursor(ctx);
   const channels = onboarding ? await onboarding.listChannels(ctx) : [];
+  const usage = await plans.usage(ctx);
   const canManage = can(ctx, 'channels.manage');
   const signupReady = Boolean(meta?.embeddedSignupConfigId);
 
@@ -71,6 +73,15 @@ export default async function ChannelsPage({ params }: { params: Promise<{ slug:
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4">
+          {canManage ? (
+            <PlanLimitHint
+              ctx={ctx}
+              one="WhatsApp number"
+              what="WhatsApp numbers"
+              used={usage.numbers}
+              limit={usage.limits.numbers}
+            />
+          ) : null}
           {!meta ? (
             <Alert tone="warning" title="Not available yet">
               WhatsApp connection is not configured on this platform. It requires the platform’s

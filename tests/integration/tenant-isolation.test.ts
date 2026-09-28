@@ -128,6 +128,27 @@ describe('database roles', () => {
       expect(await can('w360_auth', fn), fn).toBe(false);
       expect(await can('w360_platform', fn), fn).toBe(false);
     }
+    // Plans (0023): the sweep functions for the worker, the usage counts for platform staff, the
+    // entitlements for both, and the plan-state triggers for nobody.
+    for (const fn of [
+      'ops.plan_transitions_due(integer)',
+      'ops.usage_limits_reached(integer)',
+      'app.apply_plan_transition(uuid)',
+    ]) {
+      expect(await can('w360_app', fn), fn).toBe(true);
+      expect(await can('w360_auth', fn), fn).toBe(false);
+      expect(await can('w360_platform', fn), fn).toBe(false);
+    }
+    expect(await can('w360_platform', 'ops.platform_tenant_usage(uuid)')).toBe(true);
+    expect(await can('w360_app', 'ops.platform_tenant_usage(uuid)')).toBe(false);
+    expect(await can('w360_app', 'app.tenant_entitlements(uuid)')).toBe(true);
+    expect(await can('w360_platform', 'app.tenant_entitlements(uuid)')).toBe(true);
+    expect(await can('w360_auth', 'app.tenant_entitlements(uuid)')).toBe(false);
+    for (const fn of ['app.sync_tenant_plan_access()', 'app.init_tenant_plan()']) {
+      for (const role of ['w360_app', 'w360_auth', 'w360_platform']) {
+        expect(await can(role, fn), `${role} ${fn}`).toBe(false);
+      }
+    }
     await expect(
       dbs.appPool.query(
         `SELECT ops.platform_reset_user_mfa('usr_x', 'Verified identity by phone')`,

@@ -9,8 +9,10 @@ import {
   isNull,
   platformAdmins,
   platformAuditEvents,
+  plans,
   sql,
   supportAccessGrants,
+  tenantPlans,
   tenants,
   users,
   auditEvents,
@@ -19,6 +21,7 @@ import {
   type Tx,
 } from '@w360/db';
 import type { PlatformDatabase } from '@w360/db/platform';
+import { planGivesAccess } from '../plans/model';
 
 /**
  * Platform administration (HyFib staff). Separately authorised from tenant roles: the actor must be
@@ -74,6 +77,9 @@ const tenantSummaryColumns = {
   statusReason: tenants.statusReason,
   billingMode: tenants.billingMode,
   createdAt: tenants.createdAt,
+  planStatus: tenantPlans.status,
+  planName: plans.name,
+  planVersion: plans.version,
 };
 
 /** Adds active seat counts through the platform's aggregate-only definer function. */
@@ -120,6 +126,8 @@ export function createPlatformService(deps: PlatformDeps) {
         const rows = await tx
           .select(tenantSummaryColumns)
           .from(tenants)
+          .leftJoin(tenantPlans, eq(tenantPlans.tenantId, tenants.id))
+          .leftJoin(plans, eq(plans.id, tenantPlans.planId))
           .where(
             search
               ? sql`(lower(${tenants.name}) like ${`%${search}%`} or ${tenants.slug} like ${`%${search}%`})`
@@ -138,6 +146,8 @@ export function createPlatformService(deps: PlatformDeps) {
         const rows = await tx
           .select(tenantSummaryColumns)
           .from(tenants)
+          .leftJoin(tenantPlans, eq(tenantPlans.tenantId, tenants.id))
+          .leftJoin(plans, eq(plans.id, tenantPlans.planId))
           .where(eq(tenants.id, tenantId));
         const [company] = await withActiveMemberCounts(tx, rows);
         return company ?? null;
@@ -160,9 +170,31 @@ export function createPlatformService(deps: PlatformDeps) {
           );
         }
         if (current.status === data.status) return;
+        let next: 'active' | 'suspended' | 'restricted' = data.status;
+        let statusReason = data.reason;
+        if (data.status === 'active') {
+          // A lapsed plan restricts the company; only a plan change lifts that (ADR-051).
+          if (current.status === 'restricted') {
+            throw new AppError(
+              'precondition_failed',
+              "This company is restricted because its plan ended. Change the company's plan to lift the restriction.",
+            );
+          }
+          const [plan] = await tx
+            .select({ status: tenantPlans.status })
+            .from(tenantPlans)
+            .where(eq(tenantPlans.tenantId, data.tenantId))
+            .for('update');
+          if (plan && !planGivesAccess(plan.status)) {
+            next = 'restricted';
+            // As the plan state sets it (0023): the reason shown to the company.
+            statusReason =
+              plan.status === 'canceled' ? 'The plan was canceled.' : 'The plan ended.';
+          }
+        }
         await tx
           .update(tenants)
-          .set({ status: data.status, statusReason: data.reason, statusChangedAt: clock.now() })
+          .set({ status: next, statusReason, statusChangedAt: clock.now() })
           .where(eq(tenants.id, data.tenantId));
         const action =
           data.status === 'suspended' ? 'platform.tenant_suspended' : 'platform.tenant_reactivated';
@@ -185,7 +217,7 @@ export function createPlatformService(deps: PlatformDeps) {
           subjectId: data.tenantId,
           result: 'success',
           correlationId: actor.correlationId,
-          metadata: { reason: data.reason },
+          metadata: { reason: data.reason, status: next },
         });
       });
     },

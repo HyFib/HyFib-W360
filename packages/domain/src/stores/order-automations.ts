@@ -17,6 +17,7 @@ import { appendRunStep, lockActiveRun, signalAutomationRun } from '../automation
 import { checkTemplateEligibility } from '../consent/service';
 import { contactForPhone } from '../contacts/service';
 import { emitTenantEvent } from '../messaging/events';
+import { consumeAutomationRun } from '../plans/entitlements';
 import type { AutomationEvent, StoreMessageSkipReason } from './messages-model';
 import type { StoreMessageQueueDeps } from './order-messages';
 
@@ -152,6 +153,9 @@ export async function startStoreAutomation(
   if ((recent?.n ?? 0) >= RUN_BUDGETS.maxRunsPerConversationPerHour) {
     return skip('automation_limit');
   }
+  // The company's plan: automations included and a run left this month (ADR-051).
+  const counted = await consumeAutomationRun(tx, tenantId, now);
+  if (!counted.ok) return skip(counted.reason);
 
   // The run may work in the conversation while it stays resolved as it is now (the runner compares
   // the time it was resolved with the run's start), so the start is never before that time.

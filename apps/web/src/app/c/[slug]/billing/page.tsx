@@ -20,6 +20,7 @@ import {
 import { AddCredit } from '@/components/billing/add-credit';
 import { AutoRechargeForm } from '@/components/billing/auto-recharge-form';
 import { CardMandateSetup, RemoveCard } from '@/components/billing/card-mandate';
+import { PlanCard } from '@/components/billing/plan-card';
 import { PageHeader } from '@/components/page-header';
 import { RequireOwnDocument } from '@/components/require-own-document';
 import { formatDateTime } from '@/lib/format';
@@ -89,8 +90,8 @@ export default async function BillingPage({ params }: { params: Promise<{ slug: 
   const { slug } = await params;
   const ctx = await requireTenant(slug);
   assertCan(ctx, 'billing.read');
-  const { billing } = await getRuntime();
-  const overview = await billing.overview(ctx);
+  const { billing, plans } = await getRuntime();
+  const [overview, plan] = await Promise.all([billing.overview(ctx), plans.overview(ctx)]);
   const canManage = can(ctx, 'billing.manage');
   const { payments, wallet, mandate } = overview;
   const tz = ctx.tenant.timezone;
@@ -101,9 +102,10 @@ export default async function BillingPage({ params }: { params: Promise<{ slug: 
       <RequireOwnDocument />
       <PageHeader
         title="Billing"
-        description="Prepaid service credit for HyFib W360 services. Meta bills your WhatsApp account directly for conversations."
+        description="Your HyFib plan, and prepaid service credit for HyFib W360 services. Meta bills your WhatsApp account directly for conversations."
       />
       <div className="grid gap-6">
+        <PlanCard overview={plan} timeZone={tz} />
         {!payments.configured ? (
           <Alert tone="warning" title="Card payments are not available yet">
             This platform has not connected its Razorpay account, so credit cannot be added.

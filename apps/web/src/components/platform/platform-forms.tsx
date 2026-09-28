@@ -19,7 +19,8 @@ const SCOPES = [
 ];
 
 export function TenantStatusForm({ tenantId, status }: { tenantId: string; status: string }) {
-  const target = status === 'active' ? 'suspended' : 'active';
+  // A restricted company (its plan ended) can be suspended; only a plan change lifts the restriction.
+  const target = status === 'suspended' ? 'active' : 'suspended';
   const [reason, setReason] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -32,7 +33,7 @@ export function TenantStatusForm({ tenantId, status }: { tenantId: string; statu
     if (!result.ok) setError(result.message);
     else setReason('');
   }
-  if (status !== 'active' && status !== 'suspended')
+  if (status !== 'active' && status !== 'suspended' && status !== 'restricted')
     return (
       <p className="text-sm text-muted-foreground">
         Status changes are unavailable while the company is {status}.
@@ -41,6 +42,15 @@ export function TenantStatusForm({ tenantId, status }: { tenantId: string; statu
   return (
     <ClientForm onSubmit={submit} className="grid gap-3">
       <FormError message={error} />
+      {status === 'restricted' ? (
+        <p className="text-sm text-muted-foreground">
+          Restricted because its plan ended: changing the plan lifts the restriction.
+        </p>
+      ) : status === 'suspended' ? (
+        <p className="text-sm text-muted-foreground">
+          If the company’s plan has ended, reactivating makes it restricted rather than active.
+        </p>
+      ) : null}
       <Field
         id="status-reason"
         label={

@@ -76,8 +76,13 @@ export default async function ConversationPage({
     canReply ? savedReplies.savedRepliesFor(ctx, conversationId) : Promise.resolve([]),
     showCrm ? crm.contactCrm(ctx, thread.conversation.contactId) : null,
     showCrm ? crmLookups(ctx) : null,
-    canReply && can(ctx, 'flows.read') ? flows.sendable(ctx, conversationId) : Promise.resolve([]),
-    canReply && showCommerce ? commerce.sendableProducts(ctx, conversationId) : Promise.resolve([]),
+    // Sending flows and products needs their modules in the company's plan (ADR-051).
+    canReply && can(ctx, 'flows.read') && ctx.plan.modules.has('flows')
+      ? flows.sendable(ctx, conversationId)
+      : Promise.resolve([]),
+    canReply && showCommerce && ctx.plan.modules.has('commerce')
+      ? commerce.sendableProducts(ctx, conversationId)
+      : Promise.resolve([]),
     showCommerce ? commerce.orders(ctx, { conversationId }) : null,
     showStoreOrders ? stores.conversationStoreOrders(ctx, conversationId) : null,
   ]);

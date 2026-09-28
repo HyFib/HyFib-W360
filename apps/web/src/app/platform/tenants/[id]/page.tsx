@@ -1,12 +1,20 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
+import {
+  dayOf,
+  PLAN_MODULE_KEYS,
+  PLAN_MODULE_LABELS,
+  TENANT_PLAN_STATUS_LABELS,
+} from '@w360/domain';
 import { Badge, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
+import { TenantPlanForm, type AssignablePlanOption } from '@/components/platform/plan-forms';
 import {
   MfaResetForm,
   SupportGrantForm,
   TenantStatusForm,
 } from '@/components/platform/platform-forms';
+import { formatDate, formatDateTime } from '@/lib/format';
 import { getRuntime } from '@/server/runtime';
 import { requirePlatformActor } from '@/server/session';
 
@@ -16,10 +24,30 @@ export const dynamic = 'force-dynamic';
 export default async function PlatformTenantPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const actor = await requirePlatformActor();
-  const { platform } = await getRuntime();
+  const { platform, planAdmin } = await getRuntime();
   const company = await platform.getTenant(actor, id);
   if (!company) notFound();
-  const owners = await platform.tenantOwners(actor, id);
+  const [owners, planView, published] = await Promise.all([
+    platform.tenantOwners(actor, id),
+    planAdmin.tenantPlan(actor, id),
+    planAdmin.assignablePlans(actor),
+  ]);
+  const { state, usage, limits } = planView;
+  const tz = planView.timezone;
+  const option = (p: (typeof published)[number] | NonNullable<typeof planView.plan>) => ({
+    id: p.id,
+    label: `${p.name} (${p.code} v${p.version})${p.status === 'retired' ? ' · retired, kept' : ''}`,
+    trialDays: p.trialDays,
+    intervalMonths: p.intervalMonths,
+    sellsSeats: p.seatPriceMinor !== null,
+    sellsNumbers: p.numberPriceMinor !== null,
+    sellsRunPacks: p.runPackSize !== null,
+  });
+  const options: AssignablePlanOption[] = published.map(option);
+  if (planView.plan && !options.some((o) => o.id === planView.plan?.id))
+    options.unshift(option(planView.plan));
+  const used = (n: number, max: number | null) =>
+    max === null ? `${n} (no limit)` : `${n} of ${max}`;
   return (
     <div className="grid gap-6">
       <Link href="/platform" className="text-sm text-primary underline-offset-4 hover:underline">
@@ -28,6 +56,9 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
       <div className="flex flex-wrap items-center gap-3">
         <h1 className="text-2xl font-semibold tracking-tight">{company.name}</h1>
         <Badge tone={company.status === 'active' ? 'success' : 'warning'}>{company.status}</Badge>
+        {company.planStatus ? (
+          <Badge tone="info">{TENANT_PLAN_STATUS_LABELS[company.planStatus]}</Badge>
+        ) : null}
       </div>
       {company.statusReason ? (
         <p className="text-sm text-muted-foreground">Last status reason: {company.statusReason}</p>
@@ -38,7 +69,8 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
             <CardTitle>Account status</CardTitle>
             <CardDescription>
               Suspension stops outbound activity; ingestion, exports, billing and owner access
-              continue.
+              continue. A company whose plan ended is restricted the same way until its plan
+              changes.
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -52,6 +84,94 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
           </CardHeader>
           <CardContent>
             <SupportGrantForm tenantId={company.id} />
+          </CardContent>
+        </Card>
+        <Card className="lg:col-span-2">
+          <CardHeader>
+            <div className="flex flex-wrap items-center gap-2">
+              <CardTitle>Plan</CardTitle>
+              <Badge
+                tone={state.status === 'expired' || state.status === 'canceled' ? 'danger' : 'info'}
+              >
+                {TENANT_PLAN_STATUS_LABELS[state.status]}
+              </Badge>
+            </div>
+            <CardDescription>
+              {planView.plan
+                ? `${planView.plan.name} (${planView.plan.code} v${planView.plan.version})`
+                : 'No plan: no limits and every module.'}
+              {state.status === 'trialing'
+                ? ` · trial until ${formatDate(state.trialEndsAt, tz)}`
+                : ''}
+              {state.status === 'active' || state.status === 'past_due'
+                ? ` · paid ${formatDate(state.periodStart, tz)} to ${formatDate(state.periodEnd, tz)}`
+                : ''}
+              {state.status === 'past_due'
+                ? ` · grace until ${formatDate(state.graceEndsAt, tz)}`
+                : ''}
+              . Nothing is charged here; set periods after payment is settled.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-6 lg:grid-cols-2">
+            <div className="grid content-start gap-3 text-sm">
+              <dl className="grid gap-2 sm:grid-cols-2">
+                <div>
+                  <dt className="text-muted-foreground">Seats</dt>
+                  <dd>
+                    {used(usage.members + usage.invitations, limits.seats)}
+                    {usage.invitations > 0 ? ` (${usage.invitations} invitations waiting)` : ''}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-muted-foreground">WhatsApp numbers</dt>
+                  <dd>{used(usage.numbers, limits.numbers)}</dd>
+                </div>
+                <div>
+                  <dt className="text-muted-foreground">Teams</dt>
+                  <dd>{used(usage.teams, limits.teams)}</dd>
+                </div>
+                <div>
+                  <dt className="text-muted-foreground">Live automations</dt>
+                  <dd>{used(usage.liveAutomations, limits.liveAutomations)}</dd>
+                </div>
+                <div className="sm:col-span-2">
+                  <dt className="text-muted-foreground">
+                    Automation runs {formatDate(usage.periodStart, tz)} to{' '}
+                    {formatDate(usage.periodEnd, tz)}
+                  </dt>
+                  <dd>{used(usage.automationRuns, limits.automationRuns)}</dd>
+                </div>
+                <div className="sm:col-span-2">
+                  <dt className="text-muted-foreground">Modules</dt>
+                  <dd>
+                    {PLAN_MODULE_KEYS.filter((m) => planView.modules.includes(m))
+                      .map((m) => PLAN_MODULE_LABELS[m])
+                      .join(', ') || 'Only the modules every plan has'}
+                  </dd>
+                </div>
+              </dl>
+              {state.note ? (
+                <p className="text-muted-foreground">
+                  Last change {formatDateTime(state.changedAt, tz)}: {state.note}
+                </p>
+              ) : null}
+            </div>
+            <TenantPlanForm
+              tenantId={company.id}
+              version={state.version}
+              today={dayOf(new Date(), tz)}
+              current={{
+                status: state.status,
+                planId: state.planId,
+                trialEndsOn: state.trialEndsAt ? dayOf(state.trialEndsAt, tz) : '',
+                periodStart: state.periodStart ? dayOf(state.periodStart, tz) : '',
+                periodEnd: state.periodEnd ? dayOf(state.periodEnd, tz) : '',
+                extraSeats: state.extraSeats,
+                extraNumbers: state.extraNumbers,
+                runPacks: state.runPacks,
+              }}
+              options={options}
+            />
           </CardContent>
         </Card>
         <Card className="lg:col-span-2">

@@ -35,7 +35,8 @@ export default async function ModulesPage({ params }: { params: Promise<{ slug: 
         <CardTitle>Module availability</CardTitle>
         <CardDescription>
           Only modules that are fully available and permitted for your role appear in navigation.
-          This list explains the rest.
+          This list explains the rest. A module your plan does not include stays visible, read only,
+          so nothing you made in it is hidden.
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -44,6 +45,7 @@ export default async function ModulesPage({ params }: { params: Promise<{ slug: 
             <TR>
               <TH>Module</TH>
               <TH>Status</TH>
+              <TH>Your plan</TH>
               <TH>Your access</TH>
               <TH>Details</TH>
             </TR>
@@ -54,6 +56,15 @@ export default async function ModulesPage({ params }: { params: Promise<{ slug: 
                 <TD className="font-medium">{m.label}</TD>
                 <TD>
                   <Badge tone={tone[m.status]}>{label[m.status]}</Badge>
+                </TD>
+                <TD>
+                  {!m.planModule ? (
+                    'Included'
+                  ) : ctx.plan.modules.has(m.planModule) ? (
+                    <Badge tone="success">Included</Badge>
+                  ) : (
+                    <Badge tone="warning">Not included (read only)</Badge>
+                  )}
                 </TD>
                 <TD>{ctx.rolePermissions.has(m.permission) ? 'Permitted' : 'Not in your roles'}</TD>
                 <TD className="text-sm text-muted-foreground">{m.reason ?? '—'}</TD>

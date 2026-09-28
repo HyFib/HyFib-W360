@@ -172,6 +172,9 @@ export const STORE_MESSAGE_SKIP_REASONS = {
   automation_busy: 'Another automation was handling the conversation with the customer.',
   automation_limit:
     'Automations had already started too often in this conversation within the hour.',
+  not_in_plan:
+    "The company's plan did not include this (commerce, or automations for a rule that starts one).",
+  automation_quota: "The company's automation runs for this month were used up.",
 } as const;
 export type StoreMessageSkipReason = keyof typeof STORE_MESSAGE_SKIP_REASONS;
 

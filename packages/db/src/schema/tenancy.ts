@@ -25,7 +25,14 @@ export const TENANT_ROLES = [
 ] as const;
 export type TenantRole = (typeof TENANT_ROLES)[number];
 
-export const TENANT_STATUSES = ['active', 'suspended', 'pending_deletion', 'deleted'] as const;
+/** restricted: the company's plan lapsed (ADR-051); it behaves like suspended. */
+export const TENANT_STATUSES = [
+  'active',
+  'suspended',
+  'restricted',
+  'pending_deletion',
+  'deleted',
+] as const;
 export type TenantStatus = (typeof TENANT_STATUSES)[number];
 
 export const MEMBERSHIP_STATUSES = ['active', 'suspended', 'removed'] as const;
