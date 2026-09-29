@@ -16,12 +16,12 @@ import {
   authenticatedUserScope,
   desc,
   eq,
+  exactTimestamp,
   gt,
   auditEvents,
   invitations,
   lt,
   memberships,
-  or,
   sql,
   tenants,
   userPreferences,
@@ -48,6 +48,7 @@ import { INBOX_WORKER_ROLES, releaseMemberConversations } from '../inbox/routing
 import { recordAudit, type RequestMeta } from '../audit';
 import { enqueueEmail, type OutboxDeps } from '../email/outbox';
 import { assertSeatAvailable } from '../plans/entitlements';
+import { decodeKeysetCursor, encodeKeysetCursor } from '../validation';
 
 export interface TenancyDeps extends OutboxDeps {
   db: Database;
@@ -697,7 +698,7 @@ export function createTenancyService(deps: TenancyDeps) {
     async listAuditEvents(ctx: TenantContext, input: unknown) {
       assertCan(ctx, 'audit.read');
       const query = parse(auditQuerySchema, input ?? {});
-      const cursor = decodeCursor(query.cursor);
+      const cursor = decodeKeysetCursor(query.cursor);
       const rows = await db.run(
         ctx.scope,
         async (tx) =>
@@ -713,6 +714,7 @@ export function createTenancyService(deps: TenancyDeps) {
               subjectId: auditEvents.subjectId,
               result: auditEvents.result,
               metadata: auditEvents.metadata,
+              cursorAt: exactTimestamp(auditEvents.occurredAt),
             })
             .from(auditEvents)
             .leftJoin(users, eq(users.id, auditEvents.actorId))
@@ -721,10 +723,7 @@ export function createTenancyService(deps: TenancyDeps) {
                 eq(auditEvents.tenantId, ctx.tenant.id),
                 query.action ? eq(auditEvents.action, query.action) : undefined,
                 cursor
-                  ? or(
-                      lt(auditEvents.occurredAt, cursor.at),
-                      and(eq(auditEvents.occurredAt, cursor.at), lt(auditEvents.id, cursor.id)),
-                    )
+                  ? sql`(${auditEvents.occurredAt}, ${auditEvents.id}) < (${cursor.at}::timestamptz, ${cursor.id}::uuid)`
                   : undefined,
               ),
             )
@@ -734,27 +733,13 @@ export function createTenancyService(deps: TenancyDeps) {
       );
       const hasMore = rows.length > query.limit;
       const page = rows.slice(0, query.limit);
-      const last = page[page.length - 1];
+      const last = page.at(-1);
       return {
-        events: page,
-        nextCursor: hasMore && last ? encodeCursor(last.occurredAt, last.id) : null,
+        events: page.map(({ cursorAt: _cursorAt, ...event }) => event),
+        nextCursor: hasMore && last ? encodeKeysetCursor(last.cursorAt, last.id) : null,
       };
     },
   };
 }
 
 export type TenancyService = ReturnType<typeof createTenancyService>;
-
-function encodeCursor(at: Date, id: string): string {
-  return Buffer.from(`${at.toISOString()}|${id}`).toString('base64url');
-}
-
-function decodeCursor(cursor: string | undefined): { at: Date; id: string } | null {
-  if (!cursor) return null;
-  const [at, id] = Buffer.from(cursor, 'base64url').toString('utf8').split('|');
-  const date = at ? new Date(at) : null;
-  if (!date || Number.isNaN(date.getTime()) || !id || !/^[0-9a-f-]{36}$/.test(id)) {
-    throw new AppError('validation_failed', 'Invalid cursor.');
-  }
-  return { at: date, id };
-}

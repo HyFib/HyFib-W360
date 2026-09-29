@@ -14,10 +14,10 @@ import {
   conversations,
   desc,
   eq,
+  exactTimestamp,
   gt,
   isNull,
   isUniqueViolation,
-  lt,
   or,
   outerColumn,
   sql,
@@ -916,6 +916,7 @@ export function createStoreService(deps: StoreServiceDeps) {
               customerName: commerceStoreOrders.customerName,
               customerPhone: commerceStoreOrders.customerPhone,
               redactedAt: commerceStoreOrders.redactedAt,
+              cursorAt: exactTimestamp(commerceStoreOrders.placedAt),
             })
             .from(commerceStoreOrders)
             .where(
@@ -932,13 +933,7 @@ export function createStoreService(deps: StoreServiceDeps) {
                     )
                   : undefined,
                 cursor
-                  ? or(
-                      lt(commerceStoreOrders.placedAt, cursor.at),
-                      and(
-                        eq(commerceStoreOrders.placedAt, cursor.at),
-                        lt(commerceStoreOrders.id, cursor.id),
-                      ),
-                    )
+                  ? sql`(${commerceStoreOrders.placedAt}, ${commerceStoreOrders.id}) < (${cursor.at}::timestamptz, ${cursor.id}::uuid)`
                   : undefined,
               ),
             )
@@ -949,8 +944,8 @@ export function createStoreService(deps: StoreServiceDeps) {
       const page = rows.slice(0, pageSize);
       const last = page.at(-1);
       return {
-        orders: page,
-        next: rows.length > pageSize && last ? encodeKeysetCursor(last.placedAt, last.id) : null,
+        orders: page.map(({ cursorAt: _cursorAt, ...order }) => order),
+        next: rows.length > pageSize && last ? encodeKeysetCursor(last.cursorAt, last.id) : null,
       };
     },
 

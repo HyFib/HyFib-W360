@@ -1,5 +1,90 @@
 # Progress
 
+## 2026-09-29 — Phase 5: reading conversations and messages through the public API (P5-08, ADR-072)
+
+Status: **Implemented and locally verified against the Graph stand-in.** Integrations heard of new
+messages through the `message.received` webhook and could reply with text (ADR-070), but could not
+read a conversation: one that missed webhooks, or needed the thread before replying, could read
+only the status of the messages it had sent. A key with the new `conversations.read` scope now lists
+the company's conversations and reads their messages. Writing these pages also found that keyset
+cursors lost rows at page ends across the app; they are fixed.
+
+### Completed
+
+- **Design (ADR-072):** the scope, granted only by members who hold `inbox.read_all` (a key reads
+  every conversation, so the member who grants it must be able to); three read-only endpoints;
+  what a conversation says (status, whether someone is assigned but not who, unread count, last
+  message and inbound times, when the 24-hour window ends) and what a message says (the webhooks'
+  vocabulary: direction, type, text, the reply tapped, media type, template, who sent it and the
+  key, status and error; never media, internal notes or member names); erased contacts'
+  conversations hidden. `updatedSince` compares the trigger-kept `updated_at`, which is stamped with
+  the transaction's start, so the documentation tells integrations to overlap their passes instead
+  of promising an exact feed.
+- **Migrations:** 0044 lets `app.api_keys.scopes` hold `conversations.read` (up to seven scopes);
+  0045 builds `conversations_created_idx` (company, creation time, id) concurrently for the pages.
+- **Domain** (`api/conversations.ts`): `apiListConversations` (filters by status, contact, number
+  and time of change; keyset pages on creation time and id), `apiGetConversation` and
+  `apiListConversationMessages` (the conversation must be visible; inbound messages through the
+  webhooks' `inboundSummary`, outbound through `outboundText`: a text, a template's rendered body or
+  an interactive message's body), in the key's company scope, read only.
+- **Exact keyset cursors:** `exactTimestamp` (`packages/db/src/sql.ts`) selects a row's time as
+  PostgreSQL keeps it, to the microsecond, and `encodeKeysetCursor`/`decodeKeysetCursor` carry it as
+  text, compared with `(time, id) < (cursor time, cursor id)`. Cursors built from JavaScript dates
+  (milliseconds) lost the rows that shared the page's last millisecond but came after it, and rows
+  written in one transaction always share their time: the contacts list and export, API contacts,
+  the inbox thread's older messages and the audit log skipped rows at page ends (each shown by a
+  regression test that failed before the fix: 2 of 5, 3 of 7 and 500 of 505 contacts, 51 of 61
+  messages and 3 of 8 audit events came back). Campaigns and store orders use the same cursors now.
+  Cursors issued before still read; a cursor whose time PostgreSQL would refuse (30 February, 24:00,
+  year 0) or whose id is not a UUID is a validation error instead of a failed query.
+- **Web:** `GET /api/v1/conversations`, `/conversations/{id}` and `/conversations/{id}/messages`;
+  the OpenAPI document describes them with the `Conversation` and `ConversationMessage` schemas;
+  Settings → API keys offers "Read conversations" to members who can grant it.
+- **Tests:** unit tests of the cursors (microseconds kept, older cursors read, everything else
+  refused). 9 new integration tests: 4 in `api.test.ts` for conversation reads (the scope and a
+  member without `inbox.read_all` refused, every scope on one key; pages of one and two with three
+  conversations sharing a creation time, each filter and their combination, `updatedSince` after a
+  resolve, an assignment and a new message, the conversation's fields; eleven messages of each kind
+  (text, image, button, list reply, reaction, location, a member's text, a template, API replies
+  with their key, one failed with WhatsApp's error, the satisfaction survey) read in the webhooks'
+  words, pages with shared creation times, internal notes left out; erased contacts, another
+  company's key, a suspended or restricted company still reading, bad ids and queries) and one for
+  API contacts sharing a creation time; 2 in `contacts.test.ts`, 1 in `messaging.test.ts` (the inbox
+  thread) and 1 in `services.test.ts` (the audit log) for the cursors. e2e `api.spec.ts`: the key
+  created with "Reply with text" and "Read conversations" lists the open conversation, reads it,
+  and pages its messages one at a time (the reply sent through the API, then what the customer
+  wrote).
+- **Docs:** ADR-072; ARCHITECTURE §6N (conversation reads, keyset cursors); SECURITY (Phase 5 API
+  rules); THREAT-MODEL T90; RUNBOOKS (an integration missing a conversation, migrations 0044 and
+  0045); BACKLOG P5-08; FEATURE-MATRIX W-134 and H-033.
+- **Mutation checks:** 36 regressions tried one at a time, all make a test fail: the erased-contact
+  join, the visibility check before messages, the scope on each endpoint, the id tie-break of both
+  cursors, the service window, the assigned flag, each filter, the words of templates and
+  interactive messages, the API and inbound senders, the id check, unknown query fields, the page
+  size limit, the error, the scope's permission and read-only flag, cursors in milliseconds (three
+  suites), the cursor time and id checks, and each fixed cursor (inbox thread, audit log, contacts
+  list and export, API contacts).
+
+### Test commands and results (local, 2026-09-29)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `pnpm test` (unit)                                                          | 345 passed, including 3 new in `validation.test.ts`                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 473 passed, including 9 new                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 473 passed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / one full run (24.6 min): 95 passed and 1 failed, the Flows data endpoint on chromium, whose call goes to `api.w360-e2e.test`: this container's `/etc/hosts` had lost the line mapping that name to 127.0.0.1 again (CI adds it; the web log shows `egress_failed`). With the line restored during the run, the later tests calling that host passed, and `flows.spec.ts` then passed on both projects (4 tests). `api.spec.ts` with the conversation reads passed on both projects |
+| Mutation checks                                                             | 36 regressions tried; all 36 make a test fail                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+
+### Known gaps
+
+- Not built: writing to conversations (resolving, assigning, notes), member and team names, media
+  downloads, full-text search, a message feed across conversations, filtering by assignee or team.
+- `updatedSince` is not an exact change feed: changes carry their transaction's start time, so
+  integrations overlap their passes and see some conversations again.
+- Verified against the Graph stand-in only; the cost of the conversation pages at production
+  volumes is not measured.
+
 ## 2026-09-29 — Phase 5: alerts for payments no settlement showed (P5-05, ADR-071)
 
 Status: **Implemented and locally verified against the Razorpay stand-in (email through the local

@@ -192,6 +192,28 @@ describe('contacts', () => {
     // Wildcards in the search text match literally.
     expect((await contactsSvc.listContacts(ctx, { q: '%' })).items).toHaveLength(0);
   });
+
+  it('pages through contacts written in one transaction, which share their creation time to the microsecond', async () => {
+    const d = await fx.company();
+    const ctx = await fx.ctx(d, d.agent);
+    // An import writes its new contacts in one transaction: they share now(). A cursor cut to
+    // milliseconds skipped all but the first page of them.
+    const batch = await fx.query<{ id: string }>(
+      `INSERT INTO app.contacts (id, tenant_id, phone_e164, source)
+       SELECT gen_random_uuid(), $1, '+9170100' || lpad(g::text, 5, '0'), 'import'
+         FROM generate_series(1, 7) g
+       RETURNING id`,
+      [d.tenant.id],
+    );
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    do {
+      const page = await contactsSvc.listContacts(ctx, { limit: 3, ...(cursor ? { cursor } : {}) });
+      seen.push(...page.items.map((i) => i.id));
+      cursor = page.nextCursor;
+    } while (cursor);
+    expect(seen.sort()).toEqual(batch.map((r) => r.id).sort());
+  });
 });
 
 describe('CSV import and export', () => {
@@ -308,6 +330,21 @@ describe('CSV import and export', () => {
     );
     expect(run).toMatchObject({ error_count: 3 });
     expect(run!.consent_attestation).toMatch(/website sign-up form/);
+  });
+
+  it('exports every contact when more than one batch shares a creation time', async () => {
+    const d = await fx.company();
+    await fx.query(
+      `INSERT INTO app.contacts (id, tenant_id, phone_e164, source)
+       SELECT gen_random_uuid(), $1, '+9170200' || lpad(g::text, 5, '0'), 'import'
+         FROM generate_series(1, 505) g`,
+      [d.tenant.id],
+    );
+    const ctx = await fx.ctx(d, d.marketer);
+    let out = '';
+    for await (const chunk of contactsSvc.exportContacts(ctx, {})) out += chunk;
+    // The export reads 500 contacts at a time: the second batch must hold the other 5.
+    expect(parseCsv(out).rows.length).toBe(505);
   });
 
   it('exports formula-safe CSV that round-trips through the parser', async () => {

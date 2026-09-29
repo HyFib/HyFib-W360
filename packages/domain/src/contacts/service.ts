@@ -8,11 +8,12 @@ import {
   contactFields,
   contactIdentities,
   contactImports,
-  contactTags,
   contacts,
+  contactTags,
   conversations,
   desc,
   eq,
+  exactTimestamp,
   inArray,
   isNull,
   outerColumn,
@@ -271,7 +272,7 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
   async function selectContacts(
     tx: Tx,
     conditions: SQL[],
-    cursor: { at: Date; id: string } | null,
+    cursor: { at: string; id: string } | null,
     limit: number,
   ) {
     return tx
@@ -283,6 +284,7 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
         source: contacts.source,
         attributes: contacts.attributes,
         createdAt: contacts.createdAt,
+        cursorAt: exactTimestamp(contacts.createdAt),
         // Outer columns named in full: this select has no joins, so drizzle would leave the table
         // out and `id` would bind to the subquery's own table.
         tags: sql<string[]>`coalesce((select array_agg(t.tag order by t.tag) from app.contact_tags t
@@ -299,7 +301,7 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
         and(
           ...conditions,
           cursor
-            ? sql`(${contacts.createdAt}, ${contacts.id}) < (${cursor.at.toISOString()}::timestamptz, ${cursor.id}::uuid)`
+            ? sql`(${contacts.createdAt}, ${contacts.id}) < (${cursor.at}::timestamptz, ${cursor.id}::uuid)`
             : undefined,
         ),
       )
@@ -400,11 +402,11 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
         utility: r.utility,
         createdAt: r.createdAt,
       }));
-      const last = items[items.length - 1];
+      const last = rows.slice(0, q.limit).at(-1);
       return {
         items,
         nextCursor:
-          rows.length > q.limit && last ? encodeKeysetCursor(last.createdAt, last.id) : null,
+          rows.length > q.limit && last ? encodeKeysetCursor(last.cursorAt, last.id) : null,
       };
     },
 
@@ -1238,7 +1240,7 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
           'created_at',
           ...fields.map((f) => f.key),
         ]);
-      let cursor: { at: Date; id: string } | null = null;
+      let cursor: { at: string; id: string } | null = null;
       let exported = 0;
       const conditions = filterConditions(ctx, filter);
       while (exported < MAX_EXPORT_ROWS) {
@@ -1267,7 +1269,7 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
         yield chunk;
         const last = batch.at(-1);
         if (!last || batch.length < 500) break;
-        cursor = { at: last.createdAt, id: last.id };
+        cursor = { at: last.cursorAt, id: last.id };
       }
     },
 
