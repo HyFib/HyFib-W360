@@ -1204,6 +1204,17 @@ payment_requested → succeeded`; before each provider call it is written as `un
   Drafts and withdrawn cards are never shown. Nothing is stored, posted to the ledger or taken from
   service credit; Meta bills the company directly (ADR-011).
 
+- **Rate change notices (0038, ADR-065) [built]:** the minute billing sweep
+  (`packages/domain/src/billing/rate-notices.ts`, whether or not Razorpay is configured) lists, through
+  the definer function `ops.rate_change_notices_due` (ids only), active companies whose billing
+  currency has a published card taking effect within 7 days that they were not told about. Each
+  pair is checked again in the company's scope (active, the card published, for its currency, still
+  ahead and within the week) and recorded in `app.rate_change_notices` (unique per company and
+  card, append-only) in the transaction that queues the billing notice to its owners and billing
+  managers: when the card takes effect in the company's time zone, what it changes against the
+  published card in force just before it, the largest changes and a link to Usage and rates. A
+  failure records nothing and is retried by the next sweep without holding up other companies.
+
 - **Browser security:** the billing and WhatsApp-channels pages get their own CSP allowing only
   that provider's script and frame. Because a CSP belongs to the loaded document, links to these
   pages are full page loads and the pages reload once if reached by client-side navigation.

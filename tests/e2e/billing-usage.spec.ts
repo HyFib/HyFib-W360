@@ -10,7 +10,7 @@ import {
   standInRequests,
   statusUpdate,
 } from './messaging-support';
-import { expectNoHorizontalOverflow, signUpAndVerify, uniqueEmail } from './support';
+import { expectNoHorizontalOverflow, signUpAndVerify, uniqueEmail, waitForEmail } from './support';
 
 const PASSWORD = 'correct horse battery staple 42';
 
@@ -112,7 +112,7 @@ test('a company sees Meta’s rates in force, what changes next, and this month�
   page,
   request,
 }) => {
-  test.setTimeout(120_000);
+  test.setTimeout(180_000);
   const currency = CURRENCIES[test.info().project.name] ?? 'SEK';
   const email = uniqueEmail('usage');
   const slug = `use-${Date.now().toString(36)}`;
@@ -185,4 +185,16 @@ test('a company sees Meta’s rates in force, what changes next, and this month�
     '0 priced of 0 billable delivered messages',
   );
   await expectNoHorizontalOverflow(page);
+
+  // The worker's minute billing sweep emails the owner about the card taking effect in two days
+  // (ADR-065), linking to this page.
+  const mail = await waitForEmail(email, `Meta's WhatsApp rates for ${currency} change on`, 90_000);
+  expect(mail).toContain(`Meta's rate card for ${currency} changes at`);
+  expect(mail).toContain(
+    'Compared with the card before it, the new card changes 1 price, adds 1 price and no longer lists 1 price.',
+  );
+  expect(mail).toContain(`• India, marketing: 0.785 ${currency} to 0.865 ${currency} (+10.2%)`);
+  expect(mail).toContain(`• India, authentication: no longer priced (was 0.115 ${currency})`);
+  expect(mail).toContain(`• India, service: new price 0.042 ${currency}`);
+  expect(mail).toContain(`/c/${slug}/billing/usage`);
 });

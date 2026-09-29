@@ -1692,7 +1692,7 @@ Access: billing managers see aggregate counts and estimates of delivered message
 category, without any message, number, contact or market breakdown: a subset of what Reports shows
 `reports.read` holders.
 
-Not built: alerts or emails about an upcoming change, estimates per number or campaign on this page
+Not built: alerts or emails about an upcoming change (since ADR-065, an email a week before), estimates per number or campaign on this page
 (campaigns show their own), a history of past cards, and exact charges (Meta's invoice is
 authoritative; reconciling with `pricing_analytics` stays in the backlog, ADR-028).
 
@@ -1873,3 +1873,41 @@ payment-received email links to the receipt of the payment that paid the new per
 
 Not built: tax invoices, credit notes, receipts in platform pages, and plan payments in the monthly
 service-credit statements (they never touch the wallet).
+
+## ADR-065 A notice before Meta's rates change (2026-09-29)
+
+Context: Billing → Usage and rates (ADR-060) announces the next published rate card for the
+company's billing currency, but only to someone who opens the page. Meta's cards change on
+2026-10-01 (research M-075), and companies plan campaigns around their costs.
+
+Decision:
+
+- **Who and when:** once per company and published card, the company's billing managers (owners
+  and the billing role, as for other billing notices) are emailed when a published card for the
+  company's billing currency (Settings → Messaging) takes effect within the next 7 days. Companies
+  without a billing currency, and companies that are suspended, restricted or being deleted, get
+  none.
+- **What:** the date and time the card takes effect in the company's time zone; how many prices it
+  changes, adds and no longer lists compared with the published card in force just before it (for
+  a second upcoming card, the first), or that it is the first card for the currency; up to three
+  of the largest changes (by relative size; new and dropped prices last); that HyFib's estimates
+  switch at that time and that Meta bills the company directly; a link to Billing → Usage and rates.
+- **Once:** `app.rate_change_notices` (company, card, currency, effective time, when sent; unique
+  per company and card; append-only) is written in the transaction that queues the email. The
+  minute billing sweep lists due pairs through `ops.rate_change_notices_due` (a definer function
+  returning ids only, owned by `w360_definer`, which may read only published cards' id, currency,
+  status and effective time, the companies' billing currencies and which card each company was
+  told about). Each pair is then checked again in the company's own scope before anything is
+  written, so a card withdrawn, a currency changed or a company suspended after the listing sends
+  nothing; two sweeps at once send one email (the unique key). A failure (an email that cannot be
+  written) records nothing, and the next sweep tries again; the other companies are not held up.
+- A card published less than 7 days before it takes effect is announced at once; a card published
+  after its effective time is not announced (it is already in force). A withdrawn card sends
+  nothing more; its correction is a new card with its own notice. A company that chooses a billing
+  currency later is told about the cards still to come within the week.
+- Records are exported with the company and deleted with it (ADR-055). Nothing is charged or
+  posted; the notice is informational.
+
+Not built: a setting to turn the notice off, notices for currencies other than the billing
+currency, notices to other roles, and in-app banners (the Usage and rates page already shows the
+next change).

@@ -135,7 +135,8 @@ type CardRow = {
   notes: string | null;
 };
 
-async function withPrices(tx: Tx, card: CardRow): Promise<RateCardView> {
+/** A published card with its list prices (volume tier 0). */
+export async function rateCardWithPrices(tx: Tx, card: CardRow): Promise<RateCardView> {
   const rows = await tx
     .select({
       market: rateCardPrices.market,
@@ -160,7 +161,11 @@ const cardColumns = {
 };
 
 /** The published card for `currency` in force at `at` (the latest effective time not after it). */
-async function cardInForce(tx: Tx, currency: string, at: Date): Promise<RateCardView | null> {
+export async function rateCardInForce(
+  tx: Tx,
+  currency: string,
+  at: Date,
+): Promise<RateCardView | null> {
   const [card] = await tx
     .select(cardColumns)
     .from(rateCards)
@@ -173,7 +178,7 @@ async function cardInForce(tx: Tx, currency: string, at: Date): Promise<RateCard
     )
     .orderBy(desc(rateCards.effectiveFrom))
     .limit(1);
-  return card ? withPrices(tx, card) : null;
+  return card ? rateCardWithPrices(tx, card) : null;
 }
 
 /** The published card for `currency` taking effect next after `at`. */
@@ -190,7 +195,7 @@ async function nextCard(tx: Tx, currency: string, at: Date): Promise<RateCardVie
     )
     .orderBy(asc(rateCards.effectiveFrom))
     .limit(1);
-  return card ? withPrices(tx, card) : null;
+  return card ? rateCardWithPrices(tx, card) : null;
 }
 
 export interface BillingUsageDeps {
@@ -214,7 +219,7 @@ export function createBillingUsageService(deps: BillingUsageDeps) {
             .from(messagingSettings)
             .where(eq(messagingSettings.tenantId, ctx.tenant.id));
           const currency = settings?.costCurrency ?? null;
-          const current = currency ? await cardInForce(tx, currency, now) : null;
+          const current = currency ? await rateCardInForce(tx, currency, now) : null;
           const next = currency ? await nextCard(tx, currency, now) : null;
           const charges = await estimateMetaCharges(tx, ctx.tenant.id, period, currency);
           return {

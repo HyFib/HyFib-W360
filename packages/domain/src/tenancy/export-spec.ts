@@ -1294,6 +1294,10 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
     ],
   },
   {
+    table: 'app.rate_change_notices',
+    columns: ['id', 'rate_card_id', 'currency', 'effective_from', 'sent_at'],
+  },
+  {
     table: 'app.saved_replies',
     columns: [
       'id',

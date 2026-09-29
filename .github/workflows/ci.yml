@@ -79,9 +79,11 @@ jobs:
     runs-on: ubuntu-24.04
     # 168 tests run one at a time across four browser projects: about 3 minutes of set-up and 40 of
     # tests on 6b33740 (164 tests, all passing on the first attempt), plus about a minute for the
-    # plan subscription spec. Runners vary (148 tests took 33.5 minutes on b2b7614; 160 took 45.9 on
-    # fb8efa6, including a 4-minute timeout and its retry), and one retry of a long test (the cart
-    # reminder test allows 5 minutes) must still fit on a slow runner.
+    # plan subscription spec and up to a minute per project for the usage spec, which waits for the
+    # worker's minute billing sweep to send the rate change email. Runners vary (148 tests took 33.5
+    # minutes on b2b7614; 160 took 45.9 on fb8efa6, including a 4-minute timeout and its retry), and
+    # one retry of a long test (the cart reminder test allows 5 minutes) must still fit on a slow
+    # runner.
     timeout-minutes: 70
     services:
       postgres:

@@ -4,6 +4,7 @@ import { toError } from '@w360/core';
 import { authorizedTenantScope } from '@w360/db';
 import {
   advanceAutoRechargeAttempt,
+  announceRateChanges,
   authorizeJob,
   beginAutoRecharge,
   deferAutoRechargeAttempt,
@@ -186,7 +187,8 @@ export function settlementReconHandler(rt: WorkerRuntime) {
 /**
  * Every minute: move plans whose trial, paid period or grace period ended to their next state
  * (after syncing the Razorpay subscription that paid the period, ADR-063) and announce reached
- * automation run limits (ADR-051); re-signal Razorpay receipts whose signal was lost, reconcile
+ * automation run limits (ADR-051); email billing managers before Meta's rates for their currency
+ * change (ADR-065); re-signal Razorpay receipts whose signal was lost, reconcile
  * open manual top-ups, due auto-recharge attempts and due plan subscriptions with Razorpay (the
  * backstop for missed webhooks), queue due steps of staff credit refunds (ADR-058) and the
  * settlement reconciliations owed (ADR-059), start auto-recharge checks for companies below their
@@ -220,7 +222,20 @@ export function billingSweepHandler(rt: WorkerRuntime) {
         'plan sweep',
       );
     }
-    // Company deletions run whether or not Razorpay is configured (ADR-055).
+    // Rate change notices (ADR-065) and company deletions (ADR-055) run whether or not Razorpay
+    // is configured.
+    const rates = await announceRateChanges({ db: rt.db, clock: rt.clock, notices: rt.notices });
+    for (const failure of rates.failed) {
+      rt.logger.warn(
+        {
+          tenantId: failure.tenantId,
+          rateCardId: failure.rateCardId,
+          err: toError(failure.error).message,
+        },
+        'rate change notice failed for a company; will retry',
+      );
+    }
+    if (rates.announced > 0) rt.logger.info({ announced: rates.announced }, 'rate change notices');
     const deletions = await sweepTenantDeletions(rt);
     if (deletions > 0) rt.logger.info({ deletions }, 'company deletions due');
     const released = await releaseExpiredHolds(rt.db);

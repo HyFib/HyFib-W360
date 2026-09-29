@@ -947,11 +947,27 @@ requests, usage period) gets at most one warning, at 80% of the limit rounded up
 earlier period is marked without an email, and a company that is suspended, restricted or being
 deleted gets none. Queued emails go out through the email outbox like every other notice.
 
+**A rate change email did not come, or came again.** A company is told once per published card
+(`app.rate_change_notices`: the card, its currency and effective time, when the email was queued)
+when a card for its billing currency (Settings → Messaging) takes effect within 7 days. None goes to
+a company without a billing currency, one that is suspended, restricted or being deleted, or about a
+draft, a withdrawn card or a card published after it took effect. The recipients are the owners and
+billing managers at the time. The billing sweep logs `rate change notices` with how many were sent,
+and `rate change notice failed for a company; will retry` with the company and card ids (nothing is
+recorded, and the next minute tries again). A correction published as a new card is announced again
+(ADR-065).
+
 **The sweep did not move a plan on.** The billing sweep runs every minute and logs `plan sweep`
 (and `plan sweep failed for a company; will retry` with the company id and error, rolled back and
 retried the next minute). A company being deleted is skipped. Check `app.tenant_plans` for the
 company (`status`, `trial_ends_at`, `period_end`, `grace_ends_at`): the database's clock decides
 what is due.
+
+**Migration 0038 failed.** It runs in one transaction, so a failure applies nothing. It adds
+`app.rate_change_notices` (forced RLS, grants, an append-only trigger and a deletion step), column
+grants and read policies for `w360_definer` on published rate cards, billing currencies and the
+notices, and `ops.rate_change_notices_due` (granted to `w360_app`, then handed to `w360_definer`). A
+failure usually means the bootstrap roles are missing.
 
 **Migration 0037 failed.** It runs in one transaction, so a failure applies nothing. It adds the
 plan tax setting, `app.plan_subscriptions` and `app.plan_payments` (forced RLS, grants, triggers),

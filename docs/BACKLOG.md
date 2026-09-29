@@ -358,9 +358,9 @@ verification, app review, Embedded Signup configuration).
   active for each cycle Razorpay reports paid, fetched and checked by HyFib (Checkout, webhooks,
   hourly and daily checks, before period ends); failed charges, stopped retries, cancelling at the
   end of the period, staff cancelling at once, deletion cancelling at Razorpay, plan payments in
-  the daily reconciliation); **[plan payment receipts built, locally verified]** (ADR-064: a receipt page per plan payment with the plan, add-ons, billing period and tax, not a tax invoice, linked from Billing and the payment email). Remaining: invoices (tax review), refunds of
+  the daily reconciliation); **[plan payment receipts built, locally verified]** (ADR-064: a receipt page per plan payment with the plan, add-ons, billing period and tax, not a tax invoice, linked from Billing and the payment email); **[rate change notices built, locally verified]** (ADR-065: billing managers emailed once when a published card for the company's billing currency takes effect within 7 days, with what it changes). Remaining: invoices (tax review), refunds of
   plan payments, billing from the end of a trial, plan and add-on changes with proration, pausing,
-  offers, alerts before a rate change, Razorpay test-mode checks (RELEASE-CHECKLIST).
+  offers, Razorpay test-mode checks (RELEASE-CHECKLIST).
 - **P5-08 Public API** **[built, locally verified; sends through the Graph stand-in only]**
   (ADR-052): company API keys (SHA-256 only, scopes granted within the creator's permissions,
   expiry, rotation with an overlap, revocation, audit), `/api/v1` with approved template sends,

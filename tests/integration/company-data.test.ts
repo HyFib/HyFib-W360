@@ -286,6 +286,38 @@ async function exportText(ctx: TenantContext): Promise<string> {
 }
 
 /** A company with conversations, a sent reply, an API key and a chat link. */
+let noticedCard: string | undefined;
+/**
+ * A record that the company was told about a rate card (ADR-065), as the billing sweep writes it:
+ * the card took effect two days ago, so no sweep lists it again. NOK is used by this file only.
+ */
+async function rateNotice(c: Company) {
+  if (!noticedCard) {
+    noticedCard = uuidv7();
+    await fx.query(
+      `INSERT INTO ops.rate_cards (id, currency, effective_from, source_url, created_by_user_id)
+       VALUES ($1, 'NOK', now() - interval '2 days', 'https://example.test/rates/nok', $2)`,
+      [noticedCard, c.owner.id],
+    );
+    await fx.query(
+      `INSERT INTO ops.rate_card_prefixes (rate_card_id, prefix, market) VALUES ($1, '47', 'Norway')`,
+      [noticedCard],
+    );
+    await fx.query(
+      `INSERT INTO ops.rate_card_prices (rate_card_id, market, category, price_micros)
+       VALUES ($1, 'Norway', 'marketing', 700000)`,
+      [noticedCard],
+    );
+    await fx.query(`UPDATE ops.rate_cards SET status = 'published' WHERE id = $1`, [noticedCard]);
+  }
+  await fx.query(
+    `INSERT INTO app.rate_change_notices (id, tenant_id, rate_card_id, currency, effective_from, sent_at)
+     SELECT $1, $2, c.id, c.currency, c.effective_from, c.effective_from - interval '6 days'
+       FROM ops.rate_cards c WHERE c.id = $3`,
+    [uuidv7(), c.tenant.id, noticedCard],
+  );
+}
+
 async function busyCompany() {
   const c = await fx.company();
   const owner = await fx.ctx(c, c.owner);
@@ -317,6 +349,7 @@ async function busyCompany() {
     message: 'Hello from Instagram',
     includeRef: true,
   });
+  await rateNotice(c);
   return { c, owner, agent, customer, apiKey };
 }
 
@@ -601,6 +634,9 @@ describe('what an export contains', () => {
     expect(of('app.api_keys')).toHaveLength(1);
     expect(of('app.chat_links')).toHaveLength(1);
     expect(of('app.whatsapp_accounts')[0]).toMatchObject({ waba_id: c.wabaId });
+    expect(of('app.rate_change_notices')).toEqual([
+      expect.objectContaining({ rate_card_id: noticedCard, currency: 'NOK' }),
+    ]);
 
     // Nothing of the other company, no tenant ids as fields, and no credentials.
     expect(text).not.toContain(other.c.tenant.id);
@@ -899,6 +935,7 @@ describe('running a deletion', () => {
     expect(before['app.messages']).toBeGreaterThanOrEqual(3);
     expect(before['app.commerce_stores']).toBe(1);
     expect(before['app.payment_mandates']).toBe(1);
+    expect(before['app.rate_change_notices']).toBe(1);
 
     const result = await runTenantDeletion(runDeps(), c.tenant.id);
     expect(result.outcome).toBe('finished');

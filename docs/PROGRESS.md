@@ -1,5 +1,62 @@
 # Progress
 
+## 2026-09-29 — Phase 5: a notice before Meta's rates change (P5-07)
+
+Status: **Implemented and locally verified (email through the local outbox and Mailpit only).**
+Billing → Usage and rates already showed the next rate card, but only to someone who opened it; now
+the billing managers of each company whose billing currency a published card is for are emailed a
+week before it takes effect, once.
+
+### Completed
+
+- **Design (ADR-065):** once per company and published card, when the card takes effect within 7
+  days: the owners and billing managers of active companies whose billing currency it is for, with
+  when it takes effect in the company's time zone, what it changes against the published card in
+  force just before it (or that it is the first card for the currency), up to three of the largest
+  changes, that estimates switch then and that Meta bills the company, and a link to Usage and
+  rates. Cards published after they took effect are not announced; a correction is a new card with
+  its own notice.
+- **Migration 0038:** `app.rate_change_notices` (unique per company and card, append-only, forced
+  RLS, exported, deleted with the company at step 75); `ops.rate_change_notices_due` (definer, ids
+  only, executable by `w360_app`), with column grants and read policies that let `w360_definer`
+  read only published cards' id, currency, status and effective time, billing currencies and which
+  card each company was told about.
+- **Domain:** `billing/rate-notices.ts` (`announceRateChanges` for the sweep, `announceRateChange`
+  per company and card: checked again in the company's scope and recorded in the transaction that
+  queues the email); `rateCardWithPrices` and `rateCardInForce` exported from `billing/usage.ts`.
+- **Worker:** the minute billing sweep sends the notices whether or not Razorpay is configured and
+  logs `rate change notices` and each failure (retried the next minute).
+- **Tests:** `rate-change-notices.test.ts` (7), the notice in the export and deletion tests of
+  `company-data.test.ts`, the function's grants in the isolation suite, and
+  `billing-usage.spec.ts` now waits for the worker's email about the card taking effect in two
+  days.
+- **Docs:** ADR-065 (and ADR-060's "not built"); ARCHITECTURE §7; SECURITY; THREAT-MODEL T84;
+  RUNBOOKS (plans: the email, migration 0038); DATA-RETENTION; BACKLOG P5-07; FEATURE-MATRIX W-013,
+  H-038 and the new H-042; the CI timing note.
+- **Mutation checks:** 29 regressions tried one at a time; 27 make a test fail. The first run caught
+  25; tests for a withdrawn card passed straight to the announcement and for inactive companies left
+  out of the listing now catch two more. The other two are repeated by another layer: the listing's
+  published filter by the definer role's read policy (whose own regression is caught), and the
+  explicit `REVOKE … FROM PUBLIC` by the default privileges of migration 0002 (the isolation suite
+  still checks that no function is executable by PUBLIC).
+
+### Test commands and results (local, 2026-09-29)
+
+| Command                                                                     | Result                                                                                                                                                                          |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                  |
+| `pnpm test` (unit)                                                          | 326 passed                                                                                                                                                                      |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 441 passed, including the new `rate-change-notices.test.ts` (7) and the notice in `company-data.test.ts`                                                                        |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 441 passed                                                                                                                                                                      |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 84 passed (42 × 2) in one full run (19.7 min), including `billing-usage.spec.ts` receiving the rate change email from the worker's minute sweep on both projects |
+| Mutation checks                                                             | 29 regressions tried; 27 make a test fail, the other two are repeated by another layer                                                                                          |
+
+### Known gaps
+
+- No setting to turn the notice off, no notices for other roles or currencies, and no in-app banner
+  (the Usage and rates page shows the next change). Rate cards remain entered by platform staff from
+  Meta's pages; the cards taking effect on 2026-10-01 were not checked from this environment.
+
 ## 2026-09-29 — Phase 5: receipts for plan payments (P5-07)
 
 Status: **Implemented and locally verified against the Razorpay stand-in only.** Every plan payment
