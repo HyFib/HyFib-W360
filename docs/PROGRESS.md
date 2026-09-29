@@ -43,7 +43,12 @@ owners are now emailed once about each.
   the company, and the page lists it with when owners were emailed.
 - **Docs:** ADR-071; ARCHITECTURE (reconciliation section); SECURITY (Phase 5 reconciliation rules);
   THREAT-MODEL T83; RUNBOOKS (payments not seen in a settlement, migration 0043); DATA-RETENTION;
-  BACKLOG P5-05; FEATURE-MATRIX H-037.
+  BACKLOG P5-05; FEATURE-MATRIX H-037; the e2e job's comment in CI (192 tests after merging
+  `main`).
+- **Merged `main`** (PRs #13 and #14, the hydration fix and the `NS_BINDING_ABORTED` e2e fix) in
+  f9a92fc. The only conflict was the top of this file, where both sides added entries. After the
+  merge lint, format, typecheck, the 342 unit tests and the build pass; `main` changed no database
+  or domain code. The e2e suite was not run again locally after the merge; CI runs all 192 tests.
 - **Mutation checks:** 29 regressions tried one at a time, 27 make a test fail (the definition's
   settlement, seven-day, status and India-time conditions; the listing's filter and limit; the
   mark's re-check, conflict handling and result; the list's email time; the grants and privileges; the
@@ -57,13 +62,14 @@ owners are now emailed once about each.
 
 ### Test commands and results (local, 2026-09-29)
 
-| Command                                                   | Result                                                                  |
-| --------------------------------------------------------- | ----------------------------------------------------------------------- |
-| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`      | 0 problems / all files formatted / all workspace packages pass          |
-| `pnpm test` (unit)                                        | 342 passed, including 3 new in `billing/settlement-alerts.test.ts`      |
-| `pnpm test:integration` (PostgreSQL 18.6)                 | 464 passed, including 2 new in `settlement-recon.test.ts`               |
-| `pnpm test:integration` against PostgreSQL 17.11 (Docker) | 464 passed                                                              |
-| Mutation checks                                           | 29 regressions tried; 27 make a test fail, 2 cannot be observed (above) |
+| Command                                                                     | Result                                                                                                                                                                              |
+| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                      |
+| `pnpm test` (unit)                                                          | 342 passed, including 3 new in `billing/settlement-alerts.test.ts`                                                                                                                  |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 464 passed, including 2 new in `settlement-recon.test.ts`                                                                                                                           |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 464 passed                                                                                                                                                                          |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 90 passed (45 × 2) in one full run (24.1 min) on 62d3bd0, before merging `main`, including the reconciliation test with the unsettled payment alert on both projects |
+| Mutation checks                                                             | 29 regressions tried; 27 make a test fail, 2 cannot be observed (above)                                                                                                             |
 
 ### Known gaps
 
