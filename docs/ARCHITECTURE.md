@@ -818,11 +818,17 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `contacts.write`, `inbox.reply` for `messages.send` and `messages.reply`, `campaigns.send` for
   `messages.send_marketing`, `inbox.read_all` for `conversations.read`, `inbox.supervise` for
   `conversations.write`); at most 20 active keys per company, counted under an advisory lock.
-  Rotation creates a key with the same name, scopes and lifetime and lets the old one work for 0 to
-  72 hours (0 revokes it); revocation is immediate. Each change is audited without the token.
+  Rotation creates a key with the same name, scopes, lifetime and networks and lets the old one work
+  for 0 to 72 hours (0 revokes it); revocation is immediate. Each change is audited without the
+  token. A key may list up to 20 networks it accepts requests from (`allowed_networks cidr[]`, 0051,
+  ADR-076): checked for shape in the service, canonicalised by PostgreSQL (`pg_input_is_valid`,
+  `::cidr`), editable for an active key with a recent sign-in (`setAllowedNetworks`, audited).
 - **Requests** (`apps/web/src/server/api.ts`): the bearer token is checked by shape, then through
-  the definer function; the request acts in its company's scope as the key (`ApiContext`, no user),
-  so no company id is ever read from the request. Failed authentication is limited per client
+  the definer function with the client's address (`authenticateApiRequest`,
+  `ops.api_key_authenticate(hash, inet)`): a key whose networks do not contain the address (or any
+  key with networks when the address is unknown) answers 403 `ip_not_allowed`, is not marked used and
+  counts as a failed authentication for the address; the request acts in its company's scope as the
+  key (`ApiContext`, no user), so no company id is ever read from the request. Failed authentication is limited per client
   address (bursts of 20, one every 5 seconds), then each key (bursts of 50, 10 a second) and each
   company (bursts of 200, 30 a second) have token buckets (`admitFailedApiAuthentication`,
   `admitApiRate` in `api/rate-limits.ts`; a request its key refuses takes nothing from the

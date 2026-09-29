@@ -5,7 +5,7 @@ import { AppError, isAppError, sha256Hex } from '@w360/core';
 import { API_SCOPES } from '@w360/db';
 import { PERMISSIONS, ROLE_PERMISSIONS } from '../authz/permissions';
 import { apiErrorResponse, apiRequestError } from './errors';
-import { bearerToken, generateApiToken } from './keys';
+import { allowedNetworksSchema, bearerToken, generateApiToken, networkEntryProblem } from './keys';
 import type { ApiContext } from './context';
 import { apiConversationStatusSchema, apiSetConversationStatus } from './conversations';
 import {
@@ -16,6 +16,7 @@ import {
   API_TOKEN_RE,
   IDEMPOTENCY_KEY_RE,
   apiKeyState,
+  formatAllowedNetwork,
 } from './model';
 import { API_ROUTES, buildOpenApiDocument } from './openapi';
 import { apiSendMessage, apiSendTextSchema } from './resources';
@@ -196,6 +197,51 @@ describe('text replies (ADR-070)', () => {
   });
 });
 
+describe('allowed networks (ADR-076)', () => {
+  it('take IPv4 and IPv6 addresses and networks, one per line or separated by commas or spaces', () => {
+    expect(allowedNetworksSchema.parse(undefined)).toBeNull();
+    expect(allowedNetworksSchema.parse('  \n ')).toBeNull();
+    expect(
+      allowedNetworksSchema.parse(
+        '203.0.113.0/24\n198.51.100.7, 2001:db8::/32 2001:db8::1\n203.0.113.0/24',
+      ),
+    ).toEqual(['203.0.113.0/24', '198.51.100.7', '2001:db8::/32', '2001:db8::1']);
+    const twenty = Array.from({ length: 20 }, (_, i) => `198.51.100.${i}`).join('\n');
+    expect(allowedNetworksSchema.parse(twenty)).toHaveLength(20);
+    expect(allowedNetworksSchema.safeParse(`${twenty}\n198.51.100.20`).success).toBe(false);
+    expect(allowedNetworksSchema.safeParse('1'.repeat(2001)).success).toBe(false);
+  });
+
+  it('refuse what is not an address or network, a prefix longer than the address, /0 and mapped IPv4', () => {
+    for (const entry of ['203.0.113.7', '203.0.113.0/24', '2001:db8::/32', '::1', '10.0.0.0/8']) {
+      expect(networkEntryProblem(entry), entry).toBeNull();
+    }
+    const problems: [string, RegExp][] = [
+      ['example.com', /not an IP address or network/],
+      ['203.0.113', /not an IP address or network/],
+      ['203.0.113.0/24/8', /not an IP address or network/],
+      ['203.0.113.0/x', /not an IP address or network/],
+      ['203.0.113.0/', /not an IP address or network/],
+      ['203.0.113.0/33', /prefix length longer than the address/],
+      ['2001:db8::/129', /prefix length longer than the address/],
+      ['0.0.0.0/0', /accept every address/],
+      ['::/0', /accept every address/],
+      ['::ffff:203.0.113.7', /as the IPv4 address 203\.0\.113\.7/],
+    ];
+    for (const [entry, problem] of problems) {
+      expect(networkEntryProblem(entry), entry).toMatch(problem);
+      expect(allowedNetworksSchema.safeParse(`198.51.100.7\n${entry}`).success, entry).toBe(false);
+    }
+  });
+
+  it('show a single address without its prefix length', () => {
+    expect(formatAllowedNetwork('203.0.113.7/32')).toBe('203.0.113.7');
+    expect(formatAllowedNetwork('203.0.113.0/24')).toBe('203.0.113.0/24');
+    expect(formatAllowedNetwork('2001:db8::1/128')).toBe('2001:db8::1');
+    expect(formatAllowedNetwork('2001:db8::/32')).toBe('2001:db8::/32');
+  });
+});
+
 describe('apiKeyState', () => {
   const now = new Date('2026-09-28T10:00:00.000Z');
   it('is revoked before expired, and expired from the expiry instant on', () => {
@@ -294,8 +340,9 @@ describe('OpenAPI document', () => {
     expect(responses['403']?.description).toContain('not_in_plan');
     expect(responses['429']?.description).toContain('quota_exceeded');
     expect(JSON.stringify(doc.components)).toContain(
-      'not_in_plan, quota_exceeded or window_closed',
+      'ip_not_allowed, not_in_plan, quota_exceeded or window_closed',
     );
+    expect(responses['403']?.description).toContain('ip_not_allowed');
   });
 
   it('sends a template or a text reply from one operation, naming the window refusal', () => {

@@ -159,7 +159,7 @@ export const apiErrorSchema = z.object({
       .string()
       .optional()
       .describe(
-        'A finer reason: idempotency_key_reused, not_in_plan, quota_exceeded or window_closed.',
+        'A finer reason: idempotency_key_reused, ip_not_allowed, not_in_plan, quota_exceeded or window_closed.',
       ),
     issues: z.array(z.object({ path: z.string(), message: z.string() })).optional(),
   }),
@@ -188,7 +188,7 @@ const errors = (...statuses: number[]) =>
           {
             400: 'The request is malformed (for example invalid JSON or a missing header).',
             401: 'No valid API key: missing, unknown, revoked or expired.',
-            403: "The key lacks the scope this needs, or the company's plan does not include the API (reason not_in_plan).",
+            403: "The key lacks the scope this needs, the company's plan does not include the API (reason not_in_plan), or the key does not accept requests from the client's address (reason ip_not_allowed).",
             404: 'Not found in the company.',
             409: 'The request conflicts with the current state.',
             412: 'A condition for sending or saving is not met (consent, suppression, state). With reason window_closed, the number has not written to the WhatsApp number in the last 24 hours, so only templates can be sent to it.',
@@ -265,7 +265,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       description: [
         'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations and their messages, resolve and reopen conversations, manage contacts and consent, and read message status for your company.',
         '',
-        'Authenticate with `Authorization: Bearer <API key>`; keys are created in Settings → API keys and belong to the company.',
+        'Authenticate with `Authorization: Bearer <API key>`; keys are created in Settings → API keys and belong to the company. A key can be limited to the addresses its systems call from: a request from any other address is refused with 403 (reason `ip_not_allowed`).',
         `Scopes: ${API_SCOPE_KEYS.map((s) => `\`${s}\` (${API_SCOPE_INFO[s].label.toLowerCase()})`).join(', ')}.`,
         '',
         `Limits: ${API_LIMITS.keyRate.refillPerSecond} requests a second per key (bursts of ${API_LIMITS.keyRate.capacity}) and ${API_LIMITS.companyRate.refillPerSecond} per company; JSON bodies up to ${API_LIMITS.bodyBytes / 1024} KB.`,

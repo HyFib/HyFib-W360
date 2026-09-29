@@ -8,6 +8,7 @@ import {
   API_SCOPE_KEYS,
   apiKeyExpiresSoon,
   can,
+  formatAllowedNetwork,
   hasRecentSignIn,
   RECENT_SIGN_IN_MINUTES,
   type ApiKeyView,
@@ -83,7 +84,8 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
             <code className="font-mono text-xs">Authorization: Bearer &lt;key&gt;</code>. Sending a
             message needs an <code className="font-mono text-xs">Idempotency-Key</code> header, so a
             retry never sends twice. Each key can make {API_LIMITS.keyRate.refillPerSecond} requests
-            a second. The full reference is the{' '}
+            a second, and can be limited to the addresses your systems call from. The full reference
+            is the{' '}
             <a
               className="font-medium underline underline-offset-4"
               href="/api/v1/openapi.json"
@@ -146,6 +148,16 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
                         </Badge>
                       ))}
                     </p>
+                    <p className="text-xs text-muted-foreground">
+                      Accepts requests from{' '}
+                      {k.allowedNetworks ? (
+                        <span className="font-mono text-foreground">
+                          {k.allowedNetworks.map(formatAllowedNetwork).join(', ')}
+                        </span>
+                      ) : (
+                        'any address'
+                      )}
+                    </p>
                     <dl className="grid gap-x-4 gap-y-1 text-xs text-muted-foreground sm:grid-cols-2">
                       <div>
                         <dt className="inline">Created </dt>
@@ -189,6 +201,7 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
                       name={k.name}
                       rotatable={inPlan && k.state === 'active' && !k.replacedByKeyId}
                       revocable={k.state === 'active'}
+                      allowedNetworks={k.state === 'active' ? k.allowedNetworks : undefined}
                     />
                   </li>
                 );

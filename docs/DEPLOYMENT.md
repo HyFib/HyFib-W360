@@ -98,7 +98,9 @@ balancer must overwrite or append that header (never pass a client-supplied valu
 unchanged), and `TRUSTED_PROXIES` must list the addresses or CIDR ranges of every proxy hop we
 operate. Resolution reads hops from the right, skips trusted proxies, and stores the first other
 address only if it is a valid IP; malformed values are dropped rather than stored. A malformed
-`TRUSTED_PROXIES` entry stops start-up.
+`TRUSTED_PROXIES` entry stops start-up. API keys limited to networks (ADR-076) trust the same
+address: if clients can reach the web app without passing the edge, they can claim any address, and
+without `X-Forwarded-For` the connection's address is used (the web server fills the header in).
 
 ## Public chat links and website buttons
 

@@ -445,6 +445,13 @@ Phase 5 rules (Public API, P5-08):
   the token's hash, never from the path, body or headers, and data access runs in that company's
   scope (RLS). Audit rows name the key (`api_key`). Writing scopes are refused while the company is
   suspended or restricted.
+- A key may be tied to up to 20 networks (ADR-076): the lookup refuses any other address, and an
+  unknown one, before the key is marked used; the refusal (403 `ip_not_allowed`) counts against the
+  address's failed-authentication limit. Members who manage keys set the networks with a recent
+  sign-in, audited with the lists before and after; the runtime role reads and writes
+  `allowed_networks` through column grants in the company's scope, and the definer function reads it
+  to authenticate. The address is the one audit uses (`X-Forwarded-For` behind `TRUSTED_PROXIES`), so
+  the protection depends on the edge overwriting or appending that header.
 - Template sends through the API apply the members' template-send checks (approval, category scope,
   consent, suppression, erasure, the marketing frequency cap) and are checked again before dispatch.
   The API can read the status only of messages sent through the API.

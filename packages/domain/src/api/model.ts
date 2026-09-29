@@ -98,6 +98,9 @@ export const API_KEY_LIMITS = {
   activeKeys: 20,
   nameLength: 80,
   rotationOverlapHours: 72,
+  /** Networks a key may list (ADR-076), and the characters of the settings field that lists them. */
+  allowedNetworks: 20,
+  allowedNetworksText: 2000,
 } as const;
 
 export const API_LIMITS = {
@@ -126,6 +129,12 @@ export function apiKeyState(
   if (key.revokedAt) return 'revoked';
   if (key.expiresAt && key.expiresAt <= now) return 'expired';
   return 'active';
+}
+
+/** A network a key accepts (ADR-076) as settings show it: a single address without /32 or /128. */
+export function formatAllowedNetwork(network: string): string {
+  const single = network.includes(':') ? '/128' : '/32';
+  return network.endsWith(single) ? network.slice(0, -single.length) : network;
 }
 
 /**

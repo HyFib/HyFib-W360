@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { isIP } from 'node:net';
 import { z } from 'zod';
 import { AppError, notFound, sha256Hex, uuidv7, type Clock } from '@w360/core';
 import {
@@ -57,6 +58,53 @@ const scopesSchema = z
   .min(1, 'Choose at least one scope')
   .transform((chosen) => API_SCOPE_KEYS.filter((s) => chosen.includes(s)));
 
+/** Why an entry is not an IP address or network (ADR-076), or null when its shape is right. */
+export function networkEntryProblem(entry: string): string | null {
+  const [address = '', prefix, ...rest] = entry.split('/');
+  const family = isIP(address);
+  if (!family || rest.length > 0 || (prefix !== undefined && !/^\d{1,3}$/.test(prefix))) {
+    return `“${entry}” is not an IP address or network, such as 203.0.113.7 or 203.0.113.0/24.`;
+  }
+  const mapped = /^::ffff:(.+)$/i.exec(address)?.[1];
+  if (mapped && isIP(mapped) === 4) return `Write “${entry}” as the IPv4 address ${mapped}.`;
+  if (prefix !== undefined) {
+    const bits = Number(prefix);
+    if (bits > (family === 4 ? 32 : 128)) {
+      return `“${entry}” has a prefix length longer than the address.`;
+    }
+    if (bits === 0) return `“${entry}” would accept every address: leave the list empty instead.`;
+  }
+  return null;
+}
+
+/**
+ * The networks a key accepts requests from (ADR-076), as typed in settings: IPv4 or IPv6 addresses
+ * or CIDR ranges, one per line or separated by commas or spaces. An empty list accepts any address
+ * (null). PostgreSQL checks each entry as a network when it is saved (`canonicalNetworks`).
+ */
+export const allowedNetworksSchema = z
+  .string()
+  .max(API_KEY_LIMITS.allowedNetworksText, 'Keep the list of addresses under 2,000 characters')
+  .optional()
+  .transform((text, ctx): string[] | null => {
+    const entries = [...new Set((text ?? '').split(/[\s,]+/).filter(Boolean))];
+    for (const entry of entries) {
+      const problem = networkEntryProblem(entry);
+      if (problem) {
+        ctx.addIssue({ code: 'custom', message: problem });
+        return z.NEVER;
+      }
+    }
+    if (entries.length > API_KEY_LIMITS.allowedNetworks) {
+      ctx.addIssue({
+        code: 'custom',
+        message: `List at most ${API_KEY_LIMITS.allowedNetworks} addresses or networks.`,
+      });
+      return z.NEVER;
+    }
+    return entries.length > 0 ? entries : null;
+  });
+
 const createSchema = z.object({
   name: z
     .string({ error: 'Name the key' })
@@ -67,9 +115,12 @@ const createSchema = z.object({
   expiresInDays: z.coerce
     .number()
     .refine((d) => (API_KEY_EXPIRY_DAYS as readonly number[]).includes(d), 'Choose an expiry'),
+  allowedNetworks: allowedNetworksSchema,
 });
 
 const keyIdSchema = z.object({ keyId: z.uuid() });
+
+const networksSchema = keyIdSchema.extend({ allowedNetworks: allowedNetworksSchema });
 
 const rotateSchema = keyIdSchema.extend({
   overlapHours: z.coerce
@@ -92,8 +143,42 @@ export interface ApiKeyView {
   replacedByKeyId: string | null;
   /** When owners and administrators were emailed that the key expires soon (ADR-067). */
   expiryRemindedAt: Date | null;
+  /** The networks the key accepts requests from (ADR-076); null accepts any address. */
+  allowedNetworks: string[] | null;
   state: 'active' | 'revoked' | 'expired';
 }
+
+/**
+ * Each network as PostgreSQL keeps it (a single address gains /32 or /128), in the order given and
+ * without repeats. An entry that is an address with bits set after its prefix length is refused
+ * with the network it probably means, rather than widened or narrowed silently.
+ */
+async function canonicalNetworks(tx: Tx, entries: string[] | null): Promise<string[] | null> {
+  if (!entries) return null;
+  const res = await tx.execute<{ entry: string; network: string | null; masked: string | null }>(
+    sql`select e.entry,
+               case when pg_input_is_valid(e.entry, 'cidr') then e.entry::cidr::text end as network,
+               case when pg_input_is_valid(e.entry, 'inet') then network(e.entry::inet)::text end as masked
+          from unnest(${sql.param(entries)}::text[]) with ordinality as e(entry, n)
+         order by e.n`,
+  );
+  const networks: string[] = [];
+  for (const row of res.rows) {
+    if (!row.network) {
+      const message = row.masked
+        ? `“${row.entry}” has address bits after its prefix length: did you mean ${row.masked}?`
+        : `“${row.entry}” is not an IP address or network, such as 203.0.113.7 or 203.0.113.0/24.`;
+      throw new AppError('validation_failed', message, {
+        issues: [{ path: 'allowedNetworks', message }],
+      });
+    }
+    if (!networks.includes(row.network)) networks.push(row.network);
+  }
+  return networks;
+}
+
+const sameNetworks = (a: string[] | null, b: string[] | null) =>
+  (a ?? []).join(',') === (b ?? []).join(',');
 
 /** Takes the company's key lock, so two creations cannot pass the limit of active keys together. */
 async function lockKeys(tx: Tx, tenantId: string): Promise<void> {
@@ -138,7 +223,12 @@ export function createApiKeysService(deps: { db: Database; clock: Clock }) {
   async function insertKey(
     tx: Tx,
     ctx: TenantContext,
-    input: { name: string; scopes: ApiScope[]; expiresAt: Date | null },
+    input: {
+      name: string;
+      scopes: ApiScope[];
+      expiresAt: Date | null;
+      allowedNetworks: string[] | null;
+    },
   ) {
     const id = uuidv7();
     const { keyPrefix, token, tokenHash } = generateApiToken();
@@ -151,6 +241,7 @@ export function createApiKeysService(deps: { db: Database; clock: Clock }) {
       scopes: input.scopes,
       createdByUserId: ctx.user.id,
       expiresAt: input.expiresAt,
+      allowedNetworks: input.allowedNetworks,
     });
     return { id, keyPrefix, token };
   }
@@ -175,6 +266,7 @@ export function createApiKeysService(deps: { db: Database; clock: Clock }) {
               revokedAt: apiKeys.revokedAt,
               replacedByKeyId: apiKeys.replacedByKeyId,
               expiryRemindedAt: apiKeys.expiryRemindedAt,
+              allowedNetworks: apiKeys.allowedNetworks,
             })
             .from(apiKeys)
             .leftJoin(users, eq(users.id, apiKeys.createdByUserId))
@@ -205,10 +297,12 @@ export function createApiKeysService(deps: { db: Database; clock: Clock }) {
             `A company can have ${API_KEY_LIMITS.activeKeys} active API keys. Revoke one first.`,
           );
         }
+        const allowedNetworks = await canonicalNetworks(tx, data.allowedNetworks);
         const created = await insertKey(tx, ctx, {
           name: data.name,
           scopes: data.scopes,
           expiresAt,
+          allowedNetworks,
         });
         await recordAudit(
           tx,
@@ -222,6 +316,7 @@ export function createApiKeysService(deps: { db: Database; clock: Clock }) {
               keyPrefix: created.keyPrefix,
               scopes: data.scopes,
               expiresAt: expiresAt?.toISOString() ?? null,
+              allowedNetworks,
             },
           },
           meta,
@@ -252,6 +347,7 @@ export function createApiKeysService(deps: { db: Database; clock: Clock }) {
             expiresAt: apiKeys.expiresAt,
             revokedAt: apiKeys.revokedAt,
             replacedByKeyId: apiKeys.replacedByKeyId,
+            allowedNetworks: apiKeys.allowedNetworks,
           })
           .from(apiKeys)
           .where(and(eq(apiKeys.tenantId, ctx.tenant.id), eq(apiKeys.id, data.keyId)))
@@ -268,6 +364,7 @@ export function createApiKeysService(deps: { db: Database; clock: Clock }) {
           name: old.name,
           scopes: old.scopes,
           expiresAt: lifetime === null ? null : new Date(now.getTime() + lifetime),
+          allowedNetworks: old.allowedNetworks,
         });
         const overlapEnds = new Date(now.getTime() + data.overlapHours * 3_600_000);
         await tx
@@ -298,6 +395,51 @@ export function createApiKeysService(deps: { db: Database; clock: Clock }) {
           meta,
         );
         return created;
+      });
+    },
+
+    /**
+     * Changes the networks an active key accepts requests from (ADR-076); an empty list accepts
+     * any address. The change is audited with the lists before and after.
+     */
+    async setAllowedNetworks(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
+      assertCan(ctx, 'developer.manage');
+      const now = clock.now();
+      assertRecentSignIn(ctx, now);
+      const data = parseInput(networksSchema, input);
+      return db.run(ctx.scope, async (tx) => {
+        const [key] = await tx
+          .select({
+            keyPrefix: apiKeys.keyPrefix,
+            expiresAt: apiKeys.expiresAt,
+            revokedAt: apiKeys.revokedAt,
+            allowedNetworks: apiKeys.allowedNetworks,
+          })
+          .from(apiKeys)
+          .where(and(eq(apiKeys.tenantId, ctx.tenant.id), eq(apiKeys.id, data.keyId)))
+          .for('update');
+        if (!key) throw notFound('API key');
+        if (apiKeyState(key, now) !== 'active') {
+          throw new AppError('conflict', 'Only the addresses of an active key can be changed.');
+        }
+        const allowedNetworks = await canonicalNetworks(tx, data.allowedNetworks);
+        if (sameNetworks(key.allowedNetworks, allowedNetworks)) return { allowedNetworks };
+        await tx
+          .update(apiKeys)
+          .set({ allowedNetworks })
+          .where(and(eq(apiKeys.tenantId, ctx.tenant.id), eq(apiKeys.id, data.keyId)));
+        await recordAudit(
+          tx,
+          ctx,
+          {
+            action: 'api_key.networks_changed',
+            subjectType: 'api_key',
+            subjectId: data.keyId,
+            metadata: { keyPrefix: key.keyPrefix, from: key.allowedNetworks, to: allowedNetworks },
+          },
+          meta,
+        );
+        return { allowedNetworks };
       });
     },
 

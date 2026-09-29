@@ -21,6 +21,7 @@ import {
   apiSendMessage,
   apiSendTemplate,
   apiSetConversationStatus,
+  authenticateApiRequest,
   authenticateApiToken,
   createApiKeysService,
   createCampaignsService,
@@ -64,8 +65,8 @@ import {
  * reused for another request, concurrent retries, failures, expiry), contacts and consent, template
  * sends with the members' checks and the send pipeline, text replies within the 24-hour window
  * (ADR-070), message status, reading conversations and their messages (ADR-072), resolving and
- * reopening conversations (ADR-075), the idempotency sweep, isolation between companies, and
- * reminders before keys expire (ADR-067).
+ * reopening conversations (ADR-075), the networks a key accepts requests from (ADR-076), the
+ * idempotency sweep, isolation between companies, and reminders before keys expire (ADR-067).
  */
 let fx: WhatsAppFixture;
 let keys: ApiKeysService;
@@ -2225,6 +2226,197 @@ describe('conversation status (ADR-075)', () => {
   });
 });
 
+describe('allowed networks (ADR-076)', () => {
+  const create = (owner: TenantContext, allowedNetworks?: string) =>
+    keys.create(owner, {
+      name: 'Server',
+      scopes: ['contacts.read'],
+      expiresInDays: 30,
+      ...(allowedNetworks === undefined ? {} : { allowedNetworks }),
+    });
+  const keyRow = async (id: string) => {
+    const [row] = await fx.query<{ allowed_networks: string[] | null; last_used_at: Date | null }>(
+      'SELECT allowed_networks::text[] AS allowed_networks, last_used_at FROM app.api_keys WHERE id = $1',
+      [id],
+    );
+    return row!;
+  };
+  /** What a request with the token from `ip` gets: its key, a refusal of the address, or nothing. */
+  const from = async (token: string, ip: string | null) => {
+    const auth = await authenticateApiRequest(fx.dbs.app, token, uuidv7(), ip);
+    if (!auth) return 'unknown';
+    return 'ctx' in auth ? 'accepted' : 'refused';
+  };
+
+  it('accept requests only from the networks listed, and a refused request does not use the key', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const key = await create(owner, '203.0.113.0/24\n2001:db8::/32, 198.51.100.7 203.0.113.0/24');
+    expect((await keyRow(key.id)).allowed_networks).toEqual([
+      '203.0.113.0/24',
+      '2001:db8::/32',
+      '198.51.100.7/32',
+    ]);
+    const [created] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE action = 'api_key.created' AND subject_id = $1`,
+      [key.id],
+    );
+    expect(created!.metadata.allowedNetworks).toEqual([
+      '203.0.113.0/24',
+      '2001:db8::/32',
+      '198.51.100.7/32',
+    ]);
+
+    // Refused addresses leave the key unused.
+    for (const ip of ['203.0.114.1', '198.51.100.8', '2001:db9::1', '10.0.0.1', null]) {
+      expect(await from(key.token, ip), String(ip)).toBe('refused');
+    }
+    expect((await keyRow(key.id)).last_used_at).toBeNull();
+    for (const ip of [
+      '203.0.113.1',
+      '203.0.113.255',
+      '198.51.100.7',
+      '2001:db8::1',
+      '2001:db8:ffff::9',
+    ]) {
+      expect(await from(key.token, ip), ip).toBe('accepted');
+    }
+    // An IPv4 client seen as IPv4-mapped IPv6 is the same client.
+    expect(await from(key.token, '::ffff:203.0.113.9')).toBe('accepted');
+    expect((await keyRow(key.id)).last_used_at).not.toBeNull();
+    // Without an address the key is refused; the helper without one gives no context.
+    expect(await authenticateApiToken(fx.dbs.app, key.token, 'r')).toBeNull();
+    expect(await authenticateApiToken(fx.dbs.app, key.token, 'r', '203.0.113.1')).not.toBeNull();
+
+    // A key without networks accepts any address, and none.
+    const open = await create(owner);
+    expect((await keyRow(open.id)).allowed_networks).toBeNull();
+    for (const ip of ['203.0.114.1', '2001:db9::1', null]) {
+      expect(await from(open.token, ip), String(ip)).toBe('accepted');
+    }
+    // An unknown token is unknown from any address.
+    expect(await from(generateApiToken().token, '203.0.113.1')).toBe('unknown');
+
+    // The previous release's lookup, kept for a rolling deploy, refuses keys that list networks.
+    const oldLookup = (token: string) =>
+      fx.dbs.app.run(authorizedTenantScope(c.tenant.id, null), async (tx) =>
+        (
+          await tx.execute<{ key_id: string }>(
+            sql`select key_id from ops.api_key_authenticate(${sha256Hex(token)})`,
+          )
+        ).rows.map((r) => r.key_id),
+      );
+    expect(await oldLookup(key.token)).toEqual([]);
+    expect(await oldLookup(open.token)).toEqual([open.id]);
+  });
+
+  it('check what they are given as networks', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const refusals: [string, RegExp][] = [
+      ['example.com', /not an IP address or network/],
+      ['203.0.113.7/24', /did you mean 203\.0\.113\.0\/24\?/],
+      ['2001:db8::1/32', /did you mean 2001:db8::\/32\?/],
+      ['10.0.0.0/0', /accept every address/],
+      ['10.0.0.0/33', /prefix length longer/],
+      ['fe80::1%eth0', /not an IP address or network/],
+      ['::ffff:203.0.113.7', /IPv4 address 203\.0\.113\.7/],
+      [Array.from({ length: 21 }, (_, i) => `198.51.100.${i}`).join('\n'), /at most 20/],
+    ];
+    for (const [text, reason] of refusals) {
+      await expectAppError(create(owner, text), 'validation_failed', reason);
+    }
+    // The same address written twice is listed once.
+    const key = await create(owner, '203.0.113.7\n203.0.113.7/32');
+    expect((await keyRow(key.id)).allowed_networks).toEqual(['203.0.113.7/32']);
+    // Nothing was created by the refused requests.
+    const [count] = await fx.query<{ n: number }>(
+      'SELECT count(*)::int AS n FROM app.api_keys WHERE tenant_id = $1',
+      [c.tenant.id],
+    );
+    expect(count!.n).toBe(1);
+  });
+
+  it('change for an active key after a recent sign-in, audited, and carry over to the rotated key', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const key = await create(owner, '203.0.113.0/24');
+    const audit = () =>
+      fx.query<{ metadata: Record<string, unknown> }>(
+        `SELECT metadata FROM app.audit_events
+          WHERE action = 'api_key.networks_changed' AND subject_id = $1 ORDER BY occurred_at, id`,
+        [key.id],
+      );
+
+    expect(
+      await keys.setAllowedNetworks(owner, {
+        keyId: key.id,
+        allowedNetworks: '203.0.113.0/24\n198.51.100.0/24',
+      }),
+    ).toEqual({ allowedNetworks: ['203.0.113.0/24', '198.51.100.0/24'] });
+    expect(await from(key.token, '198.51.100.9')).toBe('accepted');
+    // The same list again changes nothing and records nothing.
+    await keys.setAllowedNetworks(owner, {
+      keyId: key.id,
+      allowedNetworks: '203.0.113.0/24, 198.51.100.0/24',
+    });
+    // Emptied, the key accepts any address.
+    expect(await keys.setAllowedNetworks(owner, { keyId: key.id, allowedNetworks: '' })).toEqual({
+      allowedNetworks: null,
+    });
+    expect(await from(key.token, null)).toBe('accepted');
+    expect((await audit()).map((a) => a.metadata)).toEqual([
+      {
+        keyPrefix: key.keyPrefix,
+        from: ['203.0.113.0/24'],
+        to: ['203.0.113.0/24', '198.51.100.0/24'],
+      },
+      { keyPrefix: key.keyPrefix, from: ['203.0.113.0/24', '198.51.100.0/24'], to: null },
+    ]);
+
+    // A stale sign-in, a member who does not manage keys, another company and bad input.
+    const stale: TenantContext = { ...owner, signedInAt: new Date(Date.now() - 16 * 60_000) };
+    await expectAppError(
+      keys.setAllowedNetworks(stale, { keyId: key.id, allowedNetworks: '203.0.113.0/24' }),
+      'step_up_required',
+    );
+    await expectAppError(
+      keys.setAllowedNetworks(await fx.ctx(c, c.agent), {
+        keyId: key.id,
+        allowedNetworks: '203.0.113.0/24',
+      }),
+      'forbidden',
+    );
+    await expectAppError(
+      keys.setAllowedNetworks(await fx.ctx(other, other.owner), {
+        keyId: key.id,
+        allowedNetworks: '203.0.113.0/24',
+      }),
+      'not_found',
+    );
+    await expectAppError(
+      keys.setAllowedNetworks(owner, { keyId: key.id, allowedNetworks: '203.0.113.7/24' }),
+      'validation_failed',
+    );
+    expect((await keyRow(key.id)).allowed_networks).toBeNull();
+
+    // Rotation keeps the networks.
+    await keys.setAllowedNetworks(owner, { keyId: key.id, allowedNetworks: '2001:db8::/48' });
+    const rotated = await keys.rotate(owner, { keyId: key.id, overlapHours: 0 });
+    expect((await keyRow(rotated.id)).allowed_networks).toEqual(['2001:db8::/48']);
+    expect(await from(rotated.token, '2001:db8::5')).toBe('accepted');
+    expect(await from(rotated.token, '203.0.113.1')).toBe('refused');
+    // The revoked old key's networks can no longer be changed.
+    await expectAppError(
+      keys.setAllowedNetworks(owner, { keyId: key.id, allowedNetworks: '' }),
+      'conflict',
+    );
+    const listed = (await keys.list(owner)).find((k) => k.id === rotated.id);
+    expect(listed?.allowedNetworks).toEqual(['2001:db8::/48']);
+  });
+});
+
 describe('isolation and retention', () => {
   it('keeps keys, idempotency keys and their functions to their company and roles', async () => {
     const a = await fx.company();
@@ -2264,6 +2456,7 @@ describe('isolation and retention', () => {
       )[0]!.ok;
     for (const fn of [
       'ops.api_key_authenticate(text)',
+      'ops.api_key_authenticate(text,inet)',
       'ops.purge_api_idempotency_keys(integer)',
     ]) {
       expect(await can('w360_app', fn), fn).toBe(true);

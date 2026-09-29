@@ -1000,6 +1000,14 @@ retried the next minute). A company being deleted is skipped. Check `app.tenant_
 company (`status`, `trial_ends_at`, `period_end`, `grace_ends_at`): the database's clock decides
 what is due.
 
+**Migration 0051 failed.** It runs in one transaction, so a failure applies nothing. It adds
+`app.api_keys.allowed_networks` with its check and grants, creates
+`ops.api_key_authenticate(text, inet)` and rebuilds the one-argument lookup on it (dropped and
+created again, granted to `w360_app`, then handed to `w360_definer`). A failure usually means the
+bootstrap roles are missing or the lookup was changed by hand. The one-argument lookup is kept only
+for web servers of the previous release during a rolling deploy and refuses keys that list networks;
+drop it in a later release once no older web server runs.
+
 **Migration 0050 failed.** It runs in one transaction, so a failure applies nothing. It replaces
 the check on `app.api_keys.scopes` with one that also allows `conversations.write` (up to eight
 scopes). The check is wider than before, so existing keys pass; a failure usually means the
@@ -1147,6 +1155,17 @@ previous pass began: a change carries the time its transaction began, so one sav
 be older than the pass. Before ADR-072, pages of contacts (the list, the export and the API), the
 inbox thread's older messages and the audit log could skip rows written in the same transaction as
 a page's last row; cursors issued before still work.
+
+**An API request is refused with `ip_not_allowed` (403).** The key lists the networks it accepts
+(Settings → API keys, "Accepts requests from"; ADR-076) and the request came from another address;
+the error message names the address the API saw. If that address is a load balancer's or proxy's
+rather than the integration's, `TRUSTED_PROXIES` is missing a hop (DEPLOYMENT.md): fix the
+configuration, do not add the proxy's address to the key. If the integration moved, a member who
+manages keys changes the key's addresses (a recent sign-in is needed); the change applies to the
+next request and is in the audit log (`api_key.networks_changed`). Refused requests count against
+the address's failed-authentication limit, so a client that keeps trying is answered 429 for a
+while. The web log has `api request refused: the key does not accept the address` with the key and
+company ids.
 
 **An integration cannot resolve or reopen a conversation, or a resolve did something unexpected.**
 `PATCH /api/v1/conversations/{id}` (ADR-075) needs the `conversations.write` scope (403 without it),

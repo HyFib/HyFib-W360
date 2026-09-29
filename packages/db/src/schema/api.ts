@@ -1,4 +1,4 @@
-import { jsonb, smallint, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { cidr, jsonb, smallint, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 import { appSchema } from './tenancy';
 
 const tz = (name: string) => timestamp(name, { withTimezone: true, mode: 'date' });
@@ -36,6 +36,8 @@ export const apiKeys = appSchema.table('api_keys', {
   replacedByKeyId: uuid('replaced_by_key_id'),
   /** When owners and administrators were emailed that the key expires soon (ADR-067). */
   expiryRemindedAt: tz('expiry_reminded_at'),
+  /** The networks the key accepts requests from (ADR-076); null accepts any address. */
+  allowedNetworks: cidr('allowed_networks').array(),
 });
 
 /** Stored responses of requests sent with an Idempotency-Key (24 hours). */

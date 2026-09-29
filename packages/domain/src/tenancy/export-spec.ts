@@ -52,6 +52,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'revoked_by_user_id',
       'replaced_by_key_id',
       'expiry_reminded_at',
+      'allowed_networks',
     ],
     omitted: { token_hash: "Only a hash of the key's token." },
   },

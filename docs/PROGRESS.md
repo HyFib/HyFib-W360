@@ -1,5 +1,89 @@
 # Progress
 
+## 2026-09-29 — Phase 5: the addresses an API key accepts requests from (P5-08, ADR-076)
+
+Status: **Implemented and locally verified (no customer data).** A leaked API key worked from
+anywhere until someone revoked it; integrations usually call from a few fixed servers, and a key
+tied to their addresses is useless elsewhere.
+
+### Completed
+
+- **Design (ADR-076):** up to 20 IPv4 or IPv6 addresses or CIDR ranges per key; a key without
+  them accepts any address, as every key did before. Entries are typed one per line or separated by commas or
+  spaces, kept as PostgreSQL writes them (a single address gains /32 or /128) without repeats; an
+  address with bits after its prefix length (`203.0.113.7/24`) is refused with the network it
+  probably means, never widened or narrowed silently, and `/0`, IPv4-mapped IPv6 addresses and
+  prefixes longer than the address are refused. Members who manage keys set them when creating a
+  key or later for an active key, with a recent sign-in; a rotation copies them. A request from any
+  other address, or whose address could not be determined, is refused with 403 `ip_not_allowed`
+  before the key is marked used, and counts against the address's limit of failed authentication.
+- **Migration 0051:** `app.api_keys.allowed_networks cidr[]` (1 to 20 entries, no NULL entries)
+  with column grants to `w360_app`; `ops.api_key_authenticate(token_hash, client_ip)` (SECURITY
+  DEFINER, pinned `search_path`, runtime role only) finds the key as the one-argument function of
+  0024 did and says whether the address is inside one of its networks (`<<=`), marking the key used
+  only when it is. The one-argument function stays for web servers of the previous release during
+  a rolling deploy, rebuilt on the new one so that it refuses every key that lists networks.
+- **Domain:** `allowedNetworksSchema` and `networkEntryProblem` check each entry's shape;
+  `canonicalNetworks` has PostgreSQL write each network (`pg_input_is_valid`, `::cidr`) and explains
+  host bits with the masked network; creation stores the networks and audits them, rotation copies
+  them, and `setAllowedNetworks` changes an active key's networks under its row lock (a recent
+  sign-in, `developer.manage`, a no-op for the same list), audited as `api_key.networks_changed`
+  with the lists before and after. `authenticateApiRequest` passes the normalised client address
+  and returns either the key's context or a refusal naming the key and company. The company export
+  (ADR-055) includes each key's networks.
+- **Web:** the API wrapper answers a refusal with 403 `ip_not_allowed`, naming the address it saw,
+  after taking a token from the address's failed-authentication bucket, and logs it with the key and
+  company ids. Settings → API keys: an "Allowed addresses (optional)" field when creating a key, each
+  key's "Accepts requests from" line, and an Addresses dialog for active keys. The OpenAPI document
+  lists the new reason.
+- **Tests:** unit tests of the entries accepted and refused (IPv4 and IPv6, separators, repeats, the
+  limit of 20, bad shapes, long prefixes, `/0`, mapped IPv4), how a single address is shown and the
+  OpenAPI refusal. 3 integration tests in `api.test.ts`: addresses inside and outside the networks,
+  an unknown address and an IPv4-mapped one, the key's last use untouched by a refusal, the old
+  lookup refusing keys with networks; what PostgreSQL accepts as a network and the messages for
+  host bits and other text; changes for an active key after a recent sign-in with their audit, a
+  repeat changing nothing, an empty list accepting any address, refused for stale sessions, agents,
+  other companies, revoked keys and bad input, and copied by a rotation. The grant lists in
+  `api.test.ts` and `tenant-isolation.test.ts` include the new function. e2e `api-keys.spec.ts`: a
+  key created with one network refuses another address (403 naming it) and a request without the
+  header, accepts an address inside the network, answers a burst of refusals from one address with
+  429, and accepts the other address once the owner adds it in the Addresses dialog.
+- **Docs:** ADR-076; ARCHITECTURE (keys and requests); SECURITY (Phase 5 rules); DEPLOYMENT (the
+  address allowlists trust); THREAT-MODEL T94; RUNBOOKS (migration 0051, a troubleshooting entry);
+  BACKLOG P5-08; FEATURE-MATRIX H-033 and W-135, and W-136 and W-137 brought up to date with the
+  rate limit tests (ADR-068) and monthly API requests by plan (ADR-061), which they still listed as
+  untested and not built.
+- **Mutation checks:** 25 regressions tried one at a time, all make a test fail: the address
+  check (missing, an unknown address accepted), a refused key marked used, the old lookup accepting
+  keys with networks, the runtime role's column grant, the new function's grant, networks not
+  stored at creation or dropped by a rotation, entries kept as typed, host bits masked silently, the
+  recent sign-in, the active-key check, the change's audit (missing, repeated for the same list),
+  the creation audit without networks, the shape check, `/0`, the limit of 20, mapped IPv4, a
+  refusal read as acceptance, the address not normalised, single addresses shown with /32, and in
+  the web layer (through the e2e test) a refusal answered as an unknown key, refusals not counted
+  as failed authentication and edited addresses not saved.
+
+### Test commands and results (local, 2026-09-29)
+
+| Command                                                                                                                                                          | Result                                                                                                                                                      |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                             | 0 problems / all files formatted / all workspace packages pass                                                                                              |
+| `pnpm test` (unit)                                                                                                                                               | 358 passed, including 3 new in `api/api.test.ts` (and the OpenAPI document's new reason)                                                                    |
+| `pnpm test:integration` (PostgreSQL 18.6)                                                                                                                        | 508 passed, including 3 new in `api.test.ts`; the first run failed the export classification check (`allowed_networks` unclassified), fixed before this run |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                                                                                                        | 508 passed                                                                                                                                                  |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` on `api-keys.spec.ts`, `api.spec.ts`, `api-quota.spec.ts` and `company-data.spec.ts` | build passes / 16 passed: 8 tests on each project (5.1 min)                                                                                                 |
+| Mutation checks                                                                                                                                                  | 25 regressions tried (3 of them through the e2e test); all make a test fail                                                                                 |
+
+### Known gaps
+
+- Not built: networks for the whole company, per scope or per endpoint; hostnames; time windows;
+  alerts or a list of refused requests (the web log has each refusal with the key and company).
+- The check trusts the address the web server resolves: behind a load balancer every proxy hop must
+  be in `TRUSTED_PROXIES` and the edge must overwrite or append `X-Forwarded-For` (DEPLOYMENT.md).
+- The one-argument key lookup is kept for rolling deploys and must be dropped in a later release.
+- The full e2e suite was not run locally for this slice (only the specs above, on two projects); CI
+  runs every spec on Chromium, Firefox, WebKit and mobile.
+
 ## 2026-09-29 — Phase 5: resolving and reopening conversations through the public API (P5-08, ADR-075)
 
 Status: **Implemented and locally verified (Graph stand-in; no customer data).** Integrations could

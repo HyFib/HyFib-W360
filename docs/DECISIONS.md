@@ -2303,3 +2303,40 @@ Decision:
 Not built: assigning or moving conversations, notes, setting `pending`, bulk changes, surveys after
 API resolves, and a precondition on the conversation's state (the inbox checks the version the
 member saw; the API has no counterpart).
+
+## ADR-076 Addresses an API key accepts requests from (2026-09-29)
+
+Context: a leaked API key works from anywhere until someone revokes it. Integrations usually call
+from a few fixed servers, and a key tied to their addresses is useless elsewhere (listed as not
+built under P5-08: IP allowlists).
+
+Decision:
+
+- **Networks per key:** up to 20 IPv4 or IPv6 addresses or CIDR ranges
+  (`app.api_keys.allowed_networks`, `cidr[]`, migration 0051); NULL accepts any address, as every
+  key did before. They are typed one per line or separated by commas or spaces, checked by
+  PostgreSQL as networks and kept in its form (a single address gains /32 or /128), without
+  repeats. An address with bits set after its prefix length (`203.0.113.7/24`) is refused with the
+  network it probably means, never widened or narrowed silently; `/0`, IPv4-mapped IPv6 addresses
+  and prefixes longer than the address are refused too. The company export (ADR-055) includes them.
+- **Who sets them:** members who manage keys (`developer.manage`) with a recent sign-in (ADR-056),
+  when creating a key or later for an active key; a rotation copies them to the new key. Each
+  change is audited with the lists before and after (`api_key.networks_changed`), and a creation's
+  entry lists them.
+- **Checked in the lookup:** `ops.api_key_authenticate(token_hash, client_ip)` finds the key as
+  before and says whether the address is inside one of its networks; a key with networks refuses a
+  request whose address could not be determined. A refused request does not mark the key used. The
+  API answers 403 with reason `ip_not_allowed`, naming the address it saw (the caller's own), and
+  counts the attempt against the per-address limit of failed authentication (bursts of 20, one
+  every 5 seconds), so a stolen key tried from elsewhere is slowed like a wrong one.
+- **The address is the one audit and rate limits use:** `X-Forwarded-For` read from the right,
+  skipping `TRUSTED_PROXIES` (DEPLOYMENT.md), or the connection's address when the header is missing
+  (the web server fills it in). An allowlist is only as sound as that: behind the load balancer every
+  proxy hop must be in `TRUSTED_PROXIES` and the edge must overwrite or append the header; an app
+  reachable without the edge lets a client claim any address.
+- **Rollout:** the one-argument lookup of 0024 stays for web servers of the previous release during
+  a rolling deploy, rebuilt on the new one so that it refuses every key that lists networks (it
+  cannot check an address); a later release drops it.
+
+Not built: networks for the whole company, per scope or per endpoint; hostnames; time windows; and
+alerts or a list of refused requests (the web server logs each refusal with the key and company).
