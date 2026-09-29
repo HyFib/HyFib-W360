@@ -12,6 +12,7 @@ import {
   conversationTurns,
   desc,
   eq,
+  exactTimestamp,
   inArray,
   isNull,
   lt,
@@ -40,7 +41,7 @@ import { routeConversation } from '../inbox/routing';
 import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
 import { loadReplyTarget, replyTimer, type ReplyTarget } from '../inbox/sla';
-import { likePattern } from '../validation';
+import { decodeKeysetCursor, encodeKeysetCursor, likePattern } from '../validation';
 import { emitTenantEvent } from './events';
 import { SERVICE_WINDOW_MS, canSeeConversation } from './outbound';
 
@@ -408,7 +409,7 @@ export function createInboxService(deps: InboxDeps) {
 
     async getConversation(ctx: TenantContext, conversationId: string, before?: string) {
       if (!z.uuid().safeParse(conversationId).success) throw notFound('Conversation');
-      const beforeCursor = decodeCursor(before);
+      const beforeCursor = decodeKeysetCursor(before);
       const now = clock.now();
       return db.run(
         ctx.scope,
@@ -485,6 +486,7 @@ export function createInboxService(deps: InboxDeps) {
               apiKeyName: apiKeys.name,
               createdAt: messages.createdAt,
               providerTimestamp: messages.providerTimestamp,
+              cursorAt: exactTimestamp(messages.createdAt),
             })
             .from(messages)
             .leftJoin(
@@ -503,14 +505,8 @@ export function createInboxService(deps: InboxDeps) {
               and(
                 eq(messages.tenantId, ctx.tenant.id),
                 eq(messages.conversationId, conversationId),
-                beforeCursor?.at
-                  ? or(
-                      lt(messages.createdAt, beforeCursor.at),
-                      and(
-                        eq(messages.createdAt, beforeCursor.at),
-                        lt(messages.id, beforeCursor.id),
-                      ),
-                    )
+                beforeCursor
+                  ? sql`(${messages.createdAt}, ${messages.id}) < (${beforeCursor.at}::timestamptz, ${beforeCursor.id}::uuid)`
                   : undefined,
               ),
             )
@@ -612,13 +608,15 @@ export function createInboxService(deps: InboxDeps) {
               ),
               ...timerFields(target, turn?.startedAt ?? null, now),
             },
-            messages: page.reverse().map((m) => ({
+            messages: page.reverse().map(({ cursorAt: _cursorAt, ...m }) => ({
               ...m,
               createdAt: m.createdAt.toISOString(),
               providerTimestamp: m.providerTimestamp?.toISOString() ?? null,
             })),
             olderCursor:
-              rows.length > pageSize && oldest ? encodeCursor(oldest.createdAt, oldest.id) : null,
+              rows.length > pageSize && oldest
+                ? encodeKeysetCursor(oldest.cursorAt, oldest.id)
+                : null,
             automation,
             source,
             csat: survey

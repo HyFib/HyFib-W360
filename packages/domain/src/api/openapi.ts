@@ -1,5 +1,10 @@
 import { z } from 'zod';
-import type { MessageStatus } from '@w360/db';
+import {
+  CONVERSATION_STATUSES,
+  MESSAGE_STATUSES,
+  MESSAGE_TYPES,
+  type MessageStatus,
+} from '@w360/db';
 import { WEBHOOK_EVENT_INFO, WEBHOOK_LIMITS, WEBHOOK_RETRY_SECONDS } from '../webhooks/model';
 import {
   consentChangedPayloadSchema,
@@ -94,6 +99,60 @@ export const apiMessageSchema = z.object({
   createdAt: z.iso.datetime(),
 });
 
+export const apiConversationSchema = z.object({
+  id: z.uuid(),
+  contactId: z.uuid(),
+  channelId: z.uuid().describe('The WhatsApp number the conversation is on.'),
+  status: z.enum(CONVERSATION_STATUSES),
+  assigned: z.boolean().describe('Whether a member of the team is assigned.'),
+  unreadCount: z.number().int(),
+  lastMessageAt: z.iso.datetime().nullable(),
+  lastInboundAt: z.iso.datetime().nullable().describe('When the contact last wrote.'),
+  serviceWindowEndsAt: z.iso
+    .datetime()
+    .nullable()
+    .describe(
+      'When WhatsApp’s customer service window ends, 24 hours after the contact last wrote: until then a text reply can be sent (POST /messages with `type` `text`).',
+    ),
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime().describe('When anything about the conversation last changed.'),
+  resolvedAt: z.iso.datetime().nullable(),
+});
+
+export const apiConversationMessageSchema = z.object({
+  id: z.uuid(),
+  conversationId: z.uuid(),
+  direction: z.enum(['inbound', 'outbound']).describe('inbound: written by the contact.'),
+  type: z.enum(MESSAGE_TYPES),
+  text: z
+    .string()
+    .nullable()
+    .describe(
+      'The words of the message: the text, a caption, the title of a tapped reply, a reaction or a location’s name; for outbound messages the text, a template’s body with its values or an interactive message’s body. Null if none.',
+    ),
+  reply: z
+    .object({ id: z.string().nullable(), title: z.string().nullable() })
+    .nullable()
+    .describe('The button or list reply the contact tapped.'),
+  mimeType: z.string().nullable().describe('For media messages (the media is not attached).'),
+  templateId: z.uuid().nullable(),
+  templateName: z.string().nullable(),
+  sentBy: z
+    .enum(['agent', 'bot', 'campaign', 'api', 'system'])
+    .nullable()
+    .describe(
+      'Who sent an outbound message: a member (agent), an automation (bot), a campaign, the API or HyFib (system). Null for inbound messages.',
+    ),
+  apiKeyId: z
+    .uuid()
+    .nullable()
+    .describe('The API key that sent it, for messages sent through the API.'),
+  status: z.enum(MESSAGE_STATUSES).describe('received for inbound messages.'),
+  statusAt: z.iso.datetime(),
+  error: z.object({ code: z.string().nullable(), title: z.string().nullable() }).nullable(),
+  createdAt: z.iso.datetime(),
+});
+
 export const apiErrorSchema = z.object({
   error: z.object({
     code: z
@@ -150,6 +209,30 @@ const errors = (...statuses: number[]) =>
     ]),
   );
 
+const pageParams = [
+  {
+    name: 'limit',
+    in: 'query',
+    schema: { type: 'integer', minimum: 1, maximum: API_LIMITS.pageSize, default: 50 },
+  },
+  {
+    name: 'cursor',
+    in: 'query',
+    schema: { type: 'string' },
+    description: '`nextCursor` from the previous page.',
+  },
+];
+
+const pageOf = (schema: string) =>
+  json({
+    type: 'object',
+    properties: {
+      data: { type: 'array', items: ref(schema) },
+      nextCursor: { type: ['string', 'null'] },
+    },
+    required: ['data', 'nextCursor'],
+  });
+
 const scopeNote = (...scopes: string[]) => `Scope: ${scopes.map((s) => `\`${s}\``).join(' or ')}.`;
 
 const retrySchedule = WEBHOOK_RETRY_SECONDS.map((seconds) =>
@@ -186,7 +269,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       title: 'HyFib W360 API',
       version: '1.0.0',
       description: [
-        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, manage contacts and consent, and read message status for your company.',
+        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations and their messages, manage contacts and consent, and read message status for your company.',
         '',
         'Authenticate with `Authorization: Bearer <API key>`; keys are created in Settings → API keys and belong to the company.',
         `Scopes: ${API_SCOPE_KEYS.map((s) => `\`${s}\` (${API_SCOPE_INFO[s].label.toLowerCase()})`).join(', ')}.`,
@@ -332,6 +415,71 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
         },
       },
+      '/conversations': {
+        get: {
+          operationId: 'listConversations',
+          summary: 'Conversations, newest first',
+          description: `${scopeNote('conversations.read')} Pages never skip or repeat a conversation. To catch up on changes, ask for \`updatedSince\` a little before your previous pass began (a minute, say) and expect to see some conversations again: a change carries the time it began to be saved, so one still being saved while you read can carry an earlier time. Conversations of erased contacts are not listed.`,
+          parameters: [
+            ...pageParams,
+            {
+              name: 'status',
+              in: 'query',
+              schema: { type: 'string', enum: [...CONVERSATION_STATUSES] },
+            },
+            {
+              name: 'contactId',
+              in: 'query',
+              schema: { type: 'string', format: 'uuid' },
+              description: 'Only the conversations of this contact.',
+            },
+            {
+              name: 'channelId',
+              in: 'query',
+              schema: { type: 'string', format: 'uuid' },
+              description: 'Only the conversations on this WhatsApp number.',
+            },
+            {
+              name: 'updatedSince',
+              in: 'query',
+              schema: { type: 'string', format: 'date-time' },
+              description:
+                'Only conversations changed at or after this time (a new message, a status or assignee change, a read).',
+            },
+          ],
+          responses: {
+            '200': { description: 'A page of conversations.', content: pageOf('Conversation') },
+            ...errors(401, 403, 422, 429, 500),
+          },
+        },
+      },
+      '/conversations/{id}': {
+        get: {
+          operationId: 'getConversation',
+          summary: 'A conversation',
+          description: scopeNote('conversations.read'),
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': {
+              description: 'The conversation.',
+              content: json(dataOf(ref('Conversation'))),
+            },
+            ...errors(401, 403, 404, 429, 500),
+          },
+        },
+      },
+      '/conversations/{id}/messages': {
+        get: {
+          operationId: 'listConversationMessages',
+          summary: 'The messages of a conversation, newest first',
+          description: `${scopeNote('conversations.read')} Messages read as the webhooks describe them; media is not attached. Internal notes are not messages.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }, ...pageParams],
+          responses: {
+            '200': { description: 'A page of messages.', content: pageOf('ConversationMessage') },
+            ...errors(401, 403, 404, 422, 429, 500),
+          },
+        },
+      },
       '/messages/{id}': {
         get: {
           operationId: 'getMessage',
@@ -441,6 +589,8 @@ export function buildOpenApiDocument(serverUrl: string) {
         SendText: jsonSchema(apiSendTextSchema, 'input'),
         QueuedMessage: jsonSchema(apiQueuedMessageSchema),
         Message: jsonSchema(apiMessageSchema),
+        Conversation: jsonSchema(apiConversationSchema),
+        ConversationMessage: jsonSchema(apiConversationMessageSchema),
         Error: jsonSchema(apiErrorSchema),
         WebhookMessageReceived: jsonSchema(messageReceivedPayloadSchema),
         WebhookMessageStatus: jsonSchema(messageStatusPayloadSchema),
@@ -461,4 +611,7 @@ export const API_ROUTES = [
   ['post', '/contacts/{id}/consent'],
   ['post', '/messages'],
   ['get', '/messages/{id}'],
+  ['get', '/conversations'],
+  ['get', '/conversations/{id}'],
+  ['get', '/conversations/{id}/messages'],
 ] as const;

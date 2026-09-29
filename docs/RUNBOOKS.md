@@ -976,6 +976,18 @@ retried the next minute). A company being deleted is skipped. Check `app.tenant_
 company (`status`, `trial_ends_at`, `period_end`, `grace_ends_at`): the database's clock decides
 what is due.
 
+**Migration 0045 failed or left an INVALID index.** It runs outside a transaction
+(`-- migrate:no-transaction`, one `CREATE INDEX CONCURRENTLY` of `app.conversations_created_idx`),
+so a failure can leave an INVALID index: run
+`DROP INDEX CONCURRENTLY IF EXISTS app.conversations_created_idx;` and run the migrations again.
+Without the index, conversation pages through the API still answer, only more slowly for companies
+with many conversations.
+
+**Migration 0044 failed.** It runs in one transaction, so a failure applies nothing. It replaces
+the check on `app.api_keys.scopes` with one that also allows `conversations.read` (up to seven
+scopes). The check is wider than before, so existing keys pass; a failure usually means the
+constraint was renamed or changed by hand.
+
 **Migration 0043 failed.** It runs in one transaction, so a failure applies nothing. It adds
 `ops.settlement_unsettled_alerts` (granted to `w360_definer` only), the shared definition
 `ops.settlement_unsettled_topups()` (executable by nobody else), the listing and the mark (granted
@@ -1089,6 +1101,17 @@ reply does: the run ends as taken over ("A reply was sent through the API") and 
 messages are cancelled. The reply is not a member's reply, so the conversation keeps waiting for a
 member (and counts in the Inbox SLA) until a member replies or resolves it. The inbox shows the
 message with "API" and the key's name.
+
+**An integration cannot find a conversation or a message through the API.** Reading conversations
+(ADR-072) needs the `conversations.read` scope (403 without it), which only a member who reads every
+conversation can grant. The conversations of erased contacts are not listed and read as not found
+(404), like another company's ids. Messages carry their text and media type, not the media;
+internal notes and member names are not returned. Lists are newest first and `nextCursor` gives the
+next page. To catch up on changes, an integration asks for `updatedSince` a little before its
+previous pass began: a change carries the time its transaction began, so one saved during a pass can
+be older than the pass. Before ADR-072, pages of contacts (the list, the export and the API), the
+inbox thread's older messages and the audit log could skip rows written in the same transaction as
+a page's last row; cursors issued before still work.
 
 **The company is suspended or its plan ended.** Keys keep reading; creating contacts, recording
 consent and sending answer 423 until the company is active again.

@@ -11,6 +11,7 @@ import {
   contacts,
   desc,
   eq,
+  exactTimestamp,
   inArray,
   isNull,
   messageTemplates,
@@ -763,6 +764,7 @@ export function createCampaignsService(deps: CampaignDeps) {
               startedAt: campaigns.startedAt,
               completedAt: campaigns.completedAt,
               createdAt: campaigns.createdAt,
+              cursorAt: exactTimestamp(campaigns.createdAt),
             })
             .from(campaigns)
             .leftJoin(
@@ -776,7 +778,7 @@ export function createCampaignsService(deps: CampaignDeps) {
               and(
                 eq(campaigns.tenantId, ctx.tenant.id),
                 cursor
-                  ? sql`(${campaigns.createdAt}, ${campaigns.id}) < (${cursor.at.toISOString()}::timestamptz, ${cursor.id}::uuid)`
+                  ? sql`(${campaigns.createdAt}, ${campaigns.id}) < (${cursor.at}::timestamptz, ${cursor.id}::uuid)`
                   : undefined,
               ),
             )
@@ -784,11 +786,11 @@ export function createCampaignsService(deps: CampaignDeps) {
             .limit(51),
         { accessMode: 'read only' },
       );
-      const items = rows.slice(0, 50);
-      const last = items[items.length - 1];
+      const page = rows.slice(0, 50);
+      const last = page.at(-1);
       return {
-        items,
-        nextCursor: rows.length > 50 && last ? encodeKeysetCursor(last.createdAt, last.id) : null,
+        items: page.map(({ cursorAt: _cursorAt, ...item }) => item),
+        nextCursor: rows.length > 50 && last ? encodeKeysetCursor(last.cursorAt, last.id) : null,
       };
     },
 

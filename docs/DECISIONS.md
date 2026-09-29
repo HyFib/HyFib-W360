@@ -2112,3 +2112,53 @@ not measured at production volumes; if the sweep slows, the listing is the place
 
 Not built: plan payments (the reconciliation matches them by payment id, ADR-063, and they are not
 on this list), reminders while a payment stays unsettled, thresholds by amount, other channels.
+
+## ADR-072 Reading conversations and messages through the public API (2026-09-29)
+
+Context: integrations hear of new messages through the `message.received` webhook (ADR-053) and can
+reply with text (ADR-070), but the API had no way to read a conversation: an integration that
+missed webhooks (downtime, a new install) or needed the thread before replying could only read the
+status of messages it had sent itself. Conversations hold what customers wrote, so reading them is
+the most sensitive read the API offers.
+
+Decision:
+
+- **Scope:** `conversations.read` ("Read conversations"), granted only by members who hold
+  `inbox.read_all`: a key reads every conversation of the company, so the member who grants it
+  must be able to read them all. Keys are created by owners and administrators
+  (`developer.manage`), who hold it today; the check keeps a member whose roles change from
+  granting more than they read. It does not write, so suspended and restricted companies can still
+  read.
+- **Endpoints:** `GET /api/v1/conversations` (a page, newest conversation first, filtered by
+  `status`, `contactId`, `channelId` and `updatedSince`), `GET /api/v1/conversations/{id}` and
+  `GET /api/v1/conversations/{id}/messages` (a page, newest message first). Pages are keyset pages
+  on the creation time and id, which never change, so paging never skips or repeats a conversation;
+  `updatedSince` (the conversation's `updated_at`, kept by its trigger) lets an integration catch up
+  on what changed since its previous pass. The trigger stamps the time the change's transaction
+  began, so a change still being saved while a pass read can carry an earlier time than the pass:
+  the documentation tells integrations to ask from a little before the previous pass began (a
+  minute) and to expect some conversations again, rather than promising an exact feed.
+- **What a conversation says:** its status, whether a member is assigned (not who), the unread
+  count, the last message and last inbound times, and when WhatsApp's customer service window ends
+  (24 hours after the contact last wrote), which tells whether a text reply can be sent. No preview
+  text, team or member ids.
+- **What a message says:** the vocabulary of the webhooks, so a message reads the same in both:
+  direction, type, `text` (the text, a caption, the title of a tapped reply, a reaction, a location's
+  name; for outbound messages the text, a template's rendered body or an interactive message's
+  body), the reply tapped, the media type (never the media), the template's id and name, `sentBy`
+  (`agent`, `bot`, `campaign`, `api` or `system`) and the API key for messages sent through the API,
+  the status and its time, and an error. Internal notes are not messages and are not returned.
+- **Erased contacts:** their conversations are not listed and read as not found, as their contacts
+  do (erasure already redacted the messages).
+- A new index on conversations by company and creation time serves the pages, built concurrently
+  in its own migration; messages already have one per conversation.
+- **Exact cursors:** a keyset cursor carries the last row's time as PostgreSQL keeps it, to the
+  microsecond (`exactTimestamp`), not a JavaScript date. Writing these pages showed that cursors
+  built from dates lost the rows that shared the page's last millisecond but came after it, which
+  rows written in one transaction always do: the contacts list and export, API contacts, the inbox
+  thread's older messages and the audit log skipped rows at page ends. They, campaigns and store
+  orders now use the exact cursors; cursors issued before still read, and a cursor whose time or id
+  PostgreSQL would refuse is a validation error, not a failed query.
+
+Not built: writing to conversations (resolving, assigning, notes), member and team names, media
+downloads, full-text search, a messages feed across conversations, filtering by assignee or team.

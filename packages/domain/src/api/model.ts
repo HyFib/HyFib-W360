@@ -15,6 +15,7 @@ export const API_SCOPE_KEYS = [
   'messages.send',
   'messages.send_marketing',
   'messages.reply',
+  'conversations.read',
 ] as const satisfies readonly ApiScope[];
 
 /**
@@ -62,6 +63,13 @@ export const API_SCOPE_INFO: Record<
       'Send text messages to contacts who wrote to the number in the last 24 hours, and read the status of messages the API sent.',
     permission: 'inbox.reply',
     writes: true,
+  },
+  'conversations.read': {
+    label: 'Read conversations',
+    description:
+      "List the company's conversations and read their messages, including what contacts wrote.",
+    permission: 'inbox.read_all',
+    writes: false,
   },
 };
 

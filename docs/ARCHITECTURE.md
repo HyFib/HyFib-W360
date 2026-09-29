@@ -816,7 +816,8 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   with `developer.manage` create keys (name, scopes, expiry of 30, 90 or 365 days or none) and may
   grant a scope only when they hold its permission (`templates.read`, `contacts.read`,
   `contacts.write`, `inbox.reply` for `messages.send` and `messages.reply`, `campaigns.send` for
-  `messages.send_marketing`); at most 20 active keys per company, counted under an advisory lock.
+  `messages.send_marketing`, `inbox.read_all` for `conversations.read`); at most 20 active keys per
+  company, counted under an advisory lock.
   Rotation creates a key with the same name, scopes and lifetime and lets the old one work for 0 to
   72 hours (0 revokes it); revocation is immediate. Each change is audited without the token.
 - **Requests** (`apps/web/src/server/api.ts`): the bearer token is checked by shape, then through
@@ -852,6 +853,26 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   send worker checks the window again. The reply ends an automation handling the conversation as
   taken over (`api_replied`, cancelling its queued messages) but is not a member's reply: status,
   assignee, unread count and reply turns stay, and the inbox marks the message "API (key name)".
+- **Conversation reads (0044, 0045, ADR-072):** `conversations.read` (read only, so it works while
+  the company is suspended or restricted) opens `GET /conversations` (newest first, filtered by
+  status, contact, number and `updatedSince`), `GET /conversations/{id}` and
+  `GET /conversations/{id}/messages` (newest first), all in `api/conversations.ts`. Conversations
+  join their contact, so an erased contact's conversation is neither listed nor read (404). A
+  conversation says whether a member is assigned (not who), the unread count, the last message and
+  inbound times and when the 24-hour window ends; a message reads in the webhooks' words
+  (`inboundSummary` for inbound; for outbound the text, a template's rendered body or an interactive
+  message's body), with who sent it (`agent`, `bot`, `campaign`, `api`, `system`), the key for API
+  messages, the status and its error, never the media or internal notes. `updatedSince` compares the
+  row's `updated_at`, which its trigger stamps with the transaction's start, so integrations are
+  told to overlap their passes. `conversations_created_idx` (0045, built concurrently) serves the
+  pages.
+- **Keyset cursors** (`encodeKeysetCursor`, `exactTimestamp`): a cursor carries the last row's
+  timestamp as PostgreSQL keeps it, to the microsecond, and its id, and pages compare
+  `(time, id) < (cursor time, cursor id)`; cursors made with milliseconds still read. Cursors built
+  from JavaScript dates (milliseconds) skipped the rows that shared the page's last millisecond but
+  came after it, and rows written in one transaction share their time: the contacts list and
+  export, API contacts, the inbox thread's older messages and the audit log lost rows at page ends
+  (regression tests show it). Campaigns and store orders use the same cursors now (ADR-072).
 - **Idempotency** (`api/idempotency.ts`): `POST /messages` needs an `Idempotency-Key` (optional on
   `POST /contacts`). The key's row is inserted in the request's own transaction, so a concurrent
   retry waits on the unique index and then replays the stored response (`Idempotent-Replayed:

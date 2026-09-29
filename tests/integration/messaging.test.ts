@@ -820,6 +820,49 @@ describe('inbox', () => {
     ).rejects.toMatchObject({ code: 'conflict' });
   });
 
+  it('loads older messages page by page, also those saved in one transaction', async () => {
+    const c = await companyWithChannel();
+    await deliver(
+      webhookBody(c.wabaId, c.phoneNumberId, {
+        messages: [{ waId: '919855555555', text: 'First' }],
+      }),
+    );
+    const [conv] = await adminQuery<{ id: string }>(
+      'SELECT id FROM app.conversations WHERE tenant_id = $1',
+      [c.tenant.id],
+    );
+    // Sixty more written by one statement share their creation time to the microsecond, as the
+    // messages of one webhook delivery do; the first page ends among them.
+    await adminQuery(
+      `INSERT INTO app.messages (id, tenant_id, conversation_id, channel_account_id, direction, type,
+                                 content, status, sender_type)
+       SELECT gen_random_uuid(), cv.tenant_id, cv.id, cv.channel_account_id, 'inbound', 'text',
+              jsonb_build_object('text', 'Message ' || g), 'received', 'contact'
+         FROM app.conversations cv, generate_series(1, 60) g
+        WHERE cv.id = $1`,
+      [conv!.id],
+    );
+    const newestFirst = (
+      await adminQuery<{ id: string }>(
+        'SELECT id FROM app.messages WHERE conversation_id = $1 ORDER BY created_at DESC, id DESC',
+        [conv!.id],
+      )
+    ).map((r) => r.id);
+    const inbox = createInboxService({ db: dbs.app, clock: systemClock });
+    const owner = await ctxFor(c, c.owner);
+    const pages: string[][] = [];
+    let before: string | undefined;
+    do {
+      const thread = await inbox.getConversation(owner, conv!.id, before);
+      expect(thread.messages[0]).not.toHaveProperty('cursorAt');
+      // Each page lists its messages oldest first.
+      pages.push(thread.messages.map((m) => m.id).reverse());
+      before = thread.olderCursor ?? undefined;
+    } while (before && pages.length < 5);
+    expect(pages.map((p) => p.length)).toEqual([50, 11]);
+    expect(pages.flat()).toEqual(newestFirst);
+  });
+
   it('keeps internal notes on the thread and resolves and reopens with version checks', async () => {
     const c = await companyWithChannel();
     await deliver(

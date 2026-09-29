@@ -11,6 +11,7 @@ import {
   conversations,
   desc,
   eq,
+  exactTimestamp,
   inArray,
   isNotNull,
   isNull,
@@ -336,7 +337,7 @@ export async function apiListContacts(
     ctx.scope,
     async (tx) => {
       const rows = await tx
-        .select(contactColumns)
+        .select({ ...contactColumns, cursorAt: exactTimestamp(contacts.createdAt) })
         .from(contacts)
         .where(
           and(
@@ -344,7 +345,7 @@ export async function apiListContacts(
             isNull(contacts.erasedAt),
             phone ? eq(contacts.phoneE164, phone) : undefined,
             cursor
-              ? sql`(${contacts.createdAt}, ${contacts.id}) < (${cursor.at.toISOString()}::timestamptz, ${cursor.id}::uuid)`
+              ? sql`(${contacts.createdAt}, ${contacts.id}) < (${cursor.at}::timestamptz, ${cursor.id}::uuid)`
               : undefined,
           ),
         )
@@ -355,7 +356,7 @@ export async function apiListContacts(
       return {
         data: page.map(toApiContact),
         nextCursor:
-          rows.length > q.limit && last ? encodeKeysetCursor(last.createdAt, last.id) : null,
+          rows.length > q.limit && last ? encodeKeysetCursor(last.cursorAt, last.id) : null,
       };
     },
     { accessMode: 'read only' },

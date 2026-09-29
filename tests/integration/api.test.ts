@@ -5,13 +5,17 @@ import { authorizedTenantScope, channelAccounts, sql } from '@w360/db';
 import {
   API_KEY_LIMITS,
   API_KEY_REMINDER_DAYS,
+  API_SCOPE_KEYS,
   API_TOKEN_RE,
   apiCreateContact,
   apiErrorResponse,
   apiGetContact,
+  apiGetConversation,
   apiGetMessage,
   apiKeyReminderNotice,
   apiListContacts,
+  apiListConversationMessages,
+  apiListConversations,
   apiListTemplates,
   apiRecordConsent,
   apiSendMessage,
@@ -21,6 +25,7 @@ import {
   createCampaignsService,
   createConsentService,
   createContactsService,
+  createCsatService,
   createInboxService,
   createTemplatesService,
   generateApiToken,
@@ -29,6 +34,7 @@ import {
   processTemplateSubmit,
   purgeApiIdempotencyKeys,
   queueTemplateMessage,
+  queueTextMessage,
   remindApiKeyExpiry,
   remindExpiringApiKeys,
   syncTemplates,
@@ -44,6 +50,7 @@ import {
   nextExternalId,
   startWhatsAppFixture,
   type Company,
+  type InboundSpec,
   type WhatsAppFixture,
 } from './whatsapp-fixture';
 
@@ -53,8 +60,8 @@ import {
  * through the definer function, scopes and company status, idempotent requests (replays, a key
  * reused for another request, concurrent retries, failures, expiry), contacts and consent, template
  * sends with the members' checks and the send pipeline, text replies within the 24-hour window
- * (ADR-070), message status, the idempotency sweep, isolation between companies, and reminders
- * before keys expire (ADR-067).
+ * (ADR-070), message status, reading conversations and their messages (ADR-072), the idempotency
+ * sweep, isolation between companies, and reminders before keys expire (ADR-067).
  */
 let fx: WhatsAppFixture;
 let keys: ApiKeysService;
@@ -662,6 +669,29 @@ describe('requests with a key', () => {
     expect((await apiListContacts(deps(), theirs.ctx, {})).data.map((x) => x.id)).not.toContain(
       ids[0],
     );
+  });
+
+  it('pages through contacts written in one transaction, which share their creation time', async () => {
+    const d = await fx.company();
+    const { ctx } = await apiKey(d, ['contacts.read']);
+    const batch = await fx.query<{ id: string }>(
+      `INSERT INTO app.contacts (id, tenant_id, phone_e164, source)
+       SELECT gen_random_uuid(), $1, '+9170300' || lpad(g::text, 5, '0'), 'import'
+         FROM generate_series(1, 5) g
+       RETURNING id`,
+      [d.tenant.id],
+    );
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await apiListContacts(deps(), ctx, {
+        limit: '2',
+        ...(cursor ? { cursor } : {}),
+      });
+      seen.push(...page.data.map((x) => x.id));
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor);
+    expect(seen.sort()).toEqual(batch.map((r) => r.id).sort());
   });
 
   it('record consent as the key, with its evidence', async () => {
@@ -1438,6 +1468,465 @@ describe('text replies (ADR-070)', () => {
     const sent = await apiSendMessage(deps(), mine.ctx, reply('+919811100050'), idem('i-3', 'i-3'));
     await expectAppError(apiGetMessage(deps(), theirs.ctx, idOf(sent)), 'not_found');
     expect((await apiGetMessage(deps(), mine.ctx, idOf(sent))).status).toBe('queued');
+  });
+});
+
+describe('conversation reads (ADR-072)', () => {
+  const inbox = () =>
+    createInboxService({ db: fx.dbs.app, clock: systemClock, jobs: fx.jobs(), signer: fx.signer });
+
+  /** Inbound messages from `waId`, one webhook each, to the company's number or another of its. */
+  async function inbound(
+    company: Company,
+    waId: string,
+    messages: Omit<InboundSpec, 'waId'>[],
+    phoneNumberId = company.phoneNumberId,
+  ) {
+    for (const m of messages) {
+      await fx.deliver(
+        fx.messagesBody({ ...company, phoneNumberId }, { messages: [{ ...m, waId }] }),
+      );
+    }
+  }
+
+  async function conversationOf(company: Company, waId: string) {
+    const [row] = await fx.query<{ id: string; contact_id: string; version: number }>(
+      `SELECT cv.id, cv.contact_id, cv.version
+         FROM app.conversations cv
+         JOIN app.contacts ct ON ct.tenant_id = cv.tenant_id AND ct.id = cv.contact_id
+        WHERE cv.tenant_id = $1 AND ct.phone_e164 = $2`,
+      [company.tenant.id, `+${waId}`],
+    );
+    if (!row) throw new Error('no conversation');
+    return row;
+  }
+
+  /** Every page of a listing, following `nextCursor`. */
+  async function everyPage<T>(
+    read: (cursor?: string) => Promise<{ data: T[]; nextCursor: string | null }>,
+  ) {
+    const pages: T[][] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await read(cursor);
+      pages.push(page.data);
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor && pages.length < 50);
+    return pages;
+  }
+
+  /** PostgreSQL's time, to the microsecond. */
+  async function databaseNow() {
+    const [row] = await fx.query<{ now: string }>(
+      `SELECT to_char(now() at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS now`,
+    );
+    return row!.now;
+  }
+
+  it('need the conversations.read scope, which only members who read every conversation grant', async () => {
+    const c = await fx.company();
+    const without = await apiKey(c, ['contacts.read', 'messages.reply']);
+    for (const read of [
+      apiListConversations(deps(), without.ctx, {}),
+      apiGetConversation(deps(), without.ctx, uuidv7()),
+      apiListConversationMessages(deps(), without.ctx, uuidv7(), {}),
+    ]) {
+      await expectAppError(read, 'forbidden', /conversations\.read scope/);
+    }
+
+    const owner = await fx.ctx(c, c.owner);
+    // A member who reads only the conversations assigned to them (as a narrower role would).
+    const narrower: TenantContext = {
+      ...owner,
+      permissions: new Set([...owner.permissions].filter((p) => p !== 'inbox.read_all')),
+    };
+    await expectAppError(
+      keys.create(narrower, { name: 'Reader', scopes: ['conversations.read'], expiresInDays: 30 }),
+      'forbidden',
+      /Read conversations/,
+    );
+    // Every scope fits on one key.
+    const all = await keys.create(owner, {
+      name: 'Everything',
+      scopes: [...API_SCOPE_KEYS],
+      expiresInDays: 30,
+    });
+    const [row] = await fx.query<{ scopes: string[] }>(
+      'SELECT scopes FROM app.api_keys WHERE id = $1',
+      [all.id],
+    );
+    expect(row!.scopes).toEqual([...API_SCOPE_KEYS]);
+    expect(row!.scopes).toContain('conversations.read');
+  });
+
+  it('list the company’s conversations newest first, filtered, on pages that never skip or repeat', async () => {
+    const c = await fx.company();
+    const { ctx } = await apiKey(c, ['conversations.read']);
+    const second = await addNumber(c, 'active');
+    const [secondNumber] = await fx.query<{ phone_number_id: string }>(
+      'SELECT phone_number_id FROM app.channel_accounts WHERE id = $1',
+      [second],
+    );
+    const waIds = ['919811100060', '919811100061', '919811100062', '919811100063'];
+    for (const waId of waIds) await inbound(c, waId, [{ text: 'Hello' }]);
+    await inbound(c, '919811100064', [{ text: 'Hello' }], secondNumber!.phone_number_id);
+    const convs = await Promise.all([...waIds, '919811100064'].map((w) => conversationOf(c, w)));
+    const [resolved, assigned, sameTime, wroteAgain, onSecond] = convs as [
+      (typeof convs)[number],
+      (typeof convs)[number],
+      (typeof convs)[number],
+      (typeof convs)[number],
+      (typeof convs)[number],
+    ];
+    // Conversations created in one transaction (a campaign's batch) share their creation time to
+    // the microsecond, which a cursor must keep apart.
+    await fx.query(
+      `UPDATE app.conversations SET created_at = '2026-09-28T10:00:00.123456Z'
+        WHERE id = ANY($1::uuid[])`,
+      [[assigned.id, sameTime.id, wroteAgain.id]],
+    );
+    const newestFirst = (
+      await fx.query<{ id: string }>(
+        'SELECT id FROM app.conversations WHERE tenant_id = $1 ORDER BY created_at DESC, id DESC',
+        [c.tenant.id],
+      )
+    ).map((r) => r.id);
+
+    // Query values arrive as strings from the URL.
+    const pages = await everyPage((cursor) =>
+      apiListConversations(deps(), ctx, { limit: '2', ...(cursor ? { cursor } : {}) }),
+    );
+    expect(pages.map((p) => p.length)).toEqual([2, 2, 1]);
+    expect(pages.flat().map((x) => x.id)).toEqual(newestFirst);
+    const onePerPage = await everyPage((cursor) =>
+      apiListConversations(deps(), ctx, { limit: '1', ...(cursor ? { cursor } : {}) }),
+    );
+    expect(onePerPage.flat().map((x) => x.id)).toEqual(newestFirst);
+
+    const ids = async (query: Record<string, string>) =>
+      (await apiListConversations(deps(), ctx, query)).data.map((x) => x.id);
+    const inOrder = (...wanted: { id: string }[]) =>
+      newestFirst.filter((id) => wanted.some((w) => w.id === id));
+    expect(await ids({ channelId: second })).toEqual([onSecond.id]);
+    expect(await ids({ channelId: c.channelAccountId })).toEqual(
+      inOrder(resolved, assigned, sameTime, wroteAgain),
+    );
+    expect(await ids({ contactId: sameTime.contact_id })).toEqual([sameTime.id]);
+    expect(await ids({ contactId: uuidv7() })).toEqual([]);
+
+    // A member resolves one conversation and assigns another; a contact writes again in a third.
+    const since = await databaseNow();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    await inbox().setStatus(owner, {
+      conversationId: resolved.id,
+      status: 'resolved',
+      expectedVersion: resolved.version,
+    });
+    await inbox().assign(owner, {
+      conversationId: assigned.id,
+      membershipId: agent.membership.id,
+      expectedVersion: assigned.version,
+    });
+    await inbound(c, waIds[3]!, [{ text: 'Any news?' }]);
+    expect(await ids({ updatedSince: since })).toEqual(inOrder(resolved, assigned, wroteAgain));
+    expect(await ids({ updatedSince: await databaseNow() })).toEqual([]);
+    expect(await ids({ status: 'resolved' })).toEqual([resolved.id]);
+    expect(await ids({ status: 'open' })).toEqual(
+      inOrder(assigned, sameTime, wroteAgain, onSecond),
+    );
+    expect(await ids({ status: 'open', channelId: second })).toEqual([onSecond.id]);
+    expect(await ids({ status: 'resolved', channelId: second })).toEqual([]);
+
+    const listed = (await apiListConversations(deps(), ctx, {})).data;
+    const [row] = await fx.query<{
+      last_message_at: Date;
+      last_inbound_at: Date;
+      updated_at: Date;
+    }>('SELECT last_message_at, last_inbound_at, updated_at FROM app.conversations WHERE id = $1', [
+      assigned.id,
+    ]);
+    const shown = listed.find((x) => x.id === assigned.id);
+    expect(shown).toEqual({
+      id: assigned.id,
+      contactId: assigned.contact_id,
+      channelId: c.channelAccountId,
+      status: 'open',
+      assigned: true,
+      unreadCount: 1,
+      lastMessageAt: row!.last_message_at.toISOString(),
+      lastInboundAt: row!.last_inbound_at.toISOString(),
+      serviceWindowEndsAt: new Date(row!.last_inbound_at.getTime() + 24 * 3600_000).toISOString(),
+      createdAt: '2026-09-28T10:00:00.123Z',
+      updatedAt: row!.updated_at.toISOString(),
+      resolvedAt: null,
+    });
+    expect(await apiGetConversation(deps(), ctx, assigned.id)).toEqual(shown);
+    expect(listed.find((x) => x.id === resolved.id)).toMatchObject({
+      status: 'resolved',
+      assigned: false,
+      unreadCount: 0,
+      resolvedAt: expect.any(String),
+    });
+  });
+
+  it('read a conversation’s messages newest first, in the words the webhooks use', async () => {
+    const c = await fx.company();
+    const reader = await apiKey(c, ['conversations.read']);
+    const replier = await apiKey(c, ['messages.reply'], 'Helpdesk');
+    const owner = await fx.ctx(c, c.owner);
+    await createCsatService({ db: fx.dbs.app, clock: systemClock }).updateCsatSettings(owner, {
+      enabled: true,
+      question: 'How did we do today?',
+      labels: ['Great', 'Okay', 'Poor'],
+    });
+    const waId = '919811100070';
+    await inbound(c, waId, [
+      { text: 'Where is my order?' },
+      {
+        type: 'image',
+        extra: {
+          image: {
+            id: 'media-1',
+            mime_type: 'image/jpeg',
+            sha256: 'c2hhMjU2',
+            caption: 'The box arrived damaged',
+          },
+        },
+      },
+      { type: 'button', extra: { button: { text: 'Track order', payload: 'TRACK' } } },
+      {
+        type: 'interactive',
+        extra: {
+          interactive: {
+            type: 'list_reply',
+            list_reply: { id: 'size-m', title: 'Medium', description: 'Chest 40 in' },
+          },
+        },
+      },
+      { type: 'reaction', extra: { reaction: { message_id: 'wamid.earlier', emoji: '👍' } } },
+      {
+        type: 'location',
+        extra: {
+          location: { latitude: 12.97, longitude: 77.59, name: 'Home', address: 'MG Road' },
+        },
+      },
+    ]);
+    const conv = await conversationOf(c, waId);
+    const agentReply = await queueTextMessage(deps(), owner, {
+      conversationId: conv.id,
+      text: 'Sorry about the box.',
+      clientKey: `ck-${uuidv7()}`,
+    });
+    const tpl = await approvedTemplate(c, shippingUpdate);
+    const template = await queueTemplateMessage(deps(), owner, {
+      contactId: conv.contact_id,
+      channelAccountId: c.channelAccountId,
+      templateId: tpl.id,
+      params: { header: [], body: ['Asha', 'A-1001'] },
+      clientKey: `ck-${uuidv7()}`,
+    });
+    const reply = (text: string, key: string) =>
+      apiSendMessage(deps(), replier.ctx, { type: 'text', to: `+${waId}`, text }, idem(key, key));
+    const apiReply = (await reply('A replacement ships today.', 'c-1')).body.data as { id: string };
+    const failing = (await reply('Here is the tracking link.', 'c-2')).body.data as { id: string };
+    // Resolving sends the satisfaction survey, an interactive message from HyFib.
+    await inbox().setStatus(owner, {
+      conversationId: conv.id,
+      status: 'resolved',
+      expectedVersion: (await conversationOf(c, waId)).version,
+    });
+    const [survey] = await fx.query<{ message_id: string }>(
+      'SELECT message_id FROM app.csat_surveys WHERE conversation_id = $1',
+      [conv.id],
+    );
+    expect(await sendAll(c)).toEqual(['accepted', 'accepted', 'accepted', 'accepted', 'accepted']);
+    // WhatsApp reports the template read and the second API reply failed.
+    const wamid = new Map(
+      (
+        await fx.query<{ id: string; external_message_id: string }>(
+          'SELECT id, external_message_id FROM app.messages WHERE id = ANY($1::uuid[])',
+          [[template.messageId, failing.id]],
+        )
+      ).map((r) => [r.id, r.external_message_id]),
+    );
+    const t = Math.floor(Date.now() / 1000);
+    await fx.deliver(
+      fx.messagesBody(c, {
+        statuses: [
+          {
+            id: wamid.get(template.messageId),
+            status: 'read',
+            timestamp: String(t),
+            recipient_id: waId,
+          },
+          {
+            id: wamid.get(failing.id),
+            status: 'failed',
+            timestamp: String(t),
+            recipient_id: waId,
+            errors: [{ code: 131026, title: 'Message undeliverable' }],
+          },
+        ],
+      }),
+    );
+    // Internal notes are not messages.
+    await inbox().addNote(owner, { conversationId: conv.id, body: 'Offer a refund if it recurs.' });
+
+    const pages = await everyPage((cursor) =>
+      apiListConversationMessages(deps(), reader.ctx, conv.id, {
+        limit: '4',
+        ...(cursor ? { cursor } : {}),
+      }),
+    );
+    expect(pages.map((p) => p.length)).toEqual([4, 4, 3]);
+    const read = pages.flat();
+    const base = {
+      id: expect.any(String),
+      conversationId: conv.id,
+      reply: null,
+      mimeType: null,
+      templateId: null,
+      templateName: null,
+      sentBy: null,
+      apiKeyId: null,
+      statusAt: expect.any(String),
+      error: null,
+      createdAt: expect.any(String),
+    };
+    const fromContact = (type: string, text: string, more: Record<string, unknown> = {}) => ({
+      ...base,
+      direction: 'inbound',
+      type,
+      text,
+      status: 'received',
+      ...more,
+    });
+    const toContact = (id: string, type: string, text: string, more: Record<string, unknown>) => ({
+      ...base,
+      id,
+      direction: 'outbound',
+      type,
+      text,
+      ...more,
+    });
+    expect([...read].reverse()).toEqual([
+      fromContact('text', 'Where is my order?'),
+      fromContact('image', 'The box arrived damaged', { mimeType: 'image/jpeg' }),
+      fromContact('button', 'Track order', { reply: { id: 'TRACK', title: 'Track order' } }),
+      fromContact('interactive', 'Medium', { reply: { id: 'size-m', title: 'Medium' } }),
+      fromContact('reaction', '👍'),
+      fromContact('location', 'Home'),
+      toContact(agentReply.messageId, 'text', 'Sorry about the box.', {
+        sentBy: 'agent',
+        status: 'accepted',
+      }),
+      toContact(template.messageId, 'template', 'Hi Asha, your order A-1001 has shipped.', {
+        templateId: tpl.id,
+        templateName: tpl.name,
+        sentBy: 'agent',
+        status: 'read',
+        statusAt: new Date(t * 1000).toISOString(),
+      }),
+      toContact(apiReply.id, 'text', 'A replacement ships today.', {
+        sentBy: 'api',
+        apiKeyId: replier.id,
+        status: 'accepted',
+      }),
+      toContact(failing.id, 'text', 'Here is the tracking link.', {
+        sentBy: 'api',
+        apiKeyId: replier.id,
+        status: 'failed',
+        error: { code: '131026', title: 'Message undeliverable' },
+      }),
+      toContact(survey!.message_id, 'interactive', 'How did we do today?', {
+        sentBy: 'system',
+        status: 'accepted',
+      }),
+    ]);
+
+    // Messages saved in one transaction share their creation time; pages keep them apart too.
+    const firstThree = read.slice(-3).map((m) => m.id);
+    await fx.query(
+      `UPDATE app.messages SET created_at = '2026-09-28T10:00:00.654321Z'
+        WHERE id = ANY($1::uuid[])`,
+      [firstThree],
+    );
+    const newestFirst = (
+      await fx.query<{ id: string }>(
+        'SELECT id FROM app.messages WHERE conversation_id = $1 ORDER BY created_at DESC, id DESC',
+        [conv.id],
+      )
+    ).map((r) => r.id);
+    const onePerPage = await everyPage((cursor) =>
+      apiListConversationMessages(deps(), reader.ctx, conv.id, {
+        limit: '1',
+        ...(cursor ? { cursor } : {}),
+      }),
+    );
+    expect(onePerPage.flat().map((m) => m.id)).toEqual(newestFirst);
+    expect(newestFirst).toHaveLength(11);
+  });
+
+  it('leave out erased contacts and other companies, and check what they are asked', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const mine = await apiKey(c, ['conversations.read']);
+    const theirs = await apiKey(other, ['conversations.read']);
+    await inbound(c, '919811100080', [{ text: 'Hello' }]);
+    await inbound(c, '919811100081', [{ text: 'Please forget me' }]);
+    const kept = await conversationOf(c, '919811100080');
+    const erased = await conversationOf(c, '919811100081');
+    await createContactsService({ db: fx.dbs.app, clock: systemClock }).eraseContact(
+      await fx.ctx(c, c.owner),
+      { contactId: erased.contact_id, suppress: false },
+    );
+
+    const ids = async (ctx: ApiContext, query: Record<string, string> = {}) =>
+      (await apiListConversations(deps(), ctx, query)).data.map((x) => x.id);
+    expect(await ids(mine.ctx)).toEqual([kept.id]);
+    expect(await ids(mine.ctx, { contactId: erased.contact_id })).toEqual([]);
+    await expectAppError(apiGetConversation(deps(), mine.ctx, erased.id), 'not_found');
+    await expectAppError(apiListConversationMessages(deps(), mine.ctx, erased.id, {}), 'not_found');
+
+    // Another company's key finds nothing of this company.
+    expect(await ids(theirs.ctx)).toEqual([]);
+    expect(await ids(theirs.ctx, { contactId: kept.contact_id })).toEqual([]);
+    expect(await ids(theirs.ctx, { channelId: c.channelAccountId })).toEqual([]);
+    await expectAppError(apiGetConversation(deps(), theirs.ctx, kept.id), 'not_found');
+    await expectAppError(apiListConversationMessages(deps(), theirs.ctx, kept.id, {}), 'not_found');
+
+    // Reading continues while the company is suspended or its plan has ended.
+    for (const status of ['suspended', 'restricted'] as const) {
+      const ctx = { ...mine.ctx, tenant: { ...mine.ctx.tenant, status } };
+      expect(await ids(ctx)).toEqual([kept.id]);
+      expect((await apiListConversationMessages(deps(), ctx, kept.id, {})).data).toHaveLength(1);
+    }
+
+    // Ids and queries are checked.
+    await expectAppError(apiGetConversation(deps(), mine.ctx, 'not-a-uuid'), 'not_found');
+    await expectAppError(
+      apiListConversationMessages(deps(), mine.ctx, 'not-a-uuid', {}),
+      'not_found',
+    );
+    for (const query of [
+      { limit: '0' },
+      { limit: '101' },
+      { status: 'closed' },
+      { contactId: 'x' },
+      { channelId: 'x' },
+      { updatedSince: 'yesterday' },
+      { cursor: 'not-a-cursor' },
+      { assignee: 'me' },
+    ]) {
+      await expectAppError(apiListConversations(deps(), mine.ctx, query), 'validation_failed');
+    }
+    for (const query of [{ limit: '101' }, { cursor: 'not-a-cursor' }, { status: 'open' }]) {
+      await expectAppError(
+        apiListConversationMessages(deps(), mine.ctx, kept.id, query),
+        'validation_failed',
+      );
+    }
   });
 });
 

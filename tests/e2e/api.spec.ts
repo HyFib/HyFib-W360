@@ -172,7 +172,7 @@ test('an API key created in settings sends an approved template once, and stops 
   expect(afterRevoke.status()).toBe(401);
 });
 
-test('a key with the reply scope answers a customer who wrote, and the inbox shows the reply came through the API', async ({
+test('a key with the reply scope answers a customer who wrote and reads the conversation, and the inbox shows the reply came through the API', async ({
   page,
   request,
 }) => {
@@ -188,6 +188,7 @@ test('a key with the reply scope answers a customer who wrote, and the inbox sho
   await page.goto(`/c/${slug}/settings/api-keys`);
   await page.getByLabel('Name', { exact: true }).fill('Helpdesk');
   await page.getByRole('checkbox', { name: /Reply with text/ }).check();
+  await page.getByRole('checkbox', { name: /Read conversations/ }).check();
   await page.getByRole('button', { name: 'Create API key' }).click();
   const token = await page.getByLabel('API key', { exact: true }).inputValue();
   await page.getByRole('button', { name: 'I have stored the key' }).click();
@@ -212,7 +213,12 @@ test('a key with the reply scope answers a customer who wrote, and the inbox sho
   const reply = { type: 'text', to: `+${waId}`, text: 'Order A-1001 ships today.' };
   const sent = await post(reply);
   expect(sent.status()).toBe(201);
-  const queued = (await sent.json()).data as { id: string; type: string; status: string };
+  const queued = (await sent.json()).data as {
+    id: string;
+    type: string;
+    status: string;
+    contactId: string;
+  };
   expect(queued).toMatchObject({ type: 'text', status: 'queued' });
   const stranger = await post({ ...reply, to: `+${randomWaId()}` });
   expect(stranger.status()).toBe(412);
@@ -236,6 +242,53 @@ test('a key with the reply scope answers a customer who wrote, and the inbox sho
       text: { body: 'Order A-1001 ships today.', preview_url: false },
     }),
   ]);
+
+  // The key reads the conversation and its messages, newest first, one page at a time.
+  const listed = await request.get('/api/v1/conversations?status=open', { headers: auth });
+  expect(listed.status()).toBe(200);
+  const conversations = (await listed.json()) as {
+    data: { id: string; status: string; serviceWindowEndsAt: string | null }[];
+    nextCursor: string | null;
+  };
+  expect(conversations.data).toHaveLength(1);
+  expect(conversations.nextCursor).toBeNull();
+  const [open] = conversations.data;
+  expect(open).toMatchObject({ status: 'open', assigned: false, contactId: queued.contactId });
+  expect(Date.parse(open!.serviceWindowEndsAt ?? '')).toBeGreaterThan(Date.now());
+  const one = await request.get(`/api/v1/conversations/${open!.id}`, { headers: auth });
+  expect((await one.json()).data).toEqual(open);
+  const newest = await request.get(`/api/v1/conversations/${open!.id}/messages?limit=1`, {
+    headers: auth,
+  });
+  const firstPage = (await newest.json()) as {
+    data: Record<string, unknown>[];
+    nextCursor: string | null;
+  };
+  expect(firstPage.data).toEqual([
+    expect.objectContaining({
+      id: queued.id,
+      direction: 'outbound',
+      type: 'text',
+      text: 'Order A-1001 ships today.',
+      sentBy: 'api',
+      status: 'accepted',
+    }),
+  ]);
+  const older = await request.get(
+    `/api/v1/conversations/${open!.id}/messages?limit=1&cursor=${firstPage.nextCursor}`,
+    { headers: auth },
+  );
+  expect((await older.json()).data).toEqual([
+    expect.objectContaining({
+      direction: 'inbound',
+      type: 'text',
+      text: 'Where is my order A-1001?',
+      sentBy: null,
+      status: 'received',
+    }),
+  ]);
+  const resolved = await request.get('/api/v1/conversations?status=resolved', { headers: auth });
+  expect((await resolved.json()).data).toEqual([]);
 
   // Members see the reply in the conversation, marked with the key that sent it.
   await conversation.click();

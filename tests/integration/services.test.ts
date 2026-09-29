@@ -107,6 +107,38 @@ describe('invitation quota', () => {
   });
 });
 
+describe('audit log', () => {
+  it('pages through events recorded in one transaction, which share their time to the microsecond', async () => {
+    const owner = await createUser(dbs, { name: 'Audit Owner' });
+    const tenant = await createTenant(dbs, owner);
+    // Seven events written by one statement, as the changes of one request are.
+    await dbs.app.run(authorizedTenantScope(tenant.id, owner.id), (tx) =>
+      tx.execute(sql`
+        insert into app.audit_events (id, tenant_id, actor_type, actor_id, action, result)
+        select gen_random_uuid(), ${tenant.id}::uuid, 'user', ${owner.id}, 'test.bulk_' || g, 'success'
+          from generate_series(1, 7) g`),
+    );
+    const { rows } = await dbs.adminPool.query<{ id: string }>(
+      'SELECT id FROM app.audit_events WHERE tenant_id = $1 ORDER BY occurred_at DESC, id DESC',
+      [tenant.id],
+    );
+    expect(rows.length).toBeGreaterThanOrEqual(7);
+    const ctx = await resolveTenantContext(
+      { db: dbs.app, clock: systemClock, mfaGracePeriodHours: 72 },
+      { userId: owner.id, sessionId: null, tenantSlug: tenant.slug, correlationId: uuidv7() },
+    );
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await tenancyService().listAuditEvents(ctx, { limit: 2, cursor });
+      expect(page.events[0]).not.toHaveProperty('cursorAt');
+      seen.push(...page.events.map((e) => e.id));
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor && seen.length < 100);
+    expect(seen).toEqual(rows.map((r) => r.id));
+  });
+});
+
 describe('platform console', () => {
   it('loads any company by id, with seat counts and owners from the narrow helpers', async () => {
     const actor = await platformActor();
