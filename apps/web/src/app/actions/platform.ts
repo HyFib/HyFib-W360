@@ -64,6 +64,18 @@ export async function requestCreditRefundAction(
   });
 }
 
+/** Approves or declines a company's refund request (platform owners, ADR-073). */
+export async function decideRefundRequestAction(
+  input: unknown,
+): Promise<ActionResult<{ refundId: string | null }>> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    const result = await runtime.platformBilling.decideRefundRequest(actor, input);
+    refresh();
+    return result;
+  });
+}
+
 export async function requestSettlementReconAction(
   input: unknown,
 ): Promise<ActionResult<{ runId: string }>> {

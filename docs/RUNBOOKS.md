@@ -192,6 +192,30 @@ WHERE tenant_id = … ORDER BY requested_at DESC`:
       deletion card on the platform page says so).
     - A refund still open after 90 days loses its hold to the expired-holds sweep; if Razorpay
       processes it later, it is recorded as a plain refund.
+    - **Refund requests from companies** (`/platform/refunds`, ADR-073). Billing managers ask from a
+      payment's receipt; platform owners are emailed a count ("A refund request is waiting for a
+      decision") within a minute, and decide on the page (operators only read). Approving starts
+      the refund above for the amount asked, with the same checks; declining needs a note, which
+      the company's billing managers are emailed within a minute. Before approving, check the
+      reason and the payment date: Razorpay may fail a normal refund of a payment older than about
+      6 months (R-077), so decline such a request with a note and settle it another way.
+      `SELECT status, requested_at, announced_at, decided_at, decline_notified_at, credit_refund_id
+FROM app.credit_refund_requests WHERE tenant_id = … ORDER BY requested_at DESC`:
+      - **"Approving was refused":** the request no longer fits (the unused credit was spent since,
+        a refund of the payment started meanwhile, or the company asked for deletion); the page
+        shows the reason and the request stays open. Decline it with a note, or refund a smaller
+        amount from the company's platform page and decline the request saying so.
+      - **No email about a request:** only platform owners are emailed, once per request, and only
+        while it is open (a request withdrawn or decided within the minute is not announced). The
+        worker logs `refund requests announced to platform owners`, or `companies asked for refunds
+but there is no platform owner to email` (make someone a platform owner; the requests are
+        then announced). Emails go through the outbox (section 3).
+      - **The company did not hear of a decline:** the worker logs `refund request declines
+emailed`, or `refund request decline notice failed for a company; will retry` with the
+        company; `decline_notified_at` is set when the email was queued. An approval sends no email
+        of its own: the refund's emails follow.
+      - **"We asked too often":** a company can ask 5 times in 24 hours (withdrawn requests count);
+        the next request is accepted once the oldest of those is a day old.
 11. **Settlement reconciliation** (`/platform/reconciliation`, ADR-059). Each day from 06:00 India
     time the worker reads Razorpay's settlement report for the previous day and matches every
     transaction. Look at the list once a day; "Need a person" counts what is still open. Platform
@@ -975,6 +999,12 @@ recorded, and the next minute tries again). A correction published as a new card
 retried the next minute). A company being deleted is skipped. Check `app.tenant_plans` for the
 company (`status`, `trial_ends_at`, `period_end`, `grace_ends_at`): the database's clock decides
 what is due.
+
+**Migration 0046 failed.** It runs in one transaction, so a failure applies nothing. It adds
+`app.credit_refund_requests` (row security, column grants, a restrictive policy for the company
+role, deletion step 76), the notice functions for the worker, the platform lists and
+`ops.platform_decide_credit_refund_request`. A failure usually means a deletion step numbered 76
+already exists, or a function of the same name was created by hand.
 
 **Migration 0045 failed or left an INVALID index.** It runs outside a transaction
 (`-- migrate:no-transaction`, one `CREATE INDEX CONCURRENTLY` of `app.conversations_created_idx`),

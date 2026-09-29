@@ -90,6 +90,42 @@ export async function confirmMandateAction(
   });
 }
 
+/** Asks HyFib to refund unused credit from a paid top-up (ADR-073); a platform owner decides. */
+export async function askForRefundAction(
+  slug: string,
+  input: { topupId: string; amount: string; reason: string },
+): Promise<ActionResult<{ requestId: string }>> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { refundRequests } = await getRuntime();
+    const result = await refundRequests.ask(
+      ctx,
+      {
+        topupId: input.topupId,
+        amount: typeof input.amount === 'string' ? input.amount.replace(/[,\s₹]/g, '') : '',
+        reason: input.reason,
+      },
+      await requestMeta(),
+    );
+    refresh();
+    return result;
+  });
+}
+
+/** Withdraws the company's open refund request (ADR-073). */
+export async function withdrawRefundRequestAction(
+  slug: string,
+  requestId: string,
+): Promise<ActionResult> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { refundRequests } = await getRuntime();
+    await refundRequests.withdraw(ctx, requestId, await requestMeta());
+    refresh();
+    return null;
+  });
+}
+
 export async function cancelMandateAction(slug: string, mandateId: string): Promise<ActionResult> {
   return runAction(async () => {
     const ctx = await tenantForAction(slug);

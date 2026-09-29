@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import type { PlatformDatabase } from '@w360/db/platform';
 import {
+  createPlatformBillingService,
   refundableTopups,
   type PlatformCompanyBilling,
   type PlatformCompanyTopup,
 } from './billing';
+import type { PlatformActor } from './service';
 
 function topup(overrides: Partial<PlatformCompanyTopup>): PlatformCompanyTopup {
   return {
@@ -68,5 +71,54 @@ describe('refundableTopups', () => {
       topup({ id: 'ok' }),
     ];
     expect(refundableTopups(billing(100_000, topups)).map((t) => t.id)).toEqual(['ok']);
+  });
+});
+
+describe('deciding a refund request (ADR-073)', () => {
+  // The checks below happen before any query: a database that is reached fails the test.
+  const unreachable: PlatformDatabase = {
+    run: async () => {
+      throw new Error('the database was reached');
+    },
+    close: async () => undefined,
+  };
+  const service = createPlatformBillingService({ platformDb: unreachable });
+  const requestId = '01890000-0000-7000-8000-000000000001';
+  const operator: PlatformActor = {
+    userId: 'usr_operator',
+    role: 'platform_operator',
+    correlationId: 'corr-1',
+  };
+  const owner: PlatformActor = { ...operator, userId: 'usr_owner', role: 'platform_owner' };
+
+  it('refuses platform operators before the database', async () => {
+    await expect(
+      service.decideRefundRequest(operator, { requestId, decision: 'approve' }),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+    await expect(
+      service.decideRefundRequest(operator, {
+        requestId,
+        decision: 'decline',
+        note: 'x'.repeat(20),
+      }),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+  });
+
+  it('needs a note of 10 to 1,000 characters to decline, and none shorter to approve', async () => {
+    for (const note of [undefined, '', '   ', 'too short', 'x'.repeat(1001)]) {
+      await expect(
+        service.decideRefundRequest(owner, { requestId, decision: 'decline', note }),
+        String(note),
+      ).rejects.toMatchObject({ code: 'validation_failed' });
+    }
+    await expect(
+      service.decideRefundRequest(owner, { requestId, decision: 'approve', note: 'short' }),
+    ).rejects.toMatchObject({ code: 'validation_failed' });
+    await expect(
+      service.decideRefundRequest(owner, { requestId: 'not-a-uuid', decision: 'approve' }),
+    ).rejects.toMatchObject({ code: 'validation_failed' });
+    await expect(
+      service.decideRefundRequest(owner, { requestId, decision: 'refund' }),
+    ).rejects.toMatchObject({ code: 'validation_failed' });
   });
 });

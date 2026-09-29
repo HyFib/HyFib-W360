@@ -6,6 +6,7 @@ import {
   advanceAutoRechargeAttempt,
   alertSettlementReconFindings,
   alertUnsettledPayments,
+  announceRefundRequests,
   announceRateChanges,
   authorizeJob,
   beginAutoRecharge,
@@ -15,6 +16,7 @@ import {
   findDueCreditRefunds,
   findDueSettlementRecons,
   findStaleReceipts,
+  notifyRefundRequestDeclines,
   processCreditRefund,
   processRazorpayReceipt,
   reconcileTopup,
@@ -272,6 +274,39 @@ export function billingSweepHandler(rt: WorkerRuntime) {
         { payments: unsettled.unsent },
         'payments were not settled but there is no platform owner to email',
       );
+    }
+    // Refund requests from companies (ADR-073): platform owners hear of new ones, billing managers of
+    // a decline.
+    const requests = await announceRefundRequests({
+      db: rt.db,
+      outbox: rt.notices.outbox,
+      appBaseUrl: rt.notices.appBaseUrl,
+    });
+    if (requests.announced > 0) {
+      rt.logger.info(
+        { requests: requests.announced, recipients: requests.recipients },
+        'refund requests announced to platform owners',
+      );
+    }
+    if (requests.unsent > 0) {
+      rt.logger.warn(
+        { requests: requests.unsent },
+        'companies asked for refunds but there is no platform owner to email',
+      );
+    }
+    const declines = await notifyRefundRequestDeclines({ db: rt.db, notices: rt.notices });
+    for (const failure of declines.failed) {
+      rt.logger.warn(
+        {
+          tenantId: failure.tenantId,
+          requestId: failure.requestId,
+          err: toError(failure.error).message,
+        },
+        'refund request decline notice failed for a company; will retry',
+      );
+    }
+    if (declines.notified > 0) {
+      rt.logger.info({ declines: declines.notified }, 'refund request declines emailed');
     }
     const deletions = await sweepTenantDeletions(rt);
     if (deletions > 0) rt.logger.info({ deletions }, 'company deletions due');

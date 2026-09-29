@@ -240,6 +240,35 @@ export const creditRefunds = appSchema.table('credit_refunds', {
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });
 
+/** Refunds of unused credit asked for by companies (0046, ADR-073). */
+export const CREDIT_REFUND_REQUEST_STATUSES = [
+  'open',
+  'approved',
+  'declined',
+  'withdrawn',
+] as const;
+export type CreditRefundRequestStatus = (typeof CREDIT_REFUND_REQUEST_STATUSES)[number];
+
+/**
+ * A company's request: it inserts open requests and withdraws open ones; platform owners decide
+ * through a definer function. Who decided and the notice marks are not readable by the company.
+ */
+export const creditRefundRequests = appSchema.table('credit_refund_requests', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  topupId: uuid('topup_id').notNull(),
+  amountMinor: paise('amount_minor').notNull(),
+  reason: text('reason').notNull(),
+  status: text('status', { enum: CREDIT_REFUND_REQUEST_STATUSES }).notNull().default('open'),
+  requestedByUserId: text('requested_by_user_id').notNull(),
+  requestedAt: tz('requested_at').notNull().defaultNow(),
+  withdrawnAt: tz('withdrawn_at'),
+  decidedAt: tz('decided_at'),
+  decisionNote: text('decision_note'),
+  creditRefundId: uuid('credit_refund_id'),
+  updatedAt: tz('updated_at').notNull().defaultNow(),
+});
+
 /**
  * Settlement reconciliation (0034, ADR-059). The tables are platform tables no runtime role can read
  * or write directly: the worker writes through definer functions and platform staff read through

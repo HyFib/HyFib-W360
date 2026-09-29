@@ -1216,6 +1216,33 @@ payment_requested → succeeded`; before each provider call it is written as `un
   (the worker checks before it starts). Statements label the hold "Reserved for a refund" and its
   release "Refund reservation released"; the Billing page and the receipt show refunds in progress.
 
+- **Refund requests from companies and the platform refunds list (0046, ADR-073) [built]:** a
+  member with `billing.manage` and a sign-in within 15 minutes asks from a paid top-up's receipt for
+  a refund of part or all of it, with a reason (10 to 1,000 characters). The service takes a
+  per-company advisory lock, counts the company's requests of the last 24 hours (at most 5) and
+  checks the top-up, what is left of it, a refund of it in progress and the unused credit
+  (`wallet_available`); a company being deleted cannot ask. It inserts the open request with only
+  the columns the company role may insert (a column grant: an inserted row is always `open`, with no
+  decision), and the partial unique index `credit_refund_requests_one_open_uq` keeps one open
+  request per top-up. The company can withdraw an open request (a restrictive policy lets its role
+  move `open` only to `withdrawn`). A request moves no money and holds no credit.
+  `/platform/refunds` lists the requests (open, decided or all) with the company, the top-up, its
+  payment date, what is left of it, the company's unused credit now and whether a refund of it is
+  running (`ops.platform_credit_refund_requests`), and every refund of service credit across
+  companies (`ops.platform_credit_refunds`), both newest first on exact keyset pages (the request
+  time as microsecond text and the id, ADR-072). Operators read; only a platform owner decides.
+  `ops.platform_decide_credit_refund_request` locks the open request. Approving calls
+  `ops.platform_request_credit_refund` (ADR-058) for the request's amount in the same transaction, so
+  every check runs again under its locks, and links the refund; a request that no longer fits is
+  refused with the reason and stays open. Declining needs a note the company reads. Both are in the
+  platform audit log. The minute billing sweep emails platform owners once about requests not yet
+  announced (a count only; `ops.credit_refund_requests_mark_announced` marks them in the
+  transaction that queues the emails, and nothing is marked while there is no platform owner), and
+  a company's billing managers once about a declined request, with the note
+  (`app.credit_refund_request_mark_decline_notified`, in the company's own scope). An approved
+  request needs no email of its own: the refund's emails follow. The receipt shows the requests,
+  the decision note and the refund's state; who decided is platform-only (no column grant).
+
 - **Daily settlement reconciliation (0034, ADR-059) [built]:** the minute billing sweep calls
   `ops.settlement_recon_due` with the latest day it may reconcile (the previous day in India from
   06:00 India time). That creates the run for the day and for any of the 6 days before it without

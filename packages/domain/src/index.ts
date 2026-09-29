@@ -35,6 +35,7 @@ export * from './billing/holds';
 export * from './billing/service';
 export * from './billing/history';
 export * from './billing/credit-refunds';
+export * from './billing/refund-requests';
 export * from './billing/settlement-recon';
 export * from './billing/settlement-alerts';
 export * from './billing/usage';

@@ -2162,3 +2162,44 @@ Decision:
 
 Not built: writing to conversations (resolving, assigning, notes), member and team names, media
 downloads, full-text search, a messages feed across conversations, filtering by assignee or team.
+
+## ADR-073 Refunds of unused credit asked for by companies, decided by platform owners; a platform-wide refunds list (2026-09-29)
+
+Context: since ADR-058 a platform owner can refund unused service credit from a company's platform
+page, but a company had no way to ask except by writing to support, and platform staff had no list
+of refunds across companies (both listed as not built there).
+
+Decision:
+
+- **Asking:** members with `billing.manage` (owners and billing managers) and a sign-in within the
+  last 15 minutes (ADR-056) ask from a paid top-up's receipt for a refund of part or all of it, with
+  a reason of 10 to 1,000 characters. The amount is at most what is left of the payment and the
+  company's unused credit at the time; no request while a refund of the top-up is in progress, one
+  open request per top-up (a partial unique index), at most 5 requests per company in 24 hours
+  (counted under a per-company advisory lock), none once the company asked for its deletion. The
+  company can withdraw an open request. A request moves no money and holds no credit.
+- **Deciding:** only a platform owner decides, on `/platform/refunds` (operators see it).
+  `ops.platform_decide_credit_refund_request` locks the open request; approving calls
+  `ops.platform_request_credit_refund` (ADR-058) for the request's amount in the same transaction, so
+  every check runs again under its locks (the top-up, what is left of it, the unused credit now, a
+  refund in progress, a company being deleted): a request that no longer fits is refused with the
+  reason and stays open for a decline. Declining needs a note the company reads. Both are in the
+  platform audit log; who decided is not shown to the company (column grants).
+- **Hearing about it:** the minute billing sweep emails platform owners once about new requests (a
+  count only: no company, amount or reason, as the reconciliation alerts of ADR-066 and ADR-071), and
+  a company's billing managers once when a request is declined, with the note. Each is marked in the
+  transaction that queues the email; the listing of declines runs across companies but each is
+  marked in the company's own scope. An approval needs no email of its own: the refund's emails of
+  ADR-058 follow (submitted to Razorpay, failed).
+- **The refunds list:** `/platform/refunds` also lists every refund of service credit across
+  companies (staff-started or answering a request), newest first on exact keyset pages (ADR-072),
+  with its status, error and times. Payments older than about 6 months may be refused by Razorpay for
+  a normal refund (R-077); the list shows each top-up's payment date for that judgement.
+- **Data:** `app.credit_refund_requests` is a company table (RLS, the company reads all but who
+  decided and the notice marks, inserts open requests and moves an open request to withdrawn only).
+  It is exported with the company's data and deleted with the company (ADR-055); the refunds it led
+  to stay as billing records.
+
+Not built: requests for spent credit or plan payments, approving a different amount (a platform owner
+declines with a note and refunds from the company's page instead), several open requests per top-up,
+reminders about requests waiting, and in-app notices.

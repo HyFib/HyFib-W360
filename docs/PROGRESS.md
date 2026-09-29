@@ -1,5 +1,113 @@
 # Progress
 
+## 2026-09-29 — Phase 5: refund requests from companies and a platform-wide refunds list (P5-05, ADR-073)
+
+Status: **Implemented and locally verified against the Razorpay stand-in (email through the local
+outbox and Mailpit only).** Since ADR-058 a platform owner could refund unused service credit from a
+company's platform page, but a company could only ask by writing to support, and platform staff had
+no list of refunds across companies. Billing managers now ask from a payment's receipt, platform
+owners decide on `/platform/refunds`, and the same page lists every refund.
+
+### Completed
+
+- **Design (ADR-073):** members with `billing.manage` and a sign-in within 15 minutes ask for part
+  or all of a paid top-up's unused credit, with a reason; at most what is left of the payment and
+  the unused credit, one open request per top-up, 5 requests a day per company, none once the
+  company asked for its deletion; an open request can be withdrawn. A request moves no money and
+  holds no credit. Only a platform owner decides: approving starts the staff refund of ADR-058 for
+  the amount asked, in the same transaction, so every check runs again under its locks; declining
+  needs a note the company reads. Platform owners are emailed a count (no company, amount or
+  reason); billing managers are emailed a decline with its note; each once. Requests are exported
+  and deleted with the company; the refunds they led to stay as billing records.
+- **Migration 0046:** `app.credit_refund_requests` (row security; the company role reads everything
+  but who decided and the notice marks, inserts only an open request's columns and moves an open
+  request only to withdrawn, a restrictive policy; one open request per top-up, a partial unique
+  index; deletion step 76); `ops.platform_owner_recipients`,
+  `ops.credit_refund_requests_to_announce`, `ops.credit_refund_requests_mark_announced`,
+  `ops.credit_refund_request_declines_due` and `app.credit_refund_request_mark_decline_notified` for
+  the worker; `ops.platform_credit_refund_requests` and `ops.platform_credit_refunds` (newest first
+  on exact keyset pages) and `ops.platform_decide_credit_refund_request` (platform owners, audited)
+  for platform staff.
+- **Domain** (`billing/refund-requests.ts`): `createRefundRequestsService` (`ask`, under a
+  per-company advisory lock that counts the day's requests; `withdraw`; `list`; `forTopup`, what the
+  receipt offers and why not), `announceRefundRequests` and `notifyRefundRequestDeclines` (the
+  minute sweep's emails, marked in the transaction that queues them; nothing is marked while there
+  is no platform owner); `platformBilling.refundRequests`, `creditRefunds` and
+  `decideRefundRequest`. The insert names only the columns the company role may insert: a query
+  builder insert names every column, and PostgreSQL checks the column grant even for `DEFAULT` (the
+  first test run showed it).
+- **Worker:** the minute billing sweep announces new requests to platform owners and tells billing
+  managers of declines, logging what it sent, a missing platform owner and a company whose email
+  failed (retried the next minute).
+- **Web:** the receipt's "Refund of unused credit" section (the requests with their state, the
+  decision note and the refund's progress; the form for billing managers with a recent sign-in, or
+  why nothing can be asked for; withdrawing); the Billing page's Payments card points to the receipt
+  and shows a request waiting; `/platform/refunds` (requests waiting, decided or all, with the
+  company, the payment and its date, what is left of it, the unused credit now and a refund already
+  running; approve with a confirmation or decline with a note, for platform owners; every refund
+  across companies, each list with its own "Older" pages) and its link on the platform home.
+- **Tests:** 5 unit tests (the announcement's text, its rendering and the limits the database
+  checks; the decision refusing operators and notes of the wrong length before any query). 16
+  integration tests in `refund-requests.test.ts`: asking (nothing held, audit, the receipt's and
+  staff's views; agents, administrators and stale sessions refused; bad amounts and reasons, more
+  than is left or unused, a running refund, unpaid, unknown and other companies' payments; one open
+  request per payment with two sent at once; 5 a day with 7 sent at once, withdrawn requests
+  counted, a day-old one not; a company being deleted); withdrawing; deciding (approval starting and
+  linking the staff refund with its hold and both audit entries; approval refused when the credit
+  was spent since or a refund started meanwhile, the request staying open; declining with a note,
+  checked by the function too; operators, a claimed owner role and the company role refused); the
+  company role's column grants and restrictive policy; another company's scope; the emails (owners
+  once, a count only, a withdrawn request never, two sweeps at once, no platform owner; billing
+  managers once with the note and the receipt's link, two sweeps at once, the mark refused in
+  another company's scope); the lists paging on exact times and ids with 53 requests and 2 refunds
+  sharing a microsecond. The company export classification, the deletion test (a withdrawn and an
+  approved request deleted with the company, the refund kept) and the new functions' grants in the
+  isolation suite. e2e `refund-requests.spec.ts`: a company asks for ₹300 from the receipt (the
+  Billing page shows it waiting); the platform owner is emailed a count, declines with a note on
+  `/platform/refunds`; the company is emailed the note and asks for ₹200; the owner approves; the
+  worker sends the refund to Razorpay and the company is emailed and sees it on its way.
+- **e2e fix:** the Shopify store's removal step in `stores.spec.ts` failed once on PR #16's CI
+  (Chromium, passed on its retry): the worker can remove the store before the page is drawn again,
+  so the brief "Being removed" state never shows. The step now accepts either that state or the
+  store already gone ("Page not found"); the checks after it (no store connected, HyFib uninstalled
+  at the stand-in) are unchanged.
+- **Docs:** ADR-073; ARCHITECTURE (billing section); SECURITY (controls, Phase 5 rules, platform
+  roles); THREAT-MODEL T91; RUNBOOKS (refund requests, migration 0046); DATA-RETENTION; BACKLOG
+  P5-05; FEATURE-MATRIX H-036 and H-043; RELEASE-CHECKLIST (refund requests in Razorpay test mode);
+  the e2e job's comment in CI (196 tests).
+- **Mutation checks:** 37 regressions tried one at a time; all make a test fail. They cover the
+  step-up, the permission, the deleting-company check, the advisory lock, the daily limit and what
+  it counts, each of the payment, amount, unused-credit and running-refund checks, the unique
+  index and its message, withdrawing, what the receipt offers, the announcement's no-owner rule and
+  its mark, the decline notice's mark and link, the decision's note, owner and open-request checks
+  in the service and in SQL, the company role's column grants and restrictive policy, the owner
+  recipients, both lists' exact keyset cursors, the functions' grants, the deletion step and the
+  export classification. Two were missed at first: the service's owner check (the database refuses
+  an operator with the same error) is caught since a unit test shows the service refuses before
+  any query. The SQL owner check is caught since the test also has an operator decline directly:
+  a direct approval was already refused, later, by the staff refund's own owner check.
+
+### Test commands and results (local, 2026-09-29)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `pnpm test` (unit)                                                          | 350 passed, including 3 new in `billing/refund-requests.test.ts` and 2 in `platform/billing.test.ts`                                                                                                                                                                                                                                                                                                                                                                       |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 489 passed, including 16 new in `refund-requests.test.ts`                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 489 passed                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / `refund-requests.spec.ts`, `credit-refunds.spec.ts` and `billing-history.spec.ts` passed on both projects (6 tests, 8.4 min); after the refund test's waits were reordered, it and `stores.spec.ts` passed on chromium (6 tests, 4.2 min); both runs used the build from before the forms' unreachable success messages were removed. A full run of both projects on the final build was started before pushing; its result is recorded on the pull request |
+| Mutation checks                                                             | 37 regressions tried; all make a test fail (two after the tests were strengthened, above)                                                                                                                                                                                                                                                                                                                                                                                  |
+
+### Known gaps
+
+- Not built: requests for spent credit or plan payments, approving a different amount (a platform
+  owner declines with a note and refunds from the company's page instead), several open requests
+  per top-up, reminders about requests waiting, and in-app notices.
+- Razorpay may fail a normal refund of a payment older than about 6 months (R-077); the page shows
+  each payment's date and warns, but HyFib does not refuse such a request by itself.
+- Verified against the Razorpay stand-in only; refunds in Razorpay test mode are still unrun
+  (RELEASE-CHECKLIST).
+
 ## 2026-09-29 — Phase 5: reading conversations and messages through the public API (P5-08, ADR-072)
 
 Status: **Implemented and locally verified against the Graph stand-in.** Integrations heard of new

@@ -152,7 +152,12 @@ test('a Shopify store is approved in Shopify, its orders are read and shown next
   await page.getByRole('link', { name: shopName, exact: true }).click();
   await page.getByRole('button', { name: 'Remove store' }).click();
   await page.getByRole('button', { name: 'Yes, remove the store' }).click();
-  await expect(page.getByText('Being removed', { exact: true })).toBeVisible();
+  // The worker can finish the removal before the page is drawn again: then the store is gone.
+  await expect(
+    page
+      .getByText('Being removed', { exact: true })
+      .or(page.getByRole('heading', { name: 'Page not found' })),
+  ).toBeVisible();
   await openStores(page);
   await reloadUntil(page, () => page.getByText('No store connected yet.'));
   const state = (await control(request, `${SHOPIFY}/__stand-in/shop`, { shop })) as {

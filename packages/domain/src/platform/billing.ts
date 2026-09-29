@@ -1,8 +1,8 @@
 import { AppError, parseMajorUnits } from '@w360/core';
-import { sql, type CreditRefundStatus } from '@w360/db';
+import { sql, type CreditRefundRequestStatus, type CreditRefundStatus } from '@w360/db';
 import type { PlatformDatabase } from '@w360/db/platform';
 import { z } from 'zod';
-import { parseInput } from '../validation';
+import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
 import type { PlatformActor } from './service';
 
 /**
@@ -41,6 +41,55 @@ export interface PlatformCompanyRefund {
   failedAt: Date | null;
 }
 
+/** A company's refund request as platform staff see it (ADR-073). */
+export interface PlatformRefundRequest {
+  id: string;
+  tenantId: string;
+  companyName: string;
+  companySlug: string;
+  companyStatus: string;
+  topupId: string;
+  topupReceipt: string;
+  topupAmountMinor: number;
+  topupRefundedMinor: number;
+  topupPaidAt: Date | null;
+  /** The company's unused credit now (null without a wallet). */
+  availableMinor: number | null;
+  /** A refund of the top-up is already running (approving would be refused). */
+  refundInProgress: boolean;
+  amountMinor: number;
+  reason: string;
+  status: CreditRefundRequestStatus;
+  requestedByName: string | null;
+  requestedAt: Date;
+  decidedAt: Date | null;
+  decidedByName: string | null;
+  decisionNote: string | null;
+  creditRefundId: string | null;
+  creditRefundStatus: CreditRefundStatus | null;
+}
+
+/** A refund of service credit in the platform-wide list (ADR-073). */
+export interface PlatformCreditRefund {
+  id: string;
+  tenantId: string;
+  companyName: string;
+  companySlug: string;
+  topupId: string;
+  topupReceipt: string;
+  amountMinor: number;
+  status: CreditRefundStatus;
+  reason: string;
+  requestedByName: string | null;
+  requestedAt: Date;
+  submittedAt: Date | null;
+  processedAt: Date | null;
+  failedAt: Date | null;
+  lastError: string | null;
+  /** The company request it answers, if any. */
+  requestId: string | null;
+}
+
 export interface PlatformCompanyBilling {
   /** Null when the company never started a payment (no wallet). */
   availableMinor: number | null;
@@ -72,6 +121,22 @@ export function refundableTopups(
 export interface PlatformBillingDeps {
   platformDb: PlatformDatabase;
 }
+
+/** Rows per page of the platform refund lists. */
+export const PLATFORM_REFUNDS_PAGE = 50;
+
+const requestListSchema = z.object({
+  status: z.enum(['open', 'decided', 'all']).default('open'),
+  cursor: z.string().max(200).optional(),
+});
+
+const refundListSchema = z.object({ cursor: z.string().max(200).optional() });
+
+const decisionSchema = z.object({
+  requestId: z.uuid(),
+  decision: z.enum(['approve', 'decline']),
+  note: z.string().trim().max(1000, 'Keep the note under 1,000 characters.').optional(),
+});
 
 const refundRequestSchema = z.object({
   tenantId: z.uuid(),
@@ -139,9 +204,146 @@ function parseCompanyBilling(value: unknown): PlatformCompanyBilling {
   };
 }
 
+const requiredDate = (value: unknown) => optionalDate(value) ?? new Date(0);
+
+function parseRefundRequest(r: Row): PlatformRefundRequest {
+  return {
+    id: String(r.id),
+    tenantId: String(r.tenant_id),
+    companyName: String(r.company_name ?? ''),
+    companySlug: String(r.company_slug ?? ''),
+    companyStatus: String(r.company_status ?? ''),
+    topupId: String(r.topup_id),
+    topupReceipt: String(r.topup_receipt ?? ''),
+    topupAmountMinor: num(r.topup_amount_minor),
+    topupRefundedMinor: num(r.topup_refunded_minor),
+    topupPaidAt: optionalDate(r.topup_paid_at),
+    availableMinor: optionalNum(r.available_minor),
+    refundInProgress: r.refund_in_progress === true,
+    amountMinor: num(r.amount_minor),
+    reason: String(r.reason ?? ''),
+    status: String(r.status) as CreditRefundRequestStatus,
+    requestedByName: text(r.requested_by_name),
+    requestedAt: requiredDate(r.requested_at),
+    decidedAt: optionalDate(r.decided_at),
+    decidedByName: text(r.decided_by_name),
+    decisionNote: text(r.decision_note),
+    creditRefundId: text(r.credit_refund_id),
+    creditRefundStatus: (text(r.credit_refund_status) as CreditRefundStatus | null) ?? null,
+  };
+}
+
+function parseCreditRefund(r: Row): PlatformCreditRefund {
+  return {
+    id: String(r.id),
+    tenantId: String(r.tenant_id),
+    companyName: String(r.company_name ?? ''),
+    companySlug: String(r.company_slug ?? ''),
+    topupId: String(r.topup_id),
+    topupReceipt: String(r.topup_receipt ?? ''),
+    amountMinor: num(r.amount_minor),
+    status: String(r.status) as CreditRefundStatus,
+    reason: String(r.reason ?? ''),
+    requestedByName: text(r.requested_by_name),
+    requestedAt: requiredDate(r.requested_at),
+    submittedAt: optionalDate(r.submitted_at),
+    processedAt: optionalDate(r.processed_at),
+    failedAt: optionalDate(r.failed_at),
+    lastError: text(r.last_error),
+    requestId: text(r.request_id),
+  };
+}
+
+/** A page from rows fetched one past the page size, with the exact cursor of its last row. */
+function pageOf<T>(rows: Row[], parse: (r: Row) => T): { items: T[]; nextCursor: string | null } {
+  const shown = rows.slice(0, PLATFORM_REFUNDS_PAGE);
+  const last = shown.at(-1);
+  return {
+    items: shown.map(parse),
+    nextCursor:
+      rows.length > PLATFORM_REFUNDS_PAGE && last
+        ? encodeKeysetCursor(String(last.cursor_at), String(last.id))
+        : null,
+  };
+}
+
 export function createPlatformBillingService(deps: PlatformBillingDeps) {
   const { platformDb } = deps;
   return {
+    /**
+     * Refund requests companies made (ADR-073), newest first: open ones, decided ones or all, for
+     * any platform staff member (only owners decide).
+     */
+    async refundRequests(
+      actor: PlatformActor,
+      input: unknown = {},
+    ): Promise<{ items: PlatformRefundRequest[]; nextCursor: string | null }> {
+      const data = parseInput(requestListSchema, input);
+      const cursor = decodeKeysetCursor(data.cursor);
+      const status = data.status === 'all' ? null : data.status;
+      return platformDb.run(actor.userId, async (tx) => {
+        const result = await tx.execute<Row>(
+          sql`select * from ops.platform_credit_refund_requests(${status}::text,
+                ${cursor?.at ?? null}::timestamptz, ${cursor?.id ?? null}::uuid,
+                ${PLATFORM_REFUNDS_PAGE + 1}::int)`,
+        );
+        return pageOf(result.rows, parseRefundRequest);
+      });
+    },
+
+    /** Every refund of service credit across companies, newest first (ADR-073). */
+    async creditRefunds(
+      actor: PlatformActor,
+      input: unknown = {},
+    ): Promise<{ items: PlatformCreditRefund[]; nextCursor: string | null }> {
+      const data = parseInput(refundListSchema, input);
+      const cursor = decodeKeysetCursor(data.cursor);
+      return platformDb.run(actor.userId, async (tx) => {
+        const result = await tx.execute<Row>(
+          sql`select * from ops.platform_credit_refunds(${cursor?.at ?? null}::timestamptz,
+                ${cursor?.id ?? null}::uuid, ${PLATFORM_REFUNDS_PAGE + 1}::int)`,
+        );
+        return pageOf(result.rows, parseCreditRefund);
+      });
+    },
+
+    /**
+     * Decides a company's open refund request (platform owners). Approving starts the staff refund
+     * for the request's amount, checked again under its locks; declining needs a note the company
+     * reads. Both are in the platform audit log.
+     */
+    async decideRefundRequest(
+      actor: PlatformActor,
+      input: unknown,
+    ): Promise<{ refundId: string | null }> {
+      if (actor.role !== 'platform_owner') {
+        throw new AppError('forbidden', 'Only a platform owner can decide a refund request.');
+      }
+      const data = parseInput(decisionSchema, input);
+      const note = data.note ? data.note : null;
+      if (data.decision === 'decline' && (note === null || note.length < 10)) {
+        throw new AppError('validation_failed', 'Write a note of at least 10 characters.', {
+          issues: [{ path: 'note', message: 'The company reads this note' }],
+        });
+      }
+      if (note !== null && note.length < 10) {
+        throw new AppError(
+          'validation_failed',
+          'Write a note of at least 10 characters, or none.',
+          {
+            issues: [{ path: 'note', message: 'At least 10 characters' }],
+          },
+        );
+      }
+      return platformDb.run(actor.userId, async (tx) => {
+        const result = await tx.execute<{ id: string | null }>(
+          sql`select ops.platform_decide_credit_refund_request(${data.requestId}::uuid,
+                ${data.decision === 'approve'}::boolean, ${note}::text, ${actor.correlationId}) as id`,
+        );
+        return { refundId: result.rows[0]?.id ?? null };
+      });
+    },
+
     /** A company's balances, paid top-ups and refunds, for platform staff (payments to HyFib). */
     async companyBilling(actor: PlatformActor, tenantId: string): Promise<PlatformCompanyBilling> {
       const id = parseInput(z.uuid(), tenantId);

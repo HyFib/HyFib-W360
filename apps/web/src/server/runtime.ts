@@ -31,6 +31,7 @@ import {
   createStoreMessagesService,
   createCrmService,
   createBillingService,
+  createRefundRequestsService,
   createBillingHistoryService,
   createBusinessHoursService,
   createCampaignsService,
@@ -70,6 +71,7 @@ import {
   type CrmService,
   type BillingService,
   type BillingHistoryService,
+  type RefundRequestsService,
   type BusinessHoursService,
   type CampaignsService,
   type CsatService,
@@ -191,6 +193,8 @@ export interface Runtime {
   /** Paying for plans with Razorpay Subscriptions (ADR-063). */
   planPayments: PlanSubscriptionService;
   billingHistory: BillingHistoryService;
+  /** Refunds of unused credit asked for by the company (ADR-073). */
+  refundRequests: RefundRequestsService;
   events: TenantEventHub;
   shutdown(): Promise<void>;
 }
@@ -412,6 +416,7 @@ async function init(): Promise<Runtime> {
     notices: { outbox, appBaseUrl: config.APP_BASE_URL },
   });
   const billingHistory = createBillingHistoryService({ db, clock: systemClock });
+  const refundRequests = createRefundRequestsService({ db, clock: systemClock });
   const events = createTenantEventHub({ connectionString: config.DATABASE_URL_APP, logger });
 
   logger.info({ env: config.APP_ENV }, 'web runtime initialised');
@@ -468,6 +473,7 @@ async function init(): Promise<Runtime> {
     billing,
     planPayments,
     billingHistory,
+    refundRequests,
     events,
     async shutdown() {
       await events.close();

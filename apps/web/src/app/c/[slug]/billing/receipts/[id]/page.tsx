@@ -1,8 +1,17 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
-import { displayMoney, isAppError } from '@w360/core';
-import { assertCan, REFUND_DAYS_NOTE, type PaymentReceipt } from '@w360/domain';
+import { displayMoney, formatMinorUnits, isAppError } from '@w360/core';
+import {
+  assertCan,
+  can,
+  hasRecentSignIn,
+  RECENT_SIGN_IN_MINUTES,
+  REFUND_DAYS_NOTE,
+  REFUND_REQUEST_STATUS_LABELS,
+  type PaymentReceipt,
+  type RefundRequestView,
+} from '@w360/domain';
 import {
   Badge,
   Card,
@@ -18,6 +27,11 @@ import {
   Table,
 } from '@w360/ui';
 import { PrintButton } from '@/components/billing/print-button';
+import {
+  RefundRequestForm,
+  WithdrawRefundRequestButton,
+} from '@/components/billing/refund-request-form';
+import { SignInAgain } from '@/components/sign-in-again';
 import { PageHeader } from '@/components/page-header';
 import { formatDateTime } from '@/lib/format';
 import { getRuntime } from '@/server/runtime';
@@ -27,6 +41,14 @@ export const metadata: Metadata = { title: 'Payment receipt' };
 export const dynamic = 'force-dynamic';
 
 const inr = (paise: number) => displayMoney(BigInt(paise), 'INR');
+
+const REQUEST_TONE: Record<RefundRequestView['status'], 'info' | 'success' | 'danger' | 'neutral'> =
+  {
+    open: 'info',
+    approved: 'success',
+    declined: 'danger',
+    withdrawn: 'neutral',
+  };
 
 const STATUS: Record<string, { label: string; tone: 'success' | 'warning' | 'neutral' }> = {
   paid: { label: 'Paid', tone: 'success' },
@@ -64,14 +86,18 @@ export default async function ReceiptPage({
   const { slug, id } = await params;
   const ctx = await requireTenant(slug);
   assertCan(ctx, 'billing.read');
-  const { billingHistory } = await getRuntime();
+  const { billingHistory, refundRequests, clock } = await getRuntime();
   let receipt: PaymentReceipt;
+  let asked: Awaited<ReturnType<typeof refundRequests.forTopup>>;
   try {
     receipt = await billingHistory.receipt(ctx, id);
+    asked = await refundRequests.forTopup(ctx, id);
   } catch (error) {
     if (isAppError(error) && error.code === 'not_found') notFound();
     throw error;
   }
+  const canManage = can(ctx, 'billing.manage');
+  const recent = hasRecentSignIn(ctx, clock.now());
   const tz = receipt.timezone;
   const status = STATUS[receipt.status] ?? { label: receipt.status, tone: 'neutral' as const };
 
@@ -190,6 +216,86 @@ export default async function ReceiptPage({
               {receipt.refundRequests.some((r) => r.status !== 'failed') ? (
                 <p className="text-xs text-muted-foreground">{REFUND_DAYS_NOTE}</p>
               ) : null}
+            </div>
+          ) : null}
+          {asked.requests.length > 0 || (canManage && receipt.status !== 'refunded') ? (
+            <div className="grid gap-3 print:hidden">
+              <h2 className="text-sm font-medium">Refund of unused credit</h2>
+              {asked.requests.length > 0 ? (
+                <Table>
+                  <THead>
+                    <TR>
+                      <TH>Asked</TH>
+                      <TH>Status</TH>
+                      <TH className="text-right">Amount</TH>
+                    </TR>
+                  </THead>
+                  <TBody>
+                    {asked.requests.map((r) => (
+                      <TR key={r.id}>
+                        <TD className="whitespace-nowrap">
+                          {formatDateTime(r.requestedAt, tz)}
+                          {r.requestedByName ? (
+                            <span className="block text-xs text-muted-foreground">
+                              by {r.requestedByName}
+                            </span>
+                          ) : null}
+                        </TD>
+                        <TD>
+                          <Badge tone={REQUEST_TONE[r.status]}>
+                            {REFUND_REQUEST_STATUS_LABELS[r.status]}
+                          </Badge>
+                          {r.decisionNote ? (
+                            <span className="block text-xs text-muted-foreground">
+                              HyFib’s note: {r.decisionNote}
+                            </span>
+                          ) : null}
+                          {r.status === 'approved' ? (
+                            <span className="block text-xs text-muted-foreground">
+                              {r.refund?.status === 'processed'
+                                ? 'Refunded.'
+                                : r.refund?.status === 'failed'
+                                  ? 'Razorpay could not complete the refund; the amount is back in your available credit.'
+                                  : 'The refund is on its way.'}
+                            </span>
+                          ) : null}
+                          {r.status === 'open' && canManage ? (
+                            <div className="mt-2">
+                              <WithdrawRefundRequestButton
+                                slug={ctx.tenant.slug}
+                                requestId={r.id}
+                              />
+                            </div>
+                          ) : null}
+                        </TD>
+                        <TD className="text-right tabular-nums">{inr(r.amountMinor)}</TD>
+                      </TR>
+                    ))}
+                  </TBody>
+                </Table>
+              ) : null}
+              {canManage ? (
+                asked.askable.maxMinor !== null ? (
+                  recent ? (
+                    <RefundRequestForm
+                      slug={ctx.tenant.slug}
+                      topupId={receipt.topupId}
+                      maxAmount={formatMinorUnits(BigInt(asked.askable.maxMinor), 'INR')}
+                      maxLabel={inr(asked.askable.maxMinor)}
+                    />
+                  ) : (
+                    <SignInAgain
+                      reason={`Asking for a refund needs a sign-in within the last ${RECENT_SIGN_IN_MINUTES} minutes.`}
+                    />
+                  )
+                ) : (
+                  <p className="text-xs text-muted-foreground">{asked.askable.reason}</p>
+                )
+              ) : null}
+              <p className="text-xs text-muted-foreground">
+                HyFib refunds only credit you have not spent, to the card, UPI or bank account the
+                payment came from. {REFUND_DAYS_NOTE}
+              </p>
             </div>
           ) : null}
           <p className="text-xs text-muted-foreground">

@@ -333,9 +333,14 @@ verification, app review, Embedded Signup configuration).
   finished attempt when a day waits for a person or fails, naming days and counts only);
   **[alerts for unsettled payments built, locally verified]** (ADR-071: platform owners emailed
   once about each paid top-up no settlement showed 7 days after payment, from the same definition
-  as the page's list, with counts and payment days only; the list says when). Remaining: refunds
-  asked for by companies, a platform-wide refunds list, bank statement (UTR) matching, fee and tax
-  accounting, and GST invoices (GST treatment needs tax review).
+  as the page's list, with counts and payment days only; the list says when). **[Refund requests
+  from companies and a platform-wide refunds list built; Razorpay traffic simulated by a test-only
+  stand-in]** (ADR-073): billing managers with a recent sign-in ask from a paid top-up's receipt for
+  a refund of unused credit, with a reason (5 a day, one open per top-up, withdrawable); platform
+  owners are emailed a count and decide on `/platform/refunds`, where approving starts the staff
+  refund with every check run again and declining needs a note the company is emailed; the page
+  also lists every refund across companies on exact keyset pages. Remaining: bank statement (UTR)
+  matching, fee and tax accounting, and GST invoices (GST treatment needs tax review).
 - **P5-06 Mandatory financial tests** **[29 integration tests + 2 e2e]**: concurrent spends on last
   funds; many low-balance triggers → one attempt; repeated and out-of-order events; timeout after
   capture (reconciliation); delayed success after UI timeout; decline; mandate revocation; cap

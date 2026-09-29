@@ -18,6 +18,7 @@ import {
   createGrowthService,
   createPlatformBillingService,
   createPlatformService,
+  createRefundRequestsService,
   createStoreService,
   findDueTenantDeletions,
   outboxAad,
@@ -871,7 +872,18 @@ describe('running a deletion', () => {
       topupId: topup.topupId,
       reason: 'Leaving HyFib, ticket 4471',
     };
-    const { refundId } = await refunds.requestRefund(actor, { ...ask, amount: '100' });
+    // The company asks (ADR-073), withdraws, asks again, and the platform owner's approval starts
+    // the refund.
+    const requests = createRefundRequestsService({ db: fx.dbs.app, clock: systemClock });
+    const reason = 'We are leaving HyFib and will not use this credit.';
+    const first = await requests.ask(owner, { topupId: topup.topupId, amount: '10', reason });
+    await requests.withdraw(owner, first.requestId);
+    const second = await requests.ask(owner, { topupId: topup.topupId, amount: '100', reason });
+    const { refundId: approved } = await refunds.decideRefundRequest(actor, {
+      requestId: second.requestId,
+      decision: 'approve',
+    });
+    const refundId = approved!;
     const scope = authorizedTenantScope(c.tenant.id, null);
     const refundDeps = {
       db: fx.dbs.app,
@@ -911,6 +923,12 @@ describe('running a deletion', () => {
       [refundId],
     );
     expect(kept).toEqual({ status: 'processed', amount_minor: 10_000 });
+    // The requests, the company's own text, are deleted with it; the refund they led to is kept.
+    expect(
+      await fx.query('SELECT id FROM app.credit_refund_requests WHERE tenant_id = $1', [
+        c.tenant.id,
+      ]),
+    ).toEqual([]);
     expect(await tenantRow(c.tenant.id)).toMatchObject({ status: 'deleted' });
     await expectAppError(
       refunds.requestRefund(actor, { ...ask, amount: '50' }),
