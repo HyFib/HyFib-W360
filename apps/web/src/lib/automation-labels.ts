@@ -31,6 +31,7 @@ export const END_REASONS: Record<string, string> = {
   opted_out: 'The customer opted out.',
   contact_erased: 'The contact was erased.',
   automation_archived: 'The automation was archived.',
+  stopped_by_api: 'Stopped through the API.',
   budget_steps: 'Too many steps: the run reached its step limit.',
   budget_loop: 'A step repeated too often: the run reached its loop limit.',
   budget_messages: 'The run reached its message limit.',

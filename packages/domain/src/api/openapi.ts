@@ -575,6 +575,24 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
         },
       },
+      '/automation-runs/{id}/stop': {
+        post: {
+          operationId: 'stopAutomationRun',
+          summary: 'Stop a run started through the API',
+          description: [
+            `${scopeNote('automations.start')} Any run a key of the company started. A running or waiting run ends as \`stopped\` with the reason \`stopped_by_api\`: messages it queued that have not left are cancelled, and the conversation is not handed to people (a customer who wrote waits for a member in the inbox, as after a reply through the API).`,
+            'A run that has already ended is answered as it is and nothing changes, so a retry is harmless; its `endReason` says how it ended.',
+          ].join('\n\n'),
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': {
+              description: 'The run, as it is now.',
+              content: json(dataOf(ref('AutomationRun'))),
+            },
+            ...errors(401, 403, 404, 423, 429, 500),
+          },
+        },
+      },
       '/messages/{id}': {
         get: {
           operationId: 'getMessage',
@@ -766,4 +784,5 @@ export const API_ROUTES = [
   ['get', '/automations'],
   ['post', '/automations/{id}/runs'],
   ['get', '/automation-runs/{id}'],
+  ['post', '/automation-runs/{id}/stop'],
 ] as const;

@@ -522,4 +522,34 @@ test('a key starts an automation made to start through the API: its template goe
   await expect(page.getByText('input.appointment_time', { exact: true })).toBeVisible();
   await expect(page.getByText('5 pm today', { exact: true })).toBeVisible();
   await expectNoHorizontalOverflow(page);
+
+  // The booking system stops another run it started while its template waits for an answer
+  // (ADR-079); a retry answers the same, and the run page says how it ended.
+  const second = randomWaId();
+  const started = await request.post(`/api/v1/automations/${automationId}/runs`, {
+    headers: { ...auth, 'Idempotency-Key': randomUUID() },
+    data: { to: `+${second}`, inputs: { patient: 'Ravi', appointment_time: '6 pm' } },
+  });
+  expect(started.status()).toBe(201);
+  const other = (await started.json()).data as { id: string };
+  await expect(async () => {
+    const read = await request.get(`/api/v1/automation-runs/${other.id}`, { headers: auth });
+    expect((await read.json()).data.status).toBe('waiting');
+  }).toPass({ timeout: 60_000 });
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const stopped = await request.post(`/api/v1/automation-runs/${other.id}/stop`, {
+      headers: auth,
+    });
+    expect(stopped.status()).toBe(200);
+    expect((await stopped.json()).data).toMatchObject({
+      id: other.id,
+      status: 'stopped',
+      endReason: 'stopped_by_api',
+    });
+  }
+  await page.goto(`/c/${slug}/automations/runs/${other.id}`);
+  await expect(
+    page.getByRole('paragraph').filter({ hasText: 'Stopped through the API.' }),
+  ).toBeVisible();
+  await expect(page.getByRole('table')).toContainText('Stopped through the API.');
 });

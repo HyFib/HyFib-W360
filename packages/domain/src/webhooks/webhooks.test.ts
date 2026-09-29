@@ -1,5 +1,6 @@
 import { createHmac } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
+import { AUTOMATION_END_REASONS } from '@w360/db';
 import { apiContactSchema } from '../api/contact-view';
 import { buildOpenApiDocument } from '../api/openapi';
 import { renderEmail } from '../email/templates';
@@ -317,6 +318,19 @@ describe('webhook payload schemas', () => {
       },
     };
     expect(automationRunEndedPayloadSchema.safeParse(ended).success).toBe(true);
+    // Every way a run ends is described, a stop through the API included (ADR-079).
+    for (const [status, reasons] of Object.entries(AUTOMATION_END_REASONS)) {
+      for (const endReason of reasons) {
+        expect(
+          automationRunEndedPayloadSchema.safeParse({
+            ...ended,
+            data: { ...ended.data, run: { ...ended.data.run, status, endReason } },
+          }).success,
+          endReason,
+        ).toBe(true);
+      }
+    }
+    expect(AUTOMATION_END_REASONS.stopped).toContain('stopped_by_api');
     // Each type has its own body; a test run's trigger and an unknown reason are not described.
     expect(automationRunEndedPayloadSchema.safeParse(started).success).toBe(false);
     for (const change of [{ trigger: 'test' }, { endReason: 'timeout' }, { status: 'queued' }]) {

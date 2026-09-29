@@ -2449,3 +2449,40 @@ Decision:
 
 Not built: events per step or message of a run, test runs, answers or inputs in the payload,
 filters by automation, and reading runs not started through the API with the API.
+
+## ADR-079 Stopping automation runs through the public API (2026-09-29)
+
+Context: an integration that starts an automation through the API (ADR-077) often learns later
+that it is no longer needed: the appointment was cancelled or confirmed by phone, the order was
+refunded. Until now only a member could stop the run, from its page, so the reminder flow kept
+waiting for the contact's answer or went on to its next message.
+
+Decision:
+
+- **One operation:** `POST /api/v1/automation-runs/{id}/stop`, with the `automations.start` scope
+  that starts and reads runs (granted only by members holding `automations.publish`). It writes, so
+  it is refused while the company is suspended or its plan has ended. No body.
+- **Only runs started through the API**, by any key of the company, as for reading them (ADR-077);
+  other runs (a keyword's, a store's, members' tests), other companies' runs and unknown ids
+  answer 404. A key cannot stop the automations customers start by writing.
+- **An active run ends as `stopped` with the new reason `stopped_by_api`,** in one transaction with
+  the conversation row and then the run locked, as a member's stop is: the step log records the
+  stop, messages the run queued that no send worker has claimed are cancelled (a message already
+  handed to the sender cannot be recalled), and web requests it had not made are cancelled.
+- **The conversation is not handed to people.** A member's stop routes the conversation as a new
+  case; an integration's stop means the flow is over, so nothing is routed or assigned. As after a
+  reply through the API (ADR-070), a customer who wrote and is still in an open conversation waits
+  for a member (the automation turn trigger opens a hand-off turn); a conversation the run started
+  and the contact never answered stays resolved.
+- **Retries are harmless:** a run that has already ended (stopped by an earlier call, completed,
+  handed off, stopped by a member) is answered as it is and nothing changes, so no
+  `Idempotency-Key` is needed; its `endReason` says how it ended.
+- **Recorded:** the audit entry `automation.run_stopped` names the key and the automation (with
+  `source: api` and the request id); the run names no member. The run page says "Stopped through the
+  API.", and the `automation.run_ended` webhook (ADR-078) carries the reason.
+- **Migrations:** 0057 replaces the run's end check with one that allows `stopped_by_api`,
+  `NOT VALID` so `app.automation_runs` is not scanned under the lock; 0058 validates it without
+  blocking writes.
+
+Not built: stopping runs keys did not start, stopping every run of an automation or a contact in
+one call, pausing a run, and a reason given by the caller.

@@ -26,6 +26,7 @@ import {
   apiSendTemplate,
   apiSetConversationStatus,
   apiStartAutomationRun,
+  apiStopAutomationRun,
   authenticateApiRequest,
   authenticateApiToken,
   botButtonId,
@@ -3268,6 +3269,203 @@ describe('automations started through the API (ADR-077)', () => {
     // Keys read only the runs keys started.
     const { ctx } = await apiKey(c, ['automations.start']);
     await expectAppError(apiGetAutomationRun(deps(), ctx, runId), 'not_found');
+  });
+
+  it('stop a run a key started, once, cancelling what it queued, without handing the conversation to people (ADR-079)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const template = await approvedTemplate(c, appointmentReminder);
+    const flow = await publish(
+      owner,
+      'Appointment reminder',
+      apiTrigger,
+      reminderFlow(template.id),
+      c.channelAccountId,
+    );
+    await createWebhooksService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      keyring: fx.keyring,
+      egressPolicy: { allowLoopbackForTests: true },
+    }).create(owner, {
+      url: 'https://hooks.receiver.test/runs',
+      eventTypes: ['automation.run_ended'],
+    });
+    const { ctx, id: keyId } = await apiKey(c, ['automations.start'], 'Booking system');
+    const start = async (to: string, key: string) =>
+      (await apiStartAutomationRun(deps(), ctx, flow.id, { to, inputs }, idem(key, key))).body
+        .data as ApiAutomationRun;
+    const stopsOf = (runId: string) =>
+      fx.query(
+        `SELECT actor_type, actor_id, correlation_id, metadata FROM app.audit_events
+          WHERE tenant_id = $1 AND action = 'automation.run_stopped' AND subject_id = $2`,
+        [c.tenant.id, runId],
+      );
+    const conversationOf = async (id: string) =>
+      (
+        await fx.query<{ status: string; assigned_membership_id: string | null }>(
+          'SELECT status, assigned_membership_id FROM app.conversations WHERE id = $1',
+          [id],
+        )
+      )[0];
+    const waitingTurns = (conversationId: string) =>
+      fx.query<{ start_reason: string }>(
+        `SELECT start_reason FROM app.conversation_turns
+          WHERE conversation_id = $1 AND ended_at IS NULL`,
+        [conversationId],
+      );
+
+    // A run waiting for the contact's answer to its template.
+    const waiting = await start('+91 98111 00091', 'stop-1');
+    expect(await driveRun(c, waiting.id)).toBe('waiting');
+    // Other companies' keys, keys without the scope, companies that may not write and unknown ids
+    // change nothing.
+    const theirs = await apiKey(await fx.company(), ['automations.start']);
+    await expectAppError(apiStopAutomationRun(deps(), theirs.ctx, waiting.id), 'not_found');
+    const narrow = await apiKey(c, ['contacts.read']);
+    await expectAppError(apiStopAutomationRun(deps(), narrow.ctx, waiting.id), 'forbidden');
+    for (const status of ['suspended', 'restricted'] as const) {
+      await expectAppError(
+        apiStopAutomationRun(deps(), { ...ctx, tenant: { ...ctx.tenant, status } }, waiting.id),
+        'tenant_suspended',
+      );
+    }
+    for (const id of ['not-a-uuid', uuidv7()]) {
+      await expectAppError(apiStopAutomationRun(deps(), ctx, id), 'not_found');
+    }
+    expect((await runRow(waiting.id)).status).toBe('waiting');
+
+    const stopped = await apiStopAutomationRun(deps(), ctx, waiting.id);
+    expect(stopped).toEqual({
+      ...waiting,
+      status: 'stopped',
+      endReason: 'stopped_by_api',
+      endedAt: expect.any(String),
+    });
+    expect(await runRow(waiting.id)).toMatchObject({
+      status: 'stopped',
+      end_reason: 'stopped_by_api',
+    });
+    expect(await stopsOf(waiting.id)).toEqual([
+      {
+        actor_type: 'api_key',
+        actor_id: keyId,
+        correlation_id: ctx.requestId,
+        metadata: { automationId: flow.id, source: 'api' },
+      },
+    ]);
+    // The end is sent to webhooks with its reason (ADR-078).
+    expect(
+      await fx.query(
+        `SELECT status, detail FROM app.webhook_events
+          WHERE tenant_id = $1 AND type = 'automation.run_ended'`,
+        [c.tenant.id],
+      ),
+    ).toEqual([
+      {
+        status: 'stopped',
+        detail: { runId: waiting.id, automationId: flow.id, endReason: 'stopped_by_api' },
+      },
+    ]);
+    // Not handed to people: the contact never wrote, so the conversation stays resolved, with
+    // nobody assigned and no one waiting for a reply.
+    expect(await conversationOf(waiting.conversationId)).toEqual({
+      status: 'resolved',
+      assigned_membership_id: null,
+    });
+    expect(await waitingTurns(waiting.conversationId)).toEqual([]);
+    expect(
+      (
+        await fx.query<{ outcome: string; detail: string | null }>(
+          'SELECT outcome, detail FROM app.automation_run_steps WHERE run_id = $1 ORDER BY seq',
+          [waiting.id],
+        )
+      ).at(-1),
+    ).toEqual({ outcome: 'stopped', detail: 'stopped_by_api' });
+    // A retry, or another key of the company, answers the run as it is and changes nothing, even
+    // while a newer run works in the same conversation.
+    expect(await apiStopAutomationRun(deps(), ctx, waiting.id)).toEqual(stopped);
+    const newer = await start('+91 98111 00091', 'stop-1b');
+    expect(newer.conversationId).toBe(waiting.conversationId);
+    const other = await apiKey(c, ['automations.start']);
+    expect(await apiStopAutomationRun(deps(), other.ctx, waiting.id)).toEqual(stopped);
+    expect(await stopsOf(waiting.id)).toHaveLength(1);
+    expect((await runRow(newer.id)).status).toBe('running');
+    expect(await apiStopAutomationRun(deps(), ctx, newer.id)).toMatchObject({
+      status: 'stopped',
+      endReason: 'stopped_by_api',
+    });
+
+    // Stopped before its template left: the template is cancelled and never sent.
+    const queued = await start('+91 98111 00092', 'stop-2');
+    await advanceAutomationRun(
+      { ...deps(), keyring: fx.keyring },
+      authorizedTenantScope(c.tenant.id, null),
+      queued.id,
+      null,
+    );
+    expect(
+      await fx.query(
+        `SELECT m.status, s.state FROM app.messages m
+           JOIN app.send_intents s ON s.tenant_id = m.tenant_id AND s.message_id = m.id
+          WHERE m.conversation_id = $1`,
+        [queued.conversationId],
+      ),
+    ).toEqual([{ status: 'queued', state: 'queued' }]);
+    expect(await apiStopAutomationRun(deps(), ctx, queued.id)).toMatchObject({
+      status: 'stopped',
+      endReason: 'stopped_by_api',
+    });
+    expect(await sendAll(c)).toEqual([]);
+    expect(templateSends('919811100092')).toEqual([]);
+    expect(
+      await fx.query(
+        `SELECT m.status, m.error_code, s.state FROM app.messages m
+           JOIN app.send_intents s ON s.tenant_id = m.tenant_id AND s.message_id = m.id
+          WHERE m.conversation_id = $1`,
+        [queued.conversationId],
+      ),
+    ).toEqual([{ status: 'canceled', error_code: 'bot_stopped', state: 'canceled' }]);
+
+    // A contact who wrote first: the stop leaves them waiting for a member, unassigned.
+    await fx.deliver(fx.messagesBody(c, { messages: [{ waId: '919811100093', text: 'Hello' }] }));
+    const wrote = await start('+91 98111 00093', 'stop-3');
+    expect(await driveRun(c, wrote.id)).toBe('waiting');
+    expect(await waitingTurns(wrote.conversationId)).toEqual([]);
+    await apiStopAutomationRun(deps(), ctx, wrote.id);
+    expect(await conversationOf(wrote.conversationId)).toEqual({
+      status: 'open',
+      assigned_membership_id: null,
+    });
+    expect(await waitingTurns(wrote.conversationId)).toEqual([{ start_reason: 'handoff' }]);
+
+    // Runs keys did not start are not found: a run the company's keyword automation started.
+    const brochure = await publish(
+      owner,
+      'Brochure',
+      {
+        type: 'keyword',
+        keywords: ['brochure'],
+        match: 'contains',
+        hours: 'any',
+        cooldownMinutes: 0,
+      },
+      {
+        version: 1,
+        start: 'hi',
+        nodes: [{ id: 'hi', type: 'send_text', text: 'Here it is.', next: null }],
+      },
+      null,
+    );
+    await fx.deliver(
+      fx.messagesBody(c, { messages: [{ waId: '919811100094', text: 'brochure please' }] }),
+    );
+    const [keywordRun] = await fx.query<{ id: string }>(
+      'SELECT id FROM app.automation_runs WHERE tenant_id = $1 AND automation_id = $2',
+      [c.tenant.id, brochure.id],
+    );
+    await expectAppError(apiStopAutomationRun(deps(), ctx, keywordRun!.id), 'not_found');
+    expect((await runRow(keywordRun!.id)).status).toBe('running');
   });
 });
 

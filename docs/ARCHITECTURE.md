@@ -901,6 +901,14 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   run's first job follow in the same transaction. `automation_runs_api_key` keeps `api_key_id` set
   exactly for `api` runs, the run guard keeps it fixed, and `automation_runs_api_key_idx` (0053,
   built concurrently) serves the foreign key.
+- **Stopping runs through the API (0057–0058, ADR-079):** `POST /automation-runs/{id}/stop` with
+  `automations.start` (`apiStopAutomationRun`) finds a run keys of the company started, locks the
+  conversation `FOR UPDATE` and then the active run (`lockActiveRun`), and ends it with `endRun` as
+  `stopped`/`stopped_by_api`: queued bot messages and web requests not yet made are cancelled, and
+  the conversation is not routed (the turn trigger opens a hand-off turn when it is open). The step
+  log and the audit entry (as the key) follow in the same transaction; a run that has ended is
+  answered as it is. 0057 replaces `automation_runs_end` `NOT VALID` to allow the reason; 0058
+  validates it.
 - **Keyset cursors** (`encodeKeysetCursor`, `exactTimestamp`): a cursor carries the last row's
   timestamp as PostgreSQL keeps it, to the microsecond, and its id, and pages compare
   `(time, id) < (cursor time, cursor id)`; cursors made with milliseconds still read. Cursors built

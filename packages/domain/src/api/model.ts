@@ -83,7 +83,7 @@ export const API_SCOPE_INFO: Record<
   'automations.start': {
     label: 'Start automations',
     description:
-      'Start published automations made to start through the API, for one contact at a time with the inputs they need, and read the runs keys started. They message contacts who have not written first, with templates.',
+      'Start published automations made to start through the API, for one contact at a time with the inputs they need, and read and stop the runs keys started. They message contacts who have not written first, with templates.',
     permission: 'automations.publish',
     writes: true,
   },

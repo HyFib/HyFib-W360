@@ -485,6 +485,11 @@ Phase 5 rules (Public API, P5-08):
   when it is sent. The run records its key (`api_key_id`, fixed by the run guard); its inputs are
   kept with its answers and cleared with them (erasure, 30 days after the run ends), and the audit
   entry leaves them out. A key reads only runs keys of its company started.
+- Stopping runs through the API (ADR-079) needs `automations.start` and an active company, and
+  reaches only runs keys of the company started: a key cannot stop the automations customers start
+  by writing, members' test runs or another company's runs (404). The stop runs under the
+  conversation's and the run's locks like a member's, cancels what the run queued, hands nothing to
+  people, is audited as the key and changes nothing for a run that has ended.
 - Only the token's SHA-256 is stored; the runtime role cannot read it. The token is shown once in
   the browser and kept only in the page's memory; it is never logged, and audit entries carry the
   public prefix only.

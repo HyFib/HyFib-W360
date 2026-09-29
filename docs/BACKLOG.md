@@ -403,12 +403,14 @@ verification, app review, Embedded Signup configuration).
   whose trigger is "Started through the API" for one contact with the inputs it declares, once per
   `Idempotency-Key`, with an order rule's checks and a reason for each refusal; templates until the
   contact replies, from the automation's one number; the run records its key, its inputs are kept
-  and cleared with its answers, and keys read the runs they started). Remaining: media, interactive
-  and reaction messages, replies to a given message, assigning conversations, notes, member and team
-  names, media downloads, a message feed across conversations, starting runs for many contacts in
-  one call or stopping them, bulk sends in one call, networks for the whole company, per-key
-  quotas, limits per endpoint, and dropping the one-argument key lookup kept for rolling deploys
-  (0051).
+  and cleared with its answers, and keys read the runs they started); **[stopping runs built,
+  locally verified]** (ADR-079: the same scope stops a run keys started, as `stopped_by_api`,
+  cancelling what it queued without handing the conversation to people; an ended run is answered as
+  it is). Remaining: media, interactive and reaction messages, replies to a given message, assigning
+  conversations, notes, member and team names, media downloads, a message feed across
+  conversations, starting or stopping runs for many contacts in one call, bulk sends in one call,
+  networks for the whole company, per-key quotas, limits per endpoint, and dropping the
+  one-argument key lookup kept for rolling deploys (0051).
 - **P5-09 Outgoing webhooks** **[built, locally verified; delivered to local test receivers only]**
   (ADR-053): up to 10 endpoints per company (`developer.manage`) for `message.received`,
   `message.status`, `consent.changed` and `template.status_changed`, captured by database triggers

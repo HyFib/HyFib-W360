@@ -27,7 +27,7 @@ import {
   templatesOf,
   triggerSchema,
 } from '../automations/graph';
-import { appendRunStep, lockActiveRun, signalAutomationRun } from '../automations/runs';
+import { appendRunStep, endRun, lockActiveRun, signalAutomationRun } from '../automations/runs';
 import { checkTemplateEligibility } from '../consent/service';
 import { contactForPhone } from '../contacts/service';
 import { emitTenantEvent } from '../messaging/events';
@@ -42,9 +42,9 @@ import { explicitPhone, idempotent, phoneField } from './resources';
 /**
  * Automations through the public API (ADR-077). A key with `automations.start` lists the
  * automations whose published version starts through the API, starts one for a contact with the
- * inputs its trigger declares, and reads the runs keys started. A run starts with the checks an order
- * message rule's run gets (ADR-050); its template steps check consent and the marketing frequency
- * cap again when they send.
+ * inputs its trigger declares, and reads and stops the runs keys started (ADR-079). A run starts with
+ * the checks an order message rule's run gets (ADR-050); its template steps check consent and the
+ * marketing frequency cap again when they send.
  */
 
 export const apiAutomationListQuerySchema = z
@@ -88,7 +88,7 @@ export interface ApiAutomationRun {
   endedAt: string | null;
 }
 
-/** Reading needs the scope only; starting (a write) also needs an active company. */
+/** Reading needs the scope only; starting and stopping (writes) also need an active company. */
 function assertStartScopeHeld(ctx: ApiContext) {
   if (!ctx.key.scopes.has('automations.start')) assertScope(ctx, 'automations.start');
 }
@@ -508,4 +508,68 @@ export async function apiGetAutomationRun(
   );
   if (!row) throw notFound('Automation run');
   return toApiRun(row);
+}
+
+/**
+ * Stops a run started through the API (ADR-079). An active run ends as stopped with the reason
+ * `stopped_by_api`: its queued messages are cancelled and the conversation is not routed (a customer
+ * who wrote waits for a member, as after a reply through the API). A run that has ended is answered
+ * as it is, so a retry changes nothing.
+ */
+export async function apiStopAutomationRun(
+  deps: Pick<OutboundDeps, 'db' | 'clock'>,
+  ctx: ApiContext,
+  runId: string,
+): Promise<ApiAutomationRun> {
+  assertScope(ctx, 'automations.start');
+  if (!z.uuid().safeParse(runId).success) throw notFound('Automation run');
+  return deps.db.run(ctx.scope, async (tx) => {
+    const startedByKey = and(
+      eq(automationRuns.tenantId, ctx.tenant.id),
+      eq(automationRuns.id, runId),
+      eq(automationRuns.triggerType, 'api'),
+      isNotNull(automationRuns.apiKeyId),
+    );
+    const [peek] = await tx
+      .select({
+        conversationId: automationRuns.conversationId,
+        automationId: automationRuns.automationId,
+      })
+      .from(automationRuns)
+      .where(startedByKey);
+    if (!peek) throw notFound('Automation run');
+    // The conversation row first, as for every change to its run.
+    await tx
+      .select({ id: conversations.id })
+      .from(conversations)
+      .where(
+        and(eq(conversations.tenantId, ctx.tenant.id), eq(conversations.id, peek.conversationId)),
+      )
+      .for('update');
+    const run = await lockActiveRun(tx, ctx.tenant.id, peek.conversationId);
+    if (run?.id === runId) {
+      await appendRunStep(tx, ctx.tenant.id, run.id, {
+        nodeId: run.currentNodeId,
+        nodeType: null,
+        outcome: 'stopped',
+        detail: 'stopped_by_api',
+      });
+      await endRun(tx, run, { status: 'stopped', reason: 'stopped_by_api', now: deps.clock.now() });
+      await recordSystemAudit(
+        tx,
+        ctx.tenant.id,
+        {
+          action: 'automation.run_stopped',
+          subjectType: 'automation_run',
+          subjectId: run.id,
+          metadata: { automationId: peek.automationId, source: 'api' },
+          correlationId: ctx.requestId,
+        },
+        apiActor(ctx),
+      );
+    }
+    const [row] = await tx.select(runColumns).from(automationRuns).where(startedByKey);
+    if (!row) throw new Error('The run was not found after stopping it');
+    return toApiRun(row);
+  });
 }

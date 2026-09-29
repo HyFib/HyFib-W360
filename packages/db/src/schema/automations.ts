@@ -71,6 +71,8 @@ export const AUTOMATION_END_REASONS = {
     'opted_out',
     'contact_erased',
     'automation_archived',
+    /** Stopped through the public API (migration 0057, ADR-079). */
+    'stopped_by_api',
   ],
   failed: [
     'budget_steps',

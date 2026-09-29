@@ -1,5 +1,59 @@
 # Progress
 
+## 2026-09-29 — Phase 5: stopping automation runs through the public API (P5-08, ADR-079)
+
+Status: **Implemented and locally verified against the Graph stand-in (no customer data).** An
+integration that started an automation through the API (ADR-077) could not stop it when the flow
+was no longer needed (an appointment cancelled or confirmed elsewhere); only a member could, from
+the run page.
+
+### Completed
+
+- **Design (ADR-079):** `POST /api/v1/automation-runs/{id}/stop` with the `automations.start` scope,
+  for runs keys of the company started; other runs, other companies' runs and unknown ids answer 404. An active run ends as `stopped` with the new reason `stopped_by_api`: its queued messages and
+  web requests not yet made are cancelled, and the conversation is not handed to people (a customer
+  who wrote waits for a member, as after a reply through the API). A run that has ended is answered
+  as it is, so retries change nothing.
+- **Migrations:** 0057 replaces the run's end check, `NOT VALID`, to allow `stopped_by_api`; 0058
+  validates it without blocking writes.
+- **Domain:** `apiStopAutomationRun` in `api/automations.ts` locks the conversation and then the
+  active run, and ends it with `endRun`; the step log and the audit entry `automation.run_stopped`
+  (as the key, with `source: api` and the request id) follow in the same transaction. The OpenAPI
+  document describes the operation; the scope's description mentions stopping.
+- **Web:** the route; the run page says "Stopped through the API."
+- **Tests:** a unit check that every end reason, the new one included, is described by the
+  `automation.run_ended` webhook payload, and the OpenAPI route list. 1 integration test in
+  `api.test.ts`: a waiting run stopped once (row, step log, audit entry, the webhook event with the
+  reason), the conversation left resolved with nobody assigned and no one waiting; retries and
+  another key answering the run unchanged while a newer run works in the same conversation (which
+  is not stopped); a template cancelled before it left; a contact who wrote left waiting for a member
+  (a hand-off turn), unassigned; refusals for other companies' keys, keys without the scope,
+  suspended and restricted companies, unknown ids and a keyword run. e2e `api.spec.ts`: the booking
+  system's key stops a second run over HTTP while its template waits for an answer, a retry answers
+  the same, and the run page says how it ended.
+- **Docs:** ADR-079; ARCHITECTURE (the public API); SECURITY (Phase 5 rules); THREAT-MODEL T97;
+  RUNBOOKS (migrations 0057–0058, a troubleshooting entry, suspended companies); BACKLOG P5-08;
+  FEATURE-MATRIX H-033.
+- **e2e fix (4149efe):** the settlement reconciliation test was flaky on da91fc3's CI (mobile-chromium, passed on its retry): the day's page showed two resolved notes, chromium's and its own, and the check for the note matched both. Each browser project reconciles its own day, India's date plus an offset, and the offsets were one day apart; the run crossed India's midnight (18:30 UTC) between the chromium test and the mobile-chromium one, so both reconciled the same day. The offsets are now odd and two days apart (a retry moves 8 days), so a day picked before midnight never meets one picked after it, and the note is looked for in the resolved item's row.
+- **Mutation checks:** 13 regressions tried one at a time; all make a test fail. 12 in the database and domain: the company status check (suspended and restricted companies' keys stopping runs), the scope, runs of every kind stoppable, the conversation's active run stopped whichever run was named, the run stopped as a member stops it (which hands the conversation to people), taken over instead of stopped, no step recorded, no audit entry, audited as the system, the database refusing the reason, the reason missing from the model, and the route missing from the OpenAPI document. 1 in the web layer through the e2e test: the run page's text for the reason.
+
+### Test commands and results (local, 2026-09-29)
+
+| Command                                                                                                                                          | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                             | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                           |
+| `pnpm test` (unit)                                                                                                                               | 371 passed; the webhook payload test now covers every end reason and the OpenAPI test the new route                                                                                                                                                                                                                                                                                                                                                      |
+| `pnpm test:integration` (PostgreSQL 18.6)                                                                                                        | 519 passed, including 1 new in `api.test.ts`                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                                                                                        | 519 passed                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` on `api.spec.ts`, `automations.spec.ts` and `webhook-events.spec.ts` | build passes / 12 passed: 6 tests on each project (2.7 min), on a fresh local database. An earlier run on the long-lived local database failed 3 tests: 2 waited too long for a template's approval (the worker's template syncs there are slowed by earlier runs' companies) and 1 had a locator that matched the new label twice (fixed)                                                                                                               |
+| `pnpm test:e2e --project=chromium --project=mobile-chromium settlement-recon.spec.ts` (the e2e fix)                                              | Reproduced first: with both projects forced onto one day and the old check, chromium passed and mobile-chromium failed with CI's strict mode violation (two notes; 4.1 min). Forced onto one day with the note looked for in the item's row: 2 passed (4.0 min). The final code: 2 passed (4.1 min). A check of every point in a run where India's midnight can fall, retries included, finds 7 collisions for the old offsets and none for the new ones |
+| Mutation checks                                                                                                                                  | 13 regressions tried; all make a test fail                                                                                                                                                                                                                                                                                                                                                                                                               |
+
+### Known gaps
+
+- Not built: stopping runs keys did not start, stopping every run of an automation or a contact in
+  one call, pausing a run, and a reason given by the caller.
+
 ## 2026-09-29 — Phase 5: webhook events for automation runs (P5-09, ADR-078)
 
 Status: **Implemented and locally verified with local test receivers (no customer endpoints).** An

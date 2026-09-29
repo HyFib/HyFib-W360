@@ -1000,6 +1000,14 @@ retried the next minute). A company being deleted is skipped. Check `app.tenant_
 company (`status`, `trial_ends_at`, `period_end`, `grace_ends_at`): the database's clock decides
 what is due.
 
+**Migration 0057 or 0058 failed.** 0057 runs in one transaction, so a failure applies nothing: it
+replaces `automation_runs_end` on `app.automation_runs`, `NOT VALID`, with a check that also allows
+the reason `stopped_by_api`. A failure usually means the check was renamed or changed by hand.
+0058 validates it without blocking writes; it fails only if a stored run's status and end reason do
+not match, which no code writes: find it with `SELECT id, status, end_reason FROM
+app.automation_runs WHERE status NOT IN ('running', 'waiting') AND end_reason IS NULL` (and compare
+the pairs listed in 0057) before running it again.
+
 **Migration 0052, 0053 or 0054 failed.** 0052 runs in one transaction, so a failure applies
 nothing: it widens the check on `app.api_keys.scopes` to allow `automations.start` (up to nine
 scopes), adds `app.automation_runs.api_key_id` with the trigger type check, the key check and the
@@ -1208,8 +1216,19 @@ run page shows the step and the reason, with the key that started it and the inp
 the same `Idempotency-Key` answers as the first request did; `GET /api/v1/automation-runs/{id}`
 shows the run as it is now.
 
+**A run was stopped through the API, or a stop changed nothing.** `POST
+/api/v1/automation-runs/{id}/stop` (ADR-079) stops only runs keys of the company started; any other
+run answers 404. A run that had already ended is answered as it is: its `endReason` says how it
+ended (`stopped_by_api` for an earlier stop). A stopped run's page says "Stopped through the API.",
+and the audit log shows `automation.run_stopped` with the actor `api_key`. Messages the run had
+queued but not handed to the sender are cancelled ("Not sent: the automation stopped before this
+message left."). The conversation is not handed to people: if the customer wrote, it waits,
+unassigned, for a member in the inbox; assign it or let routing pick it up when the customer writes
+again.
+
 **The company is suspended or its plan ended.** Keys keep reading; creating contacts, recording
-consent, sending and starting automations answer 423 until the company is active again.
+consent, sending, and starting and stopping automations answer 423 until the company is active
+again.
 
 **Migration 0024 failed.** It runs in one transaction. It creates the two tables, the guard trigger,
 the two SECURITY DEFINER functions (granted to `w360_app` before their ownership moves to
