@@ -25,6 +25,7 @@ export * from './messaging/rate-limit';
 export * from './messaging/ingest';
 export * from './messaging/outbound';
 export * from './messaging/inbox';
+export * from './messaging/interactive';
 export * from './messaging/onboarding';
 export * from './billing/razorpay';
 export * from './billing/notices';

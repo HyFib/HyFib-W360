@@ -1307,6 +1307,244 @@ describe('text replies (ADR-070)', () => {
     expect((await apiGetMessage(deps(), ctx, idOf(withLink))).type).toBe('text');
   });
 
+  it('send reply buttons and lists the same way, and give a tap back with its kind (ADR-080)', async () => {
+    const c = await fx.company();
+    const { ctx, id: keyId } = await apiKey(c, ['messages.reply', 'conversations.read'], 'Booking');
+    const waId = '919811100096';
+    await wrote(c, waId);
+    const conv = await conversationWith(c, `+${waId}`);
+    const buttons = {
+      type: 'buttons',
+      to: `+${waId}`,
+      header: 'Your appointment',
+      body: 'Tomorrow at 10:00 with Dr Rao. Can you come?',
+      footer: 'Sunrise Clinic',
+      buttons: [
+        { id: 'appt-7:yes', title: 'Confirm' },
+        { id: 'appt-7:no', title: 'Cancel' },
+      ],
+    };
+    const list = {
+      type: 'list',
+      to: `+${waId}`,
+      body: 'Pick another time.',
+      button: 'See times',
+      sections: [
+        {
+          title: 'Morning',
+          rows: [
+            { id: 'slot-10', title: '10:00', description: 'Dr Rao' },
+            { id: 'slot-11', title: '11:00' },
+          ],
+        },
+        { title: 'Afternoon', rows: [{ id: 'slot-15', title: '15:00' }] },
+      ],
+    };
+    const sentButtons = await apiSendMessage(deps(), ctx, buttons, idem('buttons-1', 'buttons-1'));
+    const sentList = await apiSendMessage(deps(), ctx, list, idem('list-1', 'list-1'));
+    for (const sent of [sentButtons, sentList]) {
+      expect(sent.status).toBe(201);
+      expect(sent.body.data).toEqual({
+        id: expect.any(String),
+        type: 'interactive',
+        status: 'queued',
+        contactId: expect.any(String),
+        channelId: c.channelAccountId,
+      });
+    }
+    // A retry answers as the first request did and sends nothing more.
+    expect(await apiSendMessage(deps(), ctx, list, idem('list-1', 'list-1'))).toEqual({
+      ...sentList,
+      replayed: true,
+    });
+    const stored = await fx.query(
+      `SELECT m.id, m.type, m.content, m.sender_type, m.api_key_id, si.request
+         FROM app.messages m
+         JOIN app.send_intents si ON si.tenant_id = m.tenant_id AND si.message_id = m.id
+        WHERE m.id = ANY($1::uuid[])
+        ORDER BY m.created_at`,
+      [[idOf(sentButtons), idOf(sentList)]],
+    );
+    const request = (interactive: unknown) => ({
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to: waId,
+      type: 'interactive',
+      interactive,
+    });
+    expect(stored).toEqual([
+      {
+        id: idOf(sentButtons),
+        type: 'interactive',
+        sender_type: 'api',
+        api_key_id: keyId,
+        // What the inbox shows; the ids only go to Meta.
+        content: {
+          header: 'Your appointment',
+          body: buttons.body,
+          footer: 'Sunrise Clinic',
+          buttons: ['Confirm', 'Cancel'],
+        },
+        request: request({
+          type: 'button',
+          header: { type: 'text', text: 'Your appointment' },
+          body: { text: buttons.body },
+          footer: { text: 'Sunrise Clinic' },
+          action: {
+            buttons: [
+              { type: 'reply', reply: { id: 'appt-7:yes', title: 'Confirm' } },
+              { type: 'reply', reply: { id: 'appt-7:no', title: 'Cancel' } },
+            ],
+          },
+        }),
+      },
+      {
+        id: idOf(sentList),
+        type: 'interactive',
+        sender_type: 'api',
+        api_key_id: keyId,
+        content: {
+          header: null,
+          body: 'Pick another time.',
+          footer: null,
+          list: {
+            button: 'See times',
+            sections: [
+              {
+                title: 'Morning',
+                rows: [
+                  { title: '10:00', description: 'Dr Rao' },
+                  { title: '11:00', description: null },
+                ],
+              },
+              { title: 'Afternoon', rows: [{ title: '15:00', description: null }] },
+            ],
+          },
+        },
+        request: request({
+          type: 'list',
+          body: { text: 'Pick another time.' },
+          action: {
+            button: 'See times',
+            sections: [
+              {
+                title: 'Morning',
+                rows: [
+                  { id: 'slot-10', title: '10:00', description: 'Dr Rao' },
+                  { id: 'slot-11', title: '11:00' },
+                ],
+              },
+              { title: 'Afternoon', rows: [{ id: 'slot-15', title: '15:00' }] },
+            ],
+          },
+        }),
+      },
+    ]);
+    // The Graph stand-in checks both against Meta's limits, and accepts them.
+    expect(await sendAll(c)).toEqual(['accepted', 'accepted']);
+    expect((await apiGetMessage(deps(), ctx, idOf(sentButtons))).type).toBe('interactive');
+    expect((await apiGetMessage(deps(), ctx, idOf(sentList))).type).toBe('interactive');
+    expect((await conversationWith(c, `+${waId}`)).last_message_preview).toBe('Pick another time.');
+
+    // The customer picks a row: it comes back with the row's id, its kind and its description.
+    const [sentRow] = await fx.query<{ external_message_id: string }>(
+      'SELECT external_message_id FROM app.messages WHERE id = $1',
+      [idOf(sentList)],
+    );
+    await fx.deliver(
+      fx.messagesBody(c, {
+        messages: [
+          {
+            waId,
+            type: 'interactive',
+            extra: {
+              interactive: {
+                type: 'list_reply',
+                list_reply: { id: 'slot-10', title: '10:00', description: 'Dr Rao' },
+              },
+              context: { from: '919000000000', id: sentRow!.external_message_id },
+            },
+          },
+        ],
+      }),
+    );
+    const { data } = await apiListConversationMessages(deps(), ctx, conv.id, {});
+    expect(
+      data
+        .slice(0, 3)
+        .map(({ direction, type, text, reply }) => ({ direction, type, text, reply })),
+    ).toEqual([
+      {
+        direction: 'inbound',
+        type: 'interactive',
+        text: '10:00',
+        reply: { id: 'slot-10', title: '10:00', type: 'list', description: 'Dr Rao' },
+      },
+      { direction: 'outbound', type: 'interactive', text: 'Pick another time.', reply: null },
+      { direction: 'outbound', type: 'interactive', text: buttons.body, reply: null },
+    ]);
+  });
+
+  it('refuse buttons and rows with HyFib’s own ids, or beyond Meta’s limits, before anything is stored', async () => {
+    const c = await fx.company();
+    const { ctx } = await apiKey(c, ['messages.reply']);
+    const waId = '919811100097';
+    await wrote(c, waId);
+    const bodies: Record<string, unknown>[] = [
+      {
+        type: 'buttons',
+        to: `+${waId}`,
+        body: 'How did we do?',
+        buttons: [{ id: 'w360csat:0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f01:3', title: 'Great' }],
+      },
+      {
+        type: 'list',
+        to: `+${waId}`,
+        body: 'Pick one',
+        button: 'Options',
+        sections: [{ rows: [{ id: 'W360bot:run:node:1:0', title: 'One' }] }],
+      },
+      {
+        type: 'list',
+        to: `+${waId}`,
+        body: 'Pick one',
+        button: 'Options',
+        sections: [
+          {
+            title: 'A',
+            rows: Array.from({ length: 6 }, (_, i) => ({ id: `a${i}`, title: `A${i}` })),
+          },
+          {
+            title: 'B',
+            rows: Array.from({ length: 5 }, (_, i) => ({ id: `b${i}`, title: `B${i}` })),
+          },
+        ],
+      },
+    ];
+    for (const [i, body] of bodies.entries()) {
+      await expectAppError(
+        apiSendMessage(deps(), ctx, body, idem(`bad-${i}`, `bad-${i}`)),
+        'validation_failed',
+      );
+    }
+    const [row] = await fx.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM app.messages WHERE tenant_id = $1 AND direction = 'outbound'`,
+      [c.tenant.id],
+    );
+    expect(row?.n).toBe(0);
+    // A number that has not written gets the one answer text replies get.
+    const closed = await expectAppError(
+      apiSendMessage(
+        deps(),
+        ctx,
+        { ...bodies[0], to: '+919811100098', buttons: [{ id: 'yes', title: 'Yes' }] },
+        idem('closed', 'closed'),
+      ),
+      'precondition_failed',
+    );
+    expect(reason(closed)).toBe('window_closed');
+  });
+
   it('refuse, with one answer, numbers that did not write to the number in the last 24 hours', async () => {
     const c = await fx.company();
     const { ctx, id: keyId } = await apiKey(c, ['messages.reply']);
@@ -1832,8 +2070,12 @@ describe('conversation reads (ADR-072)', () => {
     expect([...read].reverse()).toEqual([
       fromContact('text', 'Where is my order?'),
       fromContact('image', 'The box arrived damaged', { mimeType: 'image/jpeg' }),
-      fromContact('button', 'Track order', { reply: { id: 'TRACK', title: 'Track order' } }),
-      fromContact('interactive', 'Medium', { reply: { id: 'size-m', title: 'Medium' } }),
+      fromContact('button', 'Track order', {
+        reply: { id: 'TRACK', title: 'Track order', type: 'button', description: null },
+      }),
+      fromContact('interactive', 'Medium', {
+        reply: { id: 'size-m', title: 'Medium', type: 'list', description: 'Chest 40 in' },
+      }),
       fromContact('reaction', '👍'),
       fromContact('location', 'Home'),
       toContact(agentReply.messageId, 'text', 'Sorry about the box.', {

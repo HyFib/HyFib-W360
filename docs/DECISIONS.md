@@ -2486,3 +2486,47 @@ Decision:
 
 Not built: stopping runs keys did not start, stopping every run of an automation or a contact in
 one call, pausing a run, and a reason given by the caller.
+
+## ADR-080 Reply buttons and list messages through the public API (2026-09-29)
+
+Context: integrations reply inside the customer service window with text (ADR-070). A booking
+system or a helpdesk bot wants the customer to choose: "Keep it / Move it", or one of a few times.
+HyFib's automations and satisfaction surveys already send reply buttons (research M-157–M-159);
+nothing sent list messages, and the Graph stand-in refused them. Meta's OpenAPI description gives
+the list limits (M-179) and the list reply (M-180); whether a list may have 10 rows per section or
+10 in all could not be settled (M-181).
+
+Decision:
+
+- **Two more kinds of reply,** `POST /api/v1/messages` with `type: "buttons"` or `type: "list"`,
+  beside `text` and `template`, under the same `messages.reply` scope ("Reply with text, buttons and
+  lists") and every rule of ADR-070: only to a contact who wrote to the number in the last 24 hours
+  (one answer, 412 `window_closed`, for every reason it cannot be reached), the running automation
+  ended as `api_replied`, the conversation still waiting for a member, one send per
+  `Idempotency-Key`, the window checked again when the worker sends. A key that sends free-form
+  text already chooses every word the customer reads in the window; buttons and rows add choices the
+  customer taps, which arrive as ordinary messages, so no new scope.
+- **Meta's limits, checked before anything is read:** buttons: 1 to 3, ids of 1 to 256 characters,
+  titles of 1 to 20 that differ ignoring case; lists: a button label of 1 to 20 characters, 1 to 10
+  sections, a title (1 to 24) on each when there are several, rows with ids of 1 to 200 characters
+  that differ, titles of 1 to 24 and descriptions of 1 to 72, and at most 10 rows in all (the
+  stricter reading of M-181); a body of 1 to 1024 characters, an optional text header and footer of
+  1 to 60. Texts are trimmed; ids are kept exactly as given and refused with a space at either end.
+- **HyFib's own ids are refused:** ids starting with `w360`, in any case. Automation buttons
+  (`w360bot:`) and satisfaction surveys (`w360csat:`) recognise taps by their ids; a survey answer
+  counts only when it refers to the survey's own message, but a tap whose id starts `w360csat:` is
+  treated as a survey tap by ingestion and the reply-turn trigger (0009), so it would neither
+  reopen the conversation nor open a reply turn.
+- **Stored for the inbox, sent as Meta describes:** the message is `interactive`, with the
+  automations' content for buttons (titles only, so the inbox draws them as it does a bot's) and a
+  list's button, sections and rows (titles and descriptions), shown in the inbox; the ids travel only
+  in the request to Meta. `GET /messages/{id}` reports `interactive` (it reported every message but
+  text as `template`), and the conversation's messages give the body as their text.
+- **Taps say what was tapped:** `reply` in the `message.received` webhook and in the API's messages
+  gains `type` (`button` for a reply button or a template's quick reply, `list` for a row) and, for
+  a row, its `description`.
+- **No migration:** `app.messages` already takes `interactive` messages and the scope exists.
+
+Not built: media headers, call-to-action URL buttons (not in the spec's list of interactive types,
+M-043), product and catalog messages, location requests, replies quoting a message, and editing or
+deleting sent messages.

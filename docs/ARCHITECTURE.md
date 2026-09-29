@@ -909,6 +909,16 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   log and the audit entry (as the key) follow in the same transaction; a run that has ended is
   answered as it is. 0057 replaces `automation_runs_end` `NOT VALID` to allow the reason; 0058
   validates it.
+- **Buttons and lists through the API (ADR-080):** `POST /messages` with `type` `buttons` or `list`
+  (`apiSendButtons`, `apiSendList`) takes the same path as a text reply (`sendReply`: the contact
+  who wrote in the last 24 hours, the conversation locked `FOR UPDATE`, the automation ended as
+  `api_replied`, the message marked with its key, one signed send job per idempotency key). The
+  limits are `INTERACTIVE_LIMITS` (`messaging/interactive.ts`, from research M-157, M-159, M-179),
+  checked by the request schemas together with unique titles and ids, 10 rows in all and ids not
+  starting with `w360`; `replyButtonsInteractive` and `listInteractive` build the Graph `interactive`
+  object, and `replyButtonsContent` and `listContent` what the inbox stores (no ids). A tap's
+  `reply` (webhooks and the API's messages, `tappedReplySchema`) carries `type` and a row's
+  `description` from the stored `interactiveType` and reply.
 - **Keyset cursors** (`encodeKeysetCursor`, `exactTimestamp`): a cursor carries the last row's
   timestamp as PostgreSQL keeps it, to the microsecond, and its id, and pages compare
   `(time, id) < (cursor time, cursor id)`; cursors made with milliseconds still read. Cursors built

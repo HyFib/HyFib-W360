@@ -21,7 +21,7 @@ import { endRunForHuman } from '../automations/runs';
 import { emitTenantEvent } from '../messaging/events';
 import { SERVICE_WINDOW_MS, type OutboundDeps } from '../messaging/outbound';
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
-import { inboundSummary } from '../webhooks/payloads';
+import { inboundSummary, type TappedReply } from '../webhooks/payloads';
 import { apiActor, assertScope, type ApiContext } from './context';
 import { API_LIMITS } from './model';
 
@@ -86,7 +86,7 @@ export interface ApiConversationMessage {
   direction: 'inbound' | 'outbound';
   type: MessageType;
   text: string | null;
-  reply: { id: string | null; title: string | null } | null;
+  reply: TappedReply;
   mimeType: string | null;
   templateId: string | null;
   templateName: string | null;

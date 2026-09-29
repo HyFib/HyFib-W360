@@ -19,7 +19,19 @@ import {
   formatAllowedNetwork,
 } from './model';
 import { API_ROUTES, buildOpenApiDocument } from './openapi';
-import { apiSendMessage, apiSendTextSchema } from './resources';
+import {
+  INTERACTIVE_LIMITS,
+  listContent,
+  listInteractive,
+  replyButtonsContent,
+  replyButtonsInteractive,
+} from '../messaging/interactive';
+import {
+  apiSendButtonsSchema,
+  apiSendListSchema,
+  apiSendMessage,
+  apiSendTextSchema,
+} from './resources';
 
 describe('API tokens', () => {
   it('have a public prefix, a 256-bit secret and only their SHA-256 is kept', () => {
@@ -206,6 +218,249 @@ describe('text replies (ADR-070)', () => {
   });
 });
 
+describe('reply buttons and lists (ADR-080)', () => {
+  const base = { to: '+919876543210' };
+  const buttons = {
+    ...base,
+    type: 'buttons',
+    header: '  Your appointment ',
+    body: 'Tomorrow at 10:00 with Dr Rao. Can you come?',
+    footer: 'Sunrise Clinic',
+    buttons: [
+      { id: 'appt-42:yes', title: ' Confirm ' },
+      { id: 'appt-42:move', title: 'Reschedule' },
+      { id: 'appt-42:no', title: 'Cancel' },
+    ],
+  };
+  const list = {
+    ...base,
+    type: 'list',
+    body: 'Pick a time for tomorrow.',
+    button: 'See times',
+    sections: [
+      {
+        title: 'Morning',
+        rows: [
+          { id: 'slot-10', title: '10:00', description: 'Dr Rao' },
+          { id: 'slot-11', title: '11:00' },
+        ],
+      },
+      { title: 'Afternoon', rows: [{ id: 'slot-15', title: '15:00', description: 'Dr Iyer' }] },
+    ],
+  };
+  const refused = (schema: typeof apiSendButtonsSchema | typeof apiSendListSchema, body: unknown) =>
+    schema.safeParse(body).success;
+
+  it('use Meta’s published limits, with 10 rows in all (research M-157, M-159, M-179, M-181)', () => {
+    expect(INTERACTIVE_LIMITS).toEqual({
+      headerLength: 60,
+      bodyLength: 1024,
+      footerLength: 60,
+      buttons: 3,
+      buttonIdLength: 256,
+      buttonTitleLength: 20,
+      listButtonLength: 20,
+      sections: 10,
+      sectionTitleLength: 24,
+      rows: 10,
+      rowIdLength: 200,
+      rowTitleLength: 24,
+      rowDescriptionLength: 72,
+    });
+  });
+
+  it('take 1 to 3 buttons with ids kept as given and trimmed texts within Meta’s limits', () => {
+    expect(apiSendButtonsSchema.parse(buttons)).toEqual({
+      ...buttons,
+      header: 'Your appointment',
+      buttons: [{ id: 'appt-42:yes', title: 'Confirm' }, ...buttons.buttons.slice(1)],
+    });
+    const L = INTERACTIVE_LIMITS;
+    const one = {
+      ...base,
+      type: 'buttons',
+      body: 'x'.repeat(L.bodyLength),
+      buttons: [{ id: 'i'.repeat(L.buttonIdLength), title: 't'.repeat(L.buttonTitleLength) }],
+    };
+    expect(apiSendButtonsSchema.safeParse(one).success).toBe(true);
+    const button = (b: Record<string, unknown>) => ({
+      ...base,
+      type: 'buttons',
+      body: 'Hi',
+      buttons: [b],
+    });
+    for (const bad of [
+      { ...buttons, buttons: [] },
+      { ...buttons, buttons: [...buttons.buttons, { id: 'four', title: 'Four' }] },
+      {
+        ...buttons,
+        buttons: [
+          { id: 'a', title: 'Yes' },
+          { id: 'b', title: 'YES' },
+        ],
+      },
+      {
+        ...buttons,
+        buttons: [
+          { id: 'a', title: 'Yes' },
+          { id: 'a', title: 'No' },
+        ],
+      },
+      button({ id: ' a', title: 'Yes' }),
+      button({ id: 'a ', title: 'Yes' }),
+      button({ id: '', title: 'Yes' }),
+      button({ id: 'i'.repeat(L.buttonIdLength + 1), title: 'Yes' }),
+      button({ id: 'a', title: 't'.repeat(L.buttonTitleLength + 1) }),
+      button({ id: 'a', title: '   ' }),
+      button({ id: 'w360csat:0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f01:3', title: 'Great' }),
+      button({ id: 'W360bot:run:node:1:0', title: 'Yes' }),
+      button({ id: 'a', title: 'Yes', url: 'https://example.com' }),
+      { ...one, body: 'x'.repeat(L.bodyLength + 1) },
+      { ...one, header: 'h'.repeat(L.headerLength + 1) },
+      { ...one, footer: 'f'.repeat(L.footerLength + 1) },
+      { ...one, body: '  ' },
+      { ...one, text: 'Hi' },
+      { ...one, type: 'list' },
+    ]) {
+      expect(refused(apiSendButtonsSchema, bad), JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  it('take up to 10 rows in all, in titled sections, with unique ids within Meta’s limits', () => {
+    expect(apiSendListSchema.parse(list)).toEqual(list);
+    const L = INTERACTIVE_LIMITS;
+    const rows = (n: number, prefix = 'r') =>
+      Array.from({ length: n }, (_, i) => ({ id: `${prefix}${i}`, title: `Row ${i}` }));
+    const single = (section: Record<string, unknown>) => ({ ...list, sections: [section] });
+    expect(apiSendListSchema.safeParse(single({ rows: rows(L.rows) })).success).toBe(true);
+    const longest = {
+      id: 'i'.repeat(L.rowIdLength),
+      title: 't'.repeat(L.rowTitleLength),
+      description: 'd'.repeat(L.rowDescriptionLength),
+    };
+    expect(
+      apiSendListSchema.safeParse(
+        single({ title: 's'.repeat(L.sectionTitleLength), rows: [longest] }),
+      ).success,
+    ).toBe(true);
+    for (const bad of [
+      single({ rows: rows(L.rows + 1) }),
+      {
+        ...list,
+        sections: [
+          { title: 'A', rows: rows(6, 'a') },
+          { title: 'B', rows: rows(5, 'b') },
+        ],
+      },
+      { ...list, sections: [{ title: 'A', rows: rows(1, 'a') }, { rows: rows(1, 'b') }] },
+      {
+        ...list,
+        sections: [
+          { title: 'A', rows: rows(1) },
+          { title: 'B', rows: rows(1) },
+        ],
+      },
+      {
+        ...list,
+        sections: Array.from({ length: L.sections + 1 }, (_, i) => ({
+          title: `S${i}`,
+          rows: rows(1, `s${i}-`),
+        })),
+      },
+      { ...list, sections: [] },
+      single({ rows: [] }),
+      single({ title: 's'.repeat(L.sectionTitleLength + 1), rows: rows(1) }),
+      single({ rows: [{ ...longest, id: 'i'.repeat(L.rowIdLength + 1) }] }),
+      single({ rows: [{ ...longest, title: 't'.repeat(L.rowTitleLength + 1) }] }),
+      single({ rows: [{ ...longest, description: 'd'.repeat(L.rowDescriptionLength + 1) }] }),
+      single({ rows: [{ id: 'w360:anything', title: 'Row' }] }),
+      single({ rows: [{ id: 'r ', title: 'Row' }] }),
+      { ...list, button: 'b'.repeat(L.listButtonLength + 1) },
+      { ...list, button: ' ' },
+      { ...list, buttons: buttons.buttons },
+    ]) {
+      expect(refused(apiSendListSchema, bad), JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  it('become the interactive objects Meta describes, with the inbox’s content beside them', () => {
+    const b = apiSendButtonsSchema.parse(buttons);
+    expect(replyButtonsInteractive(b)).toEqual({
+      type: 'button',
+      header: { type: 'text', text: 'Your appointment' },
+      body: { text: b.body },
+      footer: { text: 'Sunrise Clinic' },
+      action: {
+        buttons: [
+          { type: 'reply', reply: { id: 'appt-42:yes', title: 'Confirm' } },
+          { type: 'reply', reply: { id: 'appt-42:move', title: 'Reschedule' } },
+          { type: 'reply', reply: { id: 'appt-42:no', title: 'Cancel' } },
+        ],
+      },
+    });
+    expect(replyButtonsContent(b)).toEqual({
+      header: 'Your appointment',
+      body: b.body,
+      footer: 'Sunrise Clinic',
+      buttons: ['Confirm', 'Reschedule', 'Cancel'],
+    });
+    const l = apiSendListSchema.parse(list);
+    // No header or footer given, none sent; a row without a description has none.
+    expect(listInteractive(l)).toEqual({
+      type: 'list',
+      body: { text: 'Pick a time for tomorrow.' },
+      action: {
+        button: 'See times',
+        sections: [
+          {
+            title: 'Morning',
+            rows: [
+              { id: 'slot-10', title: '10:00', description: 'Dr Rao' },
+              { id: 'slot-11', title: '11:00' },
+            ],
+          },
+          { title: 'Afternoon', rows: [{ id: 'slot-15', title: '15:00', description: 'Dr Iyer' }] },
+        ],
+      },
+    });
+    expect(listContent(l)).toEqual({
+      header: null,
+      body: 'Pick a time for tomorrow.',
+      footer: null,
+      list: {
+        button: 'See times',
+        sections: [
+          {
+            title: 'Morning',
+            rows: [
+              { title: '10:00', description: 'Dr Rao' },
+              { title: '11:00', description: null },
+            ],
+          },
+          { title: 'Afternoon', rows: [{ title: '15:00', description: 'Dr Iyer' }] },
+        ],
+      },
+    });
+    // Ids stay out of what the inbox stores: they travel only in the request to Meta.
+    expect(JSON.stringify(listContent(l))).not.toContain('slot-');
+    expect(JSON.stringify(replyButtonsContent(b))).not.toContain('appt-42');
+  });
+
+  it('need the reply scope, checked before anything is read', async () => {
+    const ctx = {
+      tenant: { id: 't', status: 'active' },
+      key: { id: 'k', scopes: new Set(['messages.send']) },
+    } as unknown as ApiContext;
+    for (const body of [buttons, list]) {
+      const error: unknown = await apiSendMessage({} as never, ctx, body, {
+        key: 'k-1',
+        requestHash: 'h',
+      }).catch((caught: unknown) => caught);
+      expect(isAppError(error) && error.code, body.type).toBe('forbidden');
+    }
+  });
+});
+
 describe('allowed networks (ADR-076)', () => {
   it('take IPv4 and IPv6 addresses and networks, one per line or separated by commas or spaces', () => {
     expect(allowedNetworksSchema.parse(undefined)).toBeNull();
@@ -354,7 +609,7 @@ describe('OpenAPI document', () => {
     expect(responses['403']?.description).toContain('ip_not_allowed');
   });
 
-  it('sends a template or a text reply from one operation, naming the window refusal', () => {
+  it('sends a template or a reply (text, buttons, list) from one operation, naming the window refusal', () => {
     const send = paths['/messages']?.post as unknown as {
       operationId: string;
       description: string;
@@ -366,10 +621,14 @@ describe('OpenAPI document', () => {
       oneOf: [
         { $ref: '#/components/schemas/SendTemplate' },
         { $ref: '#/components/schemas/SendText' },
+        { $ref: '#/components/schemas/SendButtons' },
+        { $ref: '#/components/schemas/SendList' },
       ],
     });
     for (const scope of API_SEND_SCOPES) expect(send.description).toContain(`\`${scope}\``);
     expect(send.description).toContain('window_closed');
+    expect(send.description).toContain('`reply.id`');
+    expect(send.description).toContain('`w360`');
     expect(send.responses['412']?.description).toContain('window_closed');
     const read = paths['/messages/{id}']?.get as unknown as { description: string };
     for (const scope of API_SEND_SCOPES) expect(read.description).toContain(`\`${scope}\``);

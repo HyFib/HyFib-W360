@@ -167,6 +167,29 @@ export function buttonReply(
   });
 }
 
+/** A customer's pick of a row of the list message `contextId` (research M-158, M-180). */
+export function listReply(
+  wabaId: string,
+  phoneNumberId: string,
+  waId: string,
+  row: { id: string; title: string; description?: string },
+  contextId: string,
+) {
+  return envelope(wabaId, phoneNumberId, {
+    contacts: [{ profile: { name: 'Priya Customer' }, wa_id: waId }],
+    messages: [
+      {
+        from: waId,
+        id: `wamid.e2e.${randomUUID()}`,
+        timestamp: String(Math.floor(Date.now() / 1000)),
+        type: 'interactive',
+        interactive: { type: 'list_reply', list_reply: row },
+        context: { from: '919000012345', id: contextId },
+      },
+    ],
+  });
+}
+
 /** A customer's tap on a quick-reply button of the template message `contextId` (research M-178). */
 export function templateButtonReply(
   wabaId: string,

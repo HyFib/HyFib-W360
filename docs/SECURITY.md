@@ -490,6 +490,12 @@ Phase 5 rules (Public API, P5-08):
   by writing, members' test runs or another company's runs (404). The stop runs under the
   conversation's and the run's locks like a member's, cancels what the run queued, hands nothing to
   people, is audited as the key and changes nothing for a run that has ended.
+- Buttons and lists through the API (ADR-080) follow every rule of text replies (`messages.reply`,
+  an active company, only contacts who wrote in the last 24 hours with one answer for every
+  refusal, the window checked again at send). Their ids cannot start with `w360`: HyFib's own
+  automation and survey ids do, and a tap on a survey-like id would not reopen the conversation or
+  open a reply turn. Meta's limits are checked before anything is read; ids reach Meta only, and the
+  inbox stores titles.
 - Only the token's SHA-256 is stored; the runtime role cannot read it. The token is shown once in
   the browser and kept only in the page's memory; it is never logged, and audit entries carry the
   public prefix only.

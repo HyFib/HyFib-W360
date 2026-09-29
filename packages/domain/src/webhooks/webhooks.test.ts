@@ -26,6 +26,7 @@ import {
   messageReceivedPayloadSchema,
   messageStatusPayloadSchema,
   pingPayloadSchema,
+  tappedReplySchema,
   templateStatusPayloadSchema,
 } from './payloads';
 import { webhookSignature, webhookSignatureHeader, verifyWebhookSignature } from './signing';
@@ -102,12 +103,16 @@ describe('inbound message summaries', () => {
     ).toEqual({ text: 'Receipt', reply: null, mimeType: 'image/jpeg' });
     expect(inboundSummary('button', { text: 'Yes', payload: 'confirm' })).toEqual({
       text: 'Yes',
-      reply: { id: 'confirm', title: 'Yes' },
+      reply: { id: 'confirm', title: 'Yes', type: 'button', description: null },
       mimeType: null,
     });
     expect(
       inboundSummary('interactive', { reply: { id: 'opt-2', title: 'Tomorrow', kind: 'list' } }),
-    ).toEqual({ text: 'Tomorrow', reply: { id: 'opt-2', title: 'Tomorrow' }, mimeType: null });
+    ).toEqual({
+      text: 'Tomorrow',
+      reply: { id: 'opt-2', title: 'Tomorrow', type: null, description: null },
+      mimeType: null,
+    });
     expect(inboundSummary('interactive', {})).toEqual({ text: null, reply: null, mimeType: null });
     expect(inboundSummary('reaction', { emoji: '👍', message_id: 'x' }).text).toBe('👍');
     expect(inboundSummary('location', { latitude: 1, longitude: 2, name: 'Shop' }).text).toBe(
@@ -121,6 +126,35 @@ describe('inbound message summaries', () => {
     });
     // Values of the wrong type are left out, not passed on.
     expect(inboundSummary('text', { text: 42 }).text).toBeNull();
+  });
+
+  it('says whether a tap was a reply button or a list row, with the row’s description (ADR-080)', () => {
+    const tap = (interactiveType: string, reply: Record<string, unknown>) =>
+      inboundSummary('interactive', { interactiveType, reply }).reply;
+    expect(tap('button_reply', { id: 'yes', title: 'Yes', description: 'ignored' })).toEqual({
+      id: 'yes',
+      title: 'Yes',
+      type: 'button',
+      description: null,
+    });
+    expect(tap('list_reply', { id: 'slot-2', title: '11:00', description: 'With Dr Rao' })).toEqual(
+      { id: 'slot-2', title: '11:00', type: 'list', description: 'With Dr Rao' },
+    );
+    // A row sent without a description may come back with an empty one or none.
+    expect(tap('list_reply', { id: 'slot-3', title: '12:00', description: '' })?.description).toBe(
+      null,
+    );
+    expect(tap('list_reply', { id: 'slot-3', title: '12:00' })?.description).toBeNull();
+    expect(tap('something_new', { id: 'x', title: 'X' })?.type).toBeNull();
+    const parsed = tappedReplySchema.parse(
+      tap('list_reply', { id: 'slot-2', title: '11:00', description: 'With Dr Rao' }),
+    );
+    expect(parsed).toEqual({
+      id: 'slot-2',
+      title: '11:00',
+      type: 'list',
+      description: 'With Dr Rao',
+    });
   });
 });
 

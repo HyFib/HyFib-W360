@@ -406,7 +406,11 @@ verification, app review, Embedded Signup configuration).
   and cleared with its answers, and keys read the runs they started); **[stopping runs built,
   locally verified]** (ADR-079: the same scope stops a run keys started, as `stopped_by_api`,
   cancelling what it queued without handing the conversation to people; an ended run is answered as
-  it is). Remaining: media, interactive and reaction messages, replies to a given message, assigning
+  it is); **[buttons and lists built, locally verified against the Graph stand-in]** (ADR-080: a
+  `messages.reply` key also sends up to 3 reply buttons or a list of up to 10 rows to a contact who
+  wrote in the last 24 hours, within Meta's limits and with its own ids, never HyFib's `w360…`; taps
+  come back with `reply.type` and a row's description). Remaining: media and reaction messages,
+  call-to-action and product messages through the API, replies to a given message, assigning
   conversations, notes, member and team names, media downloads, a message feed across
   conversations, starting or stopping runs for many contacts in one call, bulk sends in one call,
   networks for the whole company, per-key quotas, limits per endpoint, and dropping the

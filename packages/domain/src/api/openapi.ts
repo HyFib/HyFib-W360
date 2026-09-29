@@ -17,6 +17,7 @@ import {
   contactUpdatedPayloadSchema,
   conversationAssignmentPayloadSchema,
   conversationStatusPayloadSchema,
+  tappedReplySchema,
   messageReceivedPayloadSchema,
   messageStatusPayloadSchema,
   pingPayloadSchema,
@@ -29,6 +30,8 @@ import { API_LIMITS, API_SCOPE_INFO, API_SCOPE_KEYS } from './model';
 import {
   apiConsentSchema,
   apiContactCreateSchema,
+  apiSendButtonsSchema,
+  apiSendListSchema,
   apiSendMessageSchema,
   apiSendTextSchema,
 } from './resources';
@@ -59,7 +62,9 @@ export const apiTemplateSchema = z.object({
 
 export const apiQueuedMessageSchema = z.object({
   id: z.uuid(),
-  type: z.enum(['template', 'text']),
+  type: z
+    .enum(['template', 'text', 'interactive'])
+    .describe('interactive: reply buttons or a list.'),
   status: z.literal('queued'),
   contactId: z.uuid(),
   channelId: z.uuid(),
@@ -82,7 +87,9 @@ const OUTBOUND_STATUSES = [
 
 export const apiMessageSchema = z.object({
   id: z.uuid(),
-  type: z.enum(['template', 'text']),
+  type: z
+    .enum(['template', 'text', 'interactive'])
+    .describe('interactive: reply buttons or a list.'),
   status: z
     .enum(OUTBOUND_STATUSES)
     .describe(
@@ -129,10 +136,7 @@ export const apiConversationMessageSchema = z.object({
     .describe(
       'The words of the message: the text, a caption, the title of a tapped reply, a reaction or a location’s name; for outbound messages the text, a template’s body with its values or an interactive message’s body. Null if none.',
     ),
-  reply: z
-    .object({ id: z.string().nullable(), title: z.string().nullable() })
-    .nullable()
-    .describe('The button or list reply the contact tapped.'),
+  reply: tappedReplySchema,
   mimeType: z.string().nullable().describe('For media messages (the media is not attached).'),
   templateId: z.uuid().nullable(),
   templateName: z.string().nullable(),
@@ -427,16 +431,20 @@ export function buildOpenApiDocument(serverUrl: string) {
       '/messages': {
         post: {
           operationId: 'sendMessage',
-          summary: 'Send an approved template, or a text reply',
+          summary: 'Send an approved template, or a reply: text, buttons or a list',
           description: [
             `${scopeNote('messages.send', 'messages.send_marketing', 'messages.reply')}`,
             'A template (`type` `template` or left out): utility templates need `messages.send`, marketing templates `messages.send_marketing`. The contact is created when new; consent, the suppression list and the marketing frequency cap are checked.',
-            'A text reply (`type` `text`) needs `messages.reply` and goes only to a number that wrote to the WhatsApp number in the last 24 hours (WhatsApp’s customer service window); otherwise it is refused with reason `window_closed`, and nothing tells whether the number is a contact. It stops an automation answering the conversation, and the conversation keeps waiting for a member of the team. The window is checked again when the message is sent.',
+            'A reply (`type` `text`, `buttons` or `list`) needs `messages.reply` and goes only to a number that wrote to the WhatsApp number in the last 24 hours (WhatsApp’s customer service window); otherwise it is refused with reason `window_closed`, and nothing tells whether the number is a contact. It stops an automation answering the conversation, and the conversation keeps waiting for a member of the team. The window is checked again when the message is sent.',
+            'Buttons (up to 3) and lists (up to 10 rows) carry ids you choose: when the customer taps one, the `message.received` webhook gives it as `reply.id`, with `reply.type` (`button` or `list`). Ids cannot start with `w360`, which HyFib’s own buttons use.',
+            'Messages queued one after the other may be sent in either order: to be sure the customer sees one before the next, send the next once `GET /messages/{id}` reports the first `accepted`.',
           ].join('\n\n'),
           parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }],
           requestBody: {
             required: true,
-            content: json({ oneOf: [ref('SendTemplate'), ref('SendText')] }),
+            content: json({
+              oneOf: [ref('SendTemplate'), ref('SendText'), ref('SendButtons'), ref('SendList')],
+            }),
           },
           responses: {
             '201': {
@@ -742,6 +750,8 @@ export function buildOpenApiDocument(serverUrl: string) {
         Template: jsonSchema(apiTemplateSchema),
         SendTemplate: jsonSchema(apiSendMessageSchema, 'input'),
         SendText: jsonSchema(apiSendTextSchema, 'input'),
+        SendButtons: jsonSchema(apiSendButtonsSchema, 'input'),
+        SendList: jsonSchema(apiSendListSchema, 'input'),
         QueuedMessage: jsonSchema(apiQueuedMessageSchema),
         Message: jsonSchema(apiMessageSchema),
         Conversation: jsonSchema(apiConversationSchema),

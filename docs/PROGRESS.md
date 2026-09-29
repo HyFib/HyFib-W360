@@ -1,5 +1,77 @@
 # Progress
 
+## 2026-09-29 — Phase 5: reply buttons and list messages through the public API (P5-08, ADR-080)
+
+Status: **Implemented and locally verified against the Graph stand-in (no customer data).**
+Integrations replied inside the customer service window with text only (ADR-070); a booking system
+or helpdesk bot could not offer "Keep it / Move it" or a few times to pick from. HyFib's automations
+and surveys already sent reply buttons; nothing sent list messages.
+
+### Completed
+
+- **Research (M-179–M-181):** Meta's OpenAPI description, downloaded again from GitHub, gives the
+  list message's limits and the list reply's shape; whether a list may have 10 rows per section or
+  10 in all is unconfirmed, and HyFib enforces 10 in all.
+- **Design (ADR-080):** `POST /api/v1/messages` with `type` `buttons` (1 to 3) or `list` (up to 10
+  sections and 10 rows in all), under `messages.reply` and every rule of ADR-070 (the 24-hour
+  window with one answer, the automation ended, the conversation still waiting for a member, one
+  send per `Idempotency-Key`, the window checked again at send). Ids are the integration's own and
+  cannot start with `w360`: HyFib's automation and survey ids do, and a survey-like tap would
+  neither reopen the conversation nor open a reply turn.
+- **Domain:** `messaging/interactive.ts` (Meta's limits, the reserved prefix, the Graph
+  `interactive` objects and what the inbox stores); `apiSendButtonsSchema` and `apiSendListSchema`;
+  the text reply's path shared as `sendReply`; `GET /messages/{id}` reports `interactive`; taps in
+  webhooks and the API's messages carry `reply.type` and a row's `description`
+  (`tappedReplySchema`). No migration.
+- **Web:** the inbox shows a list's button and rows; the scope reads "Reply with text, buttons and
+  lists"; Settings → API keys' introduction names replies with buttons and lists and, overdue since
+  ADR-079, stopping runs.
+- **Graph stand-in:** list messages are accepted within the limits and refused beyond them.
+- **Tests:** unit (the limits pinned to Meta's numbers; both schemas and every refusal; the Graph
+  objects and stored content, ids kept out of it; the scope checked first; tap kinds and
+  descriptions; the OpenAPI operation). Integration in `api.test.ts`: buttons and a list sent once
+  per `Idempotency-Key` through the send pipeline and accepted by the stand-in, their stored content
+  and requests, the status reported `interactive`, a picked row read back through the API with its
+  kind and description; HyFib's ids (in any case) and 11 rows in all refused with nothing stored,
+  and a number that has not written answered `window_closed`; the conversation read test now expects
+  the reply's kind. e2e `api.spec.ts`: a key created in settings sends buttons and a list, a HyFib
+  id is refused, the inbox shows both, and the customer's pick comes back through the API.
+- **Docs:** ADR-080; research M-179–M-181; ARCHITECTURE (the public API); SECURITY (Phase 5
+  rules); THREAT-MODEL T98; RUNBOOKS (a troubleshooting entry); BACKLOG P5-08; FEATURE-MATRIX H-033
+  and W-134.
+- **e2e fix (aa4c902):** the Shopify store test was flaky on b453b6c's CI (Firefox, passed on
+  its retry): it timed out waiting for the main navigation's Commerce link right after removing the
+  store. The worker can finish the removal before the store's page is drawn again, and the step
+  before already accepted that case, but the page is then the plain not-found page, which has no
+  company navigation. The test now opens the store list by its address.
+- **Mutation checks:** 22 regressions tried one at a time; all make a test fail. 21 in the domain
+  and API: HyFib's ids accepted, or checked with their case; spaces around ids accepted; button
+  titles repeated, or compared with their case; button ids repeated; more than 10 rows in all;
+  several sections without titles; row ids repeated; a limit changed; section titles left out of the
+  request; ids stored for the inbox; the message stored as text; a list sent as buttons; buttons
+  without the scope; the status reported as a template; the kind of a tap lost; a description kept
+  for buttons; an empty description kept; a template's quick reply not called a button; list bodies
+  missing from the OpenAPI document. 1 in the web layer through the e2e test: the inbox no longer
+  showing a list.
+
+### Test commands and results (local, 2026-09-29)
+
+| Command                                                                                                                                                                                                                          | Result                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                                                                             | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                          |
+| `pnpm test` (unit)                                                                                                                                                                                                               | 377 passed, including 6 new in `api/api.test.ts` and `webhooks/webhooks.test.ts`                                                                                                                                                                                                                                                                                                                                        |
+| `pnpm test:integration` (PostgreSQL 18.6)                                                                                                                                                                                        | 521 passed, including 2 new in `api.test.ts`                                                                                                                                                                                                                                                                                                                                                                            |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                                                                                                                                                                        | 521 passed                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` on `api.spec.ts`, `api-keys.spec.ts`, `automations.spec.ts`, `inbox.spec.ts`, `inbox-teams.spec.ts`, `webhooks.spec.ts` and `webhook-events.spec.ts` | build passes / 28 passed: 14 tests on each project (5.8 min), on a local database created for the day's runs. The first run of `api.spec.ts` failed the new test on mobile-chromium: the list left before the buttons, which the test assumed could not happen; it now accepts either order (6 passed with the test repeated 3 times on each project), and the OpenAPI document says messages may leave in either order |
+| `pnpm test:e2e --project=chromium --project=mobile-chromium stores.spec.ts` (the e2e fix)                                                                                                                                        | Reproduced first: with the removal left to finish before the page was looked at, the old step failed on chromium as CI's did, waiting for the Commerce link on the not-found page (3.0 min). The same with the fix: 2 passed (26.9 s). The final code, the whole spec: 10 passed (3.9 min). Firefox, where CI saw the failure, is not installed here                                                                    |
+| Mutation checks                                                                                                                                                                                                                  | 22 regressions tried; all make a test fail                                                                                                                                                                                                                                                                                                                                                                              |
+
+### Known gaps
+
+- Not built: media headers, call-to-action URL buttons, product and catalog messages through the
+  API, location requests, replies quoting a message, editing or deleting sent messages.
+- The row limit follows the stricter reading (M-181) until Meta's documentation can be read.
+
 ## 2026-09-29 — Phase 5: stopping automation runs through the public API (P5-08, ADR-079)
 
 Status: **Implemented and locally verified against the Graph stand-in (no customer data).** An

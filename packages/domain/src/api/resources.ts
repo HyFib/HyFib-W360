@@ -30,6 +30,15 @@ import { normalizeEmail, normalizeTag } from '../contacts/fields';
 import { normalizePhone, phoneFromWaId, waRecipientFromPhone } from '../contacts/phone';
 import { contactForPhone } from '../contacts/service';
 import { emitTenantEvent } from '../messaging/events';
+import {
+  INTERACTIVE_LIMITS,
+  RESERVED_REPLY_ID_PREFIX,
+  isReservedReplyId,
+  listContent,
+  listInteractive,
+  replyButtonsContent,
+  replyButtonsInteractive,
+} from '../messaging/interactive';
 import { SERVICE_WINDOW_MS, type OutboundDeps } from '../messaging/outbound';
 import { STATUS_RANK } from '../messaging/status';
 import {
@@ -119,17 +128,20 @@ export const apiSendMessageSchema = z
   })
   .strict();
 
+/** The number a reply is sent from (ADR-070). */
+const replyFromField = z
+  .uuid()
+  .optional()
+  .describe(
+    'The id of the WhatsApp number the contact wrote to; optional when the company has one active number.',
+  );
+
 /** A free-form text reply to a contact who wrote in the last 24 hours (ADR-070). */
 export const apiSendTextSchema = z
   .object({
     type: z.literal('text'),
     to: phoneField,
-    from: z
-      .uuid()
-      .optional()
-      .describe(
-        'The id of the WhatsApp number the contact wrote to; optional when the company has one active number.',
-      ),
+    from: replyFromField,
     text: z
       .string({ error: 'Give the text' })
       .trim()
@@ -146,6 +158,162 @@ export const apiSendTextSchema = z
   })
   .strict();
 
+const LIMITS = INTERACTIVE_LIMITS;
+
+/** Text in a reply buttons or list message, trimmed, within Meta's limit (M-157, M-159, M-179). */
+const interactiveText = (label: string, max: number) =>
+  z
+    .string({ error: `Give the ${label}` })
+    .trim()
+    .min(1, `Give the ${label}`)
+    .max(max, `The ${label} is limited to ${max} characters`);
+
+/**
+ * A button's or row's id: the integration's own, returned when the customer taps it. Kept exactly
+ * as given (Meta refuses spaces around it), and never one of HyFib's own ids (ADR-080).
+ */
+const replyIdField = (max: number) =>
+  z
+    .string({ error: 'Give an id' })
+    .min(1, 'Give an id')
+    .max(max, `Ids are limited to ${max} characters`)
+    .refine((id) => id.trim() === id, 'Ids cannot start or end with a space')
+    .refine(
+      (id) => !isReservedReplyId(id),
+      `Ids cannot start with “${RESERVED_REPLY_ID_PREFIX}”: HyFib’s own buttons use it`,
+    );
+
+const interactiveFrame = {
+  to: phoneField,
+  from: replyFromField,
+  header: interactiveText('header', LIMITS.headerLength)
+    .optional()
+    .describe('Text shown above the body.'),
+  body: interactiveText('body', LIMITS.bodyLength).describe('The message.'),
+  footer: interactiveText('footer', LIMITS.footerLength)
+    .optional()
+    .describe('Small text shown below the body.'),
+};
+
+/** Adds an issue at each value already seen before it (compared as `key` gives them). */
+function refineUnique(
+  ctx: z.RefinementCtx,
+  values: { path: (string | number)[]; key: string }[],
+  message: string,
+) {
+  const seen = new Set<string>();
+  for (const value of values) {
+    if (seen.has(value.key)) ctx.addIssue({ code: 'custom', path: value.path, message });
+    seen.add(value.key);
+  }
+}
+
+/** Reply buttons to a contact who wrote in the last 24 hours (ADR-080). */
+export const apiSendButtonsSchema = z
+  .object({
+    type: z.literal('buttons'),
+    ...interactiveFrame,
+    buttons: z
+      .array(
+        z
+          .object({
+            id: replyIdField(LIMITS.buttonIdLength).describe(
+              'Returned as `reply.id` in the `message.received` webhook when the customer taps it.',
+            ),
+            title: interactiveText('button title', LIMITS.buttonTitleLength).describe(
+              'The button’s label, different from the others.',
+            ),
+          })
+          .strict(),
+      )
+      .min(1, 'Give at least one button')
+      .max(LIMITS.buttons, `A message has at most ${LIMITS.buttons} buttons`)
+      .describe('The buttons, each with its own id and label.'),
+  })
+  .strict()
+  .superRefine((data, ctx) => {
+    refineUnique(
+      ctx,
+      data.buttons.map((b, i) => ({ path: ['buttons', i, 'title'], key: b.title.toLowerCase() })),
+      'Give each button a different title',
+    );
+    refineUnique(
+      ctx,
+      data.buttons.map((b, i) => ({ path: ['buttons', i, 'id'], key: b.id })),
+      'Give each button a different id',
+    );
+  });
+
+/** A list message to a contact who wrote in the last 24 hours (ADR-080). */
+export const apiSendListSchema = z
+  .object({
+    type: z.literal('list'),
+    ...interactiveFrame,
+    button: interactiveText('list button', LIMITS.listButtonLength).describe(
+      'The label of the button that opens the list.',
+    ),
+    sections: z
+      .array(
+        z
+          .object({
+            title: interactiveText('section title', LIMITS.sectionTitleLength)
+              .optional()
+              .describe('Required when there is more than one section.'),
+            rows: z
+              .array(
+                z
+                  .object({
+                    id: replyIdField(LIMITS.rowIdLength).describe(
+                      'Returned as `reply.id` in the `message.received` webhook when the customer picks the row.',
+                    ),
+                    title: interactiveText('row title', LIMITS.rowTitleLength),
+                    description: interactiveText('row description', LIMITS.rowDescriptionLength)
+                      .optional()
+                      .describe('Shown under the row’s title.'),
+                  })
+                  .strict(),
+              )
+              .min(1, 'Give each section at least one row')
+              .max(LIMITS.rows, `A list has at most ${LIMITS.rows} rows`),
+          })
+          .strict(),
+      )
+      .min(1, 'Give at least one section')
+      .max(LIMITS.sections, `A list has at most ${LIMITS.sections} sections`)
+      .describe(
+        `The rows the customer picks from, in sections: at most ${LIMITS.rows} rows in all, each with its own id.`,
+      ),
+  })
+  .strict()
+  .superRefine((data, ctx) => {
+    const rows = data.sections.flatMap((section, s) =>
+      section.rows.map((row, r) => ({ row, path: ['sections', s, 'rows', r] })),
+    );
+    if (rows.length > LIMITS.rows) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['sections'],
+        message: `A list has at most ${LIMITS.rows} rows in all`,
+      });
+    }
+    if (data.sections.length > 1) {
+      data.sections.forEach((section, s) => {
+        if (!section.title) {
+          ctx.addIssue({
+            code: 'custom',
+            path: ['sections', s, 'title'],
+            message: 'Give each section a title when there is more than one',
+          });
+        }
+      });
+    }
+    refineUnique(
+      ctx,
+      rows.map(({ row, path }) => ({ path: [...path, 'id'], key: row.id })),
+      'Give each row a different id',
+    );
+  });
+
 export interface ApiTemplate {
   id: string;
   name: string;
@@ -158,7 +326,7 @@ export interface ApiTemplate {
 
 export interface ApiMessage {
   id: string;
-  type: 'template' | 'text';
+  type: 'template' | 'text' | 'interactive';
   status: string;
   statusAt: string;
   to: string | null;
@@ -705,28 +873,38 @@ const windowClosed = () =>
     { details: { apiReason: 'window_closed' } },
   );
 
+/** What a reply stores and sends (ADR-070, ADR-080). */
+interface ApiReply {
+  type: 'text' | 'interactive';
+  /** The message's stored content, as the inbox shows it. */
+  content: Record<string, unknown>;
+  preview: string;
+  /** The Graph request's `type` and its object (`text` or `interactive`). */
+  request: Record<string, unknown>;
+}
+
 /**
- * Sends a free-form text message to a contact who wrote to the number in the last 24 hours, as the
- * inbox's reply does (ADR-070). The contact is never created: a number that is not a contact, has
- * no conversation on the number, was erased, or last wrote more than 24 hours ago gets one answer,
- * so the refusal tells a key without `contacts.read` nothing more than a sent reply would. The
- * reply takes the conversation over from an automation handling it (its queued messages are
- * cancelled), but it is not a member's reply: the conversation keeps waiting for a member. Exactly
- * one send per idempotency key; the window is checked again when the worker sends.
+ * Sends a free-form message to a contact who wrote to the number in the last 24 hours, as the
+ * inbox's reply does (ADR-070): text, reply buttons or a list (ADR-080). The contact is never
+ * created: a number that is not a contact, has no conversation on the number, was erased, or last
+ * wrote more than 24 hours ago gets one answer, so the refusal tells a key without `contacts.read`
+ * nothing more than a sent reply would. The reply takes the conversation over from an automation
+ * handling it (its queued messages are cancelled), but it is not a member's reply: the
+ * conversation keeps waiting for a member. Exactly one send per idempotency key; the window is
+ * checked again when the worker sends.
  */
-export async function apiSendText(
+async function sendReply(
   deps: OutboundDeps,
   ctx: ApiContext,
-  input: unknown,
+  target: { to: string; from?: string | undefined },
   idempotency: IdempotencyInput,
+  reply: ApiReply,
 ): Promise<ApiResponse> {
-  assertScope(ctx, 'messages.reply');
-  const data = parseInput(apiSendTextSchema, input);
-  const phone = explicitPhone(data.to);
+  const phone = explicitPhone(target.to);
   const now = deps.clock.now();
   return deps.db.run(ctx.scope, (tx) =>
     idempotent(tx, ctx, idempotency, now, async () => {
-      const channel = await sendingNumber(tx, ctx, data.from);
+      const channel = await sendingNumber(tx, ctx, target.from);
       if (channel.status !== 'active') {
         throw new AppError('precondition_failed', 'This WhatsApp number is not active.');
       }
@@ -794,8 +972,8 @@ export async function apiSendText(
         conversationId: conversation.id,
         channelAccountId: channel.id,
         direction: 'outbound',
-        type: 'text',
-        content: { text: data.text },
+        type: reply.type,
+        content: reply.content,
         status: 'queued',
         statusRank: STATUS_RANK.queued,
         senderType: 'api',
@@ -810,8 +988,7 @@ export async function apiSendText(
           messaging_product: 'whatsapp',
           recipient_type: 'individual',
           to: identity.waId,
-          type: 'text',
-          text: { body: data.text, preview_url: data.previewUrl },
+          ...reply.request,
         },
         actorUserId: null,
       });
@@ -819,7 +996,7 @@ export async function apiSendText(
         .update(conversations)
         .set({
           lastMessageAt: now,
-          lastMessagePreview: data.text.slice(0, 200),
+          lastMessagePreview: reply.preview.slice(0, 200),
           version: sql`${conversations.version} + 1`,
         })
         .where(
@@ -846,7 +1023,7 @@ export async function apiSendText(
         body: {
           data: {
             id: messageId,
-            type: 'text',
+            type: reply.type,
             status: 'queued',
             contactId: contact.id,
             channelId: channel.id,
@@ -857,7 +1034,61 @@ export async function apiSendText(
   );
 }
 
-/** POST /api/v1/messages: a template (the default) or a text reply, by the body's `type`. */
+/** A free-form text reply (ADR-070); see `sendReply`. */
+export async function apiSendText(
+  deps: OutboundDeps,
+  ctx: ApiContext,
+  input: unknown,
+  idempotency: IdempotencyInput,
+): Promise<ApiResponse> {
+  assertScope(ctx, 'messages.reply');
+  const data = parseInput(apiSendTextSchema, input);
+  return sendReply(deps, ctx, data, idempotency, {
+    type: 'text',
+    content: { text: data.text },
+    preview: data.text,
+    request: { type: 'text', text: { body: data.text, preview_url: data.previewUrl } },
+  });
+}
+
+/** Reply buttons (ADR-080); see `sendReply`. */
+export async function apiSendButtons(
+  deps: OutboundDeps,
+  ctx: ApiContext,
+  input: unknown,
+  idempotency: IdempotencyInput,
+): Promise<ApiResponse> {
+  assertScope(ctx, 'messages.reply');
+  const data = parseInput(apiSendButtonsSchema, input);
+  return sendReply(deps, ctx, data, idempotency, {
+    type: 'interactive',
+    content: replyButtonsContent(data),
+    preview: data.body,
+    request: { type: 'interactive', interactive: replyButtonsInteractive(data) },
+  });
+}
+
+/** A list message (ADR-080); see `sendReply`. */
+export async function apiSendList(
+  deps: OutboundDeps,
+  ctx: ApiContext,
+  input: unknown,
+  idempotency: IdempotencyInput,
+): Promise<ApiResponse> {
+  assertScope(ctx, 'messages.reply');
+  const data = parseInput(apiSendListSchema, input);
+  return sendReply(deps, ctx, data, idempotency, {
+    type: 'interactive',
+    content: listContent(data),
+    preview: data.body,
+    request: { type: 'interactive', interactive: listInteractive(data) },
+  });
+}
+
+/**
+ * POST /api/v1/messages: a template (the default), or a reply inside the service window as text,
+ * reply buttons or a list, by the body's `type`.
+ */
 export async function apiSendMessage(
   deps: OutboundDeps,
   ctx: ApiContext,
@@ -869,11 +1100,13 @@ export async function apiSendMessage(
       ? (input as { type?: unknown }).type
       : undefined;
   if (type === 'text') return apiSendText(deps, ctx, input, idempotency);
+  if (type === 'buttons') return apiSendButtons(deps, ctx, input, idempotency);
+  if (type === 'list') return apiSendList(deps, ctx, input, idempotency);
   if (type === undefined || type === 'template') {
     return apiSendTemplate(deps, ctx, input, idempotency);
   }
-  throw new AppError('validation_failed', 'Send a template or a text message.', {
-    issues: [{ path: 'type', message: 'Use template or text.' }],
+  throw new AppError('validation_failed', 'Send a template, a text, buttons or a list.', {
+    issues: [{ path: 'type', message: 'Use template, text, buttons or list.' }],
   });
 }
 
@@ -935,7 +1168,7 @@ export async function apiGetMessage(
   const template = (row.content as { template?: { name?: string } }).template;
   return {
     id: row.id,
-    type: row.type === 'text' ? 'text' : 'template',
+    type: row.type === 'text' || row.type === 'interactive' ? row.type : 'template',
     status: row.status,
     statusAt: row.statusAt.toISOString(),
     to: row.phone,

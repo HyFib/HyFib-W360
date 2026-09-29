@@ -1226,6 +1226,15 @@ message left."). The conversation is not handed to people: if the customer wrote
 unassigned, for a member in the inbox; assign it or let routing pick it up when the customer writes
 again.
 
+**A reply with buttons or a list is refused or fails.** A 422 names the field: at most 3 buttons
+with different titles (up to 20 characters) and ids (up to 256); a list button label up to 20
+characters, up to 10 sections with a title on each when there are several (up to 24 characters),
+at most 10 rows in all with different ids (up to 200 characters), titles up to 24 and descriptions
+up to 72; ids cannot start or end with a space, or start with `w360` (HyFib's own buttons use it).
+A 412 `window_closed` means the number has not written in the last 24 hours, as for text. A
+message that fails after it was queued shows WhatsApp's error on `GET /api/v1/messages/{id}` and in
+the inbox; limits Meta applies beyond its published description would show there first.
+
 **The company is suspended or its plan ended.** Keys keep reading; creating contacts, recording
 consent, sending, and starting and stopping automations answer 423 until the company is active
 again.

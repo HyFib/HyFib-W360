@@ -58,6 +58,24 @@ export const WEBHOOK_MESSAGE_STATUSES = [
   'unknown_outcome',
 ] as const;
 
+/** The reply a contact tapped, as webhooks and the API give it (ADR-080 added type and description). */
+export const tappedReplySchema = z
+  .object({
+    id: z.string().nullable().describe('The id the button or row was sent with.'),
+    title: z.string().nullable(),
+    type: z
+      .enum(['button', 'list'])
+      .nullable()
+      .describe(
+        'button: a reply button or a template’s quick reply; list: a row of a list message.',
+      ),
+    description: z.string().nullable().describe('The description of the list row, if it had one.'),
+  })
+  .nullable()
+  .describe('The button or list reply the contact tapped.');
+
+export type TappedReply = z.infer<typeof tappedReplySchema>;
+
 export const messageReceivedPayloadSchema = envelope(
   'message.received',
   z.object({
@@ -72,10 +90,7 @@ export const messageReceivedPayloadSchema = envelope(
         .string()
         .nullable()
         .describe('The text, a caption, the title of a tapped reply or a reaction; null if none.'),
-      reply: z
-        .object({ id: z.string().nullable(), title: z.string().nullable() })
-        .nullable()
-        .describe('The button or list reply the contact tapped.'),
+      reply: tappedReplySchema,
       mimeType: z.string().nullable().describe('For media messages (the media is not attached).'),
       receivedAt: z.iso.datetime(),
     }),
@@ -267,13 +282,19 @@ export interface StoredWebhookEvent {
 
 const str = (value: unknown): string | null => (typeof value === 'string' ? value : null);
 
+/** Meta's `interactive.type` of a tap (M-158), as `reply.type` names it. */
+const INTERACTIVE_REPLY_TYPES: Record<string, 'button' | 'list'> = {
+  button_reply: 'button',
+  list_reply: 'list',
+};
+
 /** The readable part of an inbound message: its text, the reply tapped, the media type. */
 export function inboundSummary(
   type: string,
   content: Record<string, unknown>,
 ): {
   text: string | null;
-  reply: { id: string | null; title: string | null } | null;
+  reply: TappedReply;
   mimeType: string | null;
 } {
   switch (type) {
@@ -288,14 +309,27 @@ export function inboundSummary(
     case 'button':
       return {
         text: str(content.text),
-        reply: { id: str(content.payload), title: str(content.text) },
+        reply: {
+          id: str(content.payload),
+          title: str(content.text),
+          type: 'button',
+          description: null,
+        },
         mimeType: null,
       };
     case 'interactive': {
       const reply = (content.reply ?? null) as Record<string, unknown> | null;
+      const kind = INTERACTIVE_REPLY_TYPES[str(content.interactiveType) ?? ''] ?? null;
       return {
         text: reply ? str(reply.title) : null,
-        reply: reply ? { id: str(reply.id), title: str(reply.title) } : null,
+        reply: reply
+          ? {
+              id: str(reply.id),
+              title: str(reply.title),
+              type: kind,
+              description: kind === 'list' ? str(reply.description) || null : null,
+            }
+          : null,
         mimeType: null,
       };
     }

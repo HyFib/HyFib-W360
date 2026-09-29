@@ -187,9 +187,16 @@ function Body({ type, content }: { type: string; content: unknown }) {
         );
       }
       if (text(c.body)) {
-        // A question with reply buttons sent by an automation.
+        // Reply buttons (an automation's question or the API's) or a list sent through the API.
         const buttons = Array.isArray(c.buttons)
           ? (c.buttons as unknown[]).map(text).filter(Boolean)
+          : [];
+        const list =
+          typeof c.list === 'object' && c.list !== null
+            ? (c.list as { button?: unknown; sections?: unknown })
+            : null;
+        const sections = Array.isArray(list?.sections)
+          ? (list.sections as { title?: unknown; rows?: unknown }[])
           : [];
         return (
           <div className="grid gap-1">
@@ -198,6 +205,29 @@ function Body({ type, content }: { type: string; content: unknown }) {
             {text(c.footer) ? <p className="text-xs opacity-80">{text(c.footer)}</p> : null}
             {buttons.length > 0 ? (
               <p className="text-xs opacity-80">Buttons: {buttons.join(' · ')}</p>
+            ) : null}
+            {list ? (
+              <div className="grid gap-1 text-xs opacity-80">
+                <p>List: {text(list.button) ?? ''}</p>
+                {sections.map((section, i) => (
+                  <div key={i}>
+                    {text(section.title) ? (
+                      <p className="font-medium">{text(section.title)}</p>
+                    ) : null}
+                    <ul className="list-disc pl-4">
+                      {(Array.isArray(section.rows)
+                        ? (section.rows as { title?: unknown; description?: unknown }[])
+                        : []
+                      ).map((row, j) => (
+                        <li key={j} className="break-words">
+                          {text(row.title) ?? ''}
+                          {text(row.description) ? ` · ${text(row.description)}` : ''}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ))}
+              </div>
             ) : null}
           </div>
         );

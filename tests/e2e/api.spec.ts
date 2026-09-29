@@ -3,6 +3,7 @@ import { expect, test } from './fixtures';
 import {
   connectTestChannel,
   inboundMessage,
+  listReply,
   messagingConfigured,
   randomWaId,
   sendSignedWebhook,
@@ -319,6 +320,152 @@ test('a key answers a customer who wrote, reads the conversation and resolves it
   await page.reload();
   await expect(page.getByRole('button', { name: 'Resolve' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Reopen' })).toHaveCount(0);
+});
+
+test('a key sends reply buttons and a list to a customer who wrote: the inbox shows them, and a picked row comes back through the API', async ({
+  page,
+  request,
+}) => {
+  const email = uniqueEmail('apilist');
+  const slug = `apilist-${Date.now().toString(36)}`;
+  await signUpAndVerify(page, { name: 'Lata List', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('Sunrise Clinic');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+  const { wabaId, phoneNumberId } = await connectTestChannel({ ownerEmail: email, slug });
+
+  await page.goto(`/c/${slug}/settings/api-keys`);
+  await expect(page.getByText(/replies \(text, buttons and lists\)/)).toBeVisible();
+  await page.getByLabel('Name', { exact: true }).fill('Booking');
+  await page.getByRole('checkbox', { name: /Reply with text, buttons and lists/ }).check();
+  await page.getByRole('checkbox', { name: /Read conversations/ }).check();
+  await page.getByRole('button', { name: 'Create API key' }).click();
+  const token = await page.getByLabel('API key', { exact: true }).inputValue();
+  await page.getByRole('button', { name: 'I have stored the key' }).click();
+  const auth = { Authorization: `Bearer ${token}` };
+  const post = (data: Record<string, unknown>) =>
+    request.post('/api/v1/messages', {
+      headers: { ...auth, 'Idempotency-Key': randomUUID() },
+      data,
+    });
+
+  const waId = randomWaId();
+  await sendSignedWebhook(
+    request,
+    inboundMessage(wabaId, phoneNumberId, waId, 'Can I move my appointment?'),
+  );
+  await page.goto(`/c/${slug}/inbox`);
+  const conversation = page.getByRole('link', { name: /Priya Customer/ });
+  await expect(conversation).toBeVisible({ timeout: 20_000 });
+
+  // The booking system answers with buttons, then with a list of times.
+  const buttons = await post({
+    type: 'buttons',
+    to: `+${waId}`,
+    body: 'Your appointment is tomorrow at 10:00. Keep it?',
+    buttons: [
+      { id: 'appt-9:keep', title: 'Keep it' },
+      { id: 'appt-9:move', title: 'Move it' },
+    ],
+  });
+  expect(buttons.status()).toBe(201);
+  const list = await post({
+    type: 'list',
+    to: `+${waId}`,
+    header: 'New time',
+    body: 'Pick a time that suits you.',
+    button: 'See times',
+    sections: [
+      {
+        title: 'Tomorrow',
+        rows: [
+          { id: 'slot-11', title: '11:00', description: 'Dr Rao' },
+          { id: 'slot-15', title: '15:00', description: 'Dr Iyer' },
+        ],
+      },
+    ],
+  });
+  expect(list.status()).toBe(201);
+  const listId = ((await list.json()).data as { id: string; type: string }).id;
+  // HyFib's own ids are refused.
+  const reserved = await post({
+    type: 'buttons',
+    to: `+${waId}`,
+    body: 'How did we do?',
+    buttons: [{ id: 'w360csat:x', title: 'Great' }],
+  });
+  expect(reserved.status()).toBe(422);
+
+  // The worker sends both, in either order; the Graph stand-in checks them against Meta's limits.
+  let sent: Awaited<ReturnType<typeof standInRequests>> = [];
+  await expect(async () => {
+    sent = (await standInRequests(request)).filter(
+      (r) =>
+        r.path === `/v26.0/${phoneNumberId}/messages` && (r.body as { to?: string }).to === waId,
+    );
+    expect(sent).toHaveLength(2);
+  }).toPass({ timeout: 30_000 });
+  const kind = (r: (typeof sent)[number]) =>
+    (r.body as { interactive: { type: string } }).interactive;
+  expect(sent.map((r) => kind(r).type).sort()).toEqual(['button', 'list']);
+  const sentList = sent.find((r) => kind(r).type === 'list');
+  expect(kind(sentList!)).toEqual({
+    type: 'list',
+    header: { type: 'text', text: 'New time' },
+    body: { text: 'Pick a time that suits you.' },
+    action: {
+      button: 'See times',
+      sections: [
+        {
+          title: 'Tomorrow',
+          rows: [
+            { id: 'slot-11', title: '11:00', description: 'Dr Rao' },
+            { id: 'slot-15', title: '15:00', description: 'Dr Iyer' },
+          ],
+        },
+      ],
+    },
+  });
+  await expect(async () => {
+    const status = await request.get(`/api/v1/messages/${listId}`, { headers: auth });
+    expect((await status.json()).data).toMatchObject({ type: 'interactive', status: 'accepted' });
+  }).toPass({ timeout: 30_000 });
+
+  // Members see what the key sent.
+  await page.reload();
+  await page.getByRole('link', { name: /Priya Customer/ }).click();
+  await expect(page.getByText('Buttons: Keep it · Move it')).toBeVisible();
+  await expect(page.getByText('List: See times')).toBeVisible();
+  await expect(page.getByText('11:00 · Dr Rao')).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+
+  // The customer picks 15:00: the key reads the tap with the row's id, kind and description.
+  await sendSignedWebhook(
+    request,
+    listReply(
+      wabaId,
+      phoneNumberId,
+      waId,
+      { id: 'slot-15', title: '15:00', description: 'Dr Iyer' },
+      String(sentList?.wamid),
+    ),
+  );
+  const listed = await request.get('/api/v1/conversations', { headers: auth });
+  const [open] = ((await listed.json()) as { data: { id: string }[] }).data;
+  await expect(async () => {
+    const newest = await request.get(`/api/v1/conversations/${open!.id}/messages?limit=1`, {
+      headers: auth,
+    });
+    expect((await newest.json()).data).toEqual([
+      expect.objectContaining({
+        direction: 'inbound',
+        type: 'interactive',
+        text: '15:00',
+        reply: { id: 'slot-15', title: '15:00', type: 'list', description: 'Dr Iyer' },
+      }),
+    ]);
+  }).toPass({ timeout: 20_000 });
 });
 
 test('a key starts an automation made to start through the API: its template goes to a contact who never wrote, and the tap continues it', async ({

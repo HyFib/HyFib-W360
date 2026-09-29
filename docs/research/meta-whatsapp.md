@@ -303,6 +303,16 @@ The OpenAPI spec (same file as above) was read again for template button paramet
 | M-177 | Quick-reply payloads (send) | A template send can set each quick-reply button's payload with a `button` component: `sub_type` `quick_reply`, `index` and `parameters` `[{"type": "payload", "payload": "…"}]` ("Developer-defined payload that is returned when the quick reply button is clicked"). The spec's example uses `index: '0'`, although its `index` pattern reads `^[2-6, 11-14]$`. No payload length limit was found. | `sub_type: quick_reply`, `index`, `ButtonPayloadParameter.payload` | https://github.com/facebook/openapi/blob/main/business-messaging-api_v23.0.yaml (`TemplateObject`, `ButtonComponent`, `ButtonPayloadParameter`) | OFF-GH-SPEC | High (shape); index pattern conflicting |
 | M-178 | Quick-reply taps (receive) | A tap arrives as an inbound message of `type` `button`, with `button.payload` and `button.text` (both required) and `context.id`, "WhatsApp message ID of the message containing the button the WhatsApp user tapped" (required). | `ButtonMessage`, `button.payload`, `context.id` | same spec (`ButtonMessage`) | OFF-GH-SPEC | High |
 
+## 17. Addendum: list messages (fetched 2026-09-29 for ADR-080)
+
+The OpenAPI spec (`facebook/openapi`, `business-messaging-api_v23.0.yaml`) was downloaded again from raw.githubusercontent.com on 2026-09-29 (SHA-256 of the file `5c1973265369944b…`): schemas `ActionObject`, `SectionObject` and `InteractiveListReplyContent`. The GitHub API for the repository was not reachable from this session, so the file's latest commit was not read; developers.facebook.com was still blocked.
+
+| ID | Topic | Claim (paraphrased) | Exact identifiers (if shown) | Source URL | Evidence type | Confidence |
+|---|---|---|---|---|---|---|
+| M-179 | List messages (send) | An `interactive` message of `type: "list"` has an `action` with `button` (the label of the button that opens the list: not empty, unique, at most 20 characters, emojis but no markdown) and `sections`, 1 to 10 `SectionObject`s. A section's `title` has at most 24 characters and is required when the message has more than one section. `rows`: at most 10 per section, each with `id` ("unique row identifier", at most 200 characters), `title` (at most 24) and an optional `description` (at most 72). Body, header and footer as M-159. | `action.button`, `action.sections[].title`, `action.sections[].rows[].id`, `.title`, `.description` | https://github.com/facebook/openapi/blob/main/business-messaging-api_v23.0.yaml | OFF-GH-SPEC | High |
+| M-180 | List replies (webhook) | A pick arrives as `type: "interactive"` with `interactive.type: "list_reply"` and `list_reply` `{ id, title, description }` (the row's id, title and description; the schema marks all three required, with the examples `priority_express`, `Priority Mail Express`, `Next Day to 2 Days`). How the description arrives for a row sent without one is not stated. | `InteractiveListReplyContent`, `list_reply.id`, `.title`, `.description` | same spec | OFF-GH-SPEC | High (shape); unconfirmed (row without a description) |
+| M-181 | Rows per list (unconfirmed) | The spec limits `rows` to 10 per section and sections to 10, which would allow 100 rows; Meta's prose documentation is recalled as limiting a list to 10 rows in all, but could not be read in this session. HyFib enforces the stricter reading: at most 10 rows in all. | `SectionObject.rows` (`maxItems: 10`) | same spec | OFF-GH-SPEC (per section only) | Low (total per message) |
+
 ## Unconfirmed / conflicting
 
 1. **Access verification and the 200-customer cap (M-022 vs M-023).** The changelog says access verification is no longer required. The Embedded Signup overview still ties the rise from 10 to 200 new customers per 7 days to Business Verification, App Review and Access Verification. The current trigger for the higher cap is unknown.
@@ -320,6 +330,7 @@ The OpenAPI spec (same file as above) was read again for template button paramet
 13. **Account model changes.** The WABA docs page is now titled "WhatsApp accounts and Messaging accounts", and a page "Updates to WhatsApp Business accounts" (`/account-model-evolution`) exists. Their content was not retrieved; terminology or the account hierarchy may be changing.
 14. **Webhook response-time requirement** was not found.
 15. **Opt-in rules, data-deletion callbacks and deauthorization callbacks** specific to WhatsApp were not confirmed.
+16. **Rows per list message (M-181).** The spec allows 10 rows per section and 10 sections; the limit of 10 rows per message recalled from Meta's documentation was not confirmed. HyFib sends at most 10 rows in all.
 
 ## Implications for implementation
 
