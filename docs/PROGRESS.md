@@ -55,14 +55,14 @@ window, as members do in the inbox.
 
 ### Test commands and results (local, 2026-09-29)
 
-| Command | Result |
-| --- | --- |
-| `pnpm lint` / `pnpm format:check` / `pnpm typecheck` | 0 problems / all files formatted / all workspace packages pass |
-| `pnpm test` (unit) | 339 passed |
-| `pnpm test:integration` (PostgreSQL 18.6) | 462 passed, including 5 new tests in `api.test.ts` and 1 in `automations.test.ts` |
-| `pnpm test:integration` against PostgreSQL 17.11 (Docker) | 462 passed |
-| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | E2ERESULT |
-| Mutation checks | 25 regressions tried; 23 make a test fail, 2 cannot be observed (above) |
+| Command                                                                     | Result                                                                                                                       |
+| --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                               |
+| `pnpm test` (unit)                                                          | 339 passed                                                                                                                   |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 462 passed, including 5 new tests in `api.test.ts` and 1 in `automations.test.ts`                                            |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 462 passed                                                                                                                   |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 90 passed (45 × 2) in one full run (25.1 min), including the new reply test in `api.spec.ts` on both projects |
+| Mutation checks                                                             | 25 regressions tried; 23 make a test fail, 2 cannot be observed (above)                                                      |
 
 ### Known gaps
 
