@@ -43,6 +43,8 @@ export interface RazorpayPayment {
   method: string | null;
   errorCode: string | null;
   errorDescription: string | null;
+  /** The invoice a subscription charge paid (null for other payments). */
+  invoiceId: string | null;
 }
 
 export interface RazorpayToken {
@@ -72,6 +74,39 @@ export interface RazorpayDispute {
   status: 'open' | 'under_review' | 'won' | 'lost' | 'closed' | string;
 }
 
+/**
+ * One transaction of a day's settlement report (R-110, R-111), with only what reconciliation needs:
+ * notes, description, order receipt and card fields are not read (they can carry another
+ * integration's customer data).
+ */
+export interface RazorpayReconItem {
+  entityId: string;
+  /** `payment`, `refund`, `transfer`, `adjustment`, or another type Razorpay adds. */
+  type: string;
+  amount: number;
+  debit: number;
+  credit: number;
+  fee: number;
+  tax: number;
+  currency: string | null;
+  onHold: boolean | null;
+  settled: boolean | null;
+  settlementId: string | null;
+  settlementUtr: string | null;
+  /** Unix seconds. */
+  createdAt: number | null;
+  settledAt: number | null;
+  paymentId: string | null;
+  orderId: string | null;
+  disputeId: string | null;
+  method: string | null;
+}
+
+/** A page of a settlement report: `null` where Razorpay returned an item HyFib cannot read. */
+export interface RazorpayReconPage {
+  items: (RazorpayReconItem | null)[];
+}
+
 /** A Payment Link as Razorpay reports it (research R-016, R-108). */
 export interface RazorpayPaymentLink {
   id: string;
@@ -81,6 +116,65 @@ export interface RazorpayPaymentLink {
   amountPaid: number;
   currency: string;
   shortUrl: string | null;
+}
+
+/** A Razorpay plan (R-063): what a subscription charges each billing cycle. */
+export interface RazorpayPlan {
+  id: string;
+  period: string;
+  interval: number;
+  amount: number;
+  currency: string;
+}
+
+/** Subscription states (R-066; `paused` is on the states page, not in the API's enum). */
+export const RAZORPAY_SUBSCRIPTION_STATUSES = [
+  'created',
+  'authenticated',
+  'active',
+  'pending',
+  'halted',
+  'paused',
+  'cancelled',
+  'completed',
+  'expired',
+] as const;
+export type RazorpaySubscriptionStatus = (typeof RAZORPAY_SUBSCRIPTION_STATUSES)[number];
+
+/** A subscription as Razorpay reports it (R-064, R-066), with the fields HyFib follows. */
+export interface RazorpaySubscription {
+  id: string;
+  planId: string;
+  /** Null when Razorpay reports a status HyFib does not know. */
+  status: RazorpaySubscriptionStatus | null;
+  /** Unix seconds: the current billing cycle, the next charge and the end. */
+  currentStart: number | null;
+  currentEnd: number | null;
+  chargeAt: number | null;
+  endedAt: number | null;
+  paidCount: number;
+  totalCount: number | null;
+}
+
+/** An invoice of a subscription (R-065): each billing cycle's charge and the period it paid. */
+export interface RazorpayInvoice {
+  id: string;
+  subscriptionId: string | null;
+  paymentId: string | null;
+  /** `paid`, `issued`, `partially_paid`, `cancelled`, `expired`, ... */
+  status: string;
+  amount: number;
+  amountPaid: number;
+  currency: string | null;
+  /** Unix seconds. */
+  paidAt: number | null;
+  billingStart: number | null;
+  billingEnd: number | null;
+}
+
+/** A page of a subscription's invoices: `null` where Razorpay returned one HyFib cannot read. */
+export interface RazorpayInvoicePage {
+  items: (RazorpayInvoice | null)[];
 }
 
 const PRE_SEND_ERROR_CODES = new Set([
@@ -125,6 +219,7 @@ function mapPayment(json: Record<string, unknown>): RazorpayPayment | null {
     method: str(json.method),
     errorCode: str(json.error_code),
     errorDescription: str(json.error_description),
+    invoiceId: str(json.invoice_id),
   };
 }
 
@@ -141,6 +236,80 @@ function mapOrder(json: Record<string, unknown>): RazorpayOrder | null {
   };
 }
 
+const RECON_ID_RE = /^[A-Za-z0-9_]{1,64}$/;
+
+/**
+ * Reads one settlement report item. Every field HyFib keeps must have the documented shape: an
+ * item with a field of another shape is unreadable as a whole (null), never read partly.
+ */
+function mapReconItem(json: Record<string, unknown>): RazorpayReconItem | null {
+  const entityId = str(json.entity_id);
+  const type = str(json.type);
+  const amount = num(json.amount);
+  if (!entityId || !RECON_ID_RE.test(entityId) || !type || !/^[a-z_]{1,32}$/.test(type))
+    return null;
+  if (amount === null || !Number.isSafeInteger(amount) || amount < 0) return null;
+  const minor = (value: unknown): number | undefined => {
+    if (value === null || value === undefined) return 0;
+    return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+      ? value
+      : undefined;
+  };
+  const debit = minor(json.debit);
+  const credit = minor(json.credit);
+  const fee = minor(json.fee);
+  const tax = minor(json.tax);
+  if (debit === undefined || credit === undefined || fee === undefined || tax === undefined) {
+    return null;
+  }
+  const text = (value: unknown, re: RegExp): string | null | undefined => {
+    if (value === null || value === undefined || value === '') return null;
+    return typeof value === 'string' && re.test(value) ? value : undefined;
+  };
+  const flag = (value: unknown): boolean | null | undefined =>
+    value === null || value === undefined ? null : typeof value === 'boolean' ? value : undefined;
+  const time = (value: unknown): number | null | undefined =>
+    value === null || value === undefined
+      ? null
+      : typeof value === 'number' && Number.isSafeInteger(value) && value > 0
+        ? value
+        : undefined;
+  const fields = {
+    currency: text(json.currency, /^[A-Z]{3}$/),
+    onHold: flag(json.on_hold),
+    settled: flag(json.settled),
+    settlementId: text(json.settlement_id, RECON_ID_RE),
+    settlementUtr: text(json.settlement_utr, /^[A-Za-z0-9]{1,64}$/),
+    createdAt: time(json.created_at),
+    settledAt: time(json.settled_at),
+    paymentId: text(json.payment_id, RECON_ID_RE),
+    orderId: text(json.order_id, RECON_ID_RE),
+    disputeId: text(json.dispute_id, RECON_ID_RE),
+    method: text(json.method, /^[a-z_]{1,32}$/),
+  };
+  if (Object.values(fields).some((value) => value === undefined)) return null;
+  return {
+    entityId,
+    type,
+    amount,
+    debit,
+    credit,
+    fee,
+    tax,
+    currency: fields.currency ?? null,
+    onHold: fields.onHold ?? null,
+    settled: fields.settled ?? null,
+    settlementId: fields.settlementId ?? null,
+    settlementUtr: fields.settlementUtr ?? null,
+    createdAt: fields.createdAt ?? null,
+    settledAt: fields.settledAt ?? null,
+    paymentId: fields.paymentId ?? null,
+    orderId: fields.orderId ?? null,
+    disputeId: fields.disputeId ?? null,
+    method: fields.method ?? null,
+  };
+}
+
 function mapPaymentLink(json: Record<string, unknown>): RazorpayPaymentLink | null {
   const id = str(json.id);
   const amount = num(json.amount);
@@ -154,6 +323,110 @@ function mapPaymentLink(json: Record<string, unknown>): RazorpayPaymentLink | nu
     amountPaid: num(json.amount_paid) ?? 0,
     currency: str(json.currency) ?? '',
     shortUrl: shortUrl && /^https:\/\//.test(shortUrl) && shortUrl.length <= 300 ? shortUrl : null,
+  };
+}
+
+const PLAN_ID_RE = /^plan_[A-Za-z0-9]{1,40}$/;
+const SUBSCRIPTION_ID_RE = /^sub_[A-Za-z0-9]{1,40}$/;
+const INVOICE_ID_RE = /^inv_[A-Za-z0-9]{1,40}$/;
+const PAYMENT_ID_RE = /^pay_[A-Za-z0-9]{1,40}$/;
+
+/** A Unix time in seconds: undefined when present but not one (the entity is then unreadable). */
+function unixTime(value: unknown): number | null | undefined {
+  if (value === null || value === undefined) return null;
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
+function mapPlan(json: Record<string, unknown>): RazorpayPlan | null {
+  const id = str(json.id);
+  const item = json.item as Record<string, unknown> | undefined;
+  const amount = num(item?.amount);
+  const interval = num(json.interval);
+  if (!id || !PLAN_ID_RE.test(id) || amount === null || interval === null) return null;
+  return {
+    id,
+    period: str(json.period) ?? '',
+    interval,
+    amount,
+    currency: str(item?.currency) ?? '',
+  };
+}
+
+function mapSubscription(json: Record<string, unknown>): RazorpaySubscription | null {
+  const id = str(json.id);
+  const planId = str(json.plan_id);
+  if (!id || !SUBSCRIPTION_ID_RE.test(id) || !planId || !PLAN_ID_RE.test(planId)) return null;
+  const times = {
+    currentStart: unixTime(json.current_start),
+    currentEnd: unixTime(json.current_end),
+    chargeAt: unixTime(json.charge_at),
+    endedAt: unixTime(json.ended_at),
+  };
+  if (Object.values(times).some((value) => value === undefined)) return null;
+  const paidCount = json.paid_count ?? 0;
+  if (typeof paidCount !== 'number' || !Number.isSafeInteger(paidCount) || paidCount < 0) {
+    return null;
+  }
+  const totalCount = num(json.total_count);
+  const status = str(json.status);
+  return {
+    id,
+    planId,
+    status: RAZORPAY_SUBSCRIPTION_STATUSES.find((s) => s === status) ?? null,
+    currentStart: times.currentStart ?? null,
+    currentEnd: times.currentEnd ?? null,
+    chargeAt: times.chargeAt ?? null,
+    endedAt: times.endedAt ?? null,
+    paidCount,
+    totalCount: totalCount !== null && Number.isSafeInteger(totalCount) ? totalCount : null,
+  };
+}
+
+/**
+ * Reads one invoice. The fields HyFib records must have the documented shape: an invoice with a
+ * field of another shape is unreadable as a whole (null), never read partly.
+ */
+function mapInvoice(json: Record<string, unknown>): RazorpayInvoice | null {
+  const id = str(json.id);
+  const status = str(json.status);
+  const amount = json.amount ?? 0;
+  const amountPaid = json.amount_paid ?? 0;
+  if (!id || !INVOICE_ID_RE.test(id) || !status || !/^[a-z_]{1,32}$/.test(status)) return null;
+  const minor = (value: unknown) =>
+    typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+  if (!minor(amount) || !minor(amountPaid)) return null;
+  const subscriptionId = json.subscription_id ?? null;
+  const paymentId = json.payment_id ?? null;
+  const currency = json.currency ?? null;
+  if (
+    subscriptionId !== null &&
+    !(typeof subscriptionId === 'string' && SUBSCRIPTION_ID_RE.test(subscriptionId))
+  ) {
+    return null;
+  }
+  if (paymentId !== null && !(typeof paymentId === 'string' && PAYMENT_ID_RE.test(paymentId))) {
+    return null;
+  }
+  if (currency !== null && !(typeof currency === 'string' && /^[A-Z]{3}$/.test(currency))) {
+    return null;
+  }
+  const times = {
+    paidAt: unixTime(json.paid_at),
+    billingStart: unixTime(json.billing_start),
+    billingEnd: unixTime(json.billing_end),
+  };
+  if (Object.values(times).some((value) => value === undefined)) return null;
+  return {
+    id,
+    subscriptionId,
+    paymentId,
+    status,
+    amount: amount as number,
+    amountPaid: amountPaid as number,
+    currency,
+    paidAt: times.paidAt ?? null,
+    billingStart: times.billingStart ?? null,
+    billingEnd: times.billingEnd ?? null,
   };
 }
 
@@ -566,6 +839,156 @@ export class RazorpayClient {
       },
     );
   }
+
+  /**
+   * POST /v1/plans (R-063): the amount charged each billing cycle. Plans have no idempotency key: a
+   * plan whose creation went unanswered is left unused (a plan charges nobody on its own).
+   */
+  createPlan(input: {
+    period: 'monthly' | 'quarterly' | 'yearly';
+    amount: number;
+    currency: 'INR';
+    name: string;
+    notes?: Record<string, string>;
+  }) {
+    return this.request(
+      'POST',
+      '/v1/plans',
+      {
+        body: {
+          period: input.period,
+          interval: 1,
+          item: { name: input.name.slice(0, 80), amount: input.amount, currency: input.currency },
+          ...(input.notes ? { notes: input.notes } : {}),
+        },
+      },
+      mapPlan,
+    );
+  }
+
+  /**
+   * POST /v1/subscriptions (R-064), starting at once (no `start_at`): Checkout takes the first
+   * cycle's charge. `expireBy` (Unix seconds) closes the authorisation; `customerNotify` lets
+   * Razorpay tell the payer about charges. No idempotency key: a subscription whose creation went
+   * unanswered is never authorised, because no one learns its id before `expireBy` passes.
+   */
+  createSubscription(input: {
+    planId: string;
+    totalCount: number;
+    expireBy: number;
+    customerNotify: boolean;
+    notes?: Record<string, string>;
+  }) {
+    return this.request(
+      'POST',
+      '/v1/subscriptions',
+      {
+        body: {
+          plan_id: input.planId,
+          total_count: input.totalCount,
+          quantity: 1,
+          expire_by: input.expireBy,
+          customer_notify: input.customerNotify,
+          ...(input.notes ? { notes: input.notes } : {}),
+        },
+      },
+      mapSubscription,
+    );
+  }
+
+  fetchSubscription(subscriptionId: string) {
+    return this.request(
+      'GET',
+      `/v1/subscriptions/${encodeURIComponent(subscriptionId)}`,
+      {},
+      mapSubscription,
+    );
+  }
+
+  /**
+   * POST /v1/subscriptions/:id/cancel (R-068): at once, or at the end of the current billing cycle
+   * (`cancelAtCycleEnd`). Refused for subscriptions that already ended.
+   */
+  cancelSubscription(subscriptionId: string, input: { cancelAtCycleEnd: boolean }) {
+    return this.request(
+      'POST',
+      `/v1/subscriptions/${encodeURIComponent(subscriptionId)}/cancel`,
+      { body: { cancel_at_cycle_end: input.cancelAtCycleEnd } },
+      mapSubscription,
+    );
+  }
+
+  /**
+   * GET /v1/invoices?subscription_id=… (R-065): up to `count` (1-100) of the subscription's invoices
+   * after skipping `skip`. A read: safe to repeat.
+   */
+  fetchSubscriptionInvoices(subscriptionId: string, input: { count: number; skip: number }) {
+    if (!Number.isInteger(input.count) || input.count < 1 || input.count > 100)
+      throw new Error('Invalid invoice page size');
+    if (!Number.isSafeInteger(input.skip) || input.skip < 0)
+      throw new Error('Invalid invoice page offset');
+    return this.request(
+      'GET',
+      '/v1/invoices',
+      {
+        query: {
+          subscription_id: subscriptionId,
+          count: String(input.count),
+          skip: String(input.skip),
+        },
+      },
+      (json): RazorpayInvoicePage | null =>
+        Array.isArray(json.items)
+          ? {
+              items: (json.items as unknown[]).map((item) =>
+                typeof item === 'object' && item !== null && !Array.isArray(item)
+                  ? mapInvoice(item as Record<string, unknown>)
+                  : null,
+              ),
+            }
+          : null,
+    );
+  }
+
+  fetchInvoice(invoiceId: string) {
+    return this.request('GET', `/v1/invoices/${encodeURIComponent(invoiceId)}`, {}, mapInvoice);
+  }
+
+  /**
+   * GET /v1/settlements/recon/combined (R-110): up to `count` (1-1000) of the transactions settled on
+   * `date` (YYYY-MM-DD, the day as Razorpay counts it), after skipping `skip`. A read: safe to repeat.
+   */
+  fetchSettlementRecon(input: { date: string; count: number; skip: number }) {
+    const parts = /^(\d{4})-(\d{2})-(\d{2})$/.exec(input.date);
+    if (!parts) throw new Error('Invalid settlement date');
+    if (!Number.isInteger(input.count) || input.count < 1 || input.count > 1000)
+      throw new Error('Invalid settlement page size');
+    if (!Number.isSafeInteger(input.skip) || input.skip < 0)
+      throw new Error('Invalid settlement page offset');
+    return this.request(
+      'GET',
+      '/v1/settlements/recon/combined',
+      {
+        query: {
+          year: parts[1] as string,
+          month: parts[2] as string,
+          day: parts[3] as string,
+          count: String(input.count),
+          skip: String(input.skip),
+        },
+      },
+      (json): RazorpayReconPage | null =>
+        Array.isArray(json.items)
+          ? {
+              items: (json.items as unknown[]).map((item) =>
+                typeof item === 'object' && item !== null && !Array.isArray(item)
+                  ? mapReconItem(item as Record<string, unknown>)
+                  : null,
+              ),
+            }
+          : null,
+    );
+  }
 }
 
 /** `X-Razorpay-Signature`: hex HMAC-SHA256 of the raw body with the webhook secret (R-017). */
@@ -597,4 +1020,18 @@ export function verifyCheckoutSignature(
 ): boolean {
   if (!/^[0-9a-f]{64}$/.test(signature)) return false;
   return constantTimeEqual(signature, hmacSha256Hex(keySecret, `${orderId}|${paymentId}`));
+}
+
+/**
+ * Checkout's response for a subscription: HMAC-SHA256 of "<payment_id>|<subscription_id>" with the
+ * API key secret (R-072). `subscriptionId` must come from our database, never from the browser.
+ */
+export function verifySubscriptionCheckoutSignature(
+  subscriptionId: string,
+  paymentId: string,
+  signature: string,
+  keySecret: string,
+): boolean {
+  if (!/^[0-9a-f]{64}$/.test(signature)) return false;
+  return constantTimeEqual(signature, hmacSha256Hex(keySecret, `${paymentId}|${subscriptionId}`));
 }

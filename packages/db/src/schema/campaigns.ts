@@ -218,3 +218,16 @@ export const rateCardPrices = opsSchema.table(
   },
   (t) => [primaryKey({ columns: [t.rateCardId, t.market, t.category, t.tierFrom] })],
 );
+
+/**
+ * A company told about a published rate card before it takes effect (migration 0038, ADR-065):
+ * one row per company and card, written with the email.
+ */
+export const rateChangeNotices = appSchema.table('rate_change_notices', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  rateCardId: uuid('rate_card_id').notNull(),
+  currency: text('currency').notNull(),
+  effectiveFrom: tz('effective_from').notNull(),
+  sentAt: tz('sent_at').notNull().defaultNow(),
+});

@@ -1,14 +1,35 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
+import { displayMoney } from '@w360/core';
 import {
   dayOf,
+  PLAN_INTERVAL_LABELS,
   PLAN_MODULE_KEYS,
   PLAN_MODULE_LABELS,
+  PLAN_SUBSCRIPTION_STATUS_LABELS,
   TENANT_PLAN_STATUS_LABELS,
 } from '@w360/domain';
-import { Badge, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
-import { TenantPlanForm, type AssignablePlanOption } from '@/components/platform/plan-forms';
+import {
+  Alert,
+  Badge,
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+  TBody,
+  TD,
+  TH,
+  THead,
+  TR,
+  Table,
+} from '@w360/ui';
+import {
+  CancelTenantSubscriptionForm,
+  TenantPlanForm,
+  type AssignablePlanOption,
+} from '@/components/platform/plan-forms';
 import {
   MfaResetForm,
   SupportGrantForm,
@@ -229,7 +250,8 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
               {state.status === 'past_due'
                 ? ` · grace until ${formatDate(state.graceEndsAt, tz)}`
                 : ''}
-              . Nothing is charged here; set periods after payment is settled.
+              {planView.subscription?.live ? ' · paid by Razorpay subscription' : ''}. Periods set
+              here are for payments settled outside HyFib.
             </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-6 lg:grid-cols-2">
@@ -262,6 +284,17 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
                   <dd>{used(usage.automationRuns, limits.automationRuns)}</dd>
                 </div>
                 <div className="sm:col-span-2">
+                  <dt className="text-muted-foreground">
+                    API requests {formatDate(usage.periodStart, tz)} to{' '}
+                    {formatDate(usage.periodEnd, tz)}
+                  </dt>
+                  <dd>
+                    {limits.apiRequests === 0
+                      ? 'Not in the plan'
+                      : used(usage.apiRequests, limits.apiRequests)}
+                  </dd>
+                </div>
+                <div className="sm:col-span-2">
                   <dt className="text-muted-foreground">Modules</dt>
                   <dd>
                     {PLAN_MODULE_KEYS.filter((m) => planView.modules.includes(m))
@@ -276,24 +309,127 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
                 </p>
               ) : null}
             </div>
-            <TenantPlanForm
-              tenantId={company.id}
-              version={state.version}
-              today={dayOf(new Date(), tz)}
-              current={{
-                status: state.status,
-                planId: state.planId,
-                trialEndsOn: state.trialEndsAt ? dayOf(state.trialEndsAt, tz) : '',
-                periodStart: state.periodStart ? dayOf(state.periodStart, tz) : '',
-                periodEnd: state.periodEnd ? dayOf(state.periodEnd, tz) : '',
-                extraSeats: state.extraSeats,
-                extraNumbers: state.extraNumbers,
-                runPacks: state.runPacks,
-              }}
-              options={options}
-            />
+            {planView.subscription?.live ? (
+              <Alert tone="info" title="Paid by Razorpay subscription">
+                Plan changes wait until the subscription is cancelled (below), so a company is never
+                charged for a plan it is no longer on.
+              </Alert>
+            ) : (
+              <TenantPlanForm
+                tenantId={company.id}
+                version={state.version}
+                today={dayOf(new Date(), tz)}
+                current={{
+                  status: state.status,
+                  planId: state.planId,
+                  trialEndsOn: state.trialEndsAt ? dayOf(state.trialEndsAt, tz) : '',
+                  periodStart: state.periodStart ? dayOf(state.periodStart, tz) : '',
+                  periodEnd: state.periodEnd ? dayOf(state.periodEnd, tz) : '',
+                  extraSeats: state.extraSeats,
+                  extraNumbers: state.extraNumbers,
+                  runPacks: state.runPacks,
+                }}
+                options={options}
+              />
+            )}
           </CardContent>
         </Card>
+        {planView.subscription || planView.payments.length > 0 ? (
+          <Card className="lg:col-span-2" role="region" aria-labelledby="plan-subscription-title">
+            <CardHeader>
+              <div className="flex flex-wrap items-center gap-2">
+                <CardTitle id="plan-subscription-title">Plan subscription</CardTitle>
+                {planView.subscription ? (
+                  <Badge tone={planView.subscription.live ? 'info' : 'neutral'}>
+                    {PLAN_SUBSCRIPTION_STATUS_LABELS[planView.subscription.status]}
+                  </Badge>
+                ) : null}
+              </div>
+              <CardDescription>
+                The company pays for its plan through Razorpay (ADR-063). HyFib follows what
+                Razorpay reports; the paid period is set from the cycle Razorpay charged.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-4 text-sm">
+              {planView.subscription ? (
+                <dl className="grid gap-2 sm:grid-cols-3">
+                  <div>
+                    <dt className="text-muted-foreground">Charge</dt>
+                    <dd>
+                      {displayMoney(BigInt(planView.subscription.amountMinor), 'INR')}{' '}
+                      {PLAN_INTERVAL_LABELS[planView.subscription.intervalMonths] ?? ''} (tax{' '}
+                      {planView.subscription.taxBp / 100}%)
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-muted-foreground">Current cycle</dt>
+                    <dd>
+                      {planView.subscription.currentStart && planView.subscription.currentEnd
+                        ? `${formatDate(planView.subscription.currentStart, tz)} to ${formatDate(planView.subscription.currentEnd, tz)}`
+                        : '—'}
+                      {planView.subscription.cancelAtPeriodEnd ? ' · cancelled at its end' : ''}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-muted-foreground">Razorpay subscription</dt>
+                    <dd className="break-all font-mono text-xs">
+                      {planView.subscription.providerSubscriptionId ?? '—'}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-muted-foreground">Last checked with Razorpay</dt>
+                    <dd>
+                      {planView.subscription.syncedAt
+                        ? formatDateTime(planView.subscription.syncedAt, tz)
+                        : '—'}
+                    </dd>
+                  </div>
+                  {planView.subscription.failureReason ? (
+                    <div className="sm:col-span-2">
+                      <dt className="text-muted-foreground">Note</dt>
+                      <dd>{planView.subscription.failureReason}</dd>
+                    </div>
+                  ) : null}
+                </dl>
+              ) : null}
+              {planView.payments.length > 0 ? (
+                <Table>
+                  <THead>
+                    <TR>
+                      <TH>Paid</TH>
+                      <TH>Period</TH>
+                      <TH className="text-right">Amount</TH>
+                      <TH>Payment</TH>
+                    </TR>
+                  </THead>
+                  <TBody>
+                    {planView.payments.map((p) => (
+                      <TR key={p.id}>
+                        <TD>{formatDate(p.paidAt, tz)}</TD>
+                        <TD>
+                          {formatDate(p.periodStart, tz)} to {formatDate(p.periodEnd, tz)}
+                        </TD>
+                        <TD className="text-right tabular-nums">
+                          {displayMoney(BigInt(p.amountMinor), 'INR')}
+                        </TD>
+                        <TD className="font-mono text-xs">{p.providerPaymentId}</TD>
+                      </TR>
+                    ))}
+                  </TBody>
+                </Table>
+              ) : null}
+              {planView.subscription?.live ? (
+                actor.role === 'platform_owner' ? (
+                  <CancelTenantSubscriptionForm tenantId={company.id} />
+                ) : (
+                  <p className="text-muted-foreground">
+                    Only platform owners can cancel a company’s subscription.
+                  </p>
+                )
+              ) : null}
+            </CardContent>
+          </Card>
+        ) : null}
         <Card className="lg:col-span-2">
           <CardHeader>
             <CardTitle>Service credit</CardTitle>

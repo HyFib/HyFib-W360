@@ -192,6 +192,50 @@ WHERE tenant_id = … ORDER BY requested_at DESC`:
       deletion card on the platform page says so).
     - A refund still open after 90 days loses its hold to the expired-holds sweep; if Razorpay
       processes it later, it is recorded as a plain refund.
+11. **Settlement reconciliation** (`/platform/reconciliation`, ADR-059). Each day from 06:00 India
+    time the worker reads Razorpay's settlement report for the previous day and matches every
+    transaction. Look at the list once a day; "Need a person" counts what is still open. Platform
+    owners are also emailed ("Settlement reconciliation … needs a person" or "… failed", ADR-066)
+    within a minute of a day finishing with open transactions or failing, once per attempt; the
+    email names only days and counts, so open the page from its link.
+    - **No alert came:** alerts go to platform owners only (not operators), for failed days and
+      days with open transactions; retrying days wait until they fail for good, and a day whose
+      transactions were resolved before the next minute sends none. `alerted_attempt` on the run
+      shows the attempt that was emailed. The worker logs `settlement reconciliation alert emailed`,
+      or `… no platform owner to email` (make someone a platform owner; the alert then goes out).
+      Emails go through the outbox like every other email (section 3).
+    - **Recorded by the check:** Razorpay settled a payment or refund HyFib had missed (its webhook
+      never arrived); the check fetched it and recorded it the usual way. Nothing to do, but a
+      series of them means webhooks are failing: see step 1 and section 4.
+    - **Does not match, needs a look, not HyFib's:** nothing was changed. Per reason:
+      - _Second payment_: the customer paid the same top-up twice. HyFib credited one payment;
+        refund the other in the Razorpay Dashboard (it shows as a refund of an uncredited payment
+        on a later day).
+      - _Amount differs_, _refund exceeds the payment_, _not captured_: compare the company's
+        platform page (Service credit) with the Dashboard and raise an incident before anyone
+        changes anything; corrections are compensating postings through a reviewed function.
+      - _Payment or refund unavailable_: Razorpay did not return it when asked. Run the day again
+        later; if it stays, ask Razorpay support.
+      - _Dispute_: a payment or refund HyFib matched or recorded has a dispute (one HyFib had
+        missed was recorded first). Check the dispute in the Dashboard. A lost chargeback is
+        recorded from `payment.dispute.lost`; if the company's credit does not show it, redeliver
+        that webhook.
+      - _Adjustment_, _transfer_, _not HyFib's_, _unknown type_, _other currency_, _unreadable_:
+        check them in the Dashboard (another integration on the account, Razorpay's own
+        corrections).
+
+      Then resolve the item with a note of what was checked or done (platform owners; audited).
+
+    - **A day failed:** the error says why. "Refused HyFib's API keys": fix `RAZORPAY_KEY_ID` and
+      `RAZORPAY_KEY_SECRET`, then run the day again (platform owners, with a reason). A day with
+      more than 50,000 transactions fails too: raise it with engineering. Failures that may pass
+      (timeouts, 5xx) are retried by themselves after 5, 15, 60, 180 and 360 minutes.
+    - **Days are missing:** the schedule creates the previous day and fills gaps of up to a week;
+      after a longer outage, reconcile the missing days from the form. Running a day again keeps
+      what an earlier run recorded and the resolutions.
+    - **Payments not seen in a settlement:** a paid top-up whose payment no settlement showed 7
+      days after payment. Look the payment up in the Dashboard (on hold, refunded, disputed) before
+      doing anything; the list only counts days that were reconciled.
 
 ## 10. Contacts, consent and templates
 
@@ -827,6 +871,55 @@ invoice or ticket as the reason: it is shown in the company's audit log. A form 
 current plan state is refused ("The plan changed while you were editing"); reload. Nothing is
 charged in HyFib: set the period after the payment is settled elsewhere.
 
+**Paying for plans by Razorpay subscription (ADR-063).** Turn it on only after Razorpay activated
+Subscriptions (and Flash Checkout, which Subscriptions need) on HyFib's account and the webhook
+sends the `subscription.*` events (`docs/DEPLOYMENT.md`): set `RAZORPAY_SUBSCRIPTIONS_ENABLED=true`
+on web and worker, then a platform owner sets the tax on plan prices (Platform → Plans → Paying for
+plans, with a reason); companies are offered paying only once a tax is set, even 0%. Changing the
+tax affects new subscriptions only. A company on a paid period staff set, on complimentary access,
+on a retired version or with an add-on the version does not sell is not offered paying; Billing says
+why for the last two.
+
+**A company paid but its plan did not change.** Open the company's platform page → Plan
+subscription: status, cycle, last checked and any note. The plan changes only when Razorpay reports
+the cycle paid, fetched by HyFib: after Checkout, on each `subscription.*` or `payment.*` webhook, and
+by the minute sweep (every live subscription at least daily, hourly once its cycle has ended, and
+just before the plan sweep would move the period on). The worker logs `plan subscription check
+failed; will retry` with the subscription id when Razorpay cannot answer; it is tried again. A note such as "Razorpay
+returned a subscription for another plan" or a payment Razorpay reports for another amount means
+the records disagree: compare with the Razorpay Dashboard before doing anything by hand, and never
+set a paid period for a payment HyFib has not recorded unless the Dashboard shows it captured.
+
+**A plan payment failed.** `pending`: Razorpay retries; the payer changes the card through the link
+in Razorpay's email. `halted`: Razorpay stopped retrying. Billing managers were emailed at each
+step. When the paid period ends the plan gets the version's grace days (past due), then expires;
+a later successful charge makes it active again. The company can also cancel the subscription and
+pay again. Charges above ₹15,000 on Indian cards wait for the payer's approval through their bank
+every time (RBI rules, Razorpay's FAQ): a charge that stays unpaid for that reason looks the same.
+
+**Cancelling a company's subscription.** Owners and billing managers cancel in Billing (an active
+one at the end of the paid period, otherwise at once). Platform owners cancel at once on the
+company's platform page with a reason (needed before changing the company's plan, which staff
+cannot do while a subscription is live); the paid period stands and the plan then ends as canceled,
+without grace days. A company that cancelled pays again from Billing once the paid period has ended
+(there is no resume). Deleting a company cancels its subscription first; a failure shows as "Plan
+subscription at Razorpay: failed" in the deletion's provider outcomes: cancel it in the Razorpay
+Dashboard.
+
+**Refunding a plan payment.** HyFib does not refund plan payments. A refund made in the Razorpay
+Dashboard shows in the daily reconciliation as "A refund of a plan subscription payment" for a
+platform owner; it changes nothing in HyFib, so decide whether the company keeps the period (end
+the plan if not, after cancelling the subscription) and note it on the item.
+
+**A company asks for a receipt of a plan payment.** Billing → Paying for your plan lists each
+payment with a Receipt link (owners, administrators and billing managers), and the payment email
+links to it (ADR-064). It confirms the payment and is not a tax invoice; staff have no view of it.
+
+**A payment start that never finished.** A subscription is recorded before Razorpay is called; one
+still "creating" after 10 minutes is marked failed by the sweep. A Razorpay subscription created
+anyway can only be authorised within its hour (`expire_by`), and the sweep cancels any unpaid one
+whose hour has passed, so nothing can be charged later.
+
 **A new version of a plan.** Only platform owners change the catalog. Open the published version →
 "New version from this one", edit the draft, publish it, then move companies to it one by one; the
 old version can be retired (companies on it keep it). A published version never changes, even for
@@ -848,18 +941,62 @@ ones do not. The company can free one, or staff can add extra seats or numbers (
 sells them) or move it to a larger version. A lower limit never removes anything.
 
 **Automations stopped answering customers.** The month's automation runs may be used up: the
-company's billing managers were emailed once, and Billing shows the runs used and the period.
+company's billing managers were emailed when 80% were used (limits of 5 or more) and again once all
+were (ADR-062), and Billing shows the runs used and the period.
 Runs already in progress continue; runs from store events are recorded as "Not sent: the month's
 automation runs are used up". Add run packs (when the version sells them) or change the plan; the
 next customer message starts a run. The period starts on the day the current plan or trial started
 (usage anchor), whatever the billing interval. If the plan leaves out Automations, nothing starts
 ("not in the plan") and the automation pages say so.
 
+**A usage warning or used-up email did not come.** Each counter (company, automation runs or API
+requests, usage period) gets at most one warning, at 80% of the limit rounded up (none for limits of
+1 to 4, none when the limit is reached before a sweep saw 80%), and one used-up notice;
+`app.usage_counters.warned_at` and `notified_at` say when the sweep queued them. A counter of an
+earlier period is marked without an email, and a company that is suspended, restricted or being
+deleted gets none. Queued emails go out through the email outbox like every other notice.
+
+**A rate change email did not come, or came again.** A company is told once per published card
+(`app.rate_change_notices`: the card, its currency and effective time, when the email was queued)
+when a card for its billing currency (Settings → Messaging) takes effect within 7 days. None goes to
+a company without a billing currency, one that is suspended, restricted or being deleted, or about a
+draft, a withdrawn card or a card published after it took effect. The recipients are the owners and
+billing managers at the time. The billing sweep logs `rate change notices` with how many were sent,
+and `rate change notice failed for a company; will retry` with the company and card ids (nothing is
+recorded, and the next minute tries again). A correction published as a new card is announced again
+(ADR-065).
+
 **The sweep did not move a plan on.** The billing sweep runs every minute and logs `plan sweep`
 (and `plan sweep failed for a company; will retry` with the company id and error, rolled back and
 retried the next minute). A company being deleted is skipped. Check `app.tenant_plans` for the
 company (`status`, `trial_ends_at`, `period_end`, `grace_ends_at`): the database's clock decides
 what is due.
+
+**Migration 0040 failed.** It runs in one transaction, so a failure applies nothing. It adds
+`app.api_keys.expiry_reminded_at` (with column grants to `w360_app`), replaces the key's guard
+function with one that also keeps the reminder mark, adds a partial index and
+`ops.api_key_expiry_reminders_due` (granted to `w360_app`, then handed to `w360_definer`). A
+failure usually means the bootstrap roles are missing or migration 0024 was changed by hand.
+
+**Migration 0039 failed.** It runs in one transaction, so a failure applies nothing. It adds
+`ops.settlement_recon_runs.alerted_attempt` (runs already finished are marked as emailed) and the
+listing, mark and recipients functions for reconciliation alerts (granted to `w360_app`, then
+handed to `w360_definer`). A failure usually means the bootstrap roles are missing or migration 0034
+was changed by hand.
+
+**Migration 0038 failed.** It runs in one transaction, so a failure applies nothing. It adds
+`app.rate_change_notices` (forced RLS, grants, an append-only trigger and a deletion step), column
+grants and read policies for `w360_definer` on published rate cards, billing currencies and the
+notices, and `ops.rate_change_notices_due` (granted to `w360_app`, then handed to `w360_definer`). A
+failure usually means the bootstrap roles are missing.
+
+**Migration 0037 failed.** It runs in one transaction, so a failure applies nothing. It adds the
+plan tax setting, `app.plan_subscriptions` and `app.plan_payments` (forced RLS, grants, triggers),
+`tenant_plans.subscription_id`, the resolve, period and due functions, and recreates
+`app.apply_plan_transition`, `ops.settlement_recon_facts` and `ops.record_tenant_deletion_cleanup`
+(dropped as `w360_definer`, recreated, granted, then handed to `w360_definer`) and the
+reconciliation reason check. A failure usually means the bootstrap roles are missing or one of
+those functions was changed by hand.
 
 **Migration 0023 failed.** It runs in one transaction, so a failure applies nothing. It widens the
 company status check with `restricted`, adds the plan tables, triggers (two SECURITY DEFINER trigger
@@ -883,11 +1020,26 @@ presented (updated at most once a minute).
 **"Send a valid API key" (401).** The key is unknown, revoked or expired, the header is not
 `Authorization: Bearer <key>`, or the company is being deleted. Keys are shown once: a lost key is
 rotated, never recovered. Many failed attempts from one address answer 429 for a while (one attempt
-every 5 seconds after a burst of 20).
+every 5 seconds after a burst of 20). The buckets are rows of `ops.rate_limit_buckets` (keys
+`api:auth-failure:<address>`, `api:key:<key id>`, `api:company:<company id>`); the messaging sweep
+deletes them once they are full again and logs `full rate limit buckets deleted` (ADR-068). Do not
+delete a bucket by hand to lift a limit: it refills on its own within seconds for keys and companies
+and within 100 seconds for failed attempts.
 
 **429 "Too many requests".** Each key allows bursts of 50 requests and 10 a second, each company 200
-and 30 a second; wait for `Retry-After` and retry with the same `Idempotency-Key`. Monthly quotas
-are not built.
+and 30 a second; wait for `Retry-After` and retry with the same `Idempotency-Key`. A 429 with the
+reason `quota_exceeded` means the plan's API requests for the month are used up (ADR-061): the
+requests work again when the next usage period starts, or with a larger plan.
+
+**An API key expired without a reminder, or the reminder came twice.** Owners and administrators
+are emailed once, 7 days before a key expires (ADR-067): `app.api_keys.expiry_reminded_at` says when
+the reminder was queued, and Settings → API keys shows it. Keys that never expire, rotated keys (the
+new key is reminded instead), revoked keys and keys of companies being deleted get none, and a key
+created or rotated to expire within 7 days is reminded within a minute. The messaging sweep logs
+`API key expiry reminders emailed` with the count, and `API key expiry reminder failed; will retry`
+with the company and key ids (nothing is marked, and the next minute tries again). Queued emails go
+out through the email outbox like every other notice. A key is renewed by rotating it; its expiry
+cannot be extended.
 
 **"This Idempotency-Key was already used with a different request" (422).** The integration reused
 a key for another message; each new message needs a new key (for example a UUID), and only retries

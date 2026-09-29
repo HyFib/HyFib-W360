@@ -239,3 +239,58 @@ export const creditRefunds = appSchema.table('credit_refunds', {
   failedAt: tz('failed_at'),
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });
+
+/**
+ * Settlement reconciliation (0034, ADR-059). The tables are platform tables no runtime role can read
+ * or write directly: the worker writes through definer functions and platform staff read through
+ * others, so only the vocabulary is shared here.
+ */
+export const SETTLEMENT_RECON_RUN_STATUSES = ['pending', 'running', 'completed', 'failed'] as const;
+export type SettlementReconRunStatus = (typeof SETTLEMENT_RECON_RUN_STATUSES)[number];
+
+export const SETTLEMENT_RECON_ITEM_STATUSES = [
+  'matched',
+  'recorded',
+  'mismatch',
+  'review',
+  'not_hyfib',
+] as const;
+export type SettlementReconItemStatus = (typeof SETTLEMENT_RECON_ITEM_STATUSES)[number];
+
+/** Why an item has its status; the database checks each reason against its status. */
+export const SETTLEMENT_RECON_REASONS = [
+  'mandate_authorization',
+  'uncredited_payment_refund',
+  'plan_payment',
+  'credited',
+  'refund_recorded',
+  'plan_payment_recorded',
+  'amount_differs',
+  'second_payment',
+  'not_captured',
+  'mandate_payment',
+  'refund_not_processed',
+  'refund_exceeds_payment',
+  'payment_unavailable',
+  'refund_unavailable',
+  'plan_payment_unrecorded',
+  'adjustment',
+  'dispute',
+  'unknown_type',
+  'currency',
+  'unreadable',
+  'plan_payment_refund',
+  'unknown_payment',
+  'unknown_refund',
+  'transfer',
+] as const;
+export type SettlementReconReason = (typeof SETTLEMENT_RECON_REASONS)[number];
+
+export const SETTLEMENT_RECON_ITEM_TYPES = [
+  'payment',
+  'refund',
+  'transfer',
+  'adjustment',
+  'other',
+] as const;
+export type SettlementReconItemType = (typeof SETTLEMENT_RECON_ITEM_TYPES)[number];

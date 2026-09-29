@@ -190,6 +190,6 @@ export function formatUnitPrice(micros: number, currency: string): string {
   const fraction = String(micros % MICROS_PER_UNIT)
     .padStart(6, '0')
     .replace(/0+$/, '');
-  const digits = minorDigits(currency);
-  return `${whole}.${fraction.padEnd(digits, '0')} ${currency}`;
+  const decimals = fraction.padEnd(minorDigits(currency), '0');
+  return decimals ? `${whole}.${decimals} ${currency}` : `${whole} ${currency}`;
 }

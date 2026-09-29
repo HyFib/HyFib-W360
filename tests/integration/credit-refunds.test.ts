@@ -56,6 +56,7 @@ function config(): RazorpayConfig {
     keySecret: KEY_SECRET,
     webhookSecrets: [WEBHOOK_SECRET],
     recurringCardsEnabled: true,
+    subscriptionsEnabled: false,
     apiBaseUrl: standIn.baseUrl,
     mode: 'test',
   };

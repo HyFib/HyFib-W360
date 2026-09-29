@@ -1,14 +1,16 @@
 import 'server-only';
 import type { NextRequest } from 'next/server';
-import { resolveClientIp, sha256Hex, toError } from '@w360/core';
+import { resolveClientIp, sha256Hex, systemClock, toError } from '@w360/core';
 import {
   API_LIMITS,
   IDEMPOTENCY_KEY_RE,
+  admitApiRate,
+  admitApiRequest,
+  admitFailedApiAuthentication,
   apiErrorResponse,
   apiRequestError,
   authenticateApiToken,
   bearerToken,
-  takeToken,
   type ApiContext,
   type ApiResponse,
   type IdempotencyInput,
@@ -51,7 +53,8 @@ function respond(
 
 /**
  * Runs one public API request (ADR-052): authenticates the bearer key (failed attempts are limited
- * per client address), applies the key's and the company's rate limits, reads a bounded JSON body,
+ * per client address), applies the key's and the company's rate limits, counts the request against
+ * the plan's monthly API requests (ADR-061), reads a bounded JSON body,
  * checks the Idempotency-Key header, and turns results and errors into JSON responses. Tokens are
  * never logged.
  */
@@ -73,12 +76,7 @@ export async function handleApiRequest(
         request.headers.get('x-real-ip'),
         runtime.trustedProxies,
       );
-      const allowed = await takeToken(
-        runtime.db,
-        `api:auth-failure:${ip ?? 'unknown'}`,
-        API_LIMITS.authFailureRate,
-      );
-      if (!allowed) {
+      if (!(await admitFailedApiAuthentication(runtime.db, ip))) {
         const e = apiRequestError(429, 'rate_limited', 'Too many failed attempts.', requestId);
         return respond(e.status, e.body, requestId, { 'Retry-After': '60' });
       }
@@ -91,13 +89,29 @@ export async function handleApiRequest(
       return respond(e.status, e.body, requestId, { 'WWW-Authenticate': 'Bearer' });
     }
 
-    const keyAllowed = await takeToken(runtime.db, `api:key:${ctx.key.id}`, API_LIMITS.keyRate);
-    const companyAllowed =
-      keyAllowed &&
-      (await takeToken(runtime.db, `api:company:${ctx.tenant.id}`, API_LIMITS.companyRate));
-    if (!keyAllowed || !companyAllowed) {
+    if (!(await admitApiRate(runtime.db, { keyId: ctx.key.id, tenantId: ctx.tenant.id }))) {
       const e = apiRequestError(429, 'rate_limited', 'Too many requests. Slow down.', requestId);
       return respond(e.status, e.body, requestId, { 'Retry-After': '1' });
+    }
+
+    // The plan's monthly API requests (ADR-061): counted here, before the request is read.
+    const admission = await admitApiRequest(runtime.db, ctx, systemClock.now());
+    if (!admission.ok) {
+      const e = apiRequestError(
+        admission.status,
+        admission.code,
+        admission.message,
+        requestId,
+        admission.reason,
+      );
+      return respond(
+        e.status,
+        e.body,
+        requestId,
+        admission.retryAfterSeconds === null
+          ? {}
+          : { 'Retry-After': String(admission.retryAfterSeconds) },
+      );
     }
 
     let body: unknown = undefined;

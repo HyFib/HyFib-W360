@@ -64,6 +64,26 @@ export async function requestCreditRefundAction(
   });
 }
 
+export async function requestSettlementReconAction(
+  input: unknown,
+): Promise<ActionResult<{ runId: string }>> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    const result = await runtime.platformReconciliation.requestDay(actor, input);
+    refresh();
+    return result;
+  });
+}
+
+export async function resolveSettlementItemAction(input: unknown): Promise<ActionResult> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    await runtime.platformReconciliation.resolveItem(actor, input);
+    refresh();
+    return null;
+  });
+}
+
 export async function createRateCardAction(input: unknown): Promise<ActionResult<{ id: string }>> {
   return runAction(async () => {
     const { actor, runtime } = await actorForAction();
@@ -142,6 +162,26 @@ export async function setDefaultTrialAction(input: unknown): Promise<ActionResul
   return runAction(async () => {
     const { actor, runtime } = await actorForAction();
     await runtime.planAdmin.setDefaultTrial(actor, input);
+    refresh();
+    return null;
+  });
+}
+
+/** The tax added to plan prices when companies pay for their plan (ADR-063; owners only). */
+export async function setPlanTaxAction(input: unknown): Promise<ActionResult> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    await runtime.planAdmin.setPlanTax(actor, input);
+    refresh();
+    return null;
+  });
+}
+
+/** Cancels a company's plan subscription at Razorpay at once (ADR-063; owners only, audited). */
+export async function cancelTenantSubscriptionAction(input: unknown): Promise<ActionResult> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    await runtime.planAdmin.cancelTenantSubscription(actor, input);
     refresh();
     return null;
   });

@@ -12,6 +12,7 @@ import {
 import { assertCan, type TenantContext } from '../authz/context';
 import {
   activeMemberCount,
+  apiRequestsUsed,
   automationRunsUsed,
   liveAutomationsInUse,
   loadEntitlements,
@@ -30,6 +31,8 @@ export interface PlanUsage {
   teams: number;
   liveAutomations: number;
   automationRuns: { used: number; periodStart: Date; periodEnd: Date };
+  /** Public API requests counted this period (ADR-061), with or without a limit. */
+  apiRequests: { used: number; periodStart: Date; periodEnd: Date };
 }
 
 /** The company's own view of its plan (ADR-051), shown on the Billing page. */
@@ -79,6 +82,11 @@ export function createPlansService(deps: PlansServiceDeps) {
       liveAutomations: await liveAutomationsInUse(tx, tenantId),
       automationRuns: {
         used: await automationRunsUsed(tx, tenantId, entitlements, now),
+        periodStart: period.start,
+        periodEnd: period.end,
+      },
+      apiRequests: {
+        used: await apiRequestsUsed(tx, tenantId, entitlements, now),
         periodStart: period.start,
         periodEnd: period.end,
       },

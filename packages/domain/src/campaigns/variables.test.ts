@@ -112,5 +112,8 @@ describe('cost estimates', () => {
     expect(formatMicros(2_583_000, 'INR')).toBe('₹2.58');
     expect(formatUnitPrice(861_000, 'INR')).toBe('0.861 INR');
     expect(formatUnitPrice(1_000_000, 'USD')).toBe('1.00 USD');
+    // A currency without minor units shows a whole price without a trailing point.
+    expect(formatUnitPrice(2_000_000, 'JPY')).toBe('2 JPY');
+    expect(formatUnitPrice(2_500_000, 'JPY')).toBe('2.5 JPY');
   });
 });

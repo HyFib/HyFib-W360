@@ -116,7 +116,12 @@ export const deadLetters = opsSchema.table('dead_letters', {
 
 /** What happened at one provider while a company was deleted (ADR-055). */
 export interface TenantDeletionCleanup {
-  kind: 'whatsapp_account' | 'shopify_store' | 'woocommerce_store' | 'card_mandate';
+  kind:
+    | 'whatsapp_account'
+    | 'shopify_store'
+    | 'woocommerce_store'
+    | 'card_mandate'
+    | 'plan_subscription';
   label: string;
   outcome: 'done' | 'failed' | 'skipped';
   code?: string;

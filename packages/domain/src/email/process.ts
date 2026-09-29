@@ -99,18 +99,21 @@ export async function processEmailOutbox(
   }
 }
 
-/** Outbox rows that should have been processed but have no live job (lost signal or expired lease). */
+/**
+ * Outbox rows that should have been processed but have no live job (lost signal or expired lease),
+ * with their kind, so the sweep signals them again at the kind's priority.
+ */
 export async function findStaleOutboxRows(
   deps: { db: Database; clock: Clock },
   limit = 500,
-): Promise<string[]> {
+): Promise<{ id: string; kind: string }[]> {
   const now = deps.clock.now();
   const staleBefore = new Date(now.getTime() - 60_000);
   return deps.db.run(
     systemScope,
     async (tx) => {
       const rows = await tx
-        .select({ id: emailOutbox.id })
+        .select({ id: emailOutbox.id, kind: emailOutbox.kind })
         .from(emailOutbox)
         .where(
           or(
@@ -119,7 +122,7 @@ export async function findStaleOutboxRows(
           ),
         )
         .limit(limit);
-      return rows.map((r) => r.id);
+      return rows;
     },
     { accessMode: 'read only' },
   );

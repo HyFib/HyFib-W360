@@ -128,12 +128,20 @@ describe('database roles', () => {
       expect(await can('w360_auth', fn), fn).toBe(false);
       expect(await can('w360_platform', fn), fn).toBe(false);
     }
-    // Plans (0023): the sweep functions for the worker, the usage counts for platform staff, the
-    // entitlements for both, and the plan-state triggers for nobody.
+    // Plans (0023): the sweep functions for the worker (with the API request notice of 0035, the
+    // warnings of 0036, the subscription functions of 0037 and the rate change notices of 0038),
+    // the usage counts for platform staff, the entitlements for both, and the plan-state triggers
+    // for nobody.
     for (const fn of [
       'ops.plan_transitions_due(integer)',
       'ops.usage_limits_reached(integer)',
+      'ops.api_quota_reached(integer)',
+      'ops.usage_warnings_due(integer)',
       'app.apply_plan_transition(uuid)',
+      'ops.billing_resolve_subscription(text)',
+      'ops.billing_resolve_plan_payment(text)',
+      'app.apply_plan_subscription_period(uuid,uuid)',
+      'ops.rate_change_notices_due(integer,integer)',
     ]) {
       expect(await can('w360_app', fn), fn).toBe(true);
       expect(await can('w360_auth', fn), fn).toBe(false);
@@ -144,10 +152,25 @@ describe('database roles', () => {
     expect(await can('w360_app', 'app.tenant_entitlements(uuid)')).toBe(true);
     expect(await can('w360_platform', 'app.tenant_entitlements(uuid)')).toBe(true);
     expect(await can('w360_auth', 'app.tenant_entitlements(uuid)')).toBe(false);
-    // Public API (0024): the key lookup and the idempotency sweep, for the runtime app role only.
+    // Public API (0024): the key lookup and the idempotency sweep, for the runtime app role only,
+    // and the listing of keys due an expiry reminder (0040), for the worker.
     for (const fn of [
       'ops.api_key_authenticate(text)',
       'ops.purge_api_idempotency_keys(integer)',
+      'ops.api_key_expiry_reminders_due(integer,integer)',
+      // The purge of full rate limit buckets (0041), for the worker.
+      'ops.purge_rate_limit_buckets(integer)',
+    ]) {
+      expect(await can('w360_app', fn), fn).toBe(true);
+      expect(await can('w360_auth', fn), fn).toBe(false);
+      expect(await can('w360_platform', fn), fn).toBe(false);
+    }
+    // Reconciliation alerts (0039): the listing, the mark and the platform owners' addresses, for
+    // the worker only.
+    for (const fn of [
+      'ops.settlement_recon_alerts_due(integer)',
+      'ops.settlement_recon_mark_alerted(uuid,integer)',
+      'ops.settlement_recon_alert_recipients()',
     ]) {
       expect(await can('w360_app', fn), fn).toBe(true);
       expect(await can('w360_auth', fn), fn).toBe(false);

@@ -47,6 +47,26 @@ test('client forms stay disabled until React hydrates them, then accept input', 
   expect(new URL(page.url()).search).toBe('');
 });
 
+test('the two-factor password field stays disabled until React hydrates it', async ({ page }) => {
+  const password = 'correct horse battery staple 42';
+  await signUpAndVerify(page, { name: 'Hana Hydrate', email: uniqueEmail('hydrate'), password });
+  const releaseScripts = await holdScripts(page);
+
+  await page.goto('/account', { waitUntil: 'commit' });
+  // The first "Current password" is the two-factor card's (the password card comes after it).
+  const current = page.getByLabel('Current password').first();
+  await expect(current).toBeVisible();
+  // A password typed before hydration reached the field but not React, so the button stayed
+  // disabled for good (seen on WebKit in CI).
+  await expect(current).toBeDisabled();
+
+  releaseScripts();
+  await expect(current).toBeEnabled();
+  await current.fill(password);
+  await page.getByRole('button', { name: 'Set up two-factor' }).click();
+  await expect(page.getByLabel('Code from your app')).toBeVisible();
+});
+
 /*
  * Controlled inputs outside a ClientForm: React keeps a value entered before hydration in the
  * field but never reports it to the component, so it showed without reaching state (a save stayed

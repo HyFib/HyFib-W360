@@ -58,6 +58,7 @@ function config(overrides: Partial<RazorpayConfig> = {}): RazorpayConfig {
     keySecret: KEY_SECRET,
     webhookSecrets: [WEBHOOK_SECRET, OLD_WEBHOOK_SECRET],
     recurringCardsEnabled: true,
+    subscriptionsEnabled: false,
     apiBaseUrl: standIn.baseUrl,
     mode: 'test',
     ...overrides,
@@ -247,6 +248,11 @@ beforeEach(() => {
     fetch: [],
     createPaymentLink: [],
     paymentLinks: [],
+    recon: [],
+    createPlan: [],
+    createSubscription: [],
+    cancelSubscription: [],
+    subscriptionFetch: [],
   };
 });
 

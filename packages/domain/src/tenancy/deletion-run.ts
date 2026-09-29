@@ -22,6 +22,7 @@ import {
 } from '@w360/db';
 import { isAppError } from '@w360/core';
 import { cancelPendingAutoRecharge } from '../billing/attempts';
+import { cancelPlanSubscriptionForDeletion } from '../billing/plan-subscriptions';
 import type { RazorpayClient } from '../billing/razorpay';
 import { enqueueEmail, type OutboxDeps } from '../email/outbox';
 import { credentialAad } from '../messaging/credentials';
@@ -41,7 +42,10 @@ export interface DeletionRunDeps extends OutboxDeps {
   keyring: Keyring;
   /** Null when the Meta app is not configured: WhatsApp accounts are then recorded as skipped. */
   graph: GraphClient | null;
-  /** Null when Razorpay is not configured: card mandates are then recorded as skipped. */
+  /**
+   * Null when Razorpay is not configured: card mandates and a plan subscription are then recorded
+   * as skipped.
+   */
   razorpay: RazorpayClient | null;
   stores: StoreWorkerDeps;
 }
@@ -191,6 +195,10 @@ async function cleanUpProviders(
         : { kind, label, outcome: 'failed', code: remote },
     );
   }
+
+  // The plan subscription (ADR-063): cancelled at Razorpay at once, so nothing more is charged.
+  const subscription = await cancelPlanSubscriptionForDeletion(deps, scope);
+  if (subscription) items.push({ kind: 'plan_subscription', ...subscription });
 
   // HyFib's own card mandate: delete the token at Razorpay (how a card mandate is cancelled).
   const mandates = await deps.db.run(

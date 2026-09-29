@@ -95,7 +95,10 @@ export const apiErrorSchema = z.object({
         'unauthenticated, forbidden, not_found, conflict, validation_failed, precondition_failed, rate_limited, tenant_suspended, unsupported, bad_request, internal.',
       ),
     message: z.string(),
-    reason: z.string().optional().describe('A finer reason, like idempotency_key_reused.'),
+    reason: z
+      .string()
+      .optional()
+      .describe('A finer reason: idempotency_key_reused, not_in_plan or quota_exceeded.'),
     issues: z.array(z.object({ path: z.string(), message: z.string() })).optional(),
   }),
   requestId: z.string(),
@@ -123,14 +126,14 @@ const errors = (...statuses: number[]) =>
           {
             400: 'The request is malformed (for example invalid JSON or a missing header).',
             401: 'No valid API key: missing, unknown, revoked or expired.',
-            403: 'The key lacks the scope this needs.',
+            403: "The key lacks the scope this needs, or the company's plan does not include the API (reason not_in_plan).",
             404: 'Not found in the company.',
             409: 'The request conflicts with the current state.',
             412: 'A condition for sending or saving is not met (consent, suppression, state).',
             415: 'The body must be JSON (Content-Type: application/json).',
             422: 'The request body or parameters are invalid.',
             423: 'The company is suspended or its plan has ended: reading only.',
-            429: 'Too many requests: wait for Retry-After seconds.',
+            429: "Too many requests: wait for Retry-After seconds. With reason quota_exceeded, the plan's API requests for the month are used up, and Retry-After counts the seconds until the next month's period starts.",
             500: 'Something went wrong on our side; retry later (with the same Idempotency-Key).',
           }[status] ?? 'Error',
         content: json(ref('Error')),

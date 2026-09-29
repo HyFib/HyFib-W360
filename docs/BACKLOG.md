@@ -288,9 +288,15 @@ verification, app review, Embedded Signup configuration).
   with audit; a minute sweep for trial, period and grace ends with notices; restricted companies;
   limits checked where things are added (seats in SQL too) and an atomic run quota; module gating
   in permissions and workers; plan card, limit hints and banners for companies; platform plan
-  screens. Remaining: paying for plans in HyFib (Razorpay Subscriptions, P5-07), self-serve plan
-  changes and higher-plan trials, proration, plan invoices, usage alerts before a limit is reached,
-  plan-change emails to companies, API quotas (not built with P5-08) and AI credits (Phase 6).
+  screens; **[monthly API requests per plan version built, locally verified]** (ADR-061: empty
+  for no limit, 0 leaves the public API out; counted atomically, refused with 429 when used up and
+  403 without the API, one notice per period); **[a warning at 80% of the month's automation runs
+  or API requests built, locally verified]** (ADR-062: one email per counter, marked on the plan
+  card; the used-up notices now skip counters of an earlier period); **[paying for plans by
+  Razorpay subscription built, locally verified against the stand-in]** (ADR-063, see P5-07).
+  Remaining: billing that starts when a trial ends, self-serve plan changes and higher-plan trials,
+  proration, plan invoices, thresholds chosen per company, in-app notices, plan-change emails to
+  companies, packs of extra API requests and AI credits (Phase 6).
 - **P5-02 Ledger** **[built, locally verified]**: accounts, append-only journal balanced at commit,
   balances by trigger, holds, settlements, releases (expiry sweep), refunds and chargebacks as
   compensating postings; INR paise; monthly statements computed from the ledger (ADR-057).
@@ -317,15 +323,25 @@ verification, app review, Embedded Signup configuration).
   all of a paid top-up from the company's platform page, with a reason in the platform audit log;
   the credit is held at once, the worker asks Razorpay with an idempotency key and checks until
   Razorpay processes or fails the refund, and the refund is recorded from what Razorpay reports.
-  Remaining: daily reconciliation reports, refunds asked for by companies, a platform-wide refunds
-  list, and GST invoices (GST treatment needs tax review).
+  **[Daily settlement reconciliation built; Razorpay traffic simulated by a test-only stand-in]**
+  (ADR-059): each day from 06:00 India time the worker reads Razorpay's settlement report for the
+  previous day and matches every transaction against HyFib's records; a captured payment or
+  processed refund HyFib had missed is fetched and recorded through the usual paths, everything
+  else that does not match waits on `/platform/reconciliation` for a platform owner to resolve with
+  a note; paid top-ups no settlement showed 7 days after payment are listed. **[Alerts for
+  reconciliation findings built, locally verified]** (ADR-066: platform owners emailed once per
+  finished attempt when a day waits for a person or fails, naming days and counts only).
+  Remaining: refunds asked for by companies, a platform-wide refunds list, alerts for unsettled
+  payments, bank statement (UTR) matching, fee and tax accounting, and GST invoices (GST treatment
+  needs tax review).
 - **P5-06 Mandatory financial tests** **[29 integration tests + 2 e2e]**: concurrent spends on last
   funds; many low-balance triggers → one attempt; repeated and out-of-order events; timeout after
   capture (reconciliation); delayed success after UI timeout; decline; mandate revocation; cap
   exhaustion incl. in-flight; settings change during a pending charge; refund vs usage race;
   partial refunds; chargeback after spend; restart recovery; cross-company wallet access. Remaining:
-  cancelled subscription with credit (needs paid plans in HyFib; plans exist since P5-01 but are not
-  charged) and AFA-required debits (not reachable while mandates are capped at ₹15,000).
+  cancelled subscription with credit (plans are paid by subscription since ADR-063, but plan payments
+  never touch the wallet: they are not service credit) and AFA-required debits for card mandates
+  (not reachable while mandates are capped at ₹15,000).
 - **P5-07 Billing screens**: overview, plans, wallet & recharge, auto-recharge, payment methods,
   usage & rate card, transactions & receipts, invoices; step-up auth for sensitive changes
   **[step-up built, locally verified]** (ADR-056: a sign-in within the last 15 minutes for the
@@ -333,17 +349,34 @@ verification, app review, Embedded Signup configuration).
   endpoints, new owners and turning off required two-factor); **[statements and receipts built,
   locally verified]** (ADR-057: Billing → Statements with every month since the first payment in
   the company's time zone, opening and closing balances, every ledger line with running balances,
-  a printable page and an audited CSV; a receipt per paid top-up, emailed to billing managers).
-  Remaining: usage & rate card view, invoices (tax review), paying for plans in HyFib.
+  a printable page and an audited CSV; a receipt per paid top-up, emailed to billing managers);
+  **[usage and rates built, locally verified]** (ADR-060: Billing → Usage and rates with Meta's
+  rates in force for the billing currency, the next published change and what it changes, and
+  this month's estimated Meta charges by pricing category, read-only, for billing managers too);
+  **[paying for plans built, locally verified against the Razorpay stand-in; behind
+  `RAZORPAY_SUBSCRIPTIONS_ENABLED`]** (ADR-063: Billing → Paying for your plan with the price, add-ons
+  and the tax platform owners set; owners and billing managers with a recent sign-in start a Razorpay
+  subscription (written ahead, Razorpay plan and subscription, Checkout), and the plan becomes
+  active for each cycle Razorpay reports paid, fetched and checked by HyFib (Checkout, webhooks,
+  hourly and daily checks, before period ends); failed charges, stopped retries, cancelling at the
+  end of the period, staff cancelling at once, deletion cancelling at Razorpay, plan payments in
+  the daily reconciliation); **[plan payment receipts built, locally verified]** (ADR-064: a receipt page per plan payment with the plan, add-ons, billing period and tax, not a tax invoice, linked from Billing and the payment email); **[rate change notices built, locally verified]** (ADR-065: billing managers emailed once when a published card for the company's billing currency takes effect within 7 days, with what it changes). Remaining: invoices (tax review), refunds of
+  plan payments, billing from the end of a trial, plan and add-on changes with proration, pausing,
+  offers, Razorpay test-mode checks (RELEASE-CHECKLIST).
 - **P5-08 Public API** **[built, locally verified; sends through the Graph stand-in only]**
   (ADR-052): company API keys (SHA-256 only, scopes granted within the creator's permissions,
   expiry, rotation with an overlap, revocation, audit), `/api/v1` with approved template sends,
   contacts (cursor pages, create or existing), consent with evidence and message status; idempotency
   keys, per-key, per-company and failed-authentication rate limits, 64 KB bodies, an OpenAPI 3.1
-  document from the validation schemas, Settings → API keys. Remaining: monthly quotas per plan,
-  API access as a plan module, session, media and interactive messages, conversation and message
-  lists, starting automations (W-086), bulk sends in one call, IP allowlists, key expiry reminders,
-  tests of the rate limits.
+  document from the validation schemas, Settings → API keys; monthly API requests and API access
+  by plan (ADR-061, see P5-01); **[reminders before keys expire built, locally verified]** (ADR-067:
+  owners and administrators emailed once, 7 days before a usable key that was not rotated expires,
+  with its name and prefix, never a token; marked on Settings → API keys); **[rate limits tested,
+  full buckets deleted, locally verified]** (ADR-068: integration tests of the buckets and each
+  limit, an e2e burst refused with 429; buckets full again deleted every minute, so failed-
+  authentication addresses are kept only while they limit). Remaining: session, media and
+  interactive messages, conversation and message lists, starting automations (W-086), bulk sends in
+  one call, IP allowlists, per-key quotas, limits per endpoint.
 - **P5-09 Outgoing webhooks** **[built, locally verified; delivered to local test receivers only]**
   (ADR-053): up to 10 endpoints per company (`developer.manage`) for `message.received`,
   `message.status`, `consent.changed` and `template.status_changed`, captured by database triggers
