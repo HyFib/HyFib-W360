@@ -5,12 +5,15 @@ import { Checkbox } from '@w360/ui';
 import { ConfirmDialog } from '@w360/ui/client';
 import { eraseContactAction } from '@/app/actions/contacts';
 import { FormError } from '@/components/form-status';
-import { ClientButton } from '@/components/client-form';
+import { ClientButton, useHydrated } from '@/components/client-form';
 
 /** Irreversible erasure of a contact's personal data (see the confirmation text). */
 export function EraseContact({ slug, contactId }: { slug: string; contactId: string }) {
   const id = useId();
   const router = useRouter();
+  // A box unticked before hydration would show unticked while the erasure still suppressed the
+  // number (see useHydrated).
+  const hydrated = useHydrated();
   const [suppress, setSuppress] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -24,7 +27,12 @@ export function EraseContact({ slug, contactId }: { slug: string; contactId: str
   return (
     <div className="grid gap-3">
       <div className="flex items-start gap-2">
-        <Checkbox id={id} checked={suppress} onChange={(e) => setSuppress(e.target.checked)} />
+        <Checkbox
+          id={id}
+          checked={suppress}
+          disabled={!hydrated}
+          onChange={(e) => setSuppress(e.target.checked)}
+        />
         <label htmlFor={id} className="text-sm">
           Keep the number on the suppression list so it is never messaged again
         </label>

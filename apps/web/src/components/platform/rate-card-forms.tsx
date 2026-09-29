@@ -8,7 +8,7 @@ import {
   publishRateCardAction,
   withdrawRateCardAction,
 } from '@/app/actions/platform';
-import { ClientButton, ClientForm } from '@/components/client-form';
+import { ClientButton, ClientForm, useHydrated } from '@/components/client-form';
 import { FormError } from '@/components/form-status';
 
 const EXAMPLE =
@@ -108,6 +108,9 @@ export function CreateRateCardForm() {
 }
 
 export function RateCardActions({ id, status }: { id: string; status: string }) {
+  // The reason stays disabled until hydration: one typed before would never reach `reason`,
+  // leaving Withdraw disabled (see useHydrated).
+  const hydrated = useHydrated();
   const [reason, setReason] = useState('');
   const [error, setError] = useState<string | null>(null);
   return (
@@ -134,6 +137,7 @@ export function RateCardActions({ id, status }: { id: string; status: string }) 
                 {...aria}
                 value={reason}
                 maxLength={2000}
+                disabled={!hydrated}
                 onChange={(e) => setReason(e.target.value)}
               />
             )}

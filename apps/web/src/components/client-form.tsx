@@ -4,7 +4,12 @@ import { Button, cn, type ButtonProps } from '@w360/ui';
 
 const noopSubscribe = () => () => {};
 
-/** True once React has hydrated this tree in the browser; always false during server rendering. */
+/**
+ * True once React has hydrated this tree in the browser; always false during server rendering.
+ * Controlled inputs outside a `ClientForm` stay disabled until then: React keeps a value typed
+ * before hydration in the field but never reports it to `onChange`, so state misses it and the
+ * next render puts the old value back.
+ */
 export function useHydrated(): boolean {
   return useSyncExternalStore(
     noopSubscribe,

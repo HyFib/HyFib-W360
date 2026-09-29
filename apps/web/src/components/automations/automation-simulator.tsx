@@ -14,7 +14,7 @@ import {
   type RunFacts,
   type RunState,
 } from '@w360/domain/automation-model';
-import { ClientButton, ClientForm } from '@/components/client-form';
+import { ClientButton, ClientForm, useHydrated } from '@/components/client-form';
 import type { EditorTemplate } from './node-fields';
 
 /**
@@ -120,6 +120,8 @@ export function AutomationSimulator({
   /** Started by order messages: the run reads a sample order. */
   storeEvent: boolean;
 }) {
+  // The simulated contact's fields stay disabled until hydration (see useHydrated).
+  const hydrated = useHydrated();
   const [sim, setSim] = useState<SimFacts>({
     contactName: 'Asha',
     tags: '',
@@ -549,7 +551,7 @@ export function AutomationSimulator({
           and the contact’s consent.
         </p>
       </div>
-      <fieldset className="grid content-start gap-3">
+      <fieldset disabled={!hydrated} className="grid content-start gap-3">
         <legend className="mb-1 text-sm font-medium">Simulated contact</legend>
         <Field id="sim-name" label="Name">
           {(aria) => (

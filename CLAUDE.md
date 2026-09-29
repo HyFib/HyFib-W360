@@ -46,6 +46,8 @@ w360_definer` (the migration role cannot grant afterwards), and give w360_define
 - Pages/actions must call domain services; business logic stays out of React components.
 - Forms submitted by a browser handler use `ClientForm`, and click-handler buttons use
   `ClientButton` (`apps/web/src/components/client-form.tsx`): both stay disabled until hydration.
+  Any other server-rendered controlled input gets `disabled={!hydrated}` from `useHydrated()` (same
+  file): React never reports a value entered before hydration to `onChange`.
 - Update `docs/PROGRESS.md` (and the matrix/backlog when status changes) at the end of each slice.
 
 ## Where things live
