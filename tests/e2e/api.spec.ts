@@ -192,7 +192,7 @@ test('a key answers a customer who wrote, reads the conversation and resolves it
   await page.getByLabel('Name', { exact: true }).fill('Helpdesk');
   await page.getByRole('checkbox', { name: /Reply with text/ }).check();
   await page.getByRole('checkbox', { name: /Read conversations/ }).check();
-  await page.getByRole('checkbox', { name: /Resolve and reopen conversations/ }).check();
+  await page.getByRole('checkbox', { name: /Resolve, reopen and add notes/ }).check();
   await page.getByRole('button', { name: 'Create API key' }).click();
   const token = await page.getByLabel('API key', { exact: true }).inputValue();
   await page.getByRole('button', { name: 'I have stored the key' }).click();
@@ -321,6 +321,25 @@ test('a key answers a customer who wrote, reads the conversation and resolves it
   await page.reload();
   await expect(page.getByRole('button', { name: 'Resolve' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Reopen' })).toHaveCount(0);
+
+  // The integration adds an internal note (ADR-084): the team reads it, named as the key's, and
+  // WhatsApp never receives it.
+  const noteText = 'Ticket #4521 opened in the helpdesk.';
+  const noted = await request.post(`/api/v1/conversations/${open!.id}/notes`, {
+    headers: { ...auth, 'Idempotency-Key': randomUUID() },
+    data: { text: noteText },
+  });
+  expect(noted.status()).toBe(201);
+  expect((await noted.json()).data).toMatchObject({ conversationId: open!.id, text: noteText });
+  await page.reload();
+  const note = page.getByRole('listitem').filter({ hasText: noteText });
+  await expect(note.getByText(/^API \(Helpdesk\) ·/)).toBeVisible();
+  const sentToCustomer = (await standInRequests(request)).filter(
+    (r) =>
+      r.path === `/v26.0/${phoneNumberId}/messages` &&
+      (r.body as { to?: string } | null)?.to === waId,
+  );
+  expect(sentToCustomer).toHaveLength(1);
 });
 
 test('a key sends reply buttons and a list to a customer who wrote: the inbox shows them, and a picked row comes back through the API', async ({

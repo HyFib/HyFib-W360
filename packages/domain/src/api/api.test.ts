@@ -7,7 +7,12 @@ import { PERMISSIONS, ROLE_PERMISSIONS } from '../authz/permissions';
 import { apiErrorResponse, apiRequestError } from './errors';
 import { allowedNetworksSchema, bearerToken, generateApiToken, networkEntryProblem } from './keys';
 import type { ApiContext } from './context';
-import { apiConversationStatusSchema, apiSetConversationStatus } from './conversations';
+import {
+  apiAddConversationNote,
+  apiAddNoteSchema,
+  apiConversationStatusSchema,
+  apiSetConversationStatus,
+} from './conversations';
 import {
   API_LIMITS,
   API_SCOPE_INFO,
@@ -27,6 +32,7 @@ import {
   replyButtonsInteractive,
 } from '../messaging/interactive';
 import { messageSnippet, SNIPPET_LENGTH } from '../messaging/message-text';
+import { NOTE_MAX_LENGTH } from '../messaging/notes';
 import {
   answerProblem,
   answeredExternalIdOf,
@@ -197,6 +203,92 @@ describe('conversation status (ADR-075)', () => {
     expect(await set(ctx(['conversations.write']), id, { status: 'pending' })).toBe(
       'validation_failed',
     );
+  });
+});
+
+describe('internal notes (ADR-084)', () => {
+  const ctx = (scopes: string[], status = 'active') =>
+    ({
+      tenant: { id: 't', status },
+      key: { id: 'k', scopes: new Set(scopes) },
+    }) as unknown as ApiContext;
+  const id = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f01';
+
+  it('take 1 to 4000 characters of trimmed text, as members’ notes do, and nothing else', () => {
+    expect(apiAddNoteSchema.parse({ text: '  Ticket #4521 opened in the helpdesk.  ' })).toEqual({
+      text: 'Ticket #4521 opened in the helpdesk.',
+    });
+    const long = 'x'.repeat(NOTE_MAX_LENGTH);
+    expect(apiAddNoteSchema.parse({ text: long })).toEqual({ text: long });
+    expect(NOTE_MAX_LENGTH).toBe(4000);
+    for (const bad of [
+      {},
+      { text: '   ' },
+      { text: `${long}x` },
+      { text: 7 },
+      { text: 'Hi', mentionIds: [id] },
+      { body: 'Hi' },
+      'Hi',
+      null,
+    ]) {
+      expect(apiAddNoteSchema.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  it('are refused before anything is read: without the scope, while the company is not active, for ids that are not ids, and for other bodies', async () => {
+    const code = (promise: Promise<unknown>) =>
+      promise.then(
+        () => 'added',
+        (error: unknown) => (isAppError(error) ? error.code : String(error)),
+      );
+    const idempotency = { key: 'n-1', requestHash: 'h' };
+    const add = (c: ApiContext, conversationId: string, body: unknown) =>
+      code(apiAddConversationNote({} as never, c, conversationId, body, idempotency));
+    const body = { text: 'Refund issued.' };
+    expect(await add(ctx(['conversations.read', 'messages.reply']), id, body)).toBe('forbidden');
+    for (const status of ['suspended', 'restricted']) {
+      expect(await add(ctx(['conversations.write'], status), id, body)).toBe('tenant_suspended');
+    }
+    expect(await add(ctx(['conversations.write']), 'not-a-uuid', body)).toBe('not_found');
+    expect(await add(ctx(['conversations.write']), id, { text: '' })).toBe('validation_failed');
+  });
+
+  it('are described: one per Idempotency-Key, never sent to WhatsApp', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const post = (
+      doc.paths as unknown as Record<
+        string,
+        Record<
+          string,
+          {
+            description: string;
+            parameters: unknown[];
+            requestBody: unknown;
+            responses: Record<string, unknown>;
+          }
+        >
+      >
+    )['/conversations/{id}/notes']?.post;
+    expect(post?.parameters).toContainEqual({ $ref: '#/components/parameters/IdempotencyKey' });
+    expect(post?.description).toContain('WhatsApp never receives it');
+    expect(JSON.stringify(post?.requestBody)).toContain('#/components/schemas/AddConversationNote');
+    expect(JSON.stringify(post?.responses['201'])).toContain(
+      '#/components/schemas/ConversationNote',
+    );
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    expect(schemas.AddConversationNote).toMatchObject({
+      required: ['text'],
+      additionalProperties: false,
+      properties: { text: { type: 'string', minLength: 1, maxLength: NOTE_MAX_LENGTH } },
+    });
+    expect(Object.keys(schemas.ConversationNote?.properties as object).sort()).toEqual([
+      'apiKeyId',
+      'conversationId',
+      'createdAt',
+      'id',
+      'text',
+    ]);
   });
 });
 

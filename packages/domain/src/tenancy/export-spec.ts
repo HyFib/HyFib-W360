@@ -793,7 +793,14 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
   },
   {
     table: 'app.conversation_notes',
-    columns: ['id', 'conversation_id', 'author_membership_id', 'body', 'created_at'],
+    columns: [
+      'id',
+      'conversation_id',
+      'author_membership_id',
+      'author_api_key_id',
+      'body',
+      'created_at',
+    ],
   },
   {
     table: 'app.conversation_sources',

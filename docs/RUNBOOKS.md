@@ -1000,6 +1000,18 @@ retried the next minute). A company being deleted is skipped. Check `app.tenant_
 company (`status`, `trial_ends_at`, `period_end`, `grace_ends_at`): the database's clock decides
 what is due.
 
+**Migration 0060, 0061 or 0062 failed.** 0060 runs in one transaction, so a failure applies
+nothing: it makes `app.conversation_notes.author_membership_id` optional and adds
+`author_api_key_id` with the check `conversation_notes_author` (exactly one author) and a composite
+foreign key to `app.api_keys`, both `NOT VALID`. A failure usually means a lock wait on
+`app.conversation_notes` or `app.api_keys` timed out: run the migrations again when writes are
+quieter. 0061 runs outside a transaction (one `CREATE INDEX CONCURRENTLY`): a failure can leave an
+INVALID index; run `DROP INDEX CONCURRENTLY IF EXISTS app.conversation_notes_api_key_idx;` and run
+the migrations again. 0062 validates both constraints without blocking writes; it fails only if a
+stored note has no author or two, which no code writes: find it with `SELECT id FROM
+app.conversation_notes WHERE (author_membership_id IS NULL) = (author_api_key_id IS NULL)` before
+running it again.
+
 **Migration 0059 failed.** It runs in one transaction, so a failure applies nothing: it widens
 the check on `app.api_keys.scopes` to allow `webhooks.manage` (up to ten scopes), makes
 `app.webhook_endpoints.created_by_user_id` optional, and adds `created_by_api_key_id` with the check
@@ -1267,6 +1279,14 @@ administrators are emailed whenever a key adds an endpoint; if nobody expected i
 Settings → Webhooks (which names the key) and revoke the key, then check the audit log for what
 else the key did (`actor_type = 'api_key'`).
 
+**A note added through the API is refused or does not show.** `POST /conversations/{id}/notes`
+needs `conversations.write` (403 otherwise) and an `Idempotency-Key`; a retry with the same key
+answers as the first request did and adds nothing. A 404 means the conversation is another
+company's or its contact was erased (erasure deletes the conversation's notes, and a note sent while
+an erasure runs waits for it and is then refused). A 422 names the text: 1 to 4,000 characters.
+The note shows in the conversation's Notes card as "API (key name)"; it never reaches the customer
+and notifies no member.
+
 **A test event or a replay through the API is refused, or a delivery cannot be found.**
 `POST /webhook-endpoints/{id}/test` and `POST /webhook-deliveries/{id}/replay` need an
 `Idempotency-Key`; a retry with the same key answers as the first request did and queues nothing
@@ -1278,8 +1298,9 @@ another company, or was deleted after 30 days. A delivery shows no body (payload
 delivered and never stored): match it to the receiver's log by `eventId`.
 
 **The company is suspended or its plan ended.** Keys keep reading; creating contacts, recording
-consent, sending, starting and stopping automations, and managing webhook endpoints (reading them
-and their deliveries included) answer 423 until the company is active again.
+consent, sending, resolving conversations and adding notes to them, starting and stopping
+automations, and managing webhook endpoints (reading them and their deliveries included) answer 423
+until the company is active again.
 
 **Migration 0024 failed.** It runs in one transaction. It creates the two tables, the guard trigger,
 the two SECURITY DEFINER functions (granted to `w360_app` before their ownership moves to

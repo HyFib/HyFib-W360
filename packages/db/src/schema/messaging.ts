@@ -150,7 +150,9 @@ export const conversationNotes = appSchema.table('conversation_notes', {
   id: uuid('id').primaryKey(),
   tenantId: uuid('tenant_id').notNull(),
   conversationId: uuid('conversation_id').notNull(),
-  authorMembershipId: uuid('author_membership_id').notNull(),
+  /** The member who wrote the note, or the key that wrote it through the API (ADR-084). */
+  authorMembershipId: uuid('author_membership_id'),
+  authorApiKeyId: uuid('author_api_key_id'),
   body: text('body').notNull(),
   createdAt: tz('created_at').notNull().defaultNow(),
 });

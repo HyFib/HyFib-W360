@@ -517,6 +517,13 @@ Phase 5 rules (Public API, P5-08):
   HTTP status, error code, duration), never a body: payloads are not stored. Test events and
   replays need an `Idempotency-Key`, go only to an endpoint that is on, through the egress guard,
   and use the settings service's own steps; a replay is audited as the key.
+- Notes through the API (ADR-084) need `conversations.write` (granted by members holding
+  `inbox.supervise`, who read every note) and an active company. A note is internal: WhatsApp never
+  receives it and it changes nothing about the conversation; the inbox names the key, and a key's
+  note mentions no member. The conversation is locked before its contact is checked, in the order
+  erasure takes, so no note outlives an erasure; erased contacts' and other companies'
+  conversations answer 404. The database keeps exactly one author per note, which the runtime role
+  cannot change.
 - Only the token's SHA-256 is stored; the runtime role cannot read it. The token is shown once in
   the browser and kept only in the page's memory; it is never logged, and audit entries carry the
   public prefix only.

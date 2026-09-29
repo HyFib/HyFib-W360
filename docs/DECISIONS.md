@@ -2670,3 +2670,42 @@ Decision:
 
 Not built: bodies sent or received, replaying many deliveries in one call, filters beyond the
 status (event type, dates), and deliveries to members' endpoints.
+
+## ADR-084 Internal notes through the public API (2026-09-29)
+
+Context: members add internal notes to a conversation in the inbox, which the team reads and
+WhatsApp never receives (mentions notify the members named, P3-06d). An integration that works alongside the team (a helpdesk that opened a
+ticket, an order system that issued a refund, a CRM that logged a call) could resolve and reopen
+conversations (ADR-075) but could not leave the team a note in one: a note needed a member
+(`author_membership_id` was required).
+
+Decision:
+
+- **The `conversations.write` scope adds notes,** now "Resolve, reopen and add notes to
+  conversations". Its grantors (owners, administrators and supervisors, who hold `inbox.supervise`)
+  read every note already, and a note changes nothing the customer sees, so no new scope is needed.
+  Keys that already hold the scope can add notes from this release.
+- **One operation:** `POST /api/v1/conversations/{id}/notes` with `{"text": "…"}` (1 to 4,000
+  characters, trimmed, as members' notes are), answered 201 with the note (its id, the conversation,
+  the text, the key and when it was written). It needs an `Idempotency-Key`: a retry answers as the
+  first request did and adds nothing.
+- **Nothing else changes:** WhatsApp never receives a note, and the conversation's status, assignee,
+  unread count and wait for a reply stay as they are. The inbox hears of it live, as it hears of
+  members' notes, and names it as the key's ("API (name)"), as it names the messages keys send.
+- **No mentions:** the API names no members (ADR-072), so a key's note notifies no one.
+- **Erasure wins:** the conversation's row is locked before the contact is checked, in the order
+  erasure locks it, so a note sent while an erasure runs waits and is then refused (404), and
+  erasure deletes the notes added before it with the contact's other notes. Erased contacts' and
+  other companies' conversations are not found.
+- **Recorded on the note:** each note keeps the key that wrote it (`author_api_key_id`; exactly one
+  author per note). There is no audit entry, as there is none for members' notes or for the
+  messages keys send, which keep their key too.
+- **Migrations:** 0060 makes `author_membership_id` optional and adds `author_api_key_id` (a
+  composite foreign key to the key) with a check that exactly one author is set, both `NOT VALID` so
+  the notes table is not read under the lock; 0061 builds the partial index on the key concurrently;
+  0062 validates both without blocking writes. The runtime role inserts the new column through its
+  table grant and has no `UPDATE` on notes.
+
+Not built: reading notes through the API (members' notes would need their authors kept out),
+editing or deleting notes, mentions from keys, notes on contacts or deals, and a webhook event for
+notes.

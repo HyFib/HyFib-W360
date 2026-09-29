@@ -1,8 +1,9 @@
 import { z } from 'zod';
-import { notFound } from '@w360/core';
+import { notFound, uuidv7 } from '@w360/core';
 import {
   and,
   contacts,
+  conversationNotes,
   conversations,
   CONVERSATION_STATUSES,
   desc,
@@ -20,18 +21,21 @@ import { recordSystemAudit } from '../audit';
 import { endRunForHuman } from '../automations/runs';
 import { emitTenantEvent } from '../messaging/events';
 import { outboundText } from '../messaging/message-text';
+import { NOTE_MAX_LENGTH } from '../messaging/notes';
 import { SERVICE_WINDOW_MS, type OutboundDeps } from '../messaging/outbound';
 import { answeredJoin, answeredMessages } from '../messaging/reply-context';
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
 import { inboundSummary, type TappedReply } from '../webhooks/payloads';
 import { apiActor, assertScope, type ApiContext } from './context';
+import type { ApiResponse, IdempotencyInput } from './idempotency';
 import { API_LIMITS } from './model';
+import { idempotent } from './resources';
 
 /**
  * Conversations through the public API. A key with `conversations.read` lists the company's
  * conversations and reads their messages (ADR-072); one with `conversations.write` resolves and
- * reopens them (ADR-075). The conversations of erased contacts are left out, as their contacts are.
- * Messages read as the webhooks describe them (ADR-053).
+ * reopens them (ADR-075) and adds internal notes (ADR-084). The conversations of erased contacts are
+ * left out, as their contacts are. Messages read as the webhooks describe them (ADR-053).
  */
 
 const page = {
@@ -55,6 +59,18 @@ export const apiConversationListQuerySchema = z
   .strict();
 
 export const apiMessageListQuerySchema = z.object(page).strict();
+
+/** An internal note (ADR-084): for the team, never sent to WhatsApp. */
+export const apiAddNoteSchema = z
+  .object({
+    text: z
+      .string()
+      .trim()
+      .min(1)
+      .max(NOTE_MAX_LENGTH)
+      .describe('The note, which the team reads in the inbox. WhatsApp never receives it.'),
+  })
+  .strict();
 
 /** The statuses the inbox sets: `pending` is not one of them. */
 export const apiConversationStatusSchema = z
@@ -81,6 +97,16 @@ export interface ApiConversation {
 }
 
 export type ApiSentBy = 'agent' | 'bot' | 'campaign' | 'api' | 'system';
+
+/** A note a key added to a conversation (ADR-084). */
+export interface ApiConversationNote {
+  id: string;
+  conversationId: string;
+  text: string;
+  /** The key that wrote the note, named in the inbox. */
+  apiKeyId: string;
+  createdAt: string;
+}
 
 export interface ApiConversationMessage {
   id: string;
@@ -393,4 +419,57 @@ export async function apiSetConversationStatus(
   });
   if (!row) throw notFound('Conversation');
   return toApiConversation(row);
+}
+
+/**
+ * Adds an internal note to a conversation (ADR-084), once per `Idempotency-Key`: the team reads it
+ * in the inbox, named as the key's, and WhatsApp never receives it. The conversation's row is locked
+ * first, as erasure locks it before deleting the contact's notes, so a note cannot outlive an erasure
+ * that runs at the same time. Nothing else changes: the status, the assignee, the unread count and
+ * the wait for a reply stay as they are.
+ */
+export async function apiAddConversationNote(
+  deps: Pick<OutboundDeps, 'db' | 'clock'>,
+  ctx: ApiContext,
+  conversationId: string,
+  input: unknown,
+  idempotency: IdempotencyInput,
+): Promise<ApiResponse> {
+  assertScope(ctx, 'conversations.write');
+  if (!z.uuid().safeParse(conversationId).success) throw notFound('Conversation');
+  const data = parseInput(apiAddNoteSchema, input);
+  const now = deps.clock.now();
+  return deps.db.run(ctx.scope, (tx) =>
+    idempotent(tx, ctx, idempotency, now, async () => {
+      await tx
+        .select({ id: conversations.id })
+        .from(conversations)
+        .where(and(eq(conversations.tenantId, ctx.tenant.id), eq(conversations.id, conversationId)))
+        .for('update');
+      const conversation = await visibleConversation(tx, ctx.tenant.id, conversationId);
+      if (!conversation) throw notFound('Conversation');
+      const id = uuidv7();
+      await tx.insert(conversationNotes).values({
+        id,
+        tenantId: ctx.tenant.id,
+        conversationId,
+        authorApiKeyId: ctx.key.id,
+        body: data.text,
+        createdAt: now,
+      });
+      await emitTenantEvent(tx, ctx.tenant.id, {
+        type: 'conversation.note',
+        conversationId,
+        assignedMembershipId: conversation.assignedMembershipId,
+      });
+      const body: ApiConversationNote = {
+        id,
+        conversationId,
+        text: data.text,
+        apiKeyId: ctx.key.id,
+        createdAt: now.toISOString(),
+      };
+      return { status: 201, body: { data: body } };
+    }),
+  );
 }

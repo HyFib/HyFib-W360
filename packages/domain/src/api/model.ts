@@ -75,9 +75,9 @@ export const API_SCOPE_INFO: Record<
     writes: false,
   },
   'conversations.write': {
-    label: 'Resolve and reopen conversations',
+    label: 'Resolve, reopen and add notes to conversations',
     description:
-      'Mark conversations resolved, or open again, as members do in the inbox. Resolving stops an automation answering the conversation.',
+      'Mark conversations resolved, or open again, as members do in the inbox, and add internal notes the team reads there (WhatsApp never receives them). Resolving stops an automation answering the conversation.',
     permission: 'inbox.supervise',
     writes: true,
   },

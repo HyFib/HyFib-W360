@@ -421,9 +421,12 @@ verification, app review, Embedded Signup configuration).
   through the API built, locally verified; delivered to local test receivers only]** (ADR-083: the
   same `webhooks.manage` key pages the deliveries of the endpoints keys added, reads one, sends a
   test event and replays a finished delivery, once per `Idempotency-Key`; deliveries say how
-  sending went, never a body). Remaining: media messages, call-to-action and product messages
-  through the API, taking reactions back, assigning conversations, notes, member and team names,
-  media downloads, a message feed across conversations, starting or stopping runs for many contacts
+  sending went, never a body); **[notes built, locally verified]** (ADR-084: a
+  `conversations.write` key adds internal notes to a conversation, once per `Idempotency-Key`,
+  named as the key's in the inbox and never sent to WhatsApp; a note sent while the contact is being
+  erased waits for the erasure and is refused). Remaining: media messages, call-to-action and
+  product messages through the API, taking reactions back, assigning conversations, reading notes,
+  member and team names, media downloads, a message feed across conversations, starting or stopping runs for many contacts
   in one call, bulk sends in one call, replaying many deliveries in one call, networks for the
   whole company, per-key quotas, limits per endpoint, and dropping the one-argument key lookup kept
   for rolling deploys (0051).

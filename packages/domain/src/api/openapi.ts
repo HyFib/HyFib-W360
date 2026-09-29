@@ -31,7 +31,7 @@ import {
 } from '../webhooks/payloads';
 import { apiStartAutomationSchema } from './automations';
 import { apiContactSchema } from './contact-view';
-import { apiConversationStatusSchema } from './conversations';
+import { apiAddNoteSchema, apiConversationStatusSchema } from './conversations';
 import { API_LIMITS, API_SCOPE_INFO, API_SCOPE_KEYS } from './model';
 import {
   apiConsentSchema,
@@ -138,6 +138,15 @@ export const apiConversationSchema = z.object({
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime().describe('When anything about the conversation last changed.'),
   resolvedAt: z.iso.datetime().nullable(),
+});
+
+/** A note a key added to a conversation (ADR-084). */
+export const apiConversationNoteSchema = z.object({
+  id: z.uuid(),
+  conversationId: z.uuid(),
+  text: z.string(),
+  apiKeyId: z.uuid().describe('The key that wrote the note, which the inbox names.'),
+  createdAt: z.iso.datetime(),
 });
 
 export const apiConversationMessageSchema = z.object({
@@ -623,6 +632,25 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
         },
       },
+      '/conversations/{id}/notes': {
+        post: {
+          operationId: 'addConversationNote',
+          summary: 'Add an internal note to a conversation',
+          description: [
+            `${scopeNote('conversations.write')} The team reads the note in the inbox, named as the key's. WhatsApp never receives it, and nothing else about the conversation changes: its status, assignee and wait for a reply stay as they are.`,
+            'One note per `Idempotency-Key`. Conversations of erased contacts are not found.',
+          ].join('\n\n'),
+          parameters: [
+            { $ref: '#/components/parameters/Id' },
+            { $ref: '#/components/parameters/IdempotencyKey' },
+          ],
+          requestBody: { required: true, content: json(ref('AddConversationNote')) },
+          responses: {
+            '201': { description: 'The note.', content: json(dataOf(ref('ConversationNote'))) },
+            ...errors(400, 401, 403, 404, 415, 422, 423, 429, 500),
+          },
+        },
+      },
       '/conversations/{id}/messages': {
         get: {
           operationId: 'listConversationMessages',
@@ -1023,6 +1051,8 @@ export function buildOpenApiDocument(serverUrl: string) {
         Conversation: jsonSchema(apiConversationSchema),
         ConversationMessage: jsonSchema(apiConversationMessageSchema),
         ConversationStatus: jsonSchema(apiConversationStatusSchema, 'input'),
+        AddConversationNote: jsonSchema(apiAddNoteSchema, 'input'),
+        ConversationNote: jsonSchema(apiConversationNoteSchema),
         Automation: jsonSchema(apiAutomationSchema),
         AutomationRun: jsonSchema(apiAutomationRunSchema),
         StartAutomationRun: jsonSchema(apiStartAutomationSchema, 'input'),
@@ -1061,6 +1091,7 @@ export const API_ROUTES = [
   ['get', '/conversations'],
   ['get', '/conversations/{id}'],
   ['patch', '/conversations/{id}'],
+  ['post', '/conversations/{id}/notes'],
   ['get', '/conversations/{id}/messages'],
   ['get', '/automations'],
   ['post', '/automations/{id}/runs'],

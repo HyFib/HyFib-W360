@@ -1,5 +1,70 @@
 # Progress
 
+## 2026-09-29 — Phase 5: internal notes through the public API (P5-08, ADR-084)
+
+Status: **Implemented and locally verified (no customer data).** An integration that works beside
+the team (a helpdesk that opened a ticket, an order system that issued a refund) could resolve and
+reopen conversations but could not leave the team a note in one: notes needed a member.
+
+### Completed
+
+- **Design (ADR-084):** the `conversations.write` scope, now "Resolve, reopen and add notes to
+  conversations", adds internal notes with `POST /api/v1/conversations/{id}/notes` (1 to 4,000
+  characters, trimmed, as members' notes), once per `Idempotency-Key`. WhatsApp never receives a
+  note, nothing else about the conversation changes, the inbox names the key and hears of the note
+  live, and a key's note mentions no one. The conversation is locked before its contact is checked,
+  in erasure's order, so no note outlives an erasure.
+- **Migrations 0060–0062:** `author_membership_id` becomes optional and `author_api_key_id` (a
+  composite foreign key to the key) records a key, with a check that exactly one author is set; both
+  `NOT VALID` in 0060, the partial index on the key built concurrently in 0061, both validated in
+  0062 without blocking writes.
+- **Domain:** `apiAddConversationNote` and `apiAddNoteSchema` in `api/conversations.ts`;
+  `NOTE_MAX_LENGTH` in `messaging/notes.ts`, shared with members' notes; the inbox thread reads
+  notes with the member's or the key's name; the export lists the new column; the OpenAPI document
+  describes the operation (`AddConversationNote`, `ConversationNote`).
+- **Web:** the route; the Notes card names a key's note "API (name)"; Settings → API keys offers the
+  scope under its new label, and its introduction names notes and, left out by ADR-083, webhook
+  deliveries and replays.
+- **Tests:** unit (the text, the scope and company checked before anything is read, the OpenAPI
+  entries). Integration in `api.test.ts`: a note once per key (a retry answers the same and adds
+  nothing), stored with the key, shown in the inbox under the key's name beside a member's note,
+  heard live, changing nothing about the conversation and sending nothing; refusals storing nothing
+  (the reading scope, another company's key, an erased contact's conversation, bad ids and bodies,
+  suspended and restricted companies); an erasure held open while a note waits on the conversation's
+  lock, the note then refused and the earlier note deleted by the erasure; the author check, the key
+  belonging to the company and the runtime role unable to change the author. The ADR-075 test and
+  the e2e locator follow the scope's new label. e2e `api.spec.ts`: the key adds a note over HTTP
+  and the inbox shows it as "API (Helpdesk)"; the stand-in received no message for it.
+- **Docs:** ADR-084; ARCHITECTURE (the public API); SECURITY (Phase 5 rules); THREAT-MODEL T102;
+  RUNBOOKS (a troubleshooting entry, migrations 0060–0062, suspended companies, which also gains
+  resolving conversations); DATA-RETENTION (a row for conversation notes, which had none); BACKLOG
+  P5-08; FEATURE-MATRIX H-033 and W-134.
+- **Mutation checks:** 19 regressions tried one at a time; all make a test fail. 18 in the database and
+  domain: the conversation not locked before its contact is checked (caught by the erasure held
+  open); erased contacts' conversations taking notes; the note without its key; a note added again
+  on a retry; the inbox not told live; the scope not checked, or the reading scope enough; the text
+  not trimmed; no length limit; unknown fields accepted; the inbox hiding keys' notes or leaving out
+  the key's name; the scope's label not naming notes; the Idempotency-Key and the route missing
+  from the OpenAPI document; the author check and the foreign key to the key dropped from the
+  migrations; the new column not classified for the export. 1 in the web layer through the e2e
+  test: the Notes card showing only members' names.
+
+### Test commands and results (local, 2026-09-29)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                              |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                      |
+| `pnpm test` (unit)                                                          | 396 passed, including 3 new in `api/api.test.ts`                                                                                                                                                                                                                                                                                                                    |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 536 passed, including 4 new in `api.test.ts`                                                                                                                                                                                                                                                                                                                        |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 536 passed                                                                                                                                                                                                                                                                                                                                                          |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / on `api.spec.ts`, `api-keys.spec.ts`, `inbox.spec.ts`, `inbox-teams.spec.ts` and `webhooks.spec.ts`: 28 passed (4.2 min), on a local database created for the day's runs with migrations 0060–0062 applied. An earlier run of the first four, before the note's time was taken from the request's clock (a lint fix), passed too: 22 tests (2.9 min) |
+| Mutation checks                                                             | 19 regressions tried (1 through the e2e test); all make a test fail                                                                                                                                                                                                                                                                                                 |
+
+### Known gaps
+
+- Not built: reading notes through the API, editing or deleting notes, mentions from keys, notes on
+  contacts or deals, a webhook event for notes.
+
 ## 2026-09-29 — Phase 5: webhook deliveries, test events and replays through the public API (P5-08, P5-09, ADR-083)
 
 Status: **Implemented and locally verified with local test receivers (no customer data).** An

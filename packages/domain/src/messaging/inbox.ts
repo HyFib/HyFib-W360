@@ -44,6 +44,7 @@ import { loadReplyTarget, replyTimer, type ReplyTarget } from '../inbox/sla';
 import { decodeKeysetCursor, encodeKeysetCursor, likePattern } from '../validation';
 import { emitTenantEvent } from './events';
 import { messageSnippet } from './message-text';
+import { NOTE_MAX_LENGTH } from './notes';
 import { SERVICE_WINDOW_MS, canSeeConversation } from './outbound';
 import { answeredJoin, answeredMessages } from './reply-context';
 
@@ -99,7 +100,7 @@ export const responseTargetSchema = z.object({
 
 export const noteSchema = z.object({
   conversationId: z.uuid(),
-  body: z.string().trim().min(1, 'Write a note').max(4000),
+  body: z.string().trim().min(1, 'Write a note').max(NOTE_MAX_LENGTH),
   /** Members to notify; each must be able to see the conversation. */
   mentionIds: z.array(z.uuid()).max(20).default([]),
 });
@@ -519,22 +520,31 @@ export function createInboxService(deps: InboxDeps) {
             )
             .orderBy(desc(messages.createdAt), desc(messages.id))
             .limit(pageSize + 1);
+          // A note's author is a member, or an API key for notes added through the API (ADR-084).
           const notes = await tx
             .select({
               id: conversationNotes.id,
               body: conversationNotes.body,
               createdAt: conversationNotes.createdAt,
               authorName: users.name,
+              apiKeyName: apiKeys.name,
             })
             .from(conversationNotes)
-            .innerJoin(
+            .leftJoin(
               memberships,
               and(
                 eq(memberships.tenantId, conversationNotes.tenantId),
                 eq(memberships.id, conversationNotes.authorMembershipId),
               ),
             )
-            .innerJoin(users, eq(users.id, memberships.userId))
+            .leftJoin(users, eq(users.id, memberships.userId))
+            .leftJoin(
+              apiKeys,
+              and(
+                eq(apiKeys.tenantId, conversationNotes.tenantId),
+                eq(apiKeys.id, conversationNotes.authorApiKeyId),
+              ),
+            )
             .where(
               and(
                 eq(conversationNotes.tenantId, ctx.tenant.id),

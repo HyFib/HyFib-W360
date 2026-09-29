@@ -951,6 +951,15 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   and inserts a new delivery of the same event with `replay_of`; both lists select
   `webhookDeliveryColumns` joined to the event (`deliveryEventJoin`). Test events and replays run
   inside `idempotent`; a replay's audit row names the key.
+- **Notes through the API (0060–0062, ADR-084):** `POST /conversations/{id}/notes` with
+  `conversations.write` (`apiAddConversationNote`, `api/conversations.ts`) runs inside `idempotent`:
+  it locks the conversation `FOR UPDATE` (the order erasure takes), checks that it is visible (the
+  contact not erased), inserts the note with `author_api_key_id` and emits `conversation.note`. The
+  inbox thread reads notes with left joins to the member and the key (`authorName`, `apiKeyName`);
+  `NOTE_MAX_LENGTH` (`messaging/notes.ts`) bounds members' notes and keys' alike.
+  `conversation_notes_author` keeps exactly one author, `conversation_notes_api_key_fk` ties the key
+  to the company, and `conversation_notes_api_key_idx` (0061, built concurrently) serves the foreign
+  key.
 - **Keyset cursors** (`encodeKeysetCursor`, `exactTimestamp`): a cursor carries the last row's
   timestamp as PostgreSQL keeps it, to the microsecond, and its id, and pages compare
   `(time, id) < (cursor time, cursor id)`; cursors made with milliseconds still read. Cursors built

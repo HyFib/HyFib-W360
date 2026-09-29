@@ -377,7 +377,8 @@ export default async function ConversationPage({
                         </p>
                       ) : null}
                       <p className="mt-1 text-xs text-muted-foreground">
-                        {n.authorName} · {formatDateTime(n.createdAt, tz)}
+                        {n.apiKeyName !== null ? `API (${n.apiKeyName})` : n.authorName} ·{' '}
+                        {formatDateTime(n.createdAt, tz)}
                       </p>
                     </li>
                   ))}

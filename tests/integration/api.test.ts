@@ -9,6 +9,7 @@ import {
   API_TOKEN_RE,
   RUN_BUDGETS,
   advanceAutomationRun,
+  apiAddConversationNote,
   apiCreateContact,
   apiErrorResponse,
   apiGetAutomationRun,
@@ -2517,7 +2518,7 @@ describe('conversation status (ADR-075)', () => {
     await expectAppError(
       keys.create(narrower, { name: 'Closer', scopes: ['conversations.write'], expiresInDays: 30 }),
       'forbidden',
-      /Resolve and reopen conversations/,
+      /Resolve, reopen and add notes to conversations/,
     );
     const granted = await keys.create(owner, {
       name: 'Closer',
@@ -2756,6 +2757,244 @@ describe('conversation status (ADR-075)', () => {
     expect(await conversationRow(kept.id)).toEqual(keptBefore);
     expect(await statusAudit(c, erased.id)).toEqual([]);
     expect(await statusAudit(c, kept.id)).toEqual([]);
+  });
+});
+
+describe('internal notes (ADR-084)', () => {
+  const notesOf = (conversationId: string) =>
+    fx.query<{
+      author_membership_id: string | null;
+      author_api_key_id: string | null;
+      body: string;
+    }>(
+      `SELECT author_membership_id, author_api_key_id, body FROM app.conversation_notes
+        WHERE conversation_id = $1 ORDER BY created_at, id`,
+      [conversationId],
+    );
+  const conversationState = (id: string) =>
+    fx.query(
+      `SELECT status, assigned_membership_id, unread_count, version, updated_at, last_message_at,
+              last_message_preview
+         FROM app.conversations WHERE id = $1`,
+      [id],
+    );
+  const messagesOf = (id: string) =>
+    fx.query('SELECT id, status FROM app.messages WHERE conversation_id = $1 ORDER BY id', [id]);
+  const text = 'Ticket #4521 opened in the helpdesk.';
+
+  it('add a note once per Idempotency-Key, which the inbox names as the key’s and WhatsApp never receives', async () => {
+    const c = await fx.company();
+    const { ctx, id: keyId } = await apiKey(c, ['conversations.write'], 'Helpdesk');
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const waId = '919811100094';
+    await inbound(c, waId, [{ text: 'My parcel is late' }]);
+    const conv = await conversationOf(c, waId);
+    await inbox().assign(owner, {
+      conversationId: conv.id,
+      membershipId: agent.membership.id,
+      expectedVersion: conv.version,
+    });
+    const before = await conversationState(conv.id);
+    const messagesBefore = await messagesOf(conv.id);
+
+    const first = await apiAddConversationNote(
+      deps(),
+      ctx,
+      conv.id,
+      { text: `  ${text}  ` },
+      idem('note-1', 'a'),
+    );
+    expect(first).toEqual({
+      status: 201,
+      replayed: false,
+      body: {
+        data: {
+          id: expect.any(String),
+          conversationId: conv.id,
+          text,
+          apiKeyId: keyId,
+          createdAt: expect.any(String),
+        },
+      },
+    });
+    // A retry answers as the first request did and adds nothing.
+    expect(
+      await apiAddConversationNote(
+        deps(),
+        ctx,
+        conv.id,
+        { text: `  ${text}  ` },
+        idem('note-1', 'a'),
+      ),
+    ).toEqual({ ...first, replayed: true });
+    expect(await notesOf(conv.id)).toEqual([
+      { author_membership_id: null, author_api_key_id: keyId, body: text },
+    ]);
+
+    // The inbox shows it with the key's name, next to a member's note, and hears of it live.
+    await inbox().addNote(agent, { conversationId: conv.id, body: 'Called the courier.' });
+    const thread = await inbox().getConversation(agent, conv.id);
+    expect(thread.notes.map((n) => [n.body, n.authorName, n.apiKeyName])).toEqual([
+      [text, null, 'Helpdesk'],
+      ['Called the courier.', 'Agent', null],
+    ]);
+    expect(
+      await fx.query(
+        `SELECT assigned_membership_id FROM app.tenant_events
+          WHERE conversation_id = $1 AND type = 'conversation.note' ORDER BY id`,
+        [conv.id],
+      ),
+    ).toEqual([
+      { assigned_membership_id: agent.membership.id },
+      { assigned_membership_id: agent.membership.id },
+    ]);
+    // Nothing else about the conversation changes, and nothing is sent.
+    expect(await conversationState(conv.id)).toEqual(before);
+    expect(await messagesOf(conv.id)).toEqual(messagesBefore);
+  });
+
+  it('refuse, storing nothing, what the key, the company or the conversation does not allow', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const mine = await apiKey(c, ['conversations.write']);
+    const reader = await apiKey(c, ['conversations.read', 'messages.reply']);
+    const theirs = await apiKey(other, ['conversations.write']);
+    await inbound(c, '919811100095', [{ text: 'Hello' }]);
+    await inbound(c, '919811100097', [{ text: 'Please forget me' }]);
+    const kept = await conversationOf(c, '919811100095');
+    const erased = await conversationOf(c, '919811100097');
+    await createContactsService({ db: fx.dbs.app, clock: systemClock }).eraseContact(
+      await fx.ctx(c, c.owner),
+      { contactId: erased.contact_id, suppress: false },
+    );
+    const add = (ctx: ApiContext, id: string, body: unknown, key: string) =>
+      apiAddConversationNote(deps(), ctx, id, body, idem(key, key));
+
+    await expectAppError(add(reader.ctx, kept.id, { text }, 'r-1'), 'forbidden');
+    await expectAppError(add(theirs.ctx, kept.id, { text }, 'r-2'), 'not_found', /Conversation/);
+    await expectAppError(add(mine.ctx, erased.id, { text }, 'r-3'), 'not_found', /Conversation/);
+    for (const [i, id] of ['not-a-uuid', uuidv7()].entries()) {
+      await expectAppError(add(mine.ctx, id, { text }, `r-4-${i}`), 'not_found');
+    }
+    for (const [i, body] of [
+      {},
+      { text: ' ' },
+      { text: 'x'.repeat(4001) },
+      { note: text },
+    ].entries()) {
+      await expectAppError(add(mine.ctx, kept.id, body, `r-5-${i}`), 'validation_failed');
+    }
+    // Nothing is added while the company is suspended or its plan has ended.
+    for (const status of ['suspended', 'restricted'] as const) {
+      const ctx = { ...mine.ctx, tenant: { ...mine.ctx.tenant, status } };
+      await expectAppError(add(ctx, kept.id, { text }, `r-6-${status}`), 'tenant_suspended');
+    }
+    expect(await notesOf(kept.id)).toEqual([]);
+    expect(await notesOf(erased.id)).toEqual([]);
+    expect(
+      await fx.query('SELECT id FROM app.api_idempotency_keys WHERE api_key_id = ANY($1)', [
+        [mine.id, reader.id, theirs.id],
+      ]),
+    ).toEqual([]);
+  });
+
+  it('never outlive an erasure: erasure deletes notes added before it, and a note waiting for it is refused', async () => {
+    const c = await fx.company();
+    const { ctx } = await apiKey(c, ['conversations.write']);
+    await inbound(c, '919811100098', [{ text: 'Delete my data' }]);
+    const conv = await conversationOf(c, '919811100098');
+    await apiAddConversationNote(
+      deps(),
+      ctx,
+      conv.id,
+      { text: 'Asked for erasure.' },
+      idem('e-1', 'e'),
+    );
+    expect(await notesOf(conv.id)).toHaveLength(1);
+
+    // An erasure holds the conversation while the key adds a note: the note waits, then is refused.
+    const erasing = await fx.dbs.adminPool.connect();
+    let adding: Promise<unknown> | undefined;
+    try {
+      await erasing.query('BEGIN');
+      await erasing.query(
+        `SELECT set_config('app.tenant_id', $1, true), set_config('app.user_id', $2, true)`,
+        [c.tenant.id, c.owner.id],
+      );
+      await erasing.query('SELECT app.erase_contact($1, false)', [conv.contact_id]);
+      const [holder] = (await erasing.query<{ pid: number }>('SELECT pg_backend_pid() AS pid'))
+        .rows;
+      adding = expectAppError(
+        apiAddConversationNote(deps(), ctx, conv.id, { text: 'Refund issued.' }, idem('e-2', 'f')),
+        'not_found',
+        /Conversation/,
+      );
+      await vi.waitFor(
+        async () => {
+          const [waiting] = await fx.query<{ n: number }>(
+            `SELECT count(*)::int AS n FROM pg_stat_activity
+              WHERE datname = current_database() AND $1 = ANY (pg_blocking_pids(pid))`,
+            [holder!.pid],
+          );
+          if (waiting!.n < 1) throw new Error('the note is not waiting yet');
+        },
+        { timeout: 4_000, interval: 20 },
+      );
+    } finally {
+      await erasing.query('COMMIT');
+      erasing.release();
+    }
+    await adding;
+    expect(await notesOf(conv.id)).toEqual([]);
+  });
+
+  it('keep exactly one author on every note, a key of the company, fixed once written', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['conversations.write']);
+    await inbound(c, '919811100099', [{ text: 'Hi' }]);
+    const conv = await conversationOf(c, '919811100099');
+    const added = await apiAddConversationNote(
+      deps(),
+      key.ctx,
+      conv.id,
+      { text },
+      idem('d-1', 'd'),
+    );
+    const id = (added.body as { data: { id: string } }).data.id;
+    const owner = await fx.ctx(c, c.owner);
+    // Both, or neither: the check refuses (as the owner of the tables, beyond row security).
+    await expect(
+      fx.dbs.adminPool.query(
+        `UPDATE app.conversation_notes SET author_membership_id = $2 WHERE id = $1`,
+        [id, owner.membership.id],
+      ),
+    ).rejects.toThrow(/conversation_notes_author/);
+    await expect(
+      fx.dbs.adminPool.query(
+        `UPDATE app.conversation_notes SET author_api_key_id = NULL WHERE id = $1`,
+        [id],
+      ),
+    ).rejects.toThrow(/conversation_notes_author/);
+    // The key must be one of the company's own.
+    const stranger = await apiKey(await fx.company(), ['conversations.write']);
+    await expect(
+      fx.dbs.adminPool.query(
+        `UPDATE app.conversation_notes SET author_api_key_id = $2 WHERE id = $1`,
+        [id, stranger.id],
+      ),
+    ).rejects.toThrow(/conversation_notes_api_key_fk/);
+    // The runtime role cannot change who wrote a note.
+    await expect(
+      fx.dbs.app.run(authorizedTenantScope(c.tenant.id, null), (tx) =>
+        tx.execute(
+          sql`UPDATE app.conversation_notes SET author_api_key_id = NULL WHERE id = ${id}`,
+        ),
+      ),
+    ).rejects.toThrow();
+    expect(await notesOf(conv.id)).toEqual([
+      { author_membership_id: null, author_api_key_id: key.id, body: text },
+    ]);
   });
 });
 
