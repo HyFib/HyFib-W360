@@ -24,7 +24,7 @@ type Runtime = Awaited<ReturnType<typeof getRuntime>>;
 export interface ApiCall {
   ctx: ApiContext;
   runtime: Runtime;
-  /** The JSON body (POST), already parsed. */
+  /** The JSON body (POST, PATCH), already parsed. */
   body: unknown;
   /** The Idempotency-Key header with the request's hash, when the header was sent. */
   idempotency: IdempotencyInput | null;

@@ -816,8 +816,8 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   with `developer.manage` create keys (name, scopes, expiry of 30, 90 or 365 days or none) and may
   grant a scope only when they hold its permission (`templates.read`, `contacts.read`,
   `contacts.write`, `inbox.reply` for `messages.send` and `messages.reply`, `campaigns.send` for
-  `messages.send_marketing`, `inbox.read_all` for `conversations.read`); at most 20 active keys per
-  company, counted under an advisory lock.
+  `messages.send_marketing`, `inbox.read_all` for `conversations.read`, `inbox.supervise` for
+  `conversations.write`); at most 20 active keys per company, counted under an advisory lock.
   Rotation creates a key with the same name, scopes and lifetime and lets the old one work for 0 to
   72 hours (0 revokes it); revocation is immediate. Each change is audited without the token.
 - **Requests** (`apps/web/src/server/api.ts`): the bearer token is checked by shape, then through
@@ -866,6 +866,16 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   row's `updated_at`, which its trigger stamps with the transaction's start, so integrations are
   told to overlap their passes. `conversations_created_idx` (0045, built concurrently) serves the
   pages.
+- **Resolving and reopening (0050, ADR-075):** `PATCH /conversations/{id}` with the `status`
+  `resolved` or `open` needs `conversations.write` (`apiSetConversationStatus`). It locks the
+  conversation row `FOR UPDATE`, as the inbox's `setStatus` does, checks the contact is not erased
+  (404 otherwise), and answers the conversation unchanged when it already has the status. Otherwise
+  resolving ends an active automation run (`conversation_resolved`, no member) and sets `resolved_at`
+  and an unread count of 0, reopening clears `resolved_at`; the version goes up, the live
+  `conversation.status` event is emitted and the change is audited as the key
+  (`conversation.status_changed`, `source: api`). The existing triggers do the rest: the reply turn
+  and the case close without a member (`app.current_user_id()` is empty in the key's scope), a
+  reopen opens a case, and the webhook event is captured. No satisfaction survey is queued.
 - **Keyset cursors** (`encodeKeysetCursor`, `exactTimestamp`): a cursor carries the last row's
   timestamp as PostgreSQL keeps it, to the microsecond, and its id, and pages compare
   `(time, id) < (cursor time, cursor id)`; cursors made with milliseconds still read. Cursors built

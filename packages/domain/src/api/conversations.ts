@@ -16,17 +16,20 @@ import {
   type MessageType,
   type Tx,
 } from '@w360/db';
+import { recordSystemAudit } from '../audit';
+import { endRunForHuman } from '../automations/runs';
+import { emitTenantEvent } from '../messaging/events';
 import { SERVICE_WINDOW_MS, type OutboundDeps } from '../messaging/outbound';
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
 import { inboundSummary } from '../webhooks/payloads';
-import { assertScope, type ApiContext } from './context';
+import { apiActor, assertScope, type ApiContext } from './context';
 import { API_LIMITS } from './model';
 
 /**
- * Reading conversations and messages through the public API (ADR-072). A key with
- * `conversations.read` lists the company's conversations and reads their messages; the conversations
- * of erased contacts are left out, as their contacts are. Messages read as the webhooks describe
- * them (ADR-053).
+ * Conversations through the public API. A key with `conversations.read` lists the company's
+ * conversations and reads their messages (ADR-072); one with `conversations.write` resolves and
+ * reopens them (ADR-075). The conversations of erased contacts are left out, as their contacts are.
+ * Messages read as the webhooks describe them (ADR-053).
  */
 
 const page = {
@@ -50,6 +53,15 @@ export const apiConversationListQuerySchema = z
   .strict();
 
 export const apiMessageListQuerySchema = z.object(page).strict();
+
+/** The statuses the inbox sets: `pending` is not one of them. */
+export const apiConversationStatusSchema = z
+  .object({
+    status: z
+      .enum(['open', 'resolved'])
+      .describe('`resolved` to resolve the conversation, `open` to reopen it.'),
+  })
+  .strict();
 
 export interface ApiConversation {
   id: string;
@@ -319,4 +331,76 @@ export async function apiListConversationMessages(
   );
   if (!result) throw notFound('Conversation');
   return result;
+}
+
+/**
+ * Resolves or reopens a conversation as the inbox's Resolve and Reopen do (ADR-075), with the
+ * conversation row locked like a member's change. Resolving stops an automation answering the
+ * conversation; the triggers close the waiting reply turn and the case, open a new case on reopening
+ * and capture the webhook event. The key is the audit actor, so per-member report counts leave the
+ * change out, and no satisfaction survey is sent (surveys follow a member's resolve, ADR-032). The
+ * status the conversation already has changes nothing, so a retried request does no harm.
+ */
+export async function apiSetConversationStatus(
+  deps: Pick<OutboundDeps, 'db' | 'clock'>,
+  ctx: ApiContext,
+  conversationId: string,
+  input: unknown,
+): Promise<ApiConversation> {
+  assertScope(ctx, 'conversations.write');
+  if (!z.uuid().safeParse(conversationId).success) throw notFound('Conversation');
+  const data = parseInput(apiConversationStatusSchema, input);
+  const row = await deps.db.run(ctx.scope, async (tx) => {
+    const [current] = await tx
+      .select({
+        status: conversations.status,
+        assignedMembershipId: conversations.assignedMembershipId,
+      })
+      .from(conversations)
+      .where(and(eq(conversations.tenantId, ctx.tenant.id), eq(conversations.id, conversationId)))
+      .for('update');
+    if (!current || !(await visibleConversation(tx, ctx.tenant.id, conversationId))) return null;
+    if (current.status === data.status)
+      return visibleConversation(tx, ctx.tenant.id, conversationId);
+    const now = deps.clock.now();
+    if (data.status === 'resolved') {
+      await endRunForHuman(tx, {
+        tenantId: ctx.tenant.id,
+        conversationId,
+        reason: 'conversation_resolved',
+        actorMembershipId: null,
+        now,
+      });
+    }
+    await tx
+      .update(conversations)
+      .set({
+        status: data.status,
+        resolvedAt: data.status === 'resolved' ? now : null,
+        ...(data.status === 'resolved' ? { unreadCount: 0 } : {}),
+        version: sql`${conversations.version} + 1`,
+      })
+      .where(and(eq(conversations.tenantId, ctx.tenant.id), eq(conversations.id, conversationId)));
+    await emitTenantEvent(tx, ctx.tenant.id, {
+      type: 'conversation.status',
+      conversationId,
+      assignedMembershipId: current.assignedMembershipId,
+      payload: { status: data.status },
+    });
+    await recordSystemAudit(
+      tx,
+      ctx.tenant.id,
+      {
+        action: 'conversation.status_changed',
+        subjectType: 'conversation',
+        subjectId: conversationId,
+        correlationId: ctx.requestId,
+        metadata: { from: current.status, to: data.status, source: 'api' },
+      },
+      apiActor(ctx),
+    );
+    return visibleConversation(tx, ctx.tenant.id, conversationId);
+  });
+  if (!row) throw notFound('Conversation');
+  return toApiConversation(row);
 }

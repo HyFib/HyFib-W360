@@ -172,7 +172,7 @@ test('an API key created in settings sends an approved template once, and stops 
   expect(afterRevoke.status()).toBe(401);
 });
 
-test('a key with the reply scope answers a customer who wrote and reads the conversation, and the inbox shows the reply came through the API', async ({
+test('a key answers a customer who wrote, reads the conversation and resolves it, and the inbox shows what came through the API', async ({
   page,
   request,
 }) => {
@@ -189,6 +189,7 @@ test('a key with the reply scope answers a customer who wrote and reads the conv
   await page.getByLabel('Name', { exact: true }).fill('Helpdesk');
   await page.getByRole('checkbox', { name: /Reply with text/ }).check();
   await page.getByRole('checkbox', { name: /Read conversations/ }).check();
+  await page.getByRole('checkbox', { name: /Resolve and reopen conversations/ }).check();
   await page.getByRole('button', { name: 'Create API key' }).click();
   const token = await page.getByLabel('API key', { exact: true }).inputValue();
   await page.getByRole('button', { name: 'I have stored the key' }).click();
@@ -296,4 +297,25 @@ test('a key with the reply scope answers a customer who wrote and reads the conv
   await expect(thread.getByText('Order A-1001 ships today.')).toBeVisible({ timeout: 20_000 });
   await expect(thread.getByText('· API (Helpdesk)')).toBeVisible();
   await expectNoHorizontalOverflow(page);
+
+  // The integration resolves the conversation and reopens it; the inbox shows each change.
+  const setStatus = (status: string) =>
+    request.patch(`/api/v1/conversations/${open!.id}`, { headers: auth, data: { status } });
+  const doc = await (await request.get('/api/v1/openapi.json')).json();
+  expect(doc.paths['/conversations/{id}'].patch.operationId).toBe('setConversationStatus');
+  const resolvedNow = await setStatus('resolved');
+  expect(resolvedNow.status()).toBe(200);
+  const resolvedBody = (await resolvedNow.json()).data as Record<string, unknown>;
+  expect(resolvedBody).toMatchObject({ id: open!.id, status: 'resolved', unreadCount: 0 });
+  // Asking again changes nothing; a status the inbox does not set is refused.
+  const again = await setStatus('resolved');
+  expect((await again.json()).data).toEqual(resolvedBody);
+  expect((await setStatus('pending')).status()).toBe(422);
+  await page.reload();
+  await expect(page.getByRole('button', { name: 'Reopen' })).toBeVisible();
+  const reopened = await setStatus('open');
+  expect((await reopened.json()).data).toMatchObject({ status: 'open', resolvedAt: null });
+  await page.reload();
+  await expect(page.getByRole('button', { name: 'Resolve' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Reopen' })).toHaveCount(0);
 });

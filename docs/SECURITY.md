@@ -438,9 +438,9 @@ Phase 5 rules (Public API, P5-08):
   company's API keys; a key belongs to the company, not to its author. Each scope needs the
   permission a member needs for the same work: `templates.read`, `contacts.read`, `contacts.write`,
   `inbox.reply` for `messages.send` (utility templates) and `messages.reply` (text replies, ADR-070),
-  `campaigns.send` for `messages.send_marketing`, and `inbox.read_all` for `conversations.read`
-  (ADR-072). Nobody grants a key more than they hold, and rotating needs the same. A key keeps the
-  scopes it was created with.
+  `campaigns.send` for `messages.send_marketing`, `inbox.read_all` for `conversations.read`
+  (ADR-072), and `inbox.supervise` for `conversations.write` (ADR-075). Nobody grants a key more
+  than they hold, and rotating needs the same. A key keeps the scopes it was created with.
 - A request acts for the key's company only, as the key: its company comes from the key found by
   the token's hash, never from the path, body or headers, and data access runs in that company's
   scope (RLS). Audit rows name the key (`api_key`). Writing scopes are refused while the company is
@@ -461,6 +461,11 @@ Phase 5 rules (Public API, P5-08):
   contacts are neither listed nor read. A conversation shows whether someone is assigned, not who;
   messages carry their text and the media type, never the media, internal notes or member names.
   Keyset cursors carry a timestamp and an id that are checked before they reach a query.
+- Resolving and reopening conversations through the API (ADR-075) needs `conversations.write`,
+  which only members who resolve every conversation in the inbox (`inbox.supervise`: owners,
+  administrators, supervisors) can grant; an agent cannot. The change runs under the conversation's
+  row lock like a member's, finds no erased contact's or other company's conversation, is audited
+  as the key, sends no satisfaction survey and credits no member in reports.
 - Only the token's SHA-256 is stored; the runtime role cannot read it. The token is shown once in
   the browser and kept only in the page's memory; it is never logged, and audit entries carry the
   public prefix only.

@@ -50,10 +50,11 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
         <CardHeader>
           <CardTitle>Using the API</CardTitle>
           <CardDescription>
-            Your systems can send approved templates, create contacts, record consent and read
-            message status through the HyFib W360 API. Each key belongs to the company and has only
-            the scopes chosen for it. The audit log records changes to keys, and the contacts and
-            consent a key records.
+            Your systems can send approved templates and text replies, create contacts, record
+            consent, read, resolve and reopen conversations, and read message status through the
+            HyFib W360 API. Each key belongs to the company and has only the scopes chosen for it.
+            The audit log records changes to keys, the contacts and consent a key records, and the
+            conversations it resolves or reopens.
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4">

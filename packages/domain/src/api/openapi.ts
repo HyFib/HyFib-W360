@@ -19,6 +19,7 @@ import {
   templateStatusPayloadSchema,
 } from '../webhooks/payloads';
 import { apiContactSchema } from './contact-view';
+import { apiConversationStatusSchema } from './conversations';
 import { API_LIMITS, API_SCOPE_INFO, API_SCOPE_KEYS } from './model';
 import {
   apiConsentSchema,
@@ -262,7 +263,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       title: 'HyFib W360 API',
       version: '1.0.0',
       description: [
-        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations and their messages, manage contacts and consent, and read message status for your company.',
+        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations and their messages, resolve and reopen conversations, manage contacts and consent, and read message status for your company.',
         '',
         'Authenticate with `Authorization: Bearer <API key>`; keys are created in Settings → API keys and belong to the company.',
         `Scopes: ${API_SCOPE_KEYS.map((s) => `\`${s}\` (${API_SCOPE_INFO[s].label.toLowerCase()})`).join(', ')}.`,
@@ -460,6 +461,23 @@ export function buildOpenApiDocument(serverUrl: string) {
             ...errors(401, 403, 404, 429, 500),
           },
         },
+        patch: {
+          operationId: 'setConversationStatus',
+          summary: 'Resolve or reopen a conversation',
+          description: [
+            `${scopeNote('conversations.write')} As a member does in the inbox. Resolving stops an automation answering the conversation and ends the wait for a reply; the contact's next message opens the conversation again. No satisfaction survey is sent: surveys follow a member's resolve.`,
+            'Asking for the status the conversation already has changes nothing, so a retry is safe without an `Idempotency-Key`. Conversations of erased contacts are not found.',
+          ].join('\n\n'),
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          requestBody: { required: true, content: json(ref('ConversationStatus')) },
+          responses: {
+            '200': {
+              description: 'The conversation, as it now is.',
+              content: json(dataOf(ref('Conversation'))),
+            },
+            ...errors(400, 401, 403, 404, 415, 422, 423, 429, 500),
+          },
+        },
       },
       '/conversations/{id}/messages': {
         get: {
@@ -614,6 +632,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         Message: jsonSchema(apiMessageSchema),
         Conversation: jsonSchema(apiConversationSchema),
         ConversationMessage: jsonSchema(apiConversationMessageSchema),
+        ConversationStatus: jsonSchema(apiConversationStatusSchema, 'input'),
         Error: jsonSchema(apiErrorSchema),
         WebhookMessageReceived: jsonSchema(messageReceivedPayloadSchema),
         WebhookMessageStatus: jsonSchema(messageStatusPayloadSchema),
@@ -641,5 +660,6 @@ export const API_ROUTES = [
   ['get', '/messages/{id}'],
   ['get', '/conversations'],
   ['get', '/conversations/{id}'],
+  ['patch', '/conversations/{id}'],
   ['get', '/conversations/{id}/messages'],
 ] as const;

@@ -390,10 +390,14 @@ verification, app review, Embedded Signup configuration).
   company's conversations by status, contact, number and time of change, reads one, and pages its
   messages in the webhooks' words; erased contacts' conversations are hidden; keyset cursors now
   keep PostgreSQL's microseconds, which fixed rows skipped at page ends in the contacts list and
-  export, API contacts, the inbox thread and the audit log). Remaining: media, interactive and
-  reaction messages, replies to a given message, resolving or assigning conversations, member and
-  team names, media downloads, a message feed across conversations, starting automations (W-086),
-  bulk sends in one call, IP allowlists, per-key quotas, limits per endpoint.
+  export, API contacts, the inbox thread and the audit log); **[resolving and reopening
+  conversations built, locally verified]** (ADR-075: a `conversations.write` key, granted only by
+  owners, administrators and supervisors, resolves or reopens a conversation as the inbox does,
+  under its row lock: the automation stops, the reply turn and case close, the webhook fires; audited
+  as the key, no satisfaction survey, no member credited). Remaining: media, interactive and
+  reaction messages, replies to a given message, assigning conversations, notes, member and team
+  names, media downloads, a message feed across conversations, starting automations (W-086), bulk
+  sends in one call, IP allowlists, per-key quotas, limits per endpoint.
 - **P5-09 Outgoing webhooks** **[built, locally verified; delivered to local test receivers only]**
   (ADR-053): up to 10 endpoints per company (`developer.manage`) for `message.received`,
   `message.status`, `consent.changed` and `template.status_changed`, captured by database triggers

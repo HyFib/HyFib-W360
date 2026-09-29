@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { isAppError, sha256Hex, systemClock, uuidv7, type Clock } from '@w360/core';
 import { QUEUES } from '@w360/contracts';
 import { authorizedTenantScope, channelAccounts, sql } from '@w360/db';
@@ -20,6 +20,7 @@ import {
   apiRecordConsent,
   apiSendMessage,
   apiSendTemplate,
+  apiSetConversationStatus,
   authenticateApiToken,
   createApiKeysService,
   createCampaignsService,
@@ -28,6 +29,7 @@ import {
   createCsatService,
   createInboxService,
   createTemplatesService,
+  createWebhooksService,
   generateApiToken,
   outboxAad,
   processSendIntent,
@@ -39,6 +41,7 @@ import {
   remindExpiringApiKeys,
   syncTemplates,
   type ApiContext,
+  type ApiConversation,
   type ApiKeyReminderDeps,
   type ApiKeysService,
   type ApiScope,
@@ -60,8 +63,9 @@ import {
  * through the definer function, scopes and company status, idempotent requests (replays, a key
  * reused for another request, concurrent retries, failures, expiry), contacts and consent, template
  * sends with the members' checks and the send pipeline, text replies within the 24-hour window
- * (ADR-070), message status, reading conversations and their messages (ADR-072), the idempotency
- * sweep, isolation between companies, and reminders before keys expire (ADR-067).
+ * (ADR-070), message status, reading conversations and their messages (ADR-072), resolving and
+ * reopening conversations (ADR-075), the idempotency sweep, isolation between companies, and
+ * reminders before keys expire (ADR-067).
  */
 let fx: WhatsAppFixture;
 let keys: ApiKeysService;
@@ -1471,36 +1475,36 @@ describe('text replies (ADR-070)', () => {
   });
 });
 
-describe('conversation reads (ADR-072)', () => {
-  const inbox = () =>
-    createInboxService({ db: fx.dbs.app, clock: systemClock, jobs: fx.jobs(), signer: fx.signer });
+const inbox = () =>
+  createInboxService({ db: fx.dbs.app, clock: systemClock, jobs: fx.jobs(), signer: fx.signer });
 
-  /** Inbound messages from `waId`, one webhook each, to the company's number or another of its. */
-  async function inbound(
-    company: Company,
-    waId: string,
-    messages: Omit<InboundSpec, 'waId'>[],
-    phoneNumberId = company.phoneNumberId,
-  ) {
-    for (const m of messages) {
-      await fx.deliver(
-        fx.messagesBody({ ...company, phoneNumberId }, { messages: [{ ...m, waId }] }),
-      );
-    }
-  }
-
-  async function conversationOf(company: Company, waId: string) {
-    const [row] = await fx.query<{ id: string; contact_id: string; version: number }>(
-      `SELECT cv.id, cv.contact_id, cv.version
-         FROM app.conversations cv
-         JOIN app.contacts ct ON ct.tenant_id = cv.tenant_id AND ct.id = cv.contact_id
-        WHERE cv.tenant_id = $1 AND ct.phone_e164 = $2`,
-      [company.tenant.id, `+${waId}`],
+/** Inbound messages from `waId`, one webhook each, to the company's number or another of its. */
+async function inbound(
+  company: Company,
+  waId: string,
+  messages: Omit<InboundSpec, 'waId'>[],
+  phoneNumberId = company.phoneNumberId,
+) {
+  for (const m of messages) {
+    await fx.deliver(
+      fx.messagesBody({ ...company, phoneNumberId }, { messages: [{ ...m, waId }] }),
     );
-    if (!row) throw new Error('no conversation');
-    return row;
   }
+}
 
+async function conversationOf(company: Company, waId: string) {
+  const [row] = await fx.query<{ id: string; contact_id: string; version: number }>(
+    `SELECT cv.id, cv.contact_id, cv.version
+       FROM app.conversations cv
+       JOIN app.contacts ct ON ct.tenant_id = cv.tenant_id AND ct.id = cv.contact_id
+      WHERE cv.tenant_id = $1 AND ct.phone_e164 = $2`,
+    [company.tenant.id, `+${waId}`],
+  );
+  if (!row) throw new Error('no conversation');
+  return row;
+}
+
+describe('conversation reads (ADR-072)', () => {
   /** Every page of a listing, following `nextCursor`. */
   async function everyPage<T>(
     read: (cursor?: string) => Promise<{ data: T[]; nextCursor: string | null }>,
@@ -1927,6 +1931,297 @@ describe('conversation reads (ADR-072)', () => {
         'validation_failed',
       );
     }
+  });
+});
+
+describe('conversation status (ADR-075)', () => {
+  const resolve = { status: 'resolved' };
+
+  async function conversationRow(id: string) {
+    const [row] = await fx.query<{
+      status: string;
+      resolved_at: Date | null;
+      unread_count: number;
+      version: number;
+      updated_at: Date;
+    }>(
+      'SELECT status, resolved_at, unread_count, version, updated_at FROM app.conversations WHERE id = $1',
+      [id],
+    );
+    if (!row) throw new Error('no conversation');
+    return row;
+  }
+
+  /** The audit entries of status changes of a conversation, oldest first. */
+  const statusAudit = (c: Company, id: string) =>
+    fx.query<{
+      actor_type: string;
+      actor_id: string | null;
+      correlation_id: string | null;
+      metadata: Record<string, unknown>;
+    }>(
+      `SELECT actor_type, actor_id, correlation_id, metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'conversation.status_changed' AND subject_id = $2
+        ORDER BY occurred_at, id`,
+      [c.tenant.id, id],
+    );
+
+  it('need the conversations.write scope, which only members who manage the whole inbox grant', async () => {
+    const c = await fx.company();
+    const reader = await apiKey(c, ['conversations.read', 'messages.reply']);
+    await expectAppError(
+      apiSetConversationStatus(deps(), reader.ctx, uuidv7(), resolve),
+      'forbidden',
+      /conversations\.write scope/,
+    );
+    const owner = await fx.ctx(c, c.owner);
+    // A member who does not supervise the inbox (as a narrower role would not).
+    const narrower: TenantContext = {
+      ...owner,
+      permissions: new Set([...owner.permissions].filter((p) => p !== 'inbox.supervise')),
+    };
+    await expectAppError(
+      keys.create(narrower, { name: 'Closer', scopes: ['conversations.write'], expiresInDays: 30 }),
+      'forbidden',
+      /Resolve and reopen conversations/,
+    );
+    const granted = await keys.create(owner, {
+      name: 'Closer',
+      scopes: ['conversations.write'],
+      expiresInDays: 30,
+    });
+    const [row] = await fx.query<{ scopes: string[] }>(
+      'SELECT scopes FROM app.api_keys WHERE id = $1',
+      [granted.id],
+    );
+    expect(row!.scopes).toEqual(['conversations.write']);
+  });
+
+  it('resolve and reopen as the inbox does, audited as the key, without a survey', async () => {
+    const c = await fx.company();
+    const { ctx, id: keyId } = await apiKey(c, ['conversations.write'], 'Helpdesk');
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    await createCsatService({ db: fx.dbs.app, clock: systemClock }).updateCsatSettings(owner, {
+      enabled: true,
+      question: 'How did we do today?',
+      labels: ['Great', 'Okay', 'Poor'],
+    });
+    await createWebhooksService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      keyring: fx.keyring,
+      egressPolicy: { allowLoopbackForTests: true },
+    }).create(owner, {
+      url: 'https://hooks.receiver.test/status',
+      eventTypes: ['conversation.status_changed'],
+    });
+    const waId = '919811100090';
+    await inbound(c, waId, [{ text: 'Where is my order?' }, { text: 'Hello?' }]);
+    const conv = await conversationOf(c, waId);
+    await inbox().assign(owner, {
+      conversationId: conv.id,
+      membershipId: agent.membership.id,
+      expectedVersion: conv.version,
+    });
+    const before = await conversationRow(conv.id);
+    expect(before).toMatchObject({ status: 'open', resolved_at: null, unread_count: 2 });
+
+    const resolved = await apiSetConversationStatus(deps(), ctx, conv.id, resolve);
+    const after = await conversationRow(conv.id);
+    expect(after).toMatchObject({
+      status: 'resolved',
+      resolved_at: expect.any(Date),
+      unread_count: 0,
+      version: before.version + 1,
+    });
+    expect(resolved).toEqual(
+      await apiGetConversation(deps(), (await apiKey(c, ['conversations.read'])).ctx, conv.id),
+    );
+    expect(resolved).toMatchObject({
+      id: conv.id,
+      status: 'resolved',
+      assigned: true,
+      unreadCount: 0,
+      resolvedAt: after.resolved_at!.toISOString(),
+      updatedAt: after.updated_at.toISOString(),
+    });
+    expect(await statusAudit(c, conv.id)).toEqual([
+      {
+        actor_type: 'api_key',
+        actor_id: keyId,
+        correlation_id: ctx.requestId,
+        metadata: { from: 'open', to: 'resolved', source: 'api' },
+      },
+    ]);
+    // The wait for a reply and the case end without crediting a member; the case keeps the
+    // assignee, and no survey is sent although surveys are on.
+    expect(
+      await fx.query(
+        'SELECT end_reason, ended_by_membership_id FROM app.conversation_turns WHERE conversation_id = $1',
+        [conv.id],
+      ),
+    ).toEqual([{ end_reason: 'resolved', ended_by_membership_id: null }]);
+    const cases = () =>
+      fx.query<{ resolved: boolean; resolved_by: string | null; assigned: string | null }>(
+        `SELECT resolved_at IS NOT NULL AS resolved, resolved_by_membership_id AS resolved_by,
+                assigned_membership_id AS assigned
+           FROM app.conversation_cases WHERE conversation_id = $1 ORDER BY opened_at, id`,
+        [conv.id],
+      );
+    expect(await cases()).toEqual([
+      { resolved: true, resolved_by: null, assigned: agent.membership.id },
+    ]);
+    const surveys = await fx.query('SELECT id FROM app.csat_surveys WHERE conversation_id = $1', [
+      conv.id,
+    ]);
+    expect(surveys).toEqual([]);
+    // The inbox hears of it live, and the webhook event is captured once.
+    expect(
+      await fx.query(
+        `SELECT assigned_membership_id, payload FROM app.tenant_events
+          WHERE conversation_id = $1 AND type = 'conversation.status' ORDER BY id`,
+        [conv.id],
+      ),
+    ).toEqual([{ assigned_membership_id: agent.membership.id, payload: { status: 'resolved' } }]);
+    const events = () =>
+      fx.query<{ status: string; detail: Record<string, unknown> }>(
+        `SELECT status, detail FROM app.webhook_events
+          WHERE conversation_id = $1 AND type = 'conversation.status_changed' ORDER BY created_at, id`,
+        [conv.id],
+      );
+    expect(await events()).toEqual([{ status: 'resolved', detail: { previousStatus: 'open' } }]);
+
+    // The status it already has changes nothing, so a retry does no harm.
+    expect(await apiSetConversationStatus(deps(), ctx, conv.id, resolve)).toEqual(resolved);
+    expect(await conversationRow(conv.id)).toEqual(after);
+    expect(await statusAudit(c, conv.id)).toHaveLength(1);
+    expect(await events()).toHaveLength(1);
+
+    // Reopened: a new case opens and the conversation keeps its assignee.
+    const reopened = await apiSetConversationStatus(deps(), ctx, conv.id, { status: 'open' });
+    expect(reopened).toMatchObject({
+      status: 'open',
+      assigned: true,
+      unreadCount: 0,
+      resolvedAt: null,
+    });
+    expect((await conversationRow(conv.id)).version).toBe(after.version + 1);
+    expect((await statusAudit(c, conv.id)).map((a) => a.metadata)).toEqual([
+      { from: 'open', to: 'resolved', source: 'api' },
+      { from: 'resolved', to: 'open', source: 'api' },
+    ]);
+    expect(await cases()).toEqual([
+      { resolved: true, resolved_by: null, assigned: agent.membership.id },
+      { resolved: false, resolved_by: null, assigned: null },
+    ]);
+    expect((await events()).map((e) => e.status)).toEqual(['resolved', 'open']);
+    expect(await apiSetConversationStatus(deps(), ctx, conv.id, { status: 'open' })).toEqual(
+      reopened,
+    );
+
+    // Resolved again, the contact's next message opens it as after a member's resolve.
+    await apiSetConversationStatus(deps(), ctx, conv.id, resolve);
+    await inbound(c, waId, [{ text: 'One more thing' }]);
+    expect(await conversationRow(conv.id)).toMatchObject({
+      status: 'open',
+      resolved_at: null,
+      unread_count: 1,
+    });
+  });
+
+  it('change the status once when requests come at once, locked like a member’s change', async () => {
+    const c = await fx.company();
+    const { ctx } = await apiKey(c, ['conversations.write']);
+    await inbound(c, '919811100091', [{ text: 'Hello' }]);
+    const conv = await conversationOf(c, '919811100091');
+    const holder = await fx.dbs.adminPool.connect();
+    let requests: Promise<ApiConversation>[] | undefined;
+    try {
+      await holder.query('BEGIN');
+      await holder.query('SELECT id FROM app.conversations WHERE id = $1 FOR UPDATE', [conv.id]);
+      const [lock] = (await holder.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows;
+      requests = [1, 2].map(() => apiSetConversationStatus(deps(), ctx, conv.id, resolve));
+      // Both wait behind the row lock (the second behind the first), then run one after the other.
+      await vi.waitFor(
+        async () => {
+          const [waiting] = await fx.query<{ n: number }>(
+            `WITH RECURSIVE blocked (pid) AS (
+               SELECT a.pid FROM pg_stat_activity a WHERE $1 = ANY (pg_blocking_pids(a.pid))
+               UNION
+               SELECT a.pid FROM pg_stat_activity a
+                 JOIN blocked b ON b.pid = ANY (pg_blocking_pids(a.pid)))
+             SELECT count(*)::int AS n FROM blocked`,
+            [lock!.pid],
+          );
+          if (waiting!.n < 2) throw new Error('the requests are not waiting yet');
+        },
+        { timeout: 4_000, interval: 20 },
+      );
+    } finally {
+      await holder.query('COMMIT');
+      holder.release();
+    }
+    const results = await Promise.all(requests ?? []);
+    expect(results.map((r) => r.status)).toEqual(['resolved', 'resolved']);
+    expect(results[0]).toEqual(results[1]);
+    expect(await statusAudit(c, conv.id)).toHaveLength(1);
+    expect((await conversationRow(conv.id)).version).toBe(conv.version + 1);
+  });
+
+  it('leave out erased contacts and other companies, and check what they are asked', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const mine = await apiKey(c, ['conversations.write']);
+    const theirs = await apiKey(other, ['conversations.write']);
+    await inbound(c, '919811100092', [{ text: 'Hello' }]);
+    await inbound(c, '919811100093', [{ text: 'Please forget me' }]);
+    const kept = await conversationOf(c, '919811100092');
+    const erased = await conversationOf(c, '919811100093');
+    await createContactsService({ db: fx.dbs.app, clock: systemClock }).eraseContact(
+      await fx.ctx(c, c.owner),
+      { contactId: erased.contact_id, suppress: false },
+    );
+    const erasedBefore = await conversationRow(erased.id);
+    const keptBefore = await conversationRow(kept.id);
+
+    await expectAppError(
+      apiSetConversationStatus(deps(), mine.ctx, erased.id, resolve),
+      'not_found',
+    );
+    await expectAppError(
+      apiSetConversationStatus(deps(), theirs.ctx, kept.id, resolve),
+      'not_found',
+    );
+    // Nothing changes while the company is suspended or its plan has ended.
+    for (const status of ['suspended', 'restricted'] as const) {
+      const ctx = { ...mine.ctx, tenant: { ...mine.ctx.tenant, status } };
+      await expectAppError(
+        apiSetConversationStatus(deps(), ctx, kept.id, resolve),
+        'tenant_suspended',
+      );
+    }
+    // Ids and bodies are checked.
+    for (const id of ['not-a-uuid', uuidv7()]) {
+      await expectAppError(apiSetConversationStatus(deps(), mine.ctx, id, resolve), 'not_found');
+    }
+    for (const body of [
+      {},
+      { status: 'pending' },
+      { status: 'closed' },
+      { status: 'resolved', assigned: false },
+      null,
+      'resolved',
+    ]) {
+      await expectAppError(
+        apiSetConversationStatus(deps(), mine.ctx, kept.id, body),
+        'validation_failed',
+      );
+    }
+    expect(await conversationRow(erased.id)).toEqual(erasedBefore);
+    expect(await conversationRow(kept.id)).toEqual(keptBefore);
+    expect(await statusAudit(c, erased.id)).toEqual([]);
+    expect(await statusAudit(c, kept.id)).toEqual([]);
   });
 });
 

@@ -1000,6 +1000,11 @@ retried the next minute). A company being deleted is skipped. Check `app.tenant_
 company (`status`, `trial_ends_at`, `period_end`, `grace_ends_at`): the database's clock decides
 what is due.
 
+**Migration 0050 failed.** It runs in one transaction, so a failure applies nothing. It replaces
+the check on `app.api_keys.scopes` with one that also allows `conversations.write` (up to eight
+scopes). The check is wider than before, so existing keys pass; a failure usually means the
+constraint was renamed or changed by hand.
+
 **Migration 0046 failed.** It runs in one transaction, so a failure applies nothing. It adds
 `app.credit_refund_requests` (row security, column grants, a restrictive policy for the company
 role, deletion step 76), the notice functions for the worker, the platform lists and
@@ -1142,6 +1147,17 @@ previous pass began: a change carries the time its transaction began, so one sav
 be older than the pass. Before ADR-072, pages of contacts (the list, the export and the API), the
 inbox thread's older messages and the audit log could skip rows written in the same transaction as
 a page's last row; cursors issued before still work.
+
+**An integration cannot resolve or reopen a conversation, or a resolve did something unexpected.**
+`PATCH /api/v1/conversations/{id}` (ADR-075) needs the `conversations.write` scope (403 without it),
+which only owners, administrators and supervisors can grant; keys keep their scopes, so an older
+key is replaced by a new one with the scope. It answers 404 for an erased contact's conversation or
+another company's, 422 for any body but `{"status": "resolved"}` or `{"status": "open"}`, and 423
+while the company is suspended or its plan has ended. Asking for the status the conversation
+already has changes nothing. A resolve stops an automation answering the conversation ("The
+conversation was resolved.") and sends no satisfaction survey: surveys follow a member's resolve.
+The audit log shows the change with the actor `api_key`, and per-member report counts leave it out.
+The contact's next message reopens the conversation as usual.
 
 **The company is suspended or its plan ended.** Keys keep reading; creating contacts, recording
 consent and sending answer 423 until the company is active again.

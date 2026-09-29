@@ -1,5 +1,75 @@
 # Progress
 
+## 2026-09-29 — Phase 5: resolving and reopening conversations through the public API (P5-08, ADR-075)
+
+Status: **Implemented and locally verified (Graph stand-in; no customer data).** Integrations could
+read conversations (ADR-072) and reply inside the service window (ADR-070) but not close the loop: a
+helpdesk that closed a ticket left the WhatsApp conversation open until a member resolved it.
+
+### Completed
+
+- **Design (ADR-075):** a `conversations.write` scope ("Resolve and reopen conversations"), granted
+  only by members holding `inbox.supervise` (owners, administrators, supervisors: those who resolve
+  every conversation in the inbox); `PATCH /api/v1/conversations/{id}` with `{"status": "resolved"}`
+  or `{"status": "open"}`, answered with the conversation; the status it already has changes
+  nothing, so retries need no `Idempotency-Key`; `pending` and other fields are refused; no
+  satisfaction survey after an API resolve (surveys follow a member's resolve, ADR-032).
+- **Migration 0050:** widens `api_keys_scopes_check` to allow `conversations.write` (up to 8 scopes).
+  Nothing else changes in the database: the runtime role already writes a conversation's status in
+  the company's scope, and the triggers that follow (reply turns, cases, webhook events) already run.
+- **Domain:** `apiSetConversationStatus` (`api/conversations.ts`) locks the conversation `FOR UPDATE`
+  as the inbox's `setStatus` does, finds no erased contact's or other company's conversation, and on a
+  change stops an active automation (`conversation_resolved`, no member), sets or clears
+  `resolved_at`, clears the unread count on resolving, raises the version, emits the live
+  `conversation.status` event and audits `conversation.status_changed` as the key (`source: api`,
+  the request id). The scope's model entry and the OpenAPI operation (`setConversationStatus`, body
+  `ConversationStatus`) come from the same definitions; the `conversation.status_changed` webhook's
+  description now names API keys.
+- **Web:** the route's `PATCH` handler; Settings → API keys offers the scope to members who hold
+  `inbox.supervise` (the list comes from the model) and its introduction now lists everything the
+  API does.
+- **Tests:** unit tests of the write scopes, who can grant `conversations.write` (every role holding
+  `inbox.supervise` also reads and replies to every conversation), the body (only `open` or
+  `resolved`), refusals before any read (scope, company status, ids, bodies) and the OpenAPI
+  operation. 4 integration tests in `api.test.ts`: the scope and its grant; a resolve and reopen
+  with the reply turn and case closed without a member, the case keeping the assignee, no survey
+  although surveys are on, the live event, one webhook event per change, the audit entries, a
+  retried request changing nothing and the contact's next message reopening; two requests held
+  behind a row lock changing the status once; erased contacts, other companies, suspended and
+  restricted companies, bad ids and bodies. One in `automations.test.ts`: an API resolve stops the
+  bot, cancels its queued question and leaves no waiting turn. e2e `api.spec.ts`: the key (created
+  in settings with the new scope) resolves the conversation, a repeat answers the same, `pending` is
+  refused, the inbox offers Reopen, the key reopens it and the inbox offers Resolve.
+- **Docs:** ADR-075; ARCHITECTURE (the public API); SECURITY (Phase 5 rules); THREAT-MODEL T93;
+  RUNBOOKS (migration 0050, a troubleshooting entry); BACKLOG P5-08; FEATURE-MATRIX W-134 and H-033.
+- **Mutation checks:** 29 regressions tried one at a time, all make a test fail: the row lock, the
+  erased-contact check, the no-op for the same status, stopping the automation (reason and
+  condition), `resolved_at` on resolving and reopening, the unread count, the version, the live
+  event and its assignee, the audit entry (missing, as the system, without its source or request
+  id, the wrong status before), the scope check (missing, the read scope), the id check, `pending`
+  and unknown fields in the body, the scope marked as writing, the permission that grants it (read
+  all, reply), the database check (the scope, eight scopes), the `PATCH` handler, and the OpenAPI
+  schema and route list.
+
+### Test commands and results (local, 2026-09-29)
+
+| Command                                                                                                                                       | Result                                                                                                |
+| --------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                          | 0 problems / all files formatted / all workspace packages pass                                        |
+| `pnpm test` (unit)                                                                                                                            | 355 passed, including 4 new in `api/api.test.ts` (and the write scopes and permission checks widened) |
+| `pnpm test:integration` (PostgreSQL 18.6)                                                                                                     | 505 passed, including 4 new in `api.test.ts` and 1 in `automations.test.ts`                           |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                                                                                     | 505 passed                                                                                            |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` on `api.spec.ts`, `api-keys.spec.ts` and `webhook-events.spec.ts` | build passes / 10 passed on both projects (2.1 min)                                                   |
+| Mutation checks                                                                                                                               | 29 regressions tried; all make a test fail                                                            |
+
+### Known gaps
+
+- Not built: assigning or moving conversations, notes, setting `pending`, bulk changes, surveys after
+  API resolves, and a precondition on the conversation's state (the inbox checks the version the
+  member saw).
+- The full e2e suite was not run locally for this slice (only the specs above, on two projects); CI
+  runs every spec on Chromium, Firefox, WebKit and mobile.
+
 ## 2026-09-29 — Phase 5: webhook events for conversations and contacts (P5-09, ADR-074)
 
 Status: **Implemented and locally verified with local test receivers only (no customer

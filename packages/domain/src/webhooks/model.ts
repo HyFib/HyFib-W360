@@ -41,7 +41,7 @@ export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; descr
     'conversation.status_changed': {
       label: 'Conversation status',
       description:
-        'A conversation was resolved, reopened or set to pending, by a member, an automation or the contact writing again.',
+        'A conversation was resolved, reopened or set to pending, by a member, an automation, an API key or the contact writing again.',
     },
     'conversation.assignment_changed': {
       label: 'Conversation assignment',

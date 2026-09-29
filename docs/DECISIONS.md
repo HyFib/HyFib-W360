@@ -2261,3 +2261,45 @@ Decision:
 Not built: custom field changes, member and team identities (and so moves between members or
 teams), conversations started, notes, merges, events for campaigns, automations or orders, and
 filters beyond the event type.
+
+## ADR-075 Resolving and reopening conversations through the public API (2026-09-29)
+
+Context: an integration can read conversations (ADR-072) and answer inside the customer service
+window (ADR-070), but it could not close the loop: a helpdesk that closes a ticket, or an order
+system that has answered in full, left the WhatsApp conversation open in the inbox until a member
+resolved it (listed as not built in ADR-070 and ADR-072).
+
+Decision:
+
+- **Scope:** `conversations.write` ("Resolve and reopen conversations"), granted only by members who
+  hold `inbox.supervise`: owners, administrators and supervisors, who see and resolve every
+  conversation in the inbox (a unit test keeps every role holding it also holding `inbox.read_all`
+  and `inbox.reply`). A key acts on every conversation of the company, so an agent, who resolves
+  only the conversations assigned to them, cannot grant it. It writes, so it is refused while the
+  company is suspended or its plan has ended. Keys keep their scopes; migration 0050 widens the
+  scopes check (a key may now hold all 8).
+- **One operation:** `PATCH /api/v1/conversations/{id}` with `{"status": "resolved"}` or
+  `{"status": "open"}`, answered with the conversation as `GET` returns it. Other fields and the
+  `pending` status (which the inbox does not set either) are refused. Asking for the status the
+  conversation already has changes nothing and answers the same, so a retried request needs no
+  `Idempotency-Key`.
+- **What it does is what the inbox's Resolve and Reopen do**, in one transaction with the
+  conversation row locked, as a member's change is: resolving stops an automation answering the
+  conversation (its queued messages are cancelled), clears the unread count and records when it was
+  resolved; the triggers close the waiting reply turn and the case, and reopening opens a new case.
+  The inbox hears of it live, and the `conversation.status_changed` webhook (ADR-074) is captured by
+  its trigger like any other change. The contact's next message reopens a resolved conversation as
+  it always does.
+- **Attributed to the key, not a member:** the audit entry (`conversation.status_changed`, with
+  `source: api` and the request id) names the key, and the turn, the case and the stopped run name
+  no member. Per-member report counts (`agent.resolved`, answered turns) leave API resolves out;
+  company measures (cases resolved, turns resolved without a reply) include them.
+- **No satisfaction survey:** surveys follow a member's resolve and are credited to the assignee
+  (ADR-032, and the settings page says so). A survey after an integration's resolve would need its
+  own decision about who it measures, so none is sent and no survey row is recorded.
+- **Erased contacts' conversations** are not found, as in reads; another company's conversation is
+  not found either (the company's scope and the tenant condition).
+
+Not built: assigning or moving conversations, notes, setting `pending`, bulk changes, surveys after
+API resolves, and a precondition on the conversation's state (the inbox checks the version the
+member saw; the API has no counterpart).

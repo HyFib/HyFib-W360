@@ -7,6 +7,7 @@ import { authorizedTenantScope, type Database } from '@w360/db';
 import {
   advanceAutomationRun,
   apiSendText,
+  apiSetConversationStatus,
   applyAutomationRetention,
   authenticateApiToken,
   authorizeJob,
@@ -798,6 +799,49 @@ describe('automation runs', () => {
       start_reason: 'handoff',
       end_reason: 'replied',
     });
+  });
+
+  it('stops the bot when the public API resolves the conversation, leaving no waiting turn (ADR-075)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    await publish(owner, 'Menu', keyword('menu'), menuGraph());
+    const created = await createApiKeysService({ db: fx.dbs.app, clock: systemClock }).create(
+      owner,
+      { name: 'Helpdesk', scopes: ['conversations.write'], expiresInDays: 0 },
+    );
+    const key = await authenticateApiToken(fx.dbs.app, created.token, uuidv7());
+    if (!key) throw new Error('a new key does not authenticate');
+
+    // The integration resolves while the bot's question is still queued: the run stops and the
+    // bot's message is cancelled before it leaves.
+    const ivy = waId();
+    const conv = await inbound(c, ivy, 'menu');
+    const run = await onlyRun(conv);
+    await advance(c, run.id);
+    expect((await botMessages(conv)).map((m) => m.status)).toEqual(['queued']);
+    const resolved = await apiSetConversationStatus(runnerDeps(), key, conv, {
+      status: 'resolved',
+    });
+    expect(resolved.status).toBe('resolved');
+    expect(await onlyRun(conv)).toMatchObject({
+      status: 'stopped',
+      end_reason: 'conversation_resolved',
+    });
+    const [ended] = await fx.query<{ ended_by_membership_id: string | null }>(
+      'SELECT ended_by_membership_id FROM app.automation_runs WHERE id = $1',
+      [run.id],
+    );
+    expect(ended?.ended_by_membership_id).toBeNull();
+    expect((await stepLog(run.id)).at(-1)).toMatchObject({
+      outcome: 'stopped',
+      detail: 'conversation_resolved',
+    });
+    expect((await botMessages(conv)).map((m) => [m.status, m.error_code])).toEqual([
+      ['canceled', 'bot_stopped'],
+    ]);
+    expect((await turns(conv)).filter((t) => t.end_reason === null)).toEqual([]);
+    expect(await sendQueued(c, conv)).toEqual([]);
+    expect((await advance(c, run.id)).outcome).toBe('idle');
   });
 
   it('applies business-hours filters, cooldowns and the hourly cap, and skips assigned conversations', async () => {

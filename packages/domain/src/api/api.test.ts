@@ -3,10 +3,11 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { AppError, isAppError, sha256Hex } from '@w360/core';
 import { API_SCOPES } from '@w360/db';
-import { PERMISSIONS } from '../authz/permissions';
+import { PERMISSIONS, ROLE_PERMISSIONS } from '../authz/permissions';
 import { apiErrorResponse, apiRequestError } from './errors';
 import { bearerToken, generateApiToken } from './keys';
 import type { ApiContext } from './context';
+import { apiConversationStatusSchema, apiSetConversationStatus } from './conversations';
 import {
   API_LIMITS,
   API_SCOPE_INFO,
@@ -77,6 +78,7 @@ describe('API scopes', () => {
       'messages.send',
       'messages.send_marketing',
       'messages.reply',
+      'conversations.write',
     ]);
     expect([...API_SEND_SCOPES]).toEqual(API_SCOPE_KEYS.filter((s) => s.startsWith('messages.')));
   });
@@ -86,6 +88,66 @@ describe('API scopes', () => {
     expect(API_SCOPE_INFO['messages.send_marketing'].permission).toBe('campaigns.send');
     expect(API_SCOPE_INFO['messages.reply'].permission).toBe('inbox.reply');
     expect(API_SCOPE_INFO['contacts.write'].permission).toBe('contacts.write');
+    expect(API_SCOPE_INFO['conversations.read'].permission).toBe('inbox.read_all');
+    expect(API_SCOPE_INFO['conversations.write'].permission).toBe('inbox.supervise');
+  });
+
+  it('let only members who resolve every conversation in the inbox grant conversations.write', () => {
+    const granting = Object.entries(ROLE_PERMISSIONS).filter(([, permissions]) =>
+      permissions.has('inbox.supervise'),
+    );
+    expect(granting.map(([role]) => role).sort()).toEqual(['admin', 'owner', 'supervisor']);
+    for (const [, permissions] of granting) {
+      expect(permissions.has('inbox.read_all')).toBe(true);
+      expect(permissions.has('inbox.reply')).toBe(true);
+    }
+  });
+});
+
+describe('conversation status (ADR-075)', () => {
+  const ctx = (scopes: string[], status = 'active') =>
+    ({
+      tenant: { id: 't', status },
+      key: { id: 'k', scopes: new Set(scopes) },
+    }) as unknown as ApiContext;
+  const id = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f01';
+
+  it('is open or resolved, and nothing else', () => {
+    expect(apiConversationStatusSchema.parse({ status: 'resolved' })).toEqual({
+      status: 'resolved',
+    });
+    expect(apiConversationStatusSchema.parse({ status: 'open' })).toEqual({ status: 'open' });
+    for (const bad of [
+      {},
+      { status: 'pending' },
+      { status: 'closed' },
+      { status: 'RESOLVED' },
+      { status: null },
+      { status: 'resolved', assigned: false },
+      'resolved',
+      null,
+    ]) {
+      expect(apiConversationStatusSchema.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  it('is refused before anything is read: without the scope, while the company is not active, for ids that are not ids, and for other bodies', async () => {
+    const code = (promise: Promise<unknown>) =>
+      promise.then(
+        () => 'resolved',
+        (error: unknown) => (isAppError(error) ? error.code : String(error)),
+      );
+    const set = (c: ApiContext, conversationId: string, body: unknown) =>
+      code(apiSetConversationStatus({} as never, c, conversationId, body));
+    const body = { status: 'resolved' };
+    expect(await set(ctx(['conversations.read']), id, body)).toBe('forbidden');
+    for (const status of ['suspended', 'restricted']) {
+      expect(await set(ctx(['conversations.write'], status), id, body)).toBe('tenant_suspended');
+    }
+    expect(await set(ctx(['conversations.write']), 'not-a-uuid', body)).toBe('not_found');
+    expect(await set(ctx(['conversations.write']), id, { status: 'pending' })).toBe(
+      'validation_failed',
+    );
   });
 });
 
@@ -255,6 +317,34 @@ describe('OpenAPI document', () => {
     expect(send.responses['412']?.description).toContain('window_closed');
     const read = paths['/messages/{id}']?.get as unknown as { description: string };
     for (const scope of API_SEND_SCOPES) expect(read.description).toContain(`\`${scope}\``);
+  });
+
+  it('resolves or reopens a conversation with the status alone', () => {
+    const patch = paths['/conversations/{id}']?.patch as unknown as {
+      operationId: string;
+      description: string;
+      requestBody: { content: { 'application/json': { schema: unknown } } };
+      responses: Record<string, unknown>;
+    };
+    expect(patch.operationId).toBe('setConversationStatus');
+    expect(patch.description).toContain('`conversations.write`');
+    expect(patch.requestBody.content['application/json'].schema).toEqual({
+      $ref: '#/components/schemas/ConversationStatus',
+    });
+    expect(Object.keys(patch.responses)).toEqual(
+      expect.arrayContaining(['200', '404', '422', '423']),
+    );
+    const schemas = doc.components.schemas as Record<
+      string,
+      {
+        required?: string[];
+        additionalProperties?: unknown;
+        properties?: Record<string, { enum?: string[] }>;
+      }
+    >;
+    expect(schemas.ConversationStatus?.required).toEqual(['status']);
+    expect(schemas.ConversationStatus?.additionalProperties).toBe(false);
+    expect(schemas.ConversationStatus?.properties?.status?.enum).toEqual(['open', 'resolved']);
   });
 
   it('resolves every reference to a component', () => {

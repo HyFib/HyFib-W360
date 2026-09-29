@@ -16,6 +16,7 @@ export const API_SCOPE_KEYS = [
   'messages.send_marketing',
   'messages.reply',
   'conversations.read',
+  'conversations.write',
 ] as const satisfies readonly ApiScope[];
 
 /**
@@ -70,6 +71,13 @@ export const API_SCOPE_INFO: Record<
       "List the company's conversations and read their messages, including what contacts wrote.",
     permission: 'inbox.read_all',
     writes: false,
+  },
+  'conversations.write': {
+    label: 'Resolve and reopen conversations',
+    description:
+      'Mark conversations resolved, or open again, as members do in the inbox. Resolving stops an automation answering the conversation.',
+    permission: 'inbox.supervise',
+    writes: true,
   },
 };
 
