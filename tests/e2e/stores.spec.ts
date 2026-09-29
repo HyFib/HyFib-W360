@@ -10,7 +10,7 @@ import {
   standInRequests,
   templateButtonReply,
 } from './messaging-support';
-import { expectNoHorizontalOverflow, signUpAndVerify, uniqueEmail } from './support';
+import { expectNoHorizontalOverflow, openFromNav, signUpAndVerify, uniqueEmail } from './support';
 
 /**
  * Store connectors through the browser, against the TEST-ONLY Shopify and WooCommerce stand-ins
@@ -41,10 +41,6 @@ async function newCompany(page: Page, prefix: string, name: string) {
   await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
   const channel = await connectTestChannel({ ownerEmail: email, slug });
   return { slug, ...channel };
-}
-
-async function openFromNav(page: Page, name: string) {
-  await page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name }).click();
 }
 
 async function openStores(page: Page) {
@@ -260,6 +256,8 @@ async function approvedTemplate(
   await expect(page.getByRole('heading', { name: t.name, level: 1 })).toBeVisible();
   await page.getByRole('button', { name: 'Submit to Meta' }).click();
   await page.getByRole('button', { name: 'Submit for review' }).click();
+  // Submitted (no draft buttons) before reloading, which could cancel the submission's request.
+  await expect(page.getByRole('button', { name: /^Submit/ })).toHaveCount(0);
   await reloadUntil(page, () => page.getByText('In review', { exact: true }));
   await control(request, `${GRAPH}/__stand-in/template-status`, {
     wabaId,
@@ -268,6 +266,7 @@ async function approvedTemplate(
   });
   await page.goto(`/c/${slug}/templates`);
   await page.getByRole('button', { name: 'Refresh from Meta' }).click();
+  await expect(page.getByText(/Refresh requested/)).toBeVisible();
   await reloadUntil(page, () => page.getByText('Approved', { exact: true }));
 }
 

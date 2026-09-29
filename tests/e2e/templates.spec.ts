@@ -48,6 +48,9 @@ test('a template is drafted, submitted, approved at Meta and sent after the serv
 
   await page.getByRole('button', { name: 'Submit to Meta' }).click();
   await page.getByRole('button', { name: 'Submit for review' }).click();
+  // Submitted: the page the action returned has no draft buttons. Reloading earlier could cancel
+  // the submission's request.
+  await expect(page.getByRole('button', { name: /^Submit/ })).toHaveCount(0);
   // The worker sends the create request; Meta answers PENDING.
   await expect(async () => {
     await page.reload();
@@ -93,10 +96,8 @@ test('a template is drafted, submitted, approved at Meta and sent after the serv
   );
   await page.getByRole('button', { name: 'Send template' }).click();
   await expect(page.getByText(/Template queued/)).toBeVisible();
-  await expect(async () => {
-    await page.reload();
-    await expect(page.getByText('Sent to WhatsApp')).toBeVisible({ timeout: 1_000 });
-  }).toPass({ timeout: 30_000 });
+  // The conversation updates live; reloading it could cancel a live refresh (see openFromNav).
+  await expect(page.getByText('Sent to WhatsApp')).toBeVisible({ timeout: 30_000 });
   const sent = (await standInRequests(request))
     .filter((r) => r.path === `/v26.0/${phoneNumberId}/messages`)
     .pop();

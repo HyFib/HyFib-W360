@@ -1,5 +1,5 @@
 'use client';
-import { useState } from 'react';
+import { useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button, Field, Input } from '@w360/ui';
 import { ConfirmDialog } from '@w360/ui/client';
@@ -30,33 +30,37 @@ export function SegmentForm({
   );
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const [busy, startTransition] = useTransition();
 
-  async function submit(event: React.FormEvent) {
+  function submit(event: React.FormEvent) {
     event.preventDefault();
-    setBusy(true);
     setError(null);
     setSaved(false);
-    try {
-      if (existing) {
-        const r = await updateSegmentAction(slug, existing.id, {
-          name,
-          definition,
-          expectedVersion: existing.version,
-        });
-        if (!r.ok) setError(r.message);
-        else {
-          setSaved(true);
-          router.refresh();
+    // The actions refresh the page on the server; the result is set inside the transition so it
+    // appears together with that render.
+    startTransition(async () => {
+      try {
+        if (existing) {
+          const r = await updateSegmentAction(slug, existing.id, {
+            name,
+            definition,
+            expectedVersion: existing.version,
+          });
+          startTransition(() => {
+            if (!r.ok) setError(r.message);
+            else setSaved(true);
+          });
+        } else {
+          const r = await createSegmentAction(slug, { name, definition });
+          if (!r.ok) startTransition(() => setError(r.message));
+          else router.push(`/c/${slug}/contacts/segments/${r.data.id}`);
         }
-      } else {
-        const r = await createSegmentAction(slug, { name, definition });
-        if (!r.ok) setError(r.message);
-        else router.push(`/c/${slug}/contacts/segments/${r.data.id}`);
+      } catch {
+        startTransition(() =>
+          setError('The segment could not be saved because the connection failed. Try again.'),
+        );
       }
-    } finally {
-      setBusy(false);
-    }
+    });
   }
 
   return (
