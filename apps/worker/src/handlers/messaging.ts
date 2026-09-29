@@ -13,6 +13,7 @@ import {
   processSendIntent,
   purgeApiIdempotencyKeys,
   purgeDeadLetters,
+  purgeRateLimitBuckets,
   recoverExpiredSend,
   remindExpiringApiKeys,
   routeDueConversations,
@@ -146,8 +147,8 @@ export function channelOnboardHandler(rt: WorkerRuntime) {
  * Every minute: re-signal webhook receipts and send intents whose signal was lost, settle send
  * intents whose worker died (before dispatch: re-queued; after dispatch: unknown outcome, never an
  * automatic resend), signal automation runs and task reminders that are due or lost their
- * signal, route waiting conversations of round-robin teams, and remind companies of API keys that
- * expire soon.
+ * signal, route waiting conversations of round-robin teams, remind companies of API keys that
+ * expire soon, and delete rate limit buckets that are full again.
  */
 export function messagingSweepHandler(rt: WorkerRuntime) {
   return async (): Promise<void> => {
@@ -221,6 +222,9 @@ export function messagingSweepHandler(rt: WorkerRuntime) {
     }
     if (keyReminders.reminded > 0)
       rt.logger.info({ reminded: keyReminders.reminded }, 'API key expiry reminders emailed');
+    // Token buckets that are full again limit nothing (ADR-068).
+    const buckets = await purgeRateLimitBuckets(rt.db);
+    if (buckets > 0) rt.logger.info({ buckets }, 'full rate limit buckets deleted');
     const deadLettersPurged = await purgeDeadLetters(rt.db);
     if (deadLettersPurged > 0) rt.logger.info({ deadLettersPurged }, 'old dead letters deleted');
     const webhooks = await sweepWebhooks(rt);

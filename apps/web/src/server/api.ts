@@ -4,12 +4,13 @@ import { resolveClientIp, sha256Hex, systemClock, toError } from '@w360/core';
 import {
   API_LIMITS,
   IDEMPOTENCY_KEY_RE,
+  admitApiRate,
   admitApiRequest,
+  admitFailedApiAuthentication,
   apiErrorResponse,
   apiRequestError,
   authenticateApiToken,
   bearerToken,
-  takeToken,
   type ApiContext,
   type ApiResponse,
   type IdempotencyInput,
@@ -75,12 +76,7 @@ export async function handleApiRequest(
         request.headers.get('x-real-ip'),
         runtime.trustedProxies,
       );
-      const allowed = await takeToken(
-        runtime.db,
-        `api:auth-failure:${ip ?? 'unknown'}`,
-        API_LIMITS.authFailureRate,
-      );
-      if (!allowed) {
+      if (!(await admitFailedApiAuthentication(runtime.db, ip))) {
         const e = apiRequestError(429, 'rate_limited', 'Too many failed attempts.', requestId);
         return respond(e.status, e.body, requestId, { 'Retry-After': '60' });
       }
@@ -93,11 +89,7 @@ export async function handleApiRequest(
       return respond(e.status, e.body, requestId, { 'WWW-Authenticate': 'Bearer' });
     }
 
-    const keyAllowed = await takeToken(runtime.db, `api:key:${ctx.key.id}`, API_LIMITS.keyRate);
-    const companyAllowed =
-      keyAllowed &&
-      (await takeToken(runtime.db, `api:company:${ctx.tenant.id}`, API_LIMITS.companyRate));
-    if (!keyAllowed || !companyAllowed) {
+    if (!(await admitApiRate(runtime.db, { keyId: ctx.key.id, tenantId: ctx.tenant.id }))) {
       const e = apiRequestError(429, 'rate_limited', 'Too many requests. Slow down.', requestId);
       return respond(e.status, e.body, requestId, { 'Retry-After': '1' });
     }

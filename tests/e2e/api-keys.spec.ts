@@ -97,3 +97,48 @@ test('a key that expires within 7 days is marked in settings, and its owner is e
   await expect(item.getByText('Expiry reminder emailed')).toBeVisible();
   await expectNoHorizontalOverflow(page);
 });
+
+test('a burst beyond a key’s rate limit is refused with 429 and Retry-After, and the key works again a moment later', async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(120_000);
+  const email = uniqueEmail('burst');
+  const suffix = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`;
+  const slug = `burst-${suffix}`;
+  const companyName = `Burst Co ${suffix}`;
+  await signUpAndVerify(page, { name: 'Bala Burst', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill(companyName);
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page.getByRole('heading', { name: companyName })).toBeVisible();
+  await page.goto(`/c/${slug}/settings/api-keys`);
+  await page.getByLabel('Name', { exact: true }).fill('Busy sync');
+  await page.getByRole('checkbox', { name: /Read contacts/ }).check();
+  await page.getByRole('button', { name: 'Create API key' }).click();
+  const token = await page.getByLabel('API key', { exact: true }).inputValue();
+  await page.getByRole('button', { name: 'I have stored the key' }).click();
+
+  // 120 requests at once: a key allows bursts of 50 and 10 more a second (ADR-052).
+  const auth = { Authorization: `Bearer ${token}` };
+  const responses = await Promise.all(
+    Array.from({ length: 120 }, () => request.get('/api/v1/contacts', { headers: auth })),
+  );
+  const statuses = responses.map((r) => r.status());
+  expect(statuses.filter((s) => s !== 200 && s !== 429)).toEqual([]);
+  expect(statuses.filter((s) => s === 200).length).toBeGreaterThanOrEqual(50);
+  const refused = responses.filter((r) => r.status() === 429);
+  expect(refused.length).toBeGreaterThan(0);
+  expect(refused[0]!.headers()['retry-after']).toBe('1');
+  const body = (await refused[0]!.json()) as { error: { code: string }; requestId: string };
+  expect(body.error.code).toBe('rate_limited');
+  expect(body.requestId).toMatch(/^[0-9a-f-]{36}$/);
+
+  // The key's bucket refills: after the wait it asked for, the key works again.
+  await expect
+    .poll(async () => (await request.get('/api/v1/contacts', { headers: auth })).status(), {
+      timeout: 10_000,
+      intervals: [1_000],
+    })
+    .toBe(200);
+});

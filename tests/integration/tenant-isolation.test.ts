@@ -158,6 +158,8 @@ describe('database roles', () => {
       'ops.api_key_authenticate(text)',
       'ops.purge_api_idempotency_keys(integer)',
       'ops.api_key_expiry_reminders_due(integer,integer)',
+      // The purge of full rate limit buckets (0041), for the worker.
+      'ops.purge_rate_limit_buckets(integer)',
     ]) {
       expect(await can('w360_app', fn), fn).toBe(true);
       expect(await can('w360_auth', fn), fn).toBe(false);

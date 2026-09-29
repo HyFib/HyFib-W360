@@ -529,6 +529,19 @@ Phase 5 rules (API key expiry reminders, P5-08, ADR-067):
   its name and public prefix; the token is never stored, so it cannot be sent. The name is put on
   one line for the subject.
 
+Phase 5 rules (rate limit buckets, P5-08, ADR-068):
+
+- The public API's limits are domain functions the web gate calls: failed authentication per
+  client address (unknown addresses share one bucket), then each request per key and per company;
+  a request its key refuses takes nothing from the company's bucket. Integration and e2e tests
+  exercise them.
+- Buckets that are full again are deleted by the minute sweep through
+  `ops.purge_rate_limit_buckets` (SECURITY DEFINER, executable by `w360_app` only). Only the definer
+  role may delete buckets; a bucket taken from after it was listed is checked again and kept, and a
+  full bucket behaves exactly like a missing one, so no limit changes. A client address counted
+  for failed authentication is kept only while it limits (at most about 100 seconds after its last
+  failed attempt, plus a minute).
+
 Phase 5 rules (staff refunds of unused credit, P5-05, ADR-058):
 
 - Only platform owners start a refund, and the database checks it: the definer function

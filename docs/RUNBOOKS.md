@@ -1020,7 +1020,11 @@ presented (updated at most once a minute).
 **"Send a valid API key" (401).** The key is unknown, revoked or expired, the header is not
 `Authorization: Bearer <key>`, or the company is being deleted. Keys are shown once: a lost key is
 rotated, never recovered. Many failed attempts from one address answer 429 for a while (one attempt
-every 5 seconds after a burst of 20).
+every 5 seconds after a burst of 20). The buckets are rows of `ops.rate_limit_buckets` (keys
+`api:auth-failure:<address>`, `api:key:<key id>`, `api:company:<company id>`); the messaging sweep
+deletes them once they are full again and logs `full rate limit buckets deleted` (ADR-068). Do not
+delete a bucket by hand to lift a limit: it refills on its own within seconds for keys and companies
+and within 100 seconds for failed attempts.
 
 **429 "Too many requests".** Each key allows bursts of 50 requests and 10 a second, each company 200
 and 30 a second; wait for `Retry-After` and retry with the same `Idempotency-Key`. A 429 with the

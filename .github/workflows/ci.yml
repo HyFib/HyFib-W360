@@ -77,7 +77,7 @@ jobs:
   e2e:
     name: End-to-end (Chromium, Firefox, WebKit, mobile)
     runs-on: ubuntu-24.04
-    # 172 tests run one at a time across four browser projects: 168 took 43.9 minutes on 3924bfe and
+    # 176 tests run one at a time across four browser projects: 168 took 43.9 minutes on 3924bfe and
     # 44.9 on 3978329, all on their first attempt. The usage, settlement and API key specs each wait
     # per project for a worker's minute sweep to send an email: the rate change notice (since
     # 3978329) and the key expiry reminder up to 90 seconds, the reconciliation alert, which goes to

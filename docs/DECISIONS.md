@@ -1982,3 +1982,36 @@ Decision:
 Not built: a second reminder closer to the expiry, reminders to other members or by other channels,
 extending a key's expiry (rotation is the way to renew a key), and alerts when an expired key is
 still being presented.
+
+## ADR-068 Tested API rate limits, and full token buckets deleted (2026-09-29)
+
+Context: the public API's rate limits (ADR-052: failed authentication per client address, then each
+request per key and per company) run on PostgreSQL token buckets (`ops.rate_limit_buckets`,
+migration 0003), and no automated test exercised them or the bucket itself. Buckets were never
+deleted: every API key, company, WhatsApp number and client address ever limited kept a row, and
+failed-authentication buckets are keyed by the client's address, so addresses were kept without
+end (migration 0003's note said keys were only ids).
+
+Decision:
+
+- **Full buckets are deleted.** A bucket whose tokens, refilled for the time since its last use,
+  reach its capacity limits nothing and behaves exactly like a missing one: the next request starts
+  a full bucket and takes a token from it. The minute messaging sweep deletes such buckets through
+  `ops.purge_rate_limit_buckets` (SECURITY DEFINER, executable by the runtime role only; the definer
+  role may select and delete buckets, and the runtime role still cannot delete them). A bucket taken
+  from after it was listed is checked again and kept. A client address is kept only while its
+  failed attempts limit it: at most 100 seconds after the last one (20 attempts, one back every 5
+  seconds), plus up to a minute until the sweep.
+- **The limits are domain functions.** `admitFailedApiAuthentication` (per client address; requests
+  whose address is unknown share one bucket) and `admitApiRate` (the key's bucket, then the
+  company's; a request the key refuses takes nothing from the company) are what the web gate calls,
+  so the integration tests exercise the gate's own code.
+- **Tests:** a bucket's burst and refill up to its capacity, atomic takes under concurrency, the
+  three API limits, the purge (full buckets and failed-authentication addresses deleted, limiting
+  ones kept, a deleted bucket starting full), and an e2e burst of 120 requests on one key refused
+  with 429 and `Retry-After: 1` and served again after the wait. Tests move a bucket's last use back
+  instead of waiting.
+
+Not built: edge rate limits in front of the app (a deployment item), limits per endpoint, a limit on
+successful authentications per address, and hashing the address in the bucket's key (it is kept
+only while it limits).

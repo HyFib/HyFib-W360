@@ -810,8 +810,11 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   the definer function; the request acts in its company's scope as the key (`ApiContext`, no user),
   so no company id is ever read from the request. Failed authentication is limited per client
   address (bursts of 20, one every 5 seconds), then each key (bursts of 50, 10 a second) and each
-  company (bursts of 200, 30 a second) have token buckets; over the limit answers 429 with
-  `Retry-After`. Then the request is counted against the plan's monthly API requests (below). JSON
+  company (bursts of 200, 30 a second) have token buckets (`admitFailedApiAuthentication`,
+  `admitApiRate` in `api/rate-limits.ts`; a request its key refuses takes nothing from the
+  company's bucket); over the limit answers 429 with `Retry-After`. Buckets that are full again are
+  deleted by the minute messaging sweep (`ops.purge_rate_limit_buckets`, 0041, ADR-068). Then the
+  request is counted against the plan's monthly API requests (below). JSON
   bodies need `Content-Type: application/json` and at most 64 KB. Writing scopes
   are refused while the company is suspended or restricted (reading continues). Errors are
   `{"error": {"code", "message", "reason"?, "issues"?}, "requestId"}` with the status of the

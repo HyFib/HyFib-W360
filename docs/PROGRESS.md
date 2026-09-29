@@ -1,5 +1,65 @@
 # Progress
 
+## 2026-09-29 — Phase 5: tested API rate limits, and full token buckets deleted (P5-08)
+
+Status: **Implemented and locally verified.** The public API's rate limits had no automated tests,
+and their token buckets were never deleted: failed-authentication buckets are keyed by the client's
+address, so addresses stayed in `ops.rate_limit_buckets` without end.
+
+### Completed
+
+- **Design (ADR-068):** a bucket that is full again limits nothing and behaves exactly like a
+  missing one, so the minute messaging sweep deletes such buckets; a client address counted for
+  failed authentication is kept only while it limits (at most about 100 seconds after its last
+  failed attempt, plus a minute until the sweep). The limits become domain functions the web gate
+  calls, so tests exercise the gate's own code.
+- **Migration 0041:** `ops.purge_rate_limit_buckets` (SECURITY DEFINER, `w360_app` only, owned by
+  `w360_definer`, which may select and delete buckets; a bucket taken from after it was listed is
+  checked again and kept).
+- **Domain:** `api/rate-limits.ts` (`admitFailedApiAuthentication`, `admitApiRate`: the key's bucket,
+  then the company's, taking nothing from the company for a request the key refuses);
+  `purgeRateLimitBuckets` beside `takeToken`, whose note no longer says keys are only ids.
+- **Web and worker:** the API gate calls the domain functions; the messaging sweep deletes full
+  buckets and logs how many (204 on the local database's first sweep, then a few a minute).
+- **Tests:** 8 integration tests in the new `rate-limits.test.ts` (a bucket's burst and refill up to
+  its capacity; 40 takes at once admitting 10; 20 failed authentications per address, then one every
+  5 seconds, other addresses unaffected, unknown addresses sharing one bucket; keys limited to 50 and
+  companies to 200, with the buckets' capacities and refills, a refused key taking nothing from the
+  company, the company's limit holding every key back and releasing them as it refills; the purge
+  deleting full buckets and failed-authentication addresses, keeping limiting and nearly full ones,
+  a deleted bucket starting full; the runtime role unable to delete buckets); the purge's grants in
+  the isolation suite; e2e `api-keys.spec.ts`: a burst of 120 requests on one key refused with 429,
+  `Retry-After: 1` and `rate_limited`, and served again after the wait. Time is moved by setting a
+  bucket's last use back, never by waiting.
+- **Docs:** ADR-068; ARCHITECTURE §6N; SECURITY (Phase 5 rules); THREAT-MODEL
+  T70; RUNBOOKS (the buckets behind 429s); DATA-RETENTION (rate limit buckets); BACKLOG P5-08;
+  FEATURE-MATRIX H-033. The e2e job's comment in CI counts the new tests.
+- **Mutation checks:** 19 regressions tried one at a time (the purge's fullness and refill checks and
+  grants, the runtime role deleting buckets, taking without tokens, no refill, refilling beyond the
+  capacity, a new bucket starting empty, the purge's count, failed attempts sharing a bucket or using
+  the key rate, the unknown address, the company taken when the key refuses, no key or company
+  limit, each limit at the other's rate, keys limited per company). 17 of the first 18 made a test
+  fail; the company bucket created at the key's capacity was caught once the test checked each
+  bucket's capacity and the tokens left after a burst, and a 19th regression added then is caught
+  too.
+
+### Test commands and results (local, 2026-09-29)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                          |
+| --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                  |
+| `pnpm test` (unit)                                                          | 336 passed                                                                                                                                                                                                                                                                                                      |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 455 passed, including the new `rate-limits.test.ts` (8)                                                                                                                                                                                                                                                         |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 455 passed                                                                                                                                                                                                                                                                                                      |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 87 of 88 passed in one full run (22.8 min), including `api-keys.spec.ts`'s burst on both projects; `step-up.spec.ts` on mobile-chromium waited more than 30 seconds for its sign-up's confirmation email behind a reconciliation alert to 73 platform owners (fixed in the next commit, ADR-069) |
+| Mutation checks                                                             | 19 regressions tried; all 19 make a test fail (17 of 18 in the first run, the 18th after a test was strengthened, and a 19th added then)                                                                                                                                                                        |
+
+### Known gaps
+
+- Edge rate limits in front of the app, limits per endpoint and a limit on successful
+  authentications per address are not built. A bucket's key still holds a client address while it
+  limits; it is not hashed.
+
 ## 2026-09-29 — Phase 5: reminders before API keys expire (P5-08)
 
 Status: **Implemented and locally verified (email through the local outbox and Mailpit only).** A
@@ -38,6 +98,10 @@ API keys; now owners and administrators are emailed a week before.
   sweep after the check finished, to every platform owner in the database: 73 in the reused local
   database, which the email queue delivered in 37 seconds. The wait is now 150 seconds (one sweep
   plus the fan-out); with it the spec passed on both projects.
+- **Secret scan on e8b892c:** gitleaks' generic-api-key rule matched the made-up key prefix in
+  `api/expiry-reminders.test.ts` (`w360_` and 12 letters, a public prefix, not a token). The finding
+  is reviewed in `.gitleaksignore` (cb2ffc3); gitleaks 8.30.1 run locally on the whole history then
+  finds nothing.
 - **Fix to `reports.spec.ts`:** in CI on 2bdead7 (167 passed in 51.0 minutes, all green), its WebKit
   test failed once and passed on the retry. `page.goto` to Reports was interrupted by a navigation
   to the conversation it left: the conversation's live updates refresh the page, a page load

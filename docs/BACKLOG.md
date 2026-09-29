@@ -371,9 +371,12 @@ verification, app review, Embedded Signup configuration).
   document from the validation schemas, Settings → API keys; monthly API requests and API access
   by plan (ADR-061, see P5-01); **[reminders before keys expire built, locally verified]** (ADR-067:
   owners and administrators emailed once, 7 days before a usable key that was not rotated expires,
-  with its name and prefix, never a token; marked on Settings → API keys). Remaining: session,
-  media and interactive messages, conversation and message lists, starting automations (W-086),
-  bulk sends in one call, IP allowlists, per-key quotas, tests of the rate limits.
+  with its name and prefix, never a token; marked on Settings → API keys); **[rate limits tested,
+  full buckets deleted, locally verified]** (ADR-068: integration tests of the buckets and each
+  limit, an e2e burst refused with 429; buckets full again deleted every minute, so failed-
+  authentication addresses are kept only while they limit). Remaining: session, media and
+  interactive messages, conversation and message lists, starting automations (W-086), bulk sends in
+  one call, IP allowlists, per-key quotas, limits per endpoint.
 - **P5-09 Outgoing webhooks** **[built, locally verified; delivered to local test receivers only]**
   (ADR-053): up to 10 endpoints per company (`developer.manage`) for `message.received`,
   `message.status`, `consent.changed` and `template.status_changed`, captured by database triggers
