@@ -1267,9 +1267,19 @@ administrators are emailed whenever a key adds an endpoint; if nobody expected i
 Settings → Webhooks (which names the key) and revoke the key, then check the audit log for what
 else the key did (`actor_type = 'api_key'`).
 
+**A test event or a replay through the API is refused, or a delivery cannot be found.**
+`POST /webhook-endpoints/{id}/test` and `POST /webhook-deliveries/{id}/replay` need an
+`Idempotency-Key`; a retry with the same key answers as the first request did and queues nothing
+more. A 412 ("Turn the endpoint on") means the endpoint is off: the key turns it on with
+`PATCH /webhook-endpoints/{id}` and `{"enabled": true}`. A 409 ("still being attempted") means the
+delivery has not succeeded or failed yet: follow it with `GET /webhook-deliveries/{id}`. A 404
+means the delivery or endpoint was added by a member (keys see only what keys added), belongs to
+another company, or was deleted after 30 days. A delivery shows no body (payloads are built when
+delivered and never stored): match it to the receiver's log by `eventId`.
+
 **The company is suspended or its plan ended.** Keys keep reading; creating contacts, recording
-consent, sending, starting and stopping automations and managing webhook endpoints answer 423 until
-the company is active again.
+consent, sending, starting and stopping automations, and managing webhook endpoints (reading them
+and their deliveries included) answer 423 until the company is active again.
 
 **Migration 0024 failed.** It runs in one transaction. It creates the two tables, the guard trigger,
 the two SECURITY DEFINER functions (granted to `w360_app` before their ownership moves to
@@ -1300,7 +1310,9 @@ deliveries were marked failed (`endpoint_disabled`), owners and administrators g
 "Webhook endpoint turned off" email, and the audit log has `webhook.endpoint_auto_disabled`. Fix the
 receiver, turn the endpoint on (its health starts afresh), send a test event, then replay the
 failed deliveries that are still needed (within 30 days) from its deliveries page, filtered to
-failed ones.
+failed ones. For an endpoint a key added, the integration can do the same through the API
+(ADR-083): `GET /webhook-endpoints/{id}/deliveries?status=failed`, then
+`POST /webhook-deliveries/{id}/replay` for each.
 
 **The receiver rejects signatures.** It must compute HMAC-SHA256 over the exact raw body bytes
 prefixed with the `t` value and a dot, compare in constant time against any `v1` value, and allow a

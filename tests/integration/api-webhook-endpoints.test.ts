@@ -526,3 +526,209 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     ).rejects.toThrow();
   });
 });
+
+describe('deliveries, test events and replays through the API (ADR-083)', () => {
+  type DeliveryBody = { data: Record<string, unknown> & { id: string; eventId: string } };
+  const pingsAt = (path: string) =>
+    received
+      .filter((r) => r.path === path)
+      .map((r) => ({ request: r, body: JSON.parse(r.body) as { id: string; type: string } }));
+
+  it('send a test event once per key, page the deliveries and replay a finished one, audited as the key', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage'], 'Zap connector');
+    const path = `/ok/${randomBytes(6).toString('hex')}`;
+    const created = await addThroughApi(key.ctx, 'ep-1', {
+      url: receiverUrl(path),
+      events: ['message.received'],
+    });
+    const { id, secret } = created.body.data;
+    if (!secret) throw new Error('no secret');
+
+    // A test event, once per Idempotency-Key, answered with its delivery.
+    const first = await api().sendTest(key.ctx, id, idem('t-1', 't-1'));
+    expect(first.status).toBe(201);
+    const queued = (first.body as DeliveryBody).data;
+    expect(queued).toEqual({
+      id: expect.any(String),
+      endpointId: id,
+      eventId: expect.any(String),
+      eventType: 'ping',
+      status: 'pending',
+      attempts: 0,
+      nextAttemptAt: expect.any(String),
+      lastAttemptAt: null,
+      lastStatusCode: null,
+      lastError: null,
+      lastDurationMs: null,
+      deliveredAt: null,
+      replayOf: null,
+      createdAt: expect.any(String),
+    });
+    expect(await api().sendTest(key.ctx, id, idem('t-1', 't-1'))).toEqual({
+      ...first,
+      replayed: true,
+    });
+    expect(await api().getDelivery(key.ctx, queued.id)).toEqual(queued);
+
+    // Delivered to the receiver, signed with the endpoint's secret.
+    await deliverDue(c);
+    const pings = pingsAt(path);
+    expect(pings.map((p) => [p.body.type, p.body.id])).toEqual([['ping', queued.eventId]]);
+    expect(signedWith(pings[0]!.request, secret)).toBe(true);
+    expect(await api().getDelivery(key.ctx, queued.id)).toMatchObject({
+      status: 'succeeded',
+      attempts: 1,
+      nextAttemptAt: null,
+      lastStatusCode: 204,
+      lastError: null,
+      deliveredAt: expect.any(String),
+    });
+
+    // A second test; the deliveries newest first, a page at a time and by state.
+    const second = (await api().sendTest(key.ctx, id, idem('t-2', 't-2'))).body as DeliveryBody;
+    await deliverDue(c);
+    const all = await api().deliveries(key.ctx, id, {});
+    expect(all.data.map((d) => d.id)).toEqual([second.data.id, queued.id]);
+    expect(all.nextCursor).toBeNull();
+    const page1 = await api().deliveries(key.ctx, id, { limit: '1' });
+    expect(page1.data.map((d) => d.id)).toEqual([second.data.id]);
+    const page2 = await api().deliveries(key.ctx, id, {
+      limit: '1',
+      cursor: page1.nextCursor ?? undefined,
+    });
+    expect(page2.data.map((d) => d.id)).toEqual([queued.id]);
+    expect(page2.nextCursor).toBeNull();
+    expect((await api().deliveries(key.ctx, id, { status: 'succeeded' })).data).toHaveLength(2);
+    expect((await api().deliveries(key.ctx, id, { status: 'failed' })).data).toEqual([]);
+
+    // A replay of the first delivery: its event again, as a new delivery, once per key.
+    const replay = await api().replay(key.ctx, queued.id, idem('r-1', 'r-1'));
+    expect(replay.status).toBe(201);
+    const replayed = (replay.body as DeliveryBody).data;
+    expect(replayed).toMatchObject({
+      endpointId: id,
+      eventId: queued.eventId,
+      eventType: 'ping',
+      status: 'pending',
+      replayOf: queued.id,
+    });
+    expect(replayed.id).not.toBe(queued.id);
+    expect(await api().replay(key.ctx, queued.id, idem('r-1', 'r-1'))).toEqual({
+      ...replay,
+      replayed: true,
+    });
+    await deliverDue(c);
+    expect(pingsAt(path).map((p) => p.body.id)).toEqual([
+      queued.eventId,
+      second.data.eventId,
+      queued.eventId,
+    ]);
+    const audit = await fx.query<{ action: string; actor_type: string; metadata: unknown }>(
+      `SELECT action, actor_type, metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.delivery_replayed'`,
+      [c.tenant.id],
+    );
+    expect(audit).toEqual([
+      {
+        action: 'webhook.delivery_replayed',
+        actor_type: 'api_key',
+        metadata: {
+          host: HOST,
+          deliveryId: queued.id,
+          newDeliveryId: replayed.id,
+          source: 'api',
+        },
+      },
+    ]);
+  });
+
+  it('reach only deliveries to endpoints keys added, and refuse what cannot be sent or replayed', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const theirs = await apiKey(other, ['webhooks.manage']);
+    const created = await addThroughApi(key.ctx, 'ep-1', {
+      url: receiverUrl(),
+      events: ['message.received'],
+    });
+    const { id } = created.body.data;
+    const pending = (await api().sendTest(key.ctx, id, idem('t-1', 't-1'))).body as DeliveryBody;
+
+    // A member's endpoint and its test delivery are not found through the API.
+    const owner = await fx.ctx(c, c.owner);
+    const members = await settings().create(owner, {
+      url: receiverUrl(),
+      eventTypes: ['message.received'],
+    });
+    const { deliveryId: membersDelivery } = await settings().sendTest(owner, {
+      endpointId: members.id,
+    });
+    await expectAppError(api().deliveries(key.ctx, members.id, {}), 'not_found', /endpoint/);
+    await expectAppError(
+      api().sendTest(key.ctx, members.id, idem('t-2', 't-2')),
+      'not_found',
+      /endpoint/,
+    );
+    await expectAppError(api().getDelivery(key.ctx, membersDelivery), 'not_found', /Delivery/);
+    await expectAppError(
+      api().replay(key.ctx, membersDelivery, idem('r-1', 'r-1')),
+      'not_found',
+      /Delivery/,
+    );
+    // Nor are they for another company's key, or for unknown and malformed ids.
+    await expectAppError(api().deliveries(theirs.ctx, id, {}), 'not_found');
+    await expectAppError(api().getDelivery(theirs.ctx, pending.data.id), 'not_found');
+    await expectAppError(
+      api().replay(theirs.ctx, pending.data.id, idem('r-2', 'r-2')),
+      'not_found',
+    );
+    await expectAppError(
+      api().sendTest(theirs.ctx, id, idem('t-3', 't-3')),
+      'not_found',
+      /endpoint/,
+    );
+    await expectAppError(api().getDelivery(key.ctx, uuidv7()), 'not_found');
+    await expectAppError(api().getDelivery(key.ctx, 'not-a-uuid'), 'not_found');
+    await expectAppError(api().deliveries(key.ctx, id, { status: 'lost' }), 'validation_failed');
+
+    // A delivery still waiting cannot be replayed; an endpoint that is off takes no test or replay.
+    await expectAppError(
+      api().replay(key.ctx, pending.data.id, idem('r-3', 'r-3')),
+      'conflict',
+      /still being attempted/,
+    );
+    await deliverDue(c);
+    await api().update(key.ctx, id, { enabled: false });
+    await expectAppError(
+      api().sendTest(key.ctx, id, idem('t-4', 't-4')),
+      'precondition_failed',
+      /Turn the endpoint on/,
+    );
+    await expectAppError(
+      api().replay(key.ctx, pending.data.id, idem('r-4', 'r-4')),
+      'precondition_failed',
+      /Turn the endpoint on/,
+    );
+    // A key without the scope, and a suspended company.
+    const reader = await apiKey(c, ['contacts.read']);
+    await expectAppError(api().deliveries(reader.ctx, id, {}), 'forbidden');
+    await fx.query(`UPDATE app.tenants SET status = 'suspended' WHERE id = $1`, [c.tenant.id]);
+    const blocked = await authenticateApiToken(fx.dbs.app, key.token, 'r');
+    if (!blocked) throw new Error('the key no longer authenticates');
+    await expectAppError(api().deliveries(blocked, id, {}), 'tenant_suspended');
+    await expectAppError(
+      api().replay(blocked, pending.data.id, idem('r-5', 'r-5')),
+      'tenant_suspended',
+    );
+    await fx.query(`UPDATE app.tenants SET status = 'active' WHERE id = $1`, [c.tenant.id]);
+
+    // Refusals stored nothing: the one test delivery, and the member's.
+    const [counts] = await fx.query<{ deliveries: number; kept: number }>(
+      `SELECT (SELECT count(*)::int FROM app.webhook_deliveries WHERE tenant_id = $1) AS deliveries,
+              (SELECT count(*)::int FROM app.api_idempotency_keys WHERE api_key_id = $2) AS kept`,
+      [c.tenant.id, key.id],
+    );
+    expect(counts).toEqual({ deliveries: 2, kept: 2 });
+  });
+});

@@ -270,3 +270,75 @@ test('an API key adds its own endpoint over HTTP: owners are emailed, settings n
   await expect(page.getByText('No endpoints yet.')).toBeVisible();
   expect(forUs()).toHaveLength(1);
 });
+
+test('an API key sends its endpoint a test event, follows the delivery, replays it and reads the history, which settings show too (ADR-083)', async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(180_000);
+  const email = uniqueEmail('apideliv');
+  const slug = `apideliv-${Date.now().toString(36)}`;
+  const path = `/hooks/${slug}/deliveries`;
+  const forUs = () => received.filter((r) => r.path === path);
+  await signUpAndVerify(page, { name: 'Ravi Replay', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('Replay Clinic');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+
+  await page.goto(`/c/${slug}/settings/api-keys`);
+  await page.getByLabel('Name', { exact: true }).fill('Helpdesk connector');
+  await page.getByRole('checkbox', { name: /Manage webhook endpoints/ }).check();
+  await page.getByRole('button', { name: 'Create API key' }).click();
+  const token = await page.getByLabel('API key', { exact: true }).inputValue();
+  await page.getByRole('button', { name: 'I have stored the key' }).click();
+  const auth = { Authorization: `Bearer ${token}` };
+  const created = await request.post('/api/v1/webhook-endpoints', {
+    headers: { ...auth, 'Idempotency-Key': randomUUID() },
+    data: { url: `http://${HOST}:${port}${path}`, events: ['message.received'] },
+  });
+  const endpoint = ((await created.json()) as { data: { id: string; secret: string } }).data;
+
+  // A test event, answered with its delivery, which the key follows until it succeeds.
+  const sent = await request.post(`/api/v1/webhook-endpoints/${endpoint.id}/test`, {
+    headers: { ...auth, 'Idempotency-Key': randomUUID() },
+  });
+  expect(sent.status()).toBe(201);
+  const test1 = ((await sent.json()) as { data: { id: string; eventId: string } }).data;
+  expect(test1).toMatchObject({ eventType: 'ping', status: 'pending', replayOf: null });
+  await expect(async () => {
+    const res = await request.get(`/api/v1/webhook-deliveries/${test1.id}`, { headers: auth });
+    expect((await res.json()).data).toMatchObject({ status: 'succeeded', lastStatusCode: 204 });
+  }).toPass({ timeout: 30_000 });
+  expect(forUs()).toHaveLength(1);
+  expect(signatureValid(forUs()[0]!.headers, forUs()[0]!.body, endpoint.secret)).toBe(true);
+  expect(JSON.parse(forUs()[0]!.body)).toMatchObject({ id: test1.eventId, type: 'ping' });
+
+  // A replay delivers the same event again, as a new delivery.
+  const replayed = await request.post(`/api/v1/webhook-deliveries/${test1.id}/replay`, {
+    headers: { ...auth, 'Idempotency-Key': randomUUID() },
+  });
+  expect(replayed.status()).toBe(201);
+  const replay = ((await replayed.json()) as { data: { id: string } }).data;
+  expect(replay).toMatchObject({ replayOf: test1.id, eventId: test1.eventId });
+  await expect(async () => expect(forUs()).toHaveLength(2)).toPass({ timeout: 30_000 });
+  expect(JSON.parse(forUs()[1]!.body)).toMatchObject({ id: test1.eventId, type: 'ping' });
+
+  // The history, newest first, through the API and in settings (the replay marked).
+  await expect(async () => {
+    const list = await request.get(`/api/v1/webhook-endpoints/${endpoint.id}/deliveries`, {
+      headers: auth,
+    });
+    const rows = ((await list.json()) as { data: { id: string; status: string }[] }).data;
+    expect(rows.map((d) => [d.id, d.status])).toEqual([
+      [replay.id, 'succeeded'],
+      [test1.id, 'succeeded'],
+    ]);
+  }).toPass({ timeout: 30_000 });
+  await page.goto(`/c/${slug}/settings/webhooks/${endpoint.id}`);
+  const history = page.getByRole('list', { name: 'Deliveries' }).getByRole('listitem');
+  await expect(history).toHaveCount(2);
+  await expect(history.first().getByText('Replay', { exact: true })).toBeVisible();
+  await expect(history.last().getByText('Replay', { exact: true })).toHaveCount(0);
+  await expectNoHorizontalOverflow(page);
+});

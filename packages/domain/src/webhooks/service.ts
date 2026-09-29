@@ -83,6 +83,7 @@ export interface WebhookEndpointView {
 
 export interface WebhookDeliveryView {
   id: string;
+  endpointId: string;
   eventId: string;
   eventType: string;
   state: WebhookDeliveryState;
@@ -284,6 +285,102 @@ export async function failPendingDeliveries(
     )
     .returning({ id: webhookDeliveries.id });
   return failed.length;
+}
+
+/** A delivery as Settings → Webhooks and the API list it (ADR-053, ADR-083). */
+export const webhookDeliveryColumns = {
+  id: webhookDeliveries.id,
+  endpointId: webhookDeliveries.endpointId,
+  eventId: webhookDeliveries.eventId,
+  eventType: webhookEvents.type,
+  state: webhookDeliveries.state,
+  attempts: webhookDeliveries.attempts,
+  nextAttemptAt: webhookDeliveries.nextAttemptAt,
+  lastAttemptAt: webhookDeliveries.lastAttemptAt,
+  lastStatusCode: webhookDeliveries.lastStatusCode,
+  lastError: webhookDeliveries.lastError,
+  lastDurationMs: webhookDeliveries.lastDurationMs,
+  deliveredAt: webhookDeliveries.deliveredAt,
+  replayOf: webhookDeliveries.replayOf,
+  createdAt: webhookDeliveries.createdAt,
+};
+
+/** The join from a delivery to its event, which every delivery has. */
+export const deliveryEventJoin = and(
+  eq(webhookEvents.tenantId, webhookDeliveries.tenantId),
+  eq(webhookEvents.id, webhookDeliveries.eventId),
+);
+
+/**
+ * Queues a `ping` event for an endpoint the caller locked, which must be on (settings, and keys
+ * for the endpoints keys added, ADR-083).
+ */
+export async function queueWebhookTest(
+  tx: Tx,
+  tenantId: string,
+  endpoint: Pick<LockedWebhookEndpoint, 'id' | 'state'>,
+): Promise<{ eventId: string; deliveryId: string }> {
+  if (endpoint.state !== 'active') {
+    throw new AppError('precondition_failed', 'Turn the endpoint on to send it a test event.');
+  }
+  const eventId = uuidv7();
+  const deliveryId = uuidv7();
+  await tx.insert(webhookEvents).values({ id: eventId, tenantId, type: 'ping', detail: {} });
+  await tx
+    .insert(webhookDeliveries)
+    .values({ id: deliveryId, tenantId, endpointId: endpoint.id, eventId });
+  return { eventId, deliveryId };
+}
+
+/**
+ * Delivers a finished delivery's event again, as a new delivery to the same endpoint, which must
+ * be on; the endpoint is locked first. With `keysOnly`, only deliveries to endpoints keys added
+ * are found (ADR-083): any other is refused as unknown, like one that does not exist.
+ */
+export async function replayWebhookDelivery(
+  tx: Tx,
+  tenantId: string,
+  deliveryId: string,
+  options: { keysOnly?: boolean } = {},
+): Promise<{ endpoint: LockedWebhookEndpoint; deliveryId: string }> {
+  const [delivery] = await tx
+    .select({
+      endpointId: webhookDeliveries.endpointId,
+      eventId: webhookDeliveries.eventId,
+      state: webhookDeliveries.state,
+    })
+    .from(webhookDeliveries)
+    .innerJoin(
+      webhookEndpoints,
+      and(
+        eq(webhookEndpoints.tenantId, webhookDeliveries.tenantId),
+        eq(webhookEndpoints.id, webhookDeliveries.endpointId),
+      ),
+    )
+    .where(
+      and(
+        eq(webhookDeliveries.tenantId, tenantId),
+        eq(webhookDeliveries.id, deliveryId),
+        options.keysOnly ? isNotNull(webhookEndpoints.createdByApiKeyId) : undefined,
+      ),
+    );
+  if (!delivery) throw notFound('Delivery');
+  const endpoint = await lockWebhookEndpoint(tx, tenantId, delivery.endpointId);
+  if (!(['succeeded', 'failed'] as WebhookDeliveryState[]).includes(delivery.state)) {
+    throw new AppError('conflict', 'This delivery is still being attempted.');
+  }
+  if (endpoint.state !== 'active') {
+    throw new AppError('precondition_failed', 'Turn the endpoint on to replay deliveries.');
+  }
+  const newId = uuidv7();
+  await tx.insert(webhookDeliveries).values({
+    id: newId,
+    tenantId,
+    endpointId: delivery.endpointId,
+    eventId: delivery.eventId,
+    replayOf: deliveryId,
+  });
+  return { endpoint, deliveryId: newId };
 }
 
 /**
@@ -524,29 +621,13 @@ export function createWebhooksService(deps: {
     async sendTest(ctx: TenantContext, input: unknown) {
       assertCan(ctx, 'developer.manage');
       const { endpointId } = parseInput(endpointIdSchema, input);
-      const eventId = uuidv7();
-      const deliveryId = uuidv7();
-      await db.run(ctx.scope, async (tx) => {
-        const endpoint = await lockWebhookEndpoint(tx, ctx.tenant.id, endpointId);
-        if (endpoint.state !== 'active') {
-          throw new AppError(
-            'precondition_failed',
-            'Turn the endpoint on to send it a test event.',
-          );
-        }
-        await tx.insert(webhookEvents).values({
-          id: eventId,
-          tenantId: ctx.tenant.id,
-          type: 'ping',
-          detail: {},
-        });
-        await tx.insert(webhookDeliveries).values({
-          id: deliveryId,
-          tenantId: ctx.tenant.id,
-          endpointId,
-          eventId,
-        });
-      });
+      const { deliveryId } = await db.run(ctx.scope, async (tx) =>
+        queueWebhookTest(
+          tx,
+          ctx.tenant.id,
+          await lockWebhookEndpoint(tx, ctx.tenant.id, endpointId),
+        ),
+      );
       return { deliveryId };
     },
 
@@ -561,29 +642,9 @@ export function createWebhooksService(deps: {
         ctx.scope,
         async (tx) =>
           tx
-            .select({
-              id: webhookDeliveries.id,
-              eventId: webhookDeliveries.eventId,
-              eventType: webhookEvents.type,
-              state: webhookDeliveries.state,
-              attempts: webhookDeliveries.attempts,
-              nextAttemptAt: webhookDeliveries.nextAttemptAt,
-              lastAttemptAt: webhookDeliveries.lastAttemptAt,
-              lastStatusCode: webhookDeliveries.lastStatusCode,
-              lastError: webhookDeliveries.lastError,
-              lastDurationMs: webhookDeliveries.lastDurationMs,
-              deliveredAt: webhookDeliveries.deliveredAt,
-              replayOf: webhookDeliveries.replayOf,
-              createdAt: webhookDeliveries.createdAt,
-            })
+            .select(webhookDeliveryColumns)
             .from(webhookDeliveries)
-            .innerJoin(
-              webhookEvents,
-              and(
-                eq(webhookEvents.tenantId, webhookDeliveries.tenantId),
-                eq(webhookEvents.id, webhookDeliveries.eventId),
-              ),
-            )
+            .innerJoin(webhookEvents, deliveryEventJoin)
             .where(
               and(
                 eq(webhookDeliveries.tenantId, ctx.tenant.id),
@@ -601,49 +662,21 @@ export function createWebhooksService(deps: {
     async replay(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
       assertCan(ctx, 'developer.manage');
       const { deliveryId } = parseInput(deliveryIdSchema, input);
-      const newId = uuidv7();
-      await db.run(ctx.scope, async (tx) => {
-        const [delivery] = await tx
-          .select({
-            endpointId: webhookDeliveries.endpointId,
-            eventId: webhookDeliveries.eventId,
-            state: webhookDeliveries.state,
-          })
-          .from(webhookDeliveries)
-          .where(
-            and(
-              eq(webhookDeliveries.tenantId, ctx.tenant.id),
-              eq(webhookDeliveries.id, deliveryId),
-            ),
-          );
-        if (!delivery) throw notFound('Delivery');
-        const endpoint = await lockWebhookEndpoint(tx, ctx.tenant.id, delivery.endpointId);
-        if (!(['succeeded', 'failed'] as WebhookDeliveryState[]).includes(delivery.state)) {
-          throw new AppError('conflict', 'This delivery is still being attempted.');
-        }
-        if (endpoint.state !== 'active') {
-          throw new AppError('precondition_failed', 'Turn the endpoint on to replay deliveries.');
-        }
-        await tx.insert(webhookDeliveries).values({
-          id: newId,
-          tenantId: ctx.tenant.id,
-          endpointId: delivery.endpointId,
-          eventId: delivery.eventId,
-          replayOf: deliveryId,
-        });
+      return db.run(ctx.scope, async (tx) => {
+        const replayed = await replayWebhookDelivery(tx, ctx.tenant.id, deliveryId);
         await recordAudit(
           tx,
           ctx,
           {
             action: 'webhook.delivery_replayed',
             subjectType: 'webhook_endpoint',
-            subjectId: delivery.endpointId,
-            metadata: { deliveryId, newDeliveryId: newId },
+            subjectId: replayed.endpoint.id,
+            metadata: { deliveryId, newDeliveryId: replayed.deliveryId },
           },
           meta,
         );
+        return { deliveryId: replayed.deliveryId };
       });
-      return { deliveryId: newId };
     },
   };
 }

@@ -511,6 +511,12 @@ Phase 5 rules (Public API, P5-08):
   message is refused like an unknown id, and WhatsApp ids are never taken from the request. A
   reaction goes only on the contact's own messages of the last 30 days and does not end an
   automation; the emoji must be one RGI emoji.
+- Webhook deliveries, test events and replays through the API (ADR-083) use the same
+  `webhooks.manage` scope and reach only endpoints keys added: deliveries to members' endpoints
+  answer 404 when listed, read or replayed. A delivery shows how sending went (status, attempts,
+  HTTP status, error code, duration), never a body: payloads are not stored. Test events and
+  replays need an `Idempotency-Key`, go only to an endpoint that is on, through the egress guard,
+  and use the settings service's own steps; a replay is audited as the key.
 - Only the token's SHA-256 is stored; the runtime role cannot read it. The token is shown once in
   the browser and kept only in the page's memory; it is never logged, and audit entries carry the
   public prefix only.
@@ -523,7 +529,8 @@ Phase 5 rules (Public API, P5-08):
 Phase 5 rules (outgoing webhooks, P5-09):
 
 - Members with `developer.manage` (owners and administrators) add, edit, turn off, delete and test
-  the company's webhook endpoints, rotate their secrets and replay deliveries. Every change is
+  the company's webhook endpoints, rotate their secrets and replay deliveries; API keys with
+  `webhooks.manage` do the same for the endpoints keys added (ADR-081, ADR-083). Every change is
   audited with the endpoint's host only; the full URL (which may carry a receiver's token) and the
   secret are never logged.
 - An endpoint's URL must pass the egress guard's rules when saved (https, no credentials, port 443

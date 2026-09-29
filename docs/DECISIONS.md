@@ -2625,3 +2625,48 @@ Decision:
 Not built: members quoting or reacting in the inbox, taking a reaction back, reacting to the
 business's own messages, media, location and contact card replies through the API, and editing or
 deleting sent messages.
+
+## ADR-083 Webhook deliveries, test events and replays through the public API (2026-09-29)
+
+Context: since ADR-081 an integration adds and manages its webhook endpoints through the API, but it
+could not tell whether events reached its receiver, send a test event to check its setup, or have a
+failed delivery sent again once its receiver was fixed: only members could, in Settings → Webhooks
+(ADR-053). An installation that checks itself ("send a test event and confirm it arrived") still
+needed a member.
+
+Decision:
+
+- **The same scope,** `webhooks.manage`, whose description now names deliveries, test events and
+  replays. A key that adds an endpoint and chooses its events already decides what is sent to it,
+  and a delivery says only how sending went, so no new scope is needed. The scope writes, so these
+  calls, reads included, are refused while the company is suspended or restricted.
+- **Only endpoints keys added,** as in ADR-081: deliveries to endpoints members added are not found
+  (404) when listed, read or replayed, and test events to them are refused the same way.
+- **Operations:**
+  - `GET /api/v1/webhook-endpoints/{id}/deliveries`: the endpoint's deliveries, newest first, on
+    exact keyset pages (ADR-072) of up to 100 (50 by default), optionally only those `pending`,
+    `succeeded` or `failed`;
+  - `GET /api/v1/webhook-deliveries/{id}`: one delivery;
+  - `POST /api/v1/webhook-endpoints/{id}/test`: a `ping` event for an endpoint that is on, answered
+    201 with its delivery to follow;
+  - `POST /api/v1/webhook-deliveries/{id}/replay`: a finished delivery (succeeded or failed) sent
+    again as a new delivery of the same event to the same endpoint, which must be on, answered 201
+    with the new delivery, whose `replayOf` names the one replayed. A delivery still being
+    attempted is refused (409), and so is either call for an endpoint that is off (412).
+- **Once per `Idempotency-Key`:** a test event and a replay each need one, as adding an endpoint
+  and rotating its secret do; a retry answers as the first request did and sends nothing more.
+- **What a delivery says:** its event's id and type (`ping` for a test event), its status (the
+  database's `state`), the attempts made, when the next is due while it waits, the last attempt's
+  time, HTTP status, error code and duration, when it was delivered, and the delivery it replays.
+  Never what was sent or received: payloads are built when delivered and never stored (ADR-053),
+  and a receiver matches deliveries to its own log by the event id. Deliveries are kept 30 days.
+- **The settings service's own steps** (`queueWebhookTest`, `replayWebhookDelivery`), so the rules
+  are the same: the endpoint's row is locked before anything is queued, a replay is audited as
+  `webhook.delivery_replayed` (as the key, with the request id and `source: api`, the host, the
+  delivery replayed and the new one), and a test event is not audited, as in settings. The worker
+  sends both as it sends every delivery, through the egress guard.
+- **No migration:** the runtime role already reads deliveries and inserts events and deliveries in
+  the company's scope.
+
+Not built: bodies sent or received, replaying many deliveries in one call, filters beyond the
+status (event type, dates), and deliveries to members' endpoints.

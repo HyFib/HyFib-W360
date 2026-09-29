@@ -91,7 +91,7 @@ export const API_SCOPE_INFO: Record<
   'webhooks.manage': {
     label: 'Manage webhook endpoints',
     description:
-      "Add webhook endpoints that receive the company's events, including what contacts write, and read, change, rotate the secret of and delete the endpoints keys added. Owners and administrators are emailed when a key adds one.",
+      "Add webhook endpoints that receive the company's events, including what contacts write, and read, change, rotate the secret of and delete the endpoints keys added, with their deliveries, test events and replays. Owners and administrators are emailed when a key adds one.",
     permission: 'developer.manage',
     writes: true,
   },

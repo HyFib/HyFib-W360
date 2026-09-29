@@ -5,6 +5,7 @@ import {
   CONVERSATION_STATUSES,
   MESSAGE_STATUSES,
   MESSAGE_TYPES,
+  WEBHOOK_DELIVERY_STATES,
   type MessageStatus,
 } from '@w360/db';
 import {
@@ -237,6 +238,37 @@ export const apiWebhookEndpointSchema = z.object({
   apiKeyId: z.uuid().describe('The API key that added the endpoint.'),
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime(),
+});
+
+export const apiWebhookDeliverySchema = z.object({
+  id: z.uuid(),
+  endpointId: z.uuid(),
+  eventId: z.uuid().describe('The event delivered; a replay delivers the same event again.'),
+  eventType: z
+    .enum([...WEBHOOK_EVENT_KEYS, 'ping'])
+    .describe('The event’s type, or `ping` for a test event.'),
+  status: z
+    .enum(WEBHOOK_DELIVERY_STATES)
+    .describe(
+      'pending: waiting for its next attempt; delivering: an attempt is under way; succeeded: the endpoint answered 2xx; failed: every attempt failed, the endpoint was turned off, or the event is gone.',
+    ),
+  attempts: z.number().int(),
+  nextAttemptAt: z.iso
+    .datetime()
+    .nullable()
+    .describe('When the next attempt is due, while pending.'),
+  lastAttemptAt: z.iso.datetime().nullable(),
+  lastStatusCode: z.number().int().nullable().describe('The HTTP status of the last attempt.'),
+  lastError: z
+    .string()
+    .nullable()
+    .describe(
+      'Why the last attempt failed, as a code (for example `invalid_status`, `timeout`, `endpoint_disabled` or `event_gone`).',
+    ),
+  lastDurationMs: z.number().int().nullable(),
+  deliveredAt: z.iso.datetime().nullable(),
+  replayOf: z.uuid().nullable().describe('The delivery this one replays.'),
+  createdAt: z.iso.datetime(),
 });
 
 export const apiWebhookEndpointWithSecretSchema = apiWebhookEndpointSchema.extend({
@@ -765,6 +797,75 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
         },
       },
+      '/webhook-endpoints/{id}/deliveries': {
+        get: {
+          operationId: 'listWebhookDeliveries',
+          summary: "An endpoint's deliveries, newest first",
+          description: `${scopeNote('webhooks.manage')} Only for endpoints API keys added. Deliveries are kept 30 days; pages never skip or repeat one.`,
+          parameters: [
+            { $ref: '#/components/parameters/Id' },
+            ...pageParams,
+            {
+              name: 'status',
+              in: 'query',
+              schema: { type: 'string', enum: [...WEBHOOK_DELIVERY_STATES] },
+              description: 'Only deliveries in this state.',
+            },
+          ],
+          responses: {
+            '200': { description: 'A page of deliveries.', content: pageOf('WebhookDelivery') },
+            ...errors(401, 403, 404, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/webhook-endpoints/{id}/test': {
+        post: {
+          operationId: 'sendWebhookTest',
+          summary: 'Send an endpoint a test event',
+          description: `${scopeNote('webhooks.manage')} Queues a \`ping\` event, signed like any other, for an endpoint that is on (412 otherwise). One test per \`Idempotency-Key\`. Follow its delivery with \`GET /webhook-deliveries/{id}\`.`,
+          parameters: [
+            { $ref: '#/components/parameters/Id' },
+            { $ref: '#/components/parameters/IdempotencyKey' },
+          ],
+          responses: {
+            '201': {
+              description: 'The test event’s delivery.',
+              content: json(dataOf(ref('WebhookDelivery'))),
+            },
+            ...errors(400, 401, 403, 404, 412, 423, 429, 500),
+          },
+        },
+      },
+      '/webhook-deliveries/{id}': {
+        get: {
+          operationId: 'getWebhookDelivery',
+          summary: 'A delivery to an endpoint an API key added',
+          description: scopeNote('webhooks.manage'),
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': { description: 'The delivery.', content: json(dataOf(ref('WebhookDelivery'))) },
+            ...errors(401, 403, 404, 423, 429, 500),
+          },
+        },
+      },
+      '/webhook-deliveries/{id}/replay': {
+        post: {
+          operationId: 'replayWebhookDelivery',
+          summary: 'Deliver an event again',
+          description: `${scopeNote('webhooks.manage')} A delivery that succeeded or failed is delivered again, as a new delivery of the same event to the same endpoint, which must be on (412 otherwise); one still being attempted is refused (409). The payload is built when delivered, so it shows the data as it is then. One replay per \`Idempotency-Key\`; audited as the key.`,
+          parameters: [
+            { $ref: '#/components/parameters/Id' },
+            { $ref: '#/components/parameters/IdempotencyKey' },
+          ],
+          responses: {
+            '201': {
+              description: 'The new delivery.',
+              content: json(dataOf(ref('WebhookDelivery'))),
+            },
+            ...errors(400, 401, 403, 404, 409, 412, 423, 429, 500),
+          },
+        },
+      },
       '/messages/{id}': {
         get: {
           operationId: 'getMessage',
@@ -927,6 +1028,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         StartAutomationRun: jsonSchema(apiStartAutomationSchema, 'input'),
         WebhookEndpoint: jsonSchema(apiWebhookEndpointSchema),
         WebhookEndpointWithSecret: jsonSchema(apiWebhookEndpointWithSecretSchema),
+        WebhookDelivery: jsonSchema(apiWebhookDeliverySchema),
         CreateWebhookEndpoint: jsonSchema(apiCreateWebhookEndpointSchema, 'input'),
         UpdateWebhookEndpoint: jsonSchema(apiUpdateWebhookEndpointSchema, 'input'),
         Error: jsonSchema(apiErrorSchema),
@@ -970,4 +1072,8 @@ export const API_ROUTES = [
   ['patch', '/webhook-endpoints/{id}'],
   ['delete', '/webhook-endpoints/{id}'],
   ['post', '/webhook-endpoints/{id}/rotate-secret'],
+  ['get', '/webhook-endpoints/{id}/deliveries'],
+  ['post', '/webhook-endpoints/{id}/test'],
+  ['get', '/webhook-deliveries/{id}'],
+  ['post', '/webhook-deliveries/{id}/replay'],
 ] as const;

@@ -44,6 +44,7 @@ import {
 import {
   apiCreateWebhookEndpointSchema,
   apiUpdateWebhookEndpointSchema,
+  apiWebhookDeliveryListQuerySchema,
   createApiWebhookEndpoints,
   endpointAnnouncement,
 } from './webhook-endpoints';
@@ -756,6 +757,75 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     };
     expect(Object.keys(update.properties).sort()).toEqual(['description', 'enabled', 'events']);
     expect(update.additionalProperties).toBe(false);
+  });
+});
+
+describe('webhook deliveries through the API (ADR-083)', () => {
+  it('need the scope, checked before anything is read', async () => {
+    const endpoints = createApiWebhookEndpoints({} as never);
+    const ctx = {
+      tenant: { id: 't', status: 'active' },
+      key: { id: 'k', scopes: new Set(['contacts.read', 'messages.reply']) },
+    } as unknown as ApiContext;
+    const idempotency = { key: 'k-1', requestHash: 'h' };
+    for (const call of [
+      () => endpoints.deliveries(ctx, 'e', {}),
+      () => endpoints.getDelivery(ctx, 'd'),
+      () => endpoints.sendTest(ctx, 'e', idempotency),
+      () => endpoints.replay(ctx, 'd', idempotency),
+    ]) {
+      const error: unknown = await call().catch((caught: unknown) => caught);
+      expect(isAppError(error) && error.code).toBe('forbidden');
+    }
+  });
+
+  it('page deliveries newest first, by state if asked', () => {
+    expect(apiWebhookDeliveryListQuerySchema.parse({})).toEqual({ limit: 50 });
+    expect(apiWebhookDeliveryListQuerySchema.parse({ limit: '2', status: 'failed' })).toEqual({
+      limit: 2,
+      status: 'failed',
+    });
+    for (const query of [
+      { limit: '0' },
+      { limit: String(API_LIMITS.pageSize + 1) },
+      { status: 'lost' },
+      { eventType: 'ping' },
+    ]) {
+      expect(
+        apiWebhookDeliveryListQuerySchema.safeParse(query).success,
+        JSON.stringify(query),
+      ).toBe(false);
+    }
+  });
+
+  it('are described: tests and replays once per Idempotency-Key, a replay under way refused', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const paths = doc.paths as Record<
+      string,
+      Record<string, { parameters?: unknown[]; responses: Record<string, unknown> }>
+    >;
+    for (const path of ['/webhook-endpoints/{id}/test', '/webhook-deliveries/{id}/replay']) {
+      expect(paths[path]?.post?.parameters, path).toContainEqual({
+        $ref: '#/components/parameters/IdempotencyKey',
+      });
+      expect(Object.keys(paths[path]?.post?.responses ?? {}), path).toContain('412');
+    }
+    expect(Object.keys(paths['/webhook-deliveries/{id}/replay']?.post?.responses ?? {})).toContain(
+      '409',
+    );
+    expect(paths['/webhook-endpoints/{id}/deliveries']?.get?.parameters).toContainEqual(
+      expect.objectContaining({ name: 'status', in: 'query' }),
+    );
+    expect(paths['/webhook-deliveries/{id}']?.get).toBeDefined();
+    const delivery = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas.WebhookDelivery as { properties: Record<string, { enum?: string[] }> };
+    expect(delivery.properties.eventType?.enum).toContain('ping');
+    expect(delivery.properties.status?.enum).toEqual([
+      'pending',
+      'delivering',
+      'succeeded',
+      'failed',
+    ]);
   });
 });
 

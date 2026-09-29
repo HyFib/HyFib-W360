@@ -417,13 +417,16 @@ verification, app review, Embedded Signup configuration).
   the Graph stand-in]** (ADR-082: a text, buttons or a list may quote a message of the conversation
   with `replyTo`, and a `messages.reply` key reacts with one emoji to a message the contact sent in
   the last 30 days, without ending an automation; the API, the `message.received` webhook and the
-  inbox name the message a message quotes, reacts to or taps a button of). Remaining: media
-  messages, call-to-action and product messages through the API, taking reactions back, assigning
-  conversations, notes, member and team names, media downloads, a message feed across
-  conversations, starting or stopping runs for many contacts in one call, bulk sends in one call,
-  networks for the whole company, per-key quotas, limits per endpoint, webhook deliveries,
-  replays and test events through the API, and dropping the one-argument key lookup kept for
-  rolling deploys (0051).
+  inbox name the message a message quotes, reacts to or taps a button of); **[webhook deliveries
+  through the API built, locally verified; delivered to local test receivers only]** (ADR-083: the
+  same `webhooks.manage` key pages the deliveries of the endpoints keys added, reads one, sends a
+  test event and replays a finished delivery, once per `Idempotency-Key`; deliveries say how
+  sending went, never a body). Remaining: media messages, call-to-action and product messages
+  through the API, taking reactions back, assigning conversations, notes, member and team names,
+  media downloads, a message feed across conversations, starting or stopping runs for many contacts
+  in one call, bulk sends in one call, replaying many deliveries in one call, networks for the
+  whole company, per-key quotas, limits per endpoint, and dropping the one-argument key lookup kept
+  for rolling deploys (0051).
 - **P5-09 Outgoing webhooks** **[built, locally verified; delivered to local test receivers only]**
   (ADR-053): up to 10 endpoints per company (`developer.manage`) for `message.received`,
   `message.status`, `consent.changed` and `template.status_changed`, captured by database triggers
@@ -439,9 +442,11 @@ verification, app review, Embedded Signup configuration).
   personal data). **[Automation run events built, locally verified]** (ADR-078:
   `automation.run_started` and `automation.run_ended` for live runs, whatever started them, with
   what started the run, the API key for runs started through the API, the status and end reason;
-  test runs send nothing; no answers or inputs). Remaining: filters beyond the event type (such as
-  by automation), custom headers, mutual TLS, fixed egress addresses, custom field changes, member
-  and team identities, events for campaigns, orders and each step of a run, load tests.
+  test runs send nothing; no answers or inputs). **[Endpoints, deliveries, test events and replays
+  through the API built, locally verified]** (ADR-081, ADR-083: for the endpoints API keys add; see
+  P5-08). Remaining: filters beyond the event type (such as by automation), custom headers, mutual
+  TLS, fixed egress addresses, custom field changes, member and team identities, events for
+  campaigns, orders and each step of a run, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,

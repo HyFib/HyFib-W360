@@ -1,5 +1,77 @@
 # Progress
 
+## 2026-09-29 — Phase 5: webhook deliveries, test events and replays through the public API (P5-08, P5-09, ADR-083)
+
+Status: **Implemented and locally verified with local test receivers (no customer data).** An
+integration that manages its endpoints through the API (ADR-081) could not tell whether events
+reached its receiver, send a test event to check its setup, or have a failed delivery sent again
+once its receiver was fixed: only members could, in Settings → Webhooks.
+
+### Completed
+
+- **Design (ADR-083):** the same `webhooks.manage` scope pages an endpoint's deliveries (newest
+  first, exact keyset pages, optionally by status), reads one, sends a test event (`ping`) and
+  replays a finished delivery, for the endpoints keys added only. Test events and replays need an
+  `Idempotency-Key` and an endpoint that is on; a delivery still being attempted is refused. A
+  delivery says how sending went (status, attempts, next attempt, the last attempt's time, HTTP
+  status, error code and duration, when it was delivered, the delivery it replays), never a body.
+  No migration.
+- **Domain:** the settings service's test and replay steps shared as `queueWebhookTest` and
+  `replayWebhookDelivery` (with `keysOnly`), and its delivery columns and join as
+  `webhookDeliveryColumns` and `deliveryEventJoin`; `api/webhook-endpoints.ts` gains `deliveries`,
+  `getDelivery`, `sendTest` and `replay` (a replay audited as the key, with the host and both
+  deliveries); the OpenAPI document describes the four operations and the `WebhookDelivery`
+  schema; the scope's description names deliveries, test events and replays.
+- **Web:** the routes `GET /api/v1/webhook-endpoints/{id}/deliveries`,
+  `POST /api/v1/webhook-endpoints/{id}/test`, `GET /api/v1/webhook-deliveries/{id}` and
+  `POST /api/v1/webhook-deliveries/{id}/replay`.
+- **Tests:** unit (the scope checked before anything is read for all four operations, the list
+  query, the OpenAPI entries). Integration in `api-webhook-endpoints.test.ts` with a local
+  receiver: a test event once per key, answered with its pending delivery, delivered signed with
+  the endpoint's secret and read back as succeeded; a second test, the deliveries newest first, a
+  page at a time and by status; a replay of the first once per key, delivering the same event again
+  as a new delivery that names the one replayed, audited as the key; deliveries to members'
+  endpoints and other companies' not found for lists, reads, tests and replays, unknown and
+  malformed ids, a bad status, a delivery still being attempted, an endpoint that is off, a key
+  without the scope and a suspended company refused, with nothing stored by any refusal. e2e
+  `webhooks.spec.ts`: a key created in settings sends its endpoint a test event over HTTP, follows
+  the delivery until it succeeds, replays it and reads the history newest first, which Settings →
+  Webhooks shows with the replay marked.
+- **Docs:** ADR-083; ARCHITECTURE (the public API); SECURITY (Phase 5 rules, outgoing webhooks);
+  THREAT-MODEL T101; RUNBOOKS (a troubleshooting entry, turning an endpoint back on, suspended
+  companies); BACKLOG P5-08 and P5-09; FEATURE-MATRIX W-139, H-033 and H-014. DATA-RETENTION now
+  says keys also delete the endpoints keys added (ADR-081 left it saying only members did).
+- **Mutation checks:** 31 regressions tried one at a time; all make a test fail. 30 in the domain and
+  API: deliveries to members' endpoints reached by keys (the replay's lookup in the service and in
+  the API, the list, the read, a test event); a delivery still being attempted replayed; a test
+  event or a replay to an endpoint that is off; a replay not naming the delivery it replays;
+  settings replays limited to keys' endpoints; the scope left out of each of the four operations;
+  a replay not audited, or audited without the delivery replayed; a test event or a replay sent
+  again on a retry; the status filter, the order, the cursor and the next page; the next attempt
+  shown for a finished delivery; `replayOf` not returned; pages over 100 and unknown query fields;
+  the OpenAPI entries (the replay's Idempotency-Key, `ping`, the route list, the 409). 1 in the web
+  layer through the e2e test: the replay route calling the test operation. A first web attempt,
+  the delivery answered without its `data` envelope, does not build (TypeScript refuses it), so it
+  was replaced. Before the run, three not-found checks in the integration test were made to name
+  what was not found: without that, a test event let through to a member's endpoint was refused
+  only by the response's own read of the delivery, with the same code, and went unnoticed.
+
+### Test commands and results (local, 2026-09-29)
+
+| Command                                                                                                                                                           | Result                                                                                                                                        |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                              | 0 problems / all files formatted / all workspace packages pass                                                                                |
+| `pnpm test` (unit)                                                                                                                                                | 393 passed, including 3 new in `api/api.test.ts`                                                                                              |
+| `pnpm test:integration` (PostgreSQL 18.6)                                                                                                                         | 532 passed, including 2 new in `api-webhook-endpoints.test.ts`                                                                                |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                                                                                                         | 532 passed; `api-webhook-endpoints.test.ts` (7 tests) again on 18.6 and 17.11 after its not-found checks were made to name what was not found |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` on `webhooks.spec.ts`, `api-keys.spec.ts`, `api.spec.ts` and `webhook-events.spec.ts` | build passes / 26 passed: 13 tests on each project (4.5 min), on a local database created for the day's runs                                  |
+| Mutation checks                                                                                                                                                   | 31 regressions tried (1 through the e2e test); all make a test fail                                                                           |
+
+### Known gaps
+
+- Not built: bodies sent or received, replaying many deliveries in one call, filters beyond the
+  status (event type, dates), and deliveries to members' endpoints.
+
 ## 2026-09-29 — Phase 5: replies that quote a message, and reactions, through the public API (P5-08, ADR-082)
 
 Status: **Implemented and locally verified against the Graph stand-in (no customer data).**

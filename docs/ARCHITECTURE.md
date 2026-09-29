@@ -940,6 +940,17 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   API's messages, `GET /messages/{id}` and the inbox thread (`messageSnippet`,
   `messaging/message-text.ts`); the `message.received` payload looks it up when delivered
   (`findAnsweredMessageId`).
+- **Webhook deliveries through the API (ADR-083):** `createApiWebhookEndpoints` also serves an
+  endpoint's deliveries (`GET /webhook-endpoints/{id}/deliveries`, exact keyset pages on
+  `(created_at, id)`, optionally by state), one delivery (`GET /webhook-deliveries/{id}`), test
+  events (`POST /webhook-endpoints/{id}/test`) and replays (`POST /webhook-deliveries/{id}/replay`),
+  for endpoints whose `created_by_api_key_id` is set. The settings service shares its steps:
+  `queueWebhookTest` inserts a `ping` event and its delivery for an endpoint locked and on;
+  `replayWebhookDelivery` finds the delivery (with `keysOnly`, only one to an endpoint a key
+  added), locks the endpoint, refuses a delivery still being attempted or an endpoint that is off,
+  and inserts a new delivery of the same event with `replay_of`; both lists select
+  `webhookDeliveryColumns` joined to the event (`deliveryEventJoin`). Test events and replays run
+  inside `idempotent`; a replay's audit row names the key.
 - **Keyset cursors** (`encodeKeysetCursor`, `exactTimestamp`): a cursor carries the last row's
   timestamp as PostgreSQL keeps it, to the microsecond, and its id, and pages compare
   `(time, id) < (cursor time, cursor id)`; cursors made with milliseconds still read. Cursors built

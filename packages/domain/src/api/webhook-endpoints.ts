@@ -5,36 +5,51 @@ import {
   and,
   apiKeys,
   asc,
+  desc,
   eq,
+  exactTimestamp,
   isNotNull,
+  sql,
   tenants,
+  WEBHOOK_DELIVERY_STATES,
+  webhookDeliveries,
   webhookEndpoints,
+  webhookEvents,
   type Database,
   type Tx,
+  type WebhookDeliveryState,
   type WebhookEventType,
 } from '@w360/db';
 import { recordSystemAudit } from '../audit';
 import { enqueueEmail, type OutboxDeps } from '../email/outbox';
 import { deletionRecipients, formatCompanyTime } from '../tenancy/deletion';
-import { parseInput } from '../validation';
+import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
 import { WEBHOOK_EVENT_INFO, WEBHOOK_LIMITS, webhookHost } from '../webhooks/model';
 import {
   checkedWebhookUrl,
+  deliveryEventJoin,
   insertWebhookEndpoint,
   lockWebhookEndpoint,
+  queueWebhookTest,
+  replayWebhookDelivery,
   rotateWebhookEndpointSecret,
   setWebhookEndpointEnabled,
+  webhookDeliveryColumns,
   webhookEventTypesSchema,
+  type WebhookDeliveryView,
 } from '../webhooks/service';
 import { apiActor, assertScope, type ApiContext } from './context';
 import type { ApiResponse, IdempotencyInput } from './idempotency';
+import { API_LIMITS } from './model';
 import { idempotent } from './resources';
 
 /**
  * Webhook endpoints through the public API (ADR-081): a `webhooks.manage` key adds endpoints and
- * reads, changes, rotates the secret of and deletes the endpoints keys added. Endpoints members
- * added in settings are not found: their addresses can carry a receiver's own token, and they stay
- * under members' control. Settings → Webhooks shows every endpoint, whoever added it.
+ * reads, changes, rotates the secret of and deletes the endpoints keys added; it also reads their
+ * deliveries, sends them test events and replays finished deliveries (ADR-083). Endpoints members
+ * added in settings, and their deliveries, are not found: their addresses can carry a receiver's
+ * own token, and they stay under members' control. Settings → Webhooks shows every endpoint,
+ * whoever added it.
  */
 
 const descriptionField = z
@@ -95,6 +110,54 @@ export interface ApiWebhookEndpoint {
   apiKeyId: string;
   createdAt: string;
   updatedAt: string;
+}
+
+/** A delivery of an event to an endpoint a key added (ADR-083). */
+export interface ApiWebhookDelivery {
+  id: string;
+  endpointId: string;
+  eventId: string;
+  /** The event's type, or `ping` for a test event. */
+  eventType: string;
+  status: WebhookDeliveryState;
+  attempts: number;
+  /** When the next attempt is due, while the delivery waits. */
+  nextAttemptAt: string | null;
+  lastAttemptAt: string | null;
+  lastStatusCode: number | null;
+  lastError: string | null;
+  lastDurationMs: number | null;
+  deliveredAt: string | null;
+  /** The delivery this one replays. */
+  replayOf: string | null;
+  createdAt: string;
+}
+
+export const apiWebhookDeliveryListQuerySchema = z
+  .object({
+    limit: z.coerce.number().int().min(1).max(API_LIMITS.pageSize).default(50),
+    cursor: z.string().max(200).optional().describe('`nextCursor` from the previous page.'),
+    status: z.enum(WEBHOOK_DELIVERY_STATES).optional().describe('Only deliveries in this state.'),
+  })
+  .strict();
+
+function toApiDelivery(row: WebhookDeliveryView): ApiWebhookDelivery {
+  return {
+    id: row.id,
+    endpointId: row.endpointId,
+    eventId: row.eventId,
+    eventType: row.eventType,
+    status: row.state,
+    attempts: row.attempts,
+    nextAttemptAt: row.state === 'pending' ? row.nextAttemptAt.toISOString() : null,
+    lastAttemptAt: iso(row.lastAttemptAt),
+    lastStatusCode: row.lastStatusCode,
+    lastError: row.lastError,
+    lastDurationMs: row.lastDurationMs,
+    deliveredAt: iso(row.deliveredAt),
+    replayOf: row.replayOf,
+    createdAt: row.createdAt.toISOString(),
+  };
 }
 
 const columns = {
@@ -172,6 +235,29 @@ const endpointId = (id: string) => {
   if (!z.uuid().safeParse(id).success) throw notFound('Webhook endpoint');
   return id;
 };
+
+const deliveryId = (id: string) => {
+  if (!z.uuid().safeParse(id).success) throw notFound('Delivery');
+  return id;
+};
+
+/** A delivery to an endpoint a key added; any other is not found. */
+async function readDelivery(tx: Tx, ctx: ApiContext, id: string): Promise<ApiWebhookDelivery> {
+  const [row] = await tx
+    .select(webhookDeliveryColumns)
+    .from(webhookDeliveries)
+    .innerJoin(webhookEvents, deliveryEventJoin)
+    .innerJoin(
+      webhookEndpoints,
+      and(
+        eq(webhookEndpoints.tenantId, webhookDeliveries.tenantId),
+        eq(webhookEndpoints.id, webhookDeliveries.endpointId),
+      ),
+    )
+    .where(and(addedByKey(ctx.tenant.id), eq(webhookDeliveries.id, id)));
+  if (!row) throw notFound('Delivery');
+  return toApiDelivery(row);
+}
 
 /** The response kept for an `Idempotency-Key`: the same, without the secret (shown once). */
 const withoutSecret = (body: Record<string, unknown>) => ({
@@ -441,6 +527,111 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
           },
           withoutSecret,
         ),
+      );
+    },
+
+    /**
+     * GET /api/v1/webhook-endpoints/{id}/deliveries: the endpoint's deliveries, newest first, on
+     * exact keyset pages (ADR-083). Deliveries are kept 30 days.
+     */
+    async deliveries(
+      ctx: ApiContext,
+      id: string,
+      query: unknown,
+    ): Promise<{ data: ApiWebhookDelivery[]; nextCursor: string | null }> {
+      assertScope(ctx, 'webhooks.manage');
+      endpointId(id);
+      const q = parseInput(apiWebhookDeliveryListQuerySchema, query);
+      const cursor = decodeKeysetCursor(q.cursor);
+      const now = clock.now();
+      return db.run(
+        ctx.scope,
+        async (tx) => {
+          await readEndpoint(tx, ctx, id, now);
+          const rows = await tx
+            .select({
+              ...webhookDeliveryColumns,
+              cursorAt: exactTimestamp(webhookDeliveries.createdAt),
+            })
+            .from(webhookDeliveries)
+            .innerJoin(webhookEvents, deliveryEventJoin)
+            .where(
+              and(
+                eq(webhookDeliveries.tenantId, ctx.tenant.id),
+                eq(webhookDeliveries.endpointId, id),
+                q.status ? eq(webhookDeliveries.state, q.status) : undefined,
+                cursor
+                  ? sql`(${webhookDeliveries.createdAt}, ${webhookDeliveries.id}) < (${cursor.at}::timestamptz, ${cursor.id}::uuid)`
+                  : undefined,
+              ),
+            )
+            .orderBy(desc(webhookDeliveries.createdAt), desc(webhookDeliveries.id))
+            .limit(q.limit + 1);
+          const shown = rows.slice(0, q.limit);
+          const last = shown.at(-1);
+          return {
+            data: shown.map(({ cursorAt: _cursorAt, ...row }) => toApiDelivery(row)),
+            nextCursor:
+              rows.length > q.limit && last ? encodeKeysetCursor(last.cursorAt, last.id) : null,
+          };
+        },
+        { accessMode: 'read only' },
+      );
+    },
+
+    /** GET /api/v1/webhook-deliveries/{id}: a delivery to an endpoint a key added (ADR-083). */
+    async getDelivery(ctx: ApiContext, id: string): Promise<ApiWebhookDelivery> {
+      assertScope(ctx, 'webhooks.manage');
+      deliveryId(id);
+      return db.run(ctx.scope, (tx) => readDelivery(tx, ctx, id), { accessMode: 'read only' });
+    },
+
+    /**
+     * POST /api/v1/webhook-endpoints/{id}/test: a `ping` event for the endpoint, which must be on,
+     * once per `Idempotency-Key` (ADR-083). Answered with its delivery, to follow with
+     * GET /webhook-deliveries/{id}.
+     */
+    async sendTest(
+      ctx: ApiContext,
+      id: string,
+      idempotency: IdempotencyInput,
+    ): Promise<ApiResponse> {
+      assertScope(ctx, 'webhooks.manage');
+      endpointId(id);
+      const now = clock.now();
+      return db.run(ctx.scope, (tx) =>
+        idempotent(tx, ctx, idempotency, now, async () => {
+          const endpoint = await lockWebhookEndpoint(tx, ctx.tenant.id, id, 'no key update', {
+            keysOnly: true,
+          });
+          const queued = await queueWebhookTest(tx, ctx.tenant.id, endpoint);
+          return { status: 201, body: { data: await readDelivery(tx, ctx, queued.deliveryId) } };
+        }),
+      );
+    },
+
+    /**
+     * POST /api/v1/webhook-deliveries/{id}/replay: the finished delivery's event again, as a new
+     * delivery to the same endpoint, which must be on, once per `Idempotency-Key` (ADR-083).
+     * Audited as the key, as a member's replay is.
+     */
+    async replay(ctx: ApiContext, id: string, idempotency: IdempotencyInput): Promise<ApiResponse> {
+      assertScope(ctx, 'webhooks.manage');
+      deliveryId(id);
+      const now = clock.now();
+      return db.run(ctx.scope, (tx) =>
+        idempotent(tx, ctx, idempotency, now, async () => {
+          const replayed = await replayWebhookDelivery(tx, ctx.tenant.id, id, { keysOnly: true });
+          await audit(tx, ctx, 'webhook.delivery_replayed', replayed.endpoint.id, {
+            host: webhookHost(replayed.endpoint.url),
+            deliveryId: id,
+            newDeliveryId: replayed.deliveryId,
+          });
+          return {
+            status: 201,
+            body: { data: await readDelivery(tx, ctx, replayed.deliveryId) },
+          };
+        }),
       );
     },
   };
