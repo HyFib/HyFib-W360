@@ -77,7 +77,8 @@ jobs:
   e2e:
     name: End-to-end (Chromium, Firefox, WebKit, mobile)
     runs-on: ubuntu-24.04
-    # 200 tests run one at a time across four browser projects: they took 64.3 minutes on 28a774c,
+    # Tests run one at a time across four browser projects: 212 took 61.0 minutes on b453b6c and 208
+    # took 66.5 on da91fc3 (one flaky test passed on its retry in each), 200 took 64.3 on 28a774c,
     # 196 took 58.4 on 5232313, 192 took 51.7 on 2b3225c (one flaky test passed on its retry) and
     # 180 took 54.0 on 736acb4. The usage, settlement, API key and refund request specs each wait
     # per project for a worker's minute sweep to send an email: the rate change notice (since
