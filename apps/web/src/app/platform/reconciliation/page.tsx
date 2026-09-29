@@ -173,7 +173,7 @@ export default async function ReconciliationPage() {
             Paid top-ups whose payment no settlement has shown {UNSETTLED_AFTER_DAYS} days after the
             payment. A top-up is listed only when every day from its payment to{' '}
             {UNSETTLED_AFTER_DAYS} days later was reconciled; settlement is normally two working
-            days after the payment.
+            days after the payment. Platform owners are emailed once about each one.
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-3">
@@ -198,6 +198,7 @@ export default async function ReconciliationPage() {
                   <TH>Razorpay payment</TH>
                   <TH className="text-right">Amount</TH>
                   <TH>Paid</TH>
+                  <TH>Owners emailed</TH>
                 </TR>
               </THead>
               <TBody>
@@ -217,6 +218,7 @@ export default async function ReconciliationPage() {
                     <TD>
                       <Utc at={t.paidAt} />
                     </TD>
+                    <TD>{t.alertedAt ? <Utc at={t.alertedAt} /> : 'Not yet'}</TD>
                   </TR>
                 ))}
               </TBody>

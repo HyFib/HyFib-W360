@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { renderEmail } from '../email/templates';
-import { settlementReconAlert, type SettlementReconAlertDay } from './settlement-alerts';
+import {
+  settlementReconAlert,
+  unsettledPaymentsAlert,
+  type SettlementReconAlertDay,
+} from './settlement-alerts';
 
 const BASE = 'https://app.example.test';
 const CLOSING =
@@ -103,5 +107,58 @@ describe('the reconciliation alert (ADR-066)', () => {
     expect(email.html).toContain(`href="${alert.url}"`);
     expect(email.html).toContain('>Open reconciliation</a>');
     expect(email.html).toContain('1 transaction waits for a person (1 needs a look).');
+  });
+});
+
+describe('the unsettled payments alert (ADR-071)', () => {
+  const ADVICE =
+    'Razorpay may be holding a payment, it may have been refunded or disputed in the Razorpay Dashboard, or HyFib’s records may be wrong: check each payment in the Razorpay Dashboard.';
+  const WHERE =
+    'Platform → Reconciliation lists them under “Payments not seen in a settlement”, with their companies, amounts and Razorpay payment ids.';
+
+  it('names one payment’s day in India time and links the reconciliation page', () => {
+    // 20:00 UTC on 20 September is 01:30 on 21 September in India.
+    expect(unsettledPaymentsAlert([new Date('2026-09-20T20:00:00Z')], BASE)).toEqual({
+      subject: 'A paid top-up was not settled within 7 days',
+      lines: [
+        'A top-up paid on 21 Sept 2026 (India time) was in no settlement Razorpay reported for the 7 days after payment, although every one of those days was reconciled.',
+        ADVICE,
+        WHERE,
+      ],
+      url: `${BASE}/platform/reconciliation`,
+      actionLabel: 'Open reconciliation',
+    });
+  });
+
+  it('counts several payments and gives the range of their days, whatever the order given', () => {
+    const alert = unsettledPaymentsAlert(
+      [
+        new Date('2026-09-18T05:00:00Z'),
+        new Date('2026-09-12T05:00:00Z'),
+        new Date('2026-09-15T05:00:00Z'),
+      ],
+      BASE,
+    );
+    expect(alert.subject).toBe('3 paid top-ups were not settled within 7 days');
+    expect(alert.lines[0]).toBe(
+      '3 top-ups paid from 12 Sept 2026 to 18 Sept 2026 (India time) were in no settlement Razorpay reported for the 7 days after payment, although every one of those days was reconciled.',
+    );
+    // Two payments on the same day in India give one day.
+    expect(
+      unsettledPaymentsAlert(
+        [new Date('2026-09-12T19:00:00Z'), new Date('2026-09-13T03:00:00Z')],
+        BASE,
+      ).lines[0],
+    ).toBe(
+      '2 top-ups paid on 13 Sept 2026 (India time) were in no settlement Razorpay reported for the 7 days after payment, although every one of those days was reconciled.',
+    );
+  });
+
+  it('renders as a platform notice without companies, amounts or payment ids', () => {
+    const alert = unsettledPaymentsAlert([new Date('2026-09-20T05:00:00Z')], BASE);
+    const email = renderEmail({ kind: 'platform.notice', ...alert });
+    expect(email.subject).toBe('A paid top-up was not settled within 7 days · HyFib W360 platform');
+    expect(email.text).toBe(`${alert.lines.join('\n\n')}\n\n${BASE}/platform/reconciliation`);
+    expect(email.text).not.toMatch(/pay_|₹|INR/);
   });
 });

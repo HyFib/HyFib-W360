@@ -2076,3 +2076,39 @@ Decision:
 Not built: media, location, interactive (buttons and lists) and reaction messages through the API;
 replying to a given message (context); contacts known only by a WhatsApp user id (the API addresses
 numbers); resolving or assigning conversations through the API; conversation and message lists.
+
+## ADR-071 Alerts for payments no settlement showed (2026-09-29)
+
+Context: Platform → Reconciliation lists paid top-ups whose payment no settlement showed 7 days
+after the payment, once every day in between was reconciled (ADR-059). A payment can be missing
+from settlements because Razorpay holds it, because it was refunded or disputed in the Razorpay
+Dashboard, or because HyFib's records are wrong. The list was the only place such a payment
+showed: nobody heard of it unless they looked (ADR-066 left it out).
+
+Decision:
+
+- **Who and when:** platform owners are emailed once about each payment on that list, by the
+  minute billing sweep, like the reconciliation alerts (ADR-066): the same recipients (operators
+  only read) and the same `platform.notice` kind.
+- **One definition:** `ops.settlement_unsettled_topups()` holds the rule: paid or partly refunded
+  top-ups with a payment, no settlement item for the payment, and every day from the payment's day
+  (India time) to 7 days later reconciled. The page's list (migration 0034's function, replaced in 0043) and the alerts both read it, so they cannot disagree; a test checks that every payment on
+  the list was emailed. It runs only inside the definer functions.
+- **Once:** `ops.settlement_unsettled_alerts` holds a row per payment emailed. The sweep lists due
+  payment ids (`ops.settlement_unsettled_alerts_due`), then `ops.settlement_mark_unsettled_alerted`
+  checks each against the definition again and records it in the transaction that queues the
+  emails. A payment settled or refunded in between is not recorded; a concurrent sweep waits on the
+  first one's insert and then records nothing, so two sweeps send one email. With no platform owner
+  nothing is recorded, and the worker warns.
+- **What:** how many payments and the days they were paid (India time), what to check (a hold, a
+  refund or dispute made in the Dashboard, HyFib's records) and where the list is. No company,
+  amount or payment id: those stay on the page, which now says when owners were emailed about each
+  payment. Payments already on the list when this ships are emailed by the first sweep, since
+  nobody was told about them.
+
+Consequences: the minute sweep evaluates the definition each time, a pass over paid top-ups since
+the first reconciled day with index lookups for each payment's settlement items and runs. This was
+not measured at production volumes; if the sweep slows, the listing is the place to narrow.
+
+Not built: plan payments (the reconciliation matches them by payment id, ADR-063, and they are not
+on this list), reminders while a payment stays unsettled, thresholds by amount, other channels.

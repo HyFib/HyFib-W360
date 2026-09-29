@@ -1,3 +1,4 @@
+import pg from 'pg';
 import { expect, test } from './fixtures';
 import { razorpayConfigured, routeFakeCheckout } from './razorpay-checkout';
 import {
@@ -7,7 +8,6 @@ import {
   signUpAndVerify,
   turnOnTwoFactor,
   uniqueEmail,
-  waitForEmail,
   waitForEmailContaining,
 } from './support';
 
@@ -33,6 +33,52 @@ function indiaDay(offset: number): string {
   return day.toISOString().slice(0, 10);
 }
 
+/** A day as HyFib's emails write it. */
+function dayLabel(day: string): string {
+  return new Intl.DateTimeFormat('en-IN', { dateStyle: 'medium', timeZone: 'UTC' }).format(
+    new Date(`${day}T00:00:00Z`),
+  );
+}
+
+/**
+ * A fixture step: the top-up paid with `paymentId` becomes one paid long ago that no settlement
+ * showed. Its payment moves to noon (India time) 8 days before the earliest day with a run, and that
+ * day and the 7 after it become reconciled days with nothing in them, as the daily schedule leaves
+ * them. In a database kept between runs each run's day is earlier than the last, so its payment
+ * comes first on the page (oldest payment first). Returns the payment's day.
+ */
+async function payLongAgo(paymentId: string): Promise<string> {
+  const owner = new pg.Client({ connectionString: process.env.DATABASE_URL_MIGRATE });
+  await owner.connect();
+  try {
+    await owner.query('BEGIN');
+    await owner.query('SET LOCAL ROLE w360_definer');
+    const found = await owner.query<{ day: string }>(
+      `SELECT (coalesce(min(settlement_date), (now() AT TIME ZONE 'Asia/Kolkata')::date) - 8)::text
+                AS day
+         FROM ops.settlement_recon_runs`,
+    );
+    const day = found.rows[0]!.day;
+    const moved = await owner.query(
+      `UPDATE app.topups SET paid_at = ($2::date + time '12:00') AT TIME ZONE 'Asia/Kolkata'
+        WHERE provider_payment_id = $1 AND status = 'paid'`,
+      [paymentId, day],
+    );
+    expect(moved.rowCount).toBe(1);
+    await owner.query(
+      `INSERT INTO ops.settlement_recon_runs
+         (id, settlement_date, status, attempts, attempt_seq, next_attempt_at, started_at, completed_at)
+       SELECT gen_random_uuid(), $1::date + n, 'completed', 1, 1, now(), now(), now()
+         FROM generate_series(0, 7) AS n`,
+      [day],
+    );
+    await owner.query('COMMIT');
+    return day;
+  } finally {
+    await owner.end();
+  }
+}
+
 /**
  * Each browser project reconciles its own day, and a retry another one: they share one database and
  * one stand-in, which keeps what an earlier attempt settled.
@@ -48,7 +94,7 @@ const PROJECTS = Object.keys(DAY_OFFSETS).length;
 test('a platform owner reconciles a settled day: a payment HyFib missed is credited, and a payment that is not HyFib’s waits for a person', async ({
   page,
 }) => {
-  test.setTimeout(330_000);
+  test.setTimeout(420_000);
   const { project, retry } = test.info();
   const offset = DAY_OFFSETS[project.name];
   if (offset === undefined) throw new Error(`No settlement day for the ${project.name} project`);
@@ -118,6 +164,22 @@ test('a platform owner reconciles a settled day: a payment HyFib missed is credi
   // The same person is platform staff here too (a fixture step), with two-factor on.
   await turnOnTwoFactor(page, PASSWORD);
   await makePlatformOwner(email);
+
+  // A second top-up, which HyFib hears of as usual, becomes one paid long ago whose payment no
+  // settlement showed (a fixture step): the worker's minute billing sweep emails platform owners
+  // about it (ADR-071) while the day is reconciled.
+  let unsettledId = '';
+  await routeFakeCheckout(page, {
+    onPaid: (id) => {
+      unsettledId = id;
+    },
+  });
+  await page.goto(`/c/${slug}/billing`);
+  await page.getByLabel('Amount (₹)').fill('500');
+  await page.getByRole('button', { name: 'Add credit' }).click();
+  await expect(page.getByText('Payment received. Your credit is updated.')).toBeVisible();
+  const unsettledDay = await payLongAgo(unsettledId);
+
   await page.goto('/platform');
   await page.getByRole('link', { name: 'Reconciliation' }).click();
   await expect(page.getByRole('heading', { name: 'Settlement reconciliation' })).toBeVisible();
@@ -133,6 +195,23 @@ test('a platform owner reconciles a settled day: a payment HyFib missed is credi
     await page.reload();
     await expect(row).toContainText('Completed', { timeout: 1_000 });
   }).toPass({ timeout: 150_000 });
+
+  // Platform owners were emailed about the unsettled payment, which the page lists with its company
+  // and amount, and when they were emailed. The email names its day, never the payment.
+  const unsettledAlert = await waitForEmailContaining(
+    email,
+    'not settled within 7 days',
+    dayLabel(unsettledDay),
+    150_000,
+  );
+  expect(unsettledAlert).toContain('/platform/reconciliation');
+  expect(unsettledAlert).not.toContain(unsettledId);
+  expect(unsettledAlert).not.toContain(companyName);
+  await page.reload();
+  const unsettled = page.getByRole('row').filter({ hasText: unsettledId });
+  await expect(unsettled).toContainText(companyName);
+  await expect(unsettled).toContainText('₹500.00');
+  await expect(unsettled).not.toContainText('Not yet');
   await expectNoHorizontalOverflow(page);
   await row.getByRole('link', { name: day }).click();
   await expect(page.getByRole('heading', { name: `Settlements of ${day}` })).toBeVisible();
@@ -150,14 +229,10 @@ test('a platform owner reconciles a settled day: a payment HyFib missed is credi
   // the sweep after the check finished (up to a minute later), one email per platform owner in the
   // database through the email queue (about two a second). A database kept between runs keeps
   // every earlier run's owners (73 once locally: 37 seconds of emails).
-  const dayLabel = new Intl.DateTimeFormat('en-IN', {
-    dateStyle: 'medium',
-    timeZone: 'UTC',
-  }).format(new Date(`${day}T00:00:00Z`));
   const alert = await waitForEmailContaining(
     email,
     'Settlement reconciliation',
-    `${dayLabel}: 1 transaction waits for a person (1 is not HyFib’s).`,
+    `${dayLabel(day)}: 1 transaction waits for a person (1 is not HyFib’s).`,
     150_000,
   );
   expect(alert).toContain('/platform/reconciliation');
@@ -174,9 +249,8 @@ test('a platform owner reconciles a settled day: a payment HyFib missed is credi
   ).toBeVisible();
   await expectNoHorizontalOverflow(page);
 
-  // The company has its credit and the usual email with the receipt.
-  const mail = await waitForEmail(email, 'Payment received: service credit added');
-  expect(mail).toContain('₹1,200.00');
+  // The company has its credit (with the second top-up's) and the usual email with the receipt.
+  await waitForEmailContaining(email, 'Payment received: service credit added', '₹1,200.00');
   await page.goto(`/c/${slug}/billing`);
-  await expect(available).toHaveText('₹1,200.00');
+  await expect(available).toHaveText('₹1,700.00');
 });

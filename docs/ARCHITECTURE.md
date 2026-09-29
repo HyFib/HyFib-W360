@@ -1223,6 +1223,17 @@ payment_requested → succeeded`; before each provider call it is written as `un
   days. `alerted_attempt` on the run records the attempt emailed, so each attempt is emailed once and
   a day run again is emailed again.
 
+- **Alerts for unsettled payments (0043, ADR-071) [built]:** `ops.settlement_unsettled_topups()` is
+  the one definition of a payment no settlement showed (paid or partly refunded top-ups, no
+  settlement item for the payment, every day from its payment day in India time to 7 days later
+  completed), read by the page's list and by the minute billing sweep. The sweep
+  (`alertUnsettledPayments`) lists payment ids not emailed yet
+  (`ops.settlement_unsettled_alerts_due`), then `ops.settlement_mark_unsettled_alerted` checks each
+  against the definition again and inserts it into `ops.settlement_unsettled_alerts` (payment id
+  primary key; a concurrent sweep waits, then inserts nothing) in the transaction that queues one
+  `platform.notice` email per platform owner, with the count and the payment days only. The list on
+  `/platform/reconciliation` shows when owners were emailed about each payment.
+
 - **Usage and rates (ADR-060) [built]:** Billing → Usage and rates
   (`packages/domain/src/billing/usage.ts`) shows owners, administrators and billing managers
   (`billing.read`) Meta's rates for the company's billing currency (Settings → Messaging) and this

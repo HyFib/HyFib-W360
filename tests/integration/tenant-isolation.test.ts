@@ -171,10 +171,17 @@ describe('database roles', () => {
       'ops.settlement_recon_alerts_due(integer)',
       'ops.settlement_recon_mark_alerted(uuid,integer)',
       'ops.settlement_recon_alert_recipients()',
+      // Alerts for payments no settlement showed (0043).
+      'ops.settlement_unsettled_alerts_due(integer)',
+      'ops.settlement_mark_unsettled_alerted(text[])',
     ]) {
       expect(await can('w360_app', fn), fn).toBe(true);
       expect(await can('w360_auth', fn), fn).toBe(false);
       expect(await can('w360_platform', fn), fn).toBe(false);
+    }
+    // The shared definition of an unsettled payment (0043) runs only inside definer functions.
+    for (const role of ['w360_app', 'w360_auth', 'w360_platform']) {
+      expect(await can(role, 'ops.settlement_unsettled_topups()'), role).toBe(false);
     }
     // Outgoing webhooks (0025): the dispatch and retention sweeps for the worker; capture, which
     // the triggers call as the role making the change (the runtime role, or a definer function);

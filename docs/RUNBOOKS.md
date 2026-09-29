@@ -235,7 +235,11 @@ WHERE tenant_id = … ORDER BY requested_at DESC`:
       what an earlier run recorded and the resolutions.
     - **Payments not seen in a settlement:** a paid top-up whose payment no settlement showed 7
       days after payment. Look the payment up in the Dashboard (on hold, refunded, disputed) before
-      doing anything; the list only counts days that were reconciled.
+      doing anything; the list only counts days that were reconciled. Platform owners are emailed
+      once about each such payment ("… paid top-ups were not settled within 7 days", ADR-071), with
+      the count and the payment days only, and the list shows when. No email: the worker logs
+      `unsettled payments alert emailed`, or `… no platform owner to email` (the payments stay due
+      until there is one); `ops.settlement_unsettled_alerts` holds the payments emailed.
 
 ## 10. Contacts, consent and templates
 
@@ -971,6 +975,13 @@ recorded, and the next minute tries again). A correction published as a new card
 retried the next minute). A company being deleted is skipped. Check `app.tenant_plans` for the
 company (`status`, `trial_ends_at`, `period_end`, `grace_ends_at`): the database's clock decides
 what is due.
+
+**Migration 0043 failed.** It runs in one transaction, so a failure applies nothing. It adds
+`ops.settlement_unsettled_alerts` (granted to `w360_definer` only), the shared definition
+`ops.settlement_unsettled_topups()` (executable by nobody else), the listing and the mark (granted
+to `w360_app`, then handed to `w360_definer`), and replaces the page's unsettled list
+(`ops.platform_settlement_recon_unsettled`) to read the shared definition. A failure usually means
+the bootstrap roles are missing or migration 0034 was changed by hand.
 
 **Migration 0042 failed.** It runs in one transaction, so a failure applies nothing. It replaces
 the check on `app.api_keys.scopes` with one that also allows `messages.reply` (up to six scopes)

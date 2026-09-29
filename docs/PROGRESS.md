@@ -1,5 +1,77 @@
 # Progress
 
+## 2026-09-29 — Phase 5: alerts for payments no settlement showed (P5-05, ADR-071)
+
+Status: **Implemented and locally verified against the Razorpay stand-in (email through the local
+outbox and Mailpit only).** Platform → Reconciliation listed paid top-ups whose payment no
+settlement showed 7 days after payment, but nobody heard of them unless they looked. Platform
+owners are now emailed once about each.
+
+### Completed
+
+- **Design (ADR-071):** the recipients (platform owners), kind (`platform.notice`) and minute
+  billing sweep of the reconciliation alerts (ADR-066); one definition of an unsettled payment for
+  the page's list and the alerts, so they cannot disagree; each payment emailed once, checked again
+  and recorded in the transaction that queues the email; the email gives the count and the payment
+  days in India time, never a company, amount or payment id. Payments already on the list when this
+  ships are emailed by the first sweep.
+- **Migration 0043:** `ops.settlement_unsettled_alerts` (one row per payment emailed; privileges for
+  `w360_definer` only); `ops.settlement_unsettled_topups()`, the definition (paid or partly refunded
+  top-ups with a payment, no settlement item for it, and every day from its payment day in India to
+  7 days later reconciled), run only inside definer functions; the page's list
+  (`ops.platform_settlement_recon_unsettled`, dropped by its owner and recreated) reads it and says
+  when owners were emailed; the listing `ops.settlement_unsettled_alerts_due` (payment ids) and the
+  mark `ops.settlement_mark_unsettled_alerted`, for `w360_app` and owned by `w360_definer`.
+- **Domain and worker:** `unsettledPaymentsAlert` (the email) and `alertUnsettledPayments` (the
+  sweep: due payments, recipients, then the mark and the emails in one transaction; nothing recorded
+  while there is no platform owner) in `billing/settlement-alerts.ts`; the minute billing sweep runs
+  it after the reconciliation alerts and logs what it sent, or warns that there is no platform owner.
+- **Web:** Platform → Reconciliation says platform owners are emailed once about each unsettled
+  payment and shows when ("Owners emailed", or "Not yet").
+- **Tests:** 3 unit tests (one payment's day in India time; several payments counted, with the range
+  of their days whatever the order; the rendered notice without companies, amounts or payment ids).
+  2 integration tests in `settlement-recon.test.ts`: every platform owner emailed once about each
+  payment when the seventh day after it is reconciled, not before; a settled payment never; a partly
+  refunded payment and one paid late in the evening UTC counted by their day in India; the list
+  saying when and listing only payments emailed; nothing more on later sweeps; a later payment
+  emailed on its own; overlapping sweeps sending one email; the mark refusing a payment settled in
+  between, an unknown one and one recorded already; payments kept due while there is no platform
+  owner; the runtime roles unable to read or write the alerts or run the definition. The functions'
+  grants in the isolation suite. e2e `settlement-recon.spec.ts`: a second top-up becomes one paid
+  long ago by a fixture step (its payment moved before every reconciled day, and that day and the 7
+  after it marked reconciled); the worker's sweep emails the platform owner without the payment or
+  the company, and the page lists it with when owners were emailed.
+- **Docs:** ADR-071; ARCHITECTURE (reconciliation section); SECURITY (Phase 5 reconciliation rules);
+  THREAT-MODEL T83; RUNBOOKS (payments not seen in a settlement, migration 0043); DATA-RETENTION;
+  BACKLOG P5-05; FEATURE-MATRIX H-037.
+- **Mutation checks:** 29 regressions tried one at a time, 27 make a test fail (the definition's
+  settlement, seven-day, status and India-time conditions; the listing's filter and limit; the
+  mark's re-check, conflict handling and result; the list's email time; the grants and privileges; the
+  sweep's owner check, limit and recipients; the email's day, order, range, subject, link and
+  content; the domain's mapping; the worker's call and the page's column, which only the e2e test
+  sees). Two were missed at first, a partly refunded payment and the India-time day, and are caught
+  since the alert test gained a partly refunded payment and one paid late in the evening UTC. The
+  other two cannot be observed: the page function's explicit revoke from PUBLIC (migration 0002's
+  default privileges already revoke EXECUTE on new functions) and an email queued with an undefined
+  company (the outbox stores null either way).
+
+### Test commands and results (local, 2026-09-29)
+
+| Command                                                   | Result                                                                  |
+| --------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`      | 0 problems / all files formatted / all workspace packages pass          |
+| `pnpm test` (unit)                                        | 342 passed, including 3 new in `billing/settlement-alerts.test.ts`      |
+| `pnpm test:integration` (PostgreSQL 18.6)                 | 464 passed, including 2 new in `settlement-recon.test.ts`               |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker) | 464 passed                                                              |
+| Mutation checks                                           | 29 regressions tried; 27 make a test fail, 2 cannot be observed (above) |
+
+### Known gaps
+
+- Plan payments are not on the unsettled list (the reconciliation matches them by payment id,
+  ADR-063). No reminder while a payment stays unsettled, no threshold by amount, email only.
+  Verified against the Razorpay stand-in only; the settlement report's behaviour in test mode is
+  still unrun (R-110, R-111).
+
 ## 2026-09-29 — Phase 5: text replies through the public API (P5-08, ADR-070)
 
 Status: **Implemented and locally verified against the Graph stand-in.** Integrations received

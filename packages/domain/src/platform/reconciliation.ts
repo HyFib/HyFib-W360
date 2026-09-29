@@ -145,6 +145,8 @@ export interface UnsettledTopup {
   status: string;
   paymentId: string;
   paidAt: Date;
+  /** When platform owners were emailed about it (ADR-071); null until the minute sweep does. */
+  alertedAt: Date | null;
 }
 
 export interface UnsettledReport {
@@ -311,6 +313,7 @@ export function createPlatformReconciliationService(deps: PlatformReconciliation
             status: String(t.status),
             paymentId: String(t.provider_payment_id),
             paidAt: optionalDate(t.paid_at) ?? new Date(0),
+            alertedAt: optionalDate(t.alerted_at),
           })),
         };
       });

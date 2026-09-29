@@ -5,6 +5,7 @@ import { authorizedTenantScope } from '@w360/db';
 import {
   advanceAutoRechargeAttempt,
   alertSettlementReconFindings,
+  alertUnsettledPayments,
   announceRateChanges,
   authorizeJob,
   beginAutoRecharge,
@@ -224,7 +225,7 @@ export function billingSweepHandler(rt: WorkerRuntime) {
         'plan sweep',
       );
     }
-    // Rate change notices (ADR-065), reconciliation alerts (ADR-066) and company deletions
+    // Rate change notices (ADR-065), reconciliation alerts (ADR-066, ADR-071) and company deletions
     // (ADR-055) run whether or not Razorpay is configured.
     const rates = await announceRateChanges({ db: rt.db, clock: rt.clock, notices: rt.notices });
     for (const failure of rates.failed) {
@@ -253,6 +254,23 @@ export function billingSweepHandler(rt: WorkerRuntime) {
       rt.logger.warn(
         { days: alerts.unsent },
         'settlement reconciliation needs a person but there is no platform owner to email',
+      );
+    }
+    const unsettled = await alertUnsettledPayments({
+      db: rt.db,
+      outbox: rt.notices.outbox,
+      appBaseUrl: rt.notices.appBaseUrl,
+    });
+    if (unsettled.alerted > 0) {
+      rt.logger.info(
+        { payments: unsettled.alerted, recipients: unsettled.recipients },
+        'unsettled payments alert emailed',
+      );
+    }
+    if (unsettled.unsent > 0) {
+      rt.logger.warn(
+        { payments: unsettled.unsent },
+        'payments were not settled but there is no platform owner to email',
       );
     }
     const deletions = await sweepTenantDeletions(rt);

@@ -9,6 +9,7 @@ import {
   RazorpayClient,
   addDays,
   alertSettlementReconFindings,
+  alertUnsettledPayments,
   applyRefundById,
   createBillingService,
   createPlanAdminService,
@@ -1274,7 +1275,7 @@ describe('plan subscription payments (ADR-063)', () => {
   });
 });
 
-describe('alerts for platform owners (ADR-066)', () => {
+describe('alerts for platform owners (ADR-066, ADR-071)', () => {
   const CLOSING =
     'Platform owners resolve each transaction with a note, or run a failed day again, on Platform → Reconciliation.';
   const alertSweep = () =>
@@ -1483,5 +1484,184 @@ describe('alerts for platform owners (ADR-066)', () => {
     expect((await platformNotices(since2)).map((n) => n.payload.subject)).toEqual(
       owners.map(() => `Settlement reconciliation for ${label(nobody)} needs a person`),
     );
+  });
+
+  const unsettledSweep = () =>
+    alertUnsettledPayments({
+      db: dbs.app,
+      outbox: notices().outbox,
+      appBaseUrl: 'http://localhost:3000',
+    });
+  /** Moves top-ups' payment to `time` UTC on `date`, noon in India by default (a fixture step). */
+  const setPaidAt = (topupIds: string[], date: string, time = '06:30') =>
+    adminQuery(
+      `UPDATE app.topups SET paid_at = ($2::date + $3::time) AT TIME ZONE 'UTC'
+        WHERE id = ANY ($1::uuid[])`,
+      [topupIds, date, time],
+    );
+  const reconcile = async (from: string, days: number) => {
+    for (let offset = 0; offset < days; offset += 1) {
+      expect((await runDay(addDays(from, offset))).result.outcome).toBe('completed');
+    }
+  };
+  const alertedPayments = async () =>
+    new Set(
+      (
+        await adminQuery<{ payment_id: string }>(
+          'SELECT payment_id FROM ops.settlement_unsettled_alerts',
+        )
+      ).map((r) => r.payment_id),
+    );
+
+  it('emails every platform owner once about each paid top-up no settlement showed, and the list says when (ADR-071)', async () => {
+    // Whatever earlier tests left on the list is emailed first, so this test sees only its own.
+    await unsettledSweep();
+    const owners = await ownerEmails();
+    const c = await company('Recon Unsettled Alerts');
+    const D0 = day(-250);
+    const a = await paidTopup(c, 11_000);
+    const b = await paidTopup(c, 12_000);
+    const later = await paidTopup(c, 13_000);
+    const settled = await paidTopup(c, 14_000);
+    // Refunded in part, it still waits for a settlement (one refunded in full may never have one).
+    const partly = await paidTopup(c, 15_000);
+    const refund = await dashboardRefund(partly.payment.id, 5_000);
+    expect(await applyRefundById(deps(), partly.payment.id, refund.id)).toBe('recorded');
+    // Paid at 20:00 UTC the day before: 01:30 on D0 in India, where Razorpay counts its days.
+    const lateEvening = await paidTopup(c, 16_000);
+    await setPaidAt([a.topupId, b.topupId, settled.topupId, partly.topupId], D0);
+    await setPaidAt([lateEvening.topupId], addDays(D0, -1), '20:00');
+    await setPaidAt([later.topupId], addDays(D0, 2));
+    // Settled two days after its payment, as usual: never on the list.
+    standIn.settle(addDays(D0, 2), { paymentIds: [settled.payment.id], refundIds: [] });
+    await reconcile(D0, 7);
+    // Until the day 7 days after the payments is reconciled, nothing is due.
+    expect(await unsettledSweep()).toEqual({ alerted: 0, unsent: 0, recipients: 0 });
+    await reconcile(addDays(D0, 7), 1);
+
+    const since = await dbNow();
+    expect(await unsettledSweep()).toEqual({ alerted: 4, unsent: 0, recipients: owners.length });
+    const sent = await platformNotices(since);
+    expect(sent.map((n) => n.to).sort()).toEqual(owners);
+    for (const n of sent) {
+      expect(n.tenantId).toBeNull();
+      expect(n.payload).toMatchObject({
+        kind: 'platform.notice',
+        subject: '4 paid top-ups were not settled within 7 days',
+        url: 'http://localhost:3000/platform/reconciliation',
+        actionLabel: 'Open reconciliation',
+      });
+      expect(n.payload.lines[0]).toContain(`paid on ${label(D0)} (India time)`);
+      const text = JSON.stringify(n.payload);
+      for (const kept of [a.payment.id, b.payment.id, c.name, a.topupId]) {
+        expect(text).not.toContain(kept);
+      }
+    }
+    const alerted = await alertedPayments();
+    expect(
+      [a, b, partly, lateEvening, later, settled].map((t) => alerted.has(t.payment.id)),
+    ).toEqual([true, true, true, true, false, false]);
+    // The list says when owners were emailed, and every payment it lists has been emailed.
+    const report = await recon().unsettled(owner, 500);
+    expect(report.topups.find((t) => t.id === a.topupId)?.alertedAt).toBeInstanceOf(Date);
+    expect(report.topups.find((t) => t.id === partly.topupId)?.status).toBe('partially_refunded');
+    expect(report.topups.map((t) => t.id)).not.toContain(settled.topupId);
+    for (const t of report.topups) expect(alerted.has(t.paymentId), t.paymentId).toBe(true);
+    // Nothing more however often the sweep runs.
+    const since2 = await dbNow();
+    expect(await unsettledSweep()).toEqual({ alerted: 0, unsent: 0, recipients: 0 });
+    expect(await platformNotices(since2)).toEqual([]);
+
+    // The later payment is due once the 7 days after it are reconciled: emailed on its own.
+    await reconcile(addDays(D0, 8), 2);
+    const since3 = await dbNow();
+    expect(await unsettledSweep()).toMatchObject({ alerted: 1 });
+    expect(
+      (await platformNotices(since3)).map((n) => [n.payload.subject, n.payload.lines[0]]),
+    ).toEqual(
+      owners.map(() => [
+        'A paid top-up was not settled within 7 days',
+        expect.stringContaining(`paid on ${label(addDays(D0, 2))} (India time)`),
+      ]),
+    );
+  });
+
+  it('records a payment once when sweeps overlap, checks each again when marking, and waits for a platform owner (ADR-071)', async () => {
+    await unsettledSweep();
+    const owners = await ownerEmails();
+    const c = await company('Recon Unsettled Overlap');
+    const D1 = day(-230);
+    const overlap = await paidTopup(c, 21_000);
+    await setPaidAt([overlap.topupId], D1);
+    await reconcile(D1, 8);
+    const since = await dbNow();
+    const [first, second] = await Promise.all([unsettledSweep(), unsettledSweep()]);
+    expect(first.alerted + second.alerted).toBe(1);
+    expect((await platformNotices(since)).map((n) => n.to).sort()).toEqual(owners);
+
+    // The mark checks each payment again: one settled after it was listed is not recorded, and
+    // neither is an unknown payment or one recorded already.
+    const D2 = day(-215);
+    const settledLate = await paidTopup(c, 22_000);
+    await setPaidAt([settledLate.topupId], D2);
+    await reconcile(D2, 8);
+    const due = (
+      await dbs.appPool.query<{ payment_id: string }>(
+        'SELECT payment_id FROM ops.settlement_unsettled_alerts_due(500)',
+      )
+    ).rows.map((r) => r.payment_id);
+    expect(due).toContain(settledLate.payment.id);
+    expect(due).not.toContain(overlap.payment.id);
+    standIn.settle(addDays(D2, 8), { paymentIds: [settledLate.payment.id], refundIds: [] });
+    await reconcile(addDays(D2, 8), 1);
+    const mark = async (ids: string[]) =>
+      (
+        await dbs.appPool.query('SELECT * FROM ops.settlement_mark_unsettled_alerted($1::text[])', [
+          ids,
+        ])
+      ).rows;
+    expect(await mark([settledLate.payment.id, 'pay_Unknown00000000', overlap.payment.id])).toEqual(
+      [],
+    );
+    expect((await alertedPayments()).has(settledLate.payment.id)).toBe(false);
+
+    // With no platform owner, a payment stays due until there is one.
+    const D3 = day(-200);
+    const waiting = await paidTopup(c, 23_000);
+    await setPaidAt([waiting.topupId], D3);
+    await reconcile(D3, 8);
+    const demoted = await adminQuery<{ user_id: string }>(
+      `UPDATE ops.platform_admins SET role = 'platform_operator' WHERE role = 'platform_owner'
+       RETURNING user_id`,
+    );
+    try {
+      expect(await unsettledSweep()).toEqual({ alerted: 0, unsent: 1, recipients: 0 });
+    } finally {
+      await adminQuery(
+        `UPDATE ops.platform_admins SET role = 'platform_owner' WHERE user_id = ANY($1::text[])`,
+        [demoted.map((r) => r.user_id)],
+      );
+    }
+    expect((await alertedPayments()).has(waiting.payment.id)).toBe(false);
+    expect(await unsettledSweep()).toEqual({ alerted: 1, unsent: 0, recipients: owners.length });
+    expect((await alertedPayments()).has(waiting.payment.id)).toBe(true);
+
+    // Neither runtime role reads or writes the alerts, or runs the shared definition itself.
+    for (const pool of [dbs.appPool, dbs.platformPool]) {
+      await expect(pool.query('SELECT * FROM ops.settlement_unsettled_alerts')).rejects.toThrow(
+        /permission denied/,
+      );
+      await expect(
+        pool.query(
+          `INSERT INTO ops.settlement_unsettled_alerts (payment_id) VALUES ('pay_Forged0000000')`,
+        ),
+      ).rejects.toThrow(/permission denied/);
+      await expect(pool.query('SELECT * FROM ops.settlement_unsettled_topups()')).rejects.toThrow(
+        /permission denied for function/,
+      );
+    }
+    await expect(
+      dbs.platformPool.query('SELECT * FROM ops.settlement_unsettled_alerts_due(1)'),
+    ).rejects.toThrow(/permission denied for function/);
   });
 });

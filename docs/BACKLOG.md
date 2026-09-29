@@ -330,10 +330,12 @@ verification, app review, Embedded Signup configuration).
   else that does not match waits on `/platform/reconciliation` for a platform owner to resolve with
   a note; paid top-ups no settlement showed 7 days after payment are listed. **[Alerts for
   reconciliation findings built, locally verified]** (ADR-066: platform owners emailed once per
-  finished attempt when a day waits for a person or fails, naming days and counts only).
-  Remaining: refunds asked for by companies, a platform-wide refunds list, alerts for unsettled
-  payments, bank statement (UTR) matching, fee and tax accounting, and GST invoices (GST treatment
-  needs tax review).
+  finished attempt when a day waits for a person or fails, naming days and counts only);
+  **[alerts for unsettled payments built, locally verified]** (ADR-071: platform owners emailed
+  once about each paid top-up no settlement showed 7 days after payment, from the same definition
+  as the page's list, with counts and payment days only; the list says when). Remaining: refunds
+  asked for by companies, a platform-wide refunds list, bank statement (UTR) matching, fee and tax
+  accounting, and GST invoices (GST treatment needs tax review).
 - **P5-06 Mandatory financial tests** **[29 integration tests + 2 e2e]**: concurrent spends on last
   funds; many low-balance triggers → one attempt; repeated and out-of-order events; timeout after
   capture (reconciliation); delayed success after UI timeout; decline; mandate revocation; cap

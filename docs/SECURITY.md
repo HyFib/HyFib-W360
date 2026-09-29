@@ -591,6 +591,12 @@ Phase 5 rules (daily settlement reconciliation, P5-05, ADR-059):
   addresses only through three SECURITY DEFINER functions executable by `w360_app` alone: the listing
   returns ids, the mark writes only `alerted_attempt` and returns the email's content, and the
   recipients function returns platform owners' ids and addresses.
+- Alerts about payments no settlement showed (ADR-071) follow the same rules: platform owners only,
+  counts and payment days only, never a company, amount or payment id. The worker reaches them only
+  through a listing (payment ids) and a mark (which checks each payment again and records it), both
+  SECURITY DEFINER and executable by `w360_app` alone; the runtime roles have no privileges on
+  `ops.settlement_unsettled_alerts`, and the shared definition of an unsettled payment runs only
+  inside definer functions.
 
 Platform roles (`ops.platform_admins`): `platform_owner` and `platform_operator`. Both require MFA;
 all actions are audited; neither can read customer content without a support grant. Both see a
