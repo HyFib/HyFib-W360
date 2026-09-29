@@ -1,5 +1,153 @@
 # Progress
 
+## 2026-09-29 — Phase 5: alerts for payments no settlement showed (P5-05, ADR-071)
+
+Status: **Implemented and locally verified against the Razorpay stand-in (email through the local
+outbox and Mailpit only).** Platform → Reconciliation listed paid top-ups whose payment no
+settlement showed 7 days after payment, but nobody heard of them unless they looked. Platform
+owners are now emailed once about each.
+
+### Completed
+
+- **Design (ADR-071):** the recipients (platform owners), kind (`platform.notice`) and minute
+  billing sweep of the reconciliation alerts (ADR-066); one definition of an unsettled payment for
+  the page's list and the alerts, so they cannot disagree; each payment emailed once, checked again
+  and recorded in the transaction that queues the email; the email gives the count and the payment
+  days in India time, never a company, amount or payment id. Payments already on the list when this
+  ships are emailed by the first sweep.
+- **Migration 0043:** `ops.settlement_unsettled_alerts` (one row per payment emailed; privileges for
+  `w360_definer` only); `ops.settlement_unsettled_topups()`, the definition (paid or partly refunded
+  top-ups with a payment, no settlement item for it, and every day from its payment day in India to
+  7 days later reconciled), run only inside definer functions; the page's list
+  (`ops.platform_settlement_recon_unsettled`, dropped by its owner and recreated) reads it and says
+  when owners were emailed; the listing `ops.settlement_unsettled_alerts_due` (payment ids) and the
+  mark `ops.settlement_mark_unsettled_alerted`, for `w360_app` and owned by `w360_definer`.
+- **Domain and worker:** `unsettledPaymentsAlert` (the email) and `alertUnsettledPayments` (the
+  sweep: due payments, recipients, then the mark and the emails in one transaction; nothing recorded
+  while there is no platform owner) in `billing/settlement-alerts.ts`; the minute billing sweep runs
+  it after the reconciliation alerts and logs what it sent, or warns that there is no platform owner.
+- **Web:** Platform → Reconciliation says platform owners are emailed once about each unsettled
+  payment and shows when ("Owners emailed", or "Not yet").
+- **Tests:** 3 unit tests (one payment's day in India time; several payments counted, with the range
+  of their days whatever the order; the rendered notice without companies, amounts or payment ids).
+  2 integration tests in `settlement-recon.test.ts`: every platform owner emailed once about each
+  payment when the seventh day after it is reconciled, not before; a settled payment never; a partly
+  refunded payment and one paid late in the evening UTC counted by their day in India; the list
+  saying when and listing only payments emailed; nothing more on later sweeps; a later payment
+  emailed on its own; overlapping sweeps sending one email; the mark refusing a payment settled in
+  between, an unknown one and one recorded already; payments kept due while there is no platform
+  owner; the runtime roles unable to read or write the alerts or run the definition. The functions'
+  grants in the isolation suite. e2e `settlement-recon.spec.ts`: a second top-up becomes one paid
+  long ago by a fixture step (its payment moved before every reconciled day, and that day and the 7
+  after it marked reconciled); the worker's sweep emails the platform owner without the payment or
+  the company, and the page lists it with when owners were emailed.
+- **Docs:** ADR-071; ARCHITECTURE (reconciliation section); SECURITY (Phase 5 reconciliation rules);
+  THREAT-MODEL T83; RUNBOOKS (payments not seen in a settlement, migration 0043); DATA-RETENTION;
+  BACKLOG P5-05; FEATURE-MATRIX H-037; the e2e job's comment in CI (192 tests after merging
+  `main`).
+- **Merged `main`** (PRs #13 and #14, the hydration fix and the `NS_BINDING_ABORTED` e2e fix) in
+  f9a92fc. The only conflict was the top of this file, where both sides added entries. After the
+  merge lint, format, typecheck, the 342 unit tests and the build pass; `main` changed no database
+  or domain code. The e2e suite was not run again locally after the merge; CI runs all 192 tests.
+- **Mutation checks:** 29 regressions tried one at a time, 27 make a test fail (the definition's
+  settlement, seven-day, status and India-time conditions; the listing's filter and limit; the
+  mark's re-check, conflict handling and result; the list's email time; the grants and privileges; the
+  sweep's owner check, limit and recipients; the email's day, order, range, subject, link and
+  content; the domain's mapping; the worker's call and the page's column, which only the e2e test
+  sees). Two were missed at first, a partly refunded payment and the India-time day, and are caught
+  since the alert test gained a partly refunded payment and one paid late in the evening UTC. The
+  other two cannot be observed: the page function's explicit revoke from PUBLIC (migration 0002's
+  default privileges already revoke EXECUTE on new functions) and an email queued with an undefined
+  company (the outbox stores null either way).
+
+### Test commands and results (local, 2026-09-29)
+
+| Command                                                                     | Result                                                                                                                                                                              |
+| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                      |
+| `pnpm test` (unit)                                                          | 342 passed, including 3 new in `billing/settlement-alerts.test.ts`                                                                                                                  |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 464 passed, including 2 new in `settlement-recon.test.ts`                                                                                                                           |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 464 passed                                                                                                                                                                          |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 90 passed (45 × 2) in one full run (24.1 min) on 62d3bd0, before merging `main`, including the reconciliation test with the unsettled payment alert on both projects |
+| Mutation checks                                                             | 29 regressions tried; 27 make a test fail, 2 cannot be observed (above)                                                                                                             |
+
+### Known gaps
+
+- Plan payments are not on the unsettled list (the reconciliation matches them by payment id,
+  ADR-063). No reminder while a payment stays unsettled, no threshold by amount, email only.
+  Verified against the Razorpay stand-in only; the settlement report's behaviour in test mode is
+  still unrun (R-110, R-111).
+
+## 2026-09-29 — Phase 5: text replies through the public API (P5-08, ADR-070)
+
+Status: **Implemented and locally verified against the Graph stand-in.** Integrations received
+customers' messages through webhooks but could answer only with approved templates. A key with the
+new `messages.reply` scope now sends free-form text inside WhatsApp's 24-hour customer service
+window, as members do in the inbox.
+
+### Completed
+
+- **Design (ADR-070):** one operation, `POST /api/v1/messages`, with `type` `template` (the default,
+  so existing requests are unchanged) or `text`; a new scope granted by members who hold
+  `inbox.reply`; one answer (412 `window_closed`) for every number a reply cannot reach; the reply
+  takes the conversation over from an automation but is not a member's reply, so the customer keeps
+  waiting for a member. Closing the reply turn on an API reply was considered and rejected: an
+  integration's acknowledgement ("we got your message") would then hide a customer who still waits
+  for a person, and every turn-based metric definition would change meaning.
+- **Migration 0042:** the API key scopes check allows `messages.reply` (up to six scopes); the
+  automation run end check allows `api_replied` for a run taken over.
+- **Domain:** `apiSendText` (the scope, the number, the contact by number, the conversation locked,
+  the window, the contact's WhatsApp id for the number's account, the automation taken over, the
+  message with the key, the send intent and the signed `message.send` job, one send per
+  `Idempotency-Key`); `apiSendMessage` (by `type`, any other type refused); the number lookup shared
+  with template sends; `type` in queued and read messages; the OpenAPI operation `sendMessage` with a
+  `oneOf` body and the `window_closed` reason; the inbox thread names the key of messages sent through
+  the API.
+- **Web:** Settings → API keys offers "Reply with text"; the inbox marks such messages "API (key
+  name)"; the automation run page explains `api_replied`.
+- **Tests:** unit tests of the text schema, the dispatcher refusing other types, the scopes and the
+  OpenAPI document (operation, `oneOf`, scopes, the 412 reason). 5 integration tests in
+  `api.test.ts`: a reply sent once per key through the Graph stand-in (its key, request, signed job,
+  unchanged conversation, the customer still waiting, the inbox's key name, a link preview, the
+  status read); one answer for an unknown number, a contact who never wrote, a last message 24 hours
+  and a second ago or a minute past the window, and an erased contact, with the scope, a restricted
+  company, bad bodies and a body without `type` sent as a template, and nothing written for a
+  refusal; the number the contact wrote to; the window checked again when sending; another company's
+  key, number and message. One in `automations.test.ts`: the bot's queued question cancelled, the run
+  taken over as `api_replied` by nobody, then a hand-off turn a member's reply answers. e2e
+  `api.spec.ts`: a key created with "Reply with text" answers a customer who wrote, a stranger is
+  refused with `window_closed` and a template with 403, WhatsApp gets the text once, and the inbox
+  shows it with the key's name.
+- **Also:** RUNBOOKS gains the note for migration 0041, missing from the last slice, beside 0042's.
+- **Docs:** ADR-070; ARCHITECTURE §6N; SECURITY (Phase 5 API rules); THREAT-MODEL T69 and new T89;
+  RUNBOOKS (a refused reply, an automation stopped by a reply, migrations 0041 and 0042); BACKLOG
+  P5-08; FEATURE-MATRIX W-134 and H-033; the e2e job's comment in CI (180 tests).
+- **Mutation checks:** 25 regressions tried one at a time, 23 make a test fail (the scope, an inactive
+  number, the window's length and its check, the conversation's number, the automation take-over and
+  its reason, the key on the message, link previews, the conversation's unread count and preview,
+  the send job, idempotency, routing by type and its default, the type in status reads, the send
+  scopes, the reply scope's write flag and permission, the refusal's reason and sameness, the inbox's
+  key name, the template response's type). The other two cannot be observed: the erased-contact
+  filter (erasure clears the number the lookup uses) and the identity's account filter (a contact's
+  identities on two accounts carry the same WhatsApp id).
+
+### Test commands and results (local, 2026-09-29)
+
+| Command                                                                     | Result                                                                                                                       |
+| --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                               |
+| `pnpm test` (unit)                                                          | 339 passed                                                                                                                   |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 462 passed, including 5 new tests in `api.test.ts` and 1 in `automations.test.ts`                                            |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 462 passed                                                                                                                   |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 90 passed (45 × 2) in one full run (25.1 min), including the new reply test in `api.spec.ts` on both projects |
+| Mutation checks                                                             | 25 regressions tried; 23 make a test fail, 2 cannot be observed (above)                                                      |
+
+### Known gaps
+
+- Media, interactive and reaction messages, replies to a given message, contacts known only by a
+  WhatsApp user id, and resolving or assigning conversations through the API are not built. Replies
+  are verified against the Graph stand-in only.
+
 ## 2026-09-29 — Fix: controlled inputs used before hydration
 
 Status: **Fixed and verified locally on macOS (Chromium, mobile Chromium, and `forms.spec.ts` also

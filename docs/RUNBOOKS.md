@@ -235,7 +235,11 @@ WHERE tenant_id = … ORDER BY requested_at DESC`:
       what an earlier run recorded and the resolutions.
     - **Payments not seen in a settlement:** a paid top-up whose payment no settlement showed 7
       days after payment. Look the payment up in the Dashboard (on hold, refunded, disputed) before
-      doing anything; the list only counts days that were reconciled.
+      doing anything; the list only counts days that were reconciled. Platform owners are emailed
+      once about each such payment ("… paid top-ups were not settled within 7 days", ADR-071), with
+      the count and the payment days only, and the list shows when. No email: the worker logs
+      `unsettled payments alert emailed`, or `… no platform owner to email` (the payments stay due
+      until there is one); `ops.settlement_unsettled_alerts` holds the payments emailed.
 
 ## 10. Contacts, consent and templates
 
@@ -972,6 +976,24 @@ retried the next minute). A company being deleted is skipped. Check `app.tenant_
 company (`status`, `trial_ends_at`, `period_end`, `grace_ends_at`): the database's clock decides
 what is due.
 
+**Migration 0043 failed.** It runs in one transaction, so a failure applies nothing. It adds
+`ops.settlement_unsettled_alerts` (granted to `w360_definer` only), the shared definition
+`ops.settlement_unsettled_topups()` (executable by nobody else), the listing and the mark (granted
+to `w360_app`, then handed to `w360_definer`), and replaces the page's unsettled list
+(`ops.platform_settlement_recon_unsettled`) to read the shared definition. A failure usually means
+the bootstrap roles are missing or migration 0034 was changed by hand.
+
+**Migration 0042 failed.** It runs in one transaction, so a failure applies nothing. It replaces
+the check on `app.api_keys.scopes` with one that also allows `messages.reply` (up to six scopes)
+and the check on `app.automation_runs` end reasons with one that also allows `api_replied` for a
+run taken over. Both checks are wider than before, so existing rows pass; a failure usually means a
+constraint was renamed or changed by hand.
+
+**Migration 0041 failed.** It runs in one transaction, so a failure applies nothing. It grants
+`w360_definer` select and delete on `ops.rate_limit_buckets` and adds `ops.purge_rate_limit_buckets`
+(granted to `w360_app`, then handed to `w360_definer`). A failure usually means the bootstrap roles
+are missing.
+
 **Migration 0040 failed.** It runs in one transaction, so a failure applies nothing. It adds
 `app.api_keys.expiry_reminded_at` (with column grants to `w360_app`), replaces the key's guard
 function with one that also keeps the reminder mark, adds a partial index and
@@ -1050,6 +1072,23 @@ of the same request reuse one. Keys are kept 24 hours.
 send was interrupted and is not retried). A 412 at send time names the reason (no marketing opt-in,
 suppression, frequency cap, template not approved). The send pipeline is the members' (§6): the
 message appears in the conversation, which is created resolved.
+
+**An API text reply was refused with `window_closed` (412).** A text reply (ADR-070) goes only to a
+contact who wrote to that WhatsApp number in the last 24 hours. The same answer covers a number
+that is not a contact, one that wrote to another of the company's numbers (send with `from` set to
+the number it wrote to), an erased contact and a last message older than 24 hours, so the answer
+alone does not tell them apart; the conversation in the inbox shows when the customer last wrote.
+Outside the window only approved templates can be sent (`type` `template`). A reply queued just
+before the window closed can still fail when the worker sends it: `GET /api/v1/messages/{id}`
+then shows `failed` with the code `window_closed`. A key needs the `messages.reply` scope for text
+(403 without it); keys keep their scopes, so an older key is replaced by a new one with the scope.
+
+**An automation stopped after an API reply, or the conversation still waits for a member.** A text
+reply through the API takes the conversation over from an automation handling it, as a member's
+reply does: the run ends as taken over ("A reply was sent through the API") and its queued
+messages are cancelled. The reply is not a member's reply, so the conversation keeps waiting for a
+member (and counts in the Inbox SLA) until a member replies or resolves it. The inbox shows the
+message with "API" and the key's name.
 
 **The company is suspended or its plan ended.** Keys keep reading; creating contacts, recording
 consent and sending answer 423 until the company is active again.

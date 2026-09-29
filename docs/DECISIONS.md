@@ -2034,3 +2034,81 @@ delivery changes: notices still go out in order, at the same rate.
 
 Not built: a higher sending rate for the email queue (a notice to many recipients still takes about
 half a second per recipient per worker process), and priorities for other kinds.
+
+## ADR-070 Text replies through the public API (2026-09-29)
+
+Context: integrations receive customers' messages through the `message.received` webhook (ADR-053)
+but could answer only with approved templates through `POST /api/v1/messages` (ADR-052). Inside
+WhatsApp's customer service window, 24 hours after the customer's last message, members answer in
+the inbox with free-form text; an integration (a helpdesk, an order system, a company's own
+assistant) could not.
+
+Decision:
+
+- **A new scope,** `messages.reply` ("Reply with text"), granted only by members who hold
+  `inbox.reply`, as for `messages.send`. Keys keep their scopes (the key guard), so no existing key
+  gains it; migration 0042 widens the scopes check.
+- **One operation:** `POST /api/v1/messages` takes `type`: `template`, the default, so existing
+  requests are unchanged, or `text`, with `to`, an optional `from` (the number the contact wrote
+  to; optional with one active number), `text` (1 to 4,096 characters, trimmed) and `previewUrl`
+  (off unless asked for). The OpenAPI operation is renamed from `sendTemplate` to `sendMessage`
+  before any release, with a `oneOf` body. Any other `type` is refused.
+- **Only inside the window:** a text goes to an existing contact with a conversation on that number
+  whose last message is at most 24 hours old, checked under the conversation's row lock, with the
+  same `Idempotency-Key` rules as templates. A number that is not a contact, has no conversation
+  there, was erased or last wrote more than 24 hours ago gets one answer, 412 with reason
+  `window_closed`, so a key without `contacts.read` learns no more than a sent reply would tell it.
+  The contact is never created. The worker checks the window again before sending, as for the
+  inbox, and a message whose window closed in between fails with `window_closed`.
+- **Sent like a member's reply:** to the contact's WhatsApp id for the number's account, through the
+  send pipeline and its per-number rate. The message has `sender_type = 'api'` and the key, so
+  `GET /messages/{id}` (now with `type`), status webhooks and the inbox, which shows "API (key
+  name)", tell where it came from.
+- **It takes the conversation over from an automation,** as a member's reply does: the run ends as
+  taken over (`api_replied`, migration 0042) and its queued messages are cancelled, so the bot and
+  the integration never answer at once.
+- **It is not a member's reply:** the conversation keeps its status, assignee and unread count, and
+  a customer waiting for a member keeps waiting. Reply turns and the Inbox SLA metrics are
+  unchanged, and an automation ended by the API opens a hand-off turn like other take-overs. An
+  integration's acknowledgement ("we got your message") must not hide a customer who still waits
+  for a person; members resolve conversations an integration answered in full.
+
+Not built: media, location, interactive (buttons and lists) and reaction messages through the API;
+replying to a given message (context); contacts known only by a WhatsApp user id (the API addresses
+numbers); resolving or assigning conversations through the API; conversation and message lists.
+
+## ADR-071 Alerts for payments no settlement showed (2026-09-29)
+
+Context: Platform → Reconciliation lists paid top-ups whose payment no settlement showed 7 days
+after the payment, once every day in between was reconciled (ADR-059). A payment can be missing
+from settlements because Razorpay holds it, because it was refunded or disputed in the Razorpay
+Dashboard, or because HyFib's records are wrong. The list was the only place such a payment
+showed: nobody heard of it unless they looked (ADR-066 left it out).
+
+Decision:
+
+- **Who and when:** platform owners are emailed once about each payment on that list, by the
+  minute billing sweep, like the reconciliation alerts (ADR-066): the same recipients (operators
+  only read) and the same `platform.notice` kind.
+- **One definition:** `ops.settlement_unsettled_topups()` holds the rule: paid or partly refunded
+  top-ups with a payment, no settlement item for the payment, and every day from the payment's day
+  (India time) to 7 days later reconciled. The page's list (migration 0034's function, replaced in 0043) and the alerts both read it, so they cannot disagree; a test checks that every payment on
+  the list was emailed. It runs only inside the definer functions.
+- **Once:** `ops.settlement_unsettled_alerts` holds a row per payment emailed. The sweep lists due
+  payment ids (`ops.settlement_unsettled_alerts_due`), then `ops.settlement_mark_unsettled_alerted`
+  checks each against the definition again and records it in the transaction that queues the
+  emails. A payment settled or refunded in between is not recorded; a concurrent sweep waits on the
+  first one's insert and then records nothing, so two sweeps send one email. With no platform owner
+  nothing is recorded, and the worker warns.
+- **What:** how many payments and the days they were paid (India time), what to check (a hold, a
+  refund or dispute made in the Dashboard, HyFib's records) and where the list is. No company,
+  amount or payment id: those stay on the page, which now says when owners were emailed about each
+  payment. Payments already on the list when this ships are emailed by the first sweep, since
+  nobody was told about them.
+
+Consequences: the minute sweep evaluates the definition each time, a pass over paid top-ups since
+the first reconciled day with index lookups for each payment's settlement items and runs. This was
+not measured at production volumes; if the sweep slows, the listing is the place to narrow.
+
+Not built: plan payments (the reconciliation matches them by payment id, ADR-063, and they are not
+on this list), reminders while a payment stays unsettled, thresholds by amount, other channels.

@@ -161,3 +161,106 @@ export async function alertSettlementReconFindings(
     return { alerted: days.length, unsent: 0, recipients: recipients.rows.length };
   });
 }
+
+/**
+ * Alerts for payments no settlement showed (ADR-071): platform owners are emailed once about each
+ * paid top-up on the unsettled list of Platform → Reconciliation (7 days after its payment, with
+ * every day since reconciled). The email gives how many and on which days they were paid, never a
+ * company, an amount or a payment id: those stay on the page.
+ */
+
+/** Payments recorded per sweep at most; the rest wait for the next sweep. */
+export const UNSETTLED_ALERT_PAYMENTS = 50;
+
+export interface UnsettledAlertResult {
+  /** Payments in the email sent (none when nothing was due, or another sweep recorded them). */
+  alerted: number;
+  /** Payments due but not emailed because there is no platform owner to tell. */
+  unsent: number;
+  recipients: number;
+}
+
+/** A calendar day in India time, where Razorpay's settlement days are counted. */
+function indiaDayLabel(at: Date): string {
+  return new Intl.DateTimeFormat('en-IN', { dateStyle: 'medium', timeZone: 'Asia/Kolkata' }).format(
+    at,
+  );
+}
+
+/** The email about newly unsettled payments, given their payment times. */
+export function unsettledPaymentsAlert(
+  paidAt: readonly Date[],
+  appBaseUrl: string,
+): { subject: string; lines: string[]; url: string; actionLabel: string } {
+  const sorted = [...paidAt].sort((a, b) => a.getTime() - b.getTime());
+  const count = sorted.length;
+  const first = indiaDayLabel(sorted[0] ?? new Date(0));
+  const last = indiaDayLabel(sorted[count - 1] ?? new Date(0));
+  const when = first === last ? `on ${first}` : `from ${first} to ${last}`;
+  return {
+    subject:
+      count === 1
+        ? 'A paid top-up was not settled within 7 days'
+        : `${count} paid top-ups were not settled within 7 days`,
+    lines: [
+      `${count === 1 ? 'A top-up' : `${count} top-ups`} paid ${when} (India time) ${count === 1 ? 'was' : 'were'} in no settlement Razorpay reported for the 7 days after payment, although every one of those days was reconciled.`,
+      'Razorpay may be holding a payment, it may have been refunded or disputed in the Razorpay Dashboard, or HyFib’s records may be wrong: check each payment in the Razorpay Dashboard.',
+      'Platform → Reconciliation lists them under “Payments not seen in a settlement”, with their companies, amounts and Razorpay payment ids.',
+    ],
+    url: new URL('/platform/reconciliation', appBaseUrl).toString(),
+    actionLabel: 'Open reconciliation',
+  };
+}
+
+/**
+ * The minute sweep's alert about unsettled payments: emails every platform owner once about the
+ * payments on the list not emailed yet. Nothing is recorded while there is no platform owner, so the
+ * alert goes out once there is one.
+ */
+export async function alertUnsettledPayments(
+  deps: SettlementReconAlertDeps,
+  limit = UNSETTLED_ALERT_PAYMENTS,
+): Promise<UnsettledAlertResult> {
+  const due = await deps.db.run(
+    systemScope,
+    (tx) =>
+      tx.execute<{ payment_id: string }>(
+        sql`select payment_id from ops.settlement_unsettled_alerts_due(${limit}::int)`,
+      ),
+    { accessMode: 'read only' },
+  );
+  if (due.rows.length === 0) return { alerted: 0, unsent: 0, recipients: 0 };
+  const recipients = await deps.db.run(
+    systemScope,
+    (tx) =>
+      tx.execute<{ user_id: string; email: string }>(
+        sql`select user_id, email from ops.settlement_recon_alert_recipients()`,
+      ),
+    { accessMode: 'read only' },
+  );
+  if (recipients.rows.length === 0) {
+    return { alerted: 0, unsent: due.rows.length, recipients: 0 };
+  }
+  const ids = due.rows.map((r) => r.payment_id);
+  return deps.db.run(systemScope, async (tx) => {
+    const marked = await tx.execute<{ payment_id: string; paid_at: Date | string }>(
+      sql`select payment_id, paid_at from ops.settlement_mark_unsettled_alerted(${sql.param(ids)}::text[])`,
+    );
+    if (marked.rows.length === 0) {
+      return { alerted: 0, unsent: 0, recipients: recipients.rows.length };
+    }
+    const alert = unsettledPaymentsAlert(
+      marked.rows.map((r) => new Date(r.paid_at)),
+      deps.appBaseUrl,
+    );
+    for (const recipient of recipients.rows) {
+      await enqueueEmail(deps.outbox, tx, {
+        to: recipient.email,
+        // About HyFib's own settlements, not a company's data.
+        tenantId: null,
+        payload: { kind: 'platform.notice', ...alert },
+      });
+    }
+    return { alerted: marked.rows.length, unsent: 0, recipients: recipients.rows.length };
+  });
+}

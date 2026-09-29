@@ -1,19 +1,23 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { AppError, sha256Hex } from '@w360/core';
+import { AppError, isAppError, sha256Hex } from '@w360/core';
 import { API_SCOPES } from '@w360/db';
 import { PERMISSIONS } from '../authz/permissions';
 import { apiErrorResponse, apiRequestError } from './errors';
 import { bearerToken, generateApiToken } from './keys';
+import type { ApiContext } from './context';
 import {
+  API_LIMITS,
   API_SCOPE_INFO,
   API_SCOPE_KEYS,
+  API_SEND_SCOPES,
   API_TOKEN_RE,
   IDEMPOTENCY_KEY_RE,
   apiKeyState,
 } from './model';
 import { API_ROUTES, buildOpenApiDocument } from './openapi';
+import { apiSendMessage, apiSendTextSchema } from './resources';
 
 describe('API tokens', () => {
   it('have a public prefix, a 256-bit secret and only their SHA-256 is kept', () => {
@@ -68,13 +72,65 @@ describe('API scopes', () => {
 
   it('mark exactly the changing scopes as writes (refused while a company is not active)', () => {
     const writes = API_SCOPE_KEYS.filter((s) => API_SCOPE_INFO[s].writes);
-    expect(writes).toEqual(['contacts.write', 'messages.send', 'messages.send_marketing']);
+    expect(writes).toEqual([
+      'contacts.write',
+      'messages.send',
+      'messages.send_marketing',
+      'messages.reply',
+    ]);
+    expect([...API_SEND_SCOPES]).toEqual(API_SCOPE_KEYS.filter((s) => s.startsWith('messages.')));
   });
 
   it('need the permission a member needs for the same work', () => {
     expect(API_SCOPE_INFO['messages.send'].permission).toBe('inbox.reply');
     expect(API_SCOPE_INFO['messages.send_marketing'].permission).toBe('campaigns.send');
+    expect(API_SCOPE_INFO['messages.reply'].permission).toBe('inbox.reply');
     expect(API_SCOPE_INFO['contacts.write'].permission).toBe('contacts.write');
+  });
+});
+
+describe('text replies (ADR-070)', () => {
+  const base = { type: 'text', to: '+919876543210' };
+
+  it('take 1 to 4096 characters of trimmed text, with link previews off unless asked for', () => {
+    expect(apiSendTextSchema.parse({ ...base, text: '  Your order ships today.  ' })).toEqual({
+      ...base,
+      text: 'Your order ships today.',
+      previewUrl: false,
+    });
+    const long = 'x'.repeat(API_LIMITS.textLength);
+    expect(apiSendTextSchema.parse({ ...base, text: long, previewUrl: true })).toMatchObject({
+      text: long,
+      previewUrl: true,
+    });
+    for (const bad of [
+      { ...base, text: '   ' },
+      { ...base, text: `${long}x` },
+      { ...base },
+      { ...base, text: 'Hi', templateId: '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f01' },
+      { ...base, text: 'Hi', from: 'not-a-number-id' },
+      { ...base, type: 'template', text: 'Hi' },
+    ]) {
+      expect(apiSendTextSchema.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  it('are chosen by the body’s type; any other type is refused before anything is read', async () => {
+    const ctx = {
+      tenant: { id: 't', status: 'active' },
+      key: { id: 'k', scopes: new Set() },
+    } as unknown as ApiContext;
+    const idem = { key: 'k-1', requestHash: 'h' };
+    for (const body of [{ type: 'image' }, { type: 'TEXT' }, { type: null }]) {
+      const error: unknown = await apiSendMessage(
+        {} as never,
+        ctx,
+        { ...body, to: '+919876543210' },
+        idem,
+      ).catch((caught: unknown) => caught);
+      expect(isAppError(error) && error.code, JSON.stringify(body)).toBe('validation_failed');
+      expect(isAppError(error) && error.issues?.[0]?.path).toBe('type');
+    }
   });
 });
 
@@ -175,7 +231,30 @@ describe('OpenAPI document', () => {
     const responses = paths['/contacts']?.get?.responses as Record<string, { description: string }>;
     expect(responses['403']?.description).toContain('not_in_plan');
     expect(responses['429']?.description).toContain('quota_exceeded');
-    expect(JSON.stringify(doc.components)).toContain('not_in_plan or quota_exceeded');
+    expect(JSON.stringify(doc.components)).toContain(
+      'not_in_plan, quota_exceeded or window_closed',
+    );
+  });
+
+  it('sends a template or a text reply from one operation, naming the window refusal', () => {
+    const send = paths['/messages']?.post as unknown as {
+      operationId: string;
+      description: string;
+      requestBody: { content: { 'application/json': { schema: unknown } } };
+      responses: Record<string, { description: string }>;
+    };
+    expect(send.operationId).toBe('sendMessage');
+    expect(send.requestBody.content['application/json'].schema).toEqual({
+      oneOf: [
+        { $ref: '#/components/schemas/SendTemplate' },
+        { $ref: '#/components/schemas/SendText' },
+      ],
+    });
+    for (const scope of API_SEND_SCOPES) expect(send.description).toContain(`\`${scope}\``);
+    expect(send.description).toContain('window_closed');
+    expect(send.responses['412']?.description).toContain('window_closed');
+    const read = paths['/messages/{id}']?.get as unknown as { description: string };
+    for (const scope of API_SEND_SCOPES) expect(read.description).toContain(`\`${scope}\``);
   });
 
   it('resolves every reference to a component', () => {
@@ -193,7 +272,11 @@ describe('OpenAPI document', () => {
       { required?: string[]; additionalProperties?: unknown }
     >;
     expect(schemas.SendTemplate?.required).toEqual(expect.arrayContaining(['to', 'templateId']));
+    expect(schemas.SendTemplate?.required).not.toContain('type');
     expect(schemas.SendTemplate?.additionalProperties).toBe(false);
+    expect(schemas.SendText?.required).toEqual(expect.arrayContaining(['type', 'to', 'text']));
+    expect(schemas.SendText?.required).not.toContain('previewUrl');
+    expect(schemas.SendText?.additionalProperties).toBe(false);
     expect(schemas.ContactCreate?.required).toEqual(['phone']);
     expect(schemas.Consent?.required).toEqual(
       expect.arrayContaining(['purpose', 'action', 'evidence']),

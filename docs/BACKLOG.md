@@ -330,10 +330,12 @@ verification, app review, Embedded Signup configuration).
   else that does not match waits on `/platform/reconciliation` for a platform owner to resolve with
   a note; paid top-ups no settlement showed 7 days after payment are listed. **[Alerts for
   reconciliation findings built, locally verified]** (ADR-066: platform owners emailed once per
-  finished attempt when a day waits for a person or fails, naming days and counts only).
-  Remaining: refunds asked for by companies, a platform-wide refunds list, alerts for unsettled
-  payments, bank statement (UTR) matching, fee and tax accounting, and GST invoices (GST treatment
-  needs tax review).
+  finished attempt when a day waits for a person or fails, naming days and counts only);
+  **[alerts for unsettled payments built, locally verified]** (ADR-071: platform owners emailed
+  once about each paid top-up no settlement showed 7 days after payment, from the same definition
+  as the page's list, with counts and payment days only; the list says when). Remaining: refunds
+  asked for by companies, a platform-wide refunds list, bank statement (UTR) matching, fee and tax
+  accounting, and GST invoices (GST treatment needs tax review).
 - **P5-06 Mandatory financial tests** **[29 integration tests + 2 e2e]**: concurrent spends on last
   funds; many low-balance triggers → one attempt; repeated and out-of-order events; timeout after
   capture (reconciliation); delayed success after UI timeout; decline; mandate revocation; cap
@@ -374,9 +376,13 @@ verification, app review, Embedded Signup configuration).
   with its name and prefix, never a token; marked on Settings → API keys); **[rate limits tested,
   full buckets deleted, locally verified]** (ADR-068: integration tests of the buckets and each
   limit, an e2e burst refused with 429; buckets full again deleted every minute, so failed-
-  authentication addresses are kept only while they limit). Remaining: session, media and
-  interactive messages, conversation and message lists, starting automations (W-086), bulk sends in
-  one call, IP allowlists, per-key quotas, limits per endpoint.
+  authentication addresses are kept only while they limit); **[text replies built, locally
+  verified against the Graph stand-in]** (ADR-070: a `messages.reply` key sends free-form text to a
+  contact who wrote to the number in the last 24 hours, refused otherwise with one answer; it ends a
+  running automation and marks the message with its key, and the customer keeps waiting for a
+  member). Remaining: media, interactive and reaction messages, replies to a given message,
+  conversation and message lists, resolving or assigning conversations, starting automations
+  (W-086), bulk sends in one call, IP allowlists, per-key quotas, limits per endpoint.
 - **P5-09 Outgoing webhooks** **[built, locally verified; delivered to local test receivers only]**
   (ADR-053): up to 10 endpoints per company (`developer.manage`) for `message.received`,
   `message.status`, `consent.changed` and `template.status_changed`, captured by database triggers

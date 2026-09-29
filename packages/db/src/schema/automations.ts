@@ -64,7 +64,7 @@ export const ACTIVE_RUN_STATUSES = ['running', 'waiting'] as const;
 export const AUTOMATION_END_REASONS = {
   completed: ['end_node', 'no_next'],
   handed_off: ['handoff_node'],
-  taken_over: ['agent_replied', 'assigned', 'take_over'],
+  taken_over: ['agent_replied', 'assigned', 'take_over', 'api_replied'],
   stopped: [
     'stopped_by_member',
     'conversation_resolved',
