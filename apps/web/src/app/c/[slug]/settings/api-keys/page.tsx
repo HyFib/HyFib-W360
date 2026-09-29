@@ -2,19 +2,21 @@ import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
 import {
   API_KEY_LIMITS,
+  API_KEY_REMINDER_DAYS,
   API_LIMITS,
   API_SCOPE_INFO,
   API_SCOPE_KEYS,
+  apiKeyExpiresSoon,
   can,
   hasRecentSignIn,
   RECENT_SIGN_IN_MINUTES,
   type ApiKeyView,
 } from '@w360/domain';
-import { Badge, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
+import { Alert, Badge, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
 import { ApiKeyActions, CreateApiKeyForm } from '@/components/settings/api-keys';
 import { CopyField } from '@/components/growth/copy-field';
 import { SignInAgain } from '@/components/sign-in-again';
-import { formatDateTime } from '@/lib/format';
+import { formatDate, formatDateTime } from '@/lib/format';
 import { getRuntime } from '@/server/runtime';
 import { requireTenant } from '@/server/session';
 
@@ -31,13 +33,17 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
   const { slug } = await params;
   const ctx = await requireTenant(slug);
   if (!can(ctx, 'developer.manage')) notFound();
-  const { apiKeys, config, clock } = await getRuntime();
+  const { apiKeys, config, clock, plans } = await getRuntime();
   const keys = await apiKeys.list(ctx);
+  const usage = await plans.usage(ctx);
+  const apiLimit = usage.limits.apiRequests;
+  const inPlan = apiLimit !== 0;
   const tz = ctx.tenant.timezone;
   const apiBase = new URL('/api/v1', config.APP_BASE_URL).toString();
   const grantable = API_SCOPE_KEYS.filter((s) => can(ctx, API_SCOPE_INFO[s].permission));
   const activeCount = keys.filter((k) => k.state === 'active').length;
   const prefixes = new Map(keys.map((k) => [k.id, k.keyPrefix]));
+  const now = clock.now();
   return (
     <div className="grid grid-cols-1 gap-6">
       <Card>
@@ -51,6 +57,25 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4">
+          {inPlan ? (
+            <p className="text-sm">
+              {formatDate(usage.apiRequests.periodStart, tz)} to{' '}
+              {formatDate(usage.apiRequests.periodEnd, tz)}:{' '}
+              <strong>
+                {usage.apiRequests.used.toLocaleString('en-IN')}
+                {apiLimit === null ? '' : ` of ${apiLimit.toLocaleString('en-IN')}`}
+              </strong>{' '}
+              API requests
+              {apiLimit === null
+                ? '; your plan has no monthly limit.'
+                : '. When they are used up, the API refuses requests until the next period.'}
+            </p>
+          ) : (
+            <Alert tone="warning" title="The public API is not in your plan">
+              Your company’s plan does not include the public API, so requests with its keys are
+              refused and new keys cannot be created. Ask HyFib to change the plan.
+            </Alert>
+          )}
           <CopyField label="Base URL" value={apiBase} />
           <p className="text-sm">
             Send the key as{' '}
@@ -87,7 +112,8 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
           <CardTitle>API keys</CardTitle>
           <CardDescription>
             {activeCount} of {API_KEY_LIMITS.activeKeys} active keys. A key’s secret part is shown
-            only when it is created; the list shows its public prefix.
+            only when it is created; the list shows its public prefix. Owners and administrators are
+            emailed {API_KEY_REMINDER_DAYS} days before a key expires, unless it was rotated.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -102,6 +128,9 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="font-medium">{k.name}</span>
                       <Badge tone={badge.tone}>{badge.label}</Badge>
+                      {apiKeyExpiresSoon(k, now) ? (
+                        <Badge tone="warning">Expires soon</Badge>
+                      ) : null}
                       {k.replacedByKeyId ? (
                         <Badge tone="neutral">
                           Rotated to {prefixes.get(k.replacedByKeyId) ?? 'a new key'}
@@ -146,12 +175,18 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
                               : 'never'}
                         </dd>
                       </div>
+                      {k.expiryRemindedAt ? (
+                        <div>
+                          <dt className="inline">Expiry reminder emailed </dt>
+                          <dd className="inline">{formatDateTime(k.expiryRemindedAt, tz)}</dd>
+                        </div>
+                      ) : null}
                     </dl>
                     <ApiKeyActions
                       slug={ctx.tenant.slug}
                       keyId={k.id}
                       name={k.name}
-                      rotatable={k.state === 'active' && !k.replacedByKeyId}
+                      rotatable={inPlan && k.state === 'active' && !k.replacedByKeyId}
                       revocable={k.state === 'active'}
                     />
                   </li>
@@ -171,7 +206,11 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
           </CardDescription>
         </CardHeader>
         <CardContent>
-          {hasRecentSignIn(ctx, clock.now()) ? (
+          {!inPlan ? (
+            <p className="text-sm text-muted-foreground">
+              New keys cannot be created while the plan does not include the public API.
+            </p>
+          ) : hasRecentSignIn(ctx, clock.now()) ? (
             <CreateApiKeyForm
               slug={ctx.tenant.slug}
               grantable={grantable}

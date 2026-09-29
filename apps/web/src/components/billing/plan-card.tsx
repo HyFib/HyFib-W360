@@ -4,6 +4,7 @@ import {
   PLAN_MODULE_KEYS,
   PLAN_MODULE_LABELS,
   TENANT_PLAN_STATUS_LABELS,
+  warningThreshold,
   type CompanyPlanOverview,
 } from '@w360/domain';
 import {
@@ -39,14 +40,20 @@ function UsageRow({
   used,
   limit,
   detail,
+  monthly = false,
 }: {
   label: string;
   used: number;
   limit: number | null;
   detail?: string;
+  /** A monthly allowance, which warns at 80% (ADR-062). */
+  monthly?: boolean;
 }) {
   const share = limit === null || limit === 0 ? null : Math.min(100, (used / limit) * 100);
   const full = limit !== null && used >= limit;
+  // At 80% of a monthly limit the billing managers are warned by email (ADR-062).
+  const threshold = monthly ? warningThreshold(limit) : null;
+  const nearly = !full && threshold !== null && used >= threshold;
   return (
     <TR>
       <TD className="font-medium">
@@ -54,9 +61,14 @@ function UsageRow({
         {detail ? <div className="text-xs font-normal text-muted-foreground">{detail}</div> : null}
       </TD>
       <TD>
-        <span className={full ? 'font-medium text-destructive' : ''}>
+        <span
+          className={
+            full ? 'font-medium text-destructive' : nearly ? 'font-medium text-warning' : ''
+          }
+        >
           {used.toLocaleString('en-IN')}
           {limit === null ? '' : ` of ${limit.toLocaleString('en-IN')}`}
+          {nearly ? ' (nearly used up)' : ''}
         </span>
         {share !== null ? (
           <div
@@ -64,7 +76,7 @@ function UsageRow({
             aria-hidden="true"
           >
             <div
-              className={`h-full ${full ? 'bg-destructive' : 'bg-primary'}`}
+              className={`h-full ${full ? 'bg-destructive' : nearly ? 'bg-warning' : 'bg-primary'}`}
               style={{ width: `${share}%` }}
             />
           </div>
@@ -81,11 +93,15 @@ function UsageRow({
 export function PlanCard({
   overview,
   timeZone,
+  payment = null,
 }: {
   overview: CompanyPlanOverview;
   timeZone: string;
+  /** Whether the company pays by subscription, or can pay for its plan here (ADR-063). */
+  payment?: 'subscribed' | 'offered' | null;
 }) {
   const { plan, usage, status } = overview;
+  const payHere = payment === 'offered';
   const day = (at: Date | null) => formatDate(at, timeZone);
   const runs = usage.automationRuns;
   return (
@@ -103,14 +119,22 @@ export function PlanCard({
               : status === 'active' || status === 'past_due'
                 ? `Paid period ${day(overview.periodStart)} to ${day(overview.periodEnd)}.`
                 : 'The plan has ended.'}{' '}
-          HyFib sets plans and periods; there is nothing to pay here for the plan.
+          {payment === 'subscribed'
+            ? 'Paid by subscription through Razorpay.'
+            : payHere
+              ? 'HyFib sets plans; you can pay for yours below.'
+              : 'HyFib sets plans and periods; there is nothing to pay here for the plan.'}
         </CardDescription>
       </CardHeader>
       <CardContent className="grid gap-6">
         {status === 'past_due' ? (
           <Alert tone="warning" title="The paid period has ended">
-            Everything keeps working until {day(overview.graceEndsAt)}. Ask HyFib to renew the plan
-            before then.
+            Everything keeps working until {day(overview.graceEndsAt)}.{' '}
+            {payment === 'subscribed'
+              ? 'The plan is paid again once Razorpay’s charge goes through.'
+              : payHere
+                ? 'Pay for the plan below, or ask HyFib to renew it, before then.'
+                : 'Ask HyFib to renew the plan before then.'}
           </Alert>
         ) : null}
         {status === 'expired' || status === 'canceled' ? (
@@ -119,7 +143,10 @@ export function PlanCard({
             title={status === 'canceled' ? 'The plan was canceled' : 'The plan ended'}
           >
             Sending messages, campaigns and automations is paused. Your data is kept, and you can
-            still review and export it. Ask HyFib to choose a plan to continue.
+            still review and export it.{' '}
+            {payHere
+              ? 'Pay for the plan below, or ask HyFib to choose a plan, to continue.'
+              : 'Ask HyFib to choose a plan to continue.'}
           </Alert>
         ) : null}
         {plan ? (
@@ -212,8 +239,23 @@ export function PlanCard({
               label="Automation runs this month"
               used={runs.used}
               limit={usage.limits.automationRuns}
+              monthly
               detail={`${day(runs.periodStart)} to ${day(runs.periodEnd)}; test runs are not counted`}
             />
+            {usage.limits.apiRequests === 0 ? (
+              <TR>
+                <TD className="font-medium">API requests this month</TD>
+                <TD className="text-muted-foreground">The public API is not in the plan</TD>
+              </TR>
+            ) : (
+              <UsageRow
+                label="API requests this month"
+                used={usage.apiRequests.used}
+                limit={usage.limits.apiRequests}
+                monthly
+                detail={`${day(usage.apiRequests.periodStart)} to ${day(usage.apiRequests.periodEnd)}; requests with the company's API keys`}
+              />
+            )}
           </TBody>
         </Table>
       </CardContent>

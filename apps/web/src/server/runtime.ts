@@ -43,9 +43,12 @@ import {
   createInboxService,
   createOnboardingService,
   createPlanAdminService,
+  createPlanSubscriptionService,
   createPlansService,
   createPlatformService,
   createPlatformBillingService,
+  createPlatformReconciliationService,
+  createBillingUsageService,
   createPlatformOpsService,
   pgBossQueueInspector,
   createRateCardsService,
@@ -79,9 +82,12 @@ import {
   type OnboardingService,
   type OutboundDeps,
   type PlanAdminService,
+  type PlanSubscriptionService,
   type PlansService,
   type PlatformService,
   type PlatformBillingService,
+  type PlatformReconciliationService,
+  type BillingUsageService,
   type PlatformOpsService,
   type RateCardsService,
   type SavedRepliesService,
@@ -131,6 +137,10 @@ export interface Runtime {
   platformOps: PlatformOpsService;
   /** Companies' service credit for platform staff, and refunds of unused credit (ADR-058). */
   platformBilling: PlatformBillingService;
+  /** Daily settlement reconciliation with Razorpay, for platform staff (ADR-059). */
+  platformReconciliation: PlatformReconciliationService;
+  /** Billing → Usage and rates: Meta's rates and this month's estimate (ADR-060). */
+  billingUsage: BillingUsageService;
   inbox: InboxService;
   teams: TeamsService;
   businessHours: BusinessHoursService;
@@ -178,6 +188,8 @@ export interface Runtime {
   /** Null until Razorpay is configured (card payments are then reported unavailable). */
   razorpay: RazorpayConfig | null;
   billing: BillingService;
+  /** Paying for plans with Razorpay Subscriptions (ADR-063). */
+  planPayments: PlanSubscriptionService;
   billingHistory: BillingHistoryService;
   events: TenantEventHub;
   shutdown(): Promise<void>;
@@ -265,6 +277,8 @@ async function init(): Promise<Runtime> {
     clock: systemClock,
   });
   const platformBilling = createPlatformBillingService({ platformDb });
+  const platformReconciliation = createPlatformReconciliationService({ platformDb });
+  const billingUsage = createBillingUsageService({ db, clock: systemClock });
   const inbox = createInboxService({ db, clock: systemClock, jobs, signer });
   const teams = createTeamsService({ db, clock: systemClock });
   const businessHours = createBusinessHoursService({ db, clock: systemClock });
@@ -277,8 +291,20 @@ async function init(): Promise<Runtime> {
   const segments = createSegmentsService({ db, clock: systemClock });
   const campaigns = createCampaignsService({ db, jobs, signer, clock: systemClock });
   const rateCards = createRateCardsService({ platformDb, clock: systemClock });
+  const razorpay = razorpayConfigFrom(config);
+  const razorpayClient = razorpay
+    ? new RazorpayClient({
+        baseUrl: razorpay.apiBaseUrl,
+        keyId: razorpay.keyId,
+        keySecret: razorpay.keySecret,
+      })
+    : null;
   const plans = createPlansService({ db, clock: systemClock });
-  const planAdmin = createPlanAdminService({ platformDb, clock: systemClock });
+  const planAdmin = createPlanAdminService({
+    platformDb,
+    clock: systemClock,
+    razorpay: razorpayClient,
+  });
   const apiKeys = createApiKeysService({ db, clock: systemClock });
   const webhooks = createWebhooksService({
     db,
@@ -371,17 +397,17 @@ async function init(): Promise<Runtime> {
         meta,
       })
     : null;
-  const razorpay = razorpayConfigFrom(config);
   const billing = createBillingService({
     db,
     clock: systemClock,
-    razorpay: razorpay
-      ? new RazorpayClient({
-          baseUrl: razorpay.apiBaseUrl,
-          keyId: razorpay.keyId,
-          keySecret: razorpay.keySecret,
-        })
-      : null,
+    razorpay: razorpayClient,
+    razorpayConfig: razorpay,
+    notices: { outbox, appBaseUrl: config.APP_BASE_URL },
+  });
+  const planPayments = createPlanSubscriptionService({
+    db,
+    clock: systemClock,
+    razorpay: razorpayClient,
     razorpayConfig: razorpay,
     notices: { outbox, appBaseUrl: config.APP_BASE_URL },
   });
@@ -406,6 +432,8 @@ async function init(): Promise<Runtime> {
     platform,
     platformOps,
     platformBilling,
+    platformReconciliation,
+    billingUsage,
     inbox,
     teams,
     businessHours,
@@ -438,6 +466,7 @@ async function init(): Promise<Runtime> {
     onboarding,
     razorpay,
     billing,
+    planPayments,
     billingHistory,
     events,
     async shutdown() {

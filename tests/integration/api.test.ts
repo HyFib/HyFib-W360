@@ -3,11 +3,13 @@ import { isAppError, sha256Hex, systemClock, uuidv7, type Clock } from '@w360/co
 import { authorizedTenantScope, channelAccounts, sql } from '@w360/db';
 import {
   API_KEY_LIMITS,
+  API_KEY_REMINDER_DAYS,
   API_TOKEN_RE,
   apiCreateContact,
   apiErrorResponse,
   apiGetContact,
   apiGetMessage,
+  apiKeyReminderNotice,
   apiListContacts,
   apiListTemplates,
   apiRecordConsent,
@@ -17,17 +19,23 @@ import {
   createCampaignsService,
   createConsentService,
   createTemplatesService,
+  generateApiToken,
+  outboxAad,
   processSendIntent,
   processTemplateSubmit,
   purgeApiIdempotencyKeys,
   queueTemplateMessage,
+  remindApiKeyExpiry,
+  remindExpiringApiKeys,
   syncTemplates,
   type ApiContext,
+  type ApiKeyReminderDeps,
   type ApiKeysService,
   type ApiScope,
   type TemplateDefinition,
   type TenantContext,
 } from '@w360/domain';
+import { acceptInvitation, createUser, invite } from './helpers';
 import {
   nextExternalId,
   startWhatsAppFixture,
@@ -40,8 +48,8 @@ import {
  * keys (scopes, the limit of active keys, rotation with an overlap, revocation), authentication
  * through the definer function, scopes and company status, idempotent requests (replays, a key
  * reused for another request, concurrent retries, failures, expiry), contacts and consent, template
- * sends with the members' checks and the send pipeline, message status, the idempotency sweep, and
- * isolation between companies.
+ * sends with the members' checks and the send pipeline, message status, the idempotency sweep,
+ * isolation between companies, and reminders before keys expire (ADR-067).
  */
 let fx: WhatsAppFixture;
 let keys: ApiKeysService;
@@ -1164,5 +1172,296 @@ describe('isolation and retention', () => {
       [keyId],
     );
     expect(left.map((r) => r.idempotency_key)).toEqual(['new']);
+  });
+});
+
+describe('reminders before keys expire (ADR-067)', () => {
+  const DAY = 86_400_000;
+  const reminderDeps = (clock: Clock = systemClock): ApiKeyReminderDeps => ({
+    db: fx.dbs.app,
+    clock,
+    notices: {
+      outbox: { keyring: fx.keyring, jobs: fx.jobs(), signer: fx.signer },
+      appBaseUrl: 'http://localhost:3000',
+    },
+  });
+  const sweep = () => remindExpiringApiKeys(reminderDeps());
+
+  async function member(c: Company, role: string) {
+    const user = await createUser(fx.dbs, { name: `Keys ${role}` });
+    const { token } = await invite(fx.dbs, c.tenant, c.owner, user.email, [role]);
+    await acceptInvitation(fx.dbs, user, token);
+    return user;
+  }
+
+  /**
+   * A key of the company created by its owner that expires in `ms` (a fixture step: keys are
+   * created for at least 30 days, and an expiry can only come sooner).
+   */
+  async function expiringKey(c: Company, ms: number, name = 'Expiring') {
+    const owner = await fx.ctx(c, c.owner);
+    const created = await keys.create(owner, {
+      name,
+      scopes: ['contacts.read'],
+      expiresInDays: 30,
+    });
+    await fx.query(
+      `UPDATE app.api_keys SET expires_at = now() + $2 * interval '1 millisecond' WHERE id = $1`,
+      [created.id, ms],
+    );
+    return created;
+  }
+
+  /** A key written as it would stand after a lifetime in the past (a fixture step). */
+  async function pastKey(c: Company, createdAt: Date, expiresAt: Date) {
+    const id = uuidv7();
+    const { keyPrefix, tokenHash } = generateApiToken();
+    await fx.query(
+      `INSERT INTO app.api_keys (id, tenant_id, name, key_prefix, token_hash, scopes,
+                                 created_by_user_id, created_at, expires_at)
+       VALUES ($1, $2, 'Old', $3, $4, array['contacts.read'], $5, $6, $7)`,
+      [id, c.tenant.id, keyPrefix, tokenHash, c.owner.id, createdAt, expiresAt],
+    );
+    return id;
+  }
+
+  /** The keys `ops.api_key_expiry_reminders_due` lists for the company, soonest first. */
+  async function due(tenantId: string, days = API_KEY_REMINDER_DAYS): Promise<string[]> {
+    const rows = await fx.query<{ key_id: string }>(
+      `SELECT key_id FROM ops.api_key_expiry_reminders_due(1000, $2) WHERE tenant_id = $1`,
+      [tenantId, days],
+    );
+    return rows.map((r) => r.key_id);
+  }
+
+  async function keyRow(id: string) {
+    const [row] = await fx.query<{
+      created_at: Date;
+      expires_at: Date;
+      expiry_reminded_at: Date | null;
+    }>('SELECT created_at, expires_at, expiry_reminded_at FROM app.api_keys WHERE id = $1', [id]);
+    return row!;
+  }
+
+  /** The company's notices queued in the outbox, oldest first. */
+  async function companyNotices(tenantId: string) {
+    const { rows } = await fx.dbs.adminPool.query<{
+      id: string;
+      to_address: string;
+      payload_ciphertext: string;
+    }>(
+      `SELECT id, to_address, payload_ciphertext FROM ops.email_outbox
+        WHERE tenant_id = $1 AND kind = 'tenant.notice' ORDER BY id`,
+      [tenantId],
+    );
+    return rows.map((r) => ({
+      to: r.to_address,
+      ...(JSON.parse(fx.keyring.decryptString(r.payload_ciphertext, outboxAad(r.id))) as {
+        kind: string;
+        companyName: string;
+        subject: string;
+        lines: string[];
+        url: string;
+        actionLabel: string;
+      }),
+    }));
+  }
+
+  it('email the owners and administrators once when a key expires within 7 days, with its name, prefix and times in the company’s time zone', async () => {
+    const c = await fx.company();
+    await fx.query(`UPDATE app.tenants SET timezone = 'Europe/London' WHERE id = $1`, [
+      c.tenant.id,
+    ]);
+    const admin = await member(c, 'admin');
+    await member(c, 'billing');
+    const owner = await fx.ctx(c, c.owner);
+    const soon = await expiringKey(c, 3 * DAY, 'Orders\nsync');
+    const later = await expiringKey(c, 8 * DAY, 'Later');
+    const forever = await keys.create(owner, {
+      name: 'Forever',
+      scopes: ['contacts.read'],
+      expiresInDays: 0,
+    });
+    const month = await keys.create(owner, {
+      name: 'Month',
+      scopes: ['contacts.read'],
+      expiresInDays: 30,
+    });
+    expect(await due(c.tenant.id)).toEqual([soon.id]);
+    expect(await due(c.tenant.id, 9)).toEqual([soon.id, later.id]);
+    // The window is at most 30 days whatever the caller asks for.
+    expect(await due(c.tenant.id, 365)).toEqual([soon.id, later.id, month.id]);
+
+    const result = await sweep();
+    expect(result.failed).toEqual([]);
+    expect(result.reminded).toBeGreaterThanOrEqual(1);
+    const row = await keyRow(soon.id);
+    expect(row.expiry_reminded_at).not.toBeNull();
+    const sent = await companyNotices(c.tenant.id);
+    const [{ name: companyName } = { name: '' }] = await fx.query<{ name: string }>(
+      'SELECT name FROM app.tenants WHERE id = $1',
+      [c.tenant.id],
+    );
+    // Owners and administrators manage keys; the billing manager, agent and marketer do not.
+    expect(sent.map((n) => n.to).sort()).toEqual([admin.email, c.owner.email].sort());
+    const expected = apiKeyReminderNotice(
+      {
+        name: 'Orders\nsync',
+        keyPrefix: soon.keyPrefix,
+        expiresAt: row.expires_at,
+        createdAt: row.created_at,
+        createdBy: 'Owner',
+        lastUsedAt: null,
+      },
+      'Europe/London',
+    );
+    for (const notice of sent) {
+      expect(notice).toMatchObject({
+        kind: 'tenant.notice',
+        companyName,
+        subject: expected.subject,
+        lines: expected.lines,
+        url: `http://localhost:3000/c/${c.tenant.slug}/settings/api-keys`,
+        actionLabel: 'Open API keys',
+      });
+    }
+    expect(expected.subject).toMatch(/^API key “Orders sync” expires on /);
+    expect(expected.lines[0]).toMatch(/ (GMT|BST)\. From then on/);
+    expect(JSON.stringify(sent)).not.toContain(soon.token);
+
+    // Once: the key is no longer listed, and another sweep sends nothing more.
+    expect(await due(c.tenant.id)).toEqual([]);
+    await sweep();
+    expect(await companyNotices(c.tenant.id)).toHaveLength(2);
+    const listed = await keys.list(owner);
+    expect(listed.find((k) => k.id === soon.id)?.expiryRemindedAt).toEqual(row.expiry_reminded_at);
+    for (const id of [later.id, forever.id, month.id]) {
+      expect(listed.find((k) => k.id === id)?.expiryRemindedAt, id).toBeNull();
+    }
+
+    // A key that comes within 7 days later is reminded then, on its own.
+    await fx.query(`UPDATE app.api_keys SET expires_at = now() + interval '6 days' WHERE id = $1`, [
+      later.id,
+    ]);
+    await sweep();
+    const all = await companyNotices(c.tenant.id);
+    expect(all).toHaveLength(4);
+    expect(all.slice(2).every((n) => n.subject.startsWith('API key “Later” expires on '))).toBe(
+      true,
+    );
+  });
+
+  it('check each key again in its company’s scope: revoked, rotated, expired, reminded or distant keys and companies being deleted get nothing', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const deps = reminderDeps();
+    const revoked = await expiringKey(c, 2 * DAY, 'Revoked');
+    await keys.revoke(owner, { keyId: revoked.id });
+    // Rotating gives the new key the old key's lifetime (here two days, from the fixture step):
+    // the new key is reminded before it expires, the replaced one is not.
+    const rotated = await expiringKey(c, 2 * DAY, 'Rotated');
+    const replacement = await keys.rotate(owner, { keyId: rotated.id, overlapHours: 24 });
+    const now = Date.now();
+    const expired = await pastKey(c, new Date(now - 31 * DAY), new Date(now - DAY));
+    const reminded = await expiringKey(c, 2 * DAY, 'Reminded');
+    await fx.query(`UPDATE app.api_keys SET expiry_reminded_at = now() WHERE id = $1`, [
+      reminded.id,
+    ]);
+    const current = await expiringKey(c, 2 * DAY, 'Current');
+    const today = await expiringKey(c, DAY / 2, 'Today');
+    // Soonest expiry first.
+    const listed = await due(c.tenant.id);
+    expect(listed[0]).toBe(today.id);
+    expect(listed.slice(1).sort()).toEqual([current.id, replacement.id].sort());
+    // The window is at least a day whatever the caller asks for.
+    expect(await due(c.tenant.id, 0)).toEqual([today.id]);
+    expect(await due(c.tenant.id, -3)).toEqual([today.id]);
+
+    for (const id of [revoked.id, rotated.id, expired, reminded.id]) {
+      expect(await remindApiKeyExpiry(deps, c.tenant.id, id), id).toBe(false);
+    }
+    // Checked against the worker's clock too: not yet within 7 days, or expired meanwhile.
+    const { expires_at: expiresAt } = await keyRow(current.id);
+    const at = (ms: number): Clock => ({ now: () => new Date(expiresAt.getTime() + ms) });
+    expect(await remindApiKeyExpiry(reminderDeps(at(-8 * DAY)), c.tenant.id, current.id)).toBe(
+      false,
+    );
+    expect(await remindApiKeyExpiry(reminderDeps(at(1_000)), c.tenant.id, current.id)).toBe(false);
+    expect(await remindApiKeyExpiry(deps, c.tenant.id, uuidv7())).toBe(false);
+    // A key id is looked up in the company's own scope only.
+    const other = await fx.company();
+    expect(await remindApiKeyExpiry(deps, other.tenant.id, current.id)).toBe(false);
+    expect(await companyNotices(c.tenant.id)).toEqual([]);
+    expect(await companyNotices(other.tenant.id)).toEqual([]);
+    for (const id of [revoked.id, rotated.id, expired, current.id]) {
+      expect((await keyRow(id)).expiry_reminded_at, id).toBeNull();
+    }
+
+    expect(await remindApiKeyExpiry(deps, c.tenant.id, current.id)).toBe(true);
+    expect(await remindApiKeyExpiry(deps, c.tenant.id, current.id)).toBe(false);
+    expect(await remindApiKeyExpiry(deps, c.tenant.id, replacement.id)).toBe(true);
+    const sent = await companyNotices(c.tenant.id);
+    expect(sent.map((n) => n.subject)).toEqual([
+      expect.stringMatching(/^API key “Current” expires on /),
+      expect.stringMatching(/^API key “Rotated” expires on /),
+    ]);
+
+    // Suspended and restricted companies' keys still read, so they are reminded; the keys of a
+    // company being deleted no longer work, so they are not.
+    const statuses = ['suspended', 'restricted', 'pending_deletion'] as const;
+    const companies = await Promise.all(statuses.map(() => fx.company()));
+    const statusKeys = [];
+    for (const [i, status] of statuses.entries()) {
+      const company = companies[i]!;
+      statusKeys.push(await expiringKey(company, 2 * DAY));
+      await fx.query(`UPDATE app.tenants SET status = $2 WHERE id = $1`, [
+        company.tenant.id,
+        status,
+      ]);
+    }
+    const [suspended, restricted, deleting] = companies as [Company, Company, Company];
+    expect(await due(suspended.tenant.id)).toEqual([statusKeys[0]!.id]);
+    expect(await due(restricted.tenant.id)).toEqual([statusKeys[1]!.id]);
+    expect(await due(deleting.tenant.id)).toEqual([]);
+    expect(await remindApiKeyExpiry(deps, deleting.tenant.id, statusKeys[2]!.id)).toBe(false);
+    expect((await keyRow(statusKeys[2]!.id)).expiry_reminded_at).toBeNull();
+    expect(await remindApiKeyExpiry(deps, suspended.tenant.id, statusKeys[0]!.id)).toBe(true);
+    expect(await remindApiKeyExpiry(deps, restricted.tenant.id, statusKeys[1]!.id)).toBe(true);
+    expect(await companyNotices(deleting.tenant.id)).toEqual([]);
+  });
+
+  it('send one reminder when sweeps run at once', async () => {
+    const c = await fx.company();
+    const key = await expiringKey(c, 2 * DAY);
+    const deps = reminderDeps();
+    const results = await Promise.all([
+      remindApiKeyExpiry(deps, c.tenant.id, key.id),
+      remindApiKeyExpiry(deps, c.tenant.id, key.id),
+    ]);
+    expect(results.filter(Boolean)).toHaveLength(1);
+    const second = await expiringKey(c, 2 * DAY, 'Second');
+    const sweeps = await Promise.all([sweep(), sweep()]);
+    expect(sweeps.flatMap((s) => s.failed)).toEqual([]);
+    expect((await keyRow(second.id)).expiry_reminded_at).not.toBeNull();
+    // One owner: one email per key.
+    expect(await companyNotices(c.tenant.id)).toHaveLength(2);
+  });
+
+  it('keep the reminder mark once it is set', async () => {
+    const c = await fx.company();
+    const key = await expiringKey(c, 2 * DAY);
+    expect(await remindApiKeyExpiry(reminderDeps(), c.tenant.id, key.id)).toBe(true);
+    const scope = authorizedTenantScope(c.tenant.id, c.owner.id);
+    const attempt = (statement: ReturnType<typeof sql>) =>
+      fx.dbs.app.run(scope, (tx) => tx.execute(statement));
+    await expect(
+      attempt(sql`update app.api_keys set expiry_reminded_at = null where id = ${key.id}::uuid`),
+    ).rejects.toThrow(/expiry reminder is sent once/);
+    await expect(
+      attempt(sql`update app.api_keys set expiry_reminded_at = now() where id = ${key.id}::uuid`),
+    ).rejects.toThrow(/expiry reminder is sent once/);
+    // Other changes to the key still work: revoking it, for example.
+    await keys.revoke(await fx.ctx(c, c.owner), { keyId: key.id });
+    expect((await keyRow(key.id)).expiry_reminded_at).not.toBeNull();
   });
 });

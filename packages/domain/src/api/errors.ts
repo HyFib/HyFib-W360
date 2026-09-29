@@ -41,15 +41,16 @@ export function apiErrorResponse(
   };
 }
 
-/** Transport-level errors (before any service runs). */
+/** Transport-level errors (before any service runs), with a finer reason when there is one. */
 export const apiRequestError = (
   status: number,
   code: string,
   message: string,
   requestId: string,
+  reason?: string,
 ): { status: number; body: ApiErrorBody } => ({
   status,
-  body: { error: { code, message }, requestId },
+  body: { error: { code, message, ...(reason ? { reason } : {}) }, requestId },
 });
 
 /** Deletes expired idempotency keys across companies (the messaging sweep's retention). */

@@ -77,9 +77,15 @@ jobs:
   e2e:
     name: End-to-end (Chromium, Firefox, WebKit, mobile)
     runs-on: ubuntu-24.04
-    # 124 tests run one at a time across four browser projects: about 3.5 minutes of set-up and 25
-    # of tests, so one retry of a long test (the cart reminder test allows 5 minutes) must still fit.
-    timeout-minutes: 45
+    # 176 tests run one at a time across four browser projects: 168 took 43.9 minutes on 3924bfe and
+    # 44.9 on 3978329, all on their first attempt. The usage, settlement and API key specs each wait
+    # per project for a worker's minute sweep to send an email: the rate change notice (since
+    # 3978329) and the key expiry reminder up to 90 seconds, the reconciliation alert, which goes to
+    # every platform owner, up to 150.
+    # Runners vary (148 tests took 33.5 minutes on b2b7614; 160 took 45.9 on fb8efa6, including a
+    # 4-minute timeout and its retry), and one retry of a long test (the cart reminder test allows 5
+    # minutes) must still fit on a slow runner.
+    timeout-minutes: 80
     services:
       postgres:
         image: postgres:18-alpine
@@ -113,6 +119,8 @@ jobs:
       E2E_GRAPH_PORT: '4010'
       RAZORPAY_API_BASE_URL: http://127.0.0.1:4020
       E2E_RAZORPAY_PORT: '4020'
+      # Paying for plans (ADR-063) against the stand-in's subscriptions; off unless set.
+      RAZORPAY_SUBSCRIPTIONS_ENABLED: 'true'
       # Automation web requests reach a local target started by the test: loopback egress is
       # allowed for APP_ENV=local|test only, and the name below resolves to 127.0.0.1 (hosts file).
       W360_EGRESS_ALLOW_LOOPBACK: 'true'
@@ -166,7 +174,7 @@ jobs:
       - run: pnpm exec playwright install --with-deps chromium firefox webkit
       # Stops before the job's limit, so a run that overruns still gets the steps below.
       - run: pnpm test:e2e
-        timeout-minutes: 40
+        timeout-minutes: 70
       - if: failure() || cancelled()
         run: cat "$RUNNER_TEMP/web.log" "$RUNNER_TEMP/worker.log"
       # Test data only: what the job queues and the stores held when the suite failed.

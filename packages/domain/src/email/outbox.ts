@@ -20,6 +20,20 @@ export function outboxAad(outboxId: string): string {
   return `email_outbox:${outboxId}`;
 }
 
+/**
+ * Emails someone is waiting for on a page (confirming an address, resetting a password) go ahead of
+ * notices in the email queue, which fetches higher priorities first. Otherwise they wait behind any
+ * burst of notices (one email per recipient) the queue is working through.
+ */
+const WAITED_FOR: ReadonlySet<string> = new Set(['auth.verify_email', 'auth.reset_password']);
+
+export const EMAIL_PRIORITY = { waitedFor: 10, notice: 0 } as const;
+
+/** The email job's priority for an email of this kind. */
+export function emailPriority(kind: string): number {
+  return WAITED_FOR.has(kind) ? EMAIL_PRIORITY.waitedFor : EMAIL_PRIORITY.notice;
+}
+
 export async function enqueueEmail(
   deps: OutboxDeps,
   tx: Tx,
@@ -44,7 +58,7 @@ export async function enqueueEmail(
       actorUserId: null,
       ref: id,
     }),
-    { singletonKey: id },
+    { singletonKey: id, priority: emailPriority(payload.kind) },
   );
   return id;
 }

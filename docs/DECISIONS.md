@@ -1351,8 +1351,9 @@ starts the next run until the company is finished. A run:
 2. cleans up at providers, recording every outcome (a failure is recorded, and named in the final
    email, but does not stop the deletion): unsubscribes HyFib's app from each WhatsApp Business
    Account (`DELETE /{WABA-ID}/subscribed_apps`, in Meta's official OpenAPI description), uninstalls
-   HyFib's Shopify app (`appUninstall`) and deletes HyFib's WooCommerce webhooks, and deletes
-   HyFib's card mandate token at Razorpay;
+   HyFib's Shopify app (`appUninstall`) and deletes HyFib's WooCommerce webhooks, cancels the
+   company's plan subscription at Razorpay at once (ADR-063, so nothing more is charged), and
+   deletes HyFib's card mandate token at Razorpay;
 3. deletes the company's rows through `ops.delete_tenant_data`, a batch at a time, each batch its
    own transaction, following a fixed order (`ops.tenant_deletion_steps`: children before parents;
    the two tables of the one foreign-key cycle, automations and their versions, in one statement;
@@ -1368,7 +1369,8 @@ starts the next run until the company is finished. A run:
 
 **Kept after deletion:** the tombstone company row; billing and tax records (wallet, ledger,
 top-ups, card mandates with only safe card metadata, auto-recharge attempts, the Razorpay customer
-reference and billing contact); plan history (`app.tenant_plans`); the deletion register; platform evidence (platform
+reference and billing contact); plan history (`app.tenant_plans`), plan subscriptions and plan
+payments (ADR-063); the deletion register; platform evidence (platform
 audit log, support grants, security events); and people's own accounts, which may belong to other
 companies. Everything else is deleted, including members, invitations, the company audit log,
 contacts, consent history, conversations, messages, templates, campaigns, automations, CRM, growth,
@@ -1573,3 +1575,462 @@ and normally take 5–7 working days (R-077, R-079). The email and the pages say
 **Not built:** refunds asked for by companies, refunds of spent credit, refunds started here for a
 company being deleted, instant refunds (`optimum`), several refunds of one top-up at once, a
 platform-wide refunds list, and the daily reconciliation report (P5-05).
+
+## ADR-059 Daily settlement reconciliation with Razorpay: every settled transaction matched against HyFib's records, missed payments and refunds recorded through the usual paths, the rest for platform owners (2026-09-28)
+
+Decision: every day the worker reads Razorpay's settlement report for the previous day
+(`GET /v1/settlements/recon/combined`, R-110, R-111), a page of up to 1,000 transactions at a
+time, and matches each transaction against HyFib's records. The result is kept as a run (one per
+day) with an item per transaction, for platform staff.
+
+**Matching.** The report's `entity_id`, `payment_id` and `order_id` are used only to look up
+HyFib's own records, like the ids in a webhook:
+
+| Transaction       | HyFib's record                                                            | Result                                                                                                                                                        |
+| ----------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| payment           | a top-up credited by this payment                                         | matched, or `amount_differs`                                                                                                                                  |
+| payment           | a card mandate's authorisation payment                                    | matched                                                                                                                                                       |
+| payment           | a top-up's order, not credited by this payment                            | fetched and applied as a webhook would be: credited now (recorded), or `second_payment` (another payment paid the top-up), `amount_differs` or `not_captured` |
+| payment           | a mandate's authorisation order, another payment                          | for review (`mandate_payment`)                                                                                                                                |
+| refund            | a refund HyFib recorded (ledger key `refund:<id>`)                        | matched, or `amount_differs`                                                                                                                                  |
+| refund            | a mandate's authorisation refund, or a refund of an authorisation payment | matched                                                                                                                                                       |
+| refund            | a refund of a payment that credited a top-up, not recorded                | fetched and recorded as `refund.processed` would be (recorded), or `refund_not_processed` or `refund_exceeds_payment`                                         |
+| refund            | a refund of another payment on a top-up's order (never credited)          | matched                                                                                                                                                       |
+| payment or refund | none                                                                      | not HyFib's                                                                                                                                                   |
+| transfer          | none (HyFib does not use Route)                                           | not HyFib's                                                                                                                                                   |
+| adjustment        | none                                                                      | for review                                                                                                                                                    |
+
+A transaction with an unknown type, another currency or fields HyFib cannot read is listed for
+review too, and so is a payment or refund HyFib matched or recorded that carries a `dispute_id`: the
+report documents only the dispute's id, not which transaction carries a chargeback's deduction
+(R-111). A missed payment or refund with a dispute is still recorded first, so the same transaction
+reads the same on every run; a transaction already waiting for a person keeps its own reason and
+shows the dispute. Lost chargebacks are still recorded from `payment.dispute.lost`, fetched first.
+
+**What the reconciliation records by itself** goes through the existing paths: `applyPaymentById`
+credits only a payment fetched as captured, through `app.billing_credit_topup` (exactly once), and
+a refund is fetched and recorded through `app.billing_record_refund`, which also completes a staff
+refund request (ADR-058). This is the backstop for webhooks that never arrived. The top-up sweep
+stops checking an order after 24 hours, and nothing checked refunds, so a lost `refund.processed`
+left refunded credit spendable. Nothing else changes automatically. A person looks at amounts that
+differ, second payments, adjustments, disputes and transactions that are not HyFib's; refunds are
+made in the Razorpay Dashboard, and HyFib's records change only through the normal paths.
+
+**The other direction.** Paid top-ups whose payment has not appeared in any settlement 7 days after
+the payment are listed, oldest first. A top-up is listed only when every day from its payment to 7
+days later has a completed run; the page counts the days without one. Seven days is HyFib's own
+threshold: settlement is normally T+2 working days (R-082).
+
+**Runs.**
+
+- The minute billing sweep creates the run for the previous day in India from 06:00 India time. It
+  also creates runs for any of the 7 days before that has none, but never for days before the first
+  day ever reconciled, so turning this on does not backfill history. The documentation does not say
+  which time zone the report's day uses (R-110); HyFib asks for India's calendar day.
+- A platform owner can reconcile an earlier day (up to a year back) or run a day again, with a
+  reason in the platform audit log.
+- One signed `billing.settlement-recon` job per run. A claim takes a 15-minute lease and a new
+  attempt number, and a stale attempt cannot write. Reading the report is safe to repeat: a failure
+  that may pass (timeout, lost response, 429, 5xx) is retried after 5, 15, 60, 180 and 360 minutes.
+  After 6 attempts, or on any other 4xx (keys, parameters), the run fails with the error and waits for a
+  platform owner.
+- Items are kept per run, type and transaction id: running a day again keeps what an earlier
+  attempt recorded and people's resolutions. Items Razorpay no longer lists for the day are removed
+  when an attempt completes.
+
+**Stored per item:** the transaction id and type, amount, debit, credit, fee and tax, currency, on
+hold, settled, the settlement id and UTR, times, the payment, order and dispute ids and the method;
+the match (company, top-up, HyFib's amount), status and reason; a resolution (who, when, a note).
+Not stored: notes, description, order receipt and card fields, which can carry another
+integration's customer data. Runs total fees and tax for information; the platform bears
+Razorpay's fee (ADR-058).
+
+**Access.** Platform owners and operators read runs: payments to HyFib (company names, amounts,
+provider ids), no company content. Platform owners run days and resolve items with a note, in the
+platform audit log. The worker has no privileges on the tables: it writes through SECURITY DEFINER
+functions that check the attempt, and cannot read them back.
+
+**Retention:** runs and items are billing records, kept with the ledger.
+
+**Not built:** alerts and emails (since ADR-066, emails to platform owners), a CSV export of a run, reconciling settlements with bank
+statements (UTR), fee and tax accounting, companies' own Razorpay accounts, automatic handling of
+adjustments, disputes and transfers, and instant settlements.
+
+## ADR-060 Usage and rates for companies: Meta's rates in force, the next change and this month's estimate, read-only (2026-09-28)
+
+Context: companies are billed by Meta directly (ADR-011), and HyFib estimates those charges from
+the rate cards platform staff enter from Meta's published cards (ADR-028). Estimates already use
+the card in force at the time they price: a campaign's at its scheduled time, the campaign runner's
+at sending, Reports' at each message's time. But a company could not see which rates apply, or that
+Meta's rates change on a given day (Meta's cards change on 2026-10-01, research M-075, and M-067
+records service messages as free until 2026-09-30), and billing managers, who have `billing.read`
+but not `reports.read`, could not see any estimate.
+
+Decision: Billing → Usage and rates, for owners, administrators and billing managers
+(`billing.read`), read in one repeatable-read, read-only snapshot:
+
+- **The billing currency** chosen in Settings → Messaging (the currency Meta bills the company's
+  WhatsApp account in). Without it the page says where to choose it and shows no rates.
+- **Rates in force:** the published card for that currency with the latest effective time not after
+  now: its effective time, the source staff copied it from (Meta's rate card page), and the list
+  price (volume tier 0) of each market and pricing category. A category a market has no price for is
+  shown as not priced, never as zero.
+- **The next change:** the published card with the earliest effective time after now, with the date,
+  every price that changes (old and new, and the difference), prices that appear and prices that go
+  away. When no card is in force yet, the next card is shown as the rates from its date.
+- **This month so far:** in the company's time zone, the delivered messages, how many Meta marked
+  billable, free and not yet priced, and the estimated charges by category and in total, computed
+  by the same function as Reports → Estimated Meta charges (ADR-028), with the same reasons for
+  messages that cannot be priced. Members who can read reports get a link to the full report.
+
+Drafts and withdrawn cards are never shown (a withdrawal corrects a card; the correction is a new
+published card). The page is read-only: nothing is stored, and nothing is posted to the ledger or
+taken from service credit. It says that Meta bills the company directly and that estimates are upper
+bounds (list price, every billable message counted, volume tiers not applied).
+
+Access: billing managers see aggregate counts and estimates of delivered messages by pricing
+category, without any message, number, contact or market breakdown: a subset of what Reports shows
+`reports.read` holders.
+
+Not built: alerts or emails about an upcoming change (since ADR-065, an email a week before), estimates per number or campaign on this page
+(campaigns show their own), a history of past cards, and exact charges (Meta's invoice is
+authoritative; reconciling with `pricing_analytics` stays in the backlog, ADR-028).
+
+## ADR-061 API access and monthly API requests by plan (2026-09-28)
+
+Context: the public API (ADR-052) limits requests per key and per company per second, but not per
+month, and every plan includes it. Plans (ADR-051) limit seats, numbers, teams, live automations and
+automation runs; API quotas and API access by plan were left for later (backlog P5-01, P5-08).
+
+Decision: one more limit per plan version, `api_requests_monthly`:
+
+- **Meaning:** empty (NULL) for no monthly limit, 0 when the plan leaves the public API out, or the
+  requests a company may make per monthly usage period (the plan's usage anchor, as for automation
+  runs). A new column, so versions published before it keep NULL, which is what they gave: the API
+  without a monthly limit. Published versions stay unchangeable (the guard compares the new column
+  too). Complimentary access has no limit. No add-on packs yet.
+- **What counts:** every request authenticated with the company's API key that passes the key and
+  company rate limits, counted before the body is read or the request handled, so a malformed
+  request or an idempotent replay counts too; a failed authentication or a rate-limited request does
+  not. Counted in `app.usage_counters` (metric `api_requests`) for the period, atomically and never
+  beyond the limit, and counted without a limit too, so companies and staff see the month's use.
+- **Refusals:** a plan without the API gets 403 `forbidden` with reason `not_in_plan` on every
+  request, and creating or rotating keys is refused with the same message (existing keys stay
+  listed and can be revoked). When the month's requests are used, requests get 429 `rate_limited`
+  with reason `quota_exceeded` and `Retry-After` counting the seconds until the next period. The
+  OpenAPI document describes both.
+- **Notice:** the minute plan sweep emails the billing managers once per period when the month's API
+  requests reach the limit (`ops.api_quota_reached`, alongside the automation run notice).
+- **Where it shows:** the Billing plan card and Settings → API keys (the month's use and limit, or
+  that the plan does not include the API, with creating keys disabled); the platform plan form and
+  page; the platform company page.
+
+Not built: packs of extra requests, per-key or per-endpoint quotas, alerts before the limit, and
+quotas for outgoing webhooks (deliveries are not API requests).
+
+## ADR-062 A warning before a monthly limit is reached (2026-09-28)
+
+Context: automation runs (ADR-051) and public API requests (ADR-061) are limited per monthly usage
+period. The billing managers are emailed once the month's allowance is used up, when automations
+have already stopped starting or the API is already refusing requests; nothing tells them earlier.
+
+Decision:
+
+- **When:** once a counter reaches 80% of its limit (rounded up) while still below it, the billing
+  managers are emailed once for that counter, that is once per company, metric and period. A limit
+  so small that 80% rounds up to the limit itself (1 to 4) gets no warning: the used-up notice is the
+  first. A company that jumps from below 80% to the limit between two sweeps gets only the used-up
+  notice.
+- **How:** `ops.usage_warnings_due` lists counters of active companies with a limit, at or over the
+  threshold, below the limit, neither warned nor announced; the limit is read from the company's
+  current plan (with run packs for automation runs). The minute plan sweep then, in the company's
+  scope, locks each counter (`SELECT … FOR UPDATE` while `warned_at` is empty), checks it again
+  against the company's current limit and period, and sets `warned_at` in the transaction that
+  queues the email, so of two sweeps that listed a counter only one sends it.
+- **The used-up notices work the same way** (a fix to ADR-051 and ADR-061, which set `notified_at`
+  first and emailed without checking the period): a counter of an earlier usage period is marked
+  without an email, since a lowered limit or a new paid period could otherwise make last period's
+  count look like this month's; a counter no longer due under the current limit, because the limit
+  changed after the sweep listed it, is left unmarked for a later sweep to decide.
+- **Where it shows:** the email says how much is used, what happens at the limit and when the next
+  period starts; the Billing plan card marks a counter at or over the threshold as nearly used.
+
+Not built: a threshold chosen per company or per member, warnings for seats, numbers, teams or live
+automations (they refuse additions, they do not run out during the month), and in-app notices.
+
+## ADR-063 Paying for plans with Razorpay Subscriptions (2026-09-28)
+
+Context: ADR-051 left charging for plans out, so HyFib staff set paid periods, for example after an
+invoice is paid outside HyFib. ADR-012 chose Razorpay Subscriptions for plans. Companies cannot pay
+for their plan in HyFib, and a lapsed plan restricts them until staff act.
+
+Decision:
+
+- **What a company pays for:** the plan version it is on, with the add-ons HyFib staff set: the
+  version's price plus extra seats, extra numbers and run packs at the version's prices, every 1, 3
+  or 12 months as the version says (add-on prices are per billing interval, like the price). The
+  plan form says prices are before tax, so platform owners set the tax added to plan prices (a
+  percentage with up to two decimals, 0 to 50%, stored in basis points, with a reason in the
+  platform audit log); until it is set, paying is not offered. Each subscription keeps its subtotal,
+  tax and total, so a later rate change never changes it. A company can start paying while
+  trialing, past due, or after its plan expired or was canceled, on a published version whose total
+  is at least ₹1 (Razorpay's minimum); not while a paid period staff set is running, and not with
+  complimentary access. Changing the plan or add-ons stays with staff. Razorpay documents that, under
+  RBI's card mandate rules, a charge above ₹15,000 on an Indian card needs the payer's approval
+  through their bank every time, so the page says so for such totals.
+- **Starting:** owners and billing managers (`billing.manage`) with a recent sign-in (ADR-056), one
+  start at a time per company (an advisory lock). HyFib records its subscription first
+  (write-ahead), then creates a Razorpay plan for the total (`POST /v1/plans`: period `monthly`,
+  `quarterly` or `yearly`, interval 1) and a subscription (`POST /v1/subscriptions`: five years of
+  cycles, so `total_count` 60, 20 or 5, within Razorpay's ten-year limit; `customer_notify` on so
+  Razorpay tells the payer about charges, failures and card updates; the authorisation open for one
+  hour through `expire_by`). Checkout opens with the `subscription_id`. The subscription starts at
+  once: the first charge is taken in Checkout and the paid period starts then, so the rest of a
+  trial is not carried over, and the page says so. An unfinished Checkout is reopened while its
+  hour lasts; after that it is replaced, and the old one is cancelled at Razorpay so it can never be
+  authorised. A creation that fails or gets no answer marks ours failed (the sweep does this after
+  ten minutes for one that never finished); a Razorpay subscription created anyway cannot be
+  authorised after `expire_by`.
+- **Razorpay decides, HyFib follows:** the browser, the webhook payload and notes are never enough.
+  Checkout's signature (`payment_id|subscription_id`, checked against our stored subscription id)
+  only prompts a fetch. Every `subscription.*` event, the Checkout confirmation, the sweep and a sync
+  before a period-end transition fetch the subscription, and its invoices only while Razorpay counts
+  more paid cycles (`paid_count`) than HyFib recorded. A paid invoice becomes a plan payment (payment
+  id unique) only when it is for our subscription, has a billing period, was paid in INR for exactly
+  our amount, and its payment fetched from Razorpay is captured for the same amount. A subscription
+  that ended stays ended, a status HyFib does not know keeps ours, and an answer with fewer paid
+  cycles than we stored (an older read) changes nothing. While the subscription is active and a plan
+  payment covers its current cycle, a definer function in the company's scope makes the plan state
+  active for exactly Razorpay's `current_start` to `current_end`, links it to the subscription and
+  writes the company's audit log; a new paid period restarts the monthly usage period, as when staff
+  set one (ADR-051). A payment covers the cycle that holds the middle of its invoice's billing
+  period, because Razorpay's example invoices start and end at midnight India time while the
+  subscription's cycle has exact times. A subscription whose plan version or add-ons no longer match
+  the company's plan state is never applied.
+- **Missed events:** the sweep re-reads each live subscription daily, and hourly once its paid cycle
+  has ended (except when Razorpay has stopped retrying), so a missed renewal event costs at most an
+  hour after a period ends; the plan sweep syncs a subscription again just before moving its plan
+  state at the end of a period.
+- **Failed charges:** Razorpay retries a failed charge (`pending`) and then stops (`halted`). HyFib
+  shows it, emails the billing managers when it happens, and lets time decide the plan state: at the
+  end of the paid period the version's grace days (past due) and expiry apply as before, with
+  wording for a company that pays by subscription. A later successful charge (after the payer
+  updates the card through Razorpay's email) makes the plan active again. Billing managers are also
+  emailed when a payment is recorded.
+- **Cancelling:** owners and billing managers (recent sign-in) cancel an active subscription at the
+  end of the paid period (`cancel_at_cycle_end`), and one not yet charged at once; the plan then ends
+  as canceled when the period ends, without grace days, and the billing managers are emailed.
+  Platform owners can cancel a company's subscription at once, with a reason in the platform audit
+  log, for example before changing its plan; the paid period stands. Staff plan changes are refused
+  while a company has a subscription that can still be authorised or charged. Deleting a company
+  cancels its subscription at Razorpay first, and the outcome is kept with the deletion (ADR-055).
+- **Other Razorpay events:** a subscription charge also sends `payment.*` events. A payment on no
+  order of HyFib's whose invoice belongs to one of our subscriptions syncs that subscription instead
+  of being quarantined as an unknown order; an event for a subscription HyFib does not know is
+  quarantined. The daily settlement reconciliation (ADR-059) matches recorded plan payments by
+  payment id, looks up unknown payments the same way (recording a missed one), and leaves refunds of
+  plan payments to a person, since HyFib does not refund them.
+- **Flag:** `RAZORPAY_SUBSCRIPTIONS_ENABLED`, off by default: Razorpay Subscriptions (and Flash
+  Checkout, which Razorpay requires for them) must be activated on the account, and the tax
+  treatment of plan prices needs review (ADR-012). Events for existing subscriptions are processed
+  either way.
+
+Uncertain, from Razorpay's documentation and Node SDK only (no test-mode account was available):
+whether an invoice's `billing_start`/`billing_end` always fall inside the subscription's cycle as
+the midpoint rule assumes; how soon after a charge `paid_count` and the paid invoice can be fetched;
+whether every subscription charge's payment carries `invoice_id` (one that does not stays
+quarantined for a person); and how a quarterly plan behaves on domestic cards, whose mandates
+Razorpay registers "as presented" for frequencies other than weekly, monthly and yearly. The
+release checklist has the test-mode checks.
+
+Not built: billing that starts at the end of a trial, self-serve plan and add-on changes with
+proration, pausing, offers, plan payment receipts (since ADR-064) and GST invoices, refunds of plan payments, and
+emails about a subscription beyond charges, failures and endings.
+
+## ADR-064 Receipts for plan payments (2026-09-29)
+
+Context: ADR-063 records each plan payment Razorpay charges for a company's subscription, and the
+Billing page lists them, but a company had nothing to keep for its records, while every top-up has
+a receipt (ADR-057).
+
+Decision: each recorded plan payment has a **receipt page** (`/c/<company>/billing/plan-payments/<id>`),
+read with `billing.read` in the company's scope like top-up receipts. It shows:
+
+- the receipt number: Razorpay's invoice id for the charge (`inv_…`), which Razorpay also shows;
+- the plan version and billing interval, and the add-ons the subscription covers;
+- the billing period of Razorpay's invoice, in the company's time zone;
+- the subscription's subtotal, tax rate and tax, and the amount paid. The breakdown is shown only
+  when the payment is exactly the subscription's total, as every recorded payment is (ADR-063);
+- when it was paid and the method Razorpay reported, the Razorpay payment, invoice and subscription
+  ids, the company's name and billing email.
+
+Like top-up receipts, it says it is a payment confirmation and **not a tax invoice**; the operator's
+legal name, address and GSTIN are not configured, and tax invoices wait for tax review. HyFib does
+not refund plan payments, so a refund made in Razorpay's Dashboard is not shown (the daily
+reconciliation leaves it to a person). Nothing is stored: the page is computed from the plan payment
+and its subscription. The payments table in Billing links each payment to its receipt, and the
+payment-received email links to the receipt of the payment that paid the new period.
+
+Not built: tax invoices, credit notes, receipts in platform pages, and plan payments in the monthly
+service-credit statements (they never touch the wallet).
+
+## ADR-065 A notice before Meta's rates change (2026-09-29)
+
+Context: Billing → Usage and rates (ADR-060) announces the next published rate card for the
+company's billing currency, but only to someone who opens the page. Meta's cards change on
+2026-10-01 (research M-075), and companies plan campaigns around their costs.
+
+Decision:
+
+- **Who and when:** once per company and published card, the company's billing managers (owners
+  and the billing role, as for other billing notices) are emailed when a published card for the
+  company's billing currency (Settings → Messaging) takes effect within the next 7 days. Companies
+  without a billing currency, and companies that are suspended, restricted or being deleted, get
+  none.
+- **What:** the date and time the card takes effect in the company's time zone; how many prices it
+  changes, adds and no longer lists compared with the published card in force just before it (for
+  a second upcoming card, the first), or that it is the first card for the currency; up to three
+  of the largest changes (by relative size; new and dropped prices last); that HyFib's estimates
+  switch at that time and that Meta bills the company directly; a link to Billing → Usage and rates.
+- **Once:** `app.rate_change_notices` (company, card, currency, effective time, when sent; unique
+  per company and card; append-only) is written in the transaction that queues the email. The
+  minute billing sweep lists due pairs through `ops.rate_change_notices_due` (a definer function
+  returning ids only, owned by `w360_definer`, which may read only published cards' id, currency,
+  status and effective time, the companies' billing currencies and which card each company was
+  told about). Each pair is then checked again in the company's own scope before anything is
+  written, so a card withdrawn, a currency changed or a company suspended after the listing sends
+  nothing; two sweeps at once send one email (the unique key). A failure (an email that cannot be
+  written) records nothing, and the next sweep tries again; the other companies are not held up.
+- A card published less than 7 days before it takes effect is announced at once; a card published
+  after its effective time is not announced (it is already in force). A withdrawn card sends
+  nothing more; its correction is a new card with its own notice. A company that chooses a billing
+  currency later is told about the cards still to come within the week.
+- Records are exported with the company and deleted with it (ADR-055). Nothing is charged or
+  posted; the notice is informational.
+
+Not built: a setting to turn the notice off, notices for currencies other than the billing
+currency, notices to other roles, and in-app banners (the Usage and rates page already shows the
+next change).
+
+## ADR-066 Alerts for reconciliation findings (2026-09-29)
+
+Context: the daily settlement reconciliation (ADR-059) leaves what does not match on Platform →
+Reconciliation for a platform owner, and a day can fail until an owner runs it again, but nobody
+hears of either unless they open the page. Money that moved without HyFib's records following waits
+unseen.
+
+Decision:
+
+- **When:** a day's run finishes with transactions still waiting for a person (does not match,
+  needs a look, not HyFib's; not resolved), or fails (a refusal, or six attempts). Retrying days,
+  days where everything matched or was recorded, and days whose transactions were all resolved
+  first send nothing.
+- **Who:** platform owners, who resolve transactions and run days again (operators only read), by
+  their account email. While there is no platform owner nothing is marked, the worker logs a
+  warning, and the email goes out once there is one.
+- **What:** one email per sweep listing the days (up to 10, oldest first): for each, how many
+  transactions wait by status, or that the check failed with its last error (cut to 400
+  characters); a link to the day, or to the reconciliation page for several days. It names no
+  transaction, amount or company: those stay on the page, behind platform sign-in and two-factor
+  authentication.
+- **Once:** each finished attempt is emailed once. `ops.settlement_recon_runs.alerted_attempt`
+  records the attempt (the run's `attempt_seq`) emailed; the minute billing sweep lists attempts
+  not emailed yet through `ops.settlement_recon_alerts_due` (ids only) and marks each through
+  `ops.settlement_recon_mark_alerted`, which returns what the email says, counted under the run's
+  row lock, in the transaction that queues the emails. Two sweeps at once send one email; a run
+  that moved on to a new attempt is not marked for the old one. Running a day again is a new
+  attempt, and its outcome is emailed again. The recipients come from
+  `ops.settlement_recon_alert_recipients`. All three are SECURITY DEFINER functions executable by
+  the worker's role only. Runs finished before migration 0039 are marked as emailed.
+- Emails go through the encrypted outbox as a new `platform.notice` kind, not tied to a company.
+
+Not built: alerts for paid top-ups that no settlement shows (the reconciliation page lists them),
+a digest schedule or thresholds, alerts to other channels (chat, pager), and alerts for other
+platform conditions (the operations console shows them).
+
+## ADR-067 Reminders before API keys expire (2026-09-29)
+
+Context: API keys (ADR-052) are created to expire after 30, 90 or 365 days, or never. When a key
+expires, the public API refuses the integration using it without warning; the expiry shows only on
+Settings → API keys, which nobody opens while an integration works.
+
+Decision:
+
+- **Which keys:** a key that can still be used (not revoked, not expired), was not rotated, and
+  expires within the next 7 days. A rotated key is left out: its shortened expiry (at most 72 hours
+  of overlap) was chosen by whoever rotated it, and the new key is reminded in its turn. Keys that
+  never expire need no reminder.
+- **Who:** the company's active owners and administrators, the roles that manage keys
+  (`developer.manage`), as for disabled webhook endpoints. Companies being deleted get none (their
+  keys no longer work); suspended and restricted companies do, because their keys still read.
+- **What:** the key's name and public prefix (never a token, which HyFib does not keep), when it
+  expires in the company's time zone, who created it and when, when it was last used or that it
+  has not been used, how to rotate it (same name, scopes and expiry period, up to 72 hours of
+  overlap), and a link to Settings → API keys. The key's name is put on one line for the subject.
+- **Once:** `app.api_keys.expiry_reminded_at` records when the reminder was queued; the key's guard
+  keeps it once set. The minute messaging sweep lists due keys through
+  `ops.api_key_expiry_reminders_due` (a definer function returning company and key ids only,
+  executable by the runtime role only, over a partial index), then locks and checks each key again
+  in its company's own scope before marking it in the transaction that queues the emails: a key
+  revoked, rotated or expired after the listing, or a company being deleted, gets nothing, and two
+  sweeps at once send one reminder. A failure rolls back and the next sweep tries again; other keys
+  are not held up. An expiry can only come sooner, and only through rotation, so a key is reminded
+  at most once.
+- Settings → API keys marks keys that expire soon and says when the reminder was emailed. The mark
+  is exported with the company's keys and deleted with them (ADR-055).
+
+Not built: a second reminder closer to the expiry, reminders to other members or by other channels,
+extending a key's expiry (rotation is the way to renew a key), and alerts when an expired key is
+still being presented.
+
+## ADR-068 Tested API rate limits, and full token buckets deleted (2026-09-29)
+
+Context: the public API's rate limits (ADR-052: failed authentication per client address, then each
+request per key and per company) run on PostgreSQL token buckets (`ops.rate_limit_buckets`,
+migration 0003), and no automated test exercised them or the bucket itself. Buckets were never
+deleted: every API key, company, WhatsApp number and client address ever limited kept a row, and
+failed-authentication buckets are keyed by the client's address, so addresses were kept without
+end (migration 0003's note said keys were only ids).
+
+Decision:
+
+- **Full buckets are deleted.** A bucket whose tokens, refilled for the time since its last use,
+  reach its capacity limits nothing and behaves exactly like a missing one: the next request starts
+  a full bucket and takes a token from it. The minute messaging sweep deletes such buckets through
+  `ops.purge_rate_limit_buckets` (SECURITY DEFINER, executable by the runtime role only; the definer
+  role may select and delete buckets, and the runtime role still cannot delete them). A bucket taken
+  from after it was listed is checked again and kept. A client address is kept only while its
+  failed attempts limit it: at most 100 seconds after the last one (20 attempts, one back every 5
+  seconds), plus up to a minute until the sweep.
+- **The limits are domain functions.** `admitFailedApiAuthentication` (per client address; requests
+  whose address is unknown share one bucket) and `admitApiRate` (the key's bucket, then the
+  company's; a request the key refuses takes nothing from the company) are what the web gate calls,
+  so the integration tests exercise the gate's own code.
+- **Tests:** a bucket's burst and refill up to its capacity, atomic takes under concurrency, the
+  three API limits, the purge (full buckets and failed-authentication addresses deleted, limiting
+  ones kept, a deleted bucket starting full), and an e2e burst of 120 requests on one key refused
+  with 429 and `Retry-After: 1` and served again after the wait. Tests move a bucket's last use back
+  instead of waiting.
+
+Not built: edge rate limits in front of the app (a deployment item), limits per endpoint, a limit on
+successful authentications per address, and hashing the address in the bucket's key (it is kept
+only while it limits).
+
+## ADR-069 Emails someone is waiting for go ahead of notices (2026-09-29)
+
+Context: every email is one `email.send` job, and the worker's email queue works through them in
+order at about two a second per worker process (four slots, each fetching one job, pg-boss waiting
+between fetches). A notice to many people at once, such as a reconciliation alert to every platform
+owner or a rate change notice to many companies' billing managers, queued ahead of a sign-up's
+address confirmation delays it by as long as the burst takes. The local e2e run found it: a sign-up
+waited more than 30 seconds for its confirmation email behind an alert to 73 platform owners.
+
+Decision: emails someone is waiting for on a page, the address confirmation (`auth.verify_email`)
+and the password reset (`auth.reset_password`), are queued at priority 10 and every other email at
+0 (`emailPriority`). pg-boss fetches higher priorities first (its fetch orders by priority, then
+creation time), so a waited-for email is sent next whatever is queued. The outbox sweep, which
+signals rows whose job was lost, uses the row's kind for the same priority. Nothing else about
+delivery changes: notices still go out in order, at the same rate.
+
+Not built: a higher sending rate for the email queue (a notice to many recipients still takes about
+half a second per recipient per worker process), and priorities for other kinds.

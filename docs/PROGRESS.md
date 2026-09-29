@@ -1,5 +1,707 @@
 # Progress
 
+## 2026-09-29 — Phase 5: tested API rate limits, and full token buckets deleted (P5-08)
+
+Status: **Implemented and locally verified.** The public API's rate limits had no automated tests,
+and their token buckets were never deleted: failed-authentication buckets are keyed by the client's
+address, so addresses stayed in `ops.rate_limit_buckets` without end.
+
+### Completed
+
+- **Design (ADR-068):** a bucket that is full again limits nothing and behaves exactly like a
+  missing one, so the minute messaging sweep deletes such buckets; a client address counted for
+  failed authentication is kept only while it limits (at most about 100 seconds after its last
+  failed attempt, plus a minute until the sweep). The limits become domain functions the web gate
+  calls, so tests exercise the gate's own code.
+- **Migration 0041:** `ops.purge_rate_limit_buckets` (SECURITY DEFINER, `w360_app` only, owned by
+  `w360_definer`, which may select and delete buckets; a bucket taken from after it was listed is
+  checked again and kept).
+- **Domain:** `api/rate-limits.ts` (`admitFailedApiAuthentication`, `admitApiRate`: the key's bucket,
+  then the company's, taking nothing from the company for a request the key refuses);
+  `purgeRateLimitBuckets` beside `takeToken`, whose note no longer says keys are only ids.
+- **Web and worker:** the API gate calls the domain functions; the messaging sweep deletes full
+  buckets and logs how many (204 on the local database's first sweep, then a few a minute).
+- **Tests:** 8 integration tests in the new `rate-limits.test.ts` (a bucket's burst and refill up to
+  its capacity; 40 takes at once admitting 10; 20 failed authentications per address, then one every
+  5 seconds, other addresses unaffected, unknown addresses sharing one bucket; keys limited to 50 and
+  companies to 200, with the buckets' capacities and refills, a refused key taking nothing from the
+  company, the company's limit holding every key back and releasing them as it refills; the purge
+  deleting full buckets and failed-authentication addresses, keeping limiting and nearly full ones,
+  a deleted bucket starting full; the runtime role unable to delete buckets); the purge's grants in
+  the isolation suite; e2e `api-keys.spec.ts`: a burst of 120 requests on one key refused with 429,
+  `Retry-After: 1` and `rate_limited`, and served again after the wait. Time is moved by setting a
+  bucket's last use back, never by waiting.
+- **Found while verifying: emails someone is waiting for go first (ADR-069).** In the full local e2e
+  run, `step-up.spec.ts` on mobile-chromium waited more than 30 seconds for its sign-up's
+  confirmation email: the settlement spec had just queued its alert to 73 platform owners (the
+  reused local database's), and the email queue sends about two emails a second. The address
+  confirmation and the password reset are now queued at priority 10 and other emails at 0, and the
+  outbox sweep signals a lost row again at its kind's priority (`findStaleOutboxRows` returns the
+  kind). A new test in `jobs.test.ts` checks the jobs' priorities; 4 deliberate regressions
+  (no priority, every email waited for, the reset left out, the sweep without the kind) are caught.
+- **Docs:** ADR-068 and ADR-069; ARCHITECTURE §5 and §6N; SECURITY (Phase 5 rules); THREAT-MODEL
+  T70; RUNBOOKS (the buckets behind 429s); DATA-RETENTION (rate limit buckets); BACKLOG P5-08;
+  FEATURE-MATRIX H-033. The e2e job's comment in CI counts the new tests.
+- **Mutation checks:** 19 regressions tried one at a time (the purge's fullness and refill checks and
+  grants, the runtime role deleting buckets, taking without tokens, no refill, refilling beyond the
+  capacity, a new bucket starting empty, the purge's count, failed attempts sharing a bucket or using
+  the key rate, the unknown address, the company taken when the key refuses, no key or company
+  limit, each limit at the other's rate, keys limited per company). 17 of the first 18 made a test
+  fail; the company bucket created at the key's capacity was caught once the test checked each
+  bucket's capacity and the tokens left after a burst, and a 19th regression added then is caught
+  too.
+
+### Test commands and results (local, 2026-09-29)
+
+| Command                                                                     | Result                                                                                                                                                                                                           |
+| --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                   |
+| `pnpm test` (unit)                                                          | 336 passed                                                                                                                                                                                                       |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 456 passed, including the new `rate-limits.test.ts` (8) and the priority test in `jobs.test.ts`                                                                                                                  |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 456 passed                                                                                                                                                                                                       |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 88 passed in one full run (23.2 min) with the email priority, including `api-keys.spec.ts`'s burst on both projects; the run before it had 87 of 88 (`step-up.spec.ts` on mobile-chromium, above) |
+| Mutation checks                                                             | 19 regressions tried; all 19 make a test fail (17 of 18 in the first run, the 18th after a test was strengthened, and a 19th added then)                                                                         |
+
+### Known gaps
+
+- Edge rate limits in front of the app, limits per endpoint and a limit on successful
+  authentications per address are not built. A bucket's key still holds a client address while it
+  limits; it is not hashed.
+
+## 2026-09-29 — Phase 5: reminders before API keys expire (P5-08)
+
+Status: **Implemented and locally verified (email through the local outbox and Mailpit only).** A
+key that expired stopped its integration without warning, and its expiry showed only on Settings →
+API keys; now owners and administrators are emailed a week before.
+
+### Completed
+
+- **Design (ADR-067):** a key that can still be used, was not rotated and expires within 7 days is
+  reminded once, to the company's active owners and administrators (the roles that manage keys):
+  its name and public prefix (never a token), when it expires in the company's time zone, who
+  created it, when it was last used, how to rotate it, and a link to Settings → API keys. Companies
+  being deleted get none; suspended and restricted companies do (their keys still read).
+- **Migration 0040:** `app.api_keys.expiry_reminded_at` (column grants to `w360_app`), the key's
+  guard replaced by one that also keeps the mark once set, a partial index, and
+  `ops.api_key_expiry_reminders_due` (company and key ids only; `w360_app` only; owned by
+  `w360_definer`).
+- **Domain:** `api/expiry-reminders.ts` (the reminder's text, the per-key reminder that locks, checks
+  and marks the key in its company's scope in the transaction that queues the emails, and the sweep
+  that lists due keys); `apiKeyExpiresSoon` and `API_KEY_REMINDER_DAYS` in the browser-safe model;
+  the key list returns `expiryRemindedAt`; the company export classifies the new column.
+- **Worker:** the minute messaging sweep sends the reminders and logs each failure (retried the next
+  minute).
+- **Web:** Settings → API keys says owners and administrators are emailed 7 days before a key
+  expires, marks keys that expire soon and shows when the reminder was emailed.
+- **Tests:** 6 unit tests (which keys expire soon, the reminder's text, a one-line subject, the
+  rendered email with the name escaped); 4 integration tests in `api.test.ts` (recipients and
+  content in the company's time zone, once, a key coming within the week later, the listing's
+  window; revoked, rotated, expired, reminded and distant keys and companies being deleted left out
+  after a re-check in the company's scope, suspended and restricted companies reminded; overlapping
+  reminders and sweeps; the kept mark); the listing's grants in the isolation suite; e2e
+  `api-keys.spec.ts` (a key created in settings, its expiry brought forward by a fixture step, the
+  mark on the page, the owner's email from the worker's sweep, and when it was emailed).
+- **Fix to `settlement-recon.spec.ts`:** in the full local run, its chromium test waited 90 seconds
+  for the platform owner's alert and missed it by 0.8 seconds. The worker sent the alert on the
+  sweep after the check finished, to every platform owner in the database: 73 in the reused local
+  database, which the email queue delivered in 37 seconds. The wait is now 150 seconds (one sweep
+  plus the fan-out); with it the spec passed on both projects.
+- **Secret scan on e8b892c:** gitleaks' generic-api-key rule matched the made-up key prefix in
+  `api/expiry-reminders.test.ts` (`w360_` and 12 letters, a public prefix, not a token). The finding
+  is reviewed in `.gitleaksignore` (cb2ffc3); gitleaks 8.30.1 run locally on the whole history then
+  finds nothing.
+- **Fix to `reports.spec.ts`:** in CI on 2bdead7 (167 passed in 51.0 minutes, all green), its WebKit
+  test failed once and passed on the retry. `page.goto` to Reports was interrupted by a navigation
+  to the conversation it left: the conversation's live updates refresh the page, a page load
+  started during such a refresh cancels it, and Next.js answers by loading the conversation again.
+  The test now leaves from the main navigation, as `automations.spec.ts` does (passed twice on
+  each Chromium project locally; WebKit and Firefox run in CI only).
+- **Docs:** ADR-067; ARCHITECTURE §6N; SECURITY (Public API row and Phase 5 rules); THREAT-MODEL
+  T67; RUNBOOKS (a reminder that did not come, migration 0040, and the stale "monthly quotas are not
+  built" under 429 corrected); DATA-RETENTION; BACKLOG P5-08; FEATURE-MATRIX H-033. The e2e job's
+  comment in CI counts the new tests.
+- **Mutation checks:** 24 regressions tried one at a time (the listing's revoked, rotated, reminded,
+  expired, window and company-status conditions, the guard, the listing's grant, the per-key
+  company, reminded, expiring-soon, lock and mark steps, the recipients, the time zone, the subject,
+  the prefix, the creator, an unused key, the 7-day boundary, rotated and expired keys in
+  `apiKeyExpiresSoon`). 23 made a test fail in the first run; the lower bound of the listing's
+  window was not tested until a key expiring within a day was added, and now all 24 do.
+
+### Test commands and results (local, 2026-09-29)
+
+| Command                                                                     | Result                                                                                                                                                                        |
+| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                |
+| `pnpm test` (unit)                                                          | 336 passed, including the new `api/expiry-reminders.test.ts` (6)                                                                                                              |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 447 passed, including the 4 new tests in `api.test.ts`                                                                                                                        |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 447 passed                                                                                                                                                                    |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 85 of 86 passed in one full run (22.3 min), including `api-keys.spec.ts` on both projects; the 86th passed after the fix to `settlement-recon.spec.ts` (above) |
+| Mutation checks                                                             | 24 regressions tried; all 24 make a test fail (23 in the first run, the 24th after a test was added)                                                                          |
+
+### Known gaps
+
+- One reminder per key, 7 days ahead; a second reminder closer to the expiry, other channels and
+  alerts for expired keys still being presented are not built. A key's expiry cannot be extended;
+  rotation renews it.
+- Found while fixing the spec: the email queue sends about two emails a second per worker process
+  (each of its four slots takes one job, and pg-boss waits two seconds between fetches). A notice to
+  many recipients at once takes that long to deliver; the queue's settings are not changed here.
+
+## 2026-09-29 — Phase 5: alerts for reconciliation findings (P5-05)
+
+Status: **Implemented and locally verified (email through the local outbox and Mailpit only; Razorpay
+traffic simulated by the test-only stand-in).** The daily settlement reconciliation (ADR-059) left
+mismatches and failed days on Platform → Reconciliation, where nobody heard of them unless they
+looked; now platform owners are emailed.
+
+### Completed
+
+- **Design (ADR-066):** when a day's run finishes with transactions still waiting for a person, or
+  fails, every platform owner (not operators) is emailed once for that attempt: one email per sweep
+  listing up to 10 days with the open transactions by status, or a failed day's last error, and a
+  link. It names no transaction, amount or company. Retrying days, clean days and days resolved
+  first send nothing; a day run again is a new attempt and is emailed again.
+- **Migration 0039:** `ops.settlement_recon_runs.alerted_attempt` (runs already finished marked as
+  emailed) and three definer functions executable by `w360_app` only: the listing (ids and attempt
+  numbers), the mark (writes `alerted_attempt` and returns the email's content, counted under the
+  run's row lock) and the recipients (platform owners' ids and addresses).
+- **Domain:** `billing/settlement-alerts.ts` (the email text, and the sweep that marks and queues in
+  one transaction); a `platform.notice` email kind, not tied to a company.
+- **Worker:** the minute billing sweep sends the alerts whether or not Razorpay is configured, and
+  warns when a day needs a person but there is no platform owner (the alert waits for one).
+- **Web:** the reconciliation page says platform owners are emailed.
+- **Tests:** 2 integration tests in `settlement-recon.test.ts`, unit tests of the email and its
+  rendering, the functions' grants in the isolation suite, and `settlement-recon.spec.ts` waits for
+  the owner's alert from the worker before resolving the transaction.
+- **CI:** the e2e job gets 80 minutes and its test step 70 (were 70 and 60): the usage and settlement
+  specs now each wait up to a minute per project for the worker's sweep.
+- **Docs:** ADR-066 (and ADR-059's "not built"); ARCHITECTURE §7; SECURITY; THREAT-MODEL T83;
+  RUNBOOKS (step 11, migration 0039); BACKLOG P5-05; FEATURE-MATRIX H-037.
+- **Mutation checks:** 17 regressions tried one at a time (the email's text and link, the rendering,
+  marking without a platform owner, the listing's status, attempt and emailed checks, the mark's
+  attempt, emailed, open-transaction and status checks, owners only, the recipients' grant); all 17
+  make a test fail.
+
+### Test commands and results (local, 2026-09-29)
+
+| Command                                                                     | Result                                                                                                                                                                           |
+| --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                   |
+| `pnpm test` (unit)                                                          | 330 passed, including the new `billing/settlement-alerts.test.ts` (4)                                                                                                            |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 443 passed, including the 2 new alert tests in `settlement-recon.test.ts`                                                                                                        |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 443 passed                                                                                                                                                                       |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 84 passed (42 × 2) in one full run (22.2 min), including `settlement-recon.spec.ts` receiving the platform owner's alert from the worker's sweep on both projects |
+| Mutation checks                                                             | 17 regressions tried; all 17 make a test fail                                                                                                                                    |
+
+### Known gaps
+
+- Paid top-ups that no settlement shows are listed on the page but not emailed. The migration's
+  marking of runs finished before it is not covered by a test (the test database has no runs when
+  migrations run).
+
+## 2026-09-29 — Phase 5: a notice before Meta's rates change (P5-07)
+
+Status: **Implemented and locally verified (email through the local outbox and Mailpit only).**
+Billing → Usage and rates already showed the next rate card, but only to someone who opened it; now
+the billing managers of each company whose billing currency a published card is for are emailed a
+week before it takes effect, once.
+
+### Completed
+
+- **Design (ADR-065):** once per company and published card, when the card takes effect within 7
+  days: the owners and billing managers of active companies whose billing currency it is for, with
+  when it takes effect in the company's time zone, what it changes against the published card in
+  force just before it (or that it is the first card for the currency), up to three of the largest
+  changes, that estimates switch then and that Meta bills the company, and a link to Usage and
+  rates. Cards published after they took effect are not announced; a correction is a new card with
+  its own notice.
+- **Migration 0038:** `app.rate_change_notices` (unique per company and card, append-only, forced
+  RLS, exported, deleted with the company at step 75); `ops.rate_change_notices_due` (definer, ids
+  only, executable by `w360_app`), with column grants and read policies that let `w360_definer`
+  read only published cards' id, currency, status and effective time, billing currencies and which
+  card each company was told about.
+- **Domain:** `billing/rate-notices.ts` (`announceRateChanges` for the sweep, `announceRateChange`
+  per company and card: checked again in the company's scope and recorded in the transaction that
+  queues the email); `rateCardWithPrices` and `rateCardInForce` exported from `billing/usage.ts`.
+- **Worker:** the minute billing sweep sends the notices whether or not Razorpay is configured and
+  logs `rate change notices` and each failure (retried the next minute).
+- **Tests:** `rate-change-notices.test.ts` (7), the notice in the export and deletion tests of
+  `company-data.test.ts`, the function's grants in the isolation suite, and
+  `billing-usage.spec.ts` now waits for the worker's email about the card taking effect in two
+  days.
+- **Docs:** ADR-065 (and ADR-060's "not built"); ARCHITECTURE §7; SECURITY; THREAT-MODEL T84;
+  RUNBOOKS (plans: the email, migration 0038); DATA-RETENTION; BACKLOG P5-07; FEATURE-MATRIX W-013,
+  H-038 and the new H-042; the CI timing note.
+- **Mutation checks:** 29 regressions tried one at a time; 27 make a test fail. The first run caught
+  25; tests for a withdrawn card passed straight to the announcement and for inactive companies left
+  out of the listing now catch two more. The other two are repeated by another layer: the listing's
+  published filter by the definer role's read policy (whose own regression is caught), and the
+  explicit `REVOKE … FROM PUBLIC` by the default privileges of migration 0002 (the isolation suite
+  still checks that no function is executable by PUBLIC).
+
+### Test commands and results (local, 2026-09-29)
+
+| Command                                                                     | Result                                                                                                                                                                          |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                  |
+| `pnpm test` (unit)                                                          | 326 passed                                                                                                                                                                      |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 441 passed, including the new `rate-change-notices.test.ts` (7) and the notice in `company-data.test.ts`                                                                        |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 441 passed                                                                                                                                                                      |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 84 passed (42 × 2) in one full run (19.7 min), including `billing-usage.spec.ts` receiving the rate change email from the worker's minute sweep on both projects |
+| Mutation checks                                                             | 29 regressions tried; 27 make a test fail, the other two are repeated by another layer                                                                                          |
+
+### Known gaps
+
+- No setting to turn the notice off, no notices for other roles or currencies, and no in-app banner
+  (the Usage and rates page shows the next change). Rate cards remain entered by platform staff from
+  Meta's pages; the cards taking effect on 2026-10-01 were not checked from this environment.
+
+## 2026-09-29 — Phase 5: receipts for plan payments (P5-07)
+
+Status: **Implemented and locally verified against the Razorpay stand-in only.** Every plan payment
+HyFib records from Razorpay (ADR-063) now has a receipt, like every paid top-up (ADR-057).
+
+### Completed
+
+- **Design (ADR-064):** a receipt page per plan payment, read with `billing.read` in the company's
+  scope, computed from the payment and its subscription (nothing stored). It shows Razorpay's
+  invoice id as the receipt number, the plan version, interval and add-ons, the invoice's billing
+  period, the subtotal, tax rate and tax (only when the payment is exactly the subscription's total,
+  as every recorded payment is), the amount, when it was paid and the method Razorpay reported, the
+  Razorpay payment, invoice and subscription ids, and the company's name and billing email. It says
+  it is not a tax invoice; refunds made in Razorpay's Dashboard are not shown.
+- **Domain:** `planPayments.receipt(ctx, id)`; the payment-received email now links to the receipt of
+  the payment for the latest billing period.
+- **Web:** Billing → plan payment receipt (`/c/<company>/billing/plan-payments/<id>`, printable), and
+  a Receipt link on each row of the plan payments table.
+- **Tests:** a new integration test (the receipt's fields, administrators allowed, agents refused,
+  another company and a malformed id not found, the email link, the breakdown hidden for a payment
+  that is not the subscription's total) and the renewal test now checks that the second email links
+  to the renewal's receipt; `plan-subscription.spec.ts` opens the receipt from the payments table.
+- **Docs:** ADR-064 (and ADR-063's "not built"); ARCHITECTURE §7; SECURITY; THREAT-MODEL T81;
+  RUNBOOKS (plans); BACKLOG P5-07; FEATURE-MATRIX H-041.
+- **Mutation checks:** 8 regressions tried one at a time; 7 make a test fail (the permission, the
+  id check, the breakdown rule, the receipt number, the email's link and which payment it links).
+  The eighth removes the query's company filter, which forced row security repeats (another company
+  still gets "not found"), so the filter stays as defence in depth.
+
+### Test commands and results (local, 2026-09-29)
+
+| Command                                                                     | Result                                                                                                                                                                            |
+| --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                    |
+| `pnpm test` (unit)                                                          | 326 passed                                                                                                                                                                        |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 434 passed, including the new receipt test in `plan-subscriptions.test.ts` (now 21) and the renewal's email link                                                                  |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 434 passed                                                                                                                                                                        |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 84 passed (42 × 2) in one full run (18.0 min), including `plan-subscription.spec.ts` opening the receipt on both projects, with no sideways scrolling on the phone |
+| Mutation checks                                                             | 8 regressions tried; 7 make a test fail, the eighth is repeated by forced row security                                                                                            |
+
+### Known gaps
+
+- Tax invoices, credit notes and a staff view of receipts are not built; the operator's legal
+  details and GSTIN are not configured.
+
+## 2026-09-28 — Phase 5: paying for plans by Razorpay subscription (P5-07, P5-01)
+
+Status: **Implemented and locally verified against the Razorpay stand-in only; behind
+`RAZORPAY_SUBSCRIPTIONS_ENABLED` (off by default).** Companies can now pay for their plan in HyFib: a
+Razorpay subscription charges the plan version's price with the company's add-ons and the tax
+platform owners set, and each period Razorpay reports paid keeps the plan active. Until now staff
+set paid periods after a payment was settled elsewhere, and a lapsed plan restricted the company
+until staff acted.
+
+### Completed
+
+- **Design (ADR-063):** the price is the version's price plus add-ons at the version's prices, per
+  1, 3 or 12 months, plus a tax platform owners set (0 to 50%, audited; nothing is offered until it
+  is set); a subscription keeps its subtotal, tax and total. Offered while trialing, past due,
+  expired or canceled, on a published version, not during a paid period staff set, not with
+  complimentary access, not to a company being deleted. The paid period starts at the first charge
+  (the rest of a trial is not carried over). Razorpay decides and HyFib follows: the browser,
+  webhook payloads and notes only prompt a fetch. ADR-055 now cancels the subscription at deletion.
+- **Schema (migration 0037):** `ops.plan_settings.plan_tax_bp`; `app.plan_subscriptions` (written
+  ahead; amounts, add-ons, plan and starter fixed by column grants; one live row per company by a
+  partial unique index; never deleted) and `app.plan_payments` (append-only, payment and invoice
+  ids unique); `tenant_plans.subscription_id`; `ops.billing_resolve_subscription`,
+  `ops.billing_resolve_plan_payment`, `app.apply_plan_subscription_period` (the company's scope, an
+  active subscription, a paid invoice whose billing period has its middle in the current cycle, the
+  plan's version and add-ons) and `ops.plan_subscriptions_due`; `app.apply_plan_transition` ends a
+  period paid by a cancelled subscription as canceled without grace days; the reconciliation facts
+  and reasons know plan payments, and the deletion outcomes a plan subscription.
+- **Razorpay client and stand-in:** `createPlan`, `createSubscription`, `fetchSubscription`,
+  `cancelSubscription`, `fetchSubscriptionInvoices`, `fetchInvoice` and the subscription Checkout
+  signature (`payment_id|subscription_id`), read strictly; the payment's `invoice_id`. The test-only
+  stand-in keeps plans, subscriptions and invoices and advances them as Razorpay would (authorise,
+  charge, fail, end a cycle, halt), and can now alter an answer so tests can make Razorpay answer
+  with something HyFib must refuse.
+- **Domain (`billing/plan-subscriptions.ts`):** the overview, `start` (billing.manage, a recent
+  sign-in, the flag, an advisory lock per company; reopen an open Checkout, replace a closed one and
+  cancel it at Razorpay, fail a start that never finished), `confirmCheckout`, `cancel` (at the end
+  of an active subscription's paid period, at once otherwise) and `syncPlanSubscription`, which every
+  path uses: it fetches the subscription and, while Razorpay counts more paid cycles than HyFib
+  recorded, its invoices, and records a payment only for a paid invoice of our subscription, in INR,
+  for our exact amount, whose payment Razorpay reports captured for that amount. Ended statuses
+  stay ended, unknown ones keep ours, older answers change nothing. Billing managers are emailed on
+  payments, failed charges, stopped retries and company cancels. `subscription.*` webhooks sync the
+  subscription (unknown ones are quarantined); a payment on no order of HyFib's whose invoice names
+  one of our subscriptions syncs it; the daily reconciliation matches plan payments, records missed
+  ones and leaves refunds of them to a person; the plan sweep syncs before moving a period on; the
+  deletion job cancels at Razorpay first. Platform owners set the tax and cancel a company's
+  subscription at once with a reason; staff plan changes are refused while a subscription is live.
+- **Worker:** the minute billing sweep runs the subscription checks and passes the pre-transition
+  sync to the plan sweep.
+- **Web:** Billing → Paying for your plan (the breakdown, pay, finish paying, cancel, the
+  subscription's state and the payments; a sign-in-again prompt; a note that charges above ₹15,000
+  on Indian cards need the payer's approval every time, from Razorpay's documentation of RBI's
+  rules); the plan card's wording for subscribed companies; Platform → Plans (the tax) and the
+  company page (the subscription, its payments, the owner's cancel; the plan form replaced while
+  the subscription is live).
+- **Found while building:** a subscription whose cycle ended would have waited up to a day for its
+  next check (the due listing now re-reads it hourly until a new cycle starts); the past-due and
+  expired emails told subscribed companies to ask HyFib; Razorpay's example invoices run from
+  midnight to midnight India time, so a payment is matched to the cycle holding the middle of its
+  billing period rather than to exact times.
+- **Mutation checks found 20 guards no test exercised,** now tested: unpaid, foreign, uncaptured and
+  wrong-amount payments; an older answer; a cancel saved while Razorpay was being asked; an
+  administrator starting or cancelling; the flag; Razorpay answering for another amount or plan; a
+  second start over a pending subscription; retired versions and companies being deleted; the
+  pre-transition sync; a settled amount unlike the recorded one; the period function's scope,
+  status and add-on checks; deleted companies in the due listing.
+- **Docs:** ADR-063 and ADR-055; ARCHITECTURE §6Q and §7; SECURITY (controls, step-up, platform
+  roles); THREAT-MODEL T87 and T88; RUNBOOKS (plans: turning it on, a payment that did not count,
+  failed charges, cancelling, refunds, unfinished starts, migration 0037); DEPLOYMENT (the
+  subscription events, the flag, Flash Checkout); DATA-RETENTION; RELEASE-CHECKLIST (test-mode
+  checks); Razorpay research R-112 to R-118 and open questions 23 to 26; BACKLOG P5-01, P5-02 and
+  P5-07; FEATURE-MATRIX W-001, W-006 (implemented → locally verified) and H-041.
+- **Mutation checks:** 62 regressions tried one at a time. The first run caught 42; the other 20
+  (listed above) now have tests, and a rerun of those 20 caught all of them: the Checkout signature
+  and its payload order, the confirmation, every condition for recording a payment, the stale and
+  ended-status rules, the window of an unpaid subscription, the once-only emails, start and cancel
+  (permission, recent sign-in, flag, reopen, write-ahead failure, Razorpay's answers, a second
+  start), the offer's refusals, cancelling at the end of the period, deletion, owner-only staff
+  actions, a live subscription blocking staff plan changes, the tax bound, webhook resolution, the
+  pre-transition sync, the reconciliation's matching, lookup, recording and refunds, the period
+  function's midpoint, status, add-on and scope checks and usage restart, the canceled transition,
+  the due listing's clauses, the resolve function, the reconciliation facts, the deletion outcome
+  kind and the quote's rounding, minimum and unsold add-ons.
+
+### Test commands and results (local, 2026-09-28 to 2026-09-29)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `pnpm test` (unit)                                                          | 326 passed. New: the quote (integer paise, tax rounded half up, add-ons not sold, totals below ₹1 and above the ceiling), the Razorpay client's plan, subscription, invoice and signature code, and plan payments in the reconciliation's matching (a payment on no order of HyFib's is now looked up as a possible subscription charge, so the classifier's expectations changed with it).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 433 passed, including the new `plan-subscriptions.test.ts` 20 (the offer and every refusal; the write-ahead start, reopening and replacing; forged, borrowed and unpaid Checkout responses; administrators, agents and stale sessions refused; Razorpay failures and answers for another amount or plan; renewals counted once from any event; a stale answer; a cancel saved mid-sync; failed charges, grace days, a second start refused; a cycle without a paid invoice; day-aligned invoices; unpaid, foreign, uncaptured and wrong-amount payments; the period function's checks; cancelling by the company and by platform owners; deletion; the sweep, the check before a period ends and deleted companies left out), plan payments in `settlement-recon.test.ts` (matched, a missed one recorded, a refund for a person, a settled amount unlike the recorded one) and the deletion in `company-data.test.ts`. |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 433 passed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / one full run (22.4 min): 78 passed, including the new `plan-subscription.spec.ts` on both projects, and 6 failed: `flows.spec.ts` (data endpoint), `web-requests.spec.ts` and `webhooks.spec.ts` on both projects, whose outgoing calls go to `api.w360-e2e.test`. This container's `/etc/hosts` had lost the line mapping that name to 127.0.0.1 (CI adds it in a workflow step; `getent` did not resolve it, and the web log shows `egress_failed`). With the line added, those three specs passed on both projects (8 tests).                                                                                                                                                                                                                                                                                                                                                                         |
+| Mutation checks                                                             | 62 regressions tried one at a time; all 62 make a test fail (20 of them only after the tests added in this slice)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+
+### Known gaps
+
+- Razorpay test mode is not run: everything was built from Razorpay's documentation and Node SDK and
+  tested against the stand-in. Open questions: invoice periods against cycles, how soon a charge can
+  be read, `invoice_id` on every subscription payment, quarterly plans on domestic cards
+  (research 23 to 26; RELEASE-CHECKLIST).
+- Plan invoices and receipts (tax review), refunds of plan payments, billing from the end of a
+  trial, plan and add-on changes with proration, pausing and resuming are not built. A company that
+  cancelled pays again from Billing once its paid period has ended.
+- A renewal Razorpay charges while a platform owner cancels at the same moment is recorded as a
+  payment but does not extend the plan; the reconciliation shows it matched, and a person decides.
+- The first local mobile-chromium run of the new spec timed out at 240 s once, for a reason not
+  found; later runs passed, and a 30-second action timeout now names the stuck action if it recurs.
+  Firefox and WebKit run the spec in CI only.
+
+## 2026-09-28 — Phase 5: warnings before a monthly limit (P5-01)
+
+Status: **Implemented and locally verified with test data only.** A company's billing managers now
+hear once when the month's automation runs or API requests reach 80% of the plan's limit, before
+automations stop or the API refuses requests. The used-up notices no longer go out for a counter of
+an earlier usage period.
+
+### Completed
+
+- **Design (ADR-062):** one warning per counter (company, metric and monthly period) at 80% of the
+  limit rounded up, while still below it; none for limits of 1 to 4, where 80% rounds up to the
+  limit itself; a month that jumps to the limit between two sweeps gets only the used-up notice.
+- **Schema (migration 0036):** `app.usage_counters.warned_at` (the runtime role may update it, as
+  it may `used` and `notified_at`; the company data export includes it, as the export's
+  classification test requires) and `ops.usage_warnings_due`, which lists counters of active
+  companies at or over the threshold of their current limit (with run packs for automation runs)
+  and below it, neither warned nor announced (ids only; SECURITY DEFINER, executable by the app
+  role only).
+- **Domain:** `warningThreshold` (integer arithmetic matching `ceil(limit * 0.8)` in SQL) and the
+  minute plan sweep's `warnBeforeLimit`. The three counter notices (the warning and both used-up
+  notices) now lock the counter in the company's scope (`SELECT … FOR UPDATE` while unsent), check
+  it against the company's current limit and period, and mark it in the transaction that queues the
+  email. A counter of an earlier period is marked without an email. Before, the used-up notices set
+  `notified_at` first and emailed without checking the period, so a lowered limit or a new paid
+  period could make last period's count look like this month's. A counter no longer due, because
+  its limit changed after the sweep listed it, is left unmarked for a later sweep.
+- **Web:** the Billing plan card marks the month's automation runs or API requests at 80% or more
+  of the limit as "nearly used up".
+- **Tests:** `usage-warnings.test.ts` (7), the threshold in `plans/model.test.ts`, and the
+  isolation suite now checks that `ops.api_quota_reached` (0035) and `ops.usage_warnings_due` are
+  executable by the worker role only. `api-quota.spec.ts` now gives the company five API requests a
+  month: at four the Billing plan card shows "4 of 5 (nearly used up)" (with no sideways scrolling
+  on the phone), the fifth passes and the sixth is refused.
+- **Docs:** ADR-062; ARCHITECTURE §6N and §7; RUNBOOKS (plans: the warning, and a usage email that
+  did not come); BACKLOG P5-01; THREAT-MODEL T86 (and T85's e2e wording); FEATURE-MATRIX H-040 (and
+  H-039's e2e wording).
+- **CI fix (the e2e job on fb8efa6, API quotas):** the WebKit run of `settlement-recon.spec.ts`
+  failed on both attempts. First, `turnOnTwoFactor` typed the password into the account page's
+  two-factor card before React hydrated it: the value reached the field but not the component's
+  state, so "Set up two-factor" stayed disabled until the test timed out. The field now stays
+  disabled until hydration, as `ClientForm` controls do, and a new test in `forms.spec.ts` holds
+  back the bundles to check it (it failed before the change). Then the retry reused the project's
+  settlement day, for which the Razorpay stand-in still held the first attempt's settlement, so two
+  payments waited for a person instead of one. A retry now uses a day of its own; failing the first
+  attempt on purpose after the settlement reproduced the retry failure before the change, and the
+  retry passes after it. Four other components with the same kind of field (the automation editor
+  and its node fields, contact erasure, security settings) are left for a separate change.
+- **Mutation checks:** 24 regressions tried one at a time; 23 make a test fail: the listing's
+  threshold, upper bound, limit per metric, run packs, warned and company-status filters; the
+  lock's earlier-period check and mark, the lock itself (caught by two calls waiting on a held
+  counter), the limit per metric and the unsent filter; the warning's mark, range and texts; the
+  sweep's call; both used-up notices' limit checks and marks; the threshold's rounding and bound;
+  and the plan card's mark (through the e2e test). The 24th removed a guard for a limit of 0 that
+  the general rule already covers (80% of 0 is not below 0), so the guard is gone.
+
+### Test commands and results (local, 2026-09-28)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `pnpm test` (unit)                                                          | 317 passed. New: the threshold in `plans/model.test.ts` (5 → 4, 7 → 6, 10 → 8, 11 → 9, 1,000 → 800, a billion → 800 million; none without a limit, for 0 or for 1 to 4).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 412 passed, including the new `usage-warnings.test.ts` 7: one warning at 80% for automation runs and API requests, then the used-up notice and no second warning (the listing checked directly too); none for a limit of 4 or a month that reaches the limit before a sweep sees 80%; run packs in the limit; none for a suspended company; counters of an earlier period marked without a warning or a used-up notice; a counter whose limit changed after the sweep listed it left unmarked; two sweeps waiting on a counter held by another transaction sending one warning. The isolation suite's function grants now include both notice listings, and the export classification test failed until the export spec listed `warned_at`. |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 412 passed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 80 passed (40 × 2) in one full run (17.1 min), including the changed `api-quota.spec.ts` on both projects: staff give the company five API requests a month; after four the Billing plan card shows "4 of 5 (nearly used up)" with no sideways scrolling on the phone; the fifth passes and the sixth answers 429 with reason `quota_exceeded`.                                                                                                                                                                                                                                                                                                                                                                              |
+| Mutation checks                                                             | 24 regressions tried one at a time; 23 make a test fail, the 24th removed a redundant guard (now gone)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+
+### Known gaps
+
+- One warning per counter and period: a limit raised after the warning (run packs, a larger plan
+  within the period) brings no second warning at 80% of the new limit; the used-up notice still
+  comes.
+- Thresholds chosen per company or member, in-app notices, and warnings for seats, numbers, teams
+  or live automations (which refuse additions rather than run out during the month) are not built.
+- Firefox and WebKit run the changed spec in CI only; only Chromium is installed locally.
+
+## 2026-09-28 — Phase 5: monthly API requests and API access by plan (P5-01, P5-08)
+
+Status: **Implemented and locally verified with test data only.** Each plan version now sets how
+many public API requests a company may make per month, or leaves the API out; requests beyond the
+month's limit are refused until the next period.
+
+### Completed
+
+- **Design (ADR-061):** `api_requests_monthly` per plan version: empty for no limit, 0 when the
+  plan leaves the public API out. Versions published before keep no limit, which is what they gave.
+  Every request that passes authentication and the rate limits counts, before it is read (a
+  malformed request or an idempotent replay too; a failed authentication or a rate-limited request
+  not), per monthly usage period like automation runs.
+- **Schema (migration 0035):** the plan column (the guard keeps it unchangeable once published;
+  staff may set it on drafts), the `api_requests` usage metric, `app.tenant_entitlements` with the
+  limit (recreated, as its result gained a column), and `ops.api_quota_reached` for the notice.
+- **Domain:** `consumeApiRequest` counts with one upsert that never passes the limit (and counts
+  without a limit too); `admitApiRequest` turns a refusal into 403 `forbidden` / `not_in_plan` or
+  429 `rate_limited` / `quota_exceeded` with `Retry-After` until the next period; creating and
+  rotating keys are refused without the API; the minute plan sweep emails the billing managers
+  once per period; the OpenAPI document names both reasons.
+- **Web:** the public API wrapper counts each request after the rate limits. The platform plan
+  form and page show the limit ("Not included" for 0); the platform company page, the Billing plan
+  card and Settings → API keys show the month's use, and the API keys page says when the plan does
+  not include the API and offers no new keys.
+- **Docs:** ADR-061; ARCHITECTURE §6N and §7; SECURITY (Phase 5 API rules); THREAT-MODEL T85;
+  BACKLOG P5-01 and P5-08; FEATURE-MATRIX H-039.
+- **Mutation checks:** 26 guards broken one at a time; all 26 make a test fail: the published-version
+  guard (caught only once the test tried retiring a version while changing its limit, the one change
+  the guard allows), the entitlement, the upsert's limit and period and metric, the plan without the
+  API, the key checks, the refusal's status, reason and Retry-After, the notice's claim and query,
+  the plan form and new versions, the month's use shown, the OpenAPI text, and the web wrapper's
+  check (through the e2e test).
+
+### Test commands and results (local, 2026-09-28)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `pnpm test` (unit)                                                          | 315 passed. New: `api/quota.test.ts` (Retry-After in whole seconds, at least one) and, in `api/api.test.ts`, the error reason and the OpenAPI document naming `not_in_plan` and `quota_exceeded` on every route.                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 405 passed, including the new `api-quota.test.ts` 4: requests counted without a limit; twelve concurrent requests admitting five of a limit of five, the others refused with Retry-After and not counted; the next period counted from zero; a larger plan within the period carrying the count on and a plan without a limit letting every request through; one notice to the billing managers however often the sweep runs; a plan without the API refusing every request, new and rotated keys (the existing key revoked, and new keys working again on a plan with the API); the limit of a published version unchangeable, even while retiring it, and carried into its next version. |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 405 passed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 80 passed (40 × 2) in one full run (18.6 min), including the new `api-quota.spec.ts` on both projects: a key made while the company is complimentary; staff publish a plan with two API requests a month and put the company on it; two requests pass and the third answers 429 with reason `quota_exceeded` and Retry-After; the API keys page and the Billing plan card show two of two, with no sideways scrolling on the phone.                                                                                                                                                                                                                                         |
+| Mutation checks                                                             | 26 guards broken one at a time; all 26 make a test fail                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+
+### Known gaps
+
+- Packs of extra API requests, per-key or per-endpoint quotas, and alerts before the limit are not
+  built. A company learns of the limit from the refusal, the email once it is reached, and its
+  Billing and API keys pages.
+- Firefox and WebKit run the new spec in CI only; only Chromium is installed locally.
+
+## 2026-09-28 — Phase 5: usage and rates for companies (P5-07, part)
+
+Status: **Billing → Usage and rates implemented and locally verified with test data only.**
+Companies see Meta's rates in force for their billing currency, the next published change and what
+it changes, and this month's estimated Meta charges. The page is read-only: Meta bills companies
+directly, and nothing is stored or charged. No card has been entered from Meta's published rate
+cards yet; platform staff do that.
+
+### Completed
+
+- **Design (ADR-060):** for owners, administrators and billing managers (`billing.read`; billing
+  managers have no `reports.read`, so they could not see any estimate before). One repeatable-read,
+  read-only snapshot in the company's scope: the billing currency from Settings → Messaging, the
+  published card in force (the latest effective time not after now), the next published card (the
+  earliest after now) and what it changes, and this month so far from the Reports estimate. Drafts
+  and withdrawn cards are never shown; nothing is written.
+- **Domain:** `billing/usage.ts` (`createBillingUsageService`, `compareRateCards`,
+  `chargesByCategory`, `formatRateChange`, and the category labels, now shared with Reports).
+  Reports' estimate is exported as `estimateMetaCharges`, so both pages compute the same numbers.
+- **Web:** Billing links to Usage and rates. The page:
+  - warns when the rates change, with how many prices change (or that no rates apply until then);
+  - shows this month's statistics and the estimate by pricing category, the reasons messages could
+    not be priced and, for members who can read reports, a link to the estimate by market;
+  - lists the rates in force, with a missing price read as "not priced", never as zero;
+  - lists what changes on the next card's date: old and new prices, the difference with a real
+    minus sign and its percentage, new prices and prices no longer listed.
+
+  Without a billing currency it says where to choose one, with a link for members who can change
+  settings.
+
+- **Found while building:** `formatUnitPrice` showed a whole price in a currency without minor
+  units with a trailing point ("2. JPY"); it now shows "2 JPY" (unit test).
+- **CI:** the end-to-end job now has 70 minutes and its test step 60 (were 60 and 50). On a66f64e
+  the step took 39.9 minutes for 152 tests, all passing on the first attempt, where 148 tests had
+  taken 33.5 on b2b7614: runners vary more than the new spec's minute, and 10 minutes of room was
+  too little for one retry of the 5-minute cart reminder test on a slow runner.
+- **Docs:** ADR-060; ARCHITECTURE §6B and §7; SECURITY (controls, the rate card rule, Phase 5
+  rules); THREAT-MODEL T84; BACKLOG P5-07; FEATURE-MATRIX W-013 (planned → locally verified) and
+  H-038.
+- **Mutation checks:** 26 guards broken one at a time; all 26 make a test fail. They cover the
+  permission, published cards only (in force and next), the currency (in force and next), the
+  effective instant on both sides, the order of cards, list prices only, the changes, comparing
+  cards (added and dropped prices, markets only on the next card, a missing price against zero),
+  the change text (minus sign, percentage base, no percentage from zero, new and dropped prices),
+  category totals and their order, the month, the company's time zone, the currency of the
+  estimate, and whole prices in currencies without minor units.
+
+### Test commands and results (local, 2026-09-28)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `pnpm test` (unit)                                                          | 313 passed. New: `billing/usage.test.ts` 5 (the changes between two cards market by market, identical cards, a zero price against no price, the change text, category totals and ties) and two lines in `campaigns/variables.test.ts` (whole prices in a currency without minor units).                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 401 passed, including the new `billing-usage.test.ts` 3: no currency (nothing to estimate) and who may read it (owners and billing managers; agents, marketers and supervisors refused); the card in force and the next one among withdrawn and draft cards before and after, a volume tier's price and another currency's cards, with what changes, and the switch at the next card's effective instant (not a millisecond before); this month's estimate equal to Reports' (priced, free, not yet priced and unknown-market messages), for this company only, the same for billing managers, with no ledger or wallet rows written.                                                                                                                |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 401 passed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 78 passed (39 × 2) in one full run (15.6 min), including the new `billing-usage.spec.ts` on both projects (8.2 s and 10.0 s): a company chooses the currency Meta bills it in; platform staff's cards for it are in force since yesterday and change in two days; a customer writes and the reply is delivered, reported free by Meta; Billing links to Usage and rates, which announces the change and how many prices change, shows the rates in force (a price the card does not have read as not priced), what changes (a higher price with its difference and percentage, a new price, a price no longer listed), one delivered message counted free and an estimate of nothing to pay, with no sideways scrolling on the phone. |
+| Mutation checks                                                             | 26 guards broken one at a time; all 26 make a test fail                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+
+### Known gaps
+
+- No card has been entered from Meta's published rate cards: platform staff enter the cards taking
+  effect on 2026-10-01 from Meta's own rate card pages, which this environment cannot reach
+  (research M-075).
+- No alert or email before a change. The page has no per-number or per-campaign figures, no
+  history of past cards and no exact charges: Meta's invoice is authoritative, and reconciling with
+  `pricing_analytics` stays in the backlog (ADR-028).
+- On a phone the two rate tables scroll sideways inside their cards, like every table in the app;
+  the page itself does not.
+- Firefox and WebKit run the new spec in CI only; only Chromium is installed locally.
+
+## 2026-09-28 — Phase 5: daily settlement reconciliation (P5-05, part)
+
+Status: **Daily settlement reconciliation with Razorpay implemented and locally verified with test
+data only.** Every day the worker reads Razorpay's settlement report for the previous day, matches
+every settled transaction against HyFib's records, records payments and refunds HyFib had missed
+through the usual paths, and lists everything else for platform owners. Razorpay traffic comes from
+the test-only stand-in; nothing reached Razorpay.
+
+### Completed
+
+- **Design (ADR-059):** the report (`GET /v1/settlements/recon/combined`, R-110, R-111) is read a
+  page of up to 1,000 transactions at a time for India's calendar day. Its ids only look up HyFib's
+  own records (top-ups by payment and order, card mandates, recorded refunds), never a company. A
+  payment or refund HyFib missed is fetched and recorded exactly as its webhook would have been
+  (credit only from a captured payment, once); nothing else changes automatically. One run per
+  day and one item per transaction, kept with the billing records.
+- **Schema (migration 0034):**
+  - `ops.settlement_recon_runs` (pending, running, completed, failed; attempts, an attempt number
+    that never resets and fences every write, a lease, the last error, who asked, totals) and
+    `ops.settlement_recon_items` (the transaction without notes, descriptions, receipts or card
+    fields; the match; a resolution with a note). No runtime role has privileges on them.
+  - Worker functions (definer, `w360_app` only): `ops.settlement_recon_due` (creates the runs the
+    schedule owes, fails a sixth attempt whose worker stopped, returns the due runs), `_claim`,
+    `_facts`, `_record_items`, `_defer`, `_fail` and `_complete`. Each write names its attempt and
+    is refused once another attempt holds the run.
+  - Platform functions (definer, `w360_platform` only): the days, a day's items and the unsettled
+    payments for platform administrators; reconciling a day and resolving an item for platform
+    owners, with the reason or note in the platform audit log.
+- **Domain:** `billing/settlement-recon.ts` (the schedule from 06:00 India time, filling a week of
+  gaps after the first run; matching; missed payments and refunds applied through
+  `applyPaymentById` and `applyRefundById`; retries after 5, 15, 60, 180 and 360 minutes for
+  failures that may pass, failure on a refusal or after six attempts; attempts that lost their
+  claim stop writing), `platform/reconciliation.ts` (the staff service and what each reason means),
+  and the settlement report in the Razorpay client, a strict reader: an item with any field it
+  cannot read is kept as unreadable, never read partly.
+- **Worker:** the `billing.settlement-recon` queue, one attempt at a time; the minute billing sweep
+  creates the runs and queues one signed job per due run.
+- **Web:** Platform → Reconciliation lists the latest 90 days (status, counts, amounts), the paid
+  top-ups no settlement has shown and, for owners, a form to reconcile a day. A day's page lists
+  what needs a person first, with what each reason means and what to do, then what the check
+  recorded, resolutions and matches; owners run the day again and resolve items with a note.
+- **Found while building:**
+  - Running a day again reset the attempts to zero, so items from an earlier run could look seen by
+    the new attempt and survive although Razorpay no longer listed them. Writes are now fenced by an
+    attempt number that never resets.
+  - The dispute rule flagged only matched transactions, so a missed payment with a dispute was
+    credited by the check without a person hearing of it, and flagged only when the day ran again
+    (the integration test caught the change). A dispute on a transaction HyFib matched or recorded
+    now waits for a person, decided after a missed payment or refund is applied; a transaction
+    already waiting keeps its own reason and shows the dispute.
+- **Tests:** the Razorpay stand-in serves the settlement report (with Razorpay's documented
+  parameter errors) and settles payments and refunds on a day, in tests and through a test-only
+  control route for e2e; the fake Checkout can close right after paying, so HyFib never hears of
+  the payment.
+- **CI:** the end-to-end job has 60 minutes and its test step 50 (were 45 and 40). The step took
+  33.5 of its 40 minutes on b2b7614 (148 tests, all passing on the first attempt), and the new spec
+  adds about a minute per browser, which left no room for one retry of a long test.
+- **Docs:** ADR-059; ARCHITECTURE §7; SECURITY (controls, Phase 5 rules, platform roles);
+  THREAT-MODEL T83; RUNBOOKS §9 (reconciliation); DEPLOYMENT (Razorpay); DATA-RETENTION;
+  RELEASE-CHECKLIST; Razorpay research R-110, R-111 and two open questions; BACKLOG P5-05;
+  FEATURE-MATRIX H-037.
+- **Mutation checks:** 62 guards broken one at a time; all 62 make a test fail. They cover the
+  schedule (days not over, backfilling, gaps, the next attempt time, a stopped sixth attempt),
+  claims (the lease, six attempts, the attempt number), stale attempts recording, completing,
+  deferring and failing, items Razorpay no longer lists, resolutions and recorded items kept on a
+  day run again, totals, the refunded-payment lookup, the unsettled list (eight reconciled days,
+  settled payments, refunded top-ups), the owner, reason, note, date, running and audit checks, the
+  read check and grants, matching (amounts, mandates, applying missed payments and refunds,
+  transfers, adjustments, currencies, disputes before and after applying), the outcomes of applying,
+  writing what was recorded at once, paging, refusals and retries, superseded attempts, and the
+  report reader's checks.
+
+### Test commands and results (local, 2026-09-28)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `pnpm test` (unit)                                                          | 308 passed. New: `billing/settlement-recon.test.ts` 7 (India's calendar day, the schedule's latest day around 06:00, matching payments and refunds, what is left to a person, disputes decided after applying, types) and 3 settlement-report tests in `billing/razorpay.test.ts` (the documented request and fields, unreadable items never read partly, parameters Razorpay would reject refused before calling).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 398 passed, including the new `settlement-recon.test.ts` 10: the schedule (the previous day from 06:00, a week of gaps after the first run, never before it, a day not over refused); missed payments and refunds recorded once through the usual paths with the receipt email, matches for companies found through HyFib's records, totals, no notes or card fields stored; every mismatch, review and not-HyFib class changing nothing (disputes on what HyFib matched or recorded waiting for a person, a missed payment with a dispute credited first); a day run again keeping what was recorded and resolved and removing what Razorpay no longer lists; paging; retries, refusals, six attempts and a stopped sixth attempt; a failure while recording, keeping what the attempt had recorded; a superseded attempt; staff access and privileges; the unsettled payments (eight reconciled days, settled payments and refunded top-ups left out). |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 398 passed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 76 passed (38 × 2) in one full run (16.0 min), including the new `settlement-recon.spec.ts` on both projects: a customer pays and closes Checkout at once, so HyFib hears nothing and adds no credit; Razorpay settles the payment days later together with a payment of another integration; a platform owner reconciles the day and the minute billing sweep hands it to the worker; the missed payment is recorded by the check and credited with the usual receipt email; the other payment waits as not HyFib's and is resolved with a note; no page scrolls sideways on the phone.                                                                                                                                                                                                                                                                                                                                                  |
+| Mutation checks                                                             | 62 guards broken one at a time; all 62 make a test fail                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+
+### Known gaps
+
+- Not run against Razorpay test mode yet (staging, RELEASE-CHECKLIST). The documentation does not
+  say which time zone the report's day uses, in what order items come and whether pages stay stable,
+  when a day's report is complete, or how disputes and held items appear (research, open questions
+  21 and 22).
+- Alerts and emails, a CSV export of a run, matching settlements with bank statements (UTR), fee
+  and tax accounting, companies' own Razorpay accounts, automatic handling of adjustments, disputes
+  and transfers, and instant settlements are not built.
+- Firefox and WebKit run the new spec in CI only; only Chromium is installed locally.
+
 ## 2026-09-28 — Fix: the egress fallback test on macOS
 
 Status: **Fixed and verified locally on macOS; the fallback also checked on Linux with and without

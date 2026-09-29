@@ -18,7 +18,7 @@ import {
   TR,
   Table,
 } from '@w360/ui';
-import { DefaultTrialForm } from '@/components/platform/plan-forms';
+import { DefaultTrialForm, PlanTaxForm } from '@/components/platform/plan-forms';
 import { getRuntime } from '@/server/runtime';
 import { requirePlatformActor } from '@/server/session';
 
@@ -29,8 +29,8 @@ const TONE = { draft: 'neutral', published: 'success', retired: 'warning' } as c
 
 export default async function PlansPage() {
   const actor = await requirePlatformActor();
-  const { planAdmin } = await getRuntime();
-  const { plans, defaultTrialPlanId } = await planAdmin.listPlans(actor);
+  const { planAdmin, razorpay } = await getRuntime();
+  const { plans, defaultTrialPlanId, planTaxBp } = await planAdmin.listPlans(actor);
   const isOwner = actor.role === 'platform_owner';
   const trialOptions = plans
     .filter((p) => p.status === 'published' && p.trialDays > 0)
@@ -46,7 +46,7 @@ export default async function PlansPage() {
           <h1 className="text-2xl font-semibold tracking-tight">Plans</h1>
           <p className="text-sm text-muted-foreground">
             Plan versions companies can be put on. Published versions never change; a change is a
-            new version. Nothing is charged here.{' '}
+            new version.{' '}
             <Link href="/platform" className="text-primary underline-offset-4 hover:underline">
               Back to platform
             </Link>
@@ -70,6 +70,24 @@ export default async function PlansPage() {
         {isOwner ? (
           <CardContent>
             <DefaultTrialForm current={defaultTrialPlanId} options={trialOptions} />
+          </CardContent>
+        ) : null}
+      </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle>Paying for plans</CardTitle>
+          <CardDescription>
+            {!razorpay?.subscriptionsEnabled
+              ? 'Turned off on this platform: companies cannot pay for plans here until Razorpay Subscriptions is activated and RAZORPAY_SUBSCRIPTIONS_ENABLED is set.'
+              : planTaxBp === null
+                ? 'No tax on plan prices is set, so companies cannot pay for plans here yet.'
+                : `Companies on a published plan version can pay for it through a Razorpay subscription. Plan prices are before tax; ${planTaxBp / 100}% tax is added.`}{' '}
+            A subscription keeps the tax it started with.
+          </CardDescription>
+        </CardHeader>
+        {isOwner ? (
+          <CardContent>
+            <PlanTaxForm current={planTaxBp} />
           </CardContent>
         ) : null}
       </Card>

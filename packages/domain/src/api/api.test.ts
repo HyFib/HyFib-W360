@@ -138,6 +138,13 @@ describe('API errors', () => {
       status: 401,
       body: { error: { code: 'unauthenticated', message: 'No key' }, requestId: 'r' },
     });
+    expect(apiRequestError(429, 'rate_limited', 'Used up', 'r', 'quota_exceeded')).toEqual({
+      status: 429,
+      body: {
+        error: { code: 'rate_limited', message: 'Used up', reason: 'quota_exceeded' },
+        requestId: 'r',
+      },
+    });
   });
 });
 
@@ -158,9 +165,17 @@ describe('OpenAPI document', () => {
     expect(new Set(ids).size).toBe(ids.length);
     for (const [method, path] of API_ROUTES) {
       const responses = Object.keys(paths[path]?.[method]?.responses ?? {});
-      expect(responses).toEqual(expect.arrayContaining(['401', '429', '500']));
+      // 403 and 429 also carry the plan's refusals (not_in_plan, quota_exceeded; ADR-061).
+      expect(responses).toEqual(expect.arrayContaining(['401', '403', '429', '500']));
       expect(responses.some((s) => s.startsWith('2'))).toBe(true);
     }
+  });
+
+  it('names the plan refusals in the 403 and 429 responses and the error reason', () => {
+    const responses = paths['/contacts']?.get?.responses as Record<string, { description: string }>;
+    expect(responses['403']?.description).toContain('not_in_plan');
+    expect(responses['429']?.description).toContain('quota_exceeded');
+    expect(JSON.stringify(doc.components)).toContain('not_in_plan or quota_exceeded');
   });
 
   it('resolves every reference to a component', () => {

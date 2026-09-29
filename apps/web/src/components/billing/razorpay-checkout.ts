@@ -101,3 +101,49 @@ export async function openCheckout(options: {
     instance.open();
   });
 }
+
+export interface SubscriptionCheckoutResponse {
+  razorpay_payment_id: string;
+  razorpay_subscription_id: string;
+  razorpay_signature: string;
+}
+
+/**
+ * Opens Checkout for a server-created subscription (R-072): the payer authorises it and pays the
+ * first billing period. Resolves with the handler response, which the server verifies against its
+ * own subscription id and then checks with Razorpay.
+ */
+export async function openSubscriptionCheckout(options: {
+  keyId: string;
+  subscriptionId: string;
+  companyName: string;
+  description: string;
+  prefill: { name: string; email: string };
+  onAttemptFailed?: (message: string) => void;
+}): Promise<SubscriptionCheckoutResponse> {
+  const Razorpay = await loadCheckout();
+  return new Promise<SubscriptionCheckoutResponse>((resolve, reject) => {
+    let settled = false;
+    const instance = new Razorpay({
+      key: options.keyId,
+      subscription_id: options.subscriptionId,
+      name: 'HyFib W360',
+      description: options.description,
+      prefill: options.prefill,
+      notes: { company: options.companyName.slice(0, 200) },
+      handler(response: SubscriptionCheckoutResponse) {
+        settled = true;
+        resolve(response);
+      },
+      modal: {
+        ondismiss() {
+          if (!settled) reject(new CheckoutClosedError('Payment window closed.'));
+        },
+      },
+    });
+    instance.on('payment.failed', (response) => {
+      options.onAttemptFailed?.(response.error?.description ?? 'The payment attempt failed.');
+    });
+    instance.open();
+  });
+}
