@@ -1,3 +1,4 @@
+import Link from 'next/link';
 import { displayMoney } from '@w360/core';
 import {
   CARD_MANDATE_FRICTIONLESS_MAX_MINOR,
@@ -266,6 +267,9 @@ export function PlanPaymentCard({
                 <TH>Period</TH>
                 <TH className="text-right">Amount</TH>
                 <TH>Method</TH>
+                <TH>
+                  <span className="sr-only">Receipt</span>
+                </TH>
               </TR>
             </THead>
             <TBody>
@@ -277,6 +281,14 @@ export function PlanPaymentCard({
                   </TD>
                   <TD className="text-right tabular-nums">{inr(p.amountMinor)}</TD>
                   <TD>{p.method ?? '—'}</TD>
+                  <TD className="whitespace-nowrap">
+                    <Link
+                      href={`/c/${slug}/billing/plan-payments/${p.id}`}
+                      className="text-sm text-primary underline-offset-4 hover:underline"
+                    >
+                      Receipt<span className="sr-only"> for {day(p.paidAt)}</span>
+                    </Link>
+                  </TD>
                 </TR>
               ))}
             </TBody>

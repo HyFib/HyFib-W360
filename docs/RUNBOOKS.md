@@ -902,6 +902,10 @@ Dashboard shows in the daily reconciliation as "A refund of a plan subscription 
 platform owner; it changes nothing in HyFib, so decide whether the company keeps the period (end
 the plan if not, after cancelling the subscription) and note it on the item.
 
+**A company asks for a receipt of a plan payment.** Billing → Paying for your plan lists each
+payment with a Receipt link (owners, administrators and billing managers), and the payment email
+links to it (ADR-064). It confirms the payment and is not a tax invoice; staff have no view of it.
+
 **A payment start that never finished.** A subscription is recorded before Razorpay is called; one
 still "creating" after 10 minutes is marked failed by the sweep. A Razorpay subscription created
 anyway can only be authorised within its hour (`expire_by`), and the sweep cancels any unpaid one

@@ -1059,7 +1059,9 @@ WHERE used < limit`), per monthly period from `usage_anchor`; the sweep announce
   ends such a period as canceled without grace days. Platform owners set the tax and cancel a
   company's subscription at once (`/platform/tenants/<id>`), staff plan changes are refused while a
   subscription is live, and company deletion cancels it at Razorpay (§6Q). Billing managers are
-  emailed about payments, failed charges (`pending`), stopped retries (`halted`) and cancels.
+  emailed about payments, failed charges (`pending`), stopped retries (`halted`) and cancels. Each
+  plan payment has a receipt page (`billing/plan-payments/<id>`, ADR-064) computed from the payment
+  and its subscription, linked from the payments table and the payment email; not a tax invoice.
 - **Ledger (0004_billing):** one INR wallet per company with five accounts (`wallet_available`,
   `wallet_held`, `payment_clearing`, `service_revenue`, `dispute_losses`). `ledger_transactions` and
   `ledger_entries` are append-only (trigger), balances are maintained by trigger from the entries,

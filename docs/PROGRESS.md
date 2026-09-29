@@ -1,5 +1,50 @@
 # Progress
 
+## 2026-09-29 — Phase 5: receipts for plan payments (P5-07)
+
+Status: **Implemented and locally verified against the Razorpay stand-in only.** Every plan payment
+HyFib records from Razorpay (ADR-063) now has a receipt, like every paid top-up (ADR-057).
+
+### Completed
+
+- **Design (ADR-064):** a receipt page per plan payment, read with `billing.read` in the company's
+  scope, computed from the payment and its subscription (nothing stored). It shows Razorpay's
+  invoice id as the receipt number, the plan version, interval and add-ons, the invoice's billing
+  period, the subtotal, tax rate and tax (only when the payment is exactly the subscription's total,
+  as every recorded payment is), the amount, when it was paid and the method Razorpay reported, the
+  Razorpay payment, invoice and subscription ids, and the company's name and billing email. It says
+  it is not a tax invoice; refunds made in Razorpay's Dashboard are not shown.
+- **Domain:** `planPayments.receipt(ctx, id)`; the payment-received email now links to the receipt of
+  the payment for the latest billing period.
+- **Web:** Billing → plan payment receipt (`/c/<company>/billing/plan-payments/<id>`, printable), and
+  a Receipt link on each row of the plan payments table.
+- **Tests:** a new integration test (the receipt's fields, administrators allowed, agents refused,
+  another company and a malformed id not found, the email link, the breakdown hidden for a payment
+  that is not the subscription's total) and the renewal test now checks that the second email links
+  to the renewal's receipt; `plan-subscription.spec.ts` opens the receipt from the payments table.
+- **Docs:** ADR-064 (and ADR-063's "not built"); ARCHITECTURE §7; SECURITY; THREAT-MODEL T81;
+  RUNBOOKS (plans); BACKLOG P5-07; FEATURE-MATRIX H-041.
+- **Mutation checks:** 8 regressions tried one at a time; 7 make a test fail (the permission, the
+  id check, the breakdown rule, the receipt number, the email's link and which payment it links).
+  The eighth removes the query's company filter, which forced row security repeats (another company
+  still gets "not found"), so the filter stays as defence in depth.
+
+### Test commands and results (local, 2026-09-29)
+
+| Command                                                                     | Result                                                                                                                                                                            |
+| --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                    |
+| `pnpm test` (unit)                                                          | 326 passed                                                                                                                                                                        |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 434 passed, including the new receipt test in `plan-subscriptions.test.ts` (now 21) and the renewal's email link                                                                  |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 434 passed                                                                                                                                                                        |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 84 passed (42 × 2) in one full run (18.0 min), including `plan-subscription.spec.ts` opening the receipt on both projects, with no sideways scrolling on the phone |
+| Mutation checks                                                             | 8 regressions tried; 7 make a test fail, the eighth is repeated by forced row security                                                                                            |
+
+### Known gaps
+
+- Tax invoices, credit notes and a staff view of receipts are not built; the operator's legal
+  details and GSTIN are not configured.
+
 ## 2026-09-28 — Phase 5: paying for plans by Razorpay subscription (P5-07, P5-01)
 
 Status: **Implemented and locally verified against the Razorpay stand-in only; behind

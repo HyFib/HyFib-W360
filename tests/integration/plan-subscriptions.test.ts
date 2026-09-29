@@ -263,6 +263,7 @@ async function billingEmails(tenantId: string) {
     ...(JSON.parse(keyring.decryptString(r.payload_ciphertext, outboxAad(r.id))) as {
       subject: string;
       lines: string[];
+      url: string;
     }),
   }));
 }
@@ -779,6 +780,14 @@ describe('following Razorpay', () => {
       'Payment received for your HyFib plan',
       'Payment received for your HyFib plan',
     ]);
+    // The renewal's email links to the renewal's receipt.
+    const [renewalPayment] = await adminQuery<{ id: string }>(
+      'SELECT id FROM app.plan_payments WHERE provider_payment_id = $1',
+      [renewal.payment.id],
+    );
+    expect((await billingEmails(c.tenantId))[1]!.url).toMatch(
+      new RegExp(`/billing/plan-payments/${renewalPayment!.id}$`),
+    );
     // Redelivered, and the payment's own event: nothing more.
     await deliver('subscription.charged', event);
     expect(
@@ -1001,6 +1010,95 @@ describe('following Razorpay', () => {
       expect(await planPayments(d.tenantId)).toEqual([]);
       expect((await planState(d.tenantId)).status).toBe('trialing');
     }
+  });
+});
+
+describe('receipts (ADR-064)', () => {
+  it('each plan payment has a receipt for billing readers, linked from the payment email', async () => {
+    offsetMs = 0;
+    const c = await trialing();
+    const { start } = await subscribed(c);
+    const [payment] = await adminQuery<{
+      id: string;
+      subscription_id: string;
+      provider_payment_id: string;
+      provider_invoice_id: string;
+      period_start: Date;
+      period_end: Date;
+    }>('SELECT * FROM app.plan_payments WHERE tenant_id = $1', [c.tenantId]);
+    const receipt = await service().receipt(c.ctx, payment!.id);
+    expect(receipt).toMatchObject({
+      id: payment!.id,
+      receiptNumber: payment!.provider_invoice_id,
+      amountMinor: 141_482,
+      currency: 'INR',
+      breakdown: { subtotalMinor: 119_900, taxBp: 1800, taxMinor: 21_582 },
+      planName: 'Growth',
+      planVersion: 1,
+      intervalMonths: 1,
+      extraSeats: 2,
+      extraNumbers: 0,
+      runPacks: 0,
+      periodStart: payment!.period_start,
+      periodEnd: payment!.period_end,
+      method: 'card',
+      methodLabel: 'Card',
+      providerPaymentId: payment!.provider_payment_id,
+      providerInvoiceId: payment!.provider_invoice_id,
+      providerSubscriptionId: start.providerSubscriptionId,
+      timezone: c.ctx.tenant.timezone,
+    });
+    // The payment-received email links to it.
+    const [received] = await billingEmails(c.tenantId);
+    expect(received).toMatchObject({ subject: 'Payment received for your HyFib plan' });
+    expect(received!.url).toMatch(new RegExp(`/c/${c.slug}/billing/plan-payments/${payment!.id}$`));
+
+    // Administrators read billing; agents do not; another company never finds it.
+    const administrator = await createUser(dbs, { name: 'Administrator' });
+    const agent = await createUser(dbs, { name: 'Agent' });
+    for (const [user, roles] of [
+      [administrator, ['admin']],
+      [agent, ['agent']],
+    ] as const) {
+      const { token } = await invite(
+        dbs,
+        { id: c.tenantId, slug: c.slug, ownerMembershipId: '' },
+        c.owner,
+        user.email,
+        [...roles],
+      );
+      await acceptInvitation(dbs, user, token);
+    }
+    expect((await service().receipt(await contextFor(administrator, c.slug), payment!.id)).id).toBe(
+      payment!.id,
+    );
+    expect(
+      (await refusal(service().receipt(await contextFor(agent, c.slug), payment!.id))).code,
+    ).toBe('forbidden');
+    const other = await trialing();
+    expect((await refusal(service().receipt(other.ctx, payment!.id))).code).toBe('not_found');
+    expect((await refusal(service().receipt(c.ctx, 'not-a-receipt'))).code).toBe('not_found');
+
+    // A payment that is not the subscription's total shows the total only.
+    const oddId = uuidv7();
+    await adminQuery(
+      `INSERT INTO app.plan_payments (id, tenant_id, subscription_id, provider_payment_id,
+         provider_invoice_id, amount_minor, currency, period_start, period_end, paid_at, method)
+       VALUES ($1, $2, $3, $4, $5, 100, 'INR', now() - interval '1 day', now(), now(), NULL)`,
+      [
+        oddId,
+        c.tenantId,
+        payment!.subscription_id,
+        `pay_Odd${randomBytes(5).toString('hex')}`,
+        `inv_Odd${randomBytes(5).toString('hex')}`,
+      ],
+    );
+    expect(await service().receipt(c.ctx, oddId)).toMatchObject({
+      amountMinor: 100,
+      breakdown: null,
+      method: null,
+      methodLabel: null,
+    });
   });
 });
 

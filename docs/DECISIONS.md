@@ -1844,5 +1844,32 @@ Razorpay registers "as presented" for frequencies other than weekly, monthly and
 release checklist has the test-mode checks.
 
 Not built: billing that starts at the end of a trial, self-serve plan and add-on changes with
-proration, pausing, offers, plan payment receipts and GST invoices, refunds of plan payments, and
+proration, pausing, offers, plan payment receipts (since ADR-064) and GST invoices, refunds of plan payments, and
 emails about a subscription beyond charges, failures and endings.
+
+## ADR-064 Receipts for plan payments (2026-09-29)
+
+Context: ADR-063 records each plan payment Razorpay charges for a company's subscription, and the
+Billing page lists them, but a company had nothing to keep for its records, while every top-up has
+a receipt (ADR-057).
+
+Decision: each recorded plan payment has a **receipt page** (`/c/<company>/billing/plan-payments/<id>`),
+read with `billing.read` in the company's scope like top-up receipts. It shows:
+
+- the receipt number: Razorpay's invoice id for the charge (`inv_…`), which Razorpay also shows;
+- the plan version and billing interval, and the add-ons the subscription covers;
+- the billing period of Razorpay's invoice, in the company's time zone;
+- the subscription's subtotal, tax rate and tax, and the amount paid. The breakdown is shown only
+  when the payment is exactly the subscription's total, as every recorded payment is (ADR-063);
+- when it was paid and the method Razorpay reported, the Razorpay payment, invoice and subscription
+  ids, the company's name and billing email.
+
+Like top-up receipts, it says it is a payment confirmation and **not a tax invoice**; the operator's
+legal name, address and GSTIN are not configured, and tax invoices wait for tax review. HyFib does
+not refund plan payments, so a refund made in Razorpay's Dashboard is not shown (the daily
+reconciliation leaves it to a person). Nothing is stored: the page is computed from the plan payment
+and its subscription. The payments table in Billing links each payment to its receipt, and the
+payment-received email links to the receipt of the payment that paid the new period.
+
+Not built: tax invoices, credit notes, receipts in platform pages, and plan payments in the monthly
+service-credit statements (they never touch the wallet).

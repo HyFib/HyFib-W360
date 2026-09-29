@@ -95,6 +95,17 @@ test('a company pays for its plan by subscription, a renewal counts from Razorpa
     await expect(paying.getByRole('cell', { name: '₹1,414.82' })).toHaveCount(1);
     await waitForEmail(email, 'Payment received for your HyFib plan');
 
+    // The payment's receipt: the plan, the billing period and the tax, and not a tax invoice.
+    await paying.getByRole('link', { name: /^Receipt/ }).click();
+    await expect(page.getByRole('heading', { name: 'Plan payment receipt' })).toBeVisible();
+    await expect(page.getByText(/It is not a tax invoice\./)).toBeVisible();
+    await expect(page.getByText(`Growth (grow-${suffix} v1), per month`)).toBeVisible();
+    await expect(page.getByText('With 2 extra seats')).toBeVisible();
+    await expect(page.getByText('₹215.82', { exact: true })).toBeVisible();
+    await expect(page.getByText('₹1,414.82 (INR)', { exact: true })).toBeVisible();
+    await expect(page.getByText(/^inv_/).first()).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+
     // Staff see the subscription; plan changes wait for it.
     await page.goto(`/platform?q=${slug}`);
     await page.getByRole('link', { name: companyName }).click();

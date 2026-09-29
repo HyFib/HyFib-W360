@@ -1,6 +1,7 @@
 import { AppError, displayMoney, uuidv7, type Clock, type RazorpayConfig } from '@w360/core';
 import {
   and,
+  billingCustomers,
   count,
   desc,
   eq,
@@ -31,6 +32,7 @@ import {
   type PlanPaymentQuote,
   type PlanPaymentUnavailable,
 } from '../plans/model';
+import { paymentMethodLabel } from './history';
 import { notifyBillingManagers, type BillingNoticeDeps } from './notices';
 import { transient, TransientProviderError, type BillingProviderDeps } from './provider';
 import {
@@ -62,6 +64,7 @@ const INVOICE_MAX_PAGES = 12;
 const PERIODS = { 1: 'monthly', 3: 'quarterly', 12: 'yearly' } as const;
 const PAYMENT_ID_RE = /^pay_[A-Za-z0-9]{1,40}$/;
 const PAYMENT_METHOD_RE = /^[a-z_]{1,32}$/;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ENDED: readonly PlanSubscriptionStatus[] = ['cancelled', 'completed', 'expired', 'failed'];
 const LIVE: readonly PlanSubscriptionStatus[] = LIVE_PLAN_SUBSCRIPTION_STATUSES;
 
@@ -100,6 +103,38 @@ export interface PlanPaymentRecord {
 export type PlanPaymentOffer =
   | { available: true; quote: PlanPaymentQuote; intervalMonths: number }
   | { available: false; reason: PlanPaymentUnavailable };
+
+/**
+ * The receipt of a plan payment (ADR-064): a payment confirmation for the plan, not a tax invoice.
+ * The breakdown is the subscription's, shown only when the payment is exactly its total (as every
+ * recorded payment is).
+ */
+export interface PlanPaymentReceipt {
+  id: string;
+  /** Razorpay's invoice id, which Razorpay also shows for the charge. */
+  receiptNumber: string;
+  amountMinor: number;
+  currency: 'INR';
+  breakdown: { subtotalMinor: number; taxBp: number; taxMinor: number } | null;
+  planName: string;
+  planCode: string;
+  planVersion: number;
+  intervalMonths: number;
+  extraSeats: number;
+  extraNumbers: number;
+  runPacks: number;
+  periodStart: Date;
+  periodEnd: Date;
+  paidAt: Date;
+  method: string | null;
+  methodLabel: string | null;
+  providerPaymentId: string;
+  providerInvoiceId: string;
+  providerSubscriptionId: string | null;
+  companyName: string;
+  billingEmail: string | null;
+  timezone: string;
+}
 
 export interface PlanPaymentOverview {
   offer: PlanPaymentOffer;
@@ -474,8 +509,16 @@ export async function syncPlanSubscription(
       const [after] = await tx.select().from(planSubscriptions).where(where);
       const paidUntil = after?.currentEnd ?? null;
       if (period === 'applied') {
+        // The payment of the latest billing period: the one that paid the cycle just applied.
+        const [latest] = await tx
+          .select({ id: planPayments.id })
+          .from(planPayments)
+          .where(and(eq(planPayments.tenantId, tenantId), eq(planPayments.subscriptionId, row.id)))
+          .orderBy(desc(planPayments.periodStart))
+          .limit(1);
         await notifyBillingManagers(deps.notices, tx, scope, {
           subject: 'Payment received for your HyFib plan',
+          ...(latest ? { billingPath: `plan-payments/${latest.id}` } : {}),
           lines: [
             `We received ${amount} for the ${planName} plan${paidUntil ? `. It is paid until ${day(paidUntil)}` : ''}.`,
             after?.cancelAtPeriodEnd
@@ -796,6 +839,92 @@ export function createPlanSubscriptionService(deps: PlanSubscriptionServiceDeps)
             .orderBy(desc(planPayments.paidAt))
             .limit(24);
           return { offer, subscription: shown ? summary(shown, now) : null, payments };
+        },
+        { accessMode: 'read only' },
+      );
+    },
+
+    /** The receipt of one of the company's plan payments (`billing.read`). */
+    async receipt(ctx: TenantContext, planPaymentId: string): Promise<PlanPaymentReceipt> {
+      assertCan(ctx, 'billing.read');
+      if (!UUID_RE.test(planPaymentId)) {
+        throw new AppError('not_found', 'There is no such receipt.');
+      }
+      return db.run(
+        ctx.scope,
+        async (tx) => {
+          const [found] = await tx
+            .select({
+              id: planPayments.id,
+              amountMinor: planPayments.amountMinor,
+              periodStart: planPayments.periodStart,
+              periodEnd: planPayments.periodEnd,
+              paidAt: planPayments.paidAt,
+              method: planPayments.method,
+              providerPaymentId: planPayments.providerPaymentId,
+              providerInvoiceId: planPayments.providerInvoiceId,
+              providerSubscriptionId: planSubscriptions.providerSubscriptionId,
+              subtotalMinor: planSubscriptions.subtotalMinor,
+              taxBp: planSubscriptions.taxBp,
+              taxMinor: planSubscriptions.taxMinor,
+              subscriptionAmountMinor: planSubscriptions.amountMinor,
+              intervalMonths: planSubscriptions.intervalMonths,
+              extraSeats: planSubscriptions.extraSeats,
+              extraNumbers: planSubscriptions.extraNumbers,
+              runPacks: planSubscriptions.runPacks,
+              planName: plans.name,
+              planCode: plans.code,
+              planVersion: plans.version,
+            })
+            .from(planPayments)
+            .innerJoin(
+              planSubscriptions,
+              and(
+                eq(planSubscriptions.tenantId, planPayments.tenantId),
+                eq(planSubscriptions.id, planPayments.subscriptionId),
+              ),
+            )
+            .innerJoin(plans, eq(plans.id, planSubscriptions.planId))
+            .where(
+              and(eq(planPayments.tenantId, ctx.tenant.id), eq(planPayments.id, planPaymentId)),
+            );
+          if (!found) throw new AppError('not_found', 'There is no such receipt.');
+          const [customer] = await tx
+            .select({ email: billingCustomers.email })
+            .from(billingCustomers)
+            .where(eq(billingCustomers.tenantId, ctx.tenant.id));
+          return {
+            id: found.id,
+            receiptNumber: found.providerInvoiceId,
+            amountMinor: found.amountMinor,
+            currency: 'INR' as const,
+            breakdown:
+              found.amountMinor === found.subscriptionAmountMinor
+                ? {
+                    subtotalMinor: found.subtotalMinor,
+                    taxBp: found.taxBp,
+                    taxMinor: found.taxMinor,
+                  }
+                : null,
+            planName: found.planName,
+            planCode: found.planCode,
+            planVersion: found.planVersion,
+            intervalMonths: found.intervalMonths,
+            extraSeats: found.extraSeats,
+            extraNumbers: found.extraNumbers,
+            runPacks: found.runPacks,
+            periodStart: found.periodStart,
+            periodEnd: found.periodEnd,
+            paidAt: found.paidAt,
+            method: found.method,
+            methodLabel: paymentMethodLabel(found.method),
+            providerPaymentId: found.providerPaymentId,
+            providerInvoiceId: found.providerInvoiceId,
+            providerSubscriptionId: found.providerSubscriptionId,
+            companyName: ctx.tenant.name,
+            billingEmail: customer?.email ?? null,
+            timezone: ctx.tenant.timezone,
+          };
         },
         { accessMode: 'read only' },
       );
