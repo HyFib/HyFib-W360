@@ -477,7 +477,6 @@ export function PlanTaxForm({ current }: { current: number | null }) {
 
 /** Cancels the company's plan subscription at Razorpay at once (platform owners, ADR-063). */
 export function CancelTenantSubscriptionForm({ tenantId }: { tenantId: string }) {
-  const router = useRouter();
   const [reason, setReason] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [issues, setIssues] = useState<Issues>({});
@@ -523,8 +522,8 @@ export function CancelTenantSubscriptionForm({ tenantId }: { tenantId: string })
                 setIssues(issuesOf(r));
                 return;
               }
+              // The action refreshes the page on the server; a client refresh would repeat it.
               setReason('');
-              router.refresh();
             });
           }}
         />

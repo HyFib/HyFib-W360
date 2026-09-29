@@ -10,7 +10,13 @@ import {
   standInRequests,
   statusUpdate,
 } from './messaging-support';
-import { expectNoHorizontalOverflow, signUpAndVerify, uniqueEmail, waitForEmail } from './support';
+import {
+  expectNoHorizontalOverflow,
+  openFromNav,
+  signUpAndVerify,
+  uniqueEmail,
+  waitForEmail,
+} from './support';
 
 const PASSWORD = 'correct horse battery staple 42';
 
@@ -158,8 +164,9 @@ test('a company sees Meta’s rates in force, what changes next, and this month�
   );
   await expect(thread.getByText('Delivered')).toBeVisible({ timeout: 20_000 });
 
-  // Billing links to Usage and rates.
-  await page.goto(`/c/${slug}/billing`);
+  // Billing links to Usage and rates (the live conversation is left through the navigation, see
+  // openFromNav).
+  await openFromNav(page, 'Billing');
   await page.getByRole('link', { name: 'Usage and rates' }).click();
   await expect(page.getByRole('heading', { name: 'Usage and rates', level: 1 })).toBeVisible();
   await expect(page.getByText(`Meta’s ${currency} rates change on`)).toBeVisible();

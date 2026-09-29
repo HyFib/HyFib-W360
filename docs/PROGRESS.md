@@ -363,6 +363,10 @@ up on the old page. Prefetch failures do not trigger it. Any client refresh in f
   in a Firefox trace; the server had already received it); they now wait until the returned page
   has no draft buttons. After "Refresh from Meta" the campaigns, stores and API specs now wait for
   "Refresh requested", as the templates spec already did.
+- **The same rule for code merged from `main` (PR #12).** `billing-usage.spec.ts` left a live
+  conversation with `page.goto` right after a live update ("Delivered"); it now uses `openFromNav`.
+  The platform's subscription cancel form refreshed after `cancelTenantSubscriptionAction`, which
+  already calls `refresh()`; the client refresh is gone (no test drives that form).
 
 No test was skipped, quarantined or given a longer timeout.
 
