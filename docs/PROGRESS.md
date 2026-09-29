@@ -28,14 +28,14 @@ owners decide on `/platform/refunds`, and the same page lists every refund.
   the worker; `ops.platform_credit_refund_requests` and `ops.platform_credit_refunds` (newest first
   on exact keyset pages) and `ops.platform_decide_credit_refund_request` (platform owners, audited)
   for platform staff.
-- **Domain** (`billing/refund-requests.ts`): `createRefundRequestsService` (`ask`, under a
-  per-company advisory lock that counts the day's requests; `withdraw`; `list`; `forTopup`, what the
-  receipt offers and why not), `announceRefundRequests` and `notifyRefundRequestDeclines` (the
-  minute sweep's emails, marked in the transaction that queues them; nothing is marked while there
-  is no platform owner); `platformBilling.refundRequests`, `creditRefunds` and
-  `decideRefundRequest`. The insert names only the columns the company role may insert: a query
-  builder insert names every column, and PostgreSQL checks the column grant even for `DEFAULT` (the
-  first test run showed it).
+- **Domain** (`billing/refund-requests.ts`): `createRefundRequestsService` (`ask`, which reads the
+  company's status under a share lock and counts the day's requests under a per-company advisory
+  lock; `withdraw`; `list`; `forTopup`, what the receipt offers and why not),
+  `announceRefundRequests` and `notifyRefundRequestDeclines` (the minute sweep's emails, marked in
+  the transaction that queues them; nothing is marked while there is no platform owner);
+  `platformBilling.refundRequests`, `creditRefunds` and `decideRefundRequest`. The insert names only
+  the columns the company role may insert: a query builder insert names every column, and PostgreSQL
+  checks the column grant even for `DEFAULT` (the first test run showed it).
 - **Worker:** the minute billing sweep announces new requests to platform owners and tells billing
   managers of declines, logging what it sent, a missing platform owner and a company whose email
   failed (retried the next minute).
@@ -47,12 +47,13 @@ owners decide on `/platform/refunds`, and the same page lists every refund.
   running; approve with a confirmation or decline with a note, for platform owners; every refund
   across companies, each list with its own "Older" pages) and its link on the platform home.
 - **Tests:** 5 unit tests (the announcement's text, its rendering and the limits the database
-  checks; the decision refusing operators and notes of the wrong length before any query). 16
+  checks; the decision refusing operators and notes of the wrong length before any query). 17
   integration tests in `refund-requests.test.ts`: asking (nothing held, audit, the receipt's and
   staff's views; agents, administrators and stale sessions refused; bad amounts and reasons, more
   than is left or unused, a running refund, unpaid, unknown and other companies' payments; one open
   request per payment with two sent at once; 5 a day with 7 sent at once, withdrawn requests
-  counted, a day-old one not; a company being deleted); withdrawing; deciding (approval starting and
+  counted, a day-old one not; a company being deleted, also when the deletion is asked for while a
+  request is being made); withdrawing; deciding (approval starting and
   linking the staff refund with its hold and both audit entries; approval refused when the credit
   was spent since or a refund started meanwhile, the request staying open; declining with a note,
   checked by the function too; operators, a claimed owner role and the company role refused); the
@@ -71,12 +72,20 @@ owners decide on `/platform/refunds`, and the same page lists every refund.
   so the brief "Being removed" state never shows. The step now accepts either that state or the
   store already gone ("Page not found"); the checks after it (no store connected, HyFib uninstalled
   at the stand-in) are unchanged.
+- **Review fix (PR #17):** `ask` checked the company's status only in the context read before its
+  transaction, so an owner's deletion request committed in between let a request in for a company
+  being deleted. The status is now read in the transaction under a share lock:
+  `app.request_tenant_deletion` locks the row for update, so it waits for the request, or the
+  request sees the new status and is refused. A new integration test holds the deletion's
+  transaction open while a request waits on it; two new mutation checks (no lock, the context's
+  status) are caught by it.
 - **Docs:** ADR-073; ARCHITECTURE (billing section); SECURITY (controls, Phase 5 rules, platform
   roles); THREAT-MODEL T91; RUNBOOKS (refund requests, migration 0046); DATA-RETENTION; BACKLOG
   P5-05; FEATURE-MATRIX H-036 and H-043; RELEASE-CHECKLIST (refund requests in Razorpay test mode);
   the e2e job's comment in CI (196 tests).
-- **Mutation checks:** 37 regressions tried one at a time; all make a test fail. They cover the
-  step-up, the permission, the deleting-company check, the advisory lock, the daily limit and what
+- **Mutation checks:** 39 regressions tried one at a time; all make a test fail. They cover the
+  step-up, the permission, the deleting-company check (read under a lock, not from the context), the
+  advisory lock, the daily limit and what
   it counts, each of the payment, amount, unused-credit and running-refund checks, the unique
   index and its message, withdrawing, what the receipt offers, the announcement's no-owner rule and
   its mark, the decline notice's mark and link, the decision's note, owner and open-request checks
@@ -89,14 +98,14 @@ owners decide on `/platform/refunds`, and the same page lists every refund.
 
 ### Test commands and results (local, 2026-09-29)
 
-| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `pnpm test` (unit)                                                          | 350 passed, including 3 new in `billing/refund-requests.test.ts` and 2 in `platform/billing.test.ts`                                                                                                                                                                                                                                                                                                                                                                       |
-| `pnpm test:integration` (PostgreSQL 18.6)                                   | 489 passed, including 16 new in `refund-requests.test.ts`                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 489 passed                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / `refund-requests.spec.ts`, `credit-refunds.spec.ts` and `billing-history.spec.ts` passed on both projects (6 tests, 8.4 min); after the refund test's waits were reordered, it and `stores.spec.ts` passed on chromium (6 tests, 4.2 min); both runs used the build from before the forms' unreachable success messages were removed. A full run of both projects on the final build was started before pushing; its result is recorded on the pull request |
-| Mutation checks                                                             | 37 regressions tried; all make a test fail (two after the tests were strengthened, above)                                                                                                                                                                                                                                                                                                                                                                                  |
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `pnpm test` (unit)                                                          | 350 passed, including 3 new in `billing/refund-requests.test.ts` and 2 in `platform/billing.test.ts`                                                                                                                                                                                                                                                                                                                                                                                   |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 489 passed before the review fix, including 16 new in `refund-requests.test.ts`; with it, that file (17 tests), `company-data.test.ts` and `tenant-isolation.test.ts` pass                                                                                                                                                                                                                                                                                                             |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 489 passed (before the review fix)                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / `refund-requests.spec.ts`, `credit-refunds.spec.ts` and `billing-history.spec.ts` passed on both projects (6 tests, 8.4 min); after the refund test's waits were reordered, it and `stores.spec.ts` passed on chromium (6 tests, 4.2 min); both runs used the build from before the forms' unreachable success messages were removed. A full run of both projects on the build of the first push was started before pushing; its result is recorded on the pull request |
+| Mutation checks                                                             | 39 regressions tried; all make a test fail (two after the tests were strengthened, above)                                                                                                                                                                                                                                                                                                                                                                                              |
 
 ### Known gaps
 

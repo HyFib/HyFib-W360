@@ -2176,8 +2176,10 @@ Decision:
   a reason of 10 to 1,000 characters. The amount is at most what is left of the payment and the
   company's unused credit at the time; no request while a refund of the top-up is in progress, one
   open request per top-up (a partial unique index), at most 5 requests per company in 24 hours
-  (counted under a per-company advisory lock), none once the company asked for its deletion. The
-  company can withdraw an open request. A request moves no money and holds no credit.
+  (counted under a per-company advisory lock), none once the company asked for its deletion (its
+  status is read in the request's transaction under a share lock: a deletion asked for meanwhile
+  waits for the request, or the request sees it and is refused). The company can withdraw an open
+  request. A request moves no money and holds no credit.
 - **Deciding:** only a platform owner decides, on `/platform/refunds` (operators see it).
   `ops.platform_decide_credit_refund_request` locks the open request; approving calls
   `ops.platform_request_credit_refund` (ADR-058) for the request's amount in the same transaction, so

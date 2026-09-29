@@ -1,5 +1,5 @@
 import { createHmac, randomBytes } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest';
 import { PgBoss } from 'pg-boss';
 import { Keyring, isAppError, uuidv7, type Clock, type RazorpayConfig } from '@w360/core';
 import { authorizedTenantScope, sql, type TenantScope } from '@w360/db';
@@ -621,6 +621,50 @@ describe('asking for a refund', () => {
     expect(await refundsOf(c.tenantId)).toEqual([]);
     await decide(owner, requestId, 'decline', NOTE);
     expect((await requestRow(requestId)).status).toBe('declined');
+  });
+
+  it('reads the company’s status under a lock, so a deletion asked for meanwhile refuses the request', async () => {
+    const c = await company();
+    const { topupId } = await paidTopup(c, 20_000);
+    // The context was read before the deletion, as a page's is before its form is sent.
+    expect(c.ctx.tenant.status).toBe('active');
+    const deleting = await dbs.adminPool.connect();
+    let asked: Promise<{ code: string; message: string }> | undefined;
+    try {
+      await deleting.query('BEGIN');
+      await deleting.query(
+        `SELECT set_config('app.tenant_id', $1, true), set_config('app.user_id', $2, true)`,
+        [c.tenantId, c.owner.id],
+      );
+      await deleting.query('SELECT * FROM app.request_tenant_deletion($1)', [c.tenant.slug]);
+      const [holder] = (await deleting.query<{ pid: number }>('SELECT pg_backend_pid() AS pid'))
+        .rows;
+      asked = refusal(ask(c, topupId, '10'));
+      // The request waits for the deletion's transaction before it reads the status.
+      await vi.waitFor(
+        async () => {
+          const [waiting] = await adminQuery<{ n: number }>(
+            `SELECT count(*)::int AS n FROM pg_stat_activity
+              WHERE datname = current_database() AND $1 = ANY (pg_blocking_pids(pid))`,
+            [holder!.pid],
+          );
+          if (waiting!.n < 1) throw new Error('the request is not waiting yet');
+        },
+        { timeout: 4_000, interval: 20 },
+      );
+    } finally {
+      await deleting.query('COMMIT');
+      deleting.release();
+    }
+    expect(await asked).toEqual({
+      code: 'precondition_failed',
+      message: 'The company is being deleted, so it can no longer ask for refunds.',
+    });
+    expect(
+      await adminQuery('SELECT id FROM app.credit_refund_requests WHERE tenant_id = $1', [
+        c.tenantId,
+      ]),
+    ).toEqual([]);
   });
 });
 

@@ -13,6 +13,7 @@ import {
   ledgerAccounts,
   sql,
   systemScope,
+  tenants,
   topups,
   users,
   type CreditRefundRequestStatus,
@@ -114,15 +115,24 @@ export function createRefundRequestsService(deps: RefundRequestDeps) {
       assertRecentSignIn(ctx, clock.now());
       const data = parseInput(askSchema, input);
       const amountMinor = amountFromInput(data.amount);
-      if (ctx.tenant.status === 'pending_deletion' || ctx.tenant.status === 'deleted') {
-        throw new AppError(
-          'precondition_failed',
-          'The company is being deleted, so it can no longer ask for refunds.',
-        );
-      }
       const requestId = uuidv7();
       try {
         await db.run(ctx.scope, async (tx) => {
+          // The status now, not the context's: an owner may have asked for the company's deletion
+          // since the context was read. app.request_tenant_deletion locks the row for update, so
+          // under this share lock it waits for the request, or the request sees the new status.
+          const [company] = await tx
+            .select({ status: tenants.status })
+            .from(tenants)
+            .where(eq(tenants.id, ctx.tenant.id))
+            .for('share');
+          if (!company) throw notFound('Company');
+          if (company.status === 'pending_deletion' || company.status === 'deleted') {
+            throw new AppError(
+              'precondition_failed',
+              'The company is being deleted, so it can no longer ask for refunds.',
+            );
+          }
           // Counted under a per-company lock, so concurrent requests cannot pass the daily limit.
           await tx.execute(
             sql`select pg_advisory_xact_lock(hashtextextended(${`credit_refund_request:${ctx.tenant.id}`}, 0))`,
