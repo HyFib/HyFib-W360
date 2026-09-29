@@ -6,6 +6,7 @@ import {
   listReply,
   messagingConfigured,
   randomWaId,
+  reactionMessage,
   sendSignedWebhook,
   standInRequests,
   templateButtonReply,
@@ -336,9 +337,11 @@ test('a key sends reply buttons and a list to a customer who wrote: the inbox sh
   const { wabaId, phoneNumberId } = await connectTestChannel({ ownerEmail: email, slug });
 
   await page.goto(`/c/${slug}/settings/api-keys`);
-  await expect(page.getByText(/replies \(text, buttons and lists\)/)).toBeVisible();
+  await expect(page.getByText(/replies \(text, buttons, lists and\s+reactions/)).toBeVisible();
   await page.getByLabel('Name', { exact: true }).fill('Booking');
-  await page.getByRole('checkbox', { name: /Reply with text, buttons and lists/ }).check();
+  await page
+    .getByRole('checkbox', { name: /Reply with text, buttons, lists and reactions/ })
+    .check();
   await page.getByRole('checkbox', { name: /Read conversations/ }).check();
   await page.getByRole('button', { name: 'Create API key' }).click();
   const token = await page.getByLabel('API key', { exact: true }).inputValue();
@@ -466,6 +469,131 @@ test('a key sends reply buttons and a list to a customer who wrote: the inbox sh
       }),
     ]);
   }).toPass({ timeout: 20_000 });
+});
+
+test('a key quotes a customer’s message and reacts to it: the inbox shows both, and the customer’s reaction names the reply', async ({
+  page,
+  request,
+}) => {
+  const email = uniqueEmail('apiquote');
+  const slug = `apiquote-${Date.now().toString(36)}`;
+  await signUpAndVerify(page, { name: 'Quinn Quote', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('Harbour Dental');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+  const { wabaId, phoneNumberId } = await connectTestChannel({ ownerEmail: email, slug });
+
+  await page.goto(`/c/${slug}/settings/api-keys`);
+  await page.getByLabel('Name', { exact: true }).fill('Front desk');
+  await page
+    .getByRole('checkbox', { name: /Reply with text, buttons, lists and reactions/ })
+    .check();
+  await page.getByRole('checkbox', { name: /Read conversations/ }).check();
+  await page.getByRole('button', { name: 'Create API key' }).click();
+  const token = await page.getByLabel('API key', { exact: true }).inputValue();
+  await page.getByRole('button', { name: 'I have stored the key' }).click();
+  const auth = { Authorization: `Bearer ${token}` };
+  const post = (data: Record<string, unknown>) =>
+    request.post('/api/v1/messages', {
+      headers: { ...auth, 'Idempotency-Key': randomUUID() },
+      data,
+    });
+
+  const waId = randomWaId();
+  const questionWamid = `wamid.e2e.${randomUUID()}`;
+  const question = inboundMessage(
+    wabaId,
+    phoneNumberId,
+    waId,
+    'Can I come on Thursday instead?',
+    new Date(),
+    questionWamid,
+  );
+  await sendSignedWebhook(request, question);
+
+  // The key finds the question in the conversation.
+  let conversationId = '';
+  let asked = '';
+  await expect(async () => {
+    const listed = await request.get('/api/v1/conversations', { headers: auth });
+    const [conversation] = ((await listed.json()) as { data: { id: string }[] }).data;
+    conversationId = conversation!.id;
+    const messages = await request.get(`/api/v1/conversations/${conversationId}/messages`, {
+      headers: auth,
+    });
+    const [newest] = ((await messages.json()) as { data: { id: string; text: string }[] }).data;
+    expect(newest?.text).toBe('Can I come on Thursday instead?');
+    asked = newest!.id;
+  }).toPass({ timeout: 20_000 });
+
+  // The front desk answers quoting it and reacts to it; a word is not an emoji.
+  const quoted = await post({
+    type: 'text',
+    to: `+${waId}`,
+    text: 'Thursday at 11:00 works.',
+    replyTo: asked,
+  });
+  expect(quoted.status()).toBe(201);
+  const quotedId = ((await quoted.json()).data as { id: string }).id;
+  const reacted = await post({ type: 'reaction', to: `+${waId}`, replyTo: asked, emoji: '👍' });
+  expect(reacted.status()).toBe(201);
+  expect((await reacted.json()).data).toMatchObject({ type: 'reaction', status: 'queued' });
+  const word = await post({ type: 'reaction', to: `+${waId}`, replyTo: asked, emoji: 'ok' });
+  expect(word.status()).toBe(422);
+
+  // The worker sends both, in either order, as Meta's spec describes them.
+  let sent: Awaited<ReturnType<typeof standInRequests>> = [];
+  await expect(async () => {
+    sent = (await standInRequests(request)).filter(
+      (r) =>
+        r.path === `/v26.0/${phoneNumberId}/messages` && (r.body as { to?: string }).to === waId,
+    );
+    expect(sent).toHaveLength(2);
+  }).toPass({ timeout: 30_000 });
+  const ofType = (type: string) => sent.find((r) => (r.body as { type: string }).type === type);
+  expect(ofType('text')?.body).toMatchObject({
+    context: { message_id: questionWamid },
+    text: { body: 'Thursday at 11:00 works.' },
+  });
+  expect(ofType('reaction')?.body).toMatchObject({
+    reaction: { message_id: questionWamid, emoji: '👍' },
+  });
+
+  // Members see the quote above the reply, and what the reaction is for (the conversation list
+  // shows the reaction as the last message too).
+  await page.goto(`/c/${slug}/inbox`);
+  await page.getByRole('link', { name: /Priya Customer/ }).click();
+  const thread = page.getByRole('list', { name: /Messages with/ }).getByRole('listitem');
+  const reply = thread.filter({ hasText: 'Thursday at 11:00 works.' });
+  await expect(reply.getByText('Can I come on Thursday instead?')).toBeVisible();
+  await expect(thread.filter({ hasText: 'Reacted 👍' })).toContainText(
+    'to “Can I come on Thursday instead?”',
+  );
+  await expectNoHorizontalOverflow(page);
+
+  // The customer reacts to the reply: the key reads which message the reaction is for.
+  await sendSignedWebhook(
+    request,
+    reactionMessage(wabaId, phoneNumberId, waId, '🙏', String(ofType('text')?.wamid)),
+  );
+  await expect(async () => {
+    const newest = await request.get(`/api/v1/conversations/${conversationId}/messages?limit=1`, {
+      headers: auth,
+    });
+    expect((await newest.json()).data).toEqual([
+      expect.objectContaining({
+        direction: 'inbound',
+        type: 'reaction',
+        text: '🙏',
+        replyTo: quotedId,
+      }),
+    ]);
+  }).toPass({ timeout: 20_000 });
+  await page.reload();
+  await expect(thread.filter({ hasText: 'Reacted 🙏' })).toContainText(
+    'to “Thursday at 11:00 works.”',
+  );
 });
 
 test('a key starts an automation made to start through the API: its template goes to a contact who never wrote, and the tap continues it', async ({

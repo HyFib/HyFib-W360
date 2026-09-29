@@ -16,6 +16,7 @@ import {
   type WebhookEventType,
 } from '@w360/db';
 import { apiContactColumns, apiContactSchema, toApiContact } from '../api/contact-view';
+import { findAnsweredMessageId } from '../messaging/reply-context';
 
 /**
  * The JSON bodies of outgoing webhooks (ADR-053, ADR-074, ADR-078). The zod schemas describe them
@@ -91,6 +92,12 @@ export const messageReceivedPayloadSchema = envelope(
         .nullable()
         .describe('The text, a caption, the title of a tapped reply or a reaction; null if none.'),
       reply: tappedReplySchema,
+      replyTo: z
+        .uuid()
+        .nullable()
+        .describe(
+          'The id of the message this one answers: the message the contact quoted, the message a reaction is for, or the message whose button or row was tapped. Null when there is none or it is not in the conversation.',
+        ),
       mimeType: z.string().nullable().describe('For media messages (the media is not attached).'),
       receivedAt: z.iso.datetime(),
     }),
@@ -361,6 +368,8 @@ async function messageContext(tx: Tx, tenantId: string, messageId: string | null
     .select({
       type: messages.type,
       content: messages.content,
+      contextExternalId: messages.contextExternalId,
+      conversationId: messages.conversationId,
       senderType: messages.senderType,
       apiKeyId: messages.apiKeyId,
       templateId: messages.templateId,
@@ -615,6 +624,13 @@ export async function buildWebhookPayload(
               id: event.messageId,
               type: message.type,
               ...inboundSummary(message.type, message.content),
+              replyTo: await findAnsweredMessageId(tx, tenantId, {
+                conversationId: message.conversationId,
+                channelAccountId: message.channelId,
+                type: message.type,
+                content: message.content,
+                contextExternalId: message.contextExternalId,
+              }),
               receivedAt: event.occurredAt.toISOString(),
             },
             conversation,

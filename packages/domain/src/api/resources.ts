@@ -40,6 +40,12 @@ import {
   replyButtonsInteractive,
 } from '../messaging/interactive';
 import { SERVICE_WINDOW_MS, type OutboundDeps } from '../messaging/outbound';
+import {
+  answeredJoin,
+  answeredMessages,
+  answerProblem,
+  isSingleEmoji,
+} from '../messaging/reply-context';
 import { STATUS_RANK } from '../messaging/status';
 import {
   buildTemplateSend,
@@ -136,12 +142,21 @@ const replyFromField = z
     'The id of the WhatsApp number the contact wrote to; optional when the company has one active number.',
   );
 
+/** The message a reply quotes (ADR-082), checked against the conversation when sending. */
+const quoteField = z
+  .uuid({ error: 'Give the id of a message in this conversation' })
+  .optional()
+  .describe(
+    'The id of a message in the conversation to quote, from GET /conversations/{id}/messages, the message.received webhook or a send’s response: WhatsApp shows it above the reply. A message the contact sent, or one the business sent that WhatsApp accepted and that did not fail; not a reaction or a WhatsApp notice.',
+  );
+
 /** A free-form text reply to a contact who wrote in the last 24 hours (ADR-070). */
 export const apiSendTextSchema = z
   .object({
     type: z.literal('text'),
     to: phoneField,
     from: replyFromField,
+    replyTo: quoteField,
     text: z
       .string({ error: 'Give the text' })
       .trim()
@@ -186,6 +201,7 @@ const replyIdField = (max: number) =>
 const interactiveFrame = {
   to: phoneField,
   from: replyFromField,
+  replyTo: quoteField,
   header: interactiveText('header', LIMITS.headerLength)
     .optional()
     .describe('Text shown above the body.'),
@@ -314,6 +330,30 @@ export const apiSendListSchema = z
     );
   });
 
+/** The longest emoji accepted, in UTF-16 code units. */
+const EMOJI_LENGTH = 32;
+
+/** A reaction to a message the contact sent in the last 30 days (ADR-082). */
+export const apiSendReactionSchema = z
+  .object({
+    type: z.literal('reaction'),
+    to: phoneField,
+    from: replyFromField,
+    replyTo: z
+      .uuid({ error: 'Give the id of the contact’s message to react to' })
+      .describe(
+        'The id of the message to react to: one the contact sent in the last 30 days, from GET /conversations/{id}/messages or the message.received webhook.',
+      ),
+    emoji: z
+      .string({ error: 'Give one emoji, such as 👍' })
+      .max(EMOJI_LENGTH, 'Give one emoji, such as 👍')
+      .refine(isSingleEmoji, 'Give one emoji, such as 👍')
+      .describe(
+        'One emoji, such as 👍, from Unicode’s recommended set: skin tones, flags and keycaps count as one.',
+      ),
+  })
+  .strict();
+
 export interface ApiTemplate {
   id: string;
   name: string;
@@ -326,7 +366,7 @@ export interface ApiTemplate {
 
 export interface ApiMessage {
   id: string;
-  type: 'template' | 'text' | 'interactive';
+  type: 'template' | 'text' | 'interactive' | 'reaction';
   status: string;
   statusAt: string;
   to: string | null;
@@ -334,6 +374,8 @@ export interface ApiMessage {
   templateName: string | null;
   channelId: string;
   contactId: string;
+  /** The message it quotes or reacts to, when it is in the conversation (ADR-082). */
+  replyTo: string | null;
   error: { code: string | null; title: string | null } | null;
   createdAt: string;
 }
@@ -880,25 +922,77 @@ const windowClosed = () =>
     { details: { apiReason: 'window_closed' } },
   );
 
-/** What a reply stores and sends (ADR-070, ADR-080). */
+/**
+ * The WhatsApp id of the message `messageId` of the conversation, which a reply quotes or a
+ * reaction goes on (ADR-082). A message of another conversation is refused as unknown, like one
+ * that does not exist.
+ */
+async function answeredMessage(
+  tx: Tx,
+  tenantId: string,
+  conversationId: string,
+  messageId: string,
+  options: { kind: 'quote' | 'reaction'; now: Date },
+): Promise<string> {
+  const [target] = await tx
+    .select({
+      direction: messages.direction,
+      type: messages.type,
+      status: messages.status,
+      externalMessageId: messages.externalMessageId,
+      providerTimestamp: messages.providerTimestamp,
+      createdAt: messages.createdAt,
+    })
+    .from(messages)
+    .where(
+      and(
+        eq(messages.tenantId, tenantId),
+        eq(messages.conversationId, conversationId),
+        eq(messages.id, messageId),
+      ),
+    );
+  const problem = target
+    ? answerProblem(
+        options.kind,
+        { ...target, at: target.providerTimestamp ?? target.createdAt },
+        options.now,
+      )
+    : 'Give the id of a message in this conversation.';
+  if (problem) {
+    throw new AppError('validation_failed', problem, {
+      issues: [{ path: 'replyTo', message: problem }],
+    });
+  }
+  if (!target?.externalMessageId) throw new Error('Only messages with a WhatsApp id are answered');
+  return target.externalMessageId;
+}
+
+/** What a reply stores and sends (ADR-070, ADR-080, ADR-082). */
 interface ApiReply {
-  type: 'text' | 'interactive';
-  /** The message's stored content, as the inbox shows it. */
-  content: Record<string, unknown>;
-  preview: string;
-  /** The Graph request's `type` and its object (`text` or `interactive`). */
-  request: Record<string, unknown>;
+  type: 'text' | 'interactive' | 'reaction';
+  /** The message the reply quotes, or the reaction is for, as the request names it. */
+  replyTo: string | undefined;
+  /**
+   * The message's stored content (as the inbox shows it), the conversation's preview, and the
+   * Graph request's `type` and its object, given the WhatsApp id of the message named by `replyTo`.
+   */
+  build(answered: string | null): {
+    content: Record<string, unknown>;
+    preview: string;
+    request: Record<string, unknown>;
+  };
 }
 
 /**
  * Sends a free-form message to a contact who wrote to the number in the last 24 hours, as the
- * inbox's reply does (ADR-070): text, reply buttons or a list (ADR-080). The contact is never
+ * inbox's reply does (ADR-070): text, reply buttons or a list (ADR-080), which may quote a message
+ * of the conversation, or a reaction to a message the contact sent (ADR-082). The contact is never
  * created: a number that is not a contact, has no conversation on the number, was erased, or last
  * wrote more than 24 hours ago gets one answer, so the refusal tells a key without `contacts.read`
- * nothing more than a sent reply would. The reply takes the conversation over from an automation
+ * nothing more than a sent reply would. A reply takes the conversation over from an automation
  * handling it (its queued messages are cancelled), but it is not a member's reply: the
- * conversation keeps waiting for a member. Exactly one send per idempotency key; the window is
- * checked again when the worker sends.
+ * conversation keeps waiting for a member. A reaction is not an answer: it leaves an automation
+ * running. Exactly one send per idempotency key; the window is checked again when the worker sends.
  */
 async function sendReply(
   deps: OutboundDeps,
@@ -963,14 +1057,24 @@ async function sendReply(
           'This contact wrote from a WhatsApp user id without a phone number. Sending to user ids is not enabled until Meta’s request format is verified.',
         );
       }
+      const reaction = reply.type === 'reaction';
+      const answered = reply.replyTo
+        ? await answeredMessage(tx, ctx.tenant.id, conversation.id, reply.replyTo, {
+            kind: reaction ? 'reaction' : 'quote',
+            now,
+          })
+        : null;
 
-      await endRunForHuman(tx, {
-        tenantId: ctx.tenant.id,
-        conversationId: conversation.id,
-        reason: 'api_replied',
-        actorMembershipId: null,
-        now,
-      });
+      if (!reaction) {
+        await endRunForHuman(tx, {
+          tenantId: ctx.tenant.id,
+          conversationId: conversation.id,
+          reason: 'api_replied',
+          actorMembershipId: null,
+          now,
+        });
+      }
+      const built = reply.build(answered);
       const messageId = uuidv7();
       const intentId = uuidv7();
       await tx.insert(messages).values({
@@ -980,11 +1084,14 @@ async function sendReply(
         channelAccountId: channel.id,
         direction: 'outbound',
         type: reply.type,
-        content: reply.content,
+        content: built.content,
         status: 'queued',
         statusRank: STATUS_RANK.queued,
         senderType: 'api',
         apiKeyId: ctx.key.id,
+        // A quoted reply keeps the quoted message's WhatsApp id as inbound replies do; a
+        // reaction keeps it in its content, as inbound reactions do.
+        contextExternalId: reaction ? null : answered,
       });
       await tx.insert(sendIntents).values({
         id: intentId,
@@ -995,7 +1102,8 @@ async function sendReply(
           messaging_product: 'whatsapp',
           recipient_type: 'individual',
           to: identity.waId,
-          ...reply.request,
+          ...(answered && !reaction ? { context: { message_id: answered } } : {}),
+          ...built.request,
         },
         actorUserId: null,
       });
@@ -1003,7 +1111,7 @@ async function sendReply(
         .update(conversations)
         .set({
           lastMessageAt: now,
-          lastMessagePreview: reply.preview.slice(0, 200),
+          lastMessagePreview: built.preview.slice(0, 200),
           version: sql`${conversations.version} + 1`,
         })
         .where(
@@ -1052,9 +1160,12 @@ export async function apiSendText(
   const data = parseInput(apiSendTextSchema, input);
   return sendReply(deps, ctx, data, idempotency, {
     type: 'text',
-    content: { text: data.text },
-    preview: data.text,
-    request: { type: 'text', text: { body: data.text, preview_url: data.previewUrl } },
+    replyTo: data.replyTo,
+    build: () => ({
+      content: { text: data.text },
+      preview: data.text,
+      request: { type: 'text', text: { body: data.text, preview_url: data.previewUrl } },
+    }),
   });
 }
 
@@ -1069,9 +1180,12 @@ export async function apiSendButtons(
   const data = parseInput(apiSendButtonsSchema, input);
   return sendReply(deps, ctx, data, idempotency, {
     type: 'interactive',
-    content: replyButtonsContent(data),
-    preview: data.body,
-    request: { type: 'interactive', interactive: replyButtonsInteractive(data) },
+    replyTo: data.replyTo,
+    build: () => ({
+      content: replyButtonsContent(data),
+      preview: data.body,
+      request: { type: 'interactive', interactive: replyButtonsInteractive(data) },
+    }),
   });
 }
 
@@ -1086,15 +1200,44 @@ export async function apiSendList(
   const data = parseInput(apiSendListSchema, input);
   return sendReply(deps, ctx, data, idempotency, {
     type: 'interactive',
-    content: listContent(data),
-    preview: data.body,
-    request: { type: 'interactive', interactive: listInteractive(data) },
+    replyTo: data.replyTo,
+    build: () => ({
+      content: listContent(data),
+      preview: data.body,
+      request: { type: 'interactive', interactive: listInteractive(data) },
+    }),
+  });
+}
+
+/**
+ * A reaction to a message the contact sent in the last 30 days (ADR-082); see `sendReply`. Stored
+ * as inbound reactions are, with the WhatsApp id of the message in its content.
+ */
+export async function apiSendReaction(
+  deps: OutboundDeps,
+  ctx: ApiContext,
+  input: unknown,
+  idempotency: IdempotencyInput,
+): Promise<ApiResponse> {
+  assertScope(ctx, 'messages.reply');
+  const data = parseInput(apiSendReactionSchema, input);
+  return sendReply(deps, ctx, data, idempotency, {
+    type: 'reaction',
+    replyTo: data.replyTo,
+    build: (answered) => {
+      if (!answered) throw new Error('A reaction is sent only for a message it names');
+      return {
+        content: { emoji: data.emoji, message_id: answered },
+        preview: `Reacted ${data.emoji}`,
+        request: { type: 'reaction', reaction: { message_id: answered, emoji: data.emoji } },
+      };
+    },
   });
 }
 
 /**
  * POST /api/v1/messages: a template (the default), or a reply inside the service window as text,
- * reply buttons or a list, by the body's `type`.
+ * reply buttons, a list or a reaction, by the body's `type`.
  */
 export async function apiSendMessage(
   deps: OutboundDeps,
@@ -1109,12 +1252,17 @@ export async function apiSendMessage(
   if (type === 'text') return apiSendText(deps, ctx, input, idempotency);
   if (type === 'buttons') return apiSendButtons(deps, ctx, input, idempotency);
   if (type === 'list') return apiSendList(deps, ctx, input, idempotency);
+  if (type === 'reaction') return apiSendReaction(deps, ctx, input, idempotency);
   if (type === undefined || type === 'template') {
     return apiSendTemplate(deps, ctx, input, idempotency);
   }
-  throw new AppError('validation_failed', 'Send a template, a text, buttons or a list.', {
-    issues: [{ path: 'type', message: 'Use template, text, buttons or list.' }],
-  });
+  throw new AppError(
+    'validation_failed',
+    'Send a template, a text, buttons, a list or a reaction.',
+    {
+      issues: [{ path: 'type', message: 'Use template, text, buttons, list or reaction.' }],
+    },
+  );
 }
 
 /** The status of a message the API sent (any key of the company). */
@@ -1143,6 +1291,7 @@ export async function apiGetMessage(
           createdAt: messages.createdAt,
           contactId: conversations.contactId,
           phone: contacts.phoneE164,
+          replyTo: answeredMessages.id,
         })
         .from(messages)
         .innerJoin(
@@ -1159,6 +1308,7 @@ export async function apiGetMessage(
             eq(contacts.id, conversations.contactId),
           ),
         )
+        .leftJoin(answeredMessages, answeredJoin())
         .where(
           and(
             eq(messages.tenantId, ctx.tenant.id),
@@ -1175,7 +1325,10 @@ export async function apiGetMessage(
   const template = (row.content as { template?: { name?: string } }).template;
   return {
     id: row.id,
-    type: row.type === 'text' || row.type === 'interactive' ? row.type : 'template',
+    type:
+      row.type === 'text' || row.type === 'interactive' || row.type === 'reaction'
+        ? row.type
+        : 'template',
     status: row.status,
     statusAt: row.statusAt.toISOString(),
     to: row.phone,
@@ -1183,6 +1336,7 @@ export async function apiGetMessage(
     templateName: template?.name ?? null,
     channelId: row.channelId,
     contactId: row.contactId,
+    replyTo: row.replyTo,
     error: row.errorCode || row.errorTitle ? { code: row.errorCode, title: row.errorTitle } : null,
     createdAt: row.createdAt.toISOString(),
   };

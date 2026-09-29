@@ -297,6 +297,33 @@ function productMessageProblem(
   return total > 30 ? 'product_items' : null;
 }
 
+/**
+ * Checks a reaction message (research M-182): `reaction` holds only `message_id` and `emoji`, both
+ * given. Taking a reaction back (recalled as an empty emoji, M-185) is not in the spec: refused.
+ */
+function reactionProblem(body: unknown): string | null {
+  const b = body as { type?: unknown; reaction?: unknown } | undefined;
+  if (b?.type !== 'reaction') return b?.reaction === undefined ? null : 'reaction';
+  const reaction = b.reaction as Record<string, unknown> | undefined;
+  if (typeof reaction !== 'object' || reaction === null) return 'reaction';
+  if (Object.keys(reaction).some((key) => key !== 'message_id' && key !== 'emoji')) {
+    return 'reaction';
+  }
+  if (typeof reaction.message_id !== 'string' || !reaction.message_id) {
+    return 'reaction.message_id';
+  }
+  if (typeof reaction.emoji !== 'string' || !reaction.emoji) return 'reaction.emoji';
+  return null;
+}
+
+/** Checks the `context` of a reply that quotes a message (research M-041, M-183). */
+function contextProblem(body: unknown): string | null {
+  const context = (body as { context?: unknown } | undefined)?.context;
+  if (context === undefined) return null;
+  const messageId = (context as { message_id?: unknown } | null)?.message_id;
+  return typeof messageId === 'string' && messageId ? null : 'context.message_id';
+}
+
 /** Checks an interactive flow message (research M-165) against the flows the stand-in has. */
 function flowMessageProblem(body: unknown, flows: Map<string, FlowFixture>): string | null {
   const b = body as { type?: unknown; interactive?: Record<string, unknown> } | undefined;
@@ -477,6 +504,10 @@ export async function startGraphStandIn(options: {
             ? null
             : interactiveProblem(body);
         if (invalid) return graphError(res, 400, 100, `(#100) Invalid parameter: ${invalid}`);
+        const shapeInvalid = contextProblem(body) ?? reactionProblem(body);
+        if (shapeInvalid) {
+          return graphError(res, 400, 100, `(#100) Invalid parameter: ${shapeInvalid}`);
+        }
         const behaviour = state.sendQueue.shift() ?? { kind: 'accept' };
         if (behaviour.kind === 'drop_connection') {
           req.socket.destroy();

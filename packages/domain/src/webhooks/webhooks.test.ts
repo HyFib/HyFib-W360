@@ -175,6 +175,7 @@ describe('webhook payload schemas', () => {
             type: 'text',
             text: 'Hi',
             reply: null,
+            replyTo: null,
             mimeType: null,
             receivedAt: base.createdAt,
           },

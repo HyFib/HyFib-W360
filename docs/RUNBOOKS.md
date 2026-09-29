@@ -1243,6 +1243,19 @@ A 412 `window_closed` means the number has not written in the last 24 hours, as 
 message that fails after it was queued shows WhatsApp's error on `GET /api/v1/messages/{id}` and in
 the inbox; limits Meta applies beyond its published description would show there first.
 
+**A quote or a reaction sent through the API is refused, or shows no quote.** `replyTo` takes a
+HyFib message id (from `GET /api/v1/conversations/{id}/messages`, the `message.received` webhook or
+a send's response), never a WhatsApp id. A 422 on `replyTo` says why: "Give the id of a message in
+this conversation" when the id is unknown or belongs to another conversation (another number, or
+another contact, of the company or not); reactions and WhatsApp notices cannot be quoted; a
+business message can be quoted once WhatsApp accepted it and while it has not failed; reactions go
+only on messages the contact sent in the last 30 days; the emoji must be exactly one emoji (skin
+tones and flags count as one). A 412 `window_closed` means the number has not written in the last
+24 hours, as for any reply. A reaction does not end a running automation. Reactions cannot be taken
+back through the API. The inbox shows a quote above a reply and names the message a reaction is
+for; it shows no quote when the quoted message is not in the conversation (sent before HyFib had
+the number, or deleted by retention), and the API then gives `replyTo: null`.
+
 **An endpoint added through the API is refused, missing or unexpected.** A 422 names the field:
 an https address (no credentials, port 443 or from 1024; `http://` and loopback only where local
 and test configuration allow them), at least one event from the list, a description up to 200

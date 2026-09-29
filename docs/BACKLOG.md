@@ -413,8 +413,12 @@ verification, app review, Embedded Signup configuration).
   built, locally verified]** (ADR-081, W-139: a `webhooks.manage` key, granted only by owners and
   administrators, adds, reads, changes, rotates the secret of and deletes the endpoints keys added,
   never members' ones; secrets shown once and never kept for replays; owners and administrators
-  emailed about each endpoint a key adds). Remaining: media and reaction messages,
-  call-to-action and product messages through the API, replies to a given message, assigning
+  emailed about each endpoint a key adds); **[quotes and reactions built, locally verified against
+  the Graph stand-in]** (ADR-082: a text, buttons or a list may quote a message of the conversation
+  with `replyTo`, and a `messages.reply` key reacts with one emoji to a message the contact sent in
+  the last 30 days, without ending an automation; the API, the `message.received` webhook and the
+  inbox name the message a message quotes, reacts to or taps a button of). Remaining: media
+  messages, call-to-action and product messages through the API, taking reactions back, assigning
   conversations, notes, member and team names, media downloads, a message feed across
   conversations, starting or stopping runs for many contacts in one call, bulk sends in one call,
   networks for the whole company, per-key quotas, limits per endpoint, webhook deliveries,

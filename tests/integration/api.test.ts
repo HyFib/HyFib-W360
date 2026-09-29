@@ -1301,6 +1301,7 @@ describe('text replies (ADR-070)', () => {
       templateName: null,
       channelId: c.channelAccountId,
       contactId: queued.contactId,
+      replyTo: null,
       error: null,
       createdAt: expect.any(String),
     });
@@ -1757,6 +1758,280 @@ async function conversationOf(company: Company, waId: string) {
   return row;
 }
 
+describe('quotes and reactions (ADR-082)', () => {
+  const idOf = (response: { body: Record<string, unknown> }) =>
+    (response.body.data as { id: string }).id;
+  const wamid = () => `wamid.in.${uuidv7()}`;
+
+  async function messageWith(company: Company, externalId: string) {
+    const [row] = await fx.query<{ id: string }>(
+      'SELECT id FROM app.messages WHERE tenant_id = $1 AND external_message_id = $2',
+      [company.tenant.id, externalId],
+    );
+    if (!row) throw new Error('no message with that WhatsApp id');
+    return row.id;
+  }
+  async function externalIdOf(messageId: string) {
+    const [row] = await fx.query<{ external_message_id: string | null }>(
+      'SELECT external_message_id FROM app.messages WHERE id = $1',
+      [messageId],
+    );
+    return row?.external_message_id ?? null;
+  }
+  const stored = async (messageId: string) =>
+    (
+      await fx.query(
+        `SELECT m.type, m.content, m.context_external_id, si.request
+           FROM app.messages m
+           JOIN app.send_intents si ON si.tenant_id = m.tenant_id AND si.message_id = m.id
+          WHERE m.id = $1`,
+        [messageId],
+      )
+    )[0];
+
+  it('quote a message of the conversation and react to what the contact wrote, through the send pipeline', async () => {
+    const c = await fx.company();
+    const { ctx } = await apiKey(c, ['messages.reply', 'conversations.read'], 'Helpdesk');
+    const waId = '919811100200';
+    const asked = wamid();
+    await inbound(c, waId, [{ id: asked, text: 'Can I move my appointment?' }]);
+    const conv = await conversationOf(c, waId);
+    const askedId = await messageWith(c, asked);
+    const send = (input: Record<string, unknown>, key: string) =>
+      apiSendMessage(deps(), ctx, input, idem(key, key));
+
+    // A text and buttons that quote the question, and a reaction to it, once per key.
+    const text = await send(
+      { type: 'text', to: `+${waId}`, text: 'Yes: which day suits you?', replyTo: askedId },
+      'q-1',
+    );
+    expect(text.status).toBe(201);
+    const buttons = await send(
+      {
+        type: 'buttons',
+        to: `+${waId}`,
+        body: 'Or keep it?',
+        buttons: [{ id: 'keep', title: 'Keep it' }],
+        replyTo: askedId,
+      },
+      'q-2',
+    );
+    const reaction = { type: 'reaction', to: `+${waId}`, replyTo: askedId, emoji: '👍' };
+    const reacted = await send(reaction, 'q-3');
+    expect(reacted.status).toBe(201);
+    expect(reacted.body.data).toEqual({
+      id: expect.any(String),
+      type: 'reaction',
+      status: 'queued',
+      contactId: conv.contact_id,
+      channelId: c.channelAccountId,
+    });
+    expect(await send(reaction, 'q-3')).toEqual({ ...reacted, replayed: true });
+
+    // The quoted message's WhatsApp id goes in `context`; a reaction names it in `reaction`.
+    expect(await stored(idOf(text))).toEqual({
+      type: 'text',
+      content: { text: 'Yes: which day suits you?' },
+      context_external_id: asked,
+      request: {
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to: waId,
+        context: { message_id: asked },
+        type: 'text',
+        text: { body: 'Yes: which day suits you?', preview_url: false },
+      },
+    });
+    expect(await stored(idOf(buttons))).toMatchObject({
+      type: 'interactive',
+      context_external_id: asked,
+      request: { context: { message_id: asked }, type: 'interactive' },
+    });
+    expect(await stored(idOf(reacted))).toEqual({
+      type: 'reaction',
+      content: { emoji: '👍', message_id: asked },
+      context_external_id: null,
+      request: {
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to: waId,
+        type: 'reaction',
+        reaction: { message_id: asked, emoji: '👍' },
+      },
+    });
+    const [preview] = await fx.query<{ last_message_preview: string }>(
+      'SELECT last_message_preview FROM app.conversations WHERE id = $1',
+      [conv.id],
+    );
+    expect(preview?.last_message_preview).toBe('Reacted 👍');
+
+    // The Graph stand-in accepts all three, as Meta's spec describes them.
+    expect(await sendAll(c)).toEqual(['accepted', 'accepted', 'accepted']);
+    const bodies = templatesTo(waId).map((r) => r.body as Record<string, unknown>);
+    expect(bodies.map((b) => [b.type, b.context])).toEqual([
+      ['text', { message_id: asked }],
+      ['interactive', { message_id: asked }],
+      ['reaction', undefined],
+    ]);
+    expect(await apiGetMessage(deps(), ctx, idOf(reacted))).toMatchObject({
+      type: 'reaction',
+      status: 'accepted',
+      replyTo: askedId,
+    });
+    expect((await apiGetMessage(deps(), ctx, idOf(text))).replyTo).toBe(askedId);
+    expect((await apiGetMessage(deps(), ctx, idOf(buttons))).replyTo).toBe(askedId);
+
+    // The customer quotes the text reply and reacts to it; a quote of a message HyFib does not
+    // have names none.
+    const textWamid = await externalIdOf(idOf(text));
+    if (!textWamid) throw new Error('the reply has no WhatsApp id');
+    await inbound(c, waId, [
+      { text: 'Thursday, please.', contextId: textWamid },
+      { type: 'reaction', extra: { reaction: { message_id: textWamid, emoji: '🙏' } } },
+      { text: 'And one more thing.', contextId: 'wamid.not.here' },
+    ]);
+    const page = await apiListConversationMessages(deps(), ctx, conv.id, { limit: '10' });
+    expect(page.data.map((m) => [m.direction, m.type, m.text, m.replyTo])).toEqual([
+      ['inbound', 'text', 'And one more thing.', null],
+      ['inbound', 'reaction', '🙏', idOf(text)],
+      ['inbound', 'text', 'Thursday, please.', idOf(text)],
+      ['outbound', 'reaction', '👍', askedId],
+      ['outbound', 'interactive', 'Or keep it?', askedId],
+      ['outbound', 'text', 'Yes: which day suits you?', askedId],
+      ['inbound', 'text', 'Can I move my appointment?', null],
+    ]);
+
+    // Another customer on the number quoting the first one's message names nothing: only a
+    // message of the same conversation counts.
+    await inbound(c, '919811100204', [{ text: 'Same question here.', contextId: asked }]);
+    const otherConv = await conversationOf(c, '919811100204');
+    const otherPage = await apiListConversationMessages(deps(), ctx, otherConv.id, {});
+    expect(otherPage.data.map((m) => [m.text, m.replyTo])).toEqual([['Same question here.', null]]);
+    const otherThread = await inbox().getConversation(await fx.ctx(c, c.owner), otherConv.id);
+    expect(otherThread.messages.map((m) => m.replyTo)).toEqual([null]);
+
+    // Members see the quote above a reply and what a reaction is for.
+    const thread = await inbox().getConversation(await fx.ctx(c, c.owner), conv.id);
+    const shown = (id: string) => thread.messages.find((m) => m.id === id)?.replyTo;
+    const question = { id: askedId, direction: 'inbound', text: 'Can I move my appointment?' };
+    expect(shown(idOf(text))).toEqual(question);
+    expect(shown(idOf(reacted))).toEqual(question);
+    const thursday = page.data.find((m) => m.text === 'Thursday, please.');
+    expect(shown(thursday!.id)).toEqual({
+      id: idOf(text),
+      direction: 'outbound',
+      text: 'Yes: which day suits you?',
+    });
+    expect(shown(askedId)).toBeNull();
+  });
+
+  it('refuse, storing nothing, what the conversation cannot quote or react to', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const { ctx, id: keyId } = await apiKey(c, ['messages.reply']);
+    const send = (input: Record<string, unknown>, key: string) =>
+      apiSendMessage(deps(), ctx, input, idem(key, key));
+    const waId = '919811100201';
+    const to = `+${waId}`;
+    const [old, asked, theirReaction, elsewhere, otherCompany] = [
+      wamid(),
+      wamid(),
+      wamid(),
+      wamid(),
+      wamid(),
+    ];
+    // A message 31 days old, a recent one and the customer's reaction to it: the window is open.
+    await inbound(c, waId, [
+      {
+        id: old,
+        text: 'Last month’s order',
+        timestamp: Math.floor(Date.now() / 1000) - 31 * 24 * 3600,
+      },
+      { id: asked, text: 'Where is my order?' },
+      {
+        id: theirReaction,
+        type: 'reaction',
+        extra: { reaction: { message_id: asked, emoji: '😀' } },
+      },
+    ]);
+    await inbound(c, '919811100202', [{ id: elsewhere, text: 'Hello from another customer' }]);
+    await inbound(other, '919811100203', [{ id: otherCompany, text: 'Hello from elsewhere' }]);
+    const ids = {
+      old: await messageWith(c, old),
+      asked: await messageWith(c, asked),
+      theirReaction: await messageWith(c, theirReaction),
+      elsewhere: await messageWith(c, elsewhere),
+      otherCompany: await messageWith(other, otherCompany),
+    };
+    // Replies of the business: one accepted, one accepted and then failed, one still queued.
+    const accepted = idOf(await send({ type: 'text', to, text: 'On its way.' }, 'r-1'));
+    const failed = idOf(await send({ type: 'text', to, text: 'Here is the link.' }, 'r-2'));
+    expect(await sendAll(c)).toEqual(['accepted', 'accepted']);
+    await fx.deliver(
+      fx.messagesBody(c, {
+        statuses: [
+          {
+            id: await externalIdOf(failed),
+            status: 'failed',
+            timestamp: String(Math.floor(Date.now() / 1000)),
+            recipient_id: waId,
+            errors: [{ code: 131026, title: 'Message undeliverable' }],
+          },
+        ],
+      }),
+    );
+    const queued = idOf(await send({ type: 'text', to, text: 'Checking.' }, 'r-3'));
+    const quote = (replyTo: string) => ({ type: 'text', to, text: 'About this:', replyTo });
+    const react = (replyTo: string, emoji = '👍') => ({ type: 'reaction', to, replyTo, emoji });
+
+    const refused = async (input: Record<string, unknown>, key: string, message: string) => {
+      const error = await expectAppError(send(input, key), 'validation_failed');
+      expect(apiErrorResponse(error, 'r').body.error).toMatchObject({
+        message,
+        issues: [{ path: 'replyTo', message }],
+      });
+    };
+    const unknown = 'Give the id of a message in this conversation.';
+    for (const [i, id] of [uuidv7(), ids.elsewhere, ids.otherCompany].entries()) {
+      await refused(quote(id), `x-q${i}`, unknown);
+      await refused(react(id), `x-r${i}`, unknown);
+    }
+    await refused(
+      quote(ids.theirReaction),
+      'x-1',
+      'Reactions and WhatsApp notices cannot be quoted.',
+    );
+    await refused(quote(queued), 'x-2', 'Only messages WhatsApp accepted can be quoted.');
+    await refused(quote(failed), 'x-3', 'Only messages WhatsApp accepted can be quoted.');
+    await refused(react(accepted), 'x-4', 'Reactions go on messages the contact sent.');
+    await refused(react(ids.old), 'x-5', 'Reactions go on messages from the last 30 days.');
+    await refused(
+      react(ids.theirReaction),
+      'x-6',
+      'Reactions go on messages the contact sent, not on reactions or WhatsApp notices.',
+    );
+    await expectAppError(send(react(ids.asked, 'yes'), 'x-7'), 'validation_failed', /one emoji/);
+    await expectAppError(send(react(ids.asked, '👍👎'), 'x-8'), 'validation_failed', /one emoji/);
+    // A number that has not written gets the one answer, whatever it names.
+    const closed = await expectAppError(
+      send({ ...react(ids.asked), to: '+919811100299' }, 'x-9'),
+      'precondition_failed',
+    );
+    expect(apiErrorResponse(closed, 'r').body.error.reason).toBe('window_closed');
+
+    // An old message can still be quoted; the one reply sent, with the first three, is all that
+    // was stored.
+    expect((await send(quote(ids.old), 'r-4')).status).toBe(201);
+    const keysStored = await fx.query<{ idempotency_key: string }>(
+      'SELECT idempotency_key FROM app.api_idempotency_keys WHERE api_key_id = $1 ORDER BY idempotency_key',
+      [keyId],
+    );
+    expect(keysStored.map((r) => r.idempotency_key)).toEqual(['r-1', 'r-2', 'r-3', 'r-4']);
+    const sentByKey = await fx.query('SELECT id FROM app.messages WHERE api_key_id = $1', [keyId]);
+    expect(sentByKey).toHaveLength(4);
+  });
+});
+
 describe('conversation reads (ADR-072)', () => {
   /** Every page of a listing, following `nextCursor`. */
   async function everyPage<T>(
@@ -2038,10 +2313,12 @@ describe('conversation reads (ADR-072)', () => {
     );
     expect(pages.map((p) => p.length)).toEqual([4, 4, 3]);
     const read = pages.flat();
+    // The taps and the reaction answer messages this conversation does not have.
     const base = {
       id: expect.any(String),
       conversationId: conv.id,
       reply: null,
+      replyTo: null,
       mimeType: null,
       templateId: null,
       templateName: null,

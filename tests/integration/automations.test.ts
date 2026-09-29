@@ -6,6 +6,7 @@ import { QUEUES } from '@w360/contracts';
 import { authorizedTenantScope, type Database } from '@w360/db';
 import {
   advanceAutomationRun,
+  apiSendReaction,
   apiSendText,
   apiSetConversationStatus,
   applyAutomationRetention,
@@ -799,6 +800,61 @@ describe('automation runs', () => {
       start_reason: 'handoff',
       end_reason: 'replied',
     });
+  });
+
+  it('keeps the bot answering when the public API reacts to the customer’s message; a quoted reply takes over like any reply (ADR-082)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    await publish(owner, 'Menu', keyword('menu'), menuGraph());
+    const created = await createApiKeysService({ db: fx.dbs.app, clock: systemClock }).create(
+      owner,
+      { name: 'Helpdesk', scopes: ['messages.reply'], expiresInDays: 0 },
+    );
+    const key = await authenticateApiToken(fx.dbs.app, created.token, uuidv7());
+    if (!key) throw new Error('a new key does not authenticate');
+    const idem = (k: string) => ({ key: k, requestHash: sha256Hex(k) });
+
+    const ivy = waId();
+    const conv = await inbound(c, ivy, 'menu');
+    const run = await onlyRun(conv);
+    await advance(c, run.id);
+    const [menu] = await fx.query<{ id: string }>(
+      `SELECT id FROM app.messages WHERE conversation_id = $1 AND direction = 'inbound'`,
+      [conv],
+    );
+    const before = { run: await onlyRun(conv), turns: await turns(conv) };
+    expect((await botMessages(conv)).map((m) => m.status)).toEqual(['queued']);
+
+    // A reaction is not an answer: the run, its queued question and the waiting turn stay.
+    const reacted = await apiSendReaction(
+      runnerDeps(),
+      key,
+      { type: 'reaction', to: `+${ivy}`, replyTo: menu!.id, emoji: '👍' },
+      idem('react-1'),
+    );
+    expect(reacted.status).toBe(201);
+    expect(await onlyRun(conv)).toEqual(before.run);
+    expect(await turns(conv)).toEqual(before.turns);
+    expect((await botMessages(conv)).map((m) => m.status)).toEqual(['queued']);
+    expect(await sendQueued(c, conv)).toEqual(['accepted', 'accepted']);
+    const toIvy = fx.standIn.state.requests.filter(
+      (r) => (r.body as { to?: unknown } | undefined)?.to === ivy,
+    );
+    expect(toIvy.map((r) => (r.body as { type: string }).type)).toEqual([
+      'interactive',
+      'reaction',
+    ]);
+    await advance(c, run.id);
+    expect((await onlyRun(conv)).status).toBe('waiting');
+
+    // A reply that quotes the customer's message takes the conversation over, as replies do.
+    await apiSendText(
+      runnerDeps(),
+      key,
+      { type: 'text', to: `+${ivy}`, text: 'Here is the menu.', replyTo: menu!.id },
+      idem('reply-1'),
+    );
+    expect(await onlyRun(conv)).toMatchObject({ status: 'taken_over', end_reason: 'api_replied' });
   });
 
   it('stops the bot when the public API resolves the conversation, leaving no waiting turn (ADR-075)', async () => {

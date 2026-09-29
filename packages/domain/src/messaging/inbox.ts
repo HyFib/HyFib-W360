@@ -43,7 +43,9 @@ import type { JobQueue } from '../jobs/queue';
 import { loadReplyTarget, replyTimer, type ReplyTarget } from '../inbox/sla';
 import { decodeKeysetCursor, encodeKeysetCursor, likePattern } from '../validation';
 import { emitTenantEvent } from './events';
+import { messageSnippet } from './message-text';
 import { SERVICE_WINDOW_MS, canSeeConversation } from './outbound';
+import { answeredJoin, answeredMessages } from './reply-context';
 
 /**
  * Shared inbox queries and commands. Visibility: `inbox.read_all` sees every conversation;
@@ -487,8 +489,13 @@ export function createInboxService(deps: InboxDeps) {
               createdAt: messages.createdAt,
               providerTimestamp: messages.providerTimestamp,
               cursorAt: exactTimestamp(messages.createdAt),
+              answeredId: answeredMessages.id,
+              answeredDirection: answeredMessages.direction,
+              answeredType: answeredMessages.type,
+              answeredContent: answeredMessages.content,
             })
             .from(messages)
+            .leftJoin(answeredMessages, answeredJoin())
             .leftJoin(
               memberships,
               and(
@@ -608,11 +615,31 @@ export function createInboxService(deps: InboxDeps) {
               ),
               ...timerFields(target, turn?.startedAt ?? null, now),
             },
-            messages: page.reverse().map(({ cursorAt: _cursorAt, ...m }) => ({
-              ...m,
-              createdAt: m.createdAt.toISOString(),
-              providerTimestamp: m.providerTimestamp?.toISOString() ?? null,
-            })),
+            messages: page
+              .reverse()
+              .map(
+                ({
+                  cursorAt: _cursorAt,
+                  answeredId,
+                  answeredDirection,
+                  answeredType,
+                  answeredContent,
+                  ...m
+                }) => ({
+                  ...m,
+                  createdAt: m.createdAt.toISOString(),
+                  providerTimestamp: m.providerTimestamp?.toISOString() ?? null,
+                  // The message this one quotes, reacts to or taps a button of (ADR-082).
+                  replyTo:
+                    answeredId && answeredDirection && answeredType && answeredContent
+                      ? {
+                          id: answeredId,
+                          direction: answeredDirection,
+                          text: messageSnippet(answeredDirection, answeredType, answeredContent),
+                        }
+                      : null,
+                }),
+              ),
             olderCursor:
               rows.length > pageSize && oldest
                 ? encodeKeysetCursor(oldest.cursorAt, oldest.id)

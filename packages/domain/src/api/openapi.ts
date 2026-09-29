@@ -37,6 +37,7 @@ import {
   apiContactCreateSchema,
   apiSendButtonsSchema,
   apiSendListSchema,
+  apiSendReactionSchema,
   apiSendMessageSchema,
   apiSendTextSchema,
 } from './resources';
@@ -72,7 +73,7 @@ export const apiTemplateSchema = z.object({
 export const apiQueuedMessageSchema = z.object({
   id: z.uuid(),
   type: z
-    .enum(['template', 'text', 'interactive'])
+    .enum(['template', 'text', 'interactive', 'reaction'])
     .describe('interactive: reply buttons or a list.'),
   status: z.literal('queued'),
   contactId: z.uuid(),
@@ -97,7 +98,7 @@ const OUTBOUND_STATUSES = [
 export const apiMessageSchema = z.object({
   id: z.uuid(),
   type: z
-    .enum(['template', 'text', 'interactive'])
+    .enum(['template', 'text', 'interactive', 'reaction'])
     .describe('interactive: reply buttons or a list.'),
   status: z
     .enum(OUTBOUND_STATUSES)
@@ -110,6 +111,10 @@ export const apiMessageSchema = z.object({
   templateName: z.string().nullable(),
   channelId: z.uuid(),
   contactId: z.uuid(),
+  replyTo: z
+    .uuid()
+    .nullable()
+    .describe('The message it quotes or reacts to, when that message is in the conversation.'),
   error: z.object({ code: z.string().nullable(), title: z.string().nullable() }).nullable(),
   createdAt: z.iso.datetime(),
 });
@@ -143,9 +148,15 @@ export const apiConversationMessageSchema = z.object({
     .string()
     .nullable()
     .describe(
-      'The words of the message: the text, a caption, the title of a tapped reply, a reaction or a location’s name; for outbound messages the text, a template’s body with its values or an interactive message’s body. Null if none.',
+      'The words of the message: the text, a caption, the title of a tapped reply, a reaction or a location’s name; for outbound messages the text, a template’s body with its values, an interactive message’s body or a reaction. Null if none.',
     ),
   reply: tappedReplySchema,
+  replyTo: z
+    .uuid()
+    .nullable()
+    .describe(
+      'The id of the message this one answers: the message it quotes, the message a reaction is for, or the message whose button or row the contact tapped. Null when there is none or it is not in the conversation.',
+    ),
   mimeType: z.string().nullable().describe('For media messages (the media is not attached).'),
   templateId: z.uuid().nullable(),
   templateName: z.string().nullable(),
@@ -479,11 +490,12 @@ export function buildOpenApiDocument(serverUrl: string) {
       '/messages': {
         post: {
           operationId: 'sendMessage',
-          summary: 'Send an approved template, or a reply: text, buttons or a list',
+          summary: 'Send an approved template, or a reply: text, buttons, a list or a reaction',
           description: [
             `${scopeNote('messages.send', 'messages.send_marketing', 'messages.reply')}`,
             'A template (`type` `template` or left out): utility templates need `messages.send`, marketing templates `messages.send_marketing`. The contact is created when new; consent, the suppression list and the marketing frequency cap are checked.',
-            'A reply (`type` `text`, `buttons` or `list`) needs `messages.reply` and goes only to a number that wrote to the WhatsApp number in the last 24 hours (WhatsApp’s customer service window); otherwise it is refused with reason `window_closed`, and nothing tells whether the number is a contact. It stops an automation answering the conversation, and the conversation keeps waiting for a member of the team. The window is checked again when the message is sent.',
+            'A reply (`type` `text`, `buttons`, `list` or `reaction`) needs `messages.reply` and goes only to a number that wrote to the WhatsApp number in the last 24 hours (WhatsApp’s customer service window); otherwise it is refused with reason `window_closed`, and nothing tells whether the number is a contact. A text, buttons or a list stops an automation answering the conversation (a reaction does not), and the conversation keeps waiting for a member of the team. The window is checked again when the message is sent.',
+            'A text, buttons or a list can quote a message of the conversation with `replyTo`, its id from `GET /conversations/{id}/messages`, the `message.received` webhook or a send’s response: a message the contact sent, or one the business sent that WhatsApp accepted. A reaction (`type` `reaction`) puts one emoji on a message the contact sent in the last 30 days; reactions cannot be taken back through the API. A message of another conversation, or one that cannot be quoted or reacted to, is refused (422, `replyTo`).',
             'Buttons (up to 3) and lists (up to 10 rows) carry ids you choose: when the customer taps one, the `message.received` webhook gives it as `reply.id`, with `reply.type` (`button` or `list`). Ids cannot start with `w360`, which HyFib’s own buttons use.',
             'Messages queued one after the other may be sent in either order: to be sure the customer sees one before the next, send the next once `GET /messages/{id}` reports the first `accepted`.',
           ].join('\n\n'),
@@ -491,7 +503,13 @@ export function buildOpenApiDocument(serverUrl: string) {
           requestBody: {
             required: true,
             content: json({
-              oneOf: [ref('SendTemplate'), ref('SendText'), ref('SendButtons'), ref('SendList')],
+              oneOf: [
+                ref('SendTemplate'),
+                ref('SendText'),
+                ref('SendButtons'),
+                ref('SendList'),
+                ref('SendReaction'),
+              ],
             }),
           },
           responses: {
@@ -898,6 +916,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         SendText: jsonSchema(apiSendTextSchema, 'input'),
         SendButtons: jsonSchema(apiSendButtonsSchema, 'input'),
         SendList: jsonSchema(apiSendListSchema, 'input'),
+        SendReaction: jsonSchema(apiSendReactionSchema, 'input'),
         QueuedMessage: jsonSchema(apiQueuedMessageSchema),
         Message: jsonSchema(apiMessageSchema),
         Conversation: jsonSchema(apiConversationSchema),

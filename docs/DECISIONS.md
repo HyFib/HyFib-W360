@@ -2572,3 +2572,56 @@ Decision:
 Not built: deliveries, replays and test events through the API, changing an address, managing
 members' endpoints, filters beyond the event type, and notices when a key changes or deletes an
 endpoint (the audit log records them).
+
+## ADR-082 Replies that quote a message, and reactions, through the public API (2026-09-29)
+
+Context: integrations reply inside the customer service window with text, buttons and lists
+(ADR-070, ADR-080), but a reply could not show which of the customer's messages it answers, and an
+integration could not acknowledge a message with an emoji. Meta's spec lets any message carry
+`context.message_id` to reply to one (research M-041, M-183) and describes reactions
+(`reaction.message_id` and `emoji`, M-182). Customers' quotes and reactions were already stored
+with the WhatsApp id they point at (the webhook's `context.id`, M-186, and a reaction's
+`message_id`, M-184), but neither the inbox nor the API said which message that was. Meta's prose
+rules for reactions could not be read (M-185).
+
+Decision:
+
+- **Quoting:** a text, buttons or a list sent through `POST /api/v1/messages` may name `replyTo`,
+  the id of a message in the conversation (from the API's conversation messages, the
+  `message.received` webhook or a send's response). It must be a message the contact sent, or one
+  the business sent that WhatsApp accepted and that did not fail (a queued message has no WhatsApp
+  id yet); not a reaction or a WhatsApp notice. The request carries that message's WhatsApp id as
+  `context.message_id`, and the reply keeps it as inbound quotes are kept (`context_external_id`).
+  Every rule of ADR-070 still applies.
+- **Reactions:** `type: "reaction"` with `replyTo` and `emoji`, under the same `messages.reply`
+  scope, now "Reply with text, buttons, lists and reactions" (a key that writes the customer
+  anything in the window can also react). One emoji from Unicode's recommended set (RGI: skin
+  tones, flags, keycaps and joined sequences count as one), on a message the contact sent in the
+  last 30 days (the stricter reading of M-185), and only while the customer service window is open
+  (one answer, 412 `window_closed`, as for replies; checked again when the worker sends). Stored as
+  an outbound `reaction` message with the emoji and the WhatsApp id, as inbound reactions are, and
+  the conversation's preview becomes "Reacted 👍". A reaction is not an answer: it leaves a running
+  automation and the waiting reply turn alone. Reactions cannot be taken back through the API:
+  the spec does not say how (M-185).
+- **Checked in the conversation:** the message is looked up by id in the conversation between the
+  number and the contact, after the conversation's row is locked. A message of another
+  conversation or company is refused like one that does not exist (422 on `replyTo`); each other
+  refusal says why the message cannot be quoted or reacted to. A refusal stores nothing.
+- **Reading:** the API's conversation messages and `GET /messages/{id}` give `replyTo`, the message
+  a message answers: the message quoted, the message a reaction is for, or the message whose button
+  or row was tapped (taps carry the id of the message they answer, M-158, M-178), when that message
+  is in the conversation. `GET /messages/{id}` reports `reaction`. The `message.received` webhook
+  gives `replyTo` too, looked up when the event is delivered. A reaction's `text` is its emoji,
+  sent or received.
+- **In the inbox:** a quote is shown above the reply ("Customer" or "Your team" and the quoted
+  message in one line, cut at 120 characters), and a reaction names the message it is for
+  ("Reacted 👍 to …"). Taps, forms and carts answer a message by their nature and show no quote.
+- **No migration:** `app.messages` already has `context_external_id`, which the runtime role
+  inserts, and takes `reaction` messages; the unique index on a number's WhatsApp ids serves the
+  lookups. The messaging report counts outbound reactions as outbound messages (they have delivery
+  statuses, and its definition counts every outbound message), while its inbound count leaves
+  reactions out as before.
+
+Not built: members quoting or reacting in the inbox, taking a reaction back, reacting to the
+business's own messages, media, location and contact card replies through the API, and editing or
+deleting sent messages.

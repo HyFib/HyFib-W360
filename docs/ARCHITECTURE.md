@@ -927,6 +927,19 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   and manage only what keys added). Adding and rotating run inside `idempotent`, whose `kept`
   argument stores the response with `secret: null` for replays. Adding queues a `tenant.notice` to
   owners and administrators (`deletionRecipients`) in the same transaction; audit rows name the key.
+- **Quotes and reactions through the API (ADR-082):** `replyTo` on a text, buttons or a list, and
+  `type` `reaction` (`apiSendReaction`), take the same path as other replies (`sendReply`); after
+  the conversation is locked, `answeredMessage` finds the named message in that conversation and
+  `answerProblem` (`messaging/reply-context.ts`) decides whether it can be quoted (a WhatsApp id,
+  not a reaction or a notice, a business message accepted and not failed) or reacted to (the
+  contact's, from the last 30 days). A quote adds `context.message_id` to the Graph request and
+  keeps the id in `context_external_id`; a reaction stores `{emoji, message_id}` as inbound
+  reactions do, and does not end the automation. Reading, the message a message answers is joined
+  by WhatsApp id within the conversation (`answeredMessages`, `answeredJoin`: a reaction's
+  `content->>'message_id'`, otherwise `context_external_id`, on `messages_external_uq`), for the
+  API's messages, `GET /messages/{id}` and the inbox thread (`messageSnippet`,
+  `messaging/message-text.ts`); the `message.received` payload looks it up when delivered
+  (`findAnsweredMessageId`).
 - **Keyset cursors** (`encodeKeysetCursor`, `exactTimestamp`): a cursor carries the last row's
   timestamp as PostgreSQL keeps it, to the microsecond, and its id, and pages compare
   `(time, id) < (cursor time, cursor id)`; cursors made with milliseconds still read. Cursors built

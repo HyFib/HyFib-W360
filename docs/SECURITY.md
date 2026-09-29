@@ -504,6 +504,13 @@ Phase 5 rules (Public API, P5-08):
   response kept for an `Idempotency-Key` stores `secret: null`. Owners and administrators are emailed
   the key, the host and the events whenever a key adds an endpoint, since a key has no recent
   sign-in to check. Addresses cannot change through the API.
+- Quotes and reactions through the API (ADR-082) follow every rule of replies (`messages.reply`, an
+  active company, only contacts who wrote in the last 24 hours with one answer for every number it
+  cannot reach, the window checked again at send). The message named in `replyTo` is looked up by
+  id in that conversation only, after the conversation's lock: another conversation's or company's
+  message is refused like an unknown id, and WhatsApp ids are never taken from the request. A
+  reaction goes only on the contact's own messages of the last 30 days and does not end an
+  automation; the emoji must be one RGI emoji.
 - Only the token's SHA-256 is stored; the runtime role cannot read it. The token is shown once in
   the browser and kept only in the page's memory; it is never logged, and audit entries carry the
   public prefix only.

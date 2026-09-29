@@ -26,10 +26,19 @@ import {
   replyButtonsContent,
   replyButtonsInteractive,
 } from '../messaging/interactive';
+import { messageSnippet, SNIPPET_LENGTH } from '../messaging/message-text';
+import {
+  answerProblem,
+  answeredExternalIdOf,
+  isSingleEmoji,
+  REACTION_MAX_AGE_MS,
+  type AnswerTarget,
+} from '../messaging/reply-context';
 import {
   apiSendButtonsSchema,
   apiSendListSchema,
   apiSendMessage,
+  apiSendReactionSchema,
   apiSendTextSchema,
 } from './resources';
 import {
@@ -478,6 +487,172 @@ describe('reply buttons and lists (ADR-080)', () => {
   });
 });
 
+describe('quotes and reactions (ADR-082)', () => {
+  const messageId = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f01';
+  const reaction = { type: 'reaction', to: '+919876543210', replyTo: messageId, emoji: '👍' };
+
+  it('take one emoji from Unicode’s recommended set, sequences included', () => {
+    for (const emoji of ['👍', '👍🏽', '❤️', '🇮🇳', '1️⃣', '👩🏽‍❤️‍💋‍👨🏿', '🏴󠁧󠁢󠁳󠁣󠁴󠁿', '🙏🏾']) {
+      expect(isSingleEmoji(emoji), emoji).toBe(true);
+    }
+    for (const value of ['', 'a', '1', ':+1:', '👍👍', ' 👍', '👍 ', '☺', '👍'.repeat(20)]) {
+      expect(isSingleEmoji(value), JSON.stringify(value)).toBe(false);
+    }
+  });
+
+  it('send a reaction with the message it goes on and one emoji, nothing else', () => {
+    expect(apiSendReactionSchema.parse(reaction)).toEqual(reaction);
+    expect(apiSendReactionSchema.parse({ ...reaction, from: messageId })).toEqual({
+      ...reaction,
+      from: messageId,
+    });
+    for (const bad of [
+      { ...reaction, emoji: '' },
+      { ...reaction, emoji: 'ok' },
+      { ...reaction, emoji: '👍👎' },
+      { ...reaction, replyTo: undefined },
+      { ...reaction, replyTo: 'wamid.HBgLMTY1MDM4Nzk0MzkVAgARGBI0RTJEOTc2ODVERUY5RDlGNkYA' },
+      { ...reaction, messageId },
+      { ...reaction, text: 'Thanks' },
+      { ...reaction, to: undefined },
+    ]) {
+      expect(apiSendReactionSchema.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  it('let a text, buttons or a list quote a message by its id', () => {
+    const text = { type: 'text', to: '+919876543210', text: 'Yes, 10:00 works.' };
+    expect(apiSendTextSchema.parse({ ...text, replyTo: messageId })).toMatchObject({
+      replyTo: messageId,
+    });
+    expect(apiSendTextSchema.parse(text).replyTo).toBeUndefined();
+    const buttons = {
+      type: 'buttons',
+      to: '+919876543210',
+      body: 'Keep it?',
+      buttons: [{ id: 'keep', title: 'Keep it' }],
+      replyTo: messageId,
+    };
+    expect(apiSendButtonsSchema.parse(buttons).replyTo).toBe(messageId);
+    const list = {
+      type: 'list',
+      to: '+919876543210',
+      body: 'Pick a time.',
+      button: 'Times',
+      sections: [{ rows: [{ id: 'slot-10', title: '10:00' }] }],
+      replyTo: messageId,
+    };
+    expect(apiSendListSchema.parse(list).replyTo).toBe(messageId);
+    for (const bad of ['wamid.x', '', 42]) {
+      expect(apiSendTextSchema.safeParse({ ...text, replyTo: bad }).success).toBe(false);
+    }
+  });
+
+  it('quote messages WhatsApp knows, and react only to what the contact sent in the last 30 days', () => {
+    const now = new Date('2026-09-29T12:00:00Z');
+    const inbound: AnswerTarget = {
+      direction: 'inbound',
+      type: 'text',
+      status: 'received',
+      externalMessageId: 'wamid.in',
+      at: new Date(now.getTime() - 3600_000),
+    };
+    const outbound: AnswerTarget = {
+      ...inbound,
+      direction: 'outbound',
+      status: 'delivered',
+      externalMessageId: 'wamid.out',
+    };
+    expect(answerProblem('quote', inbound, now)).toBeNull();
+    for (const status of ['accepted', 'sent', 'delivered', 'read', 'played']) {
+      expect(answerProblem('quote', { ...outbound, status }, now), status).toBeNull();
+    }
+    expect(answerProblem('quote', { ...outbound, status: 'failed' }, now)).toBe(
+      'Only messages WhatsApp accepted can be quoted.',
+    );
+    expect(
+      answerProblem('quote', { ...outbound, status: 'queued', externalMessageId: null }, now),
+    ).toBe('Only messages WhatsApp accepted can be quoted.');
+    for (const type of ['reaction', 'system']) {
+      expect(answerProblem('quote', { ...inbound, type }, now)).toBe(
+        'Reactions and WhatsApp notices cannot be quoted.',
+      );
+      expect(answerProblem('reaction', { ...inbound, type }, now)).toBe(
+        'Reactions go on messages the contact sent, not on reactions or WhatsApp notices.',
+      );
+    }
+    // A quote of an old message is fine; a reaction needs a message of the last 30 days.
+    const old = { ...inbound, at: new Date(now.getTime() - REACTION_MAX_AGE_MS - 1) };
+    expect(answerProblem('quote', old, now)).toBeNull();
+    expect(answerProblem('reaction', old, now)).toBe(
+      'Reactions go on messages from the last 30 days.',
+    );
+    expect(
+      answerProblem(
+        'reaction',
+        { ...inbound, at: new Date(now.getTime() - REACTION_MAX_AGE_MS) },
+        now,
+      ),
+    ).toBeNull();
+    expect(answerProblem('reaction', { ...inbound, type: 'image' }, now)).toBeNull();
+    expect(answerProblem('reaction', outbound, now)).toBe(
+      'Reactions go on messages the contact sent.',
+    );
+    expect(REACTION_MAX_AGE_MS).toBe(30 * 24 * 3600_000);
+  });
+
+  it('find the message a reaction is for in its content, and a quoted or tapped one in its context', () => {
+    expect(answeredExternalIdOf('reaction', { emoji: '👍', message_id: 'wamid.a' }, null)).toBe(
+      'wamid.a',
+    );
+    expect(answeredExternalIdOf('reaction', { emoji: '👍', message_id: '' }, 'wamid.b')).toBeNull();
+    expect(answeredExternalIdOf('text', { text: 'Yes', message_id: 'wamid.a' }, 'wamid.b')).toBe(
+      'wamid.b',
+    );
+    expect(answeredExternalIdOf('interactive', { reply: null }, null)).toBeNull();
+  });
+
+  it('show the quoted message in one line, cut without splitting a character', () => {
+    expect(messageSnippet('inbound', 'text', { text: 'Can I\n move   it?' })).toBe(
+      'Can I move it?',
+    );
+    expect(
+      messageSnippet('outbound', 'template', { rendered: { body: 'Your order shipped.' } }),
+    ).toBe('Your order shipped.');
+    expect(messageSnippet('outbound', 'interactive', { body: 'Keep it?', buttons: ['Yes'] })).toBe(
+      'Keep it?',
+    );
+    expect(messageSnippet('inbound', 'image', { id: 'm', mime_type: 'image/jpeg' })).toBe('Photo');
+    expect(messageSnippet('inbound', 'image', { caption: 'The receipt' })).toBe('The receipt');
+    expect(messageSnippet('inbound', 'reaction', { emoji: '👍', message_id: 'w' })).toBe(
+      'Reacted 👍',
+    );
+    expect(messageSnippet('outbound', 'reaction', { emoji: '🙏', message_id: 'w' })).toBe(
+      'Reacted 🙏',
+    );
+    expect(messageSnippet('inbound', 'text', { redacted: true })).toBe('Content removed');
+    expect(messageSnippet('inbound', 'unsupported', {})).toBe('Message');
+    const long = messageSnippet('inbound', 'text', {
+      text: `${'a'.repeat(SNIPPET_LENGTH - 2)}😀😀😀`,
+    });
+    expect(Array.from(long)).toHaveLength(SNIPPET_LENGTH);
+    expect(long.endsWith('a😀…')).toBe(true);
+    expect(SNIPPET_LENGTH).toBe(120);
+  });
+
+  it('need the reply scope, checked before anything is read', async () => {
+    const ctx = {
+      tenant: { id: 't', status: 'active' },
+      key: { id: 'k', scopes: new Set(['messages.send', 'conversations.read']) },
+    } as unknown as ApiContext;
+    const error: unknown = await apiSendMessage({} as never, ctx, reaction, {
+      key: 'k-1',
+      requestHash: 'h',
+    }).catch((caught: unknown) => caught);
+    expect(isAppError(error) && error.code).toBe('forbidden');
+  });
+});
+
 describe('webhook endpoints through the API (ADR-081)', () => {
   it('take an address, events and a description, events in the settings order and once each', () => {
     expect(
@@ -732,7 +907,7 @@ describe('OpenAPI document', () => {
     expect(responses['403']?.description).toContain('ip_not_allowed');
   });
 
-  it('sends a template or a reply (text, buttons, list) from one operation, naming the window refusal', () => {
+  it('sends a template or a reply (text, buttons, list, reaction) from one operation, naming the window refusal', () => {
     const send = paths['/messages']?.post as unknown as {
       operationId: string;
       description: string;
@@ -746,12 +921,34 @@ describe('OpenAPI document', () => {
         { $ref: '#/components/schemas/SendText' },
         { $ref: '#/components/schemas/SendButtons' },
         { $ref: '#/components/schemas/SendList' },
+        { $ref: '#/components/schemas/SendReaction' },
       ],
     });
     for (const scope of API_SEND_SCOPES) expect(send.description).toContain(`\`${scope}\``);
     expect(send.description).toContain('window_closed');
     expect(send.description).toContain('`reply.id`');
     expect(send.description).toContain('`w360`');
+    expect(send.description).toContain('`replyTo`');
+    expect(send.description).toContain('last 30 days');
+    const schemas = doc.components.schemas as Record<
+      string,
+      {
+        required?: string[];
+        additionalProperties?: unknown;
+        properties?: Record<string, { enum?: string[]; format?: string }>;
+      }
+    >;
+    expect(schemas.SendReaction?.required?.sort()).toEqual(['emoji', 'replyTo', 'to', 'type']);
+    expect(schemas.SendReaction?.additionalProperties).toBe(false);
+    for (const name of ['SendText', 'SendButtons', 'SendList']) {
+      expect(schemas[name]?.properties?.replyTo?.format, name).toBe('uuid');
+      expect(schemas[name]?.required, name).not.toContain('replyTo');
+    }
+    expect(schemas.Message?.properties?.type?.enum).toContain('reaction');
+    expect(schemas.QueuedMessage?.properties?.type?.enum).toContain('reaction');
+    expect(schemas.Message?.properties?.replyTo).toBeDefined();
+    expect(schemas.ConversationMessage?.properties?.replyTo).toBeDefined();
+    expect(JSON.stringify(schemas.WebhookMessageReceived)).toContain('"replyTo"');
     expect(send.responses['412']?.description).toContain('window_closed');
     const read = paths['/messages/{id}']?.get as unknown as { description: string };
     for (const scope of API_SEND_SCOPES) expect(read.description).toContain(`\`${scope}\``);

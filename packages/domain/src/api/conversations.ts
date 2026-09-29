@@ -19,7 +19,9 @@ import {
 import { recordSystemAudit } from '../audit';
 import { endRunForHuman } from '../automations/runs';
 import { emitTenantEvent } from '../messaging/events';
+import { outboundText } from '../messaging/message-text';
 import { SERVICE_WINDOW_MS, type OutboundDeps } from '../messaging/outbound';
+import { answeredJoin, answeredMessages } from '../messaging/reply-context';
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
 import { inboundSummary, type TappedReply } from '../webhooks/payloads';
 import { apiActor, assertScope, type ApiContext } from './context';
@@ -87,6 +89,8 @@ export interface ApiConversationMessage {
   type: MessageType;
   text: string | null;
   reply: TappedReply;
+  /** The message this one quotes, reacts to or taps a button of, when it is in the conversation (ADR-082). */
+  replyTo: string | null;
   mimeType: string | null;
   templateId: string | null;
   templateName: string | null;
@@ -103,23 +107,6 @@ const obj = (value: unknown): Record<string, unknown> | null =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
-
-/**
- * The words of an outbound message: a text's body, a template's rendered body, or the body of an
- * interactive message (automation buttons, satisfaction survey, products, a WhatsApp Flow).
- */
-export function outboundText(type: string, content: Record<string, unknown>): string | null {
-  switch (type) {
-    case 'text':
-      return str(content.text);
-    case 'template':
-      return str(obj(content.rendered)?.body);
-    case 'interactive':
-      return str(content.body) ?? str(obj(content.products)?.body) ?? str(obj(content.flow)?.body);
-    default:
-      return null;
-  }
-}
 
 const sentBy = (senderType: string): ApiSentBy =>
   senderType === 'agent' ||
@@ -281,10 +268,12 @@ export async function apiListConversationMessages(
           senderType: messages.senderType,
           templateId: messages.templateId,
           apiKeyId: messages.apiKeyId,
+          replyTo: answeredMessages.id,
           createdAt: messages.createdAt,
           cursorAt: exactTimestamp(messages.createdAt),
         })
         .from(messages)
+        .leftJoin(answeredMessages, answeredJoin())
         .where(
           and(
             eq(messages.tenantId, ctx.tenant.id),
@@ -312,6 +301,7 @@ export async function apiListConversationMessages(
             type: m.type,
             text: summary.text,
             reply: summary.reply,
+            replyTo: m.replyTo,
             mimeType: summary.mimeType,
             templateId: m.templateId,
             templateName: m.type === 'template' ? str(template?.name) : null,

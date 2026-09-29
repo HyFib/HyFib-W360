@@ -30,6 +30,7 @@ import {
   createInboxService,
   createTemplatesService,
   createWebhooksService,
+  messageReceivedPayloadSchema,
   processSendIntent,
   processTemplateSubmit,
   processWebhookDeliveries,
@@ -575,6 +576,45 @@ describe('contact events', () => {
     await expectRefusedBy(capture('message.status'), /not a contact event/);
     await expectRefusedBy(capture('contact.erased'), /permission denied for table webhook_events/);
     expect((await eventsOf(c, 'contact.')).map((e) => e.type)).toEqual(['contact.created']);
+  });
+});
+
+describe('message events (ADR-082)', () => {
+  it('name the message a customer quotes or reacts to, when it is in the conversation', async () => {
+    const c = await fx.company();
+    const endpoint = await addEndpoint(c, ['message.received']);
+    const from = waId();
+    const asked = `wamid.in.${uuidv7()}`;
+    const deliverInbound = (m: Record<string, unknown>) =>
+      fx.deliver(fx.messagesBody(c, { messages: [{ waId: from, ...m }] }));
+    await deliverInbound({ id: asked, text: 'Is the blue one in stock?' });
+    await deliverInbound({ text: 'The large size.', contextId: asked });
+    await deliverInbound({
+      type: 'reaction',
+      extra: { reaction: { message_id: asked, emoji: '👍' } },
+    });
+    await deliverInbound({ text: 'About something else.', contextId: 'wamid.not.stored' });
+    // Another customer's quote of the first customer's message names nothing.
+    await fx.deliver(
+      fx.messagesBody(c, { messages: [{ waId: waId(), text: 'Me too.', contextId: asked }] }),
+    );
+    await deliverDue(c);
+    const [askedRow] = await fx.query<{ id: string }>(
+      'SELECT id FROM app.messages WHERE tenant_id = $1 AND external_message_id = $2',
+      [c.tenant.id, asked],
+    );
+    const bodies = bodiesAt(endpoint.path).map((b) => messageReceivedPayloadSchema.parse(b));
+    expect(
+      bodies
+        .map((b) => [b.data.message.text, b.data.message.replyTo])
+        .sort(([a], [b]) => String(a).localeCompare(String(b))),
+    ).toEqual([
+      ['👍', askedRow!.id],
+      ['About something else.', null],
+      ['Is the blue one in stock?', null],
+      ['Me too.', null],
+      ['The large size.', askedRow!.id],
+    ]);
   });
 });
 

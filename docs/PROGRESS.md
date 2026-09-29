@@ -1,5 +1,75 @@
 # Progress
 
+## 2026-09-29 — Phase 5: replies that quote a message, and reactions, through the public API (P5-08, ADR-082)
+
+Status: **Implemented and locally verified against the Graph stand-in (no customer data).**
+Integrations could reply in the customer service window with text, buttons and lists, but could not
+show which of the customer's messages a reply answers or acknowledge one with an emoji, and neither
+the inbox nor the API said which message a customer's quote or reaction pointed at.
+
+### Completed
+
+- **Design (ADR-082):** `replyTo` on a text, buttons or a list quotes a message of the conversation
+  (the contact's, or the business's once WhatsApp accepted it and while it has not failed; not a
+  reaction or a notice), sent as `context.message_id` (research M-041, M-183). `type: "reaction"`
+  puts one RGI emoji on a message the contact sent in the last 30 days (the stricter reading of the
+  unconfirmed M-185) under the same `messages.reply` scope, inside the service window, without
+  ending an automation. The named message is found by its HyFib id in that conversation only. No
+  migration.
+- **Research:** M-182–M-186 from Meta's OpenAPI description (the same file as for ADR-080) and the
+  pywa library's source: the reaction and `context` shapes, the reaction webhook, the unconfirmed
+  reaction rules, and the `context` of a customer's quote, which the spec leaves undescribed.
+- **Domain:** `messaging/reply-context.ts` (the rules, `isSingleEmoji`, the join on the message a
+  message answers, `findAnsweredMessageId`), `messaging/message-text.ts` (`outboundText` moved,
+  `messageSnippet`); `sendReply` builds the message after finding the named one, keeps a quote's id
+  in `context_external_id` and a reaction's in its content; `apiSendReaction`; `replyTo` in the
+  API's conversation messages, `GET /messages/{id}` (which reports `reaction`) and the
+  `message.received` payload; the OpenAPI document (the `SendReaction` body, `replyTo`).
+- **Web:** the inbox shows a quote above a reply and names the message a reaction is for; the
+  scope reads "Reply with text, buttons, lists and reactions" and Settings → API keys' introduction
+  names reactions and quotes.
+- **Graph stand-in:** reactions (`message_id` and `emoji` only) and `context` checked.
+- **Tests:** unit (the emoji check, the reaction body and `replyTo` on each reply kind, what can be
+  quoted or reacted to, where the answered message's WhatsApp id is read, the inbox's one-line
+  quote, the scope checked first, the OpenAPI entries). Integration: `api.test.ts` (a quoted text
+  and buttons and a reaction through the send pipeline and the Graph stand-in, once per key, with
+  the stored rows and requests, the preview, `GET /messages/{id}`, the customer's own quote and
+  reaction of the reply read back through the API, a quote naming nothing when it points at
+  another conversation's message, and the inbox's quotes; every refusal with nothing stored:
+  unknown ids, another conversation's and another company's messages, a reaction, queued and failed
+  business messages, the business's own message, a message 31 days old, a reaction, bad emoji, and a
+  number that has not written), `automations.test.ts` (a reaction leaving the bot and its queued
+  question alone, a quoted reply taking over) and `webhook-events.test.ts` (`replyTo` in
+  `message.received` for a quote and a reaction, null for an unknown or another conversation's
+  message). The conversation read and text reply tests now expect `replyTo`. e2e `api.spec.ts`: a
+  key created in settings quotes a customer's message and reacts to it (a word refused as an emoji),
+  the two requests the Graph stand-in received, the quote and the reaction's message in the inbox,
+  and the customer's reaction to the reply read back through the API.
+- **Docs:** ADR-082; research M-182–M-186; ARCHITECTURE (the public API); SECURITY (Phase 5 rules);
+  THREAT-MODEL T100; RUNBOOKS (a troubleshooting entry); BACKLOG P5-08; FEATURE-MATRIX H-033 and
+  W-134.
+- **Mutation checks:** 28 regressions tried one at a time; all make a test fail. 27 in the domain and API: another conversation's message answered (in the send, the inbox and API join, and the webhook lookup); reactions on the business's own, old, reacted-to or notice messages; the age taken from when HyFib stored the message; 7 days instead of 30; quotes of failed messages; no `context`, or `context` on a reaction; the quoted id not kept, or a reaction kept as a quote; a reaction ending the automation, or a quoted reply not ending it; the reaction's message not stored; the preview without "Reacted"; the emoji not checked, or several emoji taken as one; a reaction's message read from its context; the join reading only the context; the webhook without `replyTo`; a reaction reported as a template; the OpenAPI body missing; the scope not checked; a sent reaction without its emoji as text; the snippet cut inside a character. 1 in the web layer through the e2e test: the inbox not showing the quote (a first attempt did not build, as the change broke type narrowing, and proved nothing).
+
+### Test commands and results (local, 2026-09-29)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                           |
+| `pnpm test` (unit)                                                          | 390 passed, including 7 new in `api/api.test.ts`                                                                                                                                                                                                                                                                                                                                                                         |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 530 passed, including 2 new in `api.test.ts`, 1 in `automations.test.ts` and 1 in `webhook-events.test.ts`                                                                                                                                                                                                                                                                                                               |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 530 passed                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / on `api.spec.ts`, `api-keys.spec.ts`, `inbox.spec.ts`, `inbox-teams.spec.ts`, `webhooks.spec.ts`, `webhook-events.spec.ts` and `automations.spec.ts`: 31 passed and 1 failed (6.4 min), the new test on chromium, whose reaction locator also matched the conversation list; with the locator scoped to the thread, `api.spec.ts` passed: 10 tests (1.8 min). A local database created for the day's runs |
+| Mutation checks                                                             | 28 regressions tried (1 through the e2e test); all make a test fail                                                                                                                                                                                                                                                                                                                                                      |
+
+### Known gaps
+
+- Not built: members quoting or reacting in the inbox, taking a reaction back, reacting to the
+  business's own messages, media, location and contact card replies through the API, editing or
+  deleting sent messages.
+- Unconfirmed (M-185, M-186): Meta's rules for reactions (the 30 days are the stricter reading of a
+  recalled rule) and the `context` of a customer's quoted reply, which the spec does not describe.
+  If Meta sends none, such replies simply show no quote and `replyTo` is null.
+
 ## 2026-09-29 — Phase 5: managing webhook endpoints through the public API (P5-08, P5-09, ADR-081)
 
 Status: **Implemented and locally verified with local test receivers (no customer data).** Webhook
