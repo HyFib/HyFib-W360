@@ -1194,6 +1194,25 @@ row-level security and grants, the capture triggers on `app.messages`, `app.cons
 (granted to `w360_app` before their ownership moves to `w360_definer`). A failure usually means the
 bootstrap roles are missing (`infra/db/bootstrap-roles.sql`).
 
+**Conversation and contact events (ADR-074).** An endpoint that takes `contact.created` and
+`contact.updated` receives one event per contact for each change saved: an import sends one per
+contact it adds or changes, delivered like any other event. A receiver that asks why an erased
+contact's `contact.created` arrived with no name or number: payloads are built when delivered, and
+the contact was erased in between; `contact.erased` follows if the endpoint takes it. Moves of a
+conversation between members send nothing (`conversation.assignment_changed` reports only whether
+a member is assigned). To see what a transaction captured, `app.webhook_events.captured_xact` holds
+its id for contact events.
+
+**Migration 0047, 0048 or 0049 failed.** 0047 runs in one transaction, so a failure applies
+nothing: it widens the event type checks (the one on `app.webhook_events` `NOT VALID`), adds
+`captured_xact`, the capture functions and the triggers on `app.conversations`, `app.contacts` and
+`app.contact_tags`. A failure usually means a check was renamed by hand
+(`webhook_endpoints_event_types_check`, `webhook_events_type_check`). 0048 runs outside a
+transaction (one `CREATE INDEX CONCURRENTLY`): a failure can leave an INVALID index; run
+`DROP INDEX CONCURRENTLY IF EXISTS app.webhook_events_contact_xact_idx;` and run the migrations
+again. 0049 validates the type check without blocking writes; it fails only if a stored event has a
+type outside the list, which no code writes: look for the row by `type` before running it again.
+
 ## 10P. Platform operations console
 
 `/platform/ops` is for platform owners and operators (MFA). It shows counts, states, error codes,

@@ -3,8 +3,8 @@ import type { WebhookEventType } from '@w360/db';
 export type { WebhookEventType } from '@w360/db';
 
 /**
- * Outgoing webhooks (P5-09, ADR-053): the parts the settings page and the services share. Pure
- * definitions without server dependencies, so pages can use them in the browser.
+ * Outgoing webhooks (P5-09, ADR-053, ADR-074): the parts the settings page and the services share.
+ * Pure definitions without server dependencies, so pages can use them in the browser.
  */
 
 export const WEBHOOK_EVENT_KEYS = [
@@ -12,6 +12,11 @@ export const WEBHOOK_EVENT_KEYS = [
   'message.status',
   'consent.changed',
   'template.status_changed',
+  'conversation.status_changed',
+  'conversation.assignment_changed',
+  'contact.created',
+  'contact.updated',
+  'contact.erased',
 ] as const satisfies readonly WebhookEventType[];
 
 export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; description: string }> =
@@ -32,6 +37,30 @@ export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; descr
     'template.status_changed': {
       label: 'Template status',
       description: 'Meta approved, rejected, paused or disabled a template, or it was deleted.',
+    },
+    'conversation.status_changed': {
+      label: 'Conversation status',
+      description:
+        'A conversation was resolved, reopened or set to pending, by a member, an automation or the contact writing again.',
+    },
+    'conversation.assignment_changed': {
+      label: 'Conversation assignment',
+      description:
+        'A member was assigned to a conversation nobody had, or it went back to nobody. Moves between members are not sent.',
+    },
+    'contact.created': {
+      label: 'Contact added',
+      description:
+        'A contact was added: by a first message, a member, an import, the API or a store.',
+    },
+    'contact.updated': {
+      label: 'Contact changed',
+      description: 'A contact’s name, number, email or tags changed.',
+    },
+    'contact.erased': {
+      label: 'Contact erased',
+      description:
+        'A contact was erased. Take it to delete your copy: the event carries no personal data.',
     },
   };
 
@@ -87,7 +116,7 @@ export function webhookErrorLabel(code: string | null, status: number | null): s
     case 'endpoint_disabled':
       return 'The endpoint was turned off';
     case 'event_gone':
-      return 'The message no longer exists';
+      return 'What the event is about no longer exists';
     default:
       return code;
   }

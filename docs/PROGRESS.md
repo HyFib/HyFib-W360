@@ -1,5 +1,88 @@
 # Progress
 
+## 2026-09-29 — Phase 5: webhook events for conversations and contacts (P5-09, ADR-074)
+
+Status: **Implemented and locally verified with local test receivers only (no customer
+endpoints).** Webhooks told integrations about messages, consent and templates (ADR-053); a
+helpdesk or CRM kept in step with HyFib also needs to hear when a conversation is resolved,
+reopened or picked up by a person, and when a contact is added, changed or erased, which it could
+not hear at all before.
+
+### Completed
+
+- **Design (ADR-074):** five event types an endpoint can take (up to 9 per endpoint now):
+  `conversation.status_changed` (open, pending, resolved, with the status before, whoever changed
+  it), `conversation.assignment_changed` (a member assigned where none was, or none any more; moves
+  between members are not sent, as webhooks and the API name no members), `contact.created`,
+  `contact.updated` (name, number, email or tags; not custom fields, not consent) and
+  `contact.erased`. One contact event per contact and transaction; erasure sends only
+  `contact.erased`, with no personal data.
+- **Migrations 0047–0049:** 0047 widens the event type checks (the one on `app.webhook_events` `NOT
+VALID`, so the table is not scanned under the lock), adds `app.webhook_events.captured_xact`,
+  `app.capture_contact_webhook_event` and the triggers on `app.conversations`, `app.contacts` and
+  `app.contact_tags`; 0048 builds the partial index on the contact events concurrently; 0049
+  validates the check without blocking writes.
+- **Capture rules:** `contact.created` and `contact.updated` are captured when an active endpoint
+  takes either, once per contact and top-level transaction (savepoints included), and delivered to
+  the endpoints that take the event's own type: a contact added with its tags is sent as added only,
+  and an endpoint that takes only updates hears nothing of it. `contact.erased` first deletes the
+  created and updated events its own transaction captured, with their deliveries (erasure removes
+  the tags before it marks the contact).
+- **Domain:** `api/contact-view.ts` holds the API's contact (its schema, query and shape), now
+  shared by the API and the contact webhooks; `webhooks/payloads.ts` builds the five payloads when
+  delivered (conversation events as the message events are; contact events with the API's contact
+  and `erased`, an erased contact keeping its id, source and creation time only);
+  `webhooks/model.ts` names and describes the events for the settings page; the OpenAPI document's
+  `webhooks` section describes them.
+- **Web:** Settings → Webhooks offers the five events (the list comes from the model).
+- **Tests:** unit tests of the payload schemas (an erased contact included, the contact's fields
+  being the API's and `erased`) and of the OpenAPI entries. 10 integration tests in
+  `webhook-events.test.ts` with a local receiver: status changes from a member and from the contact
+  writing again, with the status before and the conversation as it is when delivered; assignment
+  sent when a member is assigned or unassigned, not for a move; one `contact.created` for a contact
+  added with tags, only to the endpoints that take it; one `contact.updated` for each save of the
+  name, the email, the number, all three, tags added and a tag removed, and nothing for a custom
+  field or an unchanged save; a customer's first message; an import (added and changed contacts);
+  erasure sending only `contact.erased` without personal data, events captured before it delivered
+  without personal data too; an endpoint taking only updates hearing nothing of an erasure; one
+  event per transaction across savepoints, a rolled-back savepoint leaving none; the capture
+  function refusing other types and refusing the company role a delete. The isolation suite checks
+  the new functions' grants. e2e `webhook-events.spec.ts`: a customer writes (`contact.created`), a
+  member resolves the conversation in the inbox (`conversation.status_changed`), tags the contact
+  (one `contact.updated`) and erases it (only `contact.erased`, without the name or number), each
+  request signed.
+- **Docs:** ADR-074; ARCHITECTURE (outgoing webhooks); SECURITY (controls, Phase 5 rules);
+  THREAT-MODEL T92; DATA-RETENTION; RUNBOOKS (the events, migrations 0047–0049); BACKLOG P5-09;
+  FEATURE-MATRIX H-014; the e2e job's comment in CI (200 tests; 196 took 58.4 minutes on
+  5232313).
+- **Mutation checks:** 27 regressions tried one at a time; 26 make a test fail. They cover each
+  trigger's condition and what it records, the one-event-per-transaction lookup and the transaction
+  id, erasure deleting its own events (also when no endpoint takes erasure), the subscription rules,
+  each contact field, custom fields, tag additions and removals, the grants to both roles, the
+  function refusing other types, and the payloads (the status and assignment as captured, the
+  erased contact, the full contact, the settings list). The other, removing the explicit `REVOKE ...
+FROM PUBLIC` of a trigger function, cannot be observed: migration 0002's default privileges
+  already withhold `EXECUTE` from `PUBLIC`, and the line stays as in every migration.
+
+### Test commands and results (local, 2026-09-29)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `pnpm test` (unit)                                                          | 351 passed, including 1 new in `webhooks/webhooks.test.ts` (and the OpenAPI list check widened)                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 500 passed, including 10 new in `webhook-events.test.ts`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 500 passed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / `webhook-events.spec.ts` and `webhooks.spec.ts` passed on both projects (4 tests, 48 s). A full run of both projects: 99 passed, 1 failed. The failure was the refund request test on mobile-chromium, which waits up to 120 s for its announcement email: the local e2e database had gathered 181 platform owners (test users) from earlier local runs, the announcement went to all of them, and this test's email arrived 87 s after the sweep, about 2 s after the wait ended (worker log and Mailpit times). CI starts from an empty database |
+| Mutation checks                                                             | 27 regressions tried; 26 make a test fail, the other cannot be observed (above)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+
+### Known gaps
+
+- Not built: custom field changes, member and team identities (and so moves between members or
+  teams), conversations started, notes, merges, events for campaigns, automations or orders, and
+  filters beyond the event type.
+- An import sends one `contact.created` or `contact.updated` per contact to each endpoint that takes
+  it; nothing batches them. Delivery was tested with local receivers only, and not under load.
+
 ## 2026-09-29 — Phase 5: refund requests from companies and a platform-wide refunds list (P5-05, ADR-073)
 
 Status: **Implemented and locally verified against the Razorpay stand-in (email through the local
@@ -98,14 +181,14 @@ owners decide on `/platform/refunds`, and the same page lists every refund.
 
 ### Test commands and results (local, 2026-09-29)
 
-| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `pnpm test` (unit)                                                          | 350 passed, including 3 new in `billing/refund-requests.test.ts` and 2 in `platform/billing.test.ts`                                                                                                                                                                                                                                                                                                                                                                                   |
-| `pnpm test:integration` (PostgreSQL 18.6)                                   | 489 passed before the review fix, including 16 new in `refund-requests.test.ts`; with it, that file (17 tests), `company-data.test.ts` and `tenant-isolation.test.ts` pass                                                                                                                                                                                                                                                                                                             |
-| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 489 passed (before the review fix)                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / `refund-requests.spec.ts`, `credit-refunds.spec.ts` and `billing-history.spec.ts` passed on both projects (6 tests, 8.4 min); after the refund test's waits were reordered, it and `stores.spec.ts` passed on chromium (6 tests, 4.2 min); both runs used the build from before the forms' unreachable success messages were removed. A full run of both projects on the build of the first push was started before pushing; its result is recorded on the pull request |
-| Mutation checks                                                             | 39 regressions tried; all make a test fail (two after the tests were strengthened, above)                                                                                                                                                                                                                                                                                                                                                                                              |
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                |
+| `pnpm test` (unit)                                                          | 350 passed, including 3 new in `billing/refund-requests.test.ts` and 2 in `platform/billing.test.ts`                                                                                                                                                                                                                                                                                                                                                          |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 489 passed before the review fix, including 16 new in `refund-requests.test.ts`; with it, that file (17 tests), `company-data.test.ts` and `tenant-isolation.test.ts` pass                                                                                                                                                                                                                                                                                    |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 489 passed (before the review fix)                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / `refund-requests.spec.ts`, `credit-refunds.spec.ts` and `billing-history.spec.ts` passed on both projects (6 tests, 8.4 min); after the refund test's waits were reordered, it and `stores.spec.ts` passed on chromium (6 tests, 4.2 min); both runs used the build from before the forms' unreachable success messages were removed. A full run of both projects on the build of the first push (before the review fix): 98 passed (33.2 min) |
+| Mutation checks                                                             | 39 regressions tried; all make a test fail (two after the tests were strengthened, above)                                                                                                                                                                                                                                                                                                                                                                     |
 
 ### Known gaps
 

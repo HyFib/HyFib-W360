@@ -2205,3 +2205,59 @@ Decision:
 Not built: requests for spent credit or plan payments, approving a different amount (a platform owner
 declines with a note and refunds from the company's page instead), several open requests per top-up,
 reminders about requests waiting, and in-app notices.
+
+## ADR-074 Outgoing webhook events for conversations and contacts (2026-09-29)
+
+Context: the webhooks of ADR-053 tell integrations about messages, consent and templates. A helpdesk
+or CRM kept in step with HyFib also needs to hear when a conversation is resolved, reopened or
+picked up by a person, and when a contact is added, changed or erased; without that it has to poll
+the API (ADR-072) and cannot hear of erasure at all.
+
+Decision:
+
+- **Five event types**, chosen per endpoint like the others (an endpoint may now take all 9):
+  - `conversation.status_changed`: the status moved between open, pending and resolved, whoever
+    moved it (a member, routing, an automation, or the contact writing to a resolved
+    conversation). It reports the status reached and the one before.
+  - `conversation.assignment_changed`: a member was assigned to a conversation nobody had, or the
+    conversation lost its member (unassigned, the member removed, routing). A move from one member
+    to another is not sent: like the API, webhooks name no members or teams, so it would show no
+    change. It reports whether a member is assigned.
+  - `contact.created`: a contact was added, whatever the source (a first message, a member, an
+    import, the API, a store).
+  - `contact.updated`: the contact's name, number, email or tags changed. Custom field values are
+    not part of the API's contact and do not send it; consent has its own event.
+  - `contact.erased`: the contact was erased, so a receiver can delete its copy.
+- **Capture** by triggers in the transaction that makes the change, as ADR-053: on
+  `app.conversations` (status; an assignee appearing or going), `app.contacts` (added; name,
+  number or email changed while not erased; erased) and `app.contact_tags` (added or removed).
+  Conversation events are one per change.
+- **One contact event per contact and transaction.** Adding a contact with its tags, or changing
+  its name and email in one save, captures one event: the event row keeps the id of the top-level
+  transaction that captured it (`captured_xact`, the same inside savepoints, and gone with a
+  rolled-back savepoint), and a partial index finds it. A contact added in the transaction is sent
+  as `contact.created` only: `contact.created` and `contact.updated` are captured when an active
+  endpoint takes either, and delivered to the endpoints that take the event's own type, so an
+  endpoint that takes only updates hears nothing about a contact being added. Erasing deletes the
+  created or updated events its own transaction captured (erasure removes the tags first), so an
+  erasure sends `contact.erased` only.
+- **Payloads are built when delivered** (ADR-053). Conversation events carry `conversation` (id,
+  status, the previous status for status changes, whether a member is assigned, when it was
+  resolved), `contact` (id, number and name, null once erased) and `channel`, as the message
+  events do. The fact the event reports (the status and the one before, or whether a member is
+  assigned) is as captured; the rest is the conversation as it is when delivered. Contact events
+  carry `contact` in the API's words (id, name, number, email, tags, consent, source, created)
+  and `erased`; an erased contact is sent with its id, source and creation time only, whichever
+  event is delivered.
+- **Volume:** an import sends one `contact.created` per contact added to each endpoint that takes
+  it, delivered like any other event (ADR-053).
+- **Migrations:** 0047 widens the event type checks, adds `captured_xact`, the capture functions
+  and the triggers; the check on `app.webhook_events` is added `NOT VALID`, so the rows already
+  there are not scanned under the lock taken to change it. 0048 builds the partial index
+  concurrently and 0049 validates the check, neither blocking writes. No endpoint can take the new
+  types before the web app of this release runs, which is after the migrations, so the lookups
+  the index serves never run without it.
+
+Not built: custom field changes, member and team identities (and so moves between members or
+teams), conversations started, notes, merges, events for campaigns, automations or orders, and
+filters beyond the event type.

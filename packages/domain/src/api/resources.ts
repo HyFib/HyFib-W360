@@ -17,7 +17,6 @@ import {
   isNull,
   messageTemplates,
   messages,
-  outerColumn,
   sendIntents,
   sql,
   suppressions,
@@ -40,6 +39,7 @@ import {
   TEMPLATE_LIMITS,
 } from '../templates/definition';
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
+import { apiContactById, apiContactColumns, toApiContact, type ApiContact } from './contact-view';
 import { apiActor, assertScope, type ApiContext } from './context';
 import {
   claimIdempotencyKey,
@@ -146,17 +146,6 @@ export const apiSendTextSchema = z
   })
   .strict();
 
-export interface ApiContact {
-  id: string;
-  name: string | null;
-  phone: string | null;
-  email: string | null;
-  tags: string[];
-  consent: { marketing: 'opted_in' | 'opted_out' | null; utility: 'opted_in' | 'opted_out' | null };
-  source: string;
-  createdAt: string;
-}
-
 export interface ApiTemplate {
   id: string;
   name: string;
@@ -179,58 +168,6 @@ export interface ApiMessage {
   contactId: string;
   error: { code: string | null; title: string | null } | null;
   createdAt: string;
-}
-
-// Outer columns named in full: these selects have no joins, so drizzle would leave the table out
-// and `id` would bind to the subquery's own table.
-const consentState = (purpose: 'marketing' | 'utility') =>
-  sql<'opted_in' | 'opted_out' | null>`(select cc.status from app.contact_consents cc
-    where cc.tenant_id = ${outerColumn(contacts.tenantId)} and cc.contact_id = ${outerColumn(contacts.id)}
-      and cc.purpose = ${purpose})`;
-
-const contactColumns = {
-  id: contacts.id,
-  name: contacts.displayName,
-  phone: contacts.phoneE164,
-  email: contacts.email,
-  source: contacts.source,
-  createdAt: contacts.createdAt,
-  erasedAt: contacts.erasedAt,
-  tags: sql<string[]>`coalesce((select array_agg(t.tag order by t.tag) from app.contact_tags t
-    where t.tenant_id = ${outerColumn(contacts.tenantId)} and t.contact_id = ${outerColumn(contacts.id)}), '{}')`,
-  marketing: consentState('marketing'),
-  utility: consentState('utility'),
-};
-
-type ContactRow = {
-  id: string;
-  name: string | null;
-  phone: string | null;
-  email: string | null;
-  source: string;
-  createdAt: Date;
-  tags: string[];
-  marketing: 'opted_in' | 'opted_out' | null;
-  utility: 'opted_in' | 'opted_out' | null;
-};
-
-const toApiContact = (r: ContactRow): ApiContact => ({
-  id: r.id,
-  name: r.name,
-  phone: r.phone,
-  email: r.email,
-  tags: r.tags,
-  consent: { marketing: r.marketing, utility: r.utility },
-  source: r.source,
-  createdAt: r.createdAt.toISOString(),
-});
-
-async function contactById(tx: Tx, tenantId: string, id: string): Promise<ContactRow | null> {
-  const [row] = await tx
-    .select(contactColumns)
-    .from(contacts)
-    .where(and(eq(contacts.tenantId, tenantId), eq(contacts.id, id), isNull(contacts.erasedAt)));
-  return row ?? null;
 }
 
 const explicitPhone = (raw: string) => {
@@ -337,7 +274,7 @@ export async function apiListContacts(
     ctx.scope,
     async (tx) => {
       const rows = await tx
-        .select({ ...contactColumns, cursorAt: exactTimestamp(contacts.createdAt) })
+        .select({ ...apiContactColumns, cursorAt: exactTimestamp(contacts.createdAt) })
         .from(contacts)
         .where(
           and(
@@ -370,7 +307,7 @@ export async function apiGetContact(
 ): Promise<ApiContact> {
   assertScope(ctx, 'contacts.read');
   if (!z.uuid().safeParse(contactId).success) throw notFound('Contact');
-  const row = await deps.db.run(ctx.scope, (tx) => contactById(tx, ctx.tenant.id, contactId), {
+  const row = await deps.db.run(ctx.scope, (tx) => apiContactById(tx, ctx.tenant.id, contactId), {
     accessMode: 'read only',
   });
   if (!row) throw notFound('Contact');
@@ -467,7 +404,7 @@ export async function apiCreateContact(
           apiActor(ctx),
         );
       }
-      const row = await contactById(tx, ctx.tenant.id, id);
+      const row = await apiContactById(tx, ctx.tenant.id, id);
       if (!row) throw new AppError('conflict', 'This contact was erased.');
       return {
         status: inserted ? 201 : 200,
@@ -520,7 +457,7 @@ export async function apiRecordConsent(
       },
       apiActor(ctx),
     );
-    const row = await contactById(tx, ctx.tenant.id, contactId);
+    const row = await apiContactById(tx, ctx.tenant.id, contactId);
     if (!row) throw notFound('Contact');
     return toApiContact(row);
   });

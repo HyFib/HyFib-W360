@@ -205,9 +205,9 @@ describe('database roles', () => {
       expect(await can('w360_app', fn), fn).toBe(false);
       expect(await can('w360_auth', fn), fn).toBe(false);
     }
-    // Outgoing webhooks (0025): the dispatch and retention sweeps for the worker; capture, which
-    // the triggers call as the role making the change (the runtime role, or a definer function);
-    // the trigger functions for nobody.
+    // Outgoing webhooks (0025, 0047): the dispatch and retention sweeps for the worker; capture,
+    // which the triggers call as the role making the change (the runtime role, or a definer
+    // function); the trigger functions for nobody.
     for (const fn of ['ops.webhook_dispatch_due(integer)', 'ops.purge_webhook_data(integer)']) {
       expect(await can('w360_app', fn), fn).toBe(true);
       expect(await can('w360_auth', fn), fn).toBe(false);
@@ -216,6 +216,7 @@ describe('database roles', () => {
     for (const fn of [
       'app.webhook_subscribed(uuid,text)',
       'app.capture_webhook_event(uuid,text,uuid,uuid,uuid,uuid,text,jsonb,timestamp with time zone)',
+      'app.capture_contact_webhook_event(uuid,uuid,text)',
     ]) {
       expect(await can('w360_app', fn), fn).toBe(true);
       expect(await can('w360_definer', fn), fn).toBe(true);
@@ -227,6 +228,9 @@ describe('database roles', () => {
       'app.webhook_capture_message()',
       'app.webhook_capture_consent()',
       'app.webhook_capture_template()',
+      'app.webhook_capture_conversation()',
+      'app.webhook_capture_contact()',
+      'app.webhook_capture_contact_tag()',
     ]) {
       for (const role of ['w360_app', 'w360_auth', 'w360_platform']) {
         expect(await can(role, fn), `${role} ${fn}`).toBe(false);

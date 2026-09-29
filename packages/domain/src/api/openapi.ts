@@ -8,11 +8,17 @@ import {
 import { WEBHOOK_EVENT_INFO, WEBHOOK_LIMITS, WEBHOOK_RETRY_SECONDS } from '../webhooks/model';
 import {
   consentChangedPayloadSchema,
+  contactCreatedPayloadSchema,
+  contactErasedPayloadSchema,
+  contactUpdatedPayloadSchema,
+  conversationAssignmentPayloadSchema,
+  conversationStatusPayloadSchema,
   messageReceivedPayloadSchema,
   messageStatusPayloadSchema,
   pingPayloadSchema,
   templateStatusPayloadSchema,
 } from '../webhooks/payloads';
+import { apiContactSchema } from './contact-view';
 import { API_LIMITS, API_SCOPE_INFO, API_SCOPE_KEYS } from './model';
 import {
   apiConsentSchema,
@@ -25,19 +31,6 @@ import {
  * The OpenAPI 3.1 document of the public API v1 (ADR-052), built from the zod schemas that
  * validate requests and describe responses, so the document and the checks cannot drift apart.
  */
-
-const consentValue = z.enum(['opted_in', 'opted_out']).nullable();
-
-export const apiContactSchema = z.object({
-  id: z.uuid(),
-  name: z.string().nullable(),
-  phone: z.string().nullable().describe('E.164, like +919876543210.'),
-  email: z.string().nullable(),
-  tags: z.array(z.string()),
-  consent: z.object({ marketing: consentValue, utility: consentValue }),
-  source: z.string().describe('Where the contact came from: whatsapp, manual, import, api, store.'),
-  createdAt: z.iso.datetime(),
-});
 
 export const apiTemplateSchema = z.object({
   id: z.uuid(),
@@ -518,6 +511,36 @@ export function buildOpenApiDocument(serverUrl: string) {
         WEBHOOK_EVENT_INFO['template.status_changed'].description,
         'WebhookTemplateStatusChanged',
       ),
+      'conversation.status_changed': webhook(
+        'webhookConversationStatusChanged',
+        WEBHOOK_EVENT_INFO['conversation.status_changed'].label,
+        WEBHOOK_EVENT_INFO['conversation.status_changed'].description,
+        'WebhookConversationStatusChanged',
+      ),
+      'conversation.assignment_changed': webhook(
+        'webhookConversationAssignmentChanged',
+        WEBHOOK_EVENT_INFO['conversation.assignment_changed'].label,
+        WEBHOOK_EVENT_INFO['conversation.assignment_changed'].description,
+        'WebhookConversationAssignmentChanged',
+      ),
+      'contact.created': webhook(
+        'webhookContactCreated',
+        WEBHOOK_EVENT_INFO['contact.created'].label,
+        `${WEBHOOK_EVENT_INFO['contact.created'].description} An import sends one per contact added.`,
+        'WebhookContactCreated',
+      ),
+      'contact.updated': webhook(
+        'webhookContactUpdated',
+        WEBHOOK_EVENT_INFO['contact.updated'].label,
+        `${WEBHOOK_EVENT_INFO['contact.updated'].description} One event per contact for each change saved; a contact added in the same change is sent as contact.created only.`,
+        'WebhookContactUpdated',
+      ),
+      'contact.erased': webhook(
+        'webhookContactErased',
+        WEBHOOK_EVENT_INFO['contact.erased'].label,
+        WEBHOOK_EVENT_INFO['contact.erased'].description,
+        'WebhookContactErased',
+      ),
       ping: webhook(
         'webhookPing',
         'Test event',
@@ -596,6 +619,11 @@ export function buildOpenApiDocument(serverUrl: string) {
         WebhookMessageStatus: jsonSchema(messageStatusPayloadSchema),
         WebhookConsentChanged: jsonSchema(consentChangedPayloadSchema),
         WebhookTemplateStatusChanged: jsonSchema(templateStatusPayloadSchema),
+        WebhookConversationStatusChanged: jsonSchema(conversationStatusPayloadSchema),
+        WebhookConversationAssignmentChanged: jsonSchema(conversationAssignmentPayloadSchema),
+        WebhookContactCreated: jsonSchema(contactCreatedPayloadSchema),
+        WebhookContactUpdated: jsonSchema(contactUpdatedPayloadSchema),
+        WebhookContactErased: jsonSchema(contactErasedPayloadSchema),
         WebhookPing: jsonSchema(pingPayloadSchema),
       },
     },

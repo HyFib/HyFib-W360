@@ -402,8 +402,13 @@ verification, app review, Embedded Signup configuration).
   delivery through the egress guard with leases, eight attempts over about 45 hours, interrupted
   attempts retried (at least once), automatic disabling after 72 hours of failures with an email,
   delivery history, replays, test events, 30-day retention, the OpenAPI `webhooks` section.
-  Remaining: filters beyond the event type, custom headers, mutual TLS, fixed egress addresses,
-  events for conversations, campaigns, automations, contact changes and orders, load tests.
+  **[Conversation and contact events built, locally verified]** (ADR-074:
+  `conversation.status_changed`, `conversation.assignment_changed` (whether a member is assigned,
+  never who), `contact.created`, `contact.updated` (name, number, email, tags) and `contact.erased`,
+  one contact event per contact and transaction, erasure sending only `contact.erased` with no
+  personal data). Remaining: filters beyond the event type, custom headers, mutual TLS, fixed egress
+  addresses, custom field changes, member and team identities, events for campaigns, automations and
+  orders, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,

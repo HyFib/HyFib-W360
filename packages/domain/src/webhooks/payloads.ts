@@ -3,17 +3,20 @@ import {
   and,
   channelAccounts,
   contacts,
+  CONVERSATION_STATUSES,
   conversations,
   eq,
   messageTemplates,
   messages,
   type Tx,
+  type WebhookEventType,
 } from '@w360/db';
+import { apiContactColumns, apiContactSchema, toApiContact } from '../api/contact-view';
 
 /**
- * The JSON bodies of outgoing webhooks (ADR-053). The zod schemas describe them in the OpenAPI
- * document; `buildWebhookPayload` builds them from an event when it is delivered, reading the
- * company's current data (an erased contact has no number or name).
+ * The JSON bodies of outgoing webhooks (ADR-053, ADR-074). The zod schemas describe them in the
+ * OpenAPI document; `buildWebhookPayload` builds them from an event when it is delivered, reading
+ * the company's current data (an erased contact has no number or name).
  */
 
 const contactSchema = z.object({
@@ -127,6 +130,65 @@ export const templateStatusPayloadSchema = envelope(
   }),
 );
 
+const conversationStatusSchema = z.enum(CONVERSATION_STATUSES);
+
+export const conversationStatusPayloadSchema = envelope(
+  'conversation.status_changed',
+  z.object({
+    conversation: z.object({
+      id: z.uuid(),
+      status: conversationStatusSchema.describe('The status this event reports.'),
+      previousStatus: conversationStatusSchema.describe('The status before it.'),
+      assigned: z.boolean().describe('Whether a member is assigned when the event is delivered.'),
+      resolvedAt: z.iso
+        .datetime()
+        .nullable()
+        .describe('When it was resolved, if it is resolved when the event is delivered.'),
+    }),
+    contact: contactSchema,
+    channel: channelSchema,
+  }),
+);
+
+export const conversationAssignmentPayloadSchema = envelope(
+  'conversation.assignment_changed',
+  z.object({
+    conversation: z.object({
+      id: z.uuid(),
+      status: conversationStatusSchema.describe('The status when the event is delivered.'),
+      assigned: z
+        .boolean()
+        .describe(
+          'Whether a member is assigned: the change this event reports. Moves between members are not sent.',
+        ),
+    }),
+    contact: contactSchema,
+    channel: channelSchema,
+  }),
+);
+
+/** A contact in the API's words (the `Contact` of GET /contacts/{id}), and whether it was erased. */
+const webhookContactSchema = apiContactSchema.extend({
+  erased: z
+    .boolean()
+    .describe(
+      'An erased contact is sent with its id, source and creation time only: delete your copy.',
+    ),
+});
+
+export const contactCreatedPayloadSchema = envelope(
+  'contact.created',
+  z.object({ contact: webhookContactSchema }),
+);
+export const contactUpdatedPayloadSchema = envelope(
+  'contact.updated',
+  z.object({ contact: webhookContactSchema }),
+);
+export const contactErasedPayloadSchema = envelope(
+  'contact.erased',
+  z.object({ contact: webhookContactSchema }),
+);
+
 export const pingPayloadSchema = envelope(
   'ping',
   z.object({ endpointId: z.uuid(), message: z.string() }),
@@ -138,8 +200,7 @@ export type WebhookPayload = { id: string; type: string; createdAt: string; data
 export interface StoredWebhookEvent {
   id: string;
   tenantId: string;
-  type:
-    'message.received' | 'message.status' | 'consent.changed' | 'template.status_changed' | 'ping';
+  type: WebhookEventType | 'ping';
   messageId: string | null;
   conversationId: string | null;
   contactId: string | null;
@@ -250,6 +311,51 @@ async function templateOf(tx: Tx, tenantId: string, templateId: string | null) {
   return row ?? null;
 }
 
+async function conversationContext(tx: Tx, tenantId: string, conversationId: string | null) {
+  if (!conversationId) return null;
+  const [row] = await tx
+    .select({
+      status: conversations.status,
+      assignedMembershipId: conversations.assignedMembershipId,
+      resolvedAt: conversations.resolvedAt,
+      contactId: conversations.contactId,
+      channelId: conversations.channelAccountId,
+      channelPhone: channelAccounts.displayPhoneNumber,
+    })
+    .from(conversations)
+    .innerJoin(
+      channelAccounts,
+      and(
+        eq(channelAccounts.tenantId, conversations.tenantId),
+        eq(channelAccounts.id, conversations.channelAccountId),
+      ),
+    )
+    .where(and(eq(conversations.tenantId, tenantId), eq(conversations.id, conversationId)));
+  return row ?? null;
+}
+
+/** The contact as the API describes it; an erased contact keeps its id, source and creation time. */
+async function webhookContactOf(tx: Tx, tenantId: string, contactId: string | null) {
+  if (!contactId) return null;
+  const [row] = await tx
+    .select(apiContactColumns)
+    .from(contacts)
+    .where(and(eq(contacts.tenantId, tenantId), eq(contacts.id, contactId)));
+  if (!row) return null;
+  if (!row.erasedAt) return { ...toApiContact(row), erased: false };
+  return {
+    id: row.id,
+    name: null,
+    phone: null,
+    email: null,
+    tags: [],
+    consent: { marketing: null, utility: null },
+    source: row.source,
+    createdAt: row.createdAt.toISOString(),
+    erased: true,
+  };
+}
+
 const sentBy = (senderType: string | undefined) =>
   senderType === 'agent' ||
   senderType === 'bot' ||
@@ -259,8 +365,9 @@ const sentBy = (senderType: string | undefined) =>
     : 'system';
 
 /**
- * The body delivered for an event, built from the company's data now. Throws when the message an
- * event names no longer exists (it cannot be described); callers fail the delivery.
+ * The body delivered for an event, built from the company's data now. Throws when the message,
+ * conversation or contact an event names no longer exists (it cannot be described); callers fail
+ * the delivery.
  */
 export async function buildWebhookPayload(
   tx: Tx,
@@ -300,6 +407,48 @@ export async function buildWebhookPayload(
           },
         },
       };
+    }
+    case 'conversation.status_changed':
+    case 'conversation.assignment_changed': {
+      const conversation = await conversationContext(tx, tenantId, event.conversationId);
+      if (!conversation) throw new WebhookEventGoneError();
+      const contact = await contactOf(tx, tenantId, conversation.contactId);
+      const channel = { id: conversation.channelId, phone: conversation.channelPhone };
+      if (event.type === 'conversation.status_changed') {
+        return {
+          ...base,
+          data: {
+            conversation: {
+              id: event.conversationId,
+              status: event.status,
+              previousStatus: str(event.detail.previousStatus),
+              assigned: conversation.assignedMembershipId !== null,
+              resolvedAt: conversation.resolvedAt?.toISOString() ?? null,
+            },
+            contact,
+            channel,
+          },
+        };
+      }
+      return {
+        ...base,
+        data: {
+          conversation: {
+            id: event.conversationId,
+            status: conversation.status,
+            assigned: event.detail.assigned === true,
+          },
+          contact,
+          channel,
+        },
+      };
+    }
+    case 'contact.created':
+    case 'contact.updated':
+    case 'contact.erased': {
+      const contact = await webhookContactOf(tx, tenantId, event.contactId);
+      if (!contact) throw new WebhookEventGoneError();
+      return { ...base, data: { contact } };
     }
     case 'message.received':
     case 'message.status': {
@@ -348,10 +497,13 @@ export async function buildWebhookPayload(
   }
 }
 
-/** The message an event names was deleted (retention); the delivery fails as `event_gone`. */
+/**
+ * The message, conversation or contact an event names was deleted (retention); the delivery fails
+ * as `event_gone`.
+ */
 export class WebhookEventGoneError extends Error {
   constructor() {
-    super('The message this event names no longer exists');
+    super('What this event names no longer exists');
     this.name = 'WebhookEventGoneError';
   }
 }

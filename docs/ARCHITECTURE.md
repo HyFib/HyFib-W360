@@ -928,6 +928,18 @@ true`); the same key with another request (method, path and body hashed) answers
   role in the company's scope, or a definer function such as `app.erase_contact`), so row security
   keeps each event in its row's company, and a rolled-back change leaves none. A delivery insert
   sends an empty `w360_webhooks` notification.
+- **Conversation and contact events** (migrations 0047–0049, ADR-074): triggers on
+  `app.conversations` (`conversation.status_changed` with the status before;
+  `conversation.assignment_changed` when an assignee appears or goes, not for moves between
+  members), `app.contacts` (`contact.created`; `contact.updated` for the name, number or email;
+  `contact.erased`) and `app.contact_tags` (`contact.updated`). Contact events go through
+  `app.capture_contact_webhook_event`: `contact.created` and `contact.updated` are captured when an
+  active endpoint takes either, once per contact and top-level transaction (`captured_xact`, found
+  by a partial index built concurrently), and `contact.erased` first deletes what its own
+  transaction captured for the contact, so an erasure (which removes the tags first) sends only
+  that. Their payloads are built when delivered: conversation events as the message events are,
+  contact events with the API's contact (`api/contact-view.ts`, shared with the public API) and
+  `erased`, an erased contact keeping its id, source and creation time only.
 - **Dispatch:** the worker's LISTEN connection (`apps/worker/src/webhook-listener.ts`) turns a
   notification into a lookup of active companies with due deliveries (`ops.webhook_dispatch_due`,
   SECURITY DEFINER), at most one lookup every 250 ms; the per-minute messaging sweep does the same
@@ -937,15 +949,15 @@ true`); the same key with another request (method, path and body hashed) answers
 - **Delivery** (`webhooks/delivery.ts`): the job claims up to 10 due deliveries (`FOR UPDATE SKIP
 LOCKED`; pending ones due now, then `delivering` ones whose lease expired), builds each payload
   from the company's current data (`webhooks/payloads.ts`; an erased contact has no number or name,
-  a message that no longer exists ends the delivery as `event_gone`), signs it, sets the lease (the
-  10 s egress deadline plus 35 s) and commits. The POSTs go through the egress client (DNS pinned,
-  private, loopback, link-local, metadata and reserved addresses refused, no redirects, 64 KB sent,
-  responses read up to 256 KB and discarded) with no transaction open. Each outcome is recorded in
-  its own transaction, locking the endpoint before the delivery; an outcome whose attempt no longer
-  owns the delivery (lease expired and re-claimed, or the endpoint deleted) is dropped. A 2xx answer
-  succeeds; anything else is retried at 1 min, 5 min, 30 min, 2 h, 6 h, 12 h and 24 h, and the eighth
-  failure fails the delivery; an interrupted delivery with no attempt left fails as `interrupted`.
-  After 200 attempts a job queues its successor.
+  a message, conversation or contact that no longer exists ends the delivery as `event_gone`), signs
+  it, sets the lease (the 10 s egress deadline plus 35 s) and commits. The POSTs go through the
+  egress client (DNS pinned, private, loopback, link-local, metadata and reserved addresses refused,
+  no redirects, 64 KB sent, responses read up to 256 KB and discarded) with no transaction open.
+  Each outcome is recorded in its own transaction, locking the endpoint before the delivery; an
+  outcome whose attempt no longer owns the delivery (lease expired and re-claimed, or the endpoint
+  deleted) is dropped. A 2xx answer succeeds; anything else is retried at 1 min, 5 min, 30 min, 2 h,
+  6 h, 12 h and 24 h, and the eighth failure fails the delivery; an interrupted delivery with no
+  attempt left fails as `interrupted`. After 200 attempts a job queues its successor.
 - **Signing:** `W360-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256 of "<t>.<body>">`, one `v1` per
   secret (the previous secret also signs for 24 hours after a rotation), with `W360-Event-Id`,
   `W360-Event-Type`, `W360-Delivery-Id`, `W360-Delivery-Attempt` and `User-Agent:

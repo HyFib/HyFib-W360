@@ -1,8 +1,11 @@
 import { createHmac } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
+import { apiContactSchema } from '../api/contact-view';
 import { buildOpenApiDocument } from '../api/openapi';
 import { renderEmail } from '../email/templates';
 import {
+  WEBHOOK_EVENT_INFO,
+  WEBHOOK_EVENT_KEYS,
   WEBHOOK_LIMITS,
   WEBHOOK_RETRY_SECONDS,
   webhookErrorLabel,
@@ -11,6 +14,11 @@ import {
 } from './model';
 import {
   consentChangedPayloadSchema,
+  contactCreatedPayloadSchema,
+  contactErasedPayloadSchema,
+  contactUpdatedPayloadSchema,
+  conversationAssignmentPayloadSchema,
+  conversationStatusPayloadSchema,
   inboundSummary,
   messageReceivedPayloadSchema,
   messageStatusPayloadSchema,
@@ -191,6 +199,85 @@ describe('webhook payload schemas', () => {
     ).toBe(true);
   });
 
+  it('describe the conversation and contact events (ADR-074)', () => {
+    expect(
+      conversationStatusPayloadSchema.safeParse({
+        ...base,
+        type: 'conversation.status_changed',
+        data: {
+          conversation: {
+            id: base.id,
+            status: 'resolved',
+            previousStatus: 'open',
+            assigned: true,
+            resolvedAt: base.createdAt,
+          },
+          contact,
+          channel,
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      conversationAssignmentPayloadSchema.safeParse({
+        ...base,
+        type: 'conversation.assignment_changed',
+        data: { conversation: { id: base.id, status: 'open', assigned: false }, contact, channel },
+      }).success,
+    ).toBe(true);
+    const person = {
+      id: contact.id,
+      name: 'Priya',
+      phone: '+919876543210',
+      email: 'priya@example.com',
+      tags: ['vip'],
+      consent: { marketing: 'opted_in', utility: null },
+      source: 'whatsapp',
+      createdAt: base.createdAt,
+      erased: false,
+    };
+    const erased = {
+      ...person,
+      name: null,
+      phone: null,
+      email: null,
+      tags: [],
+      consent: { marketing: null, utility: null },
+      erased: true,
+    };
+    for (const [schema, type] of [
+      [contactCreatedPayloadSchema, 'contact.created'],
+      [contactUpdatedPayloadSchema, 'contact.updated'],
+      [contactErasedPayloadSchema, 'contact.erased'],
+    ] as const) {
+      for (const shown of [person, erased]) {
+        expect(schema.safeParse({ ...base, type, data: { contact: shown } }).success, type).toBe(
+          true,
+        );
+      }
+    }
+    // A contact reads as the API's contact, and whether it was erased.
+    expect(Object.keys(contactCreatedPayloadSchema.shape.data.shape.contact.shape).sort()).toEqual(
+      [...Object.keys(apiContactSchema.shape), 'erased'].sort(),
+    );
+    expect(
+      conversationStatusPayloadSchema.safeParse({
+        ...base,
+        type: 'conversation.status_changed',
+        data: {
+          conversation: {
+            id: base.id,
+            status: 'closed',
+            previousStatus: 'open',
+            assigned: false,
+            resolvedAt: null,
+          },
+          contact,
+          channel,
+        },
+      }).success,
+    ).toBe(false);
+  });
+
   it('refuse a body of another type or with an unknown status', () => {
     expect(pingPayloadSchema.safeParse({ ...base, type: 'message.status', data: {} }).success).toBe(
       false,
@@ -224,7 +311,7 @@ describe('webhook labels and hosts', () => {
     expect(webhookErrorLabel('timeout', null)).toBe('No answer within 10 seconds');
     expect(webhookErrorLabel('address_blocked', null)).toBe('The address is private or reserved');
     expect(webhookErrorLabel('endpoint_disabled', null)).toBe('The endpoint was turned off');
-    expect(webhookErrorLabel('event_gone', null)).toBe('The message no longer exists');
+    expect(webhookErrorLabel('event_gone', null)).toBe('What the event is about no longer exists');
     expect(webhookErrorLabel(null, null)).toBeNull();
     expect(webhookErrorLabel('something_new', null)).toBe('something_new');
   });
@@ -254,12 +341,18 @@ describe('the endpoint-disabled email', () => {
 describe('the OpenAPI document', () => {
   it('describes each webhook with its signed headers and a body schema that exists', () => {
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
-    expect(Object.keys(doc.webhooks)).toEqual([
+    expect(Object.keys(doc.webhooks)).toEqual([...WEBHOOK_EVENT_KEYS, 'ping']);
+    expect(Object.keys(WEBHOOK_EVENT_INFO)).toEqual([...WEBHOOK_EVENT_KEYS]);
+    expect(WEBHOOK_EVENT_KEYS).toEqual([
       'message.received',
       'message.status',
       'consent.changed',
       'template.status_changed',
-      'ping',
+      'conversation.status_changed',
+      'conversation.assignment_changed',
+      'contact.created',
+      'contact.updated',
+      'contact.erased',
     ]);
     const schemas = doc.components.schemas as Record<string, unknown>;
     const parameters = doc.components.parameters as Record<string, { name: string }>;
