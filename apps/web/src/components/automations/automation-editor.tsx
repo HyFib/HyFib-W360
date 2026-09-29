@@ -34,7 +34,7 @@ import {
   type TriggerType,
 } from '@w360/domain/automation-model';
 import { saveAutomationAction } from '@/app/actions/automations';
-import { ClientButton } from '@/components/client-form';
+import { ClientButton, useHydrated } from '@/components/client-form';
 import { FormError, FormSuccess } from '@/components/form-status';
 import { AutomationDiagram } from './automation-diagram';
 import { AutomationSimulator } from './automation-simulator';
@@ -283,6 +283,9 @@ export function AutomationEditor({
     allowInsecureHttp: boolean;
   };
 }) {
+  // Every control is in the fieldset below, which stays disabled until hydration: an edit made
+  // before it would show in the field but never reach the draft (see useHydrated).
+  const hydrated = useHydrated();
   const [name, setName] = useState(automation.name);
   const [description, setDescription] = useState(automation.description ?? '');
   const [channelAccountId, setChannelAccountId] = useState(automation.channelAccountId);
@@ -420,7 +423,7 @@ export function AutomationEditor({
 
   return (
     <div className="grid min-w-0 grid-cols-1 gap-6">
-      <fieldset disabled={!canWrite} className="grid min-w-0 grid-cols-1 gap-6">
+      <fieldset disabled={!canWrite || !hydrated} className="grid min-w-0 grid-cols-1 gap-6">
         <Card>
           <CardHeader>
             <CardTitle>When it starts</CardTitle>

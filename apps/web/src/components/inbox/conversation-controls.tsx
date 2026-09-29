@@ -8,7 +8,7 @@ import {
   setConversationTeamAction,
 } from '@/app/actions/inbox';
 import { FormError } from '@/components/form-status';
-import { ClientButton } from '@/components/client-form';
+import { ClientButton, useHydrated } from '@/components/client-form';
 
 export interface AssignableMember {
   membershipId: string;
@@ -39,6 +39,9 @@ export function ConversationControls({
 }) {
   const router = useRouter();
   const selectId = useId();
+  // The select acts on change, so like a ClientButton it stays disabled until hydration: a choice
+  // made before would show without being applied (see useHydrated).
+  const hydrated = useHydrated();
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -72,7 +75,7 @@ export function ConversationControls({
               id={selectId}
               className="w-auto min-w-40"
               value={assignedMembershipId ?? ''}
-              disabled={busy}
+              disabled={busy || !hydrated}
               onChange={(event) => void assign(event.target.value || null)}
             >
               <option value="">Unassigned</option>
@@ -160,6 +163,8 @@ export function TeamControl({
 }) {
   const router = useRouter();
   const selectId = useId();
+  // Acts on change: disabled until hydration, as in ConversationControls.
+  const hydrated = useHydrated();
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   return (
@@ -172,7 +177,7 @@ export function TeamControl({
           id={selectId}
           className="w-auto min-w-40"
           value={teamId ?? ''}
-          disabled={busy}
+          disabled={busy || !hydrated}
           onChange={(event) => {
             setBusy(true);
             setError(null);

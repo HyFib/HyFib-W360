@@ -15,7 +15,7 @@ import {
   setTenantPlanAction,
   updatePlanDraftAction,
 } from '@/app/actions/platform';
-import { ClientButton, ClientForm } from '@/components/client-form';
+import { ClientButton, ClientForm, useHydrated } from '@/components/client-form';
 import { FormError, FormSuccess } from '@/components/form-status';
 
 /** A plan version's terms as form text (money in rupees; empty means none or no limit). */
@@ -292,6 +292,9 @@ export function PlanVersionActions({
   companies: number;
 }) {
   const router = useRouter();
+  // The reason stays disabled until hydration: one typed before would never reach `reason`,
+  // leaving the retire button disabled (see useHydrated).
+  const hydrated = useHydrated();
   const [reason, setReason] = useState('');
   const [error, setError] = useState<string | null>(null);
   const fail = (r: { ok: boolean; message?: string }) => {
@@ -334,6 +337,7 @@ export function PlanVersionActions({
                 {...aria}
                 value={reason}
                 maxLength={500}
+                disabled={!hydrated}
                 onChange={(e) => setReason(e.target.value)}
               />
             )}

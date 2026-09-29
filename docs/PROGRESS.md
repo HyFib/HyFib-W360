@@ -1,5 +1,67 @@
 # Progress
 
+## 2026-09-29 — Fix: controlled inputs used before hydration
+
+Status: **Fixed and verified locally on macOS (Chromium, mobile Chromium, and `forms.spec.ts` also
+on WebKit and Firefox). CI on 0176322: 7 of 8 checks passed, including the four-browser end-to-end
+job; the secret scan failed on another branch's commit (see "CI" below).** A controlled input
+outside a `ClientForm` accepted input before React hydrated it, and that input never reached the
+component. PR #12 fixed the two-factor password field (the WebKit CI failure); this fixes every
+other such input.
+
+### Cause
+
+- React (19.3, as bundled by Next.js 16.3) keeps a value entered before hydration in the field and
+  records it as the field's current value, so no change reaches `onChange`: state keeps the
+  server-rendered value, and the next render of the field writes that value back.
+- Reproduced against a build of the unfixed code (e50c6fc) with the bundles held back, as in the
+  tests (Chromium): the company security checkbox ticked early showed ticked while Save stayed
+  disabled; an automation name typed early showed while the editor said "All changes saved" (Save
+  draft disabled) and reverted at the next edit; a contact erased after unticking "Keep the number
+  on the suppression list" early was still put on the suppression list.
+
+### Completed
+
+- **Disabled until hydration** (`useHydrated()`, as PR #12 did for the two-factor card):
+  - Settings → Security: "Require two-factor authentication for every member".
+  - Contact page: the erasure's "Keep the number on the suppression list".
+  - Automation editor: its fieldset, so every trigger and step field (`node-fields.tsx` renders
+    only inside it) and the step buttons.
+  - Automation simulator: the simulated contact's fields.
+  - Campaign review: the note to the submitter ("Send back for changes" needs it).
+  - Inbox conversation: the "Assigned to" and "Team" selects, which act on change like a
+    `ClientButton`.
+  - Platform: the reasons for retiring a plan version and withdrawing a rate card (their buttons
+    need 10 characters).
+- **Audit:** every `onChange` in `apps/web/src` written outside a `ClientForm` was checked. The rest
+  are rendered inside one by their parent (for example the segment builder, the invitation's role
+  picker, import columns, store and campaign variables) or only after a client-side change, which
+  implies hydration (dialogs, editing a member's roles, the two-factor code step, the simulator's
+  web request results). PR #12 fixed the two-factor password field.
+- `useHydrated()` now documents why such inputs wait for it, and the rule in `CLAUDE.md` covers
+  them: it named only `ClientForm` and `ClientButton`, which is how these were missed.
+- **e2e:** `forms.spec.ts` uses PR #12's `holdScripts` helper (copied verbatim before PR #12
+  merged) and adds three tests: the security checkbox; the erasure choice (unticked after
+  hydration, the number stays off the suppression list); and the automation editor, a step field
+  and the simulator (edits after hydration reach the simulated run and the saved draft). Against
+  the unfixed build, all three failed at "disabled before hydration".
+- **CI:** the secret scan checks every branch, so a made-up key prefix in a unit test on PR #12's
+  branch (e1908d4) failed this branch's scan. PR #12 reviewed it as a false positive (cb2ffc3);
+  that commit is cherry-picked here, so `.gitleaksignore` matches PR #12's exactly. gitleaks
+  8.30.1 run locally over every branch then finds nothing.
+
+### Test commands and results (local, 2026-09-29, macOS, Node 24.21, fresh database)
+
+| Command                                                                                | Result                                                                                                                                                                                                                                                                                                           |
+| -------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                   | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                   |
+| `pnpm test` (unit)                                                                     | 298 passed                                                                                                                                                                                                                                                                                                       |
+| `pnpm build`                                                                           | passes                                                                                                                                                                                                                                                                                                           |
+| `pnpm test:e2e forms.spec.ts --project=chromium --project=mobile-chromium --retries=0` | 8 passed (4 × 2). Against the unfixed build (Chromium): the 3 new tests failed, the sign-in test passed                                                                                                                                                                                                          |
+| `pnpm test:e2e forms.spec.ts --project=webkit --project=firefox --retries=0`           | 8 passed (4 × 2)                                                                                                                                                                                                                                                                                                 |
+| `pnpm test:e2e <specs> --project=chromium --project=mobile-chromium --retries=0`       | 24 passed, 2 skipped (5.9 min). The specs whose pages use the changed components: `automations`, `campaigns`, `contacts`, `inbox`, `inbox-teams`, `plans`, `stores` and `web-requests`; the skipped test is `web-requests.spec.ts` on both projects (`E2E_HTTP_HOST` needs a hosts entry this Mac does not have) |
+| After merging `main` (PR #12)                                                          | lint, format and typecheck pass; `pnpm test`: 336 passed; `pnpm build` passes; `forms.spec.ts` and `plans.spec.ts` on chromium and mobile-chromium: 12 passed (6 × 2), including PR #12's two-factor test                                                                                                        |
+
 ## 2026-09-29 — Phase 5: tested API rate limits, and full token buckets deleted (P5-08)
 
 Status: **Implemented and locally verified.** The public API's rate limits had no automated tests,
