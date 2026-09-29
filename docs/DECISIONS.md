@@ -1652,7 +1652,7 @@ functions that check the attempt, and cannot read them back.
 
 **Retention:** runs and items are billing records, kept with the ledger.
 
-**Not built:** alerts and emails, a CSV export of a run, reconciling settlements with bank
+**Not built:** alerts and emails (since ADR-066, emails to platform owners), a CSV export of a run, reconciling settlements with bank
 statements (UTR), fee and tax accounting, companies' own Razorpay accounts, automatic handling of
 adjustments, disputes and transfers, and instant settlements.
 
@@ -1911,3 +1911,39 @@ Decision:
 Not built: a setting to turn the notice off, notices for currencies other than the billing
 currency, notices to other roles, and in-app banners (the Usage and rates page already shows the
 next change).
+
+## ADR-066 Alerts for reconciliation findings (2026-09-29)
+
+Context: the daily settlement reconciliation (ADR-059) leaves what does not match on Platform →
+Reconciliation for a platform owner, and a day can fail until an owner runs it again, but nobody
+hears of either unless they open the page. Money that moved without HyFib's records following waits
+unseen.
+
+Decision:
+
+- **When:** a day's run finishes with transactions still waiting for a person (does not match,
+  needs a look, not HyFib's; not resolved), or fails (a refusal, or six attempts). Retrying days,
+  days where everything matched or was recorded, and days whose transactions were all resolved
+  first send nothing.
+- **Who:** platform owners, who resolve transactions and run days again (operators only read), by
+  their account email. While there is no platform owner nothing is marked, the worker logs a
+  warning, and the email goes out once there is one.
+- **What:** one email per sweep listing the days (up to 10, oldest first): for each, how many
+  transactions wait by status, or that the check failed with its last error (cut to 400
+  characters); a link to the day, or to the reconciliation page for several days. It names no
+  transaction, amount or company: those stay on the page, behind platform sign-in and two-factor
+  authentication.
+- **Once:** each finished attempt is emailed once. `ops.settlement_recon_runs.alerted_attempt`
+  records the attempt (the run's `attempt_seq`) emailed; the minute billing sweep lists attempts
+  not emailed yet through `ops.settlement_recon_alerts_due` (ids only) and marks each through
+  `ops.settlement_recon_mark_alerted`, which returns what the email says, counted under the run's
+  row lock, in the transaction that queues the emails. Two sweeps at once send one email; a run
+  that moved on to a new attempt is not marked for the old one. Running a day again is a new
+  attempt, and its outcome is emailed again. The recipients come from
+  `ops.settlement_recon_alert_recipients`. All three are SECURITY DEFINER functions executable by
+  the worker's role only. Runs finished before migration 0039 are marked as emailed.
+- Emails go through the encrypted outbox as a new `platform.notice` kind, not tied to a company.
+
+Not built: alerts for paid top-ups that no settlement shows (the reconciliation page lists them),
+a digest schedule or thresholds, alerts to other channels (chat, pager), and alerts for other
+platform conditions (the operations console shows them).

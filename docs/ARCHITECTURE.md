@@ -1188,6 +1188,16 @@ payment_requested → succeeded`; before each provider call it is written as `un
   owners, audited with a reason or note). Items keep provider ids, amounts, fees and HyFib's match;
   never notes, descriptions, receipts or card fields.
 
+- **Reconciliation alerts (0039, ADR-066) [built]:** the minute billing sweep
+  (`packages/domain/src/billing/settlement-alerts.ts`, whether or not Razorpay is configured) lists
+  finished attempts not emailed yet (`ops.settlement_recon_alerts_due`: failed runs and completed runs
+  with transactions still waiting for a person, ids only), marks each with
+  `ops.settlement_recon_mark_alerted` (which returns the day, the outcome, the last error and the open
+  transactions by status, counted under the run's row lock) and, in the same transaction, queues one
+  `platform.notice` email per platform owner (`ops.settlement_recon_alert_recipients`) listing the
+  days. `alerted_attempt` on the run records the attempt emailed, so each attempt is emailed once and
+  a day run again is emailed again.
+
 - **Usage and rates (ADR-060) [built]:** Billing → Usage and rates
   (`packages/domain/src/billing/usage.ts`) shows owners, administrators and billing managers
   (`billing.read`) Meta's rates for the company's billing currency (Settings → Messaging) and this

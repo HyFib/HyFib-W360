@@ -548,6 +548,13 @@ Phase 5 rules (daily settlement reconciliation, P5-05, ADR-059):
   and only platform owners run a day or resolve an item, audited with the reason or note.
 - Items keep transaction ids, amounts, fees, settlement ids and HyFib's match. Notes, descriptions,
   order receipts and card fields, which can carry another integration's customer data, are not read.
+- Alerts (ADR-066) go to platform owners only, through the encrypted outbox, not tied to a company.
+  They name days, counts by status and a failed run's last error (HyFib's own description of
+  Razorpay's answer), never a transaction id, amount or company; the details stay on the page, behind
+  platform sign-in and two-factor authentication. The worker reaches the runs and the owners'
+  addresses only through three SECURITY DEFINER functions executable by `w360_app` alone: the listing
+  returns ids, the mark writes only `alerted_attempt` and returns the email's content, and the
+  recipients function returns platform owners' ids and addresses.
 
 Platform roles (`ops.platform_admins`): `platform_owner` and `platform_operator`. Both require MFA;
 all actions are audited; neither can read customer content without a support grant. Both see a

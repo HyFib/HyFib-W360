@@ -41,6 +41,14 @@ export const emailPayloadSchema = z.discriminatedUnion('kind', [
     actionLabel: z.string().max(60).optional(),
   }),
   z.object({
+    // To platform staff about HyFib itself, never about one company's data (e.g. ADR-066).
+    kind: z.literal('platform.notice'),
+    subject: z.string().max(200),
+    lines: z.array(z.string().max(600)).max(12),
+    url: z.url(),
+    actionLabel: z.string().max(60),
+  }),
+  z.object({
     kind: z.literal('webhook.endpoint_disabled'),
     companyName: z.string().max(120),
     /** The endpoint's host only, never its full URL. */
@@ -186,6 +194,16 @@ export function renderEmail(payload: EmailPayload): RenderedEmail {
             ? { label: payload.actionLabel ?? 'Open HyFib W360', url: payload.url }
             : undefined,
         ),
+      };
+    }
+    case 'platform.notice': {
+      return {
+        subject: `${payload.subject} · HyFib W360 platform`,
+        text: `${payload.lines.join('\n\n')}\n\n${payload.url}`,
+        html: layout(payload.subject, payload.lines, {
+          label: payload.actionLabel,
+          url: payload.url,
+        }),
       };
     }
     case 'webhook.endpoint_disabled': {

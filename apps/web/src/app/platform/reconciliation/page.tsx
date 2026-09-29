@@ -62,7 +62,7 @@ export default async function ReconciliationPage() {
           Every transaction Razorpay settled to HyFib’s account, matched against HyFib’s records
           each day from 06:00 India time. Payments and refunds HyFib had missed are recorded the way
           their webhooks would have recorded them; everything else that does not match waits here
-          for a person.
+          for a person. Platform owners are emailed when a day needs a person or its check fails.
         </p>
       </div>
       {!razorpay ? (

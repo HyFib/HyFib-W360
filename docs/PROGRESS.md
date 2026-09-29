@@ -1,5 +1,57 @@
 # Progress
 
+## 2026-09-29 — Phase 5: alerts for reconciliation findings (P5-05)
+
+Status: **Implemented and locally verified (email through the local outbox and Mailpit only; Razorpay
+traffic simulated by the test-only stand-in).** The daily settlement reconciliation (ADR-059) left
+mismatches and failed days on Platform → Reconciliation, where nobody heard of them unless they
+looked; now platform owners are emailed.
+
+### Completed
+
+- **Design (ADR-066):** when a day's run finishes with transactions still waiting for a person, or
+  fails, every platform owner (not operators) is emailed once for that attempt: one email per sweep
+  listing up to 10 days with the open transactions by status, or a failed day's last error, and a
+  link. It names no transaction, amount or company. Retrying days, clean days and days resolved
+  first send nothing; a day run again is a new attempt and is emailed again.
+- **Migration 0039:** `ops.settlement_recon_runs.alerted_attempt` (runs already finished marked as
+  emailed) and three definer functions executable by `w360_app` only: the listing (ids and attempt
+  numbers), the mark (writes `alerted_attempt` and returns the email's content, counted under the
+  run's row lock) and the recipients (platform owners' ids and addresses).
+- **Domain:** `billing/settlement-alerts.ts` (the email text, and the sweep that marks and queues in
+  one transaction); a `platform.notice` email kind, not tied to a company.
+- **Worker:** the minute billing sweep sends the alerts whether or not Razorpay is configured, and
+  warns when a day needs a person but there is no platform owner (the alert waits for one).
+- **Web:** the reconciliation page says platform owners are emailed.
+- **Tests:** 2 integration tests in `settlement-recon.test.ts`, unit tests of the email and its
+  rendering, the functions' grants in the isolation suite, and `settlement-recon.spec.ts` waits for
+  the owner's alert from the worker before resolving the transaction.
+- **CI:** the e2e job gets 80 minutes and its test step 70 (were 70 and 60): the usage and settlement
+  specs now each wait up to a minute per project for the worker's sweep.
+- **Docs:** ADR-066 (and ADR-059's "not built"); ARCHITECTURE §7; SECURITY; THREAT-MODEL T83;
+  RUNBOOKS (step 11, migration 0039); BACKLOG P5-05; FEATURE-MATRIX H-037.
+- **Mutation checks:** 17 regressions tried one at a time (the email's text and link, the rendering,
+  marking without a platform owner, the listing's status, attempt and emailed checks, the mark's
+  attempt, emailed, open-transaction and status checks, owners only, the recipients' grant); all 17
+  make a test fail.
+
+### Test commands and results (local, 2026-09-29)
+
+| Command                                                                     | Result                                                                                                                                                                           |
+| --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                   |
+| `pnpm test` (unit)                                                          | 330 passed, including the new `billing/settlement-alerts.test.ts` (4)                                                                                                            |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 443 passed, including the 2 new alert tests in `settlement-recon.test.ts`                                                                                                        |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 443 passed                                                                                                                                                                       |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 84 passed (42 × 2) in one full run (22.2 min), including `settlement-recon.spec.ts` receiving the platform owner's alert from the worker's sweep on both projects |
+| Mutation checks                                                             | 17 regressions tried; all 17 make a test fail                                                                                                                                    |
+
+### Known gaps
+
+- Paid top-ups that no settlement shows are listed on the page but not emailed. The migration's
+  marking of runs finished before it is not covered by a test (the test database has no runs when
+  migrations run).
+
 ## 2026-09-29 — Phase 5: a notice before Meta's rates change (P5-07)
 
 Status: **Implemented and locally verified (email through the local outbox and Mailpit only).**

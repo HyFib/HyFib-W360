@@ -161,6 +161,17 @@ describe('database roles', () => {
       expect(await can('w360_auth', fn), fn).toBe(false);
       expect(await can('w360_platform', fn), fn).toBe(false);
     }
+    // Reconciliation alerts (0039): the listing, the mark and the platform owners' addresses, for
+    // the worker only.
+    for (const fn of [
+      'ops.settlement_recon_alerts_due(integer)',
+      'ops.settlement_recon_mark_alerted(uuid,integer)',
+      'ops.settlement_recon_alert_recipients()',
+    ]) {
+      expect(await can('w360_app', fn), fn).toBe(true);
+      expect(await can('w360_auth', fn), fn).toBe(false);
+      expect(await can('w360_platform', fn), fn).toBe(false);
+    }
     // Outgoing webhooks (0025): the dispatch and retention sweeps for the worker; capture, which
     // the triggers call as the role making the change (the runtime role, or a definer function);
     // the trigger functions for nobody.

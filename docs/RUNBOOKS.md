@@ -194,7 +194,16 @@ WHERE tenant_id = … ORDER BY requested_at DESC`:
       processes it later, it is recorded as a plain refund.
 11. **Settlement reconciliation** (`/platform/reconciliation`, ADR-059). Each day from 06:00 India
     time the worker reads Razorpay's settlement report for the previous day and matches every
-    transaction. Look at the list once a day; "Need a person" counts what is still open.
+    transaction. Look at the list once a day; "Need a person" counts what is still open. Platform
+    owners are also emailed ("Settlement reconciliation … needs a person" or "… failed", ADR-066)
+    within a minute of a day finishing with open transactions or failing, once per attempt; the
+    email names only days and counts, so open the page from its link.
+    - **No alert came:** alerts go to platform owners only (not operators), for failed days and
+      days with open transactions; retrying days wait until they fail for good, and a day whose
+      transactions were resolved before the next minute sends none. `alerted_attempt` on the run
+      shows the attempt that was emailed. The worker logs `settlement reconciliation alert emailed`,
+      or `… no platform owner to email` (make someone a platform owner; the alert then goes out).
+      Emails go through the outbox like every other email (section 3).
     - **Recorded by the check:** Razorpay settled a payment or refund HyFib had missed (its webhook
       never arrived); the check fetched it and recorded it the usual way. Nothing to do, but a
       series of them means webhooks are failing: see step 1 and section 4.
@@ -962,6 +971,12 @@ recorded, and the next minute tries again). A correction published as a new card
 retried the next minute). A company being deleted is skipped. Check `app.tenant_plans` for the
 company (`status`, `trial_ends_at`, `period_end`, `grace_ends_at`): the database's clock decides
 what is due.
+
+**Migration 0039 failed.** It runs in one transaction, so a failure applies nothing. It adds
+`ops.settlement_recon_runs.alerted_attempt` (runs already finished are marked as emailed) and the
+listing, mark and recipients functions for reconciliation alerts (granted to `w360_app`, then
+handed to `w360_definer`). A failure usually means the bootstrap roles are missing or migration 0034
+was changed by hand.
 
 **Migration 0038 failed.** It runs in one transaction, so a failure applies nothing. It adds
 `app.rate_change_notices` (forced RLS, grants, an append-only trigger and a deletion step), column

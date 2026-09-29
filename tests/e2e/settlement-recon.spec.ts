@@ -8,6 +8,7 @@ import {
   turnOnTwoFactor,
   uniqueEmail,
   waitForEmail,
+  waitForEmailContaining,
 } from './support';
 
 const PASSWORD = 'correct horse battery staple 42';
@@ -47,7 +48,7 @@ const PROJECTS = Object.keys(DAY_OFFSETS).length;
 test('a platform owner reconciles a settled day: a payment HyFib missed is credited, and a payment that is not HyFib’s waits for a person', async ({
   page,
 }) => {
-  test.setTimeout(240_000);
+  test.setTimeout(330_000);
   const { project, retry } = test.info();
   const offset = DAY_OFFSETS[project.name];
   if (offset === undefined) throw new Error(`No settlement day for the ${project.name} project`);
@@ -145,6 +146,19 @@ test('a platform owner reconciles a settled day: a payment HyFib missed is credi
   await expect(page.getByRole('heading', { name: 'Needs a person (1)' })).toBeVisible();
   const other = page.getByRole('row').filter({ hasText: stranger });
   await expect(other).toContainText('Not HyFib’s');
+  // Platform owners are emailed about the day by the worker's minute billing sweep (ADR-066).
+  const dayLabel = new Intl.DateTimeFormat('en-IN', {
+    dateStyle: 'medium',
+    timeZone: 'UTC',
+  }).format(new Date(`${day}T00:00:00Z`));
+  const alert = await waitForEmailContaining(
+    email,
+    'Settlement reconciliation',
+    `${dayLabel}: 1 transaction waits for a person (1 is not HyFib’s).`,
+    90_000,
+  );
+  expect(alert).toContain('/platform/reconciliation');
+  expect(alert).not.toContain(stranger);
   await other.getByText('Resolve', { exact: true }).click();
   const resolve = page.getByRole('form', { name: `Resolve ${stranger}` });
   await resolve

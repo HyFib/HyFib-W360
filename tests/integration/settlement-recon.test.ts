@@ -8,6 +8,7 @@ import {
   PgBossJobQueue,
   RazorpayClient,
   addDays,
+  alertSettlementReconFindings,
   applyRefundById,
   createBillingService,
   createPlanAdminService,
@@ -1270,5 +1271,217 @@ describe('plan subscription payments (ADR-063)', () => {
       hyfibAmountMinor: 118_000,
     });
     expect(await planPaymentCount()).toBe(3);
+  });
+});
+
+describe('alerts for platform owners (ADR-066)', () => {
+  const CLOSING =
+    'Platform owners resolve each transaction with a note, or run a failed day again, on Platform → Reconciliation.';
+  const alertSweep = () =>
+    alertSettlementReconFindings({
+      db: dbs.app,
+      outbox: notices().outbox,
+      appBaseUrl: 'http://localhost:3000',
+    });
+  const label = (date: string) =>
+    new Intl.DateTimeFormat('en-IN', { dateStyle: 'medium', timeZone: 'UTC' }).format(
+      new Date(`${date}T00:00:00Z`),
+    );
+  const dbNow = async () => (await adminQuery<{ now: Date }>('SELECT now() AS now'))[0]!.now;
+  const ownerEmails = async () =>
+    (
+      await adminQuery<{ email: string }>(
+        `SELECT u.email FROM ops.platform_admins a JOIN auth.users u ON u.id = a.user_id
+          WHERE a.role = 'platform_owner'`,
+      )
+    )
+      .map((r) => r.email)
+      .sort();
+  const emailOf = async (userId: string) =>
+    (
+      await adminQuery<{ email: string }>('SELECT email FROM auth.users WHERE id = $1', [userId])
+    )[0]!.email;
+
+  /** Platform notices queued since `since`, with their recipients. */
+  async function platformNotices(since: Date) {
+    const rows = await adminQuery<{
+      id: string;
+      tenant_id: string | null;
+      to_address: string;
+      payload_ciphertext: string;
+    }>(
+      `SELECT id, tenant_id, to_address, payload_ciphertext FROM ops.email_outbox
+        WHERE kind = 'platform.notice' AND created_at >= $1 ORDER BY id`,
+      [since],
+    );
+    return rows.map((r) => ({
+      to: r.to_address,
+      tenantId: r.tenant_id,
+      payload: JSON.parse(keyring.decryptString(r.payload_ciphertext, outboxAad(r.id))) as {
+        kind: string;
+        subject: string;
+        lines: string[];
+        url: string;
+        actionLabel: string;
+      },
+    }));
+  }
+
+  it('emails every platform owner once when a day waits for a person or fails, never for clean or retrying days', async () => {
+    // Whatever earlier tests left due is emailed first, so this test sees only its own days.
+    await alertSweep();
+    const since = await dbNow();
+    const owners = await ownerEmails();
+    const operatorEmail = await emailOf(operator.userId);
+    expect(owners).toContain(await emailOf(owner.userId));
+    expect(owners).not.toContain(operatorEmail);
+
+    const waiting = day(-71);
+    const clean = day(-72);
+    const retrying = day(-73);
+    const refused = day(-74);
+    standIn.settle(waiting, { paymentIds: [], refundIds: [], extra: [raw({})] });
+    const c = await company('Recon Alerts Clean');
+    const t = await paidTopup(c, 10_000);
+    standIn.settle(clean, { paymentIds: [t.payment.id], refundIds: [] });
+    standIn.settle(retrying, { paymentIds: [], refundIds: [], extra: [raw({})] });
+    standIn.settle(refused, { paymentIds: [], refundIds: [], extra: [raw({})] });
+    expect((await runDay(waiting)).result.outcome).toBe('completed');
+    expect((await runDay(clean)).result.outcome).toBe('completed');
+    standIn.state.queues.recon.push({ kind: 'error', status: 503, description: 'Busy' });
+    const retry = await runDay(retrying);
+    expect(retry.result.outcome).toBe('deferred');
+    standIn.state.queues.recon.push({
+      kind: 'error',
+      status: 401,
+      description: 'The api key provided is invalid',
+    });
+    const refusal = await runDay(refused);
+    expect(refusal.result.outcome).toBe('failed');
+
+    expect(await alertSweep()).toEqual({ alerted: 2, unsent: 0, recipients: owners.length });
+    const sent = await platformNotices(since);
+    expect(sent.map((n) => n.to).sort()).toEqual(owners);
+    for (const notice of sent) {
+      expect(notice).toEqual({
+        to: notice.to,
+        tenantId: null,
+        payload: {
+          kind: 'platform.notice',
+          subject: 'Settlement reconciliation needs a person for 2 days',
+          lines: [
+            `${label(refused)}: the check failed and waits for a platform owner to run the day again. The last error: Razorpay refused HyFib's API keys (HTTP 401): The api key provided is invalid`,
+            `${label(waiting)}: 1 transaction waits for a person (1 is not HyFib’s).`,
+            CLOSING,
+          ],
+          url: 'http://localhost:3000/platform/reconciliation',
+          actionLabel: 'Open reconciliation',
+        },
+      });
+    }
+
+    // Once: nothing more for the same attempts, however often the sweep runs.
+    expect(await alertSweep()).toEqual({ alerted: 0, unsent: 0, recipients: 0 });
+    expect(await platformNotices(since)).toHaveLength(owners.length);
+
+    // The retrying day fails for good on its sixth attempt, and that is emailed.
+    await adminQuery(
+      'UPDATE ops.settlement_recon_runs SET attempts = 5, next_attempt_at = now() WHERE id = $1',
+      [retry.runId],
+    );
+    standIn.state.queues.recon.push({ kind: 'error', status: 500 });
+    expect((await runSettlementRecon(deps(), retry.runId)).outcome).toBe('failed');
+    const since2 = await dbNow();
+    expect(await alertSweep()).toMatchObject({ alerted: 1 });
+    const failedNotice = (await platformNotices(since2))[0]!.payload;
+    expect(failedNotice.subject).toBe(`Settlement reconciliation for ${label(retrying)} failed`);
+    expect(failedNotice.url).toBe(`http://localhost:3000/platform/reconciliation/${retrying}`);
+    expect(failedNotice.lines[0]).toMatch(/^.*: the check failed .* The last error: Razorpay /);
+
+    // Running a failed day again starts a new attempt, and its outcome is emailed again.
+    const since3 = await dbNow();
+    expect((await runDay(refused)).result.outcome).toBe('completed');
+    expect(await alertSweep()).toMatchObject({ alerted: 1 });
+    expect((await platformNotices(since3)).map((n) => n.payload.subject)).toEqual(
+      owners.map(() => `Settlement reconciliation for ${label(refused)} needs a person`),
+    );
+    // Running it again with the same transaction still open emails that attempt too.
+    expect((await runDay(refused)).result.outcome).toBe('completed');
+    expect(await alertSweep()).toMatchObject({ alerted: 1 });
+  });
+
+  it('skips a day whose transactions were resolved first, emails once when sweeps overlap, and waits for a platform owner', async () => {
+    await alertSweep();
+    const owners = await ownerEmails();
+    const resolved = day(-75);
+    const overlap = day(-76);
+    standIn.settle(resolved, { paymentIds: [], refundIds: [], extra: [raw({})] });
+    standIn.settle(overlap, { paymentIds: [], refundIds: [], extra: [raw({})] });
+    expect((await runDay(resolved)).result.outcome).toBe('completed');
+    expect((await runDay(overlap)).result.outcome).toBe('completed');
+    // Resolved before any sweep saw it: nothing is waiting, so nothing is emailed.
+    const [item] = [...(await itemsOf(resolved)).values()];
+    await recon().resolveItem(owner, {
+      itemId: item!.id,
+      note: 'Payment for the old website, checked with finance',
+    });
+
+    // The mark refuses on its own too: an attempt with nothing open, a run still retrying, and an
+    // attempt that is not the run's current one.
+    const mark = async (runId: string, attempt: number) =>
+      (
+        await dbs.appPool.query(
+          'SELECT * FROM ops.settlement_recon_mark_alerted($1::uuid, $2::int)',
+          [runId, attempt],
+        )
+      ).rows;
+    const runOf = async (date: string) =>
+      (
+        await adminQuery<{ id: string; attempt_seq: number }>(
+          'SELECT id, attempt_seq FROM ops.settlement_recon_runs WHERE settlement_date = $1',
+          [date],
+        )
+      )[0]!;
+    const resolvedRun = await runOf(resolved);
+    expect(await mark(resolvedRun.id, resolvedRun.attempt_seq)).toEqual([]);
+    const overlapRun = await runOf(overlap);
+    expect(await mark(overlapRun.id, overlapRun.attempt_seq - 1)).toEqual([]);
+    const pending = day(-78);
+    standIn.settle(pending, { paymentIds: [], refundIds: [], extra: [raw({})] });
+    standIn.state.queues.recon.push({ kind: 'error', status: 503, description: 'Busy' });
+    expect((await runDay(pending)).result.outcome).toBe('deferred');
+    const pendingRun = await runOf(pending);
+    expect(await mark(pendingRun.id, pendingRun.attempt_seq)).toEqual([]);
+
+    const since = await dbNow();
+    const [first, second] = await Promise.all([alertSweep(), alertSweep()]);
+    expect(first.alerted + second.alerted).toBe(1);
+    const sent = await platformNotices(since);
+    expect(sent.map((n) => n.to).sort()).toEqual(owners);
+    expect(new Set(sent.map((n) => n.payload.subject))).toEqual(
+      new Set([`Settlement reconciliation for ${label(overlap)} needs a person`]),
+    );
+
+    // With no platform owner, a day that needs a person stays due until there is one.
+    const nobody = day(-77);
+    standIn.settle(nobody, { paymentIds: [], refundIds: [], extra: [raw({})] });
+    expect((await runDay(nobody)).result.outcome).toBe('completed');
+    const demoted = await adminQuery<{ user_id: string }>(
+      `UPDATE ops.platform_admins SET role = 'platform_operator' WHERE role = 'platform_owner'
+       RETURNING user_id`,
+    );
+    try {
+      expect(await alertSweep()).toEqual({ alerted: 0, unsent: 1, recipients: 0 });
+    } finally {
+      await adminQuery(
+        `UPDATE ops.platform_admins SET role = 'platform_owner' WHERE user_id = ANY($1::text[])`,
+        [demoted.map((r) => r.user_id)],
+      );
+    }
+    const since2 = await dbNow();
+    expect(await alertSweep()).toEqual({ alerted: 1, unsent: 0, recipients: owners.length });
+    expect((await platformNotices(since2)).map((n) => n.payload.subject)).toEqual(
+      owners.map(() => `Settlement reconciliation for ${label(nobody)} needs a person`),
+    );
   });
 });
