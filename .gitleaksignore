@@ -4,3 +4,7 @@
 # .env.example had an empty NEXT_SERVER_ACTIONS_ENCRYPTION_KEY= directly followed by the next
 # variable name; the generic-api-key rule matched across the line break. No value was committed.
 2dc37dcce8a3f48f4cb7472a3933126ac41c5aeb:.env.example:generic-api-key:40
+#
+# A made-up API key prefix in a unit test ("w360_" and 12 letters: the public part of a key, which
+# Settings -> API keys lists and the expiry reminder names). It is not a token and was never one.
+e1908d464d59b03ca7c3742ecd552ab5f67adaa7:packages/domain/src/api/expiry-reminders.test.ts:generic-api-key:11
