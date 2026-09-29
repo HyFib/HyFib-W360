@@ -13,6 +13,7 @@ export const API_SCOPES = [
   'messages.reply',
   'conversations.read',
   'conversations.write',
+  'automations.start',
 ] as const;
 export type ApiScope = (typeof API_SCOPES)[number];
 

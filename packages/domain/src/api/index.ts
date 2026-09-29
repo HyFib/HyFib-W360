@@ -10,3 +10,4 @@ export * from './quota';
 export * from './expiry-reminders';
 export * from './rate-limits';
 export * from './conversations';
+export * from './automations';

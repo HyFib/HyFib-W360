@@ -54,7 +54,7 @@ import { API_LIMITS, API_SEND_SCOPES } from './model';
  * also the source of the OpenAPI document, so the two cannot drift apart.
  */
 
-const phoneField = z
+export const phoneField = z
   .string({ error: 'Give the phone number' })
   .max(40)
   .describe('The number with its country code, starting with + (for example +919876543210).');
@@ -170,7 +170,7 @@ export interface ApiMessage {
   createdAt: string;
 }
 
-const explicitPhone = (raw: string) => {
+export const explicitPhone = (raw: string) => {
   const phone = normalizePhone(raw, { kind: 'explicit' });
   if (!phone.ok)
     throw new AppError('validation_failed', phone.message, {
@@ -180,7 +180,7 @@ const explicitPhone = (raw: string) => {
 };
 
 /** Runs work once per idempotency key (when given) in one transaction with it. */
-async function idempotent(
+export async function idempotent(
   tx: Tx,
   ctx: ApiContext,
   idempotency: IdempotencyInput | null,

@@ -17,6 +17,7 @@ export const API_SCOPE_KEYS = [
   'messages.reply',
   'conversations.read',
   'conversations.write',
+  'automations.start',
 ] as const satisfies readonly ApiScope[];
 
 /**
@@ -77,6 +78,13 @@ export const API_SCOPE_INFO: Record<
     description:
       'Mark conversations resolved, or open again, as members do in the inbox. Resolving stops an automation answering the conversation.',
     permission: 'inbox.supervise',
+    writes: true,
+  },
+  'automations.start': {
+    label: 'Start automations',
+    description:
+      'Start published automations made to start through the API, for one contact at a time with the inputs they need, and read the runs keys started. They message contacts who have not written first, with templates.',
+    permission: 'automations.publish',
     writes: true,
   },
 };

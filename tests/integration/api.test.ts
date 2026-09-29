@@ -7,12 +7,16 @@ import {
   API_KEY_REMINDER_DAYS,
   API_SCOPE_KEYS,
   API_TOKEN_RE,
+  RUN_BUDGETS,
+  advanceAutomationRun,
   apiCreateContact,
   apiErrorResponse,
+  apiGetAutomationRun,
   apiGetContact,
   apiGetConversation,
   apiGetMessage,
   apiKeyReminderNotice,
+  apiListAutomations,
   apiListContacts,
   apiListConversationMessages,
   apiListConversations,
@@ -21,16 +25,21 @@ import {
   apiSendMessage,
   apiSendTemplate,
   apiSetConversationStatus,
+  apiStartAutomationRun,
   authenticateApiRequest,
   authenticateApiToken,
+  botButtonId,
   createApiKeysService,
+  createAutomationService,
   createCampaignsService,
   createConsentService,
   createContactsService,
   createCsatService,
   createInboxService,
+  createPlanAdminService,
   createTemplatesService,
   createWebhooksService,
+  dayOf,
   generateApiToken,
   outboxAad,
   processSendIntent,
@@ -41,11 +50,14 @@ import {
   remindApiKeyExpiry,
   remindExpiringApiKeys,
   syncTemplates,
+  type ApiAutomationRun,
   type ApiContext,
   type ApiConversation,
   type ApiKeyReminderDeps,
   type ApiKeysService,
   type ApiScope,
+  type AutomationTrigger,
+  type PlatformActor,
   type TemplateDefinition,
   type TenantContext,
 } from '@w360/domain';
@@ -65,8 +77,9 @@ import {
  * reused for another request, concurrent retries, failures, expiry), contacts and consent, template
  * sends with the members' checks and the send pipeline, text replies within the 24-hour window
  * (ADR-070), message status, reading conversations and their messages (ADR-072), resolving and
- * reopening conversations (ADR-075), the networks a key accepts requests from (ADR-076), the
- * idempotency sweep, isolation between companies, and reminders before keys expire (ADR-067).
+ * reopening conversations (ADR-075), the networks a key accepts requests from (ADR-076), starting
+ * automations (ADR-077), the idempotency sweep, isolation between companies, and reminders before
+ * keys expire (ADR-067).
  */
 let fx: WhatsAppFixture;
 let keys: ApiKeysService;
@@ -2414,6 +2427,847 @@ describe('allowed networks (ADR-076)', () => {
     );
     const listed = (await keys.list(owner)).find((k) => k.id === rotated.id);
     expect(listed?.allowedNetworks).toEqual(['2001:db8::/48']);
+  });
+});
+
+describe('automations started through the API (ADR-077)', () => {
+  /** An appointment reminder with two quick replies. */
+  const appointmentReminder: TemplateDefinition = {
+    category: 'UTILITY',
+    header: { type: 'none' },
+    body: {
+      text: 'Hi {{1}}, your appointment is at {{2}}. Please confirm.',
+      examples: ['Asha', '5 pm today'],
+    },
+    footer: null,
+    buttons: [
+      { type: 'QUICK_REPLY', text: 'Confirm' },
+      { type: 'QUICK_REPLY', text: 'Reschedule' },
+    ],
+  };
+  const apiTrigger: AutomationTrigger = { type: 'api', inputs: ['patient', 'appointment_time'] };
+  const inputs = { patient: 'Asha', appointment_time: '5 pm today' };
+
+  /** Reminds with the template; "Confirm" thanks the contact, any other reply goes to people. */
+  const reminderFlow = (templateId: string) => ({
+    version: 1,
+    start: 'remind',
+    nodes: [
+      {
+        id: 'remind',
+        type: 'ask_template',
+        templateId,
+        header: [],
+        body: ['{{input.patient}}', '{{input.appointment_time}}'],
+        buttons: [
+          { index: 0, title: 'Confirm', next: 'thanks' },
+          { index: 1, title: 'Reschedule', next: 'people' },
+        ],
+        saveAs: 'choice',
+        replyNext: 'people',
+        timeoutMinutes: 60,
+        timeoutNext: null,
+      },
+      {
+        id: 'thanks',
+        type: 'send_text',
+        text: 'Thanks {{input.patient}}, see you at {{input.appointment_time}}.',
+        next: null,
+      },
+      { id: 'people', type: 'handoff', teamId: null },
+    ],
+  });
+
+  const automationService = () =>
+    createAutomationService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+    });
+
+  async function save(
+    owner: TenantContext,
+    name: string,
+    trigger: AutomationTrigger,
+    graph: unknown,
+    channelAccountId: string | null,
+  ) {
+    const svc = automationService();
+    const { id } = await svc.createAutomation(owner, { name });
+    const saved = await svc.updateAutomation(owner, {
+      id,
+      expectedVersion: 0,
+      name,
+      description: null,
+      channelAccountId,
+      trigger,
+      graph,
+    });
+    return { id, version: saved.version, issues: saved.issues };
+  }
+
+  async function publish(
+    owner: TenantContext,
+    name: string,
+    trigger: AutomationTrigger,
+    graph: unknown,
+    channelAccountId: string | null,
+  ) {
+    const saved = await save(owner, name, trigger, graph, channelAccountId);
+    expect(saved.issues).toEqual([]);
+    const published = await automationService().publishAutomation(owner, {
+      id: saved.id,
+      expectedVersion: saved.version,
+      note: null,
+    });
+    return { id: saved.id, version: published.version };
+  }
+
+  const runRow = async (id: string) => {
+    const [row] = await fx.query<{
+      status: string;
+      end_reason: string | null;
+      end_detail: string | null;
+      mode: string;
+      trigger_type: string;
+      api_key_id: string | null;
+      variables: Record<string, string>;
+      conversation_id: string;
+      contact_id: string;
+    }>(
+      `SELECT status, end_reason, end_detail, mode, trigger_type, api_key_id, variables,
+              conversation_id, contact_id
+         FROM app.automation_runs WHERE id = $1`,
+      [id],
+    );
+    if (!row) throw new Error('run not found');
+    return row;
+  };
+
+  /**
+   * Advances a run the way the worker does, handing each message it queues to the send worker (the
+   * stand-in accepts it), until it waits with nothing in flight or ends. Returns the run's status.
+   */
+  async function driveRun(c: Company, runId: string) {
+    for (let i = 0; i < 20; i += 1) {
+      const result = await advanceAutomationRun(
+        { ...deps(), keyring: fx.keyring },
+        authorizedTenantScope(c.tenant.id, null),
+        runId,
+        null,
+      );
+      const sent = await sendAll(c);
+      if (sent.length === 0 && result.outcome !== 'sending') return (await runRow(runId)).status;
+    }
+    throw new Error('the run did not settle');
+  }
+
+  /** Templates and texts the stand-in received for a number. */
+  const templateSends = (to: string) =>
+    templatesTo(to).flatMap((r) => {
+      const template = (r.body as { template?: { name: string; components: unknown[] } }).template;
+      return template ? [template] : [];
+    });
+  const textsTo = (to: string) =>
+    templatesTo(to).flatMap((r) => {
+      const text = (r.body as { text?: { body: string } }).text;
+      return text ? [text.body] : [];
+    });
+  const bodyTexts = (template: { components: unknown[] } | undefined) =>
+    (
+      (template?.components ?? []).find((x) => (x as { type: string }).type === 'body') as
+        { parameters: { text: string }[] } | undefined
+    )?.parameters.map((p) => p.text);
+
+  const reasonOf = (error: unknown) => apiErrorResponse(error, 'r').body.error.reason;
+  async function refusedWith(
+    promise: Promise<unknown>,
+    code: string,
+    reason: string | undefined,
+    message?: RegExp,
+  ) {
+    const error = await expectAppError(promise, code, message);
+    expect(reasonOf(error)).toBe(reason);
+  }
+
+  let planCodes = 0;
+  /** Puts the company on a published plan with the given terms (P5-01), as platform staff would. */
+  async function onPlan(c: Company, overrides: Record<string, unknown>) {
+    const staff = await createUser(fx.dbs, { twoFactor: true });
+    await fx.dbs.ownerPool.query(
+      `INSERT INTO ops.platform_admins (user_id, role) VALUES ($1, 'platform_owner')`,
+      [staff.id],
+    );
+    const actor: PlatformActor = {
+      userId: staff.id,
+      role: 'platform_owner',
+      correlationId: uuidv7(),
+    };
+    const plans = createPlanAdminService({ platformDb: fx.dbs.platform, clock: systemClock });
+    planCodes += 1;
+    const { id } = await plans.createPlan(actor, {
+      code: `auto-api-${Date.now().toString(36)}-${planCodes}`,
+      name: 'Automation plan',
+      price: '999',
+      intervalMonths: '1',
+      trialDays: '0',
+      graceDays: '7',
+      seatsIncluded: '10',
+      numbersIncluded: '5',
+      modules: ['automations'],
+      ...overrides,
+    });
+    await plans.publishPlan(actor, id);
+    const view = await plans.tenantPlan(actor, c.tenant.id);
+    await plans.setTenantPlan(actor, {
+      tenantId: c.tenant.id,
+      version: view.state.version,
+      status: 'active',
+      planId: id,
+      periodStart: dayOf(new Date(), 'Asia/Kolkata'),
+      periodEnd: dayOf(new Date(Date.now() + 30 * 86_400_000), 'Asia/Kolkata'),
+      reason: 'Plan for the API automation tests',
+    });
+  }
+
+  it('start a published automation for a contact once per Idempotency-Key, with its inputs, and follow the contact’s tap', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const template = await approvedTemplate(c, appointmentReminder);
+    const flow = await publish(
+      owner,
+      'Appointment reminder',
+      apiTrigger,
+      reminderFlow(template.id),
+      c.channelAccountId,
+    );
+    // Drafts, archived automations and automations started otherwise are not listed.
+    await save(owner, 'Draft only', apiTrigger, reminderFlow(template.id), c.channelAccountId);
+    await publish(
+      owner,
+      'Brochure',
+      {
+        type: 'keyword',
+        keywords: ['brochure'],
+        match: 'contains',
+        hours: 'any',
+        cooldownMinutes: 0,
+      },
+      {
+        version: 1,
+        start: 'hi',
+        nodes: [{ id: 'hi', type: 'send_text', text: 'Here it is.', next: null }],
+      },
+      null,
+    );
+    const { ctx, id: keyId } = await apiKey(c, ['automations.start'], 'Booking system');
+    expect((await apiListAutomations(deps(), ctx, {})).data).toEqual([
+      {
+        id: flow.id,
+        name: 'Appointment reminder',
+        status: 'active',
+        inputs: ['patient', 'appointment_time'],
+        channelId: c.channelAccountId,
+        phoneNumber: '+91 90000 00000',
+        createdAt: expect.any(String),
+      },
+    ]);
+
+    const input = { to: '+91 98111 00060', inputs };
+    const first = await apiStartAutomationRun(deps(), ctx, flow.id, input, idem('run-1', 'run-1'));
+    expect(first.status).toBe(201);
+    const started = first.body.data as ApiAutomationRun;
+    expect(started).toEqual({
+      id: expect.any(String),
+      automationId: flow.id,
+      contactId: expect.any(String),
+      conversationId: expect.any(String),
+      channelId: c.channelAccountId,
+      status: 'running',
+      endReason: null,
+      startedAt: expect.any(String),
+      endedAt: null,
+    });
+    // A retry replays the first answer and starts nothing more.
+    expect(
+      await apiStartAutomationRun(deps(), ctx, flow.id, input, idem('run-1', 'run-1')),
+    ).toEqual({ ...first, replayed: true });
+    expect(await runRow(started.id)).toMatchObject({
+      status: 'running',
+      mode: 'live',
+      trigger_type: 'api',
+      api_key_id: keyId,
+      variables: { 'input.patient': 'Asha', 'input.appointment_time': '5 pm today' },
+      conversation_id: started.conversationId,
+      contact_id: started.contactId,
+    });
+    // The contact is new, from the API; the conversation starts resolved, out of the inbox.
+    const [contact] = await fx.query<{ source: string; phone_e164: string }>(
+      'SELECT source, phone_e164 FROM app.contacts WHERE id = $1',
+      [started.contactId],
+    );
+    expect(contact).toEqual({ source: 'api', phone_e164: '+919811100060' });
+    const [thread] = await fx.query<{ status: string; last_inbound_at: Date | null }>(
+      'SELECT status, last_inbound_at FROM app.conversations WHERE id = $1',
+      [started.conversationId],
+    );
+    expect(thread).toEqual({ status: 'resolved', last_inbound_at: null });
+    // Audited as the key, without the inputs.
+    expect(
+      await fx.query(
+        `SELECT actor_type, actor_id, correlation_id, metadata FROM app.audit_events
+          WHERE tenant_id = $1 AND action = 'automation.run_started' AND subject_id = $2`,
+        [c.tenant.id, started.id],
+      ),
+    ).toEqual([
+      {
+        actor_type: 'api_key',
+        actor_id: keyId,
+        correlation_id: ctx.requestId,
+        metadata: { automationId: flow.id, source: 'api' },
+      },
+    ]);
+
+    // Starts for the same number at once: one run, the other is refused as busy.
+    const both = await Promise.allSettled([
+      apiStartAutomationRun(
+        deps(),
+        ctx,
+        flow.id,
+        { ...input, to: '+919811100061' },
+        idem('a', 'a'),
+      ),
+      apiStartAutomationRun(
+        deps(),
+        ctx,
+        flow.id,
+        { ...input, to: '+919811100061' },
+        idem('b', 'b'),
+      ),
+    ]);
+    expect(
+      both.map((r) => (r.status === 'fulfilled' ? 'started' : reasonOf(r.reason))).sort(),
+    ).toEqual(['automation_busy', 'started']);
+
+    // The template goes out from the automation's number with the inputs and a payload per button.
+    expect(await driveRun(c, started.id)).toBe('waiting');
+    const [sent] = templateSends('919811100060');
+    expect(sent?.name).toBe(template.name);
+    expect(bodyTexts(sent)).toEqual(['Asha', '5 pm today']);
+    expect(sent?.components.filter((x) => (x as { type: string }).type === 'button')).toEqual([
+      {
+        type: 'button',
+        sub_type: 'quick_reply',
+        index: '0',
+        parameters: [{ type: 'payload', payload: botButtonId(started.id, 'remind', 1, 0) }],
+      },
+      {
+        type: 'button',
+        sub_type: 'quick_reply',
+        index: '1',
+        parameters: [{ type: 'payload', payload: botButtonId(started.id, 'remind', 1, 1) }],
+      },
+    ]);
+    expect(await apiGetAutomationRun(deps(), ctx, started.id)).toMatchObject({
+      id: started.id,
+      status: 'waiting',
+      endReason: null,
+      endedAt: null,
+    });
+
+    // The contact taps "Confirm": the conversation opens and the run continues.
+    const [bot] = await fx.query<{
+      external_message_id: string;
+      content: { rendered: { body: string } };
+    }>(
+      `SELECT external_message_id, content FROM app.messages
+        WHERE conversation_id = $1 AND sender_type = 'bot'`,
+      [started.conversationId],
+    );
+    expect(bot?.content.rendered.body).toBe(
+      'Hi Asha, your appointment is at 5 pm today. Please confirm.',
+    );
+    await fx.deliver(
+      fx.messagesBody(c, {
+        messages: [
+          {
+            waId: '919811100060',
+            type: 'button',
+            extra: {
+              button: { payload: botButtonId(started.id, 'remind', 1, 0), text: 'Confirm' },
+              context: { from: '919000000000', id: bot!.external_message_id },
+            },
+          },
+        ],
+      }),
+    );
+    expect(await driveRun(c, started.id)).toBe('completed');
+    expect(textsTo('919811100060')).toEqual(['Thanks Asha, see you at 5 pm today.']);
+    expect(await apiGetAutomationRun(deps(), ctx, started.id)).toMatchObject({
+      status: 'completed',
+      endReason: 'no_next',
+      endedAt: expect.any(String),
+    });
+    expect((await runRow(started.id)).variables).toEqual({
+      'input.patient': 'Asha',
+      'input.appointment_time': '5 pm today',
+      choice: 'Confirm',
+    });
+    // A message from the contact never starts an automation started through the API.
+    await fx.deliver(fx.messagesBody(c, { messages: [{ waId: '919811100060', text: 'thanks!' }] }));
+    expect(
+      await fx.query('SELECT 1 FROM app.automation_runs WHERE conversation_id = $1', [
+        started.conversationId,
+      ]),
+    ).toHaveLength(1);
+
+    // Members see which key started it, with the inputs among the answers.
+    expect(await automationService().getRun(owner, started.id)).toMatchObject({
+      triggerType: 'api',
+      apiKeyName: 'Booking system',
+      variables: { 'input.patient': 'Asha', choice: 'Confirm' },
+    });
+    // Any key of the company with the scope reads the run; another company's key does not.
+    const reports = await apiKey(c, ['automations.start'], 'Reports');
+    expect((await apiGetAutomationRun(deps(), reports.ctx, started.id)).id).toBe(started.id);
+    const other = await fx.company();
+    const theirs = await apiKey(other, ['automations.start']);
+    await expectAppError(apiGetAutomationRun(deps(), theirs.ctx, started.id), 'not_found');
+    await expectAppError(
+      apiStartAutomationRun(deps(), theirs.ctx, flow.id, input, idem('x', 'x')),
+      'not_found',
+    );
+    expect((await apiListAutomations(deps(), theirs.ctx, {})).data).toEqual([]);
+  });
+
+  it('refuse, changing nothing, what the key, the automation, the contact or the conversation does not allow', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const template = await approvedTemplate(c, appointmentReminder);
+    const flow = await publish(
+      owner,
+      'Reminder',
+      apiTrigger,
+      reminderFlow(template.id),
+      c.channelAccountId,
+    );
+    const { ctx } = await apiKey(c, ['automations.start', 'contacts.write']);
+    let n = 0;
+    const start = (automationId: string, body: Record<string, unknown>) => {
+      n += 1;
+      return apiStartAutomationRun(deps(), ctx, automationId, body, idem(`r-${n}`, `r-${n}`));
+    };
+    const runs = async () =>
+      (
+        await fx.query<{ n: number }>(
+          'SELECT count(*)::int AS n FROM app.automation_runs WHERE tenant_id = $1',
+          [c.tenant.id],
+        )
+      )[0]!.n;
+    const to = '+919811100070';
+
+    // The scope, for reading as for starting.
+    const narrow = await apiKey(c, ['contacts.read']);
+    await expectAppError(
+      apiListAutomations(deps(), narrow.ctx, {}),
+      'forbidden',
+      /automations\.start/,
+    );
+    await expectAppError(
+      apiStartAutomationRun(deps(), narrow.ctx, flow.id, { to, inputs }, idem('s', 's')),
+      'forbidden',
+    );
+    await expectAppError(apiGetAutomationRun(deps(), narrow.ctx, uuidv7()), 'forbidden');
+    await expectAppError(start(uuidv7(), { to, inputs }), 'not_found');
+    await expectAppError(start('not-a-uuid', { to, inputs }), 'not_found');
+    await expectAppError(apiGetAutomationRun(deps(), ctx, 'not-a-uuid'), 'not_found');
+
+    // Every declared input, as text, and nothing else.
+    await expectAppError(
+      start(flow.id, { to, inputs: { patient: 'Ravi' } }),
+      'validation_failed',
+      /Give the input “appointment_time” a value/,
+    );
+    await expectAppError(
+      start(flow.id, { to, inputs: { ...inputs, room: '4' } }),
+      'validation_failed',
+      /no input named “room”/,
+    );
+    await expectAppError(
+      start(flow.id, { to, inputs: { ...inputs, patient: 'x'.repeat(1001) } }),
+      'validation_failed',
+      /limited to 1000 characters/,
+    );
+    await expectAppError(start(flow.id, { to: '12345', inputs }), 'validation_failed');
+    await expectAppError(
+      start(flow.id, { to, inputs, from: c.channelAccountId }),
+      'validation_failed',
+    );
+
+    // An automation that is not published, archived, started otherwise or paused.
+    const draft = await save(
+      owner,
+      'Draft',
+      apiTrigger,
+      reminderFlow(template.id),
+      c.channelAccountId,
+    );
+    await refusedWith(
+      start(draft.id, { to, inputs }),
+      'precondition_failed',
+      'automation_unavailable',
+      /not been published/,
+    );
+    const keyword = await publish(
+      owner,
+      'Brochure',
+      {
+        type: 'keyword',
+        keywords: ['brochure'],
+        match: 'contains',
+        hours: 'any',
+        cooldownMinutes: 0,
+      },
+      { version: 1, start: 'hi', nodes: [{ id: 'hi', type: 'send_text', text: 'Hi', next: null }] },
+      null,
+    );
+    await refusedWith(
+      start(keyword.id, { to, inputs: {} }),
+      'precondition_failed',
+      'automation_unavailable',
+      /does not start through the API/,
+    );
+    const svc = automationService();
+    const old = await publish(
+      owner,
+      'Old',
+      apiTrigger,
+      reminderFlow(template.id),
+      c.channelAccountId,
+    );
+    await svc.archiveAutomation(owner, { id: old.id, expectedVersion: old.version });
+    await refusedWith(
+      start(old.id, { to, inputs }),
+      'precondition_failed',
+      'automation_unavailable',
+      /archived/,
+    );
+    const paused = await svc.setAutomationStatus(owner, {
+      id: flow.id,
+      expectedVersion: flow.version,
+      status: 'paused',
+    });
+    await refusedWith(start(flow.id, { to, inputs }), 'precondition_failed', 'automation_paused');
+    expect((await apiListAutomations(deps(), ctx, {})).data.map((a) => [a.id, a.status])).toEqual([
+      [flow.id, 'paused'],
+    ]);
+    await svc.setAutomationStatus(owner, {
+      id: flow.id,
+      expectedVersion: paused.version,
+      status: 'active',
+    });
+
+    // Marketing templates need the key's marketing scope; the step checks consent when it sends.
+    const promo = await approvedTemplate(c, festiveSale);
+    const promoFlow = await publish(
+      owner,
+      'Festive sale',
+      { type: 'api', inputs: ['first_name'] },
+      {
+        version: 1,
+        start: 'sale',
+        nodes: [
+          {
+            id: 'sale',
+            type: 'send_template',
+            templateId: promo.id,
+            header: [],
+            body: ['{{input.first_name}}'],
+            next: null,
+          },
+        ],
+      },
+      c.channelAccountId,
+    );
+    await expectAppError(
+      start(promoFlow.id, { to: '+919811100071', inputs: { first_name: 'Asha' } }),
+      'forbidden',
+      /messages\.send_marketing/,
+    );
+
+    // The suppression list, opt-outs and the number.
+    const consent = createConsentService({ db: fx.dbs.app, clock: systemClock });
+    await consent.addSuppression(owner, { phone: '+919811100072', reason: 'legal' });
+    await expectAppError(
+      start(flow.id, { to: '+919811100072', inputs }),
+      'precondition_failed',
+      /suppression list/,
+    );
+    expect(
+      await fx.query('SELECT 1 FROM app.contacts WHERE tenant_id = $1 AND phone_e164 = $2', [
+        c.tenant.id,
+        '+919811100072',
+      ]),
+    ).toHaveLength(0);
+    const optedOut = await apiCreateContact(deps(), ctx, { phone: '+919811100073' }, null);
+    await apiRecordConsent(deps(), ctx, (optedOut.body.data as { id: string }).id, {
+      purpose: 'utility',
+      action: 'opt_out',
+      evidence: 'Asked us by email to stop reminders',
+    });
+    await expectAppError(start(flow.id, { to: '+919811100073', inputs }), 'precondition_failed');
+    await fx.query(`UPDATE app.channel_accounts SET status = 'disconnected' WHERE id = $1`, [
+      c.channelAccountId,
+    ]);
+    try {
+      await refusedWith(
+        start(flow.id, { to, inputs }),
+        'precondition_failed',
+        'channel_unavailable',
+        /not active/,
+      );
+    } finally {
+      await fx.query(`UPDATE app.channel_accounts SET status = 'active' WHERE id = $1`, [
+        c.channelAccountId,
+      ]);
+    }
+    expect(await runs()).toBe(0);
+
+    // With the marketing scope the run starts; without the contact's opt-in its template is not sent.
+    const marketer = await apiKey(c, ['automations.start', 'messages.send_marketing']);
+    const promoRun = await apiStartAutomationRun(
+      deps(),
+      marketer.ctx,
+      promoFlow.id,
+      { to: '+919811100071', inputs: { first_name: 'Asha' } },
+      idem('p', 'p'),
+    );
+    const promoRunId = (promoRun.body.data as ApiAutomationRun).id;
+    expect(await driveRun(c, promoRunId)).toBe('failed');
+    expect(await runRow(promoRunId)).toMatchObject({
+      end_reason: 'send_blocked',
+      end_detail: 'no_marketing_opt_in',
+    });
+    expect(templateSends('919811100071')).toEqual([]);
+
+    // A conversation assigned to a member, or handled by another run.
+    await inbound(c, '919811100074', [{ text: 'Hello' }]);
+    const assigned = await conversationOf(c, '919811100074');
+    const agent = await fx.ctx(c, c.agent);
+    await inbox().assign(owner, {
+      conversationId: assigned.id,
+      membershipId: agent.membership.id,
+      expectedVersion: assigned.version,
+    });
+    await refusedWith(
+      start(flow.id, { to: '+919811100074', inputs }),
+      'conflict',
+      'conversation_assigned',
+    );
+    const busy = await start(flow.id, { to: '+919811100075', inputs });
+    await refusedWith(
+      start(flow.id, { to: '+919811100075', inputs }),
+      'conflict',
+      'automation_busy',
+    );
+
+    // At most maxRunsPerConversationPerHour runs start in a conversation in an hour.
+    await svc.stopRun(owner, (busy.body.data as ApiAutomationRun).id);
+    for (let i = 1; i < RUN_BUDGETS.maxRunsPerConversationPerHour; i += 1) {
+      const again = await start(flow.id, { to: '+919811100075', inputs });
+      await svc.stopRun(owner, (again.body.data as ApiAutomationRun).id);
+    }
+    await refusedWith(
+      start(flow.id, { to: '+919811100075', inputs }),
+      'conflict',
+      'automation_limit',
+    );
+  });
+
+  it('refuse starts the company’s plan does not allow', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const template = await approvedTemplate(c, appointmentReminder);
+    const flow = await publish(
+      owner,
+      'Reminder',
+      apiTrigger,
+      reminderFlow(template.id),
+      c.channelAccountId,
+    );
+    const { ctx } = await apiKey(c, ['automations.start']);
+    await onPlan(c, { automationRunsMonthly: '1' });
+    const first = await apiStartAutomationRun(
+      deps(),
+      ctx,
+      flow.id,
+      { to: '+919811100080', inputs },
+      idem('q-1', 'q-1'),
+    );
+    expect(first.status).toBe(201);
+    await refusedWith(
+      apiStartAutomationRun(
+        deps(),
+        ctx,
+        flow.id,
+        { to: '+919811100081', inputs },
+        idem('q-2', 'q-2'),
+      ),
+      'precondition_failed',
+      'automation_quota',
+      /no automation runs left/,
+    );
+    // The refused start leaves no contact behind.
+    expect(
+      await fx.query('SELECT 1 FROM app.contacts WHERE tenant_id = $1 AND phone_e164 = $2', [
+        c.tenant.id,
+        '+919811100081',
+      ]),
+    ).toHaveLength(0);
+    await onPlan(c, { modules: [] });
+    await refusedWith(
+      apiStartAutomationRun(
+        deps(),
+        ctx,
+        flow.id,
+        { to: '+919811100082', inputs },
+        idem('q-3', 'q-3'),
+      ),
+      'forbidden',
+      'not_in_plan',
+      /does not include automations/,
+    );
+  });
+
+  it('keep the key that started a run fixed, and clear the inputs when the contact is erased', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const template = await approvedTemplate(c, appointmentReminder);
+    const flow = await publish(
+      owner,
+      'Reminder',
+      apiTrigger,
+      reminderFlow(template.id),
+      c.channelAccountId,
+    );
+    const key = await apiKey(c, ['automations.start']);
+    const other = await apiKey(c, ['automations.start'], 'Other');
+    const started = (
+      await apiStartAutomationRun(
+        deps(),
+        key.ctx,
+        flow.id,
+        { to: '+919811100085', inputs: { patient: 'Kim', appointment_time: '9 am' } },
+        idem('e-1', 'e-1'),
+      )
+    ).body.data as ApiAutomationRun;
+    // What started the run cannot change, even for the table owner.
+    for (const change of [`api_key_id = '${other.id}'`, `trigger_type = 'keyword'`]) {
+      await expect(
+        fx.dbs.adminPool.query(`UPDATE app.automation_runs SET ${change} WHERE id = $1`, [
+          started.id,
+        ]),
+      ).rejects.toThrow(/what started an automation run is fixed/);
+    }
+    // Only runs started through the API name a key, also where the guard is set aside.
+    const client = await fx.dbs.adminPool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(`SELECT set_config('w360.allow_retention_purge', 'on', true)`);
+      await expect(
+        client.query('UPDATE app.automation_runs SET api_key_id = NULL WHERE id = $1', [
+          started.id,
+        ]),
+      ).rejects.toThrow(/automation_runs_api_key/);
+    } finally {
+      await client.query('ROLLBACK');
+      client.release();
+    }
+
+    // Erasing the contact stops the run and clears its inputs with its answers.
+    expect(await driveRun(c, started.id)).toBe('waiting');
+    await createContactsService({ db: fx.dbs.app, clock: systemClock }).eraseContact(owner, {
+      contactId: started.contactId,
+      suppress: false,
+    });
+    expect(await runRow(started.id)).toMatchObject({
+      status: 'stopped',
+      end_reason: 'contact_erased',
+      variables: {},
+    });
+    expect(await apiGetAutomationRun(deps(), key.ctx, started.id)).toMatchObject({
+      status: 'stopped',
+      endReason: 'contact_erased',
+    });
+  });
+
+  it('are saved with one number and tried by members with the inputs they give', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const template = await approvedTemplate(c, appointmentReminder);
+    const svc = automationService();
+    // Calls do not choose a number: publishing needs the automation limited to one.
+    const noNumber = await save(owner, 'No number', apiTrigger, reminderFlow(template.id), null);
+    expect(noNumber.issues.map((i) => i.message)).toEqual([
+      'An automation started through the API sends from one WhatsApp number: choose it.',
+    ]);
+    await expectAppError(
+      svc.publishAutomation(owner, {
+        id: noNumber.id,
+        expectedVersion: noNumber.version,
+        note: null,
+      }),
+      'precondition_failed',
+    );
+    // Steps use only the inputs the trigger declares.
+    const undeclared = await save(
+      owner,
+      'Undeclared',
+      { type: 'api', inputs: ['patient'] },
+      reminderFlow(template.id),
+      c.channelAccountId,
+    );
+    expect(undeclared.issues.map((i) => i.message)).toEqual([
+      '{{input.appointment_time}} is not one of the trigger’s inputs. Add it to the trigger’s inputs first.',
+      '{{input.appointment_time}} is not one of the trigger’s inputs. Add it to the trigger’s inputs first.',
+    ]);
+
+    // A test run takes the inputs from the member, on a conversation of the test phone.
+    const draft = await save(
+      owner,
+      'Reminder',
+      apiTrigger,
+      reminderFlow(template.id),
+      c.channelAccountId,
+    );
+    expect(draft.issues).toEqual([]);
+    await inbound(c, '919811100090', [{ text: 'hi' }]);
+    const conversation = await conversationOf(c, '919811100090');
+    const test = (given: Record<string, unknown>) =>
+      svc.startTestRun(owner, {
+        id: draft.id,
+        expectedVersion: draft.version,
+        conversationId: conversation.id,
+        inputs: given,
+      });
+    await expectAppError(
+      test({ patient: 'Asha' }),
+      'validation_failed',
+      /Give the input “appointment_time” a value/,
+    );
+    const { runId } = await test({ patient: 'Asha', appointment_time: '5 pm' });
+    expect(await runRow(runId)).toMatchObject({
+      mode: 'test',
+      trigger_type: 'test',
+      api_key_id: null,
+      variables: { 'input.patient': 'Asha', 'input.appointment_time': '5 pm' },
+    });
+    expect(await driveRun(c, runId)).toBe('waiting');
+    expect(bodyTexts(templateSends('919811100090').at(-1))).toEqual(['Asha', '5 pm']);
+    // Keys read only the runs keys started.
+    const { ctx } = await apiKey(c, ['automations.start']);
+    await expectAppError(apiGetAutomationRun(deps(), ctx, runId), 'not_found');
   });
 });
 

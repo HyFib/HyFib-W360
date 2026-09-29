@@ -80,6 +80,7 @@ describe('API scopes', () => {
       'messages.send_marketing',
       'messages.reply',
       'conversations.write',
+      'automations.start',
     ]);
     expect([...API_SEND_SCOPES]).toEqual(API_SCOPE_KEYS.filter((s) => s.startsWith('messages.')));
   });
@@ -91,6 +92,14 @@ describe('API scopes', () => {
     expect(API_SCOPE_INFO['contacts.write'].permission).toBe('contacts.write');
     expect(API_SCOPE_INFO['conversations.read'].permission).toBe('inbox.read_all');
     expect(API_SCOPE_INFO['conversations.write'].permission).toBe('inbox.supervise');
+    expect(API_SCOPE_INFO['automations.start'].permission).toBe('automations.publish');
+  });
+
+  it('let only members who publish automations grant automations.start (ADR-077)', () => {
+    const granting = Object.entries(ROLE_PERMISSIONS).filter(([, permissions]) =>
+      permissions.has('automations.publish'),
+    );
+    expect(granting.map(([role]) => role).sort()).toEqual(['admin', 'owner']);
   });
 
   it('let only members who resolve every conversation in the inbox grant conversations.write', () => {

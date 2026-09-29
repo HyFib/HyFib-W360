@@ -75,8 +75,9 @@ import {
  * Template steps (ADR-050) are checked again and sent through the same pipeline without the service
  * window; their marketing frequency cap is counted under the campaign runner's company lock, which
  * the runner only tries (it already holds the conversation's lock): when busy, the step is tried
- * again shortly. A run started by order messages may run in the conversation it started in while
- * that stays resolved (until the customer replies); a conversation resolved later stops it.
+ * again shortly. A run started by order messages or through the API may run in the conversation it
+ * started in while that stays resolved (until the customer replies); a conversation resolved later
+ * stops it.
  * A step that queues a bot message leaves the run holding that message (`pending_message_id`): the
  * run takes no further step, and does not complete, until the send worker records Meta's
  * acceptance and signals it. A message that fails (at the send or later), is cancelled or has an
@@ -679,10 +680,10 @@ async function runStep(
     };
 
     // The hand-off lock and the run's limits, checked on every step. A run started by order messages
-    // runs in its conversation while that stays resolved as it was when the run started (until the
-    // customer replies); one resolved after the run started stops it.
+    // or through the API runs in its conversation while that stays resolved as it was when the run
+    // started (until the customer replies); one resolved after the run started stops it.
     const closedSinceStart =
-      run.triggerType === 'store_event' &&
+      (run.triggerType === 'store_event' || run.triggerType === 'api') &&
       conv.resolvedAt !== null &&
       conv.resolvedAt.getTime() <= run.startedAt.getTime();
     if (conv.status === 'resolved' && !closedSinceStart)

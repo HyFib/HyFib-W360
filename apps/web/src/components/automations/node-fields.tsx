@@ -53,6 +53,8 @@ export interface NodeFieldOptions {
   templates: EditorTemplate[];
   /** The automation starts from a store's order messages ({{order.<field>}} is available). */
   storeEvent: boolean;
+  /** The inputs of an automation started through the API ({{input.<name>}}), else null. */
+  apiInputs: string[] | null;
 }
 
 const COMPARISON_LABELS: Record<(typeof COMPARISONS)[number], string> = {
@@ -75,7 +77,15 @@ const PLACEHOLDER_HINT = 'Use {{name}}, {{company}} or {{answer.<name>}} to fill
 const STORE_PLACEHOLDER_HINT =
   'Use {{name}}, {{company}}, {{answer.<name>}} or the order’s {{order.number}}, {{order.total}}, {{order.items}} and more.';
 const hintFor = (options: NodeFieldOptions) =>
-  options.storeEvent ? STORE_PLACEHOLDER_HINT : PLACEHOLDER_HINT;
+  options.storeEvent
+    ? STORE_PLACEHOLDER_HINT
+    : options.apiInputs
+      ? `Use {{name}}, {{company}}, {{answer.<name>}} or the call’s inputs${
+          options.apiInputs.length > 0
+            ? ` (${options.apiInputs.map((i) => `{{input.${i}}}`).join(', ')})`
+            : ', {{input.<name>}}'
+        }.`
+      : PLACEHOLDER_HINT;
 
 function NextSelect({
   id,

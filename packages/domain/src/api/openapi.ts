@@ -1,5 +1,7 @@
 import { z } from 'zod';
 import {
+  AUTOMATION_END_REASONS,
+  AUTOMATION_RUN_STATUSES,
   CONVERSATION_STATUSES,
   MESSAGE_STATUSES,
   MESSAGE_TYPES,
@@ -18,6 +20,7 @@ import {
   pingPayloadSchema,
   templateStatusPayloadSchema,
 } from '../webhooks/payloads';
+import { apiStartAutomationSchema } from './automations';
 import { apiContactSchema } from './contact-view';
 import { apiConversationStatusSchema } from './conversations';
 import { API_LIMITS, API_SCOPE_INFO, API_SCOPE_KEYS } from './model';
@@ -147,6 +150,39 @@ export const apiConversationMessageSchema = z.object({
   createdAt: z.iso.datetime(),
 });
 
+export const apiAutomationSchema = z.object({
+  id: z.uuid(),
+  name: z.string(),
+  status: z
+    .enum(['active', 'paused'])
+    .describe('A paused automation refuses to start (reason automation_paused).'),
+  inputs: z
+    .array(z.string())
+    .describe('The inputs every start must give, by name; the steps use them as {{input.<name>}}.'),
+  channelId: z.uuid().nullable().describe('The WhatsApp number the automation sends from.'),
+  phoneNumber: z.string().nullable().describe('That number, as WhatsApp displays it.'),
+  createdAt: z.iso.datetime(),
+});
+
+export const apiAutomationRunSchema = z.object({
+  id: z.uuid(),
+  automationId: z.uuid(),
+  contactId: z.uuid(),
+  conversationId: z.uuid(),
+  channelId: z.uuid(),
+  status: z
+    .enum(AUTOMATION_RUN_STATUSES)
+    .describe(
+      'running or waiting while it works (waiting for the contact, a timer or a web request); completed, handed_off (to a member), taken_over (a member or the API replied), stopped or failed once it ended.',
+    ),
+  endReason: z
+    .enum(Object.values(AUTOMATION_END_REASONS).flat() as [string, ...string[]])
+    .nullable()
+    .describe('Why the run ended; null while it works.'),
+  startedAt: z.iso.datetime(),
+  endedAt: z.iso.datetime().nullable(),
+});
+
 export const apiErrorSchema = z.object({
   error: z.object({
     code: z
@@ -159,7 +195,7 @@ export const apiErrorSchema = z.object({
       .string()
       .optional()
       .describe(
-        'A finer reason: idempotency_key_reused, ip_not_allowed, not_in_plan, quota_exceeded or window_closed.',
+        'A finer reason: automation_busy, automation_limit, automation_paused, automation_quota, automation_unavailable, channel_unavailable, conversation_assigned, idempotency_key_reused, ip_not_allowed, not_in_plan, quota_exceeded or window_closed.',
       ),
     issues: z.array(z.object({ path: z.string(), message: z.string() })).optional(),
   }),
@@ -188,10 +224,10 @@ const errors = (...statuses: number[]) =>
           {
             400: 'The request is malformed (for example invalid JSON or a missing header).',
             401: 'No valid API key: missing, unknown, revoked or expired.',
-            403: "The key lacks the scope this needs, the company's plan does not include the API (reason not_in_plan), or the key does not accept requests from the client's address (reason ip_not_allowed).",
+            403: "The key lacks the scope this needs, the company's plan does not include the API, or automations when starting one (reason not_in_plan), or the key does not accept requests from the client's address (reason ip_not_allowed).",
             404: 'Not found in the company.',
-            409: 'The request conflicts with the current state.',
-            412: 'A condition for sending or saving is not met (consent, suppression, state). With reason window_closed, the number has not written to the WhatsApp number in the last 24 hours, so only templates can be sent to it.',
+            409: 'The request conflicts with the current state. Starting an automation: another automation handles the conversation (reason automation_busy), a member is assigned to it (conversation_assigned), or it had as many runs in the last hour as allowed (automation_limit).',
+            412: "A condition for sending or saving is not met (consent, suppression, state). With reason window_closed, the number has not written to the WhatsApp number in the last 24 hours, so only templates can be sent to it. Starting an automation: it is not published, archived or not started through the API (automation_unavailable), paused (automation_paused), its number is not active (channel_unavailable), or the plan's automation runs for the month are used up (automation_quota).",
             415: 'The body must be JSON (Content-Type: application/json).',
             422: 'The request body or parameters are invalid.',
             423: 'The company is suspended or its plan has ended: reading only.',
@@ -491,6 +527,52 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
         },
       },
+      '/automations': {
+        get: {
+          operationId: 'listAutomations',
+          summary: 'Automations started through the API, oldest first',
+          description: `${scopeNote('automations.start')} Published automations whose trigger is "Started through the API", active or paused, with the inputs each start must give.`,
+          parameters: pageParams,
+          responses: {
+            '200': { description: 'A page of automations.', content: pageOf('Automation') },
+            ...errors(401, 403, 422, 429, 500),
+          },
+        },
+      },
+      '/automations/{id}/runs': {
+        post: {
+          operationId: 'startAutomationRun',
+          summary: 'Start an automation for a contact',
+          description: [
+            `${scopeNote('automations.start')} An automation that sends marketing templates also needs \`messages.send_marketing\`. Starts the published automation for the contact with this number (created when new), with every input its trigger declares. The run sends from the automation's number; until the contact replies it sends templates only, each checked for consent (and, for marketing, the frequency cap) when it is sent.`,
+            'Refused, changing nothing, when the contact was erased, opted out or is on the suppression list, when a member is assigned to the conversation or another automation handles it, or when the plan has no automation runs left. One run per `Idempotency-Key`: a retry answers as the first request did.',
+          ].join('\n\n'),
+          parameters: [
+            { $ref: '#/components/parameters/Id' },
+            { $ref: '#/components/parameters/IdempotencyKey' },
+          ],
+          requestBody: { required: true, content: json(ref('StartAutomationRun')) },
+          responses: {
+            '201': {
+              description: 'The run, as it starts.',
+              content: json(dataOf(ref('AutomationRun'))),
+            },
+            ...errors(400, 401, 403, 404, 409, 412, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/automation-runs/{id}': {
+        get: {
+          operationId: 'getAutomationRun',
+          summary: 'A run started through the API',
+          description: `${scopeNote('automations.start')} Any run a key of the company started.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': { description: 'The run.', content: json(dataOf(ref('AutomationRun'))) },
+            ...errors(401, 403, 404, 429, 500),
+          },
+        },
+      },
       '/messages/{id}': {
         get: {
           operationId: 'getMessage',
@@ -633,6 +715,9 @@ export function buildOpenApiDocument(serverUrl: string) {
         Conversation: jsonSchema(apiConversationSchema),
         ConversationMessage: jsonSchema(apiConversationMessageSchema),
         ConversationStatus: jsonSchema(apiConversationStatusSchema, 'input'),
+        Automation: jsonSchema(apiAutomationSchema),
+        AutomationRun: jsonSchema(apiAutomationRunSchema),
+        StartAutomationRun: jsonSchema(apiStartAutomationSchema, 'input'),
         Error: jsonSchema(apiErrorSchema),
         WebhookMessageReceived: jsonSchema(messageReceivedPayloadSchema),
         WebhookMessageStatus: jsonSchema(messageStatusPayloadSchema),
@@ -662,4 +747,7 @@ export const API_ROUTES = [
   ['get', '/conversations/{id}'],
   ['patch', '/conversations/{id}'],
   ['get', '/conversations/{id}/messages'],
+  ['get', '/automations'],
+  ['post', '/automations/{id}/runs'],
+  ['get', '/automation-runs/{id}'],
 ] as const;

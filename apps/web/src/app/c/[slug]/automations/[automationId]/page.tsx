@@ -6,6 +6,7 @@ import { can } from '@w360/domain';
 import { Badge, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
 import { AutomationEditor } from '@/components/automations/automation-editor';
 import { AutomationStatusActions, TestRunForm } from '@/components/automations/automation-actions';
+import { CopyField } from '@/components/growth/copy-field';
 import { PageHeader } from '@/components/page-header';
 import { AUTOMATION_STATUS, RUN_STATUS, TRIGGER_TYPE_LABELS } from '@/lib/automation-labels';
 import { formatDateTime } from '@/lib/format';
@@ -23,7 +24,7 @@ export default async function AutomationPage({
   const { slug, automationId } = await params;
   const ctx = await requireTenant(slug);
   if (!can(ctx, 'automations.read')) notFound();
-  const { automations } = await getRuntime();
+  const { automations, config } = await getRuntime();
   let detail: Awaited<ReturnType<typeof automations.getAutomation>>;
   try {
     detail = await automations.getAutomation(ctx, automationId);
@@ -45,6 +46,9 @@ export default async function AutomationPage({
   };
   const base = `/c/${ctx.tenant.slug}/automations`;
   const tz = ctx.tenant.timezone;
+  // Started through the API (ADR-077): what an integration calls, once a version is published.
+  const apiInputs = detail.draft.trigger?.type === 'api' ? detail.draft.trigger.inputs : null;
+  const apiRuns = new URL(`/api/v1/automations/${detail.id}/runs`, config.APP_BASE_URL).toString();
   return (
     <>
       <PageHeader
@@ -114,6 +118,35 @@ export default async function AutomationPage({
               </p>
             </CardContent>
           </Card>
+          {apiInputs ? (
+            <Card>
+              <CardHeader>
+                <CardTitle>Start through the API</CardTitle>
+                <CardDescription>
+                  Your systems start the published version for one contact at a time with a key that
+                  has the “Start automations” scope (Settings → API keys). A retry with the same
+                  Idempotency-Key starts nothing more.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="grid gap-3">
+                <CopyField label="Automation id" value={detail.id} />
+                <CopyField
+                  label="Example"
+                  multiline
+                  value={[
+                    `curl -X POST ${apiRuns} \\`,
+                    `  -H "Authorization: Bearer $W360_API_KEY" \\`,
+                    `  -H "Idempotency-Key: $(uuidgen)" \\`,
+                    `  -H "Content-Type: application/json" \\`,
+                    `  -d '${JSON.stringify({
+                      to: '+919876543210',
+                      inputs: Object.fromEntries(apiInputs.map((i) => [i, `<${i}>`])),
+                    })}'`,
+                  ].join('\n')}
+                />
+              </CardContent>
+            </Card>
+          ) : null}
           {canWrite ? (
             <Card>
               <CardHeader>
@@ -130,6 +163,7 @@ export default async function AutomationPage({
                   version={detail.version}
                   conversations={testConversations}
                   orders={testOrders}
+                  inputs={detail.draft.trigger?.type === 'api' ? detail.draft.trigger.inputs : null}
                   disabledReason={
                     !can(ctx, 'inbox.reply')
                       ? 'Testing needs permission to reply in the inbox.'

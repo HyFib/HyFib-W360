@@ -397,11 +397,18 @@ verification, app review, Embedded Signup configuration).
   as the key, no satisfaction survey, no member credited); **[networks per key built, locally
   verified]** (ADR-076: up to 20 IPv4 or IPv6 networks a key accepts requests from, checked in the
   lookup before the key is marked used, 403 `ip_not_allowed` counted as a failed authentication,
-  set at creation, copied on rotation, changed with a recent sign-in and audited). Remaining: media,
-  interactive and reaction messages, replies to a given message, assigning conversations, notes,
-  member and team names, media downloads, a message feed across conversations, starting automations
-  (W-086), bulk sends in one call, networks for the whole company, per-key quotas, limits per
-  endpoint, and dropping the one-argument key lookup kept for rolling deploys (0051).
+  set at creation, copied on rotation, changed with a recent sign-in and audited); **[starting
+  automations built, locally verified against the Graph stand-in]** (ADR-077, W-086: an
+  `automations.start` key, granted only by owners and administrators, starts a published automation
+  whose trigger is "Started through the API" for one contact with the inputs it declares, once per
+  `Idempotency-Key`, with an order rule's checks and a reason for each refusal; templates until the
+  contact replies, from the automation's one number; the run records its key, its inputs are kept
+  and cleared with its answers, and keys read the runs they started). Remaining: media, interactive
+  and reaction messages, replies to a given message, assigning conversations, notes, member and team
+  names, media downloads, a message feed across conversations, starting runs for many contacts in
+  one call or stopping them, bulk sends in one call, networks for the whole company, per-key
+  quotas, limits per endpoint, and dropping the one-argument key lookup kept for rolling deploys
+  (0051).
 - **P5-09 Outgoing webhooks** **[built, locally verified; delivered to local test receivers only]**
   (ADR-053): up to 10 endpoints per company (`developer.manage`) for `message.received`,
   `message.status`, `consent.changed` and `template.status_changed`, captured by database triggers

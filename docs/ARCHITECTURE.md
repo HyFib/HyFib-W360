@@ -368,20 +368,22 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 
 - **Model** (`packages/domain/src/automations/graph.ts`, browser-safe): a trigger (a message is or
   contains a keyword; a customer starts a conversation; any customer message; optionally only while
-  the business is open or closed; a cooldown per conversation; or started by a store's order
-  messages, §6M) and a graph of typed steps: send a message, ask with reply buttons (Meta's limits:
+  the business is open or closed; a cooldown per conversation; started by a store's order messages,
+  §6M; or started through the API with the inputs it declares, §6N) and a graph of typed steps: send a message, ask with reply buttons (Meta's limits:
   1–3 buttons, titles ≤ 20, body ≤ 1024, header and footer ≤ 60; research M-157/M-159), ask a
   question (any text, a number or an email; retries; answer saved under a name), send a template and
   ask with a template (an approved utility or marketing template with its variables as texts; the
   asking step branches on each quick-reply button, any other reply and no reply; ADR-050), condition
   (answers, contact fields, tags, business hours), update contact (tags, custom fields), wait
   (≤ 24 h), hand off to people (a team, or routed like a new case), end. Texts may use `{{name}}`,
-  `{{company}}`, `{{answer.<name>}}` and, in automations started by order messages,
-  `{{order.<field>}}`. `checkGraph` rejects missing targets, unsaved answers, unknown or misplaced
+  `{{company}}`, `{{answer.<name>}}`, in automations started by order messages
+  `{{order.<field>}}`, and in automations started through the API `{{input.<name>}}`. `checkGraph`
+  rejects missing targets, unsaved answers, unknown or misplaced
   placeholders, missing teams or fields, loops that never pass through a question or a wait, empty
   template variables, templates HyFib cannot send or whose variables, buttons or account no longer
   match (checked against the company's synced templates), and, in automations started by order
-  messages, a message or question that some path reaches before the customer replied. A wait or a
+  messages or through the API, a message or question that some path reaches before the customer
+  replied; an automation started through the API must be limited to one number (`triggerIssues`). A wait or a
   question timeout over 23 hours warns only when a message that is not a template can follow it
   before a reply (templates need no window, so a run can follow up a day or more later).
 - **Interpreter** (`automations/interpreter.ts`): a pure function (graph, run state, event, facts)
@@ -410,7 +412,8 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   frequency cap under the campaign runner's company lock, which the runner only tries: busy, the step
   runs again two seconds later), contact updates as single statements, hand-off routing — appends
   the step log row and stores the position. A run started by order messages reads its order for
-  each step with texts and may run while its conversation stays resolved as it was at the start. A queued bot message holds the run
+  each step with texts; it, and a run started through the API, may run while its conversation stays
+  resolved as it was at the start. A queued bot message holds the run
   (`pending_message_id`) until the send worker records Meta's acceptance and signals the run; a
   rejected, cancelled, unknown or late (10 minutes) send, or a failure Meta reports later, fails the
   run (`send_failed`) and hands the conversation to people, so a run never moves on or completes on
@@ -817,7 +820,8 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   grant a scope only when they hold its permission (`templates.read`, `contacts.read`,
   `contacts.write`, `inbox.reply` for `messages.send` and `messages.reply`, `campaigns.send` for
   `messages.send_marketing`, `inbox.read_all` for `conversations.read`, `inbox.supervise` for
-  `conversations.write`); at most 20 active keys per company, counted under an advisory lock.
+  `conversations.write`, `automations.publish` for `automations.start`); at most 20 active keys
+  per company, counted under an advisory lock.
   Rotation creates a key with the same name, scopes, lifetime and networks and lets the old one work
   for 0 to 72 hours (0 revokes it); revocation is immediate. Each change is audited without the
   token. A key may list up to 20 networks it accepts requests from (`allowed_networks cidr[]`, 0051,
@@ -882,6 +886,21 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   (`conversation.status_changed`, `source: api`). The existing triggers do the rest: the reply turn
   and the case close without a member (`app.current_user_id()` is empty in the key's scope), a
   reopen opens a case, and the webhook event is captured. No satisfaction survey is queued.
+- **Automations started through the API (0052–0054, ADR-077):** `automations.start` (writes,
+  granted by members holding `automations.publish`) opens `GET /automations` (published automations
+  whose trigger is `api`, with their inputs and number), `POST /automations/{id}/runs` (an
+  `Idempotency-Key` is required) and `GET /automation-runs/{id}`, in `api/automations.ts`. A start
+  runs in the idempotency key's transaction: it locks the automation `FOR SHARE`, checks the
+  published version (trigger `api`, active, the inputs `apiInputValues` accepts; a marketing
+  template needs `messages.send_marketing`), the number, the contact (`contactForPhone` with source
+  `api`, then `checkTemplateEligibility` for utility: suppression, erasure, opt-out), the
+  conversation (created resolved, locked `FOR UPDATE`; not assigned, no active run, fewer than 10
+  runs in the hour) and the plan (`consumeAutomationRun`), each refusal with its reason. The run row
+  has `trigger_type = 'api'`, `api_key_id` and the inputs as `input.<name>` variables; the step log,
+  the live `automation.started` event, the audit entry (as the key, without the inputs) and the
+  run's first job follow in the same transaction. `automation_runs_api_key` keeps `api_key_id` set
+  exactly for `api` runs, the run guard keeps it fixed, and `automation_runs_api_key_idx` (0053,
+  built concurrently) serves the foreign key.
 - **Keyset cursors** (`encodeKeysetCursor`, `exactTimestamp`): a cursor carries the last row's
   timestamp as PostgreSQL keeps it, to the microsecond, and its id, and pages compare
   `(time, id) < (cursor time, cursor id)`; cursors made with milliseconds still read. Cursors built

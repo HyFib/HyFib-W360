@@ -439,8 +439,9 @@ Phase 5 rules (Public API, P5-08):
   permission a member needs for the same work: `templates.read`, `contacts.read`, `contacts.write`,
   `inbox.reply` for `messages.send` (utility templates) and `messages.reply` (text replies, ADR-070),
   `campaigns.send` for `messages.send_marketing`, `inbox.read_all` for `conversations.read`
-  (ADR-072), and `inbox.supervise` for `conversations.write` (ADR-075). Nobody grants a key more
-  than they hold, and rotating needs the same. A key keeps the scopes it was created with.
+  (ADR-072), `inbox.supervise` for `conversations.write` (ADR-075), and `automations.publish` for
+  `automations.start` (ADR-077). Nobody grants a key more than they hold, and rotating needs the
+  same. A key keeps the scopes it was created with.
 - A request acts for the key's company only, as the key: its company comes from the key found by
   the token's hash, never from the path, body or headers, and data access runs in that company's
   scope (RLS). Audit rows name the key (`api_key`). Writing scopes are refused while the company is
@@ -473,6 +474,17 @@ Phase 5 rules (Public API, P5-08):
   administrators, supervisors) can grant; an agent cannot. The change runs under the conversation's
   row lock like a member's, finds no erased contact's or other company's conversation, is audited
   as the key, sends no satisfaction survey and credits no member in reports.
+- Starting automations through the API (ADR-077) needs `automations.start`, which only members who
+  publish automations (`automations.publish`: owners and administrators) can grant, as a started run
+  messages contacts as a published version does; an automation whose version sends a marketing
+  template also needs `messages.send_marketing`. Only a published, active automation whose trigger
+  is "Started through the API" starts, from the one number it is limited to, for a contact who is not
+  suppressed, erased or opted out, in a conversation no member is assigned to and no other run
+  handles, within the hourly limit per conversation and the plan's runs; until the contact replies
+  its steps send templates only, each checked for consent (and, for marketing, the frequency cap)
+  when it is sent. The run records its key (`api_key_id`, fixed by the run guard); its inputs are
+  kept with its answers and cleared with them (erasure, 30 days after the run ends), and the audit
+  entry leaves them out. A key reads only runs keys of its company started.
 - Only the token's SHA-256 is stored; the runtime role cannot read it. The token is shown once in
   the browser and kept only in the page's memory; it is never logged, and audit entries carry the
   public prefix only.

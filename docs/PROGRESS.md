@@ -1,5 +1,90 @@
 # Progress
 
+## 2026-09-29 — Phase 5: starting automations through the public API (P5-08, ADR-077)
+
+Status: **Implemented and locally verified against the Graph stand-in (no customer data).**
+Integrations (booking systems, CRMs, a company's own order system) could send one template through
+the API but not start a flow that continues on the contact's replies (W-086).
+
+### Completed
+
+- **Design (ADR-077):** a trigger, "Started through the API", that never matches a customer message
+  and declares up to 10 inputs by name; every start gives each a text of 1 to 1,000 characters, and
+  steps use them as `{{input.<name>}}`. Such an automation is limited to one WhatsApp number and,
+  as for order messages (ADR-050), sends only templates until the contact replies. A key with the
+  new `automations.start` scope (granted only by members holding `automations.publish`) lists these
+  automations, starts the published version for a contact once per `Idempotency-Key`, and reads the
+  runs keys started; a marketing template also needs `messages.send_marketing`.
+- **Migrations:** 0052 widens the scope check, adds `app.automation_runs.api_key_id` with the
+  trigger type check, a check tying the key to `api` runs and the foreign key, all `NOT VALID`, and
+  replaces the run guard so that the key stays fixed; 0053 builds the partial index on the key
+  concurrently; 0054 validates the three constraints without blocking writes.
+- **Domain:** the trigger, `apiInputValues`, `{{input.<name>}}` in texts, templates and web
+  requests, the checks that refuse undeclared inputs and inputs in other automations, the service
+  window rule and `triggerIssues` (one number). `api/automations.ts`: `apiListAutomations`,
+  `apiStartAutomationRun` and `apiGetAutomationRun`. A start runs in the idempotency key's
+  transaction with an order rule's checks (the automation, its number, suppression, erasure,
+  opt-out, an unassigned conversation with no active run, 10 runs per conversation per hour, the
+  plan's runs), each refusal with its reason; the run records its key and the inputs as
+  `input.<name>` answers, and the audit entry `automation.run_started` names the key without them.
+  **Fix found while testing:** the runner let only order message runs work in a conversation that is
+  still resolved, so a run started through the API would have stopped at its first step; API runs
+  now work the same way. Members' test runs of an `api` automation take the inputs; the run page
+  names the key (as the inbox does for API messages). The plan's usage emails and module notice now
+  mention starts through the API.
+- **Web:** `GET /api/v1/automations`, `POST /api/v1/automations/{id}/runs`, `GET
+/api/v1/automation-runs/{id}`; the builder's trigger with its inputs, sample inputs in the
+  simulator, inputs in the test form, a "Start through the API" card with the automation id and a
+  request example, the key on the run page; the OpenAPI document and Settings → API keys list the
+  scope and operations.
+- **Tests:** unit tests of the trigger (inputs, matching, description), the number requirement,
+  `{{input.<name>}}` (declared, undeclared, in other automations), the service window rule, the
+  template variables filled from inputs, the inputs a start gives, and the scope and who grants it.
+  5 integration tests in `api.test.ts`: a start once per key with its row, contact, conversation and
+  audit, concurrent starts for one number, the template and the tap through the Graph stand-in and
+  the run read through the API; every refusal (scope, ids, inputs, unpublished, archived, other
+  trigger, paused, marketing scope, suppression, opt-out, inactive number, assigned, busy, hourly
+  limit) changing nothing, and a marketing template refused at send without an opt-in; the plan's
+  runs and module; the run guard and the key check; erasure clearing the inputs; the number
+  requirement, undeclared inputs and test runs with inputs. e2e `api.spec.ts`: an automation built in
+  the builder with the API trigger is started by a key created in settings, sends its template to a
+  number that never wrote, continues on the tap, and its run page names the key.
+- **Docs:** ADR-077; ARCHITECTURE (automations, the public API); SECURITY (Phase 5 rules);
+  THREAT-MODEL T95; RUNBOOKS (migrations 0052–0054, a troubleshooting entry); DATA-RETENTION;
+  BACKLOG P5-08; FEATURE-MATRIX W-086, W-084, W-134 and H-033.
+- **Mutation checks:** 40 regressions tried one at a time; 39 make a test fail. 36 in the database
+  and domain: the trigger type, paused, archived and unpublished automations, the inputs (not
+  checked, unknown, too long, not stored, not filled in, undeclared in steps, allowed in other
+  automations), the marketing scope, the number's status, the start's consent check, assigned
+  conversations, active runs, the hourly limit, the plan's runs, a run without its key, the audit
+  entry (missing, as the system), runs of other kinds readable by keys, the list (other triggers,
+  archived automations), the idempotency key, the runner stopping API runs in a resolved
+  conversation, the number requirement, messages before a reply, the trigger matching messages,
+  the run guard, the key check, the scope in the database, test runs without inputs, the run
+  page's key, and the scope's permission, write flag and OpenAPI route. 3 in the web layer through
+  the e2e test: the run page not naming the key, the simulator without sample inputs, and the
+  builder not offering the trigger. The other, the dispatcher skipping API automations, cannot be
+  observed while their trigger never matches a message (that check's own regression is caught).
+
+### Test commands and results (local, 2026-09-29)
+
+| Command                                                                                                                                                            | Result                                                                                                       |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                               | 0 problems / all files formatted / all workspace packages pass                                               |
+| `pnpm test` (unit)                                                                                                                                                 | 370 passed, including 12 new: 11 in `automations/api-trigger.test.ts`, 1 in `api/api.test.ts`                |
+| `pnpm test:integration` (PostgreSQL 18.6)                                                                                                                          | 513 passed, including 5 new in `api.test.ts`                                                                 |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                                                                                                          | 513 passed                                                                                                   |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` on `api.spec.ts`, `api-keys.spec.ts`, `automations.spec.ts` and `company-data.spec.ts` | build passes / 18 passed: 9 tests on each project (6.2 min)                                                  |
+| Mutation checks                                                                                                                                                    | 40 regressions tried (3 of them through the e2e test); 39 make a test fail, and the other cannot be observed |
+
+### Known gaps
+
+- Not built: choosing a number per call, starting runs for many contacts in one call (or a
+  segment), stopping runs through the API, inputs other than text, webhook events for runs.
+- A start checks the contact's utility consent; a marketing template step checks the marketing
+  opt-in when it sends, so a run for a contact without one starts and then fails (`send_blocked`),
+  which the run's status shows.
+
 ## 2026-09-29 — Phase 5: the addresses an API key accepts requests from (P5-08, ADR-076)
 
 Status: **Implemented and locally verified (no customer data).** A leaked API key worked from

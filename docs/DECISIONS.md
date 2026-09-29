@@ -2340,3 +2340,66 @@ Decision:
 
 Not built: networks for the whole company, per scope or per endpoint; hostnames; time windows; and
 alerts or a list of refused requests (the web server logs each refusal with the key and company).
+
+## ADR-077 Starting automations through the public API (2026-09-29)
+
+Context: integrations (booking systems, CRMs, a company's own order system) want to start a
+WhatsApp flow for a contact and let it continue on the contact's replies: an appointment reminder
+with Confirm and Reschedule buttons, a follow-up after a form. Automations started from customer
+messages (ADR-034, ADR-035), from order message rules (ADR-050) and as members' test runs
+(ADR-038); the API could send one template but not start a flow (W-086, listed as not built under
+P5-08).
+
+Decision:
+
+- **A trigger for it:** "Started through the API" (`api`) never matches a customer message; only a
+  call starts it. It declares up to 10 inputs by name (`^[a-z][a-z0-9_]{0,31}$`, like answer
+  names), and every call gives each of them a text of 1 to 1,000 characters, and nothing else.
+  Texts, template variables and web requests use them as `{{input.<name>}}`; the checks refuse an
+  input the trigger does not declare, and `{{input.…}}` in automations with other triggers. The
+  simulator gives each input a sample value; a member's test run takes them in the test form.
+- **Templates before the contact replies**, as for order messages (ADR-050): a call starts a run
+  outside the conversation's service window, so the check that refuses messages, questions with
+  buttons and typed questions before a reply applies to `api` automations too.
+- **One number:** an `api` automation must be limited to one WhatsApp number (saving shows an
+  error, publishing is refused), as calls do not choose a number; its templates belong to that
+  number's account.
+- **Scope `automations.start`** ("Start automations", writes), granted only by members holding
+  `automations.publish` (owners and administrators): a key that starts live runs acts as
+  publishing does. Starting an automation whose published version sends a marketing template also
+  needs the key's `messages.send_marketing` scope, as publishing it needs `campaigns.send`.
+- **Operations:** `GET /api/v1/automations` lists the automations whose published version starts
+  through the API, active or paused, with their inputs and number; `POST
+/api/v1/automations/{id}/runs` with `{"to": "+91…", "inputs": {…}}` and a required
+  `Idempotency-Key` starts a run and answers 201 with it (a retry answers as the first request
+  did); `GET /api/v1/automation-runs/{id}` reads a run any key of the company started (status, end
+  reason, contact, conversation, number, times).
+- **The checks of an order rule's start (ADR-050), in one transaction with the idempotency key:**
+  the automation is active and its published version starts through the API; its number is
+  active; the recipient is not on the suppression list; the contact (created with source `api`
+  when new; a refused start leaves none) is not erased and has not opted out of utility messages;
+  the conversation (created resolved when new) is not assigned to a member, has no active run and
+  had fewer than `maxRunsPerConversationPerHour` runs in the last hour; the plan includes
+  automations and has a run left this month (ADR-051). Refusals: 409 `automation_busy`,
+  `conversation_assigned`, `automation_limit`; 412 `automation_unavailable`, `automation_paused`,
+  `channel_unavailable`, `automation_quota`, and the consent refusals with their message as for
+  template sends (ADR-052); 403 `not_in_plan`; 422 for inputs. Each template step checks the
+  contact's consent for its category (a marketing opt-in) and the frequency cap again when it
+  sends; a step refused then fails the run with `send_blocked`, which the run's status shows.
+- **Runs in a resolved conversation:** like order message runs, a run started through the API works
+  in its conversation while it stays resolved as it was when the run started (until the contact
+  replies); a member resolving it later stops the run. The runner allowed this only for order
+  message runs, so an API-started run would have stopped at its first step.
+- **Recorded:** the run has `trigger_type = 'api'` and `api_key_id` (migration 0052), both fixed by
+  the run guard with everything else that started it; a check keeps `api_key_id` set exactly for
+  `api` runs. The inputs are kept with the run's answers as `input.<name>`, so erasure and the purge
+  30 days after the run ends clear them (ADR-035). The audit entry `automation.run_started` names
+  the key and the automation, without the inputs. The run page names the key, as the inbox does for
+  API messages, and lists the inputs with the answers. The company export includes the key column.
+- **Migrations:** 0052 widens the scope check, adds the column with its checks and foreign key `NOT
+VALID` (so `app.automation_runs` is not scanned under the lock) and replaces the run guard; 0053
+  builds the partial index on `(tenant_id, api_key_id)` concurrently; 0054 validates the checks and
+  the foreign key without blocking writes.
+
+Not built: choosing a number per call, starting runs for many contacts in one call (or a segment),
+stopping runs through the API, inputs other than text, and webhook events for runs.

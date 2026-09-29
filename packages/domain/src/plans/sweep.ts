@@ -319,7 +319,7 @@ export async function announceRunLimit(
       subject: "This month's automation runs are used up",
       lines: [
         `Your company used all ${counter.limit} automation runs of the ${planName} plan for this month.`,
-        `Automations will not start again from customer messages or store events until ${day(counter.period.end)}. Runs already in progress continue.`,
+        `Automations will not start again from customer messages, store events or the API until ${day(counter.period.end)}. Runs already in progress continue.`,
         'Ask HyFib for more automation runs or a larger plan.',
       ],
     });
@@ -383,7 +383,7 @@ export async function warnBeforeLimit(
       lines: runs
         ? [
             `Your company has used ${count(used)} of the ${count(limit)} automation runs of the ${planName} plan for this month.`,
-            `At ${count(limit)}, automations stop starting from customer messages and store events until ${day(period.end)}. Runs in progress continue.`,
+            `At ${count(limit)}, automations stop starting from customer messages, store events and the API until ${day(period.end)}. Runs in progress continue.`,
             'Ask HyFib for more automation runs or a larger plan if you need them.',
           ]
         : [

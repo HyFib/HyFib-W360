@@ -66,6 +66,7 @@ export const STEP_DETAILS: Record<string, string> = {
   conversation_started: 'a new conversation',
   any_message: 'a customer message',
   test: 'a test started by a member',
+  api: 'a call through the HyFib W360 API',
   'store_event:order_placed': 'a new order in a store',
   'store_event:order_shipped': 'an order shipped by a store',
   'store_event:order_delivered': 'an order delivered',
@@ -144,6 +145,7 @@ export const TRIGGER_TYPE_LABELS: Record<string, string> = {
   any_message: 'Any message',
   test: 'Test',
   store_event: 'Order messages',
+  api: 'API',
 };
 
 /** Text for a step-log or end detail code, including send failures (`failed:<code>`). */

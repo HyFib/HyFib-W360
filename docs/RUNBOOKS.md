@@ -1000,6 +1000,18 @@ retried the next minute). A company being deleted is skipped. Check `app.tenant_
 company (`status`, `trial_ends_at`, `period_end`, `grace_ends_at`): the database's clock decides
 what is due.
 
+**Migration 0052, 0053 or 0054 failed.** 0052 runs in one transaction, so a failure applies
+nothing: it widens the check on `app.api_keys.scopes` to allow `automations.start` (up to nine
+scopes), adds `app.automation_runs.api_key_id` with the trigger type check, the key check and the
+foreign key `NOT VALID`, and replaces `app.guard_automation_run` so that the key stays fixed. A
+failure usually means a constraint was renamed or changed by hand (`api_keys_scopes_check`,
+`automation_runs_trigger_type_check`). 0053 runs outside a transaction (one `CREATE INDEX
+CONCURRENTLY`): a failure can leave an INVALID index; run `DROP INDEX CONCURRENTLY IF EXISTS
+app.automation_runs_api_key_idx;` and run the migrations again. 0054 validates the three
+constraints without blocking writes; it fails only if a stored run breaks one, which no code writes:
+find it with `SELECT id, trigger_type, api_key_id FROM app.automation_runs WHERE (trigger_type =
+'api') <> (api_key_id IS NOT NULL)` before running it again.
+
 **Migration 0051 failed.** It runs in one transaction, so a failure applies nothing. It adds
 `app.api_keys.allowed_networks` with its check and grants, creates
 `ops.api_key_authenticate(text, inet)` and rebuilds the one-argument lookup on it (dropped and
@@ -1178,8 +1190,26 @@ conversation was resolved.") and sends no satisfaction survey: surveys follow a 
 The audit log shows the change with the actor `api_key`, and per-member report counts leave it out.
 The contact's next message reopens the conversation as usual.
 
+**An integration cannot start an automation, or its run ended early.** `POST
+/api/v1/automations/{id}/runs` (ADR-077) needs the `automations.start` scope, which only owners and
+administrators can grant (keys keep their scopes: replace an older key), and an `Idempotency-Key`.
+The reason says what is missing: `automation_unavailable` (not published, archived, or the published
+version is not "Started through the API": publish the draft with that trigger), `automation_paused`
+(resume it), `channel_unavailable` (the automation's number is not active), `automation_busy` (a run
+is already handling the contact's conversation: wait for it, or stop it on its run page),
+`conversation_assigned` (a member has the conversation), `automation_limit` (10 runs in that
+conversation in the last hour), `automation_quota` or `not_in_plan` (the plan). A 412 without a
+reason is the contact's consent: on the suppression list, erased, or opted out of utility messages.
+A 422 names the input that is missing, unknown or longer than 1,000 characters (`GET
+/api/v1/automations` lists the inputs); a marketing template needs the key's
+`messages.send_marketing` scope (403). A run that starts and then fails with `send_blocked` had a
+template step refused when it sent (for a marketing template, no opt-in or the frequency cap); the
+run page shows the step and the reason, with the key that started it and the inputs. A retry with
+the same `Idempotency-Key` answers as the first request did; `GET /api/v1/automation-runs/{id}`
+shows the run as it is now.
+
 **The company is suspended or its plan ended.** Keys keep reading; creating contacts, recording
-consent and sending answer 423 until the company is active again.
+consent, sending and starting automations answer 423 until the company is active again.
 
 **Migration 0024 failed.** It runs in one transaction. It creates the two tables, the guard trigger,
 the two SECURITY DEFINER functions (granted to `w360_app` before their ownership moves to

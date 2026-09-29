@@ -179,6 +179,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'http_call_count',
       'store_order_id',
       'store_event',
+      'api_key_id',
     ],
   },
   {

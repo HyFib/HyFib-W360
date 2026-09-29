@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button, Field, Input, Select } from '@w360/ui';
 import { ConfirmDialog } from '@w360/ui/client';
+import { AUTOMATION_LIMITS } from '@w360/domain/automation-model';
 import {
   archiveAutomationAction,
   createAutomationAction,
@@ -239,6 +240,7 @@ export function TestRunForm({
   version,
   conversations,
   orders,
+  inputs,
   disabledReason,
 }: {
   slug: string;
@@ -247,10 +249,13 @@ export function TestRunForm({
   conversations: { id: string; label: string }[];
   /** For an automation started by order messages: orders the test can read (null otherwise). */
   orders: { id: string; label: string }[] | null;
+  /** For an automation started through the API: the inputs a test gives (null otherwise). */
+  inputs: string[] | null;
   disabledReason: string | null;
 }) {
   const [conversationId, setConversationId] = useState(conversations[0]?.id ?? '');
   const [storeOrderId, setStoreOrderId] = useState(orders?.[0]?.id ?? '');
+  const [values, setValues] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [runId, setRunId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -285,6 +290,9 @@ export function TestRunForm({
           expectedVersion: version,
           conversationId,
           storeOrderId: orders ? storeOrderId : null,
+          ...(inputs
+            ? { inputs: Object.fromEntries(inputs.map((i) => [i, values[i] ?? ''])) }
+            : {}),
         }).then((r) => {
           setBusy(false);
           if (!r.ok) setError(r.message);
@@ -336,6 +344,23 @@ export function TestRunForm({
           )}
         </Field>
       ) : null}
+      {(inputs ?? []).map((input) => (
+        <Field
+          key={input}
+          id={`test-input-${input}`}
+          label={`Input “${input}”`}
+          description={`What a call would give as ${input}; steps read it as {{input.${input}}}.`}
+        >
+          {(aria) => (
+            <Input
+              {...aria}
+              value={values[input] ?? ''}
+              maxLength={AUTOMATION_LIMITS.apiInputLength}
+              onChange={(e) => setValues({ ...values, [input]: e.target.value })}
+            />
+          )}
+        </Field>
+      ))}
       <div className="flex flex-wrap items-center gap-3">
         <Button
           type="submit"

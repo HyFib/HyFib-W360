@@ -7,8 +7,9 @@ import {
   randomWaId,
   sendSignedWebhook,
   standInRequests,
+  templateButtonReply,
 } from './messaging-support';
-import { expectNoHorizontalOverflow, signUpAndVerify, uniqueEmail } from './support';
+import { expectNoHorizontalOverflow, openFromNav, signUpAndVerify, uniqueEmail } from './support';
 
 const PASSWORD = 'correct horse battery staple 42';
 const standIn = `http://127.0.0.1:${process.env.E2E_GRAPH_PORT}`;
@@ -318,4 +319,207 @@ test('a key answers a customer who wrote, reads the conversation and resolves it
   await page.reload();
   await expect(page.getByRole('button', { name: 'Resolve' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Reopen' })).toHaveCount(0);
+});
+
+test('a key starts an automation made to start through the API: its template goes to a contact who never wrote, and the tap continues it', async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(240_000);
+  const email = uniqueEmail('apiflow');
+  const slug = `apiflow-${Date.now().toString(36)}`;
+  await signUpAndVerify(page, { name: 'Dev Clinic', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('Cora Clinic');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+  const { wabaId, phoneNumberId } = await connectTestChannel({ ownerEmail: email, slug });
+
+  // An approved utility template with two variables and two quick replies.
+  await page.goto(`/c/${slug}/templates/new`);
+  await page.getByLabel('Name').fill('appointment_reminder');
+  await page.getByLabel('Language code').fill('en');
+  await page.getByLabel('Category').selectOption('UTILITY');
+  await page.getByLabel('Body').fill('Hi {{1}}, your appointment is at {{2}}.');
+  await page.getByLabel('{{1}}').fill('Asha');
+  await page.getByLabel('{{2}}').fill('5 pm');
+  for (const [i, text] of ['Confirm', 'Reschedule'].entries()) {
+    await page.getByRole('button', { name: 'Add quick reply' }).click();
+    await page.getByLabel('Quick reply text').nth(i).fill(text);
+  }
+  await page.getByRole('button', { name: 'Save draft' }).click();
+  await expect(page.getByRole('heading', { name: 'appointment_reminder', level: 1 })).toBeVisible();
+  await page.getByRole('button', { name: 'Submit to Meta' }).click();
+  await page.getByRole('button', { name: 'Submit for review' }).click();
+  // Submitted (no draft buttons) before reloading, which could cancel the submission's request.
+  await expect(page.getByRole('button', { name: /^Submit/ })).toHaveCount(0);
+  await expect(async () => {
+    await page.reload();
+    await expect(page.getByText('In review', { exact: true }).first()).toBeVisible({
+      timeout: 1_000,
+    });
+  }).toPass({ timeout: 30_000 });
+  const approved = await request.post(`${standIn}/__stand-in/template-status`, {
+    data: { wabaId, name: 'appointment_reminder', status: 'APPROVED' },
+  });
+  expect(approved.status()).toBe(200);
+  await page.goto(`/c/${slug}/templates`);
+  await page.getByRole('button', { name: 'Refresh from Meta' }).click();
+  await expect(page.getByText(/Refresh requested/)).toBeVisible();
+  await expect(async () => {
+    await page.reload();
+    await expect(page.getByText('Approved', { exact: true }).first()).toBeVisible({
+      timeout: 1_000,
+    });
+  }).toPass({ timeout: 30_000 });
+
+  // The automation: started through the API with two inputs, from the company's number. It asks
+  // with the template first (only templates reach a contact who has not written) and thanks the
+  // contact who taps "Confirm".
+  await openFromNav(page, 'Automations');
+  await page.getByLabel('Name', { exact: true }).fill('Appointment reminder');
+  await page.getByRole('button', { name: 'Create draft' }).click();
+  await expect(page.getByRole('heading', { name: 'Appointment reminder' })).toBeVisible();
+  const automationId = page.url().split('/').at(-1) ?? '';
+  expect(automationId).toMatch(/^[0-9a-f-]{36}$/);
+  await page.getByLabel('Start when').selectOption('api');
+  await page.getByLabel('Inputs').fill('patient, appointment_time');
+  await expect(
+    page.getByText(
+      'An automation started through the API sends from one WhatsApp number: choose it.',
+    ),
+  ).toBeVisible();
+  await page.getByLabel('WhatsApp number').selectOption({ index: 1 });
+  await page.getByLabel('Add a step').selectOption('ask_template');
+  await page.getByRole('button', { name: 'Add step' }).click();
+  await expect(page.locator('#step-ask-template-1-template')).toHaveValue(/[0-9a-f-]{36}/);
+  await page.locator('#step-ask-template-1-body-0').fill('{{input.patient}}');
+  await page.locator('#step-ask-template-1-body-1').fill('{{input.appointment_time}}');
+  await page.getByLabel('First step', { exact: true }).selectOption('ask-template-1');
+  await page.getByRole('button', { name: 'Delete step welcome' }).click();
+  await page.getByLabel('Add a step').selectOption('send_text');
+  await page.getByRole('button', { name: 'Add step' }).click();
+  await page
+    .locator('#step-send-text-1-text')
+    .fill('Thanks {{input.patient}}, see you at {{input.appointment_time}}.');
+  await page.locator('#step-ask-template-1-button-0').selectOption('send-text-1');
+  await expect(page.getByText(/to fix before publishing/)).toBeHidden();
+  await expectNoHorizontalOverflow(page);
+  // The simulator gives each input a sample value and offers the template's quick replies.
+  await page.getByRole('button', { name: 'Start', exact: true }).click();
+  await expect(
+    page.getByText('Hi sample patient, your appointment is at sample appointment_time.'),
+  ).toBeVisible();
+  await page.getByRole('button', { name: 'Confirm', exact: true }).click();
+  await expect(
+    page.getByText('Thanks sample patient, see you at sample appointment_time.'),
+  ).toBeVisible();
+  await page.getByRole('button', { name: 'Save draft' }).click();
+  await expect(page.getByText('Draft saved.')).toBeVisible();
+  await page.getByRole('button', { name: 'Publish' }).click();
+  await page.getByRole('alertdialog').getByRole('button', { name: 'Publish' }).click();
+  await expect(page.getByText(/Version 1 is live/)).toBeVisible();
+  await expect(page.getByText('Start through the API', { exact: true })).toBeVisible();
+  await expect(page.getByLabel('Automation id')).toHaveValue(automationId);
+
+  // A key with the "Start automations" scope.
+  await page.goto(`/c/${slug}/settings/api-keys`);
+  await page.getByLabel('Name', { exact: true }).fill('Booking system');
+  await page.getByRole('checkbox', { name: /Start automations/ }).check();
+  await page.getByRole('button', { name: 'Create API key' }).click();
+  const token = await page.getByLabel('API key', { exact: true }).inputValue();
+  await page.getByRole('button', { name: 'I have stored the key' }).click();
+  const auth = { Authorization: `Bearer ${token}` };
+
+  const listed = await request.get('/api/v1/automations', { headers: auth });
+  expect(listed.status()).toBe(200);
+  expect((await listed.json()).data).toEqual([
+    expect.objectContaining({
+      id: automationId,
+      name: 'Appointment reminder',
+      status: 'active',
+      inputs: ['patient', 'appointment_time'],
+    }),
+  ]);
+
+  // The booking system starts it for a number that never wrote, once per Idempotency-Key.
+  const waId = randomWaId();
+  const idempotencyKey = randomUUID();
+  const start = (inputs: Record<string, string>, key = idempotencyKey) =>
+    request.post(`/api/v1/automations/${automationId}/runs`, {
+      headers: { ...auth, 'Idempotency-Key': key },
+      data: { to: `+${waId}`, inputs },
+    });
+  const missing = await start({ patient: 'Asha' }, randomUUID());
+  expect(missing.status()).toBe(422);
+  const first = await start({ patient: 'Asha', appointment_time: '5 pm today' });
+  expect(first.status()).toBe(201);
+  const run = (await first.json()).data as { id: string; status: string };
+  expect(run.status).toBe('running');
+  const retry = await start({ patient: 'Asha', appointment_time: '5 pm today' });
+  expect(retry.headers()['idempotent-replayed']).toBe('true');
+  expect((await retry.json()).data.id).toBe(run.id);
+  // Another start for the same contact while the run works is refused.
+  const busy = await start({ patient: 'Asha', appointment_time: '6 pm' }, randomUUID());
+  expect(busy.status()).toBe(409);
+  expect((await busy.json()).error.reason).toBe('automation_busy');
+
+  // The worker sends the template with the inputs and a payload per quick reply.
+  let sent: { wamid?: string; body: unknown } | undefined;
+  await expect(async () => {
+    sent = (await standInRequests(request)).find(
+      (r) =>
+        r.path === `/v26.0/${phoneNumberId}/messages` && (r.body as { to?: string }).to === waId,
+    );
+    expect(sent?.wamid).toBeTruthy();
+  }).toPass({ timeout: 60_000 });
+  const template = (sent?.body as { template: { name: string; components: unknown[] } }).template;
+  expect(template.name).toBe('appointment_reminder');
+  expect(template.components).toContainEqual({
+    type: 'body',
+    parameters: [
+      { type: 'text', text: 'Asha' },
+      { type: 'text', text: '5 pm today' },
+    ],
+  });
+  const buttons = template.components.filter((c) => (c as { type: string }).type === 'button') as {
+    parameters: { payload: string }[];
+  }[];
+  const confirm = buttons[0]?.parameters[0]?.payload ?? '';
+  expect(confirm).toBe(`w360bot:${run.id}:ask-template-1:1:0`);
+
+  // The contact taps "Confirm": the automation thanks them, and the run completes.
+  await sendSignedWebhook(
+    request,
+    templateButtonReply(
+      wabaId,
+      phoneNumberId,
+      waId,
+      { payload: confirm, text: 'Confirm' },
+      String(sent?.wamid),
+    ),
+  );
+  await expect
+    .poll(
+      async () =>
+        (await standInRequests(request))
+          .filter((r) => (r.body as { to?: string } | null | undefined)?.to === waId)
+          .map((r) => (r.body as { text?: { body?: string } }).text?.body ?? null)
+          .filter(Boolean),
+      { timeout: 60_000 },
+    )
+    .toEqual(['Thanks Asha, see you at 5 pm today.']);
+  await expect(async () => {
+    const read = await request.get(`/api/v1/automation-runs/${run.id}`, { headers: auth });
+    expect((await read.json()).data).toMatchObject({ status: 'completed', endReason: 'no_next' });
+  }).toPass({ timeout: 30_000 });
+
+  // The run page names the key that started it and lists the inputs with the answers.
+  await page.goto(`/c/${slug}/automations/runs/${run.id}`);
+  await expect(page.getByRole('heading', { name: 'Run of Appointment reminder' })).toBeVisible();
+  await expect(page.getByText(/by the API key “Booking system”/)).toBeVisible();
+  await expect(page.getByRole('table')).toContainText('Got an answer → Confirm');
+  await expect(page.getByText('input.appointment_time', { exact: true })).toBeVisible();
+  await expect(page.getByText('5 pm today', { exact: true })).toBeVisible();
+  await expectNoHorizontalOverflow(page);
 });
