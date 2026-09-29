@@ -13,6 +13,8 @@ import {
   webhookRetryDelaySeconds,
 } from './model';
 import {
+  automationRunEndedPayloadSchema,
+  automationRunStartedPayloadSchema,
   consentChangedPayloadSchema,
   contactCreatedPayloadSchema,
   contactErasedPayloadSchema,
@@ -278,6 +280,56 @@ describe('webhook payload schemas', () => {
     ).toBe(false);
   });
 
+  it('describe the automation run events (ADR-078)', () => {
+    const run = {
+      id: base.id,
+      automationId: '0192a1b2-0000-7000-8000-000000000005',
+      automationName: 'Welcome',
+      trigger: 'api',
+      apiKeyId: '0192a1b2-0000-7000-8000-000000000006',
+      status: 'running',
+      endReason: null,
+      startedAt: base.createdAt,
+      endedAt: null,
+    };
+    const started = {
+      ...base,
+      type: 'automation.run_started',
+      data: { run, conversation, contact, channel },
+    };
+    expect(automationRunStartedPayloadSchema.safeParse(started).success).toBe(true);
+    const ended = {
+      ...base,
+      type: 'automation.run_ended',
+      data: {
+        run: {
+          ...run,
+          automationName: null,
+          trigger: 'keyword',
+          apiKeyId: null,
+          status: 'completed',
+          endReason: 'no_next',
+          endedAt: '2026-09-28T10:00:05Z',
+        },
+        conversation,
+        contact,
+        channel,
+      },
+    };
+    expect(automationRunEndedPayloadSchema.safeParse(ended).success).toBe(true);
+    // Each type has its own body; a test run's trigger and an unknown reason are not described.
+    expect(automationRunEndedPayloadSchema.safeParse(started).success).toBe(false);
+    for (const change of [{ trigger: 'test' }, { endReason: 'timeout' }, { status: 'queued' }]) {
+      expect(
+        automationRunEndedPayloadSchema.safeParse({
+          ...ended,
+          data: { ...ended.data, run: { ...ended.data.run, ...change } },
+        }).success,
+        JSON.stringify(change),
+      ).toBe(false);
+    }
+  });
+
   it('refuse a body of another type or with an unknown status', () => {
     expect(pingPayloadSchema.safeParse({ ...base, type: 'message.status', data: {} }).success).toBe(
       false,
@@ -353,6 +405,8 @@ describe('the OpenAPI document', () => {
       'contact.created',
       'contact.updated',
       'contact.erased',
+      'automation.run_started',
+      'automation.run_ended',
     ]);
     const schemas = doc.components.schemas as Record<string, unknown>;
     const parameters = doc.components.parameters as Record<string, { name: string }>;

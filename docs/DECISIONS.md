@@ -2403,3 +2403,49 @@ VALID` (so `app.automation_runs` is not scanned under the lock) and replaces the
 
 Not built: choosing a number per call, starting runs for many contacts in one call (or a segment),
 stopping runs through the API, inputs other than text, and webhook events for runs.
+
+## ADR-078 Outgoing webhook events for automation runs (2026-09-29)
+
+Context: an integration that starts automations through the API (ADR-077) learns how a run went only
+by polling `GET /automation-runs/{id}`, and runs started otherwise (a keyword, a new conversation,
+any message, a store's order event) cannot be read through the API at all. A CRM or helpdesk needs
+to hear when an automation hands a customer to people or fails, and a booking system when its
+reminder flow has finished.
+
+Decision:
+
+- **Two event types**, chosen per endpoint like the others (an endpoint may now take all 11):
+  - `automation.run_started`: a live run started, whatever started it (a keyword, a new
+    conversation, any message, a store's order event, a call through the API).
+  - `automation.run_ended`: a live run ended: completed, handed off, taken over, stopped or failed,
+    with the reason the run records.
+  - Members' test runs of drafts send nothing: they try out a draft in a member's own conversation,
+    and an integration acting on hand-offs or counting runs would act on tests. Moving between
+    running and waiting is not sent either: runs do it at every question.
+- **Capture** by two triggers on `app.automation_runs` in the transaction that inserts a live run
+  or moves it from running or waiting to an ended status, as ADR-053. They run with the rights of
+  whoever makes the change: the runtime role in the company's scope, or `w360_definer` inside a
+  definer function (erasure stopping the contact's run), both of which already capture events. The
+  event keeps the run and automation ids, the conversation and contact, the status it reports and,
+  for an end, the reason.
+- **Payloads are built when delivered** (ADR-053): `run` (id, the automation's id and its name when
+  delivered, what started it, the API key that started it for `api` runs, the status the event
+  reports, the start time, and the end reason and end time for `automation.run_ended`),
+  `conversation` (id), `contact` (id, number and name, null once erased) and `channel`, as the
+  message events do. The status, reason and end time are as captured; the rest as when delivered,
+  so the start of a run whose contact was erased since is delivered without the number or name. A
+  run that no longer exists fails the delivery as `event_gone`, like a deleted message.
+- **No answers or inputs:** the run's captured answers and API inputs can hold personal data a
+  receiver did not ask for, and the API's run read (ADR-077) returns neither; a receiver that needs
+  them reads the conversation.
+- **Order:** deliveries are not ordered (ADR-053), so the end of a short run can arrive before its
+  start; receivers compare `startedAt` and `endedAt`, and deduplicate on the event id.
+- **Volume:** two events per live run, bounded by the runs a conversation may start in an hour and
+  the plan's monthly runs (ADR-051).
+- **Migrations:** 0055 widens the endpoint and event type checks (the one on `app.webhook_events`
+  added `NOT VALID`, as in 0047) and adds the capture function and triggers; 0056 validates the
+  check without blocking writes. Endpoints can take the new types only once this release's web app
+  runs, after the migrations and the workers, so every worker delivering them knows them.
+
+Not built: events per step or message of a run, test runs, answers or inputs in the payload,
+filters by automation, and reading runs not started through the API with the API.

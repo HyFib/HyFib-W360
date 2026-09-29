@@ -9,6 +9,7 @@ import {
   messagingConfigured,
   randomWaId,
   sendSignedWebhook,
+  standInRequests,
 } from './messaging-support';
 import { signUpAndVerify, uniqueEmail } from './support';
 
@@ -163,4 +164,121 @@ test('conversation and contact events reach an endpoint: a customer writes, a me
   // Nothing else arrives for these changes.
   await page.goto(`/c/${slug}/settings/webhooks`);
   expect(forUs()).toHaveLength(4);
+});
+
+/** An automation run event body, as far as this test reads it. */
+interface RunEventBody {
+  type: string;
+  data: {
+    run: { id: string; trigger: string } & Record<string, unknown>;
+    conversation: { id: string };
+    contact: { phone: string | null } & Record<string, unknown>;
+  };
+}
+
+test('automation run events reach an endpoint: a live run starts and ends, and a member’s test run sends nothing', async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(180_000);
+  const email = uniqueEmail('hookrun');
+  const slug = `hookrun-${Date.now().toString(36)}`;
+  const path = `/runs/${slug}`;
+  const forUs = () =>
+    received
+      .filter((r) => r.path === path)
+      .map((r) => ({ ...r, json: JSON.parse(r.body) as RunEventBody }));
+  await signUpAndVerify(page, { name: 'Ravi Runs', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('Run Traders');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+  const { wabaId, phoneNumberId } = await connectTestChannel({ ownerEmail: email, slug });
+
+  // An endpoint for the two automation events.
+  await page.goto(`/c/${slug}/settings/webhooks`);
+  await page.getByLabel('Endpoint URL').fill(`http://${HOST}:${port}${path}`);
+  await page.getByRole('checkbox', { name: /Automation started/ }).check();
+  await page.getByRole('checkbox', { name: /Automation ended/ }).check();
+  await page.getByRole('button', { name: 'Add endpoint' }).click();
+  const secretField = page.getByLabel('Signing secret');
+  await expect(secretField).toBeVisible();
+  const secret = await secretField.inputValue();
+  await page.getByRole('button', { name: 'I have stored the secret' }).click();
+
+  // A published automation greets a customer who writes "hello".
+  await page.goto(`/c/${slug}/automations`);
+  await page.getByLabel('Name', { exact: true }).fill('Greeter');
+  await page.getByRole('button', { name: 'Create draft' }).click();
+  await expect(page.getByRole('heading', { name: 'Greeter' })).toBeVisible();
+  const automationUrl = page.url();
+  await page.getByLabel('Start when').selectOption('keyword');
+  await page.getByLabel('Keywords').fill('hello');
+  await page.locator('#step-welcome-text').fill('Hi {{name}}, thanks for writing!');
+  await page.getByRole('button', { name: 'Save draft' }).click();
+  await expect(page.getByText('Draft saved.')).toBeVisible();
+  await page.getByRole('button', { name: 'Publish' }).click();
+  await page.getByRole('alertdialog').getByRole('button', { name: 'Publish' }).click();
+  await expect(page.getByText('Published.')).toBeVisible();
+
+  // A customer writes "hello": the worker runs the automation, which greets them and ends.
+  const first = randomWaId();
+  await sendSignedWebhook(request, inboundMessage(wabaId, phoneNumberId, first, 'hello'));
+  await expect(async () => expect(forUs()).toHaveLength(2)).toPass({ timeout: 30_000 });
+  for (const event of forUs()) {
+    expect(signatureValid(event.headers, event.body, secret)).toBe(true);
+    expect(event.headers['w360-event-type']).toBe(event.json.type);
+  }
+  const started = forUs().find((e) => e.json.type === 'automation.run_started')!.json;
+  const ended = forUs().find((e) => e.json.type === 'automation.run_ended')!.json;
+  expect(started.data).toMatchObject({
+    run: {
+      automationName: 'Greeter',
+      trigger: 'keyword',
+      apiKeyId: null,
+      status: 'running',
+      endReason: null,
+      endedAt: null,
+    },
+    contact: { phone: `+${first}`, name: 'Priya Customer' },
+  });
+  expect(ended.data).toMatchObject({
+    run: { id: started.data.run.id, trigger: 'keyword', status: 'completed', endReason: 'no_next' },
+    conversation: started.data.conversation,
+  });
+
+  // A member tests the draft in that conversation: the test greets the customer and ends.
+  await page.goto(automationUrl);
+  await page.getByRole('button', { name: 'Start test run' }).click();
+  await expect(page.getByText('Test started.')).toBeVisible();
+  await expect
+    .poll(
+      async () =>
+        (await standInRequests(request)).filter(
+          (r) =>
+            (r.body as { to?: string; type?: string })?.to === first &&
+            (r.body as { type?: string }).type === 'text',
+        ).length,
+      { timeout: 30_000 },
+    )
+    .toBe(2);
+  const testRun = page.locator('li').filter({ hasText: /Test$/ });
+  await expect(async () => {
+    await page.goto(automationUrl);
+    await expect(testRun).toContainText('Completed', { timeout: 1_000 });
+  }).toPass({ timeout: 30_000 });
+
+  // It sent nothing: another customer's run brings only its own two events.
+  const second = randomWaId();
+  await sendSignedWebhook(request, inboundMessage(wabaId, phoneNumberId, second, 'hello'));
+  await expect(async () => expect(forUs()).toHaveLength(4)).toPass({ timeout: 30_000 });
+  expect(
+    forUs()
+      .slice(2)
+      .map((e) => [e.json.type, e.json.data.run.trigger, e.json.data.contact.phone])
+      .sort(),
+  ).toEqual([
+    ['automation.run_ended', 'keyword', `+${second}`],
+    ['automation.run_started', 'keyword', `+${second}`],
+  ]);
 });

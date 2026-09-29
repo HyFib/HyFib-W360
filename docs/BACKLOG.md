@@ -421,9 +421,12 @@ verification, app review, Embedded Signup configuration).
   `conversation.status_changed`, `conversation.assignment_changed` (whether a member is assigned,
   never who), `contact.created`, `contact.updated` (name, number, email, tags) and `contact.erased`,
   one contact event per contact and transaction, erasure sending only `contact.erased` with no
-  personal data). Remaining: filters beyond the event type, custom headers, mutual TLS, fixed egress
-  addresses, custom field changes, member and team identities, events for campaigns, automations and
-  orders, load tests.
+  personal data). **[Automation run events built, locally verified]** (ADR-078:
+  `automation.run_started` and `automation.run_ended` for live runs, whatever started them, with
+  what started the run, the API key for runs started through the API, the status and end reason;
+  test runs send nothing; no answers or inputs). Remaining: filters beyond the event type (such as
+  by automation), custom headers, mutual TLS, fixed egress addresses, custom field changes, member
+  and team identities, events for campaigns, orders and each step of a run, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,

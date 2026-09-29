@@ -1278,6 +1278,22 @@ transaction (one `CREATE INDEX CONCURRENTLY`): a failure can leave an INVALID in
 again. 0049 validates the type check without blocking writes; it fails only if a stored event has a
 type outside the list, which no code writes: look for the row by `type` before running it again.
 
+**Automation run events (ADR-078).** An endpoint that takes `automation.run_started` or
+`automation.run_ended` hears of live runs only: a member's test run sends nothing, so a receiver
+that sees no event for a test is working as designed. The end of a short run can arrive before its
+start (deliveries are not ordered); receivers compare `run.startedAt` and `run.endedAt`. A receiver
+that asks for a run's answers or API inputs: payloads never carry them; the run page shows answers
+to members who can see the conversation. The event keeps the run and automation ids and the end
+reason in `app.webhook_events.detail`.
+
+**Migration 0055 or 0056 failed.** 0055 runs in one transaction, so a failure applies nothing: it
+widens the event type checks (the one on `app.webhook_events` `NOT VALID`) and adds the capture
+function and the two triggers on `app.automation_runs`. A failure usually means a check was renamed
+by hand (`webhook_endpoints_event_types_check`, `webhook_events_type_check`) or a trigger of the
+same name exists. 0056 validates the type check without blocking writes; it fails only if a stored
+event has a type outside the list, which no code writes: look for the row by `type` before running
+it again.
+
 ## 10P. Platform operations console
 
 `/platform/ops` is for platform owners and operators (MFA). It shows counts, states, error codes,

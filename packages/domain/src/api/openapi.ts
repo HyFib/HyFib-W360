@@ -9,6 +9,8 @@ import {
 } from '@w360/db';
 import { WEBHOOK_EVENT_INFO, WEBHOOK_LIMITS, WEBHOOK_RETRY_SECONDS } from '../webhooks/model';
 import {
+  automationRunEndedPayloadSchema,
+  automationRunStartedPayloadSchema,
   consentChangedPayloadSchema,
   contactCreatedPayloadSchema,
   contactErasedPayloadSchema,
@@ -641,6 +643,18 @@ export function buildOpenApiDocument(serverUrl: string) {
         WEBHOOK_EVENT_INFO['contact.erased'].description,
         'WebhookContactErased',
       ),
+      'automation.run_started': webhook(
+        'webhookAutomationRunStarted',
+        WEBHOOK_EVENT_INFO['automation.run_started'].label,
+        `${WEBHOOK_EVENT_INFO['automation.run_started'].description} For a run started through the API, run.id is the id POST /automations/{id}/runs answered and run.apiKeyId names the key that called it.`,
+        'WebhookAutomationRunStarted',
+      ),
+      'automation.run_ended': webhook(
+        'webhookAutomationRunEnded',
+        WEBHOOK_EVENT_INFO['automation.run_ended'].label,
+        `${WEBHOOK_EVENT_INFO['automation.run_ended'].description} Deliveries are not ordered: the end of a short run can arrive before its start, so compare run.startedAt and run.endedAt.`,
+        'WebhookAutomationRunEnded',
+      ),
       ping: webhook(
         'webhookPing',
         'Test event',
@@ -728,6 +742,8 @@ export function buildOpenApiDocument(serverUrl: string) {
         WebhookContactCreated: jsonSchema(contactCreatedPayloadSchema),
         WebhookContactUpdated: jsonSchema(contactUpdatedPayloadSchema),
         WebhookContactErased: jsonSchema(contactErasedPayloadSchema),
+        WebhookAutomationRunStarted: jsonSchema(automationRunStartedPayloadSchema),
+        WebhookAutomationRunEnded: jsonSchema(automationRunEndedPayloadSchema),
         WebhookPing: jsonSchema(pingPayloadSchema),
       },
     },

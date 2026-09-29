@@ -1,6 +1,10 @@
 import { z } from 'zod';
 import {
   and,
+  AUTOMATION_END_REASONS,
+  AUTOMATION_RUN_STATUSES,
+  automationRuns,
+  automations,
   channelAccounts,
   contacts,
   CONVERSATION_STATUSES,
@@ -14,9 +18,9 @@ import {
 import { apiContactColumns, apiContactSchema, toApiContact } from '../api/contact-view';
 
 /**
- * The JSON bodies of outgoing webhooks (ADR-053, ADR-074). The zod schemas describe them in the
- * OpenAPI document; `buildWebhookPayload` builds them from an event when it is delivered, reading
- * the company's current data (an erased contact has no number or name).
+ * The JSON bodies of outgoing webhooks (ADR-053, ADR-074, ADR-078). The zod schemas describe them
+ * in the OpenAPI document; `buildWebhookPayload` builds them from an event when it is delivered,
+ * reading the company's current data (an erased contact has no number or name).
  */
 
 const contactSchema = z.object({
@@ -189,6 +193,57 @@ export const contactErasedPayloadSchema = envelope(
   z.object({ contact: webhookContactSchema }),
 );
 
+/** What starts a live run; members' test runs send no events. */
+export const WEBHOOK_RUN_TRIGGERS = [
+  'keyword',
+  'conversation_started',
+  'any_message',
+  'store_event',
+  'api',
+] as const;
+
+const webhookRunSchema = z.object({
+  id: z.uuid(),
+  automationId: z.uuid(),
+  automationName: z
+    .string()
+    .nullable()
+    .describe('The automation’s name when the event is delivered.'),
+  trigger: z
+    .enum(WEBHOOK_RUN_TRIGGERS)
+    .describe(
+      'What started it: a keyword, a new conversation, any message, a store’s order event or a call through the API.',
+    ),
+  apiKeyId: z
+    .uuid()
+    .nullable()
+    .describe('The API key that started it, for a run started through the API.'),
+  status: z
+    .enum(AUTOMATION_RUN_STATUSES)
+    .describe('The status this event reports: running when it started, the status it ended with.'),
+  endReason: z
+    .enum(Object.values(AUTOMATION_END_REASONS).flat() as [string, ...string[]])
+    .nullable()
+    .describe('Why it ended; null for automation.run_started.'),
+  startedAt: z.iso.datetime(),
+  endedAt: z.iso.datetime().nullable().describe('When it ended; null for automation.run_started.'),
+});
+const webhookRunDataSchema = z.object({
+  run: webhookRunSchema,
+  conversation: z.object({ id: z.uuid() }),
+  contact: contactSchema,
+  channel: channelSchema,
+});
+
+export const automationRunStartedPayloadSchema = envelope(
+  'automation.run_started',
+  webhookRunDataSchema,
+);
+export const automationRunEndedPayloadSchema = envelope(
+  'automation.run_ended',
+  webhookRunDataSchema,
+);
+
 export const pingPayloadSchema = envelope(
   'ping',
   z.object({ endpointId: z.uuid(), message: z.string() }),
@@ -356,6 +411,41 @@ async function webhookContactOf(tx: Tx, tenantId: string, contactId: string | nu
   };
 }
 
+/** A live run with its automation's name and its number, in the company. */
+async function runOf(tx: Tx, tenantId: string, runId: string | null) {
+  if (!runId || !z.uuid().safeParse(runId).success) return null;
+  const [row] = await tx
+    .select({
+      id: automationRuns.id,
+      automationId: automationRuns.automationId,
+      automationName: automations.name,
+      triggerType: automationRuns.triggerType,
+      apiKeyId: automationRuns.apiKeyId,
+      startedAt: automationRuns.startedAt,
+      conversationId: automationRuns.conversationId,
+      contactId: automationRuns.contactId,
+      channelId: automationRuns.channelAccountId,
+      channelPhone: channelAccounts.displayPhoneNumber,
+    })
+    .from(automationRuns)
+    .leftJoin(
+      automations,
+      and(
+        eq(automations.tenantId, automationRuns.tenantId),
+        eq(automations.id, automationRuns.automationId),
+      ),
+    )
+    .leftJoin(
+      channelAccounts,
+      and(
+        eq(channelAccounts.tenantId, automationRuns.tenantId),
+        eq(channelAccounts.id, automationRuns.channelAccountId),
+      ),
+    )
+    .where(and(eq(automationRuns.tenantId, tenantId), eq(automationRuns.id, runId)));
+  return row ?? null;
+}
+
 const sentBy = (senderType: string | undefined) =>
   senderType === 'agent' ||
   senderType === 'bot' ||
@@ -366,8 +456,8 @@ const sentBy = (senderType: string | undefined) =>
 
 /**
  * The body delivered for an event, built from the company's data now. Throws when the message,
- * conversation or contact an event names no longer exists (it cannot be described); callers fail
- * the delivery.
+ * conversation, contact or run an event names no longer exists (it cannot be described); callers
+ * fail the delivery.
  */
 export async function buildWebhookPayload(
   tx: Tx,
@@ -450,6 +540,32 @@ export async function buildWebhookPayload(
       if (!contact) throw new WebhookEventGoneError();
       return { ...base, data: { contact } };
     }
+    case 'automation.run_started':
+    case 'automation.run_ended': {
+      // The status, end reason and end as captured; the rest as it is now.
+      const run = await runOf(tx, tenantId, str(event.detail.runId));
+      if (!run) throw new WebhookEventGoneError();
+      const ended = event.type === 'automation.run_ended';
+      return {
+        ...base,
+        data: {
+          run: {
+            id: run.id,
+            automationId: run.automationId,
+            automationName: run.automationName ?? null,
+            trigger: run.triggerType,
+            apiKeyId: run.apiKeyId,
+            status: event.status,
+            endReason: ended ? str(event.detail.endReason) : null,
+            startedAt: run.startedAt.toISOString(),
+            endedAt: ended ? event.occurredAt.toISOString() : null,
+          },
+          conversation: { id: run.conversationId },
+          contact: await contactOf(tx, tenantId, run.contactId),
+          channel: { id: run.channelId, phone: run.channelPhone ?? null },
+        },
+      };
+    }
     case 'message.received':
     case 'message.status': {
       const message = await messageContext(tx, tenantId, event.messageId);
@@ -498,8 +614,8 @@ export async function buildWebhookPayload(
 }
 
 /**
- * The message, conversation or contact an event names was deleted (retention); the delivery fails
- * as `event_gone`.
+ * The message, conversation, contact or run an event names was deleted (retention); the delivery
+ * fails as `event_gone`.
  */
 export class WebhookEventGoneError extends Error {
   constructor() {

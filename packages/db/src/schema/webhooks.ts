@@ -14,6 +14,8 @@ export const WEBHOOK_EVENT_TYPES = [
   'contact.created',
   'contact.updated',
   'contact.erased',
+  'automation.run_started',
+  'automation.run_ended',
 ] as const;
 export type WebhookEventType = (typeof WEBHOOK_EVENT_TYPES)[number];
 

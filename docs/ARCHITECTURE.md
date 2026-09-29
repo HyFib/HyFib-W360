@@ -975,6 +975,13 @@ true`); the same key with another request (method, path and body hashed) answers
   that. Their payloads are built when delivered: conversation events as the message events are,
   contact events with the API's contact (`api/contact-view.ts`, shared with the public API) and
   `erased`, an erased contact keeping its id, source and creation time only.
+- **Automation run events** (migrations 0055–0056, ADR-078): triggers on `app.automation_runs`
+  capture `automation.run_started` when a live run is inserted and `automation.run_ended` when one
+  moves from running or waiting to an ended status, through `app.capture_webhook_event` (the run and
+  automation ids, and the end reason, in `detail`). Test runs send nothing. Their payloads are built
+  when delivered: the run (what started it, the API key for `api` runs, the automation's name now,
+  the status and end as captured), the conversation id, the contact and the number; never the run's
+  answers or inputs.
 - **Dispatch:** the worker's LISTEN connection (`apps/worker/src/webhook-listener.ts`) turns a
   notification into a lookup of active companies with due deliveries (`ops.webhook_dispatch_due`,
   SECURITY DEFINER), at most one lookup every 250 ms; the per-minute messaging sweep does the same
@@ -984,7 +991,7 @@ true`); the same key with another request (method, path and body hashed) answers
 - **Delivery** (`webhooks/delivery.ts`): the job claims up to 10 due deliveries (`FOR UPDATE SKIP
 LOCKED`; pending ones due now, then `delivering` ones whose lease expired), builds each payload
   from the company's current data (`webhooks/payloads.ts`; an erased contact has no number or name,
-  a message, conversation or contact that no longer exists ends the delivery as `event_gone`), signs
+  a message, conversation, contact or run that is gone ends the delivery as `event_gone`), signs
   it, sets the lease (the 10 s egress deadline plus 35 s) and commits. The POSTs go through the
   egress client (DNS pinned, private, loopback, link-local, metadata and reserved addresses refused,
   no redirects, 64 KB sent, responses read up to 256 KB and discarded) with no transaction open.

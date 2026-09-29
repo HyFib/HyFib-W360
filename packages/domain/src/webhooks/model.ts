@@ -3,8 +3,9 @@ import type { WebhookEventType } from '@w360/db';
 export type { WebhookEventType } from '@w360/db';
 
 /**
- * Outgoing webhooks (P5-09, ADR-053, ADR-074): the parts the settings page and the services share.
- * Pure definitions without server dependencies, so pages can use them in the browser.
+ * Outgoing webhooks (P5-09, ADR-053, ADR-074, ADR-078): the parts the settings page and the
+ * services share. Pure definitions without server dependencies, so pages can use them in the
+ * browser.
  */
 
 export const WEBHOOK_EVENT_KEYS = [
@@ -17,6 +18,8 @@ export const WEBHOOK_EVENT_KEYS = [
   'contact.created',
   'contact.updated',
   'contact.erased',
+  'automation.run_started',
+  'automation.run_ended',
 ] as const satisfies readonly WebhookEventType[];
 
 export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; description: string }> =
@@ -61,6 +64,16 @@ export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; descr
       label: 'Contact erased',
       description:
         'A contact was erased. Take it to delete your copy: the event carries no personal data.',
+    },
+    'automation.run_started': {
+      label: 'Automation started',
+      description:
+        'An automation started in a conversation: from a customer message, a store’s order event or a call through the API. Members’ test runs are not sent.',
+    },
+    'automation.run_ended': {
+      label: 'Automation ended',
+      description:
+        'An automation run ended: completed, handed to people, taken over, stopped or failed, with the reason.',
     },
   };
 

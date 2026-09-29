@@ -1,5 +1,68 @@
 # Progress
 
+## 2026-09-29 — Phase 5: webhook events for automation runs (P5-09, ADR-078)
+
+Status: **Implemented and locally verified with local test receivers (no customer endpoints).** An
+integration could learn how an automation run went only by polling a run it started through the API
+(ADR-077), and runs started otherwise could not be followed at all.
+
+### Completed
+
+- **Design (ADR-078):** `automation.run_started` when a live run starts, whatever started it, and
+  `automation.run_ended` when it ends (completed, handed off, taken over, stopped or failed) with its
+  reason; members' test runs and moves between running and waiting send nothing. Payloads are built
+  when delivered: the run (what started it, the API key for runs started through the API, the
+  automation's name, the status, reason and end time as captured, the start time), the conversation
+  id, the contact and the number; never the run's answers or inputs.
+- **Migrations:** 0055 widens the event type checks (the one on `app.webhook_events` `NOT VALID`)
+  and adds `app.webhook_capture_automation_run` with triggers after a live run is inserted and after
+  its status moves from running or waiting to an ended one; they call `app.capture_webhook_event` as
+  the role making the change (the runtime role, or `w360_definer` when erasure stops a run). 0056
+  validates the check without blocking writes.
+- **Domain:** `webhooks/payloads.ts` builds the two payloads (a run that no longer exists fails the
+  delivery as `event_gone`); `webhooks/model.ts` names and describes the events; the OpenAPI
+  document lists them, noting the API key and that deliveries are not ordered.
+- **Web:** Settings → Webhooks offers the events (from the model); its introduction, which still
+  listed only the first four kinds of event, now names every kind.
+- **Tests:** unit tests of the two payload schemas (a test run's trigger, an unknown reason and an
+  unknown status refused) and the OpenAPI entries. 5 integration tests in `webhook-events.test.ts`
+  with a local receiver: a keyword run's start and end reaching the endpoints that take each (none
+  to an endpoint that takes other events) with every payload field, and a member's test run in the
+  same conversation sending nothing; a run started through the API naming its key; a run failing
+  once the service window has closed; erasure stopping a waiting run inside its definer function,
+  both bodies delivered without the number or name; nothing captured for a company whose endpoints
+  take other events, and an event whose run is gone failing as `event_gone`. e2e
+  `webhook-events.spec.ts`: an endpoint added in settings for the two events receives a keyword
+  run's signed start and end, and a member's test run of the draft sends nothing (a second
+  customer's run then brings only its own two events).
+- **Docs:** ADR-078; ARCHITECTURE (outgoing webhooks); SECURITY (controls, Phase 5 rules);
+  THREAT-MODEL T96; RUNBOOKS (the events, migrations 0055–0056); DATA-RETENTION; BACKLOG P5-09;
+  FEATURE-MATRIX H-014.
+- **Mutation checks:** 22 regressions tried one at a time; 21 make a test fail: 10 in migration 0055 (test
+  runs captured at start or at end, no start or end trigger, moves to waiting sent as ends, the end
+  reason or end time not kept, no status, the two checks not widened), 9 in the payload builder (the
+  end reason, end time, status, key, trigger, automation name, number, contact and gone runs), the
+  event list and the OpenAPI entries. The other, removing the trigger function's explicit `REVOKE …
+FROM PUBLIC` in 0055, cannot be observed: migration 0002's default privileges already withhold
+  `EXECUTE` from `PUBLIC`.
+
+### Test commands and results (local, 2026-09-29)
+
+| Command                                                                                                                                               | Result                                                                                                                                                                                                                           |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                  | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                   |
+| `pnpm test` (unit)                                                                                                                                    | 371 passed, including 1 new in `webhooks/webhooks.test.ts`                                                                                                                                                                       |
+| `pnpm test:integration` (PostgreSQL 18.6)                                                                                                             | 518 passed, including 5 new in `webhook-events.test.ts`                                                                                                                                                                          |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                                                                                             | 518 passed                                                                                                                                                                                                                       |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` on `webhook-events.spec.ts`, `webhooks.spec.ts` and `automations.spec.ts` | build passes / 8 passed: 4 tests on each project (1.8 min). A first run failed every webhook test: after the container restarted, the test receiver's host no longer resolved to 127.0.0.1 (CI's workflow adds that hosts entry) |
+| Mutation checks                                                                                                                                       | 22 regressions tried; 21 make a test fail, and the other cannot be observed                                                                                                                                                      |
+
+### Known gaps
+
+- Not built: events per step or message of a run, test runs, answers or inputs in the payload,
+  filters by automation, and reading runs not started through the API with the API.
+- Delivered only to local test receivers; no customer endpoint has received these events.
+
 ## 2026-09-29 — Phase 5: starting automations through the public API (P5-08, ADR-077)
 
 Status: **Implemented and locally verified against the Graph stand-in (no customer data).**

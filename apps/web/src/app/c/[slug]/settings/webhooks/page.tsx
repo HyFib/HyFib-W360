@@ -40,9 +40,10 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
         <CardHeader>
           <CardTitle>Webhooks</CardTitle>
           <CardDescription>
-            Your systems can receive what happens in HyFib W360 as it happens: messages received,
-            message status, consent changes and template status. Each event is a signed JSON POST to
-            your endpoint.
+            Your systems can receive what happens in HyFib W360 as it happens: messages and their
+            status, consent changes, template status, conversations resolved, reopened or assigned,
+            contacts added, changed or erased, and automations starting and ending. Each event is a
+            signed JSON POST to your endpoint.
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-2 text-sm">
