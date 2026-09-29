@@ -38,6 +38,12 @@ API keys; now owners and administrators are emailed a week before.
   sweep after the check finished, to every platform owner in the database: 73 in the reused local
   database, which the email queue delivered in 37 seconds. The wait is now 150 seconds (one sweep
   plus the fan-out); with it the spec passed on both projects.
+- **Fix to `reports.spec.ts`:** in CI on 2bdead7 (167 passed in 51.0 minutes, all green), its WebKit
+  test failed once and passed on the retry. `page.goto` to Reports was interrupted by a navigation
+  to the conversation it left: the conversation's live updates refresh the page, a page load
+  started during such a refresh cancels it, and Next.js answers by loading the conversation again.
+  The test now leaves from the main navigation, as `automations.spec.ts` does (passed twice on
+  each Chromium project locally; WebKit and Firefox run in CI only).
 - **Docs:** ADR-067; ARCHITECTURE §6N; SECURITY (Public API row and Phase 5 rules); THREAT-MODEL
   T67; RUNBOOKS (a reminder that did not come, migration 0040, and the stale "monthly quotas are not
   built" under 429 corrected); DATA-RETENTION; BACKLOG P5-08; FEATURE-MATRIX H-033. The e2e job's

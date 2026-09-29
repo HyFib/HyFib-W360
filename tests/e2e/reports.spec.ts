@@ -63,13 +63,18 @@ test('reports show response times against the target, member activity and a CSV 
   await page.getByRole('button', { name: 'Send' }).click();
   const thread = page.getByRole('list', { name: /^Messages with/ });
   await expect(thread.getByText('Yes, we do.')).toBeVisible();
-  // Leave only once the reply was handed to WhatsApp and the thread refreshed, so no refresh of
-  // this page is still in flight when the next one is opened.
   await expect(thread.getByText('Sent to WhatsApp')).toBeVisible({ timeout: 20_000 });
 
-  // Reports is in the navigation now that the module is available.
-  await expect(page.getByRole('link', { name: 'Reports' }).first()).toBeAttached();
-  await page.goto(`/c/${slug}/reports`);
+  // Reports is in the navigation now that the module is available. The conversation is left from
+  // the navigation, not by loading a URL: its live updates refresh the page, a page load started
+  // while such a refresh is in flight cancels the refresh, and Next.js answers by loading the
+  // conversation again, which interrupts the page load (WebKit, on 2bdead7). Navigation inside the
+  // app does not cancel the refresh.
+  await page
+    .getByRole('navigation', { name: 'Main' })
+    .getByRole('link', { name: 'Reports' })
+    .click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}/reports$`));
   await expect(page.getByRole('heading', { name: 'Reports', level: 1 })).toBeVisible();
   await expect(stat(page, 'Customer messages')).toContainText('2');
   await expect(stat(page, 'Waiting for a reply')).toContainText('1');
