@@ -10,6 +10,7 @@ export function ConfirmDialog({
   title,
   description,
   confirmLabel,
+  cancelLabel = 'Cancel',
   onConfirm,
   destructive = false,
   children,
@@ -18,6 +19,8 @@ export function ConfirmDialog({
   title: string;
   description: ReactNode;
   confirmLabel: string;
+  /** The button that closes the dialog without doing anything. */
+  cancelLabel?: string;
   onConfirm: () => void;
   destructive?: boolean;
   /** Extra content between the description and the buttons (for example an optional note). */
@@ -33,7 +36,7 @@ export function ConfirmDialog({
           <AD.Description className="text-sm text-muted-foreground">{description}</AD.Description>
           {children}
           <div className="flex justify-end gap-2">
-            <AD.Cancel className={buttonVariants({ variant: 'outline' })}>Cancel</AD.Cancel>
+            <AD.Cancel className={buttonVariants({ variant: 'outline' })}>{cancelLabel}</AD.Cancel>
             <AD.Action
               className={cn(buttonVariants({ variant: destructive ? 'destructive' : 'primary' }))}
               onClick={onConfirm}

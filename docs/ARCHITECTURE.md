@@ -144,7 +144,10 @@ so grants issued after the transfer would silently grant nothing (migration 0002
 payload bound (AAD) to the row id. The worker claims a row with a short lease (`sending`,
 `locked_until`), sends via the SMTP adapter outside any transaction, then records `sent` and erases
 the payload. Transient failures return the row to `pending` and pg-boss retries with backoff;
-permanent SMTP 5xx or exhausted attempts mark `failed`. Delivery is at-least-once.
+permanent SMTP 5xx or exhausted attempts mark `failed`. Delivery is at-least-once. Emails someone
+is waiting for on a page (confirming an address, resetting a password) are queued at a higher
+priority than notices, also when the outbox sweep signals a lost one again, so they do not wait
+behind a burst of notices (ADR-069).
 
 ## 6. Messaging pipeline **[built — verified against a local Graph stand-in; no live Meta traffic yet]**
 
@@ -263,8 +266,9 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   (`packages/domain/src/reports/definitions.ts`); clicks and conversions are reported as not
   measured. Per-recipient CSV export is formula-safe and audited.
 - **Rate cards** (`ops.rate_cards`, `rate_card_prefixes`, `rate_card_prices`): entered by platform
-  staff from Meta's published cards (platform console), immutable once published; companies read
-  published cards only.
+  staff from Meta's published cards (platform console), immutable once published; the app role reads
+  published and withdrawn cards, and estimates use published cards only. Companies see the cards
+  for their currency under Billing → Usage and rates (§7).
 
 ## 6C. Reports **[built — numbers come from HyFib's own records; provider data verified against a local Graph stand-in only]**
 
@@ -818,8 +822,12 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   the definer function; the request acts in its company's scope as the key (`ApiContext`, no user),
   so no company id is ever read from the request. Failed authentication is limited per client
   address (bursts of 20, one every 5 seconds), then each key (bursts of 50, 10 a second) and each
-  company (bursts of 200, 30 a second) have token buckets; over the limit answers 429 with
-  `Retry-After`. JSON bodies need `Content-Type: application/json` and at most 64 KB. Writing scopes
+  company (bursts of 200, 30 a second) have token buckets (`admitFailedApiAuthentication`,
+  `admitApiRate` in `api/rate-limits.ts`; a request its key refuses takes nothing from the
+  company's bucket); over the limit answers 429 with `Retry-After`. Buckets that are full again are
+  deleted by the minute messaging sweep (`ops.purge_rate_limit_buckets`, 0041, ADR-068). Then the
+  request is counted against the plan's monthly API requests (below). JSON
+  bodies need `Content-Type: application/json` and at most 64 KB. Writing scopes
   are refused while the company is suspended or restricted (reading continues). Errors are
   `{"error": {"code", "message", "reason"?, "issues"?}, "requestId"}` with the status of the
   application error; other failures are a generic 500 logged with the request id. Tokens are never
@@ -838,15 +846,33 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   retry waits on the unique index and then replays the stored response (`Idempotent-Replayed:
 true`); the same key with another request (method, path and body hashed) answers 422
   `idempotency_key_reused`; a failed request stores nothing; an expired key is reused.
+- **Monthly API requests by plan (0035, ADR-061):** `ops.plans.api_requests_monthly` is empty for no
+  limit, 0 when the plan leaves the API out, or the requests a company may make per monthly usage
+  period (§7). `admitApiRequest` (`api/quota.ts`) counts every request that passed authentication
+  and the rate limits in `app.usage_counters` (metric `api_requests`) with one upsert that never
+  counts beyond the limit, and counts without a limit too. A plan without the API answers 403
+  `forbidden` with reason `not_in_plan` (creating and rotating keys are refused too); a month used
+  up answers 429 `rate_limited` with reason `quota_exceeded` and `Retry-After` until the next
+  period. The minute plan sweep emails the billing managers once per period
+  (`ops.api_quota_reached`), and once before, at 80% of the limit (ADR-062).
 - **OpenAPI** (`api/openapi.ts`): `GET /api/v1/openapi.json` (no key; cacheable 5 minutes) is built
   from the zod schemas that validate requests; a unit test checks it against the route handlers.
-- **Web:** Settings → API keys (`developer.manage`): the base URL and an example, the keys with state,
-  prefix, scopes, author, last use and expiry; creation with the scopes the member may grant; the new
-  token shown once with a copy button (kept only in the page's memory); rotation with an overlap;
-  revocation.
+- **Expiry reminders (0040, ADR-067):** the minute messaging sweep (`api/expiry-reminders.ts`) lists,
+  through the definer function `ops.api_key_expiry_reminders_due` (company and key ids only, over a
+  partial index), keys that can still be used, were not rotated, expire within 7 days and were not
+  reminded, of companies not being deleted. Each key is locked and checked again in its company's
+  scope, then `expiry_reminded_at` is set (kept by the key's guard) in the transaction that queues a
+  company notice to its active owners and administrators: the key's name and prefix, its expiry in
+  the company's time zone, its author, its last use and how to rotate it. A failure rolls back and
+  is retried by the next sweep without holding up other keys.
+- **Web:** Settings → API keys (`developer.manage`): the month's API requests and the plan's limit
+  (or that the plan leaves the API out), the base URL and an example, the keys with state, prefix,
+  scopes, author, last use and expiry, a mark on keys that expire within 7 days and when their
+  reminder was emailed; creation with the scopes the member may grant; the new token shown once
+  with a copy button (kept only in the page's memory); rotation with an overlap; revocation.
 - **Not built yet:** session, media and interactive messages, listing conversations and messages,
-  starting automations, OAuth apps, IP allowlists per key, monthly API quotas per plan and API
-  access as a plan module. Outgoing webhooks are section 6O.
+  starting automations, OAuth apps, IP allowlists per key, packs of extra API requests and per-key
+  quotas. Outgoing webhooks are section 6O.
 
 ## 6O. Outgoing webhooks **[built — verified with local test receivers only; no customer endpoints yet]**
 
@@ -981,10 +1007,12 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   only inside the functions.
 - **Provider clean-up:** Graph `DELETE /{WABA-ID}/subscribed_apps` with the account's stored token;
   the store worker's removal (Shopify `appUninstall`, WooCommerce webhook deletion) with the removal
-  deadline already past; Razorpay token deletion for HyFib's card mandate, with the mandate cancelled
+  deadline already past; the company's plan subscription cancelled at Razorpay at once (0037,
+  ADR-063); Razorpay token deletion for HyFib's card mandate, with the mandate cancelled
   and auto-recharge turned off either way. Missing configuration or credentials are recorded as
   skipped, errors as failed; neither stops the deletion.
-- **Kept:** the company row as a tombstone, billing tables, plan history, the register, support
+- **Kept:** the company row as a tombstone, billing tables, plan history, plan subscriptions and
+  plan payments, the register, support
   grants and security events (the catalog tests list them); people's accounts.
 - **Web:** Settings → Company data (owners: export link, deletion form with the typed address, the
   pending state with the due date and a cancel button, the started state); the platform company page
@@ -993,7 +1021,7 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   (ADR-056).
 - **Not built yet:** staff-started deletion, stored exports and other formats.
 
-## 7. Commercial model and billing **[built: plans and entitlements, wallet, top-ups, auto-recharge, statements and receipts, staff refunds of unused credit — verified against a local Razorpay stand-in only; paying for plans in HyFib and tax invoices planned]**
+## 7. Commercial model and billing **[built: plans and entitlements, paying for plans by Razorpay subscription, wallet, top-ups, auto-recharge, statements and receipts, usage and rates, staff refunds of unused credit, daily settlement reconciliation — verified against a local Razorpay stand-in only; tax invoices planned]**
 
 - **Who pays Meta:** as a Meta Tech Provider HyFib has no credit line; each customer adds its own
   payment method and Meta bills them directly (`tenants.billing_mode = 'direct_meta'`, the default).
@@ -1018,11 +1046,45 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   `app.accept_invitation` checks the same limit in SQL. Live automation runs started by customer
   messages or store events consume `app.usage_counters` atomically (`ON CONFLICT … DO UPDATE …
 WHERE used < limit`), per monthly period from `usage_anchor`; the sweep announces a used-up month
-  once (`notified_at`). The tenant context drops the write permissions of modules the plan leaves
-  out (`MODULE_WRITE_PERMISSIONS`); workers check the module before starting runs, order messages
-  and cart reminders (`not_in_plan`). Platform staff see usage as counts only
-  (`ops.platform_tenant_usage`). Charging for plans (Razorpay Subscriptions), self-serve changes,
-  proration and plan invoices are not built: staff set paid periods.
+  once (`notified_at`) and warns once at 80% of the limit (`warned_at`, 0036, ADR-062), each time
+  locking the counter and checking it against the current limit and period (a counter of an
+  earlier period is marked without an email). The tenant context drops the write permissions of
+  modules the plan leaves out (`MODULE_WRITE_PERMISSIONS`); workers check the module before
+  starting runs, order messages and cart reminders (`not_in_plan`). Public API requests are counted
+  the same way against the version's monthly API requests (0035, ADR-061; §6N). Platform staff see
+  usage as counts only (`ops.platform_tenant_usage`). Staff set paid periods for payments settled
+  outside HyFib; companies can also pay by Razorpay subscription (below). Self-serve plan changes,
+  proration and plan invoices are not built.
+- **Paying for plans (0037, ADR-063) [built, behind `RAZORPAY_SUBSCRIPTIONS_ENABLED`]:** Billing →
+  Paying for your plan (`packages/domain/src/billing/plan-subscriptions.ts`) quotes the plan version
+  with the company's add-ons plus the tax platform owners set (`ops.plan_settings.plan_tax_bp`,
+  `planPaymentQuote` in integer paise). Owners and billing managers with a recent sign-in start a
+  subscription: `app.plan_subscriptions` is written first (`creating`, amounts, add-ons and the plan
+  fixed by column grants, one live row per company by a partial unique index, an advisory lock per
+  company), then Razorpay's plan (`POST /v1/plans`, monthly, quarterly or yearly) and subscription
+  (`POST /v1/subscriptions`, five years of cycles, `expire_by` in one hour, `customer_notify`).
+  Checkout opens with the `subscription_id`; its signature (`payment_id|subscription_id`, checked
+  against OUR stored id) only prompts `syncPlanSubscription`, which is also run by every
+  `subscription.*` webhook, by a `payment.*` webhook whose fetched invoice names one of our
+  subscriptions (`ops.billing_resolve_subscription`), by the minute sweep
+  (`ops.plan_subscriptions_due`: unfinished starts after 10 minutes, unpaid ones past `expire_by`,
+  live ones daily and hourly after a cycle ends) and by the plan sweep before a period-end
+  transition. The sync fetches the subscription and, while Razorpay's `paid_count` exceeds the
+  recorded payments, its invoices; each paid invoice of our subscription, in INR, for our amount,
+  whose payment is fetched as captured, becomes one append-only `app.plan_payments` row (payment and
+  invoice ids unique). Ended statuses stay ended, unknown ones keep ours, older reads (fewer paid
+  cycles) change nothing, and an unpaid subscription past its window is cancelled at Razorpay. For
+  an active subscription `app.apply_plan_subscription_period` (definer, the company's scope) makes
+  the plan active for exactly `current_start`–`current_end` when a payment's billing period has its
+  middle in that cycle and the plan state still has the subscription's version and add-ons, links
+  `tenant_plans.subscription_id` and restarts the usage period. Company cancels are
+  `cancel_at_cycle_end` for an active subscription (at once otherwise); `app.apply_plan_transition`
+  ends such a period as canceled without grace days. Platform owners set the tax and cancel a
+  company's subscription at once (`/platform/tenants/<id>`), staff plan changes are refused while a
+  subscription is live, and company deletion cancels it at Razorpay (§6Q). Billing managers are
+  emailed about payments, failed charges (`pending`), stopped retries (`halted`) and cancels. Each
+  plan payment has a receipt page (`billing/plan-payments/<id>`, ADR-064) computed from the payment
+  and its subscription, linked from the payments table and the payment email; not a tax invoice.
 - **Ledger (0004_billing):** one INR wallet per company with five accounts (`wallet_available`,
   `wallet_held`, `payment_clearing`, `service_revenue`, `dispute_losses`). `ledger_transactions` and
   `ledger_entries` are append-only (trigger), balances are maintained by trigger from the entries,
@@ -1120,6 +1182,71 @@ payment_requested → succeeded`; before each provider call it is written as `un
   definer functions that settle the hold. A due company deletion waits until no refund is open
   (the worker checks before it starts). Statements label the hold "Reserved for a refund" and its
   release "Refund reservation released"; the Billing page and the receipt show refunds in progress.
+
+- **Daily settlement reconciliation (0034, ADR-059) [built]:** the minute billing sweep calls
+  `ops.settlement_recon_due` with the latest day it may reconcile (the previous day in India from
+  06:00 India time). That creates the run for the day and for any of the 6 days before it without
+  one (never before the first day ever reconciled), fails runs that used their six attempts, and
+  returns the runs due; one signed `billing.settlement-recon` job is queued for each. The job claims
+  its run (`ops.settlement_recon_claim`: a 15-minute lease and a new attempt number that every
+  write of the attempt names, so an attempt whose lease expired cannot write). It reads
+  `GET /v1/settlements/recon/combined` a page of 1,000 at a time (R-110, R-111; at most 50 pages)
+  and looks each page's provider ids up in HyFib's records (`ops.settlement_recon_facts`: top-ups by
+  payment and order, card mandates by authorisation payment, order and refund, recorded refunds by
+  ledger key through the refunded payment's top-up, and plan payments by payment id, 0037). A
+  payment on a top-up's order that did not credit it goes through `applyPaymentById`, as does a
+  payment on no order of HyFib's (it may be a plan subscription's charge, recorded by syncing the
+  subscription), and a refund of a payment that credited a top-up but was never recorded goes
+  through `applyRefundById`: both fetch from Razorpay first and use the functions the webhooks use,
+  so the reconciliation is the backstop for lost webhooks and records nothing twice. Refunds of plan
+  payments wait for a person (HyFib does not refund them). Everything else is classified (matched, a mismatch, for review, not HyFib's) and
+  written with `ops.settlement_recon_record_items`; `ops.settlement_recon_complete` removes items
+  Razorpay no longer lists for the day and totals the run. A Razorpay failure that may pass leaves
+  the run due again after 5, 15, 60, 180 and 360 minutes (`ops.settlement_recon_defer`); any other
+  4xx fails it (`ops.settlement_recon_fail`). The runtime roles have no privileges on
+  `ops.settlement_recon_runs` or `ops.settlement_recon_items`: the worker writes through these
+  definer functions, and `/platform/reconciliation` reads through
+  `ops.platform_settlement_recon_runs`, `…_run` and `…_unsettled` (platform staff) and acts through
+  `ops.platform_request_settlement_recon` and `ops.platform_resolve_settlement_item` (platform
+  owners, audited with a reason or note). Items keep provider ids, amounts, fees and HyFib's match;
+  never notes, descriptions, receipts or card fields.
+
+- **Reconciliation alerts (0039, ADR-066) [built]:** the minute billing sweep
+  (`packages/domain/src/billing/settlement-alerts.ts`, whether or not Razorpay is configured) lists
+  finished attempts not emailed yet (`ops.settlement_recon_alerts_due`: failed runs and completed runs
+  with transactions still waiting for a person, ids only), marks each with
+  `ops.settlement_recon_mark_alerted` (which returns the day, the outcome, the last error and the open
+  transactions by status, counted under the run's row lock) and, in the same transaction, queues one
+  `platform.notice` email per platform owner (`ops.settlement_recon_alert_recipients`) listing the
+  days. `alerted_attempt` on the run records the attempt emailed, so each attempt is emailed once and
+  a day run again is emailed again.
+
+- **Usage and rates (ADR-060) [built]:** Billing → Usage and rates
+  (`packages/domain/src/billing/usage.ts`) shows owners, administrators and billing managers
+  (`billing.read`) Meta's rates for the company's billing currency (Settings → Messaging) and this
+  month's estimate, read in one repeatable-read, read-only transaction in the company's RLS scope:
+  - the published card in force (the latest effective time not after now): list prices at volume
+    tier 0 by market and pricing category, a missing price shown as not priced, never as zero;
+  - the next published card (the earliest effective time after now) with every price it changes,
+    adds or no longer lists, and the difference;
+  - this month so far in the company's time zone: delivered, billable, free and not-yet-priced
+    messages and the estimate by pricing category, from `estimateMetaCharges`, the function behind
+    Reports → Estimated Meta charges (§6C), so each message is priced with the card in force when it
+    was recorded and the two pages agree.
+
+  Drafts and withdrawn cards are never shown. Nothing is stored, posted to the ledger or taken from
+  service credit; Meta bills the company directly (ADR-011).
+
+- **Rate change notices (0038, ADR-065) [built]:** the minute billing sweep
+  (`packages/domain/src/billing/rate-notices.ts`, whether or not Razorpay is configured) lists, through
+  the definer function `ops.rate_change_notices_due` (ids only), active companies whose billing
+  currency has a published card taking effect within 7 days that they were not told about. Each
+  pair is checked again in the company's scope (active, the card published, for its currency, still
+  ahead and within the week) and recorded in `app.rate_change_notices` (unique per company and
+  card, append-only) in the transaction that queues the billing notice to its owners and billing
+  managers: when the card takes effect in the company's time zone, what it changes against the
+  published card in force just before it, the largest changes and a link to Usage and rates. A
+  failure records nothing and is retried by the next sweep without holding up other companies.
 
 - **Browser security:** the billing and WhatsApp-channels pages get their own CSP allowing only
   that provider's script and frame. Because a CSP belongs to the loaded document, links to these

@@ -1,6 +1,6 @@
 import type { Job } from 'pg-boss';
 import { QUEUES } from '@w360/contracts';
-import { authorizeJob, findStaleOutboxRows, processEmailOutbox } from '@w360/domain';
+import { authorizeJob, emailPriority, findStaleOutboxRows, processEmailOutbox } from '@w360/domain';
 import type { WorkerRuntime } from '../runtime';
 
 /** Thrown to hand a job back to pg-boss for a retry with backoff. */
@@ -37,14 +37,12 @@ export function emailSendHandler(rt: WorkerRuntime) {
 export function outboxSweepHandler(rt: WorkerRuntime) {
   return async (): Promise<void> => {
     const stale = await findStaleOutboxRows(rt);
-    for (const id of stale) {
+    for (const { id, kind } of stale) {
       await rt.jobs.enqueue(
         null,
         QUEUES.emailSend.name,
         rt.signer.sign({ kind: 'email.send', tenantId: null, actorUserId: null, ref: id }),
-        {
-          singletonKey: id,
-        },
+        { singletonKey: id, priority: emailPriority(kind) },
       );
     }
     if (stale.length > 0) rt.logger.info({ count: stale.length }, 'outbox sweep re-signalled rows');

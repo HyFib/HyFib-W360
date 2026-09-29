@@ -6,22 +6,35 @@ import {
   auditEvents,
   desc,
   eq,
+  inArray,
   outerColumn,
+  planPayments,
   planSettings,
+  planSubscriptions,
   plans,
   platformAuditEvents,
   sql,
   tenantPlans,
   tenants,
   usageCounters,
+  gt,
+  or,
+  LIVE_PLAN_SUBSCRIPTION_STATUSES,
   PLAN_MODULES,
   type TenantPlanStatus,
 } from '@w360/db';
 import type { PlatformDatabase } from '@w360/db/platform';
+import type { RazorpayClient } from '../billing/razorpay';
 import { parseLocalDateTime, resolveLocalTime } from '../campaigns/schedule';
 import { parseAmountToMinor } from '../crm/money';
 import { loadEntitlements } from '../plans/entitlements';
-import { ASSIGNABLE_PLAN_STATES, PLAN_BOUNDS, PLAN_MODULE_KEYS, usagePeriod } from '../plans/model';
+import {
+  ASSIGNABLE_PLAN_STATES,
+  PLAN_BOUNDS,
+  PLAN_MODULE_KEYS,
+  PLAN_TAX_MAX_BP,
+  usagePeriod,
+} from '../plans/model';
 import { parseInput } from '../validation';
 import type { PlatformActor } from './service';
 
@@ -31,7 +44,9 @@ import type { PlatformActor } from './service';
  * longer offered; one published version with trial days may be the default trial for new
  * companies. Platform staff (owners and operators) put companies on plans. Every change is written
  * to the platform audit log, and changes to a company's plan to the company's own log too.
- * Nothing is charged here: periods are set by staff (ADR-051 "Not built").
+ * Companies may pay for their plan through a Razorpay subscription (ADR-063): platform owners set
+ * the tax on plan prices and can cancel a company's subscription; staff plan changes wait until a
+ * company has no subscription that can still be charged.
  */
 
 const DAY_MS = 86_400_000;
@@ -150,6 +165,11 @@ const planFieldsSchema = z
       'A run pack is a whole number of runs up to 10,000,000',
     ),
     runPackPrice: optionalRupees('Enter the price of a run pack in rupees, or leave it empty'),
+    apiRequestsMonthly: optionalWhole(
+      0,
+      PLAN_BOUNDS.apiRequests,
+      'API requests are a whole number up to 1,000,000,000',
+    ),
     modules: z
       .preprocess(
         (v) => (v === undefined || v === null ? [] : typeof v === 'string' ? [v] : v),
@@ -202,6 +222,28 @@ const defaultTrialSchema = z.object({
   planId: z.preprocess((v) => (blank(v) ? null : v), z.uuid('Choose a plan').nullable()),
 });
 
+/** A percentage as typed ("18", "12.5") in basis points, exactly; empty: not set. */
+const taxPercent = z.preprocess(
+  (v) => (blank(v) ? null : String(v).trim()),
+  z
+    .string()
+    .nullable()
+    .transform((text, ctx) => {
+      if (text === null) return null;
+      const match = /^(\d{1,2})(?:\.(\d{1,2}))?$/.exec(text);
+      const bp = match ? Number(match[1]) * 100 + Number((match[2] ?? '').padEnd(2, '0')) : NaN;
+      if (!Number.isInteger(bp) || bp > PLAN_TAX_MAX_BP) {
+        ctx.addIssue({ code: 'custom', message: 'Enter the tax as a percentage from 0 to 50' });
+        return z.NEVER;
+      }
+      return bp;
+    }),
+);
+
+const planTaxSchema = z.object({ tax: taxPercent }).and(reasonSchema);
+
+const cancelSubscriptionSchema = z.object({ tenantId: z.uuid() }).and(reasonSchema);
+
 const day = z.preprocess(
   (v) => (blank(v) ? null : v),
   z
@@ -244,6 +286,7 @@ function planValues(d: PlanFields) {
     automationRunsMonthly: d.automationRunsMonthly,
     runPackSize: d.runPackSize,
     runPackPriceMinor: d.runPackPrice,
+    apiRequestsMonthly: d.apiRequestsMonthly,
     modules: d.modules,
   };
 }
@@ -257,7 +300,12 @@ const idOrNotFound = (id: string, what: string) => {
   if (!z.uuid().safeParse(id).success) throw notFound(what);
 };
 
-export function createPlanAdminService(deps: { platformDb: PlatformDatabase; clock: Clock }) {
+export function createPlanAdminService(deps: {
+  platformDb: PlatformDatabase;
+  clock: Clock;
+  /** HyFib's Razorpay account, for cancelling companies' plan subscriptions (ADR-063). */
+  razorpay?: RazorpayClient | null;
+}) {
   const { platformDb, clock } = deps;
 
   const audit = (
@@ -300,9 +348,125 @@ export function createPlanAdminService(deps: { platformDb: PlatformDatabase; clo
           .from(plans)
           .orderBy(asc(plans.code), desc(plans.version));
         const [settings] = await tx
-          .select({ defaultTrialPlanId: planSettings.defaultTrialPlanId })
+          .select({
+            defaultTrialPlanId: planSettings.defaultTrialPlanId,
+            planTaxBp: planSettings.planTaxBp,
+          })
           .from(planSettings);
-        return { plans: rows, defaultTrialPlanId: settings?.defaultTrialPlanId ?? null };
+        return {
+          plans: rows,
+          defaultTrialPlanId: settings?.defaultTrialPlanId ?? null,
+          planTaxBp: settings?.planTaxBp ?? null,
+        };
+      });
+    },
+
+    /**
+     * The tax added to plan prices when companies pay for their plan (ADR-063), in basis points;
+     * none: companies cannot pay for plans in HyFib. A subscription keeps the rate it started with.
+     */
+    async setPlanTax(actor: PlatformActor, input: unknown): Promise<void> {
+      if (actor.role !== 'platform_owner') {
+        throw forbidden('Only platform owners can set the tax on plan prices.');
+      }
+      const { tax, reason } = parseInput(planTaxSchema, input);
+      await platformDb.run(actor.userId, async (tx) => {
+        const [settings] = await tx
+          .select({ planTaxBp: planSettings.planTaxBp })
+          .from(planSettings)
+          .for('update');
+        if ((settings?.planTaxBp ?? null) === tax) return;
+        await tx
+          .update(planSettings)
+          .set({ planTaxBp: tax, updatedByUserId: actor.userId, updatedAt: clock.now() })
+          .where(eq(planSettings.id, true));
+        await tx
+          .insert(platformAuditEvents)
+          .values(
+            audit(
+              actor,
+              'platform.plan_tax_set',
+              { taxBp: tax, previousTaxBp: settings?.planTaxBp ?? null },
+              reason,
+            ),
+          );
+      });
+    },
+
+    /**
+     * Cancels a company's plan subscription at once (platform owners, with a reason), for example
+     * before changing its plan: Razorpay first, then HyFib's record. The period already paid stands.
+     */
+    async cancelTenantSubscription(actor: PlatformActor, input: unknown): Promise<void> {
+      if (actor.role !== 'platform_owner') {
+        throw forbidden('Only platform owners can cancel a company’s subscription.');
+      }
+      const { tenantId, reason } = parseInput(cancelSubscriptionSchema, input);
+      const [row] = await platformDb.run(actor.userId, (tx) =>
+        tx
+          .select()
+          .from(planSubscriptions)
+          .where(
+            and(
+              eq(planSubscriptions.tenantId, tenantId),
+              inArray(planSubscriptions.status, [...LIVE_PLAN_SUBSCRIPTION_STATUSES]),
+            ),
+          ),
+      );
+      if (!row) throw notFound('Subscription');
+      if (row.status === 'creating' || !row.providerSubscriptionId) {
+        throw conflict('The company is starting a payment. Try again in a few minutes.');
+      }
+      if (!deps.razorpay) {
+        throw new AppError('provider_unavailable', 'Razorpay is not configured on this platform.');
+      }
+      const res = await deps.razorpay.cancelSubscription(row.providerSubscriptionId, {
+        cancelAtCycleEnd: false,
+      });
+      if (!res.ok) {
+        if (res.kind !== 'permanent') {
+          throw new AppError('provider_unavailable', 'Razorpay did not answer. Try again.');
+        }
+        throw new AppError(
+          'precondition_failed',
+          `Razorpay did not cancel the subscription: ${res.description} HyFib updates its record at its next check with Razorpay.`,
+        );
+      }
+      await platformDb.run(actor.userId, async (tx) => {
+        const now = clock.now();
+        const updated = await tx
+          .update(planSubscriptions)
+          .set({
+            status: 'cancelled',
+            endedAt: now,
+            cancelRequestedAt: now,
+            cancelledByUserId: actor.userId,
+          })
+          .where(
+            and(
+              eq(planSubscriptions.tenantId, tenantId),
+              eq(planSubscriptions.id, row.id),
+              inArray(planSubscriptions.status, [...LIVE_PLAN_SUBSCRIPTION_STATUSES]),
+            ),
+          )
+          .returning({ id: planSubscriptions.id });
+        if (updated.length === 0) return;
+        const metadata = { subscriptionId: row.id, previousStatus: row.status };
+        await tx
+          .insert(platformAuditEvents)
+          .values(audit(actor, 'platform.plan_subscription_cancelled', metadata, reason, tenantId));
+        await tx.insert(auditEvents).values({
+          id: uuidv7(),
+          tenantId,
+          actorType: 'platform_admin',
+          actorId: actor.userId,
+          action: 'platform.plan_subscription_cancelled',
+          subjectType: 'plan_subscription',
+          subjectId: row.id,
+          result: 'success',
+          correlationId: actor.correlationId,
+          metadata: { reason, ...metadata },
+        });
       });
     },
 
@@ -429,6 +593,7 @@ export function createPlanAdminService(deps: { platformDb: PlatformDatabase; clo
           automationRunsMonthly: source.automationRunsMonthly,
           runPackSize: source.runPackSize,
           runPackPriceMinor: source.runPackPriceMinor,
+          apiRequestsMonthly: source.apiRequestsMonthly,
           modules: source.modules,
           createdByUserId: actor.userId,
         });
@@ -607,20 +772,71 @@ export function createPlanAdminService(deps: { platformDb: PlatformDatabase; clo
           live_automations: number;
         }>(sql`select * from ops.platform_tenant_usage(${tenantId}::uuid)`);
         const period = usagePeriod(state.usageAnchor, clock.now());
-        const [runs] = await tx
-          .select({ used: usageCounters.used })
+        const counters = await tx
+          .select({ metric: usageCounters.metric, used: usageCounters.used })
           .from(usageCounters)
           .where(
             and(
               eq(usageCounters.tenantId, tenantId),
-              eq(usageCounters.metric, 'automation_runs'),
+              inArray(usageCounters.metric, ['automation_runs', 'api_requests']),
               eq(usageCounters.periodStart, period.start),
             ),
           );
+        const counted = (metric: string) => counters.find((c) => c.metric === metric)?.used ?? 0;
         const usage = counts.rows[0];
+        const [subscription] = await tx
+          .select({
+            id: planSubscriptions.id,
+            status: planSubscriptions.status,
+            amountMinor: planSubscriptions.amountMinor,
+            taxBp: planSubscriptions.taxBp,
+            intervalMonths: planSubscriptions.intervalMonths,
+            providerSubscriptionId: planSubscriptions.providerSubscriptionId,
+            currentStart: planSubscriptions.currentStart,
+            currentEnd: planSubscriptions.currentEnd,
+            cancelAtPeriodEnd: planSubscriptions.cancelAtPeriodEnd,
+            endedAt: planSubscriptions.endedAt,
+            failureReason: planSubscriptions.failureReason,
+            createdAt: planSubscriptions.createdAt,
+            syncedAt: planSubscriptions.syncedAt,
+          })
+          .from(planSubscriptions)
+          .where(
+            and(
+              eq(planSubscriptions.tenantId, tenantId),
+              or(
+                inArray(planSubscriptions.status, [...LIVE_PLAN_SUBSCRIPTION_STATUSES]),
+                gt(planSubscriptions.paidCount, 0),
+              ),
+            ),
+          )
+          .orderBy(desc(planSubscriptions.createdAt))
+          .limit(1);
+        const payments = await tx
+          .select({
+            id: planPayments.id,
+            providerPaymentId: planPayments.providerPaymentId,
+            amountMinor: planPayments.amountMinor,
+            periodStart: planPayments.periodStart,
+            periodEnd: planPayments.periodEnd,
+            paidAt: planPayments.paidAt,
+          })
+          .from(planPayments)
+          .where(eq(planPayments.tenantId, tenantId))
+          .orderBy(desc(planPayments.paidAt))
+          .limit(12);
         return {
           timezone: company.timezone,
           state,
+          subscription: subscription
+            ? {
+                ...subscription,
+                live: (LIVE_PLAN_SUBSCRIPTION_STATUSES as readonly string[]).includes(
+                  subscription.status,
+                ),
+              }
+            : null,
+          payments,
           plan: plan ?? null,
           limits: entitlements.limits,
           modules: PLAN_MODULE_KEYS.filter((m) => entitlements.modules.has(m)),
@@ -630,7 +846,8 @@ export function createPlanAdminService(deps: { platformDb: PlatformDatabase; clo
             numbers: Number(usage?.numbers ?? 0),
             teams: Number(usage?.teams ?? 0),
             liveAutomations: Number(usage?.live_automations ?? 0),
-            automationRuns: runs?.used ?? 0,
+            automationRuns: counted('automation_runs'),
+            apiRequests: counted('api_requests'),
             periodStart: period.start,
             periodEnd: period.end,
           },
@@ -666,6 +883,20 @@ export function createPlanAdminService(deps: { platformDb: PlatformDatabase; clo
         if (!current) throw new Error('The company has no plan state');
         if (current.version !== data.version)
           throw conflict('The plan changed while you were editing. Reload the page and try again.');
+        const [subscribed] = await tx
+          .select({ id: planSubscriptions.id })
+          .from(planSubscriptions)
+          .where(
+            and(
+              eq(planSubscriptions.tenantId, data.tenantId),
+              inArray(planSubscriptions.status, [...LIVE_PLAN_SUBSCRIPTION_STATUSES]),
+            ),
+          );
+        if (subscribed)
+          throw new AppError(
+            'precondition_failed',
+            'The company pays for its plan by Razorpay subscription. Cancel the subscription first.',
+          );
 
         const invalid = (message: string) => new AppError('validation_failed', message);
         let planId: string | null;
@@ -789,6 +1020,8 @@ export function createPlanAdminService(deps: { platformDb: PlatformDatabase; clo
             graceEndsAt: null,
             ...addOns,
             usageAnchor,
+            // A period staff set is not paid by a subscription (ADR-063).
+            subscriptionId: null,
             note: data.reason,
             changedByUserId: actor.userId,
             changedAt: now,

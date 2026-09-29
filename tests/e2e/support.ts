@@ -39,6 +39,41 @@ export async function waitForEmail(
   return message.Text;
 }
 
+/**
+ * Waits for an email whose subject and text body include the given parts (for emails that can list
+ * several things, such as a digest), and returns its text body.
+ */
+export async function waitForEmailContaining(
+  to: string,
+  subjectIncludes: string,
+  textIncludes: string,
+  timeout = 30_000,
+): Promise<string> {
+  let text = '';
+  await expect
+    .poll(
+      async () => {
+        const res = await fetch(
+          `${MAILPIT}/api/v1/search?query=${encodeURIComponent(`to:"${to}"`)}`,
+        );
+        const body = (await res.json()) as { messages: MailpitSummary[] };
+        for (const summary of body.messages.filter((m) => m.Subject.includes(subjectIncludes))) {
+          const message = (await (
+            await fetch(`${MAILPIT}/api/v1/message/${summary.ID}`)
+          ).json()) as { Text: string };
+          if (message.Text.includes(textIncludes)) {
+            text = message.Text;
+            return true;
+          }
+        }
+        return false;
+      },
+      { timeout, intervals: [1000, 2000, 5000] },
+    )
+    .toBe(true);
+  return text;
+}
+
 export function firstLink(text: string): string {
   const match = /https?:\/\/[^\s)]+/.exec(text);
   if (!match) throw new Error('No link in email');

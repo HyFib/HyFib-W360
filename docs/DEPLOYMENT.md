@@ -149,8 +149,13 @@ authenticated by Meta's signature and the flow's encryption key, not by a sessio
 2. Add a webhook to `https://<app host>/api/webhooks/razorpay` with a random secret
    (`RAZORPAY_WEBHOOK_SECRET`) and the events `payment.authorized`, `payment.captured`,
    `payment.failed`, `order.paid`, `refund.processed`, `refund.failed`, `payment.dispute.lost`,
-   `token.confirmed`, `token.rejected`, `token.cancelled`, `token.paused`. Without `refund.failed`,
-   a failed staff refund is still found by the worker's check (ADR-058), only later.
+   `token.confirmed`, `token.rejected`, `token.cancelled`, `token.paused`, and for paying for
+   plans `subscription.authenticated`, `subscription.activated`, `subscription.charged`,
+   `subscription.completed`, `subscription.updated`, `subscription.pending`, `subscription.halted`,
+   `subscription.cancelled`, `subscription.paused`, `subscription.resumed`. Without `refund.failed`,
+   a failed staff refund is still found by the worker's check (ADR-058), only later; without the
+   subscription events, plan payments are still found by the worker's hourly and daily checks, only
+   later.
 3. Rotate the webhook secret by setting the old value as `RAZORPAY_WEBHOOK_SECRET_PREVIOUS`, the new
    one as `RAZORPAY_WEBHOOK_SECRET`, deploying, changing it in the Dashboard, and removing the
    previous value after 24 h (Razorpay's retry window).
@@ -160,6 +165,17 @@ authenticated by Meta's signature and the flow's encryption key, not by a sessio
    unreachable): before launch, run a test-mode top-up, a failed payment, a refund and a card
    mandate end to end, and confirm the Checkout CSP (script `checkout.razorpay.com`, frame and
    connect `api.razorpay.com` / `checkout.razorpay.com`) is sufficient in all supported browsers.
+6. Paying for plans (ADR-063) stays off until `RAZORPAY_SUBSCRIPTIONS_ENABLED=true` is set on web and
+   worker, which needs Razorpay Subscriptions and Flash Checkout activated on the account (Razorpay
+   documents Flash Checkout as required for Subscriptions) and a review of the tax on plan prices;
+   a platform owner then sets the tax in Platform → Plans. HyFib creates one Razorpay plan per
+   subscription (named "HyFib <plan> plan") and subscriptions of five years of cycles; they are
+   visible in the Dashboard. Events for subscriptions that already exist are processed whether or
+   not the flag is on.
+7. The daily settlement reconciliation (ADR-059) uses the same API keys and needs nothing else to
+   configure: the worker reads `GET /v1/settlements/recon/combined` for the previous day from
+   06:00 India time. It runs only where Razorpay is configured, and the reconciliation page says so
+   otherwise. Keep the worker's clock in sync (NTP): it decides which day is over.
 
 ## Commerce (companies' own Razorpay accounts)
 

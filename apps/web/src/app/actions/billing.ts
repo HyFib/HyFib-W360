@@ -1,7 +1,7 @@
 'use server';
 import { refresh } from 'next/cache';
 import { AppError, parseMajorUnits } from '@w360/core';
-import type { CheckoutStart } from '@w360/domain';
+import type { CheckoutStart, SubscriptionCheckoutStart } from '@w360/domain';
 import { getRuntime } from '@/server/runtime';
 import { runAction, type ActionResult } from '@/server/action';
 import { requestMeta } from '@/server/session';
@@ -126,5 +126,45 @@ export async function updateAutoRechargeAction(
     );
     refresh();
     return result;
+  });
+}
+
+/** Starts paying for the plan (ADR-063): the browser then opens Checkout for the subscription. */
+export async function startPlanSubscriptionAction(
+  slug: string,
+): Promise<ActionResult<SubscriptionCheckoutStart>> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { planPayments } = await getRuntime();
+    return planPayments.start(ctx, await requestMeta());
+  });
+}
+
+export async function confirmPlanSubscriptionAction(
+  slug: string,
+  input: { subscriptionId: string; paymentId: string; signature: string },
+): Promise<ActionResult<{ status: 'active' | 'processing' | 'failed' }>> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { planPayments } = await getRuntime();
+    const result = await planPayments.confirmCheckout(ctx, {
+      subscriptionId: String(input.subscriptionId ?? ''),
+      paymentId: String(input.paymentId ?? ''),
+      signature: String(input.signature ?? ''),
+    });
+    refresh();
+    return result;
+  });
+}
+
+export async function cancelPlanSubscriptionAction(
+  slug: string,
+): Promise<ActionResult<{ atPeriodEnd: boolean }>> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { planPayments } = await getRuntime();
+    const result = await planPayments.cancel(ctx, await requestMeta());
+    refresh();
+    return { atPeriodEnd: result.atPeriodEnd };
   });
 }

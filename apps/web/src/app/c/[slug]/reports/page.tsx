@@ -5,6 +5,7 @@ import type { ReactNode } from 'react';
 import { isAppError } from '@w360/core';
 import {
   PERIOD_PRESETS,
+  RATE_CATEGORY_LABELS,
   can,
   formatMicros,
   type MetricDefinition,
@@ -48,14 +49,6 @@ const PRESET_LABELS: Record<string, string> = {
   this_month: 'This month',
   last_month: 'Last month',
   custom: 'Custom dates',
-};
-
-const CATEGORY_LABELS: Record<string, string> = {
-  marketing: 'Marketing',
-  utility: 'Utility',
-  authentication: 'Authentication',
-  authentication_international: 'Authentication (international)',
-  service: 'Service',
 };
 
 const one = (v: string | string[] | undefined) => (typeof v === 'string' ? v : undefined);
@@ -462,7 +455,7 @@ function CostLines({ lines, currency }: { lines: Report['costs']['lines']; curre
         <TBody>
           {lines.map((l) => (
             <TR key={`${l.category}|${l.market}`}>
-              <TD>{CATEGORY_LABELS[l.category] ?? l.category}</TD>
+              <TD>{RATE_CATEGORY_LABELS[l.category]}</TD>
               <TD>{l.market}</TD>
               <TD className="text-right">{l.count}</TD>
               <TD className="text-right">{formatMicros(l.micros, currency)}</TD>

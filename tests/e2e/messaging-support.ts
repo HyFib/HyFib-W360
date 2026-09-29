@@ -253,16 +253,24 @@ export function orderMessage(
   });
 }
 
+/** A status update; `pricing` is Meta's pricing object (research M-076) when given. */
 export function statusUpdate(
   wabaId: string,
   phoneNumberId: string,
   wamid: string,
   status: 'sent' | 'delivered' | 'read',
   waId: string,
+  pricing?: { billable: boolean; pricing_model: string; type: string; category: string },
 ) {
   return envelope(wabaId, phoneNumberId, {
     statuses: [
-      { id: wamid, status, timestamp: String(Math.floor(Date.now() / 1000)), recipient_id: waId },
+      {
+        id: wamid,
+        status,
+        timestamp: String(Math.floor(Date.now() / 1000)),
+        recipient_id: waId,
+        ...(pricing ? { pricing } : {}),
+      },
     ],
   });
 }

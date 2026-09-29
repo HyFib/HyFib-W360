@@ -5,11 +5,13 @@ import { Button, Checkbox, Field, Input, Label, Select, Textarea } from '@w360/u
 import { ConfirmDialog } from '@w360/ui/client';
 import { PLAN_MODULE_KEYS, PLAN_MODULE_LABELS, addOnsForPlan } from '@w360/domain/plan-model';
 import {
+  cancelTenantSubscriptionAction,
   createPlanAction,
   createPlanVersionAction,
   publishPlanAction,
   retirePlanAction,
   setDefaultTrialAction,
+  setPlanTaxAction,
   setTenantPlanAction,
   updatePlanDraftAction,
 } from '@/app/actions/platform';
@@ -36,6 +38,7 @@ export interface PlanFormValues {
   automationRunsMonthly: string;
   runPackSize: string;
   runPackPrice: string;
+  apiRequestsMonthly: string;
   modules: string[];
 }
 
@@ -58,6 +61,7 @@ export const EMPTY_PLAN_FORM: PlanFormValues = {
   automationRunsMonthly: '',
   runPackSize: '',
   runPackPrice: '',
+  apiRequestsMonthly: '',
   modules: [],
 };
 
@@ -232,6 +236,10 @@ export function PlanForm({
             description: 'Needs a monthly run limit. Empty: not sold.',
           })}
           {text('runPackPrice', 'Run pack (₹)', { inputMode: 'decimal' })}
+          {text('apiRequestsMonthly', 'API requests a month', {
+            inputMode: 'numeric',
+            description: '0 leaves the public API out of the plan.',
+          })}
         </div>
       </fieldset>
       <fieldset className="grid gap-2">
@@ -404,6 +412,122 @@ export function DefaultTrialForm({
       </Field>
       <div>
         <Button type="submit">Save</Button>
+      </div>
+    </ClientForm>
+  );
+}
+
+/** The tax added to plan prices when companies pay for their plan (ADR-063). */
+export function PlanTaxForm({ current }: { current: number | null }) {
+  const [tax, setTax] = useState(current === null ? '' : String(current / 100));
+  const [reason, setReason] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [issues, setIssues] = useState<Issues>({});
+  const [saved, setSaved] = useState<string | null>(null);
+  return (
+    <ClientForm
+      className="grid gap-3 sm:max-w-md"
+      onSubmit={(event) => {
+        event.preventDefault();
+        setError(null);
+        setIssues({});
+        setSaved(null);
+        void setPlanTaxAction({ tax, reason }).then((r) => {
+          if (!r.ok) {
+            setError(r.message);
+            setIssues(issuesOf(r));
+            return;
+          }
+          setReason('');
+          setSaved(
+            tax.trim()
+              ? 'Saved. New subscriptions add this tax; running ones keep their rate.'
+              : 'Saved. Companies cannot start paying for plans until a tax is set.',
+          );
+        });
+      }}
+    >
+      <FormError message={error} />
+      <FormSuccess message={saved} />
+      <Field
+        id="plan-tax"
+        label="Tax on plan prices (%)"
+        description="For example 18. Leave empty to stop offering payment for plans."
+        error={issues.tax}
+      >
+        {(aria) => (
+          <Input
+            inputMode="decimal"
+            autoComplete="off"
+            value={tax}
+            onChange={(e) => setTax(e.target.value)}
+            {...aria}
+          />
+        )}
+      </Field>
+      <Field id="plan-tax-reason" label="Reason" error={issues.reason}>
+        {(aria) => <Input value={reason} onChange={(e) => setReason(e.target.value)} {...aria} />}
+      </Field>
+      <div>
+        <Button type="submit">Save tax</Button>
+      </div>
+    </ClientForm>
+  );
+}
+
+/** Cancels the company's plan subscription at Razorpay at once (platform owners, ADR-063). */
+export function CancelTenantSubscriptionForm({ tenantId }: { tenantId: string }) {
+  const router = useRouter();
+  const [reason, setReason] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [issues, setIssues] = useState<Issues>({});
+  const [busy, setBusy] = useState(false);
+  return (
+    <ClientForm
+      className="grid gap-3"
+      onSubmit={(event) => {
+        event.preventDefault();
+      }}
+    >
+      <FormError message={error} />
+      <Field
+        id="cancel-subscription-reason"
+        label="Reason"
+        description="Recorded in the platform audit log and the company’s own log."
+        error={issues.reason}
+      >
+        {(aria) => (
+          <Textarea rows={2} value={reason} onChange={(e) => setReason(e.target.value)} {...aria} />
+        )}
+      </Field>
+      <div>
+        <ConfirmDialog
+          trigger={
+            <ClientButton variant="outline" disabled={busy}>
+              Cancel subscription now
+            </ClientButton>
+          }
+          title="Cancel the company’s subscription now?"
+          description="Razorpay stops charging at once. The period already paid stands; after it, the plan ends unless you set a new one."
+          confirmLabel="Cancel subscription"
+          cancelLabel="Keep it"
+          destructive
+          onConfirm={() => {
+            setBusy(true);
+            setError(null);
+            setIssues({});
+            void cancelTenantSubscriptionAction({ tenantId, reason }).then((r) => {
+              setBusy(false);
+              if (!r.ok) {
+                setError(r.message);
+                setIssues(issuesOf(r));
+                return;
+              }
+              setReason('');
+              router.refresh();
+            });
+          }}
+        />
       </div>
     </ClientForm>
   );

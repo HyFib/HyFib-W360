@@ -3,10 +3,13 @@ import { PERMISSIONS } from '../authz/permissions';
 import {
   addOnsForPlan,
   MODULE_WRITE_PERMISSIONS,
+  PLAN_BOUNDS,
   PLAN_MODULE_KEYS,
   moduleOfPermission,
   planGivesAccess,
+  planPaymentQuote,
   usagePeriod,
+  warningThreshold,
 } from './model';
 
 const at = (iso: string) => new Date(iso);
@@ -106,6 +109,117 @@ describe('addOnsForPlan', () => {
       extraSeats: '0',
       extraNumbers: '0',
       runPacks: '0',
+    });
+  });
+});
+
+describe('warningThreshold', () => {
+  it('is 80% of a monthly limit rounded up, when that is still below the limit', () => {
+    expect(warningThreshold(5)).toBe(4);
+    expect(warningThreshold(7)).toBe(6);
+    expect(warningThreshold(10)).toBe(8);
+    expect(warningThreshold(11)).toBe(9);
+    expect(warningThreshold(1_000)).toBe(800);
+    expect(warningThreshold(1_000_000_000)).toBe(800_000_000);
+  });
+
+  it('gives no warning without a limit, for no allowance, or when 80% rounds up to the limit', () => {
+    for (const limit of [null, 0, 1, 2, 3, 4]) expect(warningThreshold(limit)).toBeNull();
+  });
+});
+
+describe('planPaymentQuote', () => {
+  const prices = {
+    priceMinor: 99_900,
+    seatPriceMinor: 10_000,
+    numberPriceMinor: 50_000,
+    runPackPriceMinor: 25_000,
+  };
+  const none = { extraSeats: 0, extraNumbers: 0, runPacks: 0 };
+
+  it('adds the add-ons at the version’s prices and the tax, rounded half up to the paisa', () => {
+    expect(planPaymentQuote(prices, { extraSeats: 2, extraNumbers: 1, runPacks: 3 }, 1800)).toEqual(
+      {
+        ok: true,
+        quote: {
+          planMinor: 99_900,
+          seatsMinor: 20_000,
+          numbersMinor: 50_000,
+          runPacksMinor: 75_000,
+          subtotalMinor: 244_900,
+          taxBp: 1800,
+          taxMinor: 44_082,
+          totalMinor: 288_982,
+        },
+      },
+    );
+    // 12.5% of ₹999.00 is ₹124.875: half a paisa rounds up.
+    expect(planPaymentQuote(prices, none, 1250)).toMatchObject({
+      quote: { taxMinor: 12_488, totalMinor: 112_388 },
+    });
+    // 0.01% of ₹49.99 is 0.4999 paise and rounds down; of ₹50.00, half a paisa rounds up.
+    expect(planPaymentQuote({ ...prices, priceMinor: 4_999 }, none, 1)).toMatchObject({
+      quote: { taxMinor: 0, totalMinor: 4_999 },
+    });
+    expect(planPaymentQuote({ ...prices, priceMinor: 5_000 }, none, 1)).toMatchObject({
+      quote: { taxMinor: 1, totalMinor: 5_001 },
+    });
+    expect(planPaymentQuote(prices, none, 0)).toMatchObject({
+      quote: { taxMinor: 0, totalMinor: 99_900 },
+    });
+  });
+
+  it('is exact where floating point would not be, up to HyFib’s ceiling', () => {
+    // 3 × 10¹³ paise with 17.99% tax: beyond what a double holds to the paisa.
+    const big = planPaymentQuote(
+      {
+        priceMinor: 300_000_000_000,
+        seatPriceMinor: null,
+        numberPriceMinor: null,
+        runPackPriceMinor: null,
+      },
+      none,
+      1799,
+    );
+    expect(big).toEqual({
+      ok: true,
+      quote: expect.objectContaining({ taxMinor: 53_970_000_000, totalMinor: 353_970_000_000 }),
+    });
+    expect(
+      planPaymentQuote(
+        { ...prices, priceMinor: PLAN_BOUNDS.priceMinor, seatPriceMinor: PLAN_BOUNDS.priceMinor },
+        { extraSeats: 10_000, extraNumbers: 0, runPacks: 0 },
+        5000,
+      ),
+    ).toEqual({ ok: false, reason: 'too_large' });
+    expect(
+      planPaymentQuote({ ...prices, priceMinor: PLAN_BOUNDS.priceMinor }, none, 0),
+    ).toMatchObject({
+      ok: true,
+    });
+    expect(planPaymentQuote({ ...prices, priceMinor: PLAN_BOUNDS.priceMinor }, none, 1)).toEqual({
+      ok: false,
+      reason: 'too_large',
+    });
+  });
+
+  it('refuses add-ons the version does not sell and totals below ₹1', () => {
+    const unsold = { ...prices, seatPriceMinor: null };
+    expect(planPaymentQuote(unsold, { ...none, extraSeats: 1 }, 1800)).toEqual({
+      ok: false,
+      reason: 'add_on_not_sold',
+    });
+    expect(planPaymentQuote(unsold, none, 1800)).toMatchObject({ ok: true });
+    expect(planPaymentQuote({ ...prices, priceMinor: 0 }, none, 1800)).toEqual({
+      ok: false,
+      reason: 'too_small',
+    });
+    expect(planPaymentQuote({ ...prices, priceMinor: 84 }, none, 1800)).toEqual({
+      ok: false,
+      reason: 'too_small',
+    });
+    expect(planPaymentQuote({ ...prices, priceMinor: 85 }, none, 1800)).toMatchObject({
+      quote: { totalMinor: 100 },
     });
   });
 });

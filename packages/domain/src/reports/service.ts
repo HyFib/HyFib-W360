@@ -408,9 +408,10 @@ async function messagingReport(
  * Estimated Meta charges: delivered messages (Meta charges per delivered message, research M-065)
  * that Meta's status webhook marked billable (M-076), priced at the list price (tier 0) of the
  * published rate card in force when each message was recorded, by the recipient's market (the
- * number Meta reported delivering to) and Meta's pricing category.
+ * number Meta reported delivering to) and Meta's pricing category. Shared by Reports and Billing →
+ * Usage and rates (ADR-060); runs in the caller's company-scoped snapshot.
  */
-async function costReport(
+export async function estimateMetaCharges(
   tx: Tx,
   tenantId: string,
   period: ReportPeriod,
@@ -1446,7 +1447,7 @@ export function createReportsService(deps: ReportsDeps) {
       async (tx) => {
         const settings = await loadReportSettings(tx, ctx.tenant.id, ctx.tenant.timezone);
         const messaging = await messagingReport(tx, ctx.tenant.id, period);
-        const costs = await costReport(tx, ctx.tenant.id, period, settings.costCurrency);
+        const costs = await estimateMetaCharges(tx, ctx.tenant.id, period, settings.costCurrency);
         const inbox = await inboxReport(tx, ctx.tenant.id, period, now, settings.target);
         const csat = await csatReport(tx, ctx.tenant.id, period, settings.csatEnabled);
         const automations = await automationReport(tx, ctx.tenant.id, period);

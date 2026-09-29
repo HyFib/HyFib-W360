@@ -58,11 +58,14 @@ const KEPT = [
   'app.ledger_entries',
   'app.ledger_transactions',
   'app.payment_mandates',
+  'app.plan_payments',
+  'app.plan_subscriptions',
   'app.tenant_plans',
   'app.topups',
   'app.wallet_holds',
   'app.wallets',
   'ops.security_events',
+  'ops.settlement_recon_items',
   'ops.support_access_grants',
   'ops.tenant_deletions',
 ];
@@ -283,6 +286,38 @@ async function exportText(ctx: TenantContext): Promise<string> {
 }
 
 /** A company with conversations, a sent reply, an API key and a chat link. */
+let noticedCard: string | undefined;
+/**
+ * A record that the company was told about a rate card (ADR-065), as the billing sweep writes it:
+ * the card took effect two days ago, so no sweep lists it again. NOK is used by this file only.
+ */
+async function rateNotice(c: Company) {
+  if (!noticedCard) {
+    noticedCard = uuidv7();
+    await fx.query(
+      `INSERT INTO ops.rate_cards (id, currency, effective_from, source_url, created_by_user_id)
+       VALUES ($1, 'NOK', now() - interval '2 days', 'https://example.test/rates/nok', $2)`,
+      [noticedCard, c.owner.id],
+    );
+    await fx.query(
+      `INSERT INTO ops.rate_card_prefixes (rate_card_id, prefix, market) VALUES ($1, '47', 'Norway')`,
+      [noticedCard],
+    );
+    await fx.query(
+      `INSERT INTO ops.rate_card_prices (rate_card_id, market, category, price_micros)
+       VALUES ($1, 'Norway', 'marketing', 700000)`,
+      [noticedCard],
+    );
+    await fx.query(`UPDATE ops.rate_cards SET status = 'published' WHERE id = $1`, [noticedCard]);
+  }
+  await fx.query(
+    `INSERT INTO app.rate_change_notices (id, tenant_id, rate_card_id, currency, effective_from, sent_at)
+     SELECT $1, $2, c.id, c.currency, c.effective_from, c.effective_from - interval '6 days'
+       FROM ops.rate_cards c WHERE c.id = $3`,
+    [uuidv7(), c.tenant.id, noticedCard],
+  );
+}
+
 async function busyCompany() {
   const c = await fx.company();
   const owner = await fx.ctx(c, c.owner);
@@ -314,6 +349,7 @@ async function busyCompany() {
     message: 'Hello from Instagram',
     includeRef: true,
   });
+  await rateNotice(c);
   return { c, owner, agent, customer, apiKey };
 }
 
@@ -362,6 +398,7 @@ const billingService = () =>
       keySecret: RZP_KEY_SECRET,
       webhookSecrets: [randomBytes(16).toString('hex')],
       recurringCardsEnabled: true,
+      subscriptionsEnabled: false,
       apiBaseUrl: rzp.baseUrl,
       mode: 'test',
     },
@@ -391,6 +428,44 @@ async function addCardMandate(owner: TenantContext) {
   );
   expect(mandate!.status).toBe('active');
   return { mandateId: setup.mandateId, tokenId: mandate!.provider_token_id };
+}
+
+/**
+ * A plan subscription paid through the Razorpay stand-in (ADR-063), with HyFib's record of it as the
+ * product keeps it (fixture rows: paying is covered by plan-subscriptions.test.ts).
+ */
+async function addPlanSubscription(c: Company) {
+  const planId = uuidv7();
+  await fx.dbs.adminPool.query(
+    `INSERT INTO ops.plans (id, code, version, name, price_minor, interval_months, seats_included,
+       numbers_included, created_by_user_id, status, published_at, published_by_user_id)
+     VALUES ($1, $2, 1, 'Deletion Plan', 100000, 1, 3, 1, $3, 'published', now(), $3)`,
+    [planId, `del-${planId.slice(-12)}`, c.owner.id],
+  );
+  const plan = await razorpay.createPlan({
+    period: 'monthly',
+    amount: 118_000,
+    currency: 'INR',
+    name: 'HyFib Deletion Plan plan',
+  });
+  if (!plan.ok) throw new Error('plan');
+  const sub = await razorpay.createSubscription({
+    planId: plan.data.id,
+    totalCount: 60,
+    expireBy: Math.floor(Date.now() / 1000) + 3600,
+    customerNotify: true,
+  });
+  if (!sub.ok) throw new Error('subscription');
+  rzp.authorizeSubscription(sub.data.id);
+  await fx.query(
+    `INSERT INTO app.plan_subscriptions (id, tenant_id, plan_id, status, interval_months, extra_seats,
+       extra_numbers, run_packs, subtotal_minor, tax_bp, tax_minor, amount_minor, total_count,
+       provider_plan_id, provider_subscription_id, authorize_by, created_by_user_id)
+     VALUES ($1, $2, $3, 'active', 1, 0, 0, 0, 100000, 1800, 18000, 118000, 60, $4, $5,
+             now() + interval '1 hour', $6)`,
+    [uuidv7(), c.tenant.id, planId, plan.data.id, sub.data.id, c.owner.id],
+  );
+  return sub.data.id;
 }
 
 describe('what a deletion deletes', () => {
@@ -559,6 +634,9 @@ describe('what an export contains', () => {
     expect(of('app.api_keys')).toHaveLength(1);
     expect(of('app.chat_links')).toHaveLength(1);
     expect(of('app.whatsapp_accounts')[0]).toMatchObject({ waba_id: c.wabaId });
+    expect(of('app.rate_change_notices')).toEqual([
+      expect.objectContaining({ rate_card_id: noticedCard, currency: 'NOK' }),
+    ]);
 
     // Nothing of the other company, no tenant ids as fields, and no credentials.
     expect(text).not.toContain(other.c.tenant.id);
@@ -846,6 +924,7 @@ describe('running a deletion', () => {
     const adminUser = await member(c, 'admin', 'Admin Person');
     const { shop } = await connectShopify(c, owner);
     const { tokenId } = await addCardMandate(owner);
+    const providerSubscriptionId = await addPlanSubscription(c);
     const other = await busyCompany();
     const tables = await companyTables();
     const otherBefore = await rowCounts(other.c.tenant.id, tables);
@@ -856,6 +935,7 @@ describe('running a deletion', () => {
     expect(before['app.messages']).toBeGreaterThanOrEqual(3);
     expect(before['app.commerce_stores']).toBe(1);
     expect(before['app.payment_mandates']).toBe(1);
+    expect(before['app.rate_change_notices']).toBe(1);
 
     const result = await runTenantDeletion(runDeps(), c.tenant.id);
     expect(result.outcome).toBe('finished');
@@ -867,8 +947,16 @@ describe('running a deletion', () => {
         outcome: 'done',
       },
       { kind: 'shopify_store', label: shop, outcome: 'done' },
+      { kind: 'plan_subscription', label: 'Plan subscription at Razorpay', outcome: 'done' },
       { kind: 'card_mandate', label: 'Card Visa •••• 1111', outcome: 'done' },
     ]);
+    // Nothing more is charged: the subscription is cancelled at Razorpay, and HyFib's record kept.
+    expect(rzp.state.subscriptions.get(providerSubscriptionId)?.status).toBe('cancelled');
+    expect(
+      await fx.query('SELECT status FROM app.plan_subscriptions WHERE tenant_id = $1', [
+        c.tenant.id,
+      ]),
+    ).toEqual([{ status: 'cancelled' }]);
 
     // Every deletable row is gone; the kept records are all still there.
     const after = await rowCounts(c.tenant.id, tables);

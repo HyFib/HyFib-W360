@@ -60,6 +60,9 @@ export const API_SCOPE_INFO: Record<
 /** Days until a new key expires; 0 means it does not expire. */
 export const API_KEY_EXPIRY_DAYS = [30, 90, 365, 0] as const;
 
+/** How long before a key expires owners and administrators are reminded (ADR-067). */
+export const API_KEY_REMINDER_DAYS = 7;
+
 export const API_KEY_LIMITS = {
   activeKeys: 20,
   nameLength: 80,
@@ -90,4 +93,16 @@ export function apiKeyState(
   if (key.revokedAt) return 'revoked';
   if (key.expiresAt && key.expiresAt <= now) return 'expired';
   return 'active';
+}
+
+/**
+ * Whether a usable key expires within API_KEY_REMINDER_DAYS days and was not rotated: the keys
+ * owners and administrators are reminded about (ADR-067).
+ */
+export function apiKeyExpiresSoon(
+  key: { revokedAt: Date | null; expiresAt: Date | null; replacedByKeyId: string | null },
+  now: Date,
+): boolean {
+  if (apiKeyState(key, now) !== 'active' || key.replacedByKeyId || !key.expiresAt) return false;
+  return key.expiresAt.getTime() - now.getTime() <= API_KEY_REMINDER_DAYS * 86_400_000;
 }

@@ -66,8 +66,10 @@ test('reports show response times against the target, member activity and a CSV 
   await expect(thread.getByText('Sent to WhatsApp')).toBeVisible({ timeout: 20_000 });
 
   // Reports is in the navigation now that the module is available. Later live events can still
-  // refresh the inbox, so it is left through the navigation (see openFromNav).
+  // refresh the conversation, so it is left through the navigation, not by loading a URL (see
+  // openFromNav; `page.goto` was interrupted here in WebKit on 2bdead7).
   await openFromNav(page, 'Reports');
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}/reports$`));
   await expect(page.getByRole('heading', { name: 'Reports', level: 1 })).toBeVisible();
   await expect(stat(page, 'Customer messages')).toContainText('2');
   await expect(stat(page, 'Waiting for a reply')).toContainText('1');

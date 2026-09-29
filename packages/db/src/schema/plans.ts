@@ -37,6 +37,8 @@ export const plans = opsSchema.table('plans', {
   runPackSize: integer('run_pack_size'),
   runPackPriceMinor: bigint('run_pack_price_minor', { mode: 'number' }),
   modules: text('modules').array().notNull().$type<PlanModule[]>(),
+  /** Requests to the public API per monthly usage period; null: no limit; 0: no API (ADR-061). */
+  apiRequestsMonthly: integer('api_requests_monthly'),
   status: text('status', { enum: PLAN_STATUSES }).notNull().default('draft'),
   createdByUserId: text('created_by_user_id').notNull(),
   createdAt: tz('created_at').notNull().defaultNow(),
@@ -46,10 +48,12 @@ export const plans = opsSchema.table('plans', {
   retiredAt: tz('retired_at'),
 });
 
-/** The default trial for new companies (a single row). */
+/** The default trial for new companies and the tax on plan prices (a single row). */
 export const planSettings = opsSchema.table('plan_settings', {
   id: boolean('id').primaryKey().default(true),
   defaultTrialPlanId: uuid('default_trial_plan_id'),
+  /** Tax added to plan prices, in basis points (1800 = 18%); null: not set (ADR-063). */
+  planTaxBp: integer('plan_tax_bp'),
   updatedByUserId: text('updated_by_user_id'),
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });
@@ -82,9 +86,86 @@ export const tenantPlans = appSchema.table('tenant_plans', {
   changedByUserId: text('changed_by_user_id'),
   changedAt: tz('changed_at').notNull().defaultNow(),
   version: integer('version').notNull().default(1),
+  /** The subscription that paid the current period; null for periods staff set (ADR-063). */
+  subscriptionId: uuid('subscription_id'),
 });
 
-export const USAGE_METRICS = ['automation_runs'] as const;
+export const PLAN_SUBSCRIPTION_STATUSES = [
+  'creating',
+  'created',
+  'authenticated',
+  'active',
+  'pending',
+  'halted',
+  'paused',
+  'cancelled',
+  'completed',
+  'expired',
+  'failed',
+] as const;
+export type PlanSubscriptionStatus = (typeof PLAN_SUBSCRIPTION_STATUSES)[number];
+/** Subscriptions that may still be authorised or charged: at most one per company (0037). */
+export const LIVE_PLAN_SUBSCRIPTION_STATUSES = [
+  'creating',
+  'created',
+  'authenticated',
+  'active',
+  'pending',
+  'halted',
+  'paused',
+] as const satisfies readonly PlanSubscriptionStatus[];
+
+/** A Razorpay subscription for the company's plan version and add-ons (migration 0037). */
+export const planSubscriptions = appSchema.table('plan_subscriptions', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  planId: uuid('plan_id').notNull(),
+  status: text('status', { enum: PLAN_SUBSCRIPTION_STATUSES }).notNull().default('creating'),
+  intervalMonths: smallint('interval_months').notNull(),
+  extraSeats: integer('extra_seats').notNull(),
+  extraNumbers: integer('extra_numbers').notNull(),
+  runPacks: integer('run_packs').notNull(),
+  subtotalMinor: bigint('subtotal_minor', { mode: 'number' }).notNull(),
+  taxBp: integer('tax_bp').notNull(),
+  taxMinor: bigint('tax_minor', { mode: 'number' }).notNull(),
+  amountMinor: bigint('amount_minor', { mode: 'number' }).notNull(),
+  currency: text('currency').notNull().default('INR'),
+  totalCount: smallint('total_count').notNull(),
+  providerPlanId: text('provider_plan_id'),
+  providerSubscriptionId: text('provider_subscription_id'),
+  authorizeBy: tz('authorize_by').notNull(),
+  currentStart: tz('current_start'),
+  currentEnd: tz('current_end'),
+  chargeAt: tz('charge_at'),
+  paidCount: integer('paid_count').notNull().default(0),
+  endedAt: tz('ended_at'),
+  cancelAtPeriodEnd: boolean('cancel_at_period_end').notNull().default(false),
+  cancelRequestedAt: tz('cancel_requested_at'),
+  cancelledByUserId: text('cancelled_by_user_id'),
+  failureReason: text('failure_reason'),
+  createdByUserId: text('created_by_user_id').notNull(),
+  createdAt: tz('created_at').notNull().defaultNow(),
+  syncedAt: tz('synced_at'),
+  updatedAt: tz('updated_at').notNull().defaultNow(),
+});
+
+/** A paid invoice of a subscription: the charge and the billing cycle it paid for (0037). */
+export const planPayments = appSchema.table('plan_payments', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  subscriptionId: uuid('subscription_id').notNull(),
+  providerPaymentId: text('provider_payment_id').notNull(),
+  providerInvoiceId: text('provider_invoice_id').notNull(),
+  amountMinor: bigint('amount_minor', { mode: 'number' }).notNull(),
+  currency: text('currency').notNull(),
+  periodStart: tz('period_start').notNull(),
+  periodEnd: tz('period_end').notNull(),
+  paidAt: tz('paid_at').notNull(),
+  method: text('method'),
+  createdAt: tz('created_at').notNull().defaultNow(),
+});
+
+export const USAGE_METRICS = ['automation_runs', 'api_requests'] as const;
 export type UsageMetric = (typeof USAGE_METRICS)[number];
 
 export const usageCounters = appSchema.table('usage_counters', {
@@ -94,4 +175,6 @@ export const usageCounters = appSchema.table('usage_counters', {
   periodStart: tz('period_start').notNull(),
   used: integer('used').notNull(),
   notifiedAt: tz('notified_at'),
+  /** When the billing managers were warned that 80% of the limit was used (ADR-062). */
+  warnedAt: tz('warned_at'),
 });
