@@ -76,6 +76,7 @@ const facts = indexReconFacts([
   fact('mandate_order', 'order_M', { subjectId: 'mandate-1', amountMinor: null }),
   fact('mandate_refund', 'rfnd_M', { subjectId: 'mandate-1', amountMinor: null }),
   fact('refund', 'rfnd_A', { subjectId: 'topup_payment-subject', amountMinor: 5_000 }),
+  fact('plan_payment', 'pay_P', { subjectId: 'subscription-1', amountMinor: 117_882 }),
 ]);
 
 const outcome = (i: RazorpayReconItem) => {
@@ -109,10 +110,32 @@ describe('matching a settled transaction', () => {
     expect(outcome(item({ entityId: 'pay_M2', orderId: 'order_M' }))).toBe(
       'mismatch:mandate_payment:',
     );
+    // A payment on no order of HyFib's may be a plan subscription's charge (an invoice's order, or
+    // none): it is looked up as one before it counts as not HyFib's.
     expect(outcome(item({ entityId: 'pay_X', orderId: 'order_X' }))).toBe(
-      'not_hyfib:unknown_payment:',
+      'not_hyfib:unknown_payment:plan_payment',
     );
-    expect(outcome(item({ entityId: 'pay_X', orderId: null }))).toBe('not_hyfib:unknown_payment:');
+    expect(outcome(item({ entityId: 'pay_X', orderId: null }))).toBe(
+      'not_hyfib:unknown_payment:plan_payment',
+    );
+  });
+
+  it('matches plan subscription payments by payment id (ADR-063)', () => {
+    expect(
+      classifyReconItem(item({ entityId: 'pay_P', orderId: 'order_inv', amount: 117_882 }), facts),
+    ).toEqual({
+      status: 'matched',
+      reason: 'plan_payment',
+      tenantId: 'tenant-1',
+      topupId: null,
+      hyfibAmountMinor: 117_882,
+      apply: null,
+    });
+    expect(outcome(item({ entityId: 'pay_P', amount: 117_881 }))).toBe('mismatch:amount_differs:');
+    // A dispute on a plan payment is for a person, as on any other matched payment.
+    expect(outcome(item({ entityId: 'pay_P', amount: 117_882, disputeId: 'disp_P' }))).toBe(
+      'review:dispute:',
+    );
   });
 
   it('matches refunds by refund id, then by the refunded payment and its order', () => {
@@ -151,6 +174,10 @@ describe('matching a settled transaction', () => {
     );
     expect(outcome(refund({ entityId: 'rfnd_X', paymentId: 'pay_X', orderId: 'order_X' }))).toBe(
       'not_hyfib:unknown_refund:',
+    );
+    // HyFib does not refund plan payments: a refund of one was made outside it, for a person.
+    expect(outcome(refund({ entityId: 'rfnd_P', paymentId: 'pay_P', orderId: 'order_inv' }))).toBe(
+      'review:plan_payment_refund:',
     );
   });
 

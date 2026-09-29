@@ -13,6 +13,7 @@ import {
   applyRefundById,
   type BillingProviderDeps,
 } from './payments';
+import { findPlanPayment } from './plan-subscriptions';
 import type { RazorpayReconItem, RazorpayResult } from './razorpay';
 
 /**
@@ -78,10 +79,11 @@ export interface ReconFact {
     | 'mandate_payment'
     | 'mandate_order'
     | 'mandate_refund'
-    | 'refund';
+    | 'refund'
+    | 'plan_payment';
   providerId: string;
   tenantId: string;
-  /** The top-up or card mandate. */
+  /** The top-up, card mandate or plan subscription. */
   subjectId: string;
   amountMinor: number | null;
   currency: string | null;
@@ -96,6 +98,7 @@ export interface ReconFacts {
   mandateByOrder: Map<string, ReconFact>;
   mandateByRefund: Map<string, ReconFact>;
   refundById: Map<string, ReconFact>;
+  planByPayment: Map<string, ReconFact>;
 }
 
 export function indexReconFacts(facts: readonly ReconFact[]): ReconFacts {
@@ -106,6 +109,7 @@ export function indexReconFacts(facts: readonly ReconFact[]): ReconFacts {
     mandateByOrder: new Map(),
     mandateByRefund: new Map(),
     refundById: new Map(),
+    planByPayment: new Map(),
   };
   const maps: Record<ReconFact['kind'], Map<string, ReconFact>> = {
     topup_payment: index.topupByPayment,
@@ -114,6 +118,7 @@ export function indexReconFacts(facts: readonly ReconFact[]): ReconFacts {
     mandate_order: index.mandateByOrder,
     mandate_refund: index.mandateByRefund,
     refund: index.refundById,
+    plan_payment: index.planByPayment,
   };
   for (const fact of facts) maps[fact.kind].set(fact.providerId, fact);
   return index;
@@ -126,8 +131,11 @@ export interface ReconClassification {
   topupId: string | null;
   /** HyFib's amount for the transaction, when HyFib has one. */
   hyfibAmountMinor: number | null;
-  /** HyFib missed this transaction: fetch it from Razorpay and record it through the usual path. */
-  apply: 'payment' | 'refund' | null;
+  /**
+   * HyFib missed this transaction: fetch it from Razorpay and record it through the usual path
+   * (`plan_payment`: a payment on no order of HyFib's, which may be a plan subscription's charge).
+   */
+  apply: 'payment' | 'refund' | 'plan_payment' | null;
 }
 
 const DOCUMENTED_TYPES: readonly string[] = ['payment', 'refund', 'transfer', 'adjustment'];
@@ -162,6 +170,13 @@ function matchReconItem(item: RazorpayReconItem, facts: ReconFacts): ReconClassi
           reason: 'mandate_authorization',
         };
       }
+      const plan = facts.planByPayment.get(item.entityId);
+      if (plan) {
+        const match = { ...NO_MATCH, tenantId: plan.tenantId, hyfibAmountMinor: plan.amountMinor };
+        return plan.amountMinor === item.amount
+          ? { ...match, status: 'matched', reason: 'plan_payment' }
+          : { ...match, status: 'mismatch', reason: 'amount_differs' };
+      }
       const order = item.orderId ? facts.topupByOrder.get(item.orderId) : undefined;
       if (order) {
         // A payment on a top-up's order that did not credit it: applied as a webhook would be.
@@ -183,7 +198,8 @@ function matchReconItem(item: RazorpayReconItem, facts: ReconFacts): ReconClassi
           reason: 'mandate_payment',
         };
       }
-      return { ...NO_MATCH, status: 'not_hyfib', reason: 'unknown_payment' };
+      // Possibly a plan subscription's charge HyFib has not recorded: synced when it is.
+      return { ...NO_MATCH, status: 'not_hyfib', reason: 'unknown_payment', apply: 'plan_payment' };
     }
     case 'refund': {
       const recorded = facts.refundById.get(item.entityId);
@@ -230,6 +246,15 @@ function matchReconItem(item: RazorpayReconItem, facts: ReconFacts): ReconClassi
           status: 'matched',
           reason: 'uncredited_payment_refund',
           apply: null,
+        };
+      }
+      const planPayment = item.paymentId ? facts.planByPayment.get(item.paymentId) : undefined;
+      if (planPayment) {
+        return {
+          ...NO_MATCH,
+          tenantId: planPayment.tenantId,
+          status: 'review',
+          reason: 'plan_payment_refund',
         };
       }
       return { ...NO_MATCH, status: 'not_hyfib', reason: 'unknown_refund' };
@@ -437,6 +462,18 @@ async function applyMissed(
       }
       throw error;
     }
+  }
+  if (found.apply === 'plan_payment') {
+    const applied = await applyPaymentById(deps, item.entityId);
+    if (applied.outcome !== 'subscription_synced') return as('not_hyfib', 'unknown_payment');
+    const recorded = await findPlanPayment(deps.db, item.entityId);
+    if (!recorded) {
+      return { ...as('mismatch', 'plan_payment_unrecorded'), tenantId: applied.tenantId };
+    }
+    const match = { tenantId: recorded.tenantId, hyfibAmountMinor: recorded.amountMinor };
+    return recorded.amountMinor === item.amount
+      ? { ...as('recorded', 'plan_payment_recorded'), ...match }
+      : { ...as('mismatch', 'amount_differs'), ...match };
   }
   if (found.apply === 'refund' && item.paymentId) {
     try {

@@ -1351,8 +1351,9 @@ starts the next run until the company is finished. A run:
 2. cleans up at providers, recording every outcome (a failure is recorded, and named in the final
    email, but does not stop the deletion): unsubscribes HyFib's app from each WhatsApp Business
    Account (`DELETE /{WABA-ID}/subscribed_apps`, in Meta's official OpenAPI description), uninstalls
-   HyFib's Shopify app (`appUninstall`) and deletes HyFib's WooCommerce webhooks, and deletes
-   HyFib's card mandate token at Razorpay;
+   HyFib's Shopify app (`appUninstall`) and deletes HyFib's WooCommerce webhooks, cancels the
+   company's plan subscription at Razorpay at once (ADR-063, so nothing more is charged), and
+   deletes HyFib's card mandate token at Razorpay;
 3. deletes the company's rows through `ops.delete_tenant_data`, a batch at a time, each batch its
    own transaction, following a fixed order (`ops.tenant_deletion_steps`: children before parents;
    the two tables of the one foreign-key cycle, automations and their versions, in one statement;
@@ -1368,7 +1369,8 @@ starts the next run until the company is finished. A run:
 
 **Kept after deletion:** the tombstone company row; billing and tax records (wallet, ledger,
 top-ups, card mandates with only safe card metadata, auto-recharge attempts, the Razorpay customer
-reference and billing contact); plan history (`app.tenant_plans`); the deletion register; platform evidence (platform
+reference and billing contact); plan history (`app.tenant_plans`), plan subscriptions and plan
+payments (ADR-063); the deletion register; platform evidence (platform
 audit log, support grants, security events); and people's own accounts, which may belong to other
 companies. Everything else is deleted, including members, invitations, the company audit log,
 contacts, consent history, conversations, messages, templates, campaigns, automations, CRM, growth,
@@ -1755,3 +1757,92 @@ Decision:
 
 Not built: a threshold chosen per company or per member, warnings for seats, numbers, teams or live
 automations (they refuse additions, they do not run out during the month), and in-app notices.
+
+## ADR-063 Paying for plans with Razorpay Subscriptions (2026-09-28)
+
+Context: ADR-051 left charging for plans out, so HyFib staff set paid periods, for example after an
+invoice is paid outside HyFib. ADR-012 chose Razorpay Subscriptions for plans. Companies cannot pay
+for their plan in HyFib, and a lapsed plan restricts them until staff act.
+
+Decision:
+
+- **What a company pays for:** the plan version it is on, with the add-ons HyFib staff set: the
+  version's price plus extra seats, extra numbers and run packs at the version's prices, every 1, 3
+  or 12 months as the version says (add-on prices are per billing interval, like the price). The
+  plan form says prices are before tax, so platform owners set the tax added to plan prices (a
+  percentage with up to two decimals, 0 to 50%, stored in basis points, with a reason in the
+  platform audit log); until it is set, paying is not offered. Each subscription keeps its subtotal,
+  tax and total, so a later rate change never changes it. A company can start paying while
+  trialing, past due, or after its plan expired or was canceled, on a published version whose total
+  is at least ₹1 (Razorpay's minimum); not while a paid period staff set is running, and not with
+  complimentary access. Changing the plan or add-ons stays with staff. Razorpay documents that, under
+  RBI's card mandate rules, a charge above ₹15,000 on an Indian card needs the payer's approval
+  through their bank every time, so the page says so for such totals.
+- **Starting:** owners and billing managers (`billing.manage`) with a recent sign-in (ADR-056), one
+  start at a time per company (an advisory lock). HyFib records its subscription first
+  (write-ahead), then creates a Razorpay plan for the total (`POST /v1/plans`: period `monthly`,
+  `quarterly` or `yearly`, interval 1) and a subscription (`POST /v1/subscriptions`: five years of
+  cycles, so `total_count` 60, 20 or 5, within Razorpay's ten-year limit; `customer_notify` on so
+  Razorpay tells the payer about charges, failures and card updates; the authorisation open for one
+  hour through `expire_by`). Checkout opens with the `subscription_id`. The subscription starts at
+  once: the first charge is taken in Checkout and the paid period starts then, so the rest of a
+  trial is not carried over, and the page says so. An unfinished Checkout is reopened while its
+  hour lasts; after that it is replaced, and the old one is cancelled at Razorpay so it can never be
+  authorised. A creation that fails or gets no answer marks ours failed (the sweep does this after
+  ten minutes for one that never finished); a Razorpay subscription created anyway cannot be
+  authorised after `expire_by`.
+- **Razorpay decides, HyFib follows:** the browser, the webhook payload and notes are never enough.
+  Checkout's signature (`payment_id|subscription_id`, checked against our stored subscription id)
+  only prompts a fetch. Every `subscription.*` event, the Checkout confirmation, the sweep and a sync
+  before a period-end transition fetch the subscription, and its invoices only while Razorpay counts
+  more paid cycles (`paid_count`) than HyFib recorded. A paid invoice becomes a plan payment (payment
+  id unique) only when it is for our subscription, has a billing period, was paid in INR for exactly
+  our amount, and its payment fetched from Razorpay is captured for the same amount. A subscription
+  that ended stays ended, a status HyFib does not know keeps ours, and an answer with fewer paid
+  cycles than we stored (an older read) changes nothing. While the subscription is active and a plan
+  payment covers its current cycle, a definer function in the company's scope makes the plan state
+  active for exactly Razorpay's `current_start` to `current_end`, links it to the subscription and
+  writes the company's audit log; a new paid period restarts the monthly usage period, as when staff
+  set one (ADR-051). A payment covers the cycle that holds the middle of its invoice's billing
+  period, because Razorpay's example invoices start and end at midnight India time while the
+  subscription's cycle has exact times. A subscription whose plan version or add-ons no longer match
+  the company's plan state is never applied.
+- **Missed events:** the sweep re-reads each live subscription daily, and hourly once its paid cycle
+  has ended (except when Razorpay has stopped retrying), so a missed renewal event costs at most an
+  hour after a period ends; the plan sweep syncs a subscription again just before moving its plan
+  state at the end of a period.
+- **Failed charges:** Razorpay retries a failed charge (`pending`) and then stops (`halted`). HyFib
+  shows it, emails the billing managers when it happens, and lets time decide the plan state: at the
+  end of the paid period the version's grace days (past due) and expiry apply as before, with
+  wording for a company that pays by subscription. A later successful charge (after the payer
+  updates the card through Razorpay's email) makes the plan active again. Billing managers are also
+  emailed when a payment is recorded.
+- **Cancelling:** owners and billing managers (recent sign-in) cancel an active subscription at the
+  end of the paid period (`cancel_at_cycle_end`), and one not yet charged at once; the plan then ends
+  as canceled when the period ends, without grace days, and the billing managers are emailed.
+  Platform owners can cancel a company's subscription at once, with a reason in the platform audit
+  log, for example before changing its plan; the paid period stands. Staff plan changes are refused
+  while a company has a subscription that can still be authorised or charged. Deleting a company
+  cancels its subscription at Razorpay first, and the outcome is kept with the deletion (ADR-055).
+- **Other Razorpay events:** a subscription charge also sends `payment.*` events. A payment on no
+  order of HyFib's whose invoice belongs to one of our subscriptions syncs that subscription instead
+  of being quarantined as an unknown order; an event for a subscription HyFib does not know is
+  quarantined. The daily settlement reconciliation (ADR-059) matches recorded plan payments by
+  payment id, looks up unknown payments the same way (recording a missed one), and leaves refunds of
+  plan payments to a person, since HyFib does not refund them.
+- **Flag:** `RAZORPAY_SUBSCRIPTIONS_ENABLED`, off by default: Razorpay Subscriptions (and Flash
+  Checkout, which Razorpay requires for them) must be activated on the account, and the tax
+  treatment of plan prices needs review (ADR-012). Events for existing subscriptions are processed
+  either way.
+
+Uncertain, from Razorpay's documentation and Node SDK only (no test-mode account was available):
+whether an invoice's `billing_start`/`billing_end` always fall inside the subscription's cycle as
+the midpoint rule assumes; how soon after a charge `paid_count` and the paid invoice can be fetched;
+whether every subscription charge's payment carries `invoice_id` (one that does not stays
+quarantined for a person); and how a quarterly plan behaves on domestic cards, whose mandates
+Razorpay registers "as presented" for frequencies other than weekly, monthly and yearly. The
+release checklist has the test-mode checks.
+
+Not built: billing that starts at the end of a trial, self-serve plan and add-on changes with
+proration, pausing, offers, plan payment receipts and GST invoices, refunds of plan payments, and
+emails about a subscription beyond charges, failures and endings.

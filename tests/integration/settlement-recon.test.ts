@@ -2,7 +2,7 @@ import { createHmac, randomBytes } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 import { PgBoss } from 'pg-boss';
 import { Keyring, isAppError, uuidv7, type Clock, type RazorpayConfig } from '@w360/core';
-import { sql, systemScope } from '@w360/db';
+import { authorizedTenantScope, sql, systemScope } from '@w360/db';
 import {
   JobSigner,
   PgBossJobQueue,
@@ -10,12 +10,14 @@ import {
   addDays,
   applyRefundById,
   createBillingService,
+  createPlanAdminService,
   createPlatformReconciliationService,
   findDueSettlementRecons,
   indiaDate,
   outboxAad,
   resolveTenantContext,
   runSettlementRecon,
+  syncPlanSubscription,
   type BillingNoticeDeps,
   type BillingProviderDeps,
   type PlatformActor,
@@ -56,6 +58,7 @@ function config(): RazorpayConfig {
     keySecret: KEY_SECRET,
     webhookSecrets: [randomBytes(16).toString('hex')],
     recurringCardsEnabled: true,
+    subscriptionsEnabled: false,
     apiBaseUrl: standIn.baseUrl,
     mode: 'test',
   };
@@ -1132,5 +1135,140 @@ describe('payments not seen in a settlement', () => {
     standIn.settle(addDays(D0, 8), { paymentIds: [t9.payment.id], refundIds: [] });
     expect((await runDay(addDays(D0, 8))).result.outcome).toBe('completed');
     expect((await recon().unsettled(owner)).topups.map((t) => t.id)).not.toContain(t9.topupId);
+  });
+});
+
+describe('plan subscription payments (ADR-063)', () => {
+  it('matches recorded plan payments, records a missed one by syncing its subscription, and leaves refunds of them to a person', async () => {
+    const D = day(-50);
+    const c = await company('Recon Epsilon Plans');
+    const plans = createPlanAdminService({ platformDb: dbs.platform, clock });
+    const { id: planId } = await plans.createPlan(owner, {
+      code: `recon-sub-${Date.now().toString(36)}`,
+      name: 'Recon Plan',
+      price: '1180',
+      intervalMonths: '1',
+      trialDays: '0',
+      graceDays: '0',
+      seatsIncluded: '3',
+      numbersIncluded: '1',
+      modules: [],
+    });
+    await plans.publishPlan(owner, planId);
+    // The company's subscription at Razorpay, paid in Checkout, and HyFib's record of it.
+    const rzpPlan = await razorpay.createPlan({
+      period: 'monthly',
+      amount: 118_000,
+      currency: 'INR',
+      name: 'HyFib Recon Plan plan',
+    });
+    if (!rzpPlan.ok) throw new Error('plan');
+    const rzpSub = await razorpay.createSubscription({
+      planId: rzpPlan.data.id,
+      totalCount: 60,
+      expireBy: Math.floor(Date.now() / 1000) + 3600,
+      customerNotify: true,
+    });
+    if (!rzpSub.ok) throw new Error('subscription');
+    const first = standIn.authorizeSubscription(rzpSub.data.id);
+    const subscriptionId = uuidv7();
+    await adminQuery(
+      `INSERT INTO app.plan_subscriptions (id, tenant_id, plan_id, status, interval_months, extra_seats,
+         extra_numbers, run_packs, subtotal_minor, tax_bp, tax_minor, amount_minor, total_count,
+         provider_plan_id, provider_subscription_id, authorize_by, created_by_user_id)
+       VALUES ($1, $2, $3, 'created', 1, 0, 0, 0, 100000, 1800, 18000, 118000, 60, $4, $5,
+               now() + interval '1 hour', $6)`,
+      [subscriptionId, c.tenantId, planId, rzpPlan.data.id, rzpSub.data.id, c.ctx.user.id],
+    );
+    const scope = authorizedTenantScope(c.tenantId, null);
+    await syncPlanSubscription(deps(), scope, subscriptionId);
+    // The renewal Razorpay charged, whose events HyFib never received.
+    const renewal = standIn.chargeSubscription(rzpSub.data.id);
+    const planPaymentCount = async () =>
+      (
+        await adminQuery<{ n: number }>(
+          'SELECT count(*)::int AS n FROM app.plan_payments WHERE subscription_id = $1',
+          [subscriptionId],
+        )
+      )[0]!.n;
+    expect(await planPaymentCount()).toBe(1);
+    // Another integration's subscription on the same account.
+    const otherPlan = await razorpay.createPlan({
+      period: 'monthly',
+      amount: 20_000,
+      currency: 'INR',
+      name: 'Not HyFib',
+    });
+    if (!otherPlan.ok) throw new Error('plan');
+    const otherSub = await razorpay.createSubscription({
+      planId: otherPlan.data.id,
+      totalCount: 12,
+      expireBy: Math.floor(Date.now() / 1000) + 3600,
+      customerNotify: true,
+    });
+    if (!otherSub.ok) throw new Error('subscription');
+    const foreign = standIn.authorizeSubscription(otherSub.data.id);
+    // A refund of the first plan payment, made in the Dashboard.
+    const refund = await dashboardRefund(first.payment.id, 5_000);
+
+    standIn.settle(D, {
+      paymentIds: [first.payment.id, renewal.payment.id, foreign.payment.id],
+      refundIds: [refund.id],
+    });
+    const { result } = await runDay(D);
+    expect(result).toMatchObject({ outcome: 'completed', items: 4, recorded: 1 });
+    const byId = await itemsOf(D);
+    expect(byId.get(first.payment.id)).toMatchObject({
+      status: 'matched',
+      reason: 'plan_payment',
+      tenantId: c.tenantId,
+      topupId: null,
+      hyfibAmountMinor: 118_000,
+    });
+    expect(byId.get(renewal.payment.id)).toMatchObject({
+      status: 'recorded',
+      reason: 'plan_payment_recorded',
+      tenantId: c.tenantId,
+      hyfibAmountMinor: 118_000,
+    });
+    expect(byId.get(foreign.payment.id)).toMatchObject({
+      status: 'not_hyfib',
+      reason: 'unknown_payment',
+      tenantId: null,
+    });
+    expect(byId.get(refund.id)).toMatchObject({
+      status: 'review',
+      reason: 'plan_payment_refund',
+      tenantId: c.tenantId,
+    });
+    expect(await planPaymentCount()).toBe(2);
+
+    // The day again: the missed payment is now matched, nothing is recorded twice.
+    const again = await runDay(D);
+    expect(again.result).toMatchObject({ outcome: 'completed', items: 4 });
+    expect((await itemsOf(D)).get(renewal.payment.id)).toMatchObject({
+      status: 'recorded',
+      reason: 'plan_payment_recorded',
+    });
+    expect(await planPaymentCount()).toBe(2);
+
+    // A later renewal the report shows for another amount than Razorpay's payment: it is recorded
+    // from the payment, and the difference waits for a person.
+    const D2 = day(-51);
+    const later = standIn.chargeSubscription(rzpSub.data.id);
+    standIn.settle(D2, { paymentIds: [later.payment.id], refundIds: [] });
+    const reported = standIn.state.settlements
+      .get(D2)!
+      .find((item) => item.entity_id === later.payment.id)!;
+    reported.amount = 117_000;
+    const third = await runDay(D2);
+    expect(third.result).toMatchObject({ outcome: 'completed', items: 1 });
+    expect((await itemsOf(D2)).get(later.payment.id)).toMatchObject({
+      status: 'mismatch',
+      reason: 'amount_differs',
+      tenantId: c.tenantId,
+      hyfibAmountMinor: 118_000,
+    });
+    expect(await planPaymentCount()).toBe(3);
   });
 });

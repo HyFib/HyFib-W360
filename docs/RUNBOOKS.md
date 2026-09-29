@@ -862,6 +862,51 @@ invoice or ticket as the reason: it is shown in the company's audit log. A form 
 current plan state is refused ("The plan changed while you were editing"); reload. Nothing is
 charged in HyFib: set the period after the payment is settled elsewhere.
 
+**Paying for plans by Razorpay subscription (ADR-063).** Turn it on only after Razorpay activated
+Subscriptions (and Flash Checkout, which Subscriptions need) on HyFib's account and the webhook
+sends the `subscription.*` events (`docs/DEPLOYMENT.md`): set `RAZORPAY_SUBSCRIPTIONS_ENABLED=true`
+on web and worker, then a platform owner sets the tax on plan prices (Platform → Plans → Paying for
+plans, with a reason); companies are offered paying only once a tax is set, even 0%. Changing the
+tax affects new subscriptions only. A company on a paid period staff set, on complimentary access,
+on a retired version or with an add-on the version does not sell is not offered paying; Billing says
+why for the last two.
+
+**A company paid but its plan did not change.** Open the company's platform page → Plan
+subscription: status, cycle, last checked and any note. The plan changes only when Razorpay reports
+the cycle paid, fetched by HyFib: after Checkout, on each `subscription.*` or `payment.*` webhook, and
+by the minute sweep (every live subscription at least daily, hourly once its cycle has ended, and
+just before the plan sweep would move the period on). The worker logs `plan subscription check
+failed; will retry` with the subscription id when Razorpay cannot answer; it is tried again. A note such as "Razorpay
+returned a subscription for another plan" or a payment Razorpay reports for another amount means
+the records disagree: compare with the Razorpay Dashboard before doing anything by hand, and never
+set a paid period for a payment HyFib has not recorded unless the Dashboard shows it captured.
+
+**A plan payment failed.** `pending`: Razorpay retries; the payer changes the card through the link
+in Razorpay's email. `halted`: Razorpay stopped retrying. Billing managers were emailed at each
+step. When the paid period ends the plan gets the version's grace days (past due), then expires;
+a later successful charge makes it active again. The company can also cancel the subscription and
+pay again. Charges above ₹15,000 on Indian cards wait for the payer's approval through their bank
+every time (RBI rules, Razorpay's FAQ): a charge that stays unpaid for that reason looks the same.
+
+**Cancelling a company's subscription.** Owners and billing managers cancel in Billing (an active
+one at the end of the paid period, otherwise at once). Platform owners cancel at once on the
+company's platform page with a reason (needed before changing the company's plan, which staff
+cannot do while a subscription is live); the paid period stands and the plan then ends as canceled,
+without grace days. A company that cancelled pays again from Billing once the paid period has ended
+(there is no resume). Deleting a company cancels its subscription first; a failure shows as "Plan
+subscription at Razorpay: failed" in the deletion's provider outcomes: cancel it in the Razorpay
+Dashboard.
+
+**Refunding a plan payment.** HyFib does not refund plan payments. A refund made in the Razorpay
+Dashboard shows in the daily reconciliation as "A refund of a plan subscription payment" for a
+platform owner; it changes nothing in HyFib, so decide whether the company keeps the period (end
+the plan if not, after cancelling the subscription) and note it on the item.
+
+**A payment start that never finished.** A subscription is recorded before Razorpay is called; one
+still "creating" after 10 minutes is marked failed by the sweep. A Razorpay subscription created
+anyway can only be authorised within its hour (`expire_by`), and the sweep cancels any unpaid one
+whose hour has passed, so nothing can be charged later.
+
 **A new version of a plan.** Only platform owners change the catalog. Open the published version →
 "New version from this one", edit the draft, publish it, then move companies to it one by one; the
 old version can be retired (companies on it keep it). A published version never changes, even for
@@ -903,6 +948,14 @@ deleted gets none. Queued emails go out through the email outbox like every othe
 retried the next minute). A company being deleted is skipped. Check `app.tenant_plans` for the
 company (`status`, `trial_ends_at`, `period_end`, `grace_ends_at`): the database's clock decides
 what is due.
+
+**Migration 0037 failed.** It runs in one transaction, so a failure applies nothing. It adds the
+plan tax setting, `app.plan_subscriptions` and `app.plan_payments` (forced RLS, grants, triggers),
+`tenant_plans.subscription_id`, the resolve, period and due functions, and recreates
+`app.apply_plan_transition`, `ops.settlement_recon_facts` and `ops.record_tenant_deletion_cleanup`
+(dropped as `w360_definer`, recreated, granted, then handed to `w360_definer`) and the
+reconciliation reason check. A failure usually means the bootstrap roles are missing or one of
+those functions was changed by hand.
 
 **Migration 0023 failed.** It runs in one transaction, so a failure applies nothing. It widens the
 company status check with `restricted`, adds the plan tables, triggers (two SECURITY DEFINER trigger

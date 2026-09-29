@@ -58,6 +58,8 @@ const KEPT = [
   'app.ledger_entries',
   'app.ledger_transactions',
   'app.payment_mandates',
+  'app.plan_payments',
+  'app.plan_subscriptions',
   'app.tenant_plans',
   'app.topups',
   'app.wallet_holds',
@@ -363,6 +365,7 @@ const billingService = () =>
       keySecret: RZP_KEY_SECRET,
       webhookSecrets: [randomBytes(16).toString('hex')],
       recurringCardsEnabled: true,
+      subscriptionsEnabled: false,
       apiBaseUrl: rzp.baseUrl,
       mode: 'test',
     },
@@ -392,6 +395,44 @@ async function addCardMandate(owner: TenantContext) {
   );
   expect(mandate!.status).toBe('active');
   return { mandateId: setup.mandateId, tokenId: mandate!.provider_token_id };
+}
+
+/**
+ * A plan subscription paid through the Razorpay stand-in (ADR-063), with HyFib's record of it as the
+ * product keeps it (fixture rows: paying is covered by plan-subscriptions.test.ts).
+ */
+async function addPlanSubscription(c: Company) {
+  const planId = uuidv7();
+  await fx.dbs.adminPool.query(
+    `INSERT INTO ops.plans (id, code, version, name, price_minor, interval_months, seats_included,
+       numbers_included, created_by_user_id, status, published_at, published_by_user_id)
+     VALUES ($1, $2, 1, 'Deletion Plan', 100000, 1, 3, 1, $3, 'published', now(), $3)`,
+    [planId, `del-${planId.slice(-12)}`, c.owner.id],
+  );
+  const plan = await razorpay.createPlan({
+    period: 'monthly',
+    amount: 118_000,
+    currency: 'INR',
+    name: 'HyFib Deletion Plan plan',
+  });
+  if (!plan.ok) throw new Error('plan');
+  const sub = await razorpay.createSubscription({
+    planId: plan.data.id,
+    totalCount: 60,
+    expireBy: Math.floor(Date.now() / 1000) + 3600,
+    customerNotify: true,
+  });
+  if (!sub.ok) throw new Error('subscription');
+  rzp.authorizeSubscription(sub.data.id);
+  await fx.query(
+    `INSERT INTO app.plan_subscriptions (id, tenant_id, plan_id, status, interval_months, extra_seats,
+       extra_numbers, run_packs, subtotal_minor, tax_bp, tax_minor, amount_minor, total_count,
+       provider_plan_id, provider_subscription_id, authorize_by, created_by_user_id)
+     VALUES ($1, $2, $3, 'active', 1, 0, 0, 0, 100000, 1800, 18000, 118000, 60, $4, $5,
+             now() + interval '1 hour', $6)`,
+    [uuidv7(), c.tenant.id, planId, plan.data.id, sub.data.id, c.owner.id],
+  );
+  return sub.data.id;
 }
 
 describe('what a deletion deletes', () => {
@@ -847,6 +888,7 @@ describe('running a deletion', () => {
     const adminUser = await member(c, 'admin', 'Admin Person');
     const { shop } = await connectShopify(c, owner);
     const { tokenId } = await addCardMandate(owner);
+    const providerSubscriptionId = await addPlanSubscription(c);
     const other = await busyCompany();
     const tables = await companyTables();
     const otherBefore = await rowCounts(other.c.tenant.id, tables);
@@ -868,8 +910,16 @@ describe('running a deletion', () => {
         outcome: 'done',
       },
       { kind: 'shopify_store', label: shop, outcome: 'done' },
+      { kind: 'plan_subscription', label: 'Plan subscription at Razorpay', outcome: 'done' },
       { kind: 'card_mandate', label: 'Card Visa •••• 1111', outcome: 'done' },
     ]);
+    // Nothing more is charged: the subscription is cancelled at Razorpay, and HyFib's record kept.
+    expect(rzp.state.subscriptions.get(providerSubscriptionId)?.status).toBe('cancelled');
+    expect(
+      await fx.query('SELECT status FROM app.plan_subscriptions WHERE tenant_id = $1', [
+        c.tenant.id,
+      ]),
+    ).toEqual([{ status: 'cancelled' }]);
 
     // Every deletable row is gone; the kept records are all still there.
     const after = await rowCounts(c.tenant.id, tables);

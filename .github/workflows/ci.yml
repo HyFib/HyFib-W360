@@ -77,11 +77,11 @@ jobs:
   e2e:
     name: End-to-end (Chromium, Firefox, WebKit, mobile)
     runs-on: ubuntu-24.04
-    # 164 tests run one at a time across four browser projects: about 3 minutes of set-up and 40 of
-    # tests on a66f64e (152 tests, all passing on the first attempt), plus about a minute each for
-    # the usage and rates and API quota specs. Runners vary (148 tests took 33.5 minutes on
-    # b2b7614; 160 took 45.9 on fb8efa6, including a 4-minute timeout and its retry), and one retry
-    # of a long test (the cart reminder test allows 5 minutes) must still fit on a slow runner.
+    # 168 tests run one at a time across four browser projects: about 3 minutes of set-up and 40 of
+    # tests on 6b33740 (164 tests, all passing on the first attempt), plus about a minute for the
+    # plan subscription spec. Runners vary (148 tests took 33.5 minutes on b2b7614; 160 took 45.9 on
+    # fb8efa6, including a 4-minute timeout and its retry), and one retry of a long test (the cart
+    # reminder test allows 5 minutes) must still fit on a slow runner.
     timeout-minutes: 70
     services:
       postgres:
@@ -116,6 +116,8 @@ jobs:
       E2E_GRAPH_PORT: '4010'
       RAZORPAY_API_BASE_URL: http://127.0.0.1:4020
       E2E_RAZORPAY_PORT: '4020'
+      # Paying for plans (ADR-063) against the stand-in's subscriptions; off unless set.
+      RAZORPAY_SUBSCRIPTIONS_ENABLED: 'true'
       # Automation web requests reach a local target started by the test: loopback egress is
       # allowed for APP_ENV=local|test only, and the name below resolves to 127.0.0.1 (hosts file).
       W360_EGRESS_ALLOW_LOOPBACK: 'true'

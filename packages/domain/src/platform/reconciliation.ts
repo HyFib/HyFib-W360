@@ -38,10 +38,13 @@ export const SETTLEMENT_RECON_REASON_TEXT: Record<SettlementReconReason, string>
   mandate_authorization: 'A card mandate’s authorisation payment, or its refund.',
   uncredited_payment_refund:
     'A refund of a payment HyFib never credited, such as a second payment on an order.',
+  plan_payment: 'A payment of a company’s plan subscription that HyFib recorded.',
   credited:
     'Razorpay settled a captured payment HyFib had not credited. The check credited it, as its webhook would have.',
   refund_recorded:
     'Razorpay settled a refund HyFib had not recorded. The check recorded it, as its webhook would have.',
+  plan_payment_recorded:
+    'Razorpay settled a plan subscription payment HyFib had not recorded. The check synced the subscription, which recorded it, as its webhook would have.',
   amount_differs: 'The amount is not HyFib’s amount for this transaction.',
   second_payment:
     'A second payment on a top-up another payment already paid. HyFib gave no credit for it: refund it in the Razorpay Dashboard.',
@@ -54,12 +57,16 @@ export const SETTLEMENT_RECON_REASON_TEXT: Record<SettlementReconReason, string>
     'Recording this refund would refund more than the payment. Check the top-up’s refunds.',
   payment_unavailable: 'Razorpay did not return this payment, so HyFib could not record it.',
   refund_unavailable: 'Razorpay did not return this refund, so HyFib could not record it.',
+  plan_payment_unrecorded:
+    'A payment of a HyFib plan subscription that syncing the subscription did not record (not captured, or not the subscription’s amount). Check the subscription in the Razorpay Dashboard.',
   adjustment: 'An adjustment by Razorpay. Check it in the Razorpay Dashboard.',
   dispute:
     'The transaction has a dispute, and the report does not say which transaction carries a chargeback’s deduction. Check it in the Razorpay Dashboard; a lost chargeback is recorded from its webhook. If HyFib had missed the payment or refund, the check recorded it first, as its webhook would have.',
   unknown_type: 'A kind of transaction HyFib does not know.',
   currency: 'Not in rupees.',
   unreadable: 'Razorpay returned a transaction HyFib could not read.',
+  plan_payment_refund:
+    'A refund of a plan subscription payment. HyFib does not refund plan payments, and the paid period is unchanged: check it in the Razorpay Dashboard.',
   unknown_payment:
     'A payment that is not HyFib’s (another integration or a payment made in the Dashboard).',
   unknown_refund: 'A refund of a payment that is not HyFib’s.',

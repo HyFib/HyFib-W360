@@ -119,7 +119,7 @@ describe('Razorpay configuration', () => {
   };
   const production = { ...base, APP_ENV: 'production', APP_BASE_URL: 'https://w360.example.net' };
 
-  it('is optional, and recurring card mandates stay off unless enabled', () => {
+  it('is optional, and recurring card mandates and plan subscriptions stay off unless enabled', () => {
     expect(razorpayConfigFrom(loadWebConfig(local))).toBeNull();
     const config = razorpayConfigFrom(
       loadWebConfig({ ...local, ...razorpay, RAZORPAY_WEBHOOK_SECRET_PREVIOUS: 'o'.repeat(24) }),
@@ -127,9 +127,15 @@ describe('Razorpay configuration', () => {
     expect(config).toMatchObject({
       mode: 'test',
       recurringCardsEnabled: false,
+      subscriptionsEnabled: false,
       apiBaseUrl: 'https://api.razorpay.com',
       webhookSecrets: ['w'.repeat(24), 'o'.repeat(24)],
     });
+    expect(
+      razorpayConfigFrom(
+        loadWebConfig({ ...local, ...razorpay, RAZORPAY_SUBSCRIPTIONS_ENABLED: 'true' }),
+      ),
+    ).toMatchObject({ recurringCardsEnabled: false, subscriptionsEnabled: true });
   });
 
   it('rejects malformed key ids and allows live keys only in production', () => {

@@ -57,6 +57,11 @@ const baseSchema = z.object({
   RAZORPAY_WEBHOOK_SECRET_PREVIOUS: z.string().optional(),
   /** Only after Razorpay confirms Recurring Payments (card mandates) for this merchant. */
   RAZORPAY_RECURRING_CARDS_ENABLED: bool.optional(),
+  /**
+   * Paying for plans with Razorpay Subscriptions (ADR-063): only after Razorpay activates
+   * Subscriptions (and Flash Checkout) for this merchant.
+   */
+  RAZORPAY_SUBSCRIPTIONS_ENABLED: bool.optional(),
   /** API origin override, allowed only for APP_ENV=local|test (a test stand-in). */
   RAZORPAY_API_BASE_URL: z.url().optional(),
   /**
@@ -261,6 +266,8 @@ export interface RazorpayConfig {
   /** Webhook secrets accepted for signatures: current first, then the previous during rotation. */
   webhookSecrets: string[];
   recurringCardsEnabled: boolean;
+  /** Companies may pay for their plan through a Razorpay subscription (ADR-063). */
+  subscriptionsEnabled: boolean;
   apiBaseUrl: string;
   /** Live keys move real money; test keys only simulate payments. */
   mode: 'test' | 'live';
@@ -301,6 +308,7 @@ export function razorpayConfigFrom(config: BaseConfig): RazorpayConfig | null {
       (v): v is string => Boolean(v),
     ),
     recurringCardsEnabled: config.RAZORPAY_RECURRING_CARDS_ENABLED ?? false,
+    subscriptionsEnabled: config.RAZORPAY_SUBSCRIPTIONS_ENABLED ?? false,
     apiBaseUrl,
     mode,
   };

@@ -4,6 +4,7 @@ import {
   RazorpayClient,
   verifyCheckoutSignature,
   verifyRazorpayWebhookSignature,
+  verifySubscriptionCheckoutSignature,
 } from './razorpay';
 
 const hmac = (secret: string, data: string | Buffer) =>
@@ -34,6 +35,27 @@ describe('Razorpay signatures', () => {
     expect(verifyRazorpayWebhookSignature(tampered, hmac('current', body), ['current'])).toBe(
       false,
     );
+  });
+
+  it('verifies a subscription’s checkout response as payment id, then our subscription id', () => {
+    const signature = hmac('key-secret', 'pay_1|sub_A');
+    expect(verifySubscriptionCheckoutSignature('sub_A', 'pay_1', signature, 'key-secret')).toBe(
+      true,
+    );
+    expect(verifySubscriptionCheckoutSignature('sub_B', 'pay_1', signature, 'key-secret')).toBe(
+      false,
+    );
+    // The order-style payload (id first) is not the subscription one.
+    expect(
+      verifySubscriptionCheckoutSignature(
+        'sub_A',
+        'pay_1',
+        hmac('key-secret', 'sub_A|pay_1'),
+        'key-secret',
+      ),
+    ).toBe(false);
+    expect(verifySubscriptionCheckoutSignature('sub_A', 'pay_1', signature, 'other')).toBe(false);
+    expect(verifySubscriptionCheckoutSignature('sub_A', 'pay_1', 'zz', 'key-secret')).toBe(false);
   });
 
   it('verifies the checkout response against our own order id', () => {
@@ -379,5 +401,237 @@ describe('RazorpayClient settlement reports', () => {
       client.fetchSettlementRecon({ date: '2022-06-11', count: 10, skip: -1 }),
     ).toThrow();
     expect(seen).toEqual([]);
+  });
+});
+
+describe('RazorpayClient subscriptions', () => {
+  const json = (status: number, body: unknown) =>
+    new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+  const subscription = (over: Record<string, unknown> = {}) => ({
+    id: 'sub_Abc123',
+    entity: 'subscription',
+    plan_id: 'plan_Def456',
+    status: 'active',
+    current_start: 1_790_000_000,
+    current_end: 1_792_600_000,
+    charge_at: 1_792_600_000,
+    ended_at: null,
+    paid_count: 1,
+    total_count: 60,
+    notes: [],
+    ...over,
+  });
+  const invoice = (over: Record<string, unknown> = {}) => ({
+    id: 'inv_Ghi789',
+    entity: 'invoice',
+    subscription_id: 'sub_Abc123',
+    payment_id: 'pay_Jkl012',
+    status: 'paid',
+    amount: 141_482,
+    amount_paid: 141_482,
+    currency: 'INR',
+    paid_at: 1_790_000_100,
+    billing_start: 1_790_000_000,
+    billing_end: 1_792_600_000,
+    customer_details: { email: 'payer@example.test' },
+    notes: [],
+    ...over,
+  });
+  function clientReturning(response: () => Response) {
+    const seen: { method: string; url: string; body: unknown }[] = [];
+    const client = new RazorpayClient({
+      baseUrl: 'https://api.razorpay.test',
+      keyId: 'rzp_test_unit',
+      keySecret: 'unit-secret',
+      fetchImpl: async (input, init) => {
+        seen.push({
+          method: init?.method ?? 'GET',
+          url: String(input),
+          body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined,
+        });
+        return response();
+      },
+    });
+    return { client, seen };
+  }
+
+  it('creates a plan for the amount and a subscription that starts at once, with an authorisation deadline', async () => {
+    const planned = clientReturning(() =>
+      json(200, {
+        id: 'plan_Def456',
+        period: 'monthly',
+        interval: 1,
+        item: { amount: 141_482, currency: 'INR' },
+      }),
+    );
+    const plan = await planned.client.createPlan({
+      period: 'monthly',
+      amount: 141_482,
+      currency: 'INR',
+      name: 'HyFib Growth plan',
+      notes: { purpose: 'plan_subscription' },
+    });
+    expect(plan).toEqual({
+      ok: true,
+      data: { id: 'plan_Def456', period: 'monthly', interval: 1, amount: 141_482, currency: 'INR' },
+    });
+    expect(planned.seen[0]).toMatchObject({
+      method: 'POST',
+      url: 'https://api.razorpay.test/v1/plans',
+      body: {
+        period: 'monthly',
+        interval: 1,
+        item: { name: 'HyFib Growth plan', amount: 141_482, currency: 'INR' },
+        notes: { purpose: 'plan_subscription' },
+      },
+    });
+    const created = clientReturning(() =>
+      json(
+        200,
+        subscription({ status: 'created', current_start: null, current_end: null, paid_count: 0 }),
+      ),
+    );
+    const sub = await created.client.createSubscription({
+      planId: 'plan_Def456',
+      totalCount: 60,
+      expireBy: 1_790_003_600,
+      customerNotify: true,
+    });
+    expect(sub).toMatchObject({
+      ok: true,
+      data: { id: 'sub_Abc123', status: 'created', paidCount: 0 },
+    });
+    // No start_at: the subscription starts when Checkout takes the first charge.
+    expect(created.seen[0]!.body).toEqual({
+      plan_id: 'plan_Def456',
+      total_count: 60,
+      quantity: 1,
+      expire_by: 1_790_003_600,
+      customer_notify: true,
+    });
+    const cancel = clientReturning(() =>
+      json(200, subscription({ status: 'cancelled', ended_at: 1_790_500_000 })),
+    );
+    expect(
+      await cancel.client.cancelSubscription('sub_Abc123', { cancelAtCycleEnd: true }),
+    ).toMatchObject({
+      ok: true,
+      data: { status: 'cancelled', endedAt: 1_790_500_000 },
+    });
+    expect(cancel.seen[0]).toMatchObject({
+      method: 'POST',
+      url: 'https://api.razorpay.test/v1/subscriptions/sub_Abc123/cancel',
+      body: { cancel_at_cycle_end: true },
+    });
+  });
+
+  it('reads a subscription strictly: an unknown status is null, a malformed field makes it unreadable', async () => {
+    const read = (body: unknown) =>
+      clientReturning(() => json(200, body)).client.fetchSubscription('sub_Abc123');
+    expect(await read(subscription())).toEqual({
+      ok: true,
+      data: {
+        id: 'sub_Abc123',
+        planId: 'plan_Def456',
+        status: 'active',
+        currentStart: 1_790_000_000,
+        currentEnd: 1_792_600_000,
+        chargeAt: 1_792_600_000,
+        endedAt: null,
+        paidCount: 1,
+        totalCount: 60,
+      },
+    });
+    expect(await read(subscription({ status: 'resumed' }))).toMatchObject({
+      ok: true,
+      data: { status: null },
+    });
+    for (const broken of [
+      subscription({ id: 'order_Abc' }),
+      subscription({ plan_id: null }),
+      subscription({ current_end: '1792600000' }),
+      subscription({ current_start: -5 }),
+      subscription({ paid_count: 1.5 }),
+    ]) {
+      expect(await read(broken)).toMatchObject({ ok: false, kind: 'unknown' });
+    }
+  });
+
+  it('reads a subscription’s invoices a page at a time and marks one it cannot read', async () => {
+    const page = clientReturning(() =>
+      json(200, {
+        entity: 'collection',
+        count: 4,
+        items: [
+          invoice(),
+          invoice({
+            id: 'inv_Issued1',
+            status: 'issued',
+            payment_id: null,
+            amount_paid: 0,
+            paid_at: null,
+          }),
+          invoice({ id: 'inv_Bad1', billing_end: 'soon' }),
+          invoice({ id: 'inv_Bad2', payment_id: 'order_x' }),
+        ],
+      }),
+    );
+    const result = await page.client.fetchSubscriptionInvoices('sub_Abc123', {
+      count: 100,
+      skip: 200,
+    });
+    expect(page.seen[0]!.url).toBe(
+      'https://api.razorpay.test/v1/invoices?subscription_id=sub_Abc123&count=100&skip=200',
+    );
+    if (!result.ok) throw new Error('expected a page');
+    expect(result.data.items).toHaveLength(4);
+    expect(result.data.items[0]).toEqual({
+      id: 'inv_Ghi789',
+      subscriptionId: 'sub_Abc123',
+      paymentId: 'pay_Jkl012',
+      status: 'paid',
+      amount: 141_482,
+      amountPaid: 141_482,
+      currency: 'INR',
+      paidAt: 1_790_000_100,
+      billingStart: 1_790_000_000,
+      billingEnd: 1_792_600_000,
+    });
+    expect(result.data.items[1]).toMatchObject({
+      status: 'issued',
+      paymentId: null,
+      amountPaid: 0,
+    });
+    expect(result.data.items.slice(2)).toEqual([null, null]);
+    expect(() =>
+      page.client.fetchSubscriptionInvoices('sub_Abc123', { count: 101, skip: 0 }),
+    ).toThrow();
+    expect(() =>
+      page.client.fetchSubscriptionInvoices('sub_Abc123', { count: 10, skip: -1 }),
+    ).toThrow();
+  });
+
+  it('reads the invoice a payment paid', async () => {
+    const payment = clientReturning(() =>
+      json(200, {
+        id: 'pay_Jkl012',
+        amount: 141_482,
+        currency: 'INR',
+        status: 'captured',
+        captured: true,
+        order_id: 'order_Mno345',
+        invoice_id: 'inv_Ghi789',
+      }),
+    );
+    expect(await payment.client.fetchPayment('pay_Jkl012')).toMatchObject({
+      ok: true,
+      data: { invoiceId: 'inv_Ghi789', orderId: 'order_Mno345' },
+    });
+    const read = clientReturning(() => json(200, invoice()));
+    expect(await read.client.fetchInvoice('inv_Ghi789')).toMatchObject({
+      ok: true,
+      data: { subscriptionId: 'sub_Abc123' },
+    });
+    expect(read.seen[0]!.url).toBe('https://api.razorpay.test/v1/invoices/inv_Ghi789');
   });
 });

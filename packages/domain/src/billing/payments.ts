@@ -23,31 +23,23 @@ import { recordSystemAudit } from '../audit';
 import { receiptAad } from '../messaging/receipts';
 import { cancelPendingAutoRecharge, failTopup } from './attempts';
 import { failCreditRefund } from './credit-refunds';
-import { notifyBillingManagers, type BillingNoticeDeps } from './notices';
-import type { RazorpayClient, RazorpayPayment, RazorpayResult, RazorpayToken } from './razorpay';
+import { notifyBillingManagers } from './notices';
+import {
+  resolvePlanSubscription,
+  syncPlanSubscription,
+  syncPlanSubscriptionForPayment,
+} from './plan-subscriptions';
+import { transient, type BillingProviderDeps } from './provider';
+import type { RazorpayPayment, RazorpayToken } from './razorpay';
 
-/**
+export { TransientProviderError, type BillingProviderDeps } from './provider';
+
+/*
  * Applying provider facts to the ledger. Every credit is based on an authoritative fetch from
  * Razorpay (never on a webhook body, a browser redirect or a checkout signature alone), requires
  * `captured`, and goes through app.billing_credit_topup, which credits a top-up exactly once.
  * Companies are resolved from our own provider-id mappings, never from ids inside payloads.
  */
-export interface BillingProviderDeps {
-  db: Database;
-  razorpay: RazorpayClient;
-  clock: Clock;
-  notices: BillingNoticeDeps;
-}
-
-export class TransientProviderError extends Error {
-  override name = 'TransientProviderError';
-}
-
-type Failure = Extract<RazorpayResult<never>, { ok: false }>;
-
-function transient(result: Failure, what: string): TransientProviderError {
-  return new TransientProviderError(`${what}: ${result.kind} ${result.description}`);
-}
 
 export async function resolveProviderOrder(
   db: Database,
@@ -169,9 +161,14 @@ async function markTopupFailed(db: Database, scope: TenantScope, topupId: string
 
 export type PaymentApplication =
   | { outcome: CreditOutcome | 'failed_recorded' | 'pending' | 'mandate_updated' }
+  | { outcome: 'subscription_synced'; tenantId: string }
   | { outcome: 'unknown_order'; orderId: string | null };
 
-/** Fetches a payment authoritatively and applies it to whatever our records say it belongs to. */
+/**
+ * Fetches a payment authoritatively and applies it to whatever our records say it belongs to. A
+ * payment on no order of ours may be a charge of one of our plan subscriptions (its invoice names
+ * the subscription), which is then synced from Razorpay (ADR-063).
+ */
 export async function applyPaymentById(
   deps: BillingProviderDeps,
   paymentId: string,
@@ -182,9 +179,12 @@ export async function applyPaymentById(
     throw transient(fetched, 'payment fetch');
   }
   const payment = fetched.data;
-  if (!payment.orderId) return { outcome: 'unknown_order', orderId: null };
-  const binding = await resolveProviderOrder(deps.db, payment.orderId);
-  if (!binding) return { outcome: 'unknown_order', orderId: payment.orderId };
+  const binding = payment.orderId ? await resolveProviderOrder(deps.db, payment.orderId) : null;
+  if (!binding) {
+    const subscription = await syncPlanSubscriptionForPayment(deps, payment);
+    if (subscription) return { outcome: 'subscription_synced', tenantId: subscription.tenantId };
+    return { outcome: 'unknown_order', orderId: payment.orderId };
+  }
   const scope = authorizedTenantScope(binding.tenantId, null);
   if (binding.subject === 'mandate') {
     await applyMandateAuthorization(deps, scope, binding.subjectId, payment);
@@ -653,6 +653,39 @@ export async function processRazorpayReceipt(
       case 'payment.dispute.lost': {
         const disputeId = entityId(payload, 'dispute');
         result = disputeId ? await applyDispute(deps, disputeId) : 'no dispute id';
+        break;
+      }
+      case 'subscription.authenticated':
+      case 'subscription.activated':
+      case 'subscription.charged':
+      case 'subscription.completed':
+      case 'subscription.updated':
+      case 'subscription.pending':
+      case 'subscription.halted':
+      case 'subscription.cancelled':
+      case 'subscription.paused':
+      case 'subscription.resumed': {
+        // The payload only names the subscription: its state is fetched from Razorpay (ADR-063).
+        const subscriptionId = entityId(payload, 'subscription');
+        if (!subscriptionId) {
+          await finish('ignored', { event: name, reason: 'no subscription id' });
+          return 'ignored';
+        }
+        const binding = await resolvePlanSubscription(deps.db, subscriptionId);
+        if (!binding) {
+          await finish(
+            'quarantined',
+            { event: name },
+            { reason: 'unknown_asset', externalIds: { subscriptionId } },
+          );
+          return 'quarantined';
+        }
+        const synced = await syncPlanSubscription(
+          deps,
+          authorizedTenantScope(binding.tenantId, null),
+          binding.subscriptionId,
+        );
+        result = synced ? `subscription_${synced.status}` : 'subscription_missing';
         break;
       }
       case 'token.confirmed':

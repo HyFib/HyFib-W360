@@ -1,5 +1,115 @@
 # Progress
 
+## 2026-09-28 — Phase 5: paying for plans by Razorpay subscription (P5-07, P5-01)
+
+Status: **Implemented and locally verified against the Razorpay stand-in only; behind
+`RAZORPAY_SUBSCRIPTIONS_ENABLED` (off by default).** Companies can now pay for their plan in HyFib: a
+Razorpay subscription charges the plan version's price with the company's add-ons and the tax
+platform owners set, and each period Razorpay reports paid keeps the plan active. Until now staff
+set paid periods after a payment was settled elsewhere, and a lapsed plan restricted the company
+until staff acted.
+
+### Completed
+
+- **Design (ADR-063):** the price is the version's price plus add-ons at the version's prices, per
+  1, 3 or 12 months, plus a tax platform owners set (0 to 50%, audited; nothing is offered until it
+  is set); a subscription keeps its subtotal, tax and total. Offered while trialing, past due,
+  expired or canceled, on a published version, not during a paid period staff set, not with
+  complimentary access, not to a company being deleted. The paid period starts at the first charge
+  (the rest of a trial is not carried over). Razorpay decides and HyFib follows: the browser,
+  webhook payloads and notes only prompt a fetch. ADR-055 now cancels the subscription at deletion.
+- **Schema (migration 0037):** `ops.plan_settings.plan_tax_bp`; `app.plan_subscriptions` (written
+  ahead; amounts, add-ons, plan and starter fixed by column grants; one live row per company by a
+  partial unique index; never deleted) and `app.plan_payments` (append-only, payment and invoice
+  ids unique); `tenant_plans.subscription_id`; `ops.billing_resolve_subscription`,
+  `ops.billing_resolve_plan_payment`, `app.apply_plan_subscription_period` (the company's scope, an
+  active subscription, a paid invoice whose billing period has its middle in the current cycle, the
+  plan's version and add-ons) and `ops.plan_subscriptions_due`; `app.apply_plan_transition` ends a
+  period paid by a cancelled subscription as canceled without grace days; the reconciliation facts
+  and reasons know plan payments, and the deletion outcomes a plan subscription.
+- **Razorpay client and stand-in:** `createPlan`, `createSubscription`, `fetchSubscription`,
+  `cancelSubscription`, `fetchSubscriptionInvoices`, `fetchInvoice` and the subscription Checkout
+  signature (`payment_id|subscription_id`), read strictly; the payment's `invoice_id`. The test-only
+  stand-in keeps plans, subscriptions and invoices and advances them as Razorpay would (authorise,
+  charge, fail, end a cycle, halt), and can now alter an answer so tests can make Razorpay answer
+  with something HyFib must refuse.
+- **Domain (`billing/plan-subscriptions.ts`):** the overview, `start` (billing.manage, a recent
+  sign-in, the flag, an advisory lock per company; reopen an open Checkout, replace a closed one and
+  cancel it at Razorpay, fail a start that never finished), `confirmCheckout`, `cancel` (at the end
+  of an active subscription's paid period, at once otherwise) and `syncPlanSubscription`, which every
+  path uses: it fetches the subscription and, while Razorpay counts more paid cycles than HyFib
+  recorded, its invoices, and records a payment only for a paid invoice of our subscription, in INR,
+  for our exact amount, whose payment Razorpay reports captured for that amount. Ended statuses
+  stay ended, unknown ones keep ours, older answers change nothing. Billing managers are emailed on
+  payments, failed charges, stopped retries and company cancels. `subscription.*` webhooks sync the
+  subscription (unknown ones are quarantined); a payment on no order of HyFib's whose invoice names
+  one of our subscriptions syncs it; the daily reconciliation matches plan payments, records missed
+  ones and leaves refunds of them to a person; the plan sweep syncs before moving a period on; the
+  deletion job cancels at Razorpay first. Platform owners set the tax and cancel a company's
+  subscription at once with a reason; staff plan changes are refused while a subscription is live.
+- **Worker:** the minute billing sweep runs the subscription checks and passes the pre-transition
+  sync to the plan sweep.
+- **Web:** Billing → Paying for your plan (the breakdown, pay, finish paying, cancel, the
+  subscription's state and the payments; a sign-in-again prompt; a note that charges above ₹15,000
+  on Indian cards need the payer's approval every time, from Razorpay's documentation of RBI's
+  rules); the plan card's wording for subscribed companies; Platform → Plans (the tax) and the
+  company page (the subscription, its payments, the owner's cancel; the plan form replaced while
+  the subscription is live).
+- **Found while building:** a subscription whose cycle ended would have waited up to a day for its
+  next check (the due listing now re-reads it hourly until a new cycle starts); the past-due and
+  expired emails told subscribed companies to ask HyFib; Razorpay's example invoices run from
+  midnight to midnight India time, so a payment is matched to the cycle holding the middle of its
+  billing period rather than to exact times.
+- **Mutation checks found 20 guards no test exercised,** now tested: unpaid, foreign, uncaptured and
+  wrong-amount payments; an older answer; a cancel saved while Razorpay was being asked; an
+  administrator starting or cancelling; the flag; Razorpay answering for another amount or plan; a
+  second start over a pending subscription; retired versions and companies being deleted; the
+  pre-transition sync; a settled amount unlike the recorded one; the period function's scope,
+  status and add-on checks; deleted companies in the due listing.
+- **Docs:** ADR-063 and ADR-055; ARCHITECTURE §6Q and §7; SECURITY (controls, step-up, platform
+  roles); THREAT-MODEL T87 and T88; RUNBOOKS (plans: turning it on, a payment that did not count,
+  failed charges, cancelling, refunds, unfinished starts, migration 0037); DEPLOYMENT (the
+  subscription events, the flag, Flash Checkout); DATA-RETENTION; RELEASE-CHECKLIST (test-mode
+  checks); Razorpay research R-112 to R-118 and open questions 23 to 26; BACKLOG P5-01, P5-02 and
+  P5-07; FEATURE-MATRIX W-001, W-006 (implemented → locally verified) and H-041.
+- **Mutation checks:** 62 regressions tried one at a time. The first run caught 42; the other 20
+  (listed above) now have tests, and a rerun of those 20 caught all of them: the Checkout signature
+  and its payload order, the confirmation, every condition for recording a payment, the stale and
+  ended-status rules, the window of an unpaid subscription, the once-only emails, start and cancel
+  (permission, recent sign-in, flag, reopen, write-ahead failure, Razorpay's answers, a second
+  start), the offer's refusals, cancelling at the end of the period, deletion, owner-only staff
+  actions, a live subscription blocking staff plan changes, the tax bound, webhook resolution, the
+  pre-transition sync, the reconciliation's matching, lookup, recording and refunds, the period
+  function's midpoint, status, add-on and scope checks and usage restart, the canceled transition,
+  the due listing's clauses, the resolve function, the reconciliation facts, the deletion outcome
+  kind and the quote's rounding, minimum and unsold add-ons.
+
+### Test commands and results (local, 2026-09-28 to 2026-09-29)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `pnpm test` (unit)                                                          | 326 passed. New: the quote (integer paise, tax rounded half up, add-ons not sold, totals below ₹1 and above the ceiling), the Razorpay client's plan, subscription, invoice and signature code, and plan payments in the reconciliation's matching (a payment on no order of HyFib's is now looked up as a possible subscription charge, so the classifier's expectations changed with it).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 433 passed, including the new `plan-subscriptions.test.ts` 20 (the offer and every refusal; the write-ahead start, reopening and replacing; forged, borrowed and unpaid Checkout responses; administrators, agents and stale sessions refused; Razorpay failures and answers for another amount or plan; renewals counted once from any event; a stale answer; a cancel saved mid-sync; failed charges, grace days, a second start refused; a cycle without a paid invoice; day-aligned invoices; unpaid, foreign, uncaptured and wrong-amount payments; the period function's checks; cancelling by the company and by platform owners; deletion; the sweep, the check before a period ends and deleted companies left out), plan payments in `settlement-recon.test.ts` (matched, a missed one recorded, a refund for a person, a settled amount unlike the recorded one) and the deletion in `company-data.test.ts`. |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 433 passed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / one full run (22.4 min): 78 passed, including the new `plan-subscription.spec.ts` on both projects, and 6 failed: `flows.spec.ts` (data endpoint), `web-requests.spec.ts` and `webhooks.spec.ts` on both projects, whose outgoing calls go to `api.w360-e2e.test`. This container's `/etc/hosts` had lost the line mapping that name to 127.0.0.1 (CI adds it in a workflow step; `getent` did not resolve it, and the web log shows `egress_failed`). With the line added, those three specs passed on both projects (8 tests).                                                                                                                                                                                                                                                                                                                                                                         |
+| Mutation checks                                                             | 62 regressions tried one at a time; all 62 make a test fail (20 of them only after the tests added in this slice)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+
+### Known gaps
+
+- Razorpay test mode is not run: everything was built from Razorpay's documentation and Node SDK and
+  tested against the stand-in. Open questions: invoice periods against cycles, how soon a charge can
+  be read, `invoice_id` on every subscription payment, quarterly plans on domestic cards
+  (research 23 to 26; RELEASE-CHECKLIST).
+- Plan invoices and receipts (tax review), refunds of plan payments, billing from the end of a
+  trial, plan and add-on changes with proration, pausing and resuming are not built. A company that
+  cancelled pays again from Billing once its paid period has ended.
+- A renewal Razorpay charges while a platform owner cancels at the same moment is recorded as a
+  payment but does not extend the plan; the reconciliation shows it matched, and a person decides.
+- The first local mobile-chromium run of the new spec timed out at 240 s once, for a reason not
+  found; later runs passed, and a 30-second action timeout now names the stuck action if it recurs.
+  Firefox and WebKit run the spec in CI only.
+
 ## 2026-09-28 — Phase 5: warnings before a monthly limit (P5-01)
 
 Status: **Implemented and locally verified with test data only.** A company's billing managers now

@@ -160,6 +160,17 @@ made. This checklist records the evidence required per gate; unchecked items blo
       confirm how a lost chargeback appears in the report (R-111) before relying on the dispute
       items; check the page's credited, debited and fee totals against the Dashboard's settlement
       report for the day
+- [ ] Paying for plans (ADR-063) in Razorpay test mode on a staging deployment, before setting
+      `RAZORPAY_SUBSCRIPTIONS_ENABLED=true`: Subscriptions and Flash Checkout activated (R-115); the
+      tax on plan prices reviewed; a monthly subscription paid in Checkout makes the plan active for
+      Razorpay's cycle, and its invoice's `billing_start`/`billing_end` fall mostly inside that cycle
+      (R-113); a test-mode renewal (or the Dashboard's charge in test mode) is recorded from
+      `subscription.charged` and, with the webhook switched off, by the hourly check; a failed
+      charge moves to `pending` and then `halted` with the emails; cancelling at the end of the
+      cycle ends the plan as canceled; a subscription left unpaid is cancelled after its hour; a
+      quarterly plan authorised on a domestic card (as-presented, R-116); a charge above ₹15,000
+      asks for the payer's approval (R-117); a settled plan payment matched by the daily
+      reconciliation
 - [ ] Tenant-isolation and security gates passing in CI on the release commit
 - [ ] Measured load behaviour against the test envelope (k6 results)
 - [ ] Backup restoration drill performed and timings recorded (RPO/RTO)

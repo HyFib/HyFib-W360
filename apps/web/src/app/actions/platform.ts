@@ -167,6 +167,26 @@ export async function setDefaultTrialAction(input: unknown): Promise<ActionResul
   });
 }
 
+/** The tax added to plan prices when companies pay for their plan (ADR-063; owners only). */
+export async function setPlanTaxAction(input: unknown): Promise<ActionResult> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    await runtime.planAdmin.setPlanTax(actor, input);
+    refresh();
+    return null;
+  });
+}
+
+/** Cancels a company's plan subscription at Razorpay at once (ADR-063; owners only, audited). */
+export async function cancelTenantSubscriptionAction(input: unknown): Promise<ActionResult> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    await runtime.planAdmin.cancelTenantSubscription(actor, input);
+    refresh();
+    return null;
+  });
+}
+
 export async function setTenantPlanAction(input: unknown): Promise<ActionResult> {
   return runAction(async () => {
     const { actor, runtime } = await actorForAction();

@@ -43,6 +43,7 @@ import {
   createInboxService,
   createOnboardingService,
   createPlanAdminService,
+  createPlanSubscriptionService,
   createPlansService,
   createPlatformService,
   createPlatformBillingService,
@@ -81,6 +82,7 @@ import {
   type OnboardingService,
   type OutboundDeps,
   type PlanAdminService,
+  type PlanSubscriptionService,
   type PlansService,
   type PlatformService,
   type PlatformBillingService,
@@ -186,6 +188,8 @@ export interface Runtime {
   /** Null until Razorpay is configured (card payments are then reported unavailable). */
   razorpay: RazorpayConfig | null;
   billing: BillingService;
+  /** Paying for plans with Razorpay Subscriptions (ADR-063). */
+  planPayments: PlanSubscriptionService;
   billingHistory: BillingHistoryService;
   events: TenantEventHub;
   shutdown(): Promise<void>;
@@ -287,8 +291,20 @@ async function init(): Promise<Runtime> {
   const segments = createSegmentsService({ db, clock: systemClock });
   const campaigns = createCampaignsService({ db, jobs, signer, clock: systemClock });
   const rateCards = createRateCardsService({ platformDb, clock: systemClock });
+  const razorpay = razorpayConfigFrom(config);
+  const razorpayClient = razorpay
+    ? new RazorpayClient({
+        baseUrl: razorpay.apiBaseUrl,
+        keyId: razorpay.keyId,
+        keySecret: razorpay.keySecret,
+      })
+    : null;
   const plans = createPlansService({ db, clock: systemClock });
-  const planAdmin = createPlanAdminService({ platformDb, clock: systemClock });
+  const planAdmin = createPlanAdminService({
+    platformDb,
+    clock: systemClock,
+    razorpay: razorpayClient,
+  });
   const apiKeys = createApiKeysService({ db, clock: systemClock });
   const webhooks = createWebhooksService({
     db,
@@ -381,17 +397,17 @@ async function init(): Promise<Runtime> {
         meta,
       })
     : null;
-  const razorpay = razorpayConfigFrom(config);
   const billing = createBillingService({
     db,
     clock: systemClock,
-    razorpay: razorpay
-      ? new RazorpayClient({
-          baseUrl: razorpay.apiBaseUrl,
-          keyId: razorpay.keyId,
-          keySecret: razorpay.keySecret,
-        })
-      : null,
+    razorpay: razorpayClient,
+    razorpayConfig: razorpay,
+    notices: { outbox, appBaseUrl: config.APP_BASE_URL },
+  });
+  const planPayments = createPlanSubscriptionService({
+    db,
+    clock: systemClock,
+    razorpay: razorpayClient,
     razorpayConfig: razorpay,
     notices: { outbox, appBaseUrl: config.APP_BASE_URL },
   });
@@ -450,6 +466,7 @@ async function init(): Promise<Runtime> {
     onboarding,
     razorpay,
     billing,
+    planPayments,
     billingHistory,
     events,
     async shutdown() {

@@ -93,11 +93,15 @@ function UsageRow({
 export function PlanCard({
   overview,
   timeZone,
+  payment = null,
 }: {
   overview: CompanyPlanOverview;
   timeZone: string;
+  /** Whether the company pays by subscription, or can pay for its plan here (ADR-063). */
+  payment?: 'subscribed' | 'offered' | null;
 }) {
   const { plan, usage, status } = overview;
+  const payHere = payment === 'offered';
   const day = (at: Date | null) => formatDate(at, timeZone);
   const runs = usage.automationRuns;
   return (
@@ -115,14 +119,22 @@ export function PlanCard({
               : status === 'active' || status === 'past_due'
                 ? `Paid period ${day(overview.periodStart)} to ${day(overview.periodEnd)}.`
                 : 'The plan has ended.'}{' '}
-          HyFib sets plans and periods; there is nothing to pay here for the plan.
+          {payment === 'subscribed'
+            ? 'Paid by subscription through Razorpay.'
+            : payHere
+              ? 'HyFib sets plans; you can pay for yours below.'
+              : 'HyFib sets plans and periods; there is nothing to pay here for the plan.'}
         </CardDescription>
       </CardHeader>
       <CardContent className="grid gap-6">
         {status === 'past_due' ? (
           <Alert tone="warning" title="The paid period has ended">
-            Everything keeps working until {day(overview.graceEndsAt)}. Ask HyFib to renew the plan
-            before then.
+            Everything keeps working until {day(overview.graceEndsAt)}.{' '}
+            {payment === 'subscribed'
+              ? 'The plan is paid again once Razorpay’s charge goes through.'
+              : payHere
+                ? 'Pay for the plan below, or ask HyFib to renew it, before then.'
+                : 'Ask HyFib to renew the plan before then.'}
           </Alert>
         ) : null}
         {status === 'expired' || status === 'canceled' ? (
@@ -131,7 +143,10 @@ export function PlanCard({
             title={status === 'canceled' ? 'The plan was canceled' : 'The plan ended'}
           >
             Sending messages, campaigns and automations is paused. Your data is kept, and you can
-            still review and export it. Ask HyFib to choose a plan to continue.
+            still review and export it.{' '}
+            {payHere
+              ? 'Pay for the plan below, or ask HyFib to choose a plan, to continue.'
+              : 'Ask HyFib to choose a plan to continue.'}
           </Alert>
         ) : null}
         {plan ? (

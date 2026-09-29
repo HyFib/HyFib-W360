@@ -7,7 +7,14 @@ import {
   systemScope,
   tenants,
   type Database,
+  and,
+  inArray,
+  planSettings,
+  planSubscriptions,
+  tenantPlans,
+  LIVE_PLAN_SUBSCRIPTION_STATUSES,
   type TenantPlanStatus,
+  type TenantScope,
   type Tx,
   type UsageMetric,
 } from '@w360/db';
@@ -19,6 +26,15 @@ export interface PlanSweepDeps {
   db: Database;
   clock: Clock;
   notices: BillingNoticeDeps;
+  /**
+   * Plan subscriptions (ADR-063), when Razorpay is configured: the subscription that paid a period
+   * is synced before the period is moved on, and `offered` says whether companies can pay for their
+   * plan in billing (the emails then say so).
+   */
+  planPayments?: {
+    offered: boolean;
+    syncBeforeTransition: (scope: TenantScope) => Promise<void>;
+  };
 }
 
 async function companyFacts(tx: Tx, tenantId: string, planId: string | null) {
@@ -37,6 +53,33 @@ async function companyFacts(tx: Tx, tenantId: string, planId: string | null) {
   return { planName: plan?.name ?? 'your', day };
 }
 
+/** Whether the subscription that paid the company's plan may still be charged (ADR-063). */
+async function subscriptionLive(tx: Tx, tenantId: string): Promise<boolean> {
+  const [linked] = await tx
+    .select({ id: planSubscriptions.id })
+    .from(tenantPlans)
+    .innerJoin(
+      planSubscriptions,
+      and(
+        eq(planSubscriptions.tenantId, tenantPlans.tenantId),
+        eq(planSubscriptions.id, tenantPlans.subscriptionId),
+      ),
+    )
+    .where(
+      and(
+        eq(tenantPlans.tenantId, tenantId),
+        inArray(planSubscriptions.status, [...LIVE_PLAN_SUBSCRIPTION_STATUSES]),
+      ),
+    );
+  return Boolean(linked);
+}
+
+/** Whether platform owners set the tax on plan prices (paying for plans needs it, ADR-063). */
+async function planTaxSet(tx: Tx): Promise<boolean> {
+  const [settings] = await tx.select({ planTaxBp: planSettings.planTaxBp }).from(planSettings);
+  return settings?.planTaxBp !== null && settings?.planTaxBp !== undefined;
+}
+
 export interface PlanSweepResult {
   transitioned: number;
   announced: number;
@@ -46,8 +89,9 @@ export interface PlanSweepResult {
 
 /**
  * The minute sweep's plan work (ADR-051): moves trials, paid periods and grace periods that have
- * ended to their next state (each in the company's own scope, recorded in its audit log) and
- * emails the company's billing managers; then announces, once per month, automation run limits
+ * ended to their next state (each in the company's own scope, recorded in its audit log, after
+ * syncing the subscription that paid the period, ADR-063) and emails the company's billing
+ * managers; then announces, once per month, automation run limits
  * and monthly API request limits (ADR-061) that were reached, and warns once when 80% of one is
  * used (ADR-062). One company's failure does not hold up the others.
  */
@@ -64,6 +108,18 @@ export async function sweepPlanStates(deps: PlanSweepDeps, limit = 200): Promise
   let transitioned = 0;
   for (const { tenant_id: tenantId } of due.rows) {
     const scope = authorizedTenantScope(tenantId, null);
+    if (deps.planPayments) {
+      // A renewal Razorpay charged counts before the period ends; when Razorpay cannot answer,
+      // the company waits for the next sweep instead of losing a period it may have paid for.
+      const synced = await deps.planPayments.syncBeforeTransition(scope).then(
+        () => true,
+        (error: unknown) => {
+          failed.push({ tenantId, error });
+          return false;
+        },
+      );
+      if (!synced) continue;
+    }
     const moved = await deps.db
       .run(scope, async (tx) => {
         const res = await tx.execute<{
@@ -75,6 +131,9 @@ export async function sweepPlanStates(deps: PlanSweepDeps, limit = 200): Promise
         if (!row) return false;
         const { planName, day } = await companyFacts(tx, tenantId, row.plan_id);
         const now = deps.clock.now();
+        const payHere = deps.planPayments?.offered === true && (await planTaxSet(tx));
+        // A company still paying by subscription waits for Razorpay's next charge (ADR-063).
+        const subscribed = await subscriptionLive(tx, tenantId);
         if (row.new_status === 'past_due') {
           const ent = await tx.execute<{ grace_ends_at: Date | string }>(
             sql`select grace_ends_at from app.tenant_plans where tenant_id = ${tenantId}::uuid`,
@@ -82,12 +141,21 @@ export async function sweepPlanStates(deps: PlanSweepDeps, limit = 200): Promise
           const graceEnds = ent.rows[0]?.grace_ends_at;
           await notifyBillingManagers(deps.notices, tx, scope, {
             subject: 'The paid period of your HyFib plan has ended',
-            lines: [
-              `The paid period of the ${planName} plan ended on ${day(now)}.`,
-              graceEnds
-                ? `Everything keeps working until ${day(new Date(graceEnds))}. Ask HyFib to renew the plan before then.`
-                : 'Ask HyFib to renew the plan.',
-            ],
+            lines: subscribed
+              ? [
+                  `The paid period of the ${planName} plan ended on ${day(now)}, and Razorpay has not charged for the next one yet.`,
+                  graceEnds
+                    ? `Everything keeps working until ${day(new Date(graceEnds))}. The plan is paid again once a charge goes through; the payer can change the card through the link in Razorpay’s email.`
+                    : 'The plan is paid again once a charge goes through; the payer can change the card through the link in Razorpay’s email.',
+                ]
+              : [
+                  `The paid period of the ${planName} plan ended on ${day(now)}.`,
+                  graceEnds
+                    ? `Everything keeps working until ${day(new Date(graceEnds))}. ${payHere ? 'Pay for the plan in billing, or ask HyFib to renew it, before then.' : 'Ask HyFib to renew the plan before then.'}`
+                    : payHere
+                      ? 'Pay for the plan in billing, or ask HyFib to renew it.'
+                      : 'Ask HyFib to renew the plan.',
+                ],
           });
         } else {
           await notifyBillingManagers(deps.notices, tx, scope, {
@@ -100,7 +168,11 @@ export async function sweepPlanStates(deps: PlanSweepDeps, limit = 200): Promise
                 ? `The trial of the ${planName} plan ended on ${day(now)}.`
                 : `The ${planName} plan ended on ${day(now)}.`,
               'Sending messages, campaigns and automations is paused. Your data is kept, and you can still review and export it.',
-              'Ask HyFib to choose a plan to continue.',
+              subscribed
+                ? 'The plan is paid again once a Razorpay charge goes through (the payer can change the card through the link in Razorpay’s email), or cancel the subscription in billing and pay again.'
+                : payHere
+                  ? 'Pay for the plan in billing, or ask HyFib to choose a plan, to continue.'
+                  : 'Ask HyFib to choose a plan to continue.',
             ],
           });
         }

@@ -32,6 +32,7 @@ import { AddCredit } from '@/components/billing/add-credit';
 import { AutoRechargeForm } from '@/components/billing/auto-recharge-form';
 import { CardMandateSetup, RemoveCard } from '@/components/billing/card-mandate';
 import { PlanCard } from '@/components/billing/plan-card';
+import { PlanPaymentCard } from '@/components/billing/plan-payment-card';
 import { PageHeader } from '@/components/page-header';
 import { RequireOwnDocument } from '@/components/require-own-document';
 import { SignInAgain } from '@/components/sign-in-again';
@@ -96,8 +97,12 @@ export default async function BillingPage({ params }: { params: Promise<{ slug: 
   const { slug } = await params;
   const ctx = await requireTenant(slug);
   assertCan(ctx, 'billing.read');
-  const { billing, plans, clock } = await getRuntime();
-  const [overview, plan] = await Promise.all([billing.overview(ctx), plans.overview(ctx)]);
+  const { billing, plans, planPayments, clock } = await getRuntime();
+  const [overview, plan, planPayment] = await Promise.all([
+    billing.overview(ctx),
+    plans.overview(ctx),
+    planPayments.overview(ctx),
+  ]);
   const canManage = can(ctx, 'billing.manage');
   // Adding a card and turning automatic top-ups on need a recent sign-in (ADR-056).
   const recent = hasRecentSignIn(ctx, clock.now());
@@ -126,7 +131,27 @@ export default async function BillingPage({ params }: { params: Promise<{ slug: 
           shows Meta’s rates for your billing currency, the next change to them, and this month’s
           estimated Meta charges.
         </p>
-        <PlanCard overview={plan} timeZone={tz} />
+        <PlanCard
+          overview={plan}
+          timeZone={tz}
+          payment={
+            planPayment.subscription &&
+            !['cancelled', 'completed', 'expired', 'failed'].includes(
+              planPayment.subscription.status,
+            )
+              ? 'subscribed'
+              : planPayment.offer.available
+                ? 'offered'
+                : null
+          }
+        />
+        <PlanPaymentCard
+          slug={ctx.tenant.slug}
+          payment={planPayment}
+          canManage={canManage}
+          recentSignIn={recent}
+          timeZone={tz}
+        />
         {!payments.configured ? (
           <Alert tone="warning" title="Card payments are not available yet">
             This platform has not connected its Razorpay account, so credit cannot be added.

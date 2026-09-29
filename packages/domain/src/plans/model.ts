@@ -1,7 +1,7 @@
-import type { PlanModule, TenantPlanStatus } from '@w360/db';
+import type { PlanModule, PlanSubscriptionStatus, TenantPlanStatus } from '@w360/db';
 import type { Permission } from '../authz/permissions';
 
-export type { PlanModule, PlanStatus, TenantPlanStatus } from '@w360/db';
+export type { PlanModule, PlanStatus, PlanSubscriptionStatus, TenantPlanStatus } from '@w360/db';
 
 /**
  * Plans and entitlements (P5-01, ADR-051): the parts the pages and the services share. Pure
@@ -109,6 +109,119 @@ export function warningThreshold(limit: number | null): number | null {
   const threshold = Math.ceil((limit * 4) / 5);
   return threshold < limit ? threshold : null;
 }
+
+/** Razorpay's minimum payment, ₹1 (R-064). */
+export const PLAN_PAYMENT_MIN_MINOR = 100;
+/** HyFib's ceiling on one plan charge: a plan version's highest price. */
+export const PLAN_PAYMENT_MAX_MINOR = PLAN_BOUNDS.priceMinor;
+/** The highest tax on plan prices platform owners can set, in basis points (the database checks it). */
+export const PLAN_TAX_MAX_BP = 5000;
+/**
+ * Above this charge (₹15,000), an Indian card needs the payer's approval through their bank for every
+ * subscription debit: RBI's card mandate rules, as Razorpay's Subscriptions FAQ documents them.
+ */
+export const CARD_MANDATE_FRICTIONLESS_MAX_MINOR = 1_500_000;
+
+/** What a company pays for its plan each billing interval (ADR-063), in paise. */
+export interface PlanPaymentQuote {
+  planMinor: number;
+  seatsMinor: number;
+  numbersMinor: number;
+  runPacksMinor: number;
+  subtotalMinor: number;
+  taxBp: number;
+  taxMinor: number;
+  totalMinor: number;
+}
+
+export type PlanPaymentQuoteResult =
+  | { ok: true; quote: PlanPaymentQuote }
+  | { ok: false; reason: 'add_on_not_sold' | 'too_small' | 'too_large' };
+
+/**
+ * The price of a plan version with add-ons at the version's prices, plus the tax on plan prices
+ * (rounded half up to the paisa). Exact integer arithmetic: a quantity of an add-on the version
+ * does not sell, a total below ₹1 or above HyFib's ceiling is refused.
+ */
+export function planPaymentQuote(
+  prices: {
+    priceMinor: number;
+    seatPriceMinor: number | null;
+    numberPriceMinor: number | null;
+    runPackPriceMinor: number | null;
+  },
+  addOns: { extraSeats: number; extraNumbers: number; runPacks: number },
+  taxBp: number,
+): PlanPaymentQuoteResult {
+  const line = (quantity: number, price: number | null): bigint | null =>
+    quantity === 0 ? 0n : price === null ? null : BigInt(quantity) * BigInt(price);
+  const seats = line(addOns.extraSeats, prices.seatPriceMinor);
+  const numbers = line(addOns.extraNumbers, prices.numberPriceMinor);
+  const runPacks = line(addOns.runPacks, prices.runPackPriceMinor);
+  if (seats === null || numbers === null || runPacks === null) {
+    return { ok: false, reason: 'add_on_not_sold' };
+  }
+  const subtotal = BigInt(prices.priceMinor) + seats + numbers + runPacks;
+  const tax = (subtotal * BigInt(taxBp) + 5000n) / 10000n;
+  const total = subtotal + tax;
+  if (total < BigInt(PLAN_PAYMENT_MIN_MINOR)) return { ok: false, reason: 'too_small' };
+  if (total > BigInt(PLAN_PAYMENT_MAX_MINOR)) return { ok: false, reason: 'too_large' };
+  return {
+    ok: true,
+    quote: {
+      planMinor: prices.priceMinor,
+      seatsMinor: Number(seats),
+      numbersMinor: Number(numbers),
+      runPacksMinor: Number(runPacks),
+      subtotalMinor: Number(subtotal),
+      taxBp,
+      taxMinor: Number(tax),
+      totalMinor: Number(total),
+    },
+  };
+}
+
+/** Why a company cannot pay for its plan here now (ADR-063). */
+export type PlanPaymentUnavailable =
+  | 'not_offered'
+  | 'no_tax'
+  | 'complimentary'
+  | 'paid_period'
+  | 'plan_not_published'
+  | 'add_on_not_sold'
+  | 'too_small'
+  | 'too_large'
+  | 'subscribed'
+  | 'deleting';
+
+export const PLAN_PAYMENT_UNAVAILABLE_TEXT: Record<PlanPaymentUnavailable, string> = {
+  not_offered: 'Paying for plans here is not available yet. Ask HyFib to renew your plan.',
+  no_tax: 'Paying for plans here is not available yet. Ask HyFib to renew your plan.',
+  complimentary: 'Your company has complimentary access, so there is nothing to pay.',
+  paid_period:
+    'Your plan has a paid period. You can pay here once it ends, or ask HyFib to renew it.',
+  plan_not_published: 'Your plan version is no longer offered. Ask HyFib to choose a plan.',
+  add_on_not_sold:
+    'Your add-ons are not sold with this plan version. Ask HyFib to update the plan.',
+  too_small: 'Your plan costs less than ₹1, so there is nothing to pay.',
+  too_large: 'Your plan costs more than can be paid here. Ask HyFib to renew your plan.',
+  subscribed: 'Your company already pays for its plan by subscription.',
+  deleting: 'Your company is being deleted.',
+};
+
+export const PLAN_SUBSCRIPTION_STATUS_LABELS: Record<PlanSubscriptionStatus, string> = {
+  creating: 'Starting',
+  created: 'Waiting for payment',
+  authenticated: 'Authorised',
+  active: 'Active',
+  pending: 'Payment failed, Razorpay is retrying',
+  halted: 'Payments stopped',
+  paused: 'Paused',
+  cancelled: 'Cancelled',
+  completed: 'Completed',
+  expired: 'Not paid in time',
+  failed: 'Could not start',
+};
 
 export const PLAN_INTERVAL_LABELS: Record<number, string> = {
   1: 'per month',

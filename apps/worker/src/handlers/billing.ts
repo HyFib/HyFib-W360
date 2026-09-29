@@ -18,6 +18,8 @@ import {
   releaseExpiredHolds,
   runSettlementRecon,
   sweepPlanStates,
+  sweepPlanSubscriptions,
+  syncPlanSubscriptionOfPlan,
   type BillingProviderDeps,
 } from '@w360/domain';
 import type { WorkerRuntime } from '../runtime';
@@ -182,16 +184,30 @@ export function settlementReconHandler(rt: WorkerRuntime) {
 }
 
 /**
- * Every minute: move plans whose trial, paid period or grace period ended to their next state and
- * announce reached automation run limits (ADR-051); re-signal Razorpay receipts whose signal was
- * lost, reconcile open manual top-ups and due auto-recharge attempts with Razorpay (the backstop
- * for missed webhooks), queue due steps of staff credit refunds (ADR-058) and the settlement
- * reconciliations owed (ADR-059), start auto-recharge checks for companies below their threshold,
- * and release expired holds.
+ * Every minute: move plans whose trial, paid period or grace period ended to their next state
+ * (after syncing the Razorpay subscription that paid the period, ADR-063) and announce reached
+ * automation run limits (ADR-051); re-signal Razorpay receipts whose signal was lost, reconcile
+ * open manual top-ups, due auto-recharge attempts and due plan subscriptions with Razorpay (the
+ * backstop for missed webhooks), queue due steps of staff credit refunds (ADR-058) and the
+ * settlement reconciliations owed (ADR-059), start auto-recharge checks for companies below their
+ * threshold, and release expired holds.
  */
 export function billingSweepHandler(rt: WorkerRuntime) {
   return async (): Promise<void> => {
-    const plans = await sweepPlanStates({ db: rt.db, clock: rt.clock, notices: rt.notices });
+    const provider = providerDeps(rt);
+    const plans = await sweepPlanStates({
+      db: rt.db,
+      clock: rt.clock,
+      notices: rt.notices,
+      ...(provider
+        ? {
+            planPayments: {
+              offered: rt.razorpayConfig?.subscriptionsEnabled === true,
+              syncBeforeTransition: (scope) => syncPlanSubscriptionOfPlan(provider, scope),
+            },
+          }
+        : {}),
+    });
     for (const failure of plans.failed) {
       rt.logger.warn(
         { tenantId: failure.tenantId, err: toError(failure.error).message },
@@ -212,6 +228,17 @@ export function billingSweepHandler(rt: WorkerRuntime) {
     if (!deps) {
       if (released > 0) rt.logger.info({ released }, 'billing sweep');
       return;
+    }
+    const subscriptions = await sweepPlanSubscriptions(deps);
+    for (const failure of subscriptions.failed) {
+      rt.logger.warn(
+        {
+          tenantId: failure.tenantId,
+          subscriptionId: failure.subscriptionId,
+          err: toError(failure.error).message,
+        },
+        'plan subscription check failed; will retry',
+      );
     }
     const receipts = await findStaleReceipts(rt, 500, 'razorpay');
     for (const id of receipts) {

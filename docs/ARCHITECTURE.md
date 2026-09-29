@@ -984,10 +984,12 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   only inside the functions.
 - **Provider clean-up:** Graph `DELETE /{WABA-ID}/subscribed_apps` with the account's stored token;
   the store worker's removal (Shopify `appUninstall`, WooCommerce webhook deletion) with the removal
-  deadline already past; Razorpay token deletion for HyFib's card mandate, with the mandate cancelled
+  deadline already past; the company's plan subscription cancelled at Razorpay at once (0037,
+  ADR-063); Razorpay token deletion for HyFib's card mandate, with the mandate cancelled
   and auto-recharge turned off either way. Missing configuration or credentials are recorded as
   skipped, errors as failed; neither stops the deletion.
-- **Kept:** the company row as a tombstone, billing tables, plan history, the register, support
+- **Kept:** the company row as a tombstone, billing tables, plan history, plan subscriptions and
+  plan payments, the register, support
   grants and security events (the catalog tests list them); people's accounts.
 - **Web:** Settings → Company data (owners: export link, deletion form with the typed address, the
   pending state with the due date and a cancel button, the started state); the platform company page
@@ -996,7 +998,7 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   (ADR-056).
 - **Not built yet:** staff-started deletion, stored exports and other formats.
 
-## 7. Commercial model and billing **[built: plans and entitlements, wallet, top-ups, auto-recharge, statements and receipts, usage and rates, staff refunds of unused credit, daily settlement reconciliation — verified against a local Razorpay stand-in only; paying for plans in HyFib and tax invoices planned]**
+## 7. Commercial model and billing **[built: plans and entitlements, paying for plans by Razorpay subscription, wallet, top-ups, auto-recharge, statements and receipts, usage and rates, staff refunds of unused credit, daily settlement reconciliation — verified against a local Razorpay stand-in only; tax invoices planned]**
 
 - **Who pays Meta:** as a Meta Tech Provider HyFib has no credit line; each customer adds its own
   payment method and Meta bills them directly (`tenants.billing_mode = 'direct_meta'`, the default).
@@ -1027,8 +1029,37 @@ WHERE used < limit`), per monthly period from `usage_anchor`; the sweep announce
   modules the plan leaves out (`MODULE_WRITE_PERMISSIONS`); workers check the module before
   starting runs, order messages and cart reminders (`not_in_plan`). Public API requests are counted
   the same way against the version's monthly API requests (0035, ADR-061; §6N). Platform staff see
-  usage as counts only (`ops.platform_tenant_usage`). Charging for plans (Razorpay Subscriptions),
-  self-serve changes, proration and plan invoices are not built: staff set paid periods.
+  usage as counts only (`ops.platform_tenant_usage`). Staff set paid periods for payments settled
+  outside HyFib; companies can also pay by Razorpay subscription (below). Self-serve plan changes,
+  proration and plan invoices are not built.
+- **Paying for plans (0037, ADR-063) [built, behind `RAZORPAY_SUBSCRIPTIONS_ENABLED`]:** Billing →
+  Paying for your plan (`packages/domain/src/billing/plan-subscriptions.ts`) quotes the plan version
+  with the company's add-ons plus the tax platform owners set (`ops.plan_settings.plan_tax_bp`,
+  `planPaymentQuote` in integer paise). Owners and billing managers with a recent sign-in start a
+  subscription: `app.plan_subscriptions` is written first (`creating`, amounts, add-ons and the plan
+  fixed by column grants, one live row per company by a partial unique index, an advisory lock per
+  company), then Razorpay's plan (`POST /v1/plans`, monthly, quarterly or yearly) and subscription
+  (`POST /v1/subscriptions`, five years of cycles, `expire_by` in one hour, `customer_notify`).
+  Checkout opens with the `subscription_id`; its signature (`payment_id|subscription_id`, checked
+  against OUR stored id) only prompts `syncPlanSubscription`, which is also run by every
+  `subscription.*` webhook, by a `payment.*` webhook whose fetched invoice names one of our
+  subscriptions (`ops.billing_resolve_subscription`), by the minute sweep
+  (`ops.plan_subscriptions_due`: unfinished starts after 10 minutes, unpaid ones past `expire_by`,
+  live ones daily and hourly after a cycle ends) and by the plan sweep before a period-end
+  transition. The sync fetches the subscription and, while Razorpay's `paid_count` exceeds the
+  recorded payments, its invoices; each paid invoice of our subscription, in INR, for our amount,
+  whose payment is fetched as captured, becomes one append-only `app.plan_payments` row (payment and
+  invoice ids unique). Ended statuses stay ended, unknown ones keep ours, older reads (fewer paid
+  cycles) change nothing, and an unpaid subscription past its window is cancelled at Razorpay. For
+  an active subscription `app.apply_plan_subscription_period` (definer, the company's scope) makes
+  the plan active for exactly `current_start`–`current_end` when a payment's billing period has its
+  middle in that cycle and the plan state still has the subscription's version and add-ons, links
+  `tenant_plans.subscription_id` and restarts the usage period. Company cancels are
+  `cancel_at_cycle_end` for an active subscription (at once otherwise); `app.apply_plan_transition`
+  ends such a period as canceled without grace days. Platform owners set the tax and cancel a
+  company's subscription at once (`/platform/tenants/<id>`), staff plan changes are refused while a
+  subscription is live, and company deletion cancels it at Razorpay (§6Q). Billing managers are
+  emailed about payments, failed charges (`pending`), stopped retries (`halted`) and cancels.
 - **Ledger (0004_billing):** one INR wallet per company with five accounts (`wallet_available`,
   `wallet_held`, `payment_clearing`, `service_revenue`, `dispute_losses`). `ledger_transactions` and
   `ledger_entries` are append-only (trigger), balances are maintained by trigger from the entries,
@@ -1137,11 +1168,13 @@ payment_requested → succeeded`; before each provider call it is written as `un
   `GET /v1/settlements/recon/combined` a page of 1,000 at a time (R-110, R-111; at most 50 pages)
   and looks each page's provider ids up in HyFib's records (`ops.settlement_recon_facts`: top-ups by
   payment and order, card mandates by authorisation payment, order and refund, recorded refunds by
-  ledger key through the refunded payment's top-up). A payment on a top-up's order that did not
-  credit it goes through `applyPaymentById`, and a refund of a payment that credited a top-up but
-  was never recorded goes through `applyRefundById`: both fetch from Razorpay first and use the
-  functions the webhooks use, so the reconciliation is the backstop for lost webhooks and records
-  nothing twice. Everything else is classified (matched, a mismatch, for review, not HyFib's) and
+  ledger key through the refunded payment's top-up, and plan payments by payment id, 0037). A
+  payment on a top-up's order that did not credit it goes through `applyPaymentById`, as does a
+  payment on no order of HyFib's (it may be a plan subscription's charge, recorded by syncing the
+  subscription), and a refund of a payment that credited a top-up but was never recorded goes
+  through `applyRefundById`: both fetch from Razorpay first and use the functions the webhooks use,
+  so the reconciliation is the backstop for lost webhooks and records nothing twice. Refunds of plan
+  payments wait for a person (HyFib does not refund them). Everything else is classified (matched, a mismatch, for review, not HyFib's) and
   written with `ops.settlement_recon_record_items`; `ops.settlement_recon_complete` removes items
   Razorpay no longer lists for the day and totals the run. A Razorpay failure that may pass leaves
   the run due again after 5, 15, 60, 180 and 360 minutes (`ops.settlement_recon_defer`); any other
