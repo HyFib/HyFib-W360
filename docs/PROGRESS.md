@@ -3,9 +3,11 @@
 ## 2026-09-29 — Fix: controlled inputs used before hydration
 
 Status: **Fixed and verified locally on macOS (Chromium, mobile Chromium, and `forms.spec.ts` also
-on WebKit and Firefox); CI has not run on it yet.** A controlled input outside a `ClientForm`
-accepted input before React hydrated it, and that input never reached the component. PR #12 fixed
-the two-factor password field (the WebKit CI failure); this fixes every other such input.
+on WebKit and Firefox). CI on 0176322: 7 of 8 checks passed, including the four-browser end-to-end
+job; the secret scan failed on another branch's commit (see "CI" below).** A controlled input
+outside a `ClientForm` accepted input before React hydrated it, and that input never reached the
+component. PR #12 fixed the two-factor password field (the WebKit CI failure); this fixes every
+other such input.
 
 ### Cause
 
@@ -44,6 +46,10 @@ the two-factor password field (the WebKit CI failure); this fixes every other su
   the automation editor, a step field and the simulator (edits after hydration reach the simulated
   run and the saved draft). Against the unfixed build, all three failed at "disabled before
   hydration".
+- **CI:** the secret scan checks every branch, so a made-up key prefix in a unit test on PR #12's
+  branch (e1908d4) failed this branch's scan. PR #12 reviewed it as a false positive (cb2ffc3);
+  that commit is cherry-picked here, so `.gitleaksignore` matches PR #12's exactly. gitleaks
+  8.30.1 run locally over every branch then finds nothing.
 
 ### Test commands and results (local, 2026-09-29, macOS, Node 24.21, fresh database)
 
