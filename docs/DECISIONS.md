@@ -2015,3 +2015,22 @@ Decision:
 Not built: edge rate limits in front of the app (a deployment item), limits per endpoint, a limit on
 successful authentications per address, and hashing the address in the bucket's key (it is kept
 only while it limits).
+
+## ADR-069 Emails someone is waiting for go ahead of notices (2026-09-29)
+
+Context: every email is one `email.send` job, and the worker's email queue works through them in
+order at about two a second per worker process (four slots, each fetching one job, pg-boss waiting
+between fetches). A notice to many people at once, such as a reconciliation alert to every platform
+owner or a rate change notice to many companies' billing managers, queued ahead of a sign-up's
+address confirmation delays it by as long as the burst takes. The local e2e run found it: a sign-up
+waited more than 30 seconds for its confirmation email behind an alert to 73 platform owners.
+
+Decision: emails someone is waiting for on a page, the address confirmation (`auth.verify_email`)
+and the password reset (`auth.reset_password`), are queued at priority 10 and every other email at
+0 (`emailPriority`). pg-boss fetches higher priorities first (its fetch orders by priority, then
+creation time), so a waited-for email is sent next whatever is queued. The outbox sweep, which
+signals rows whose job was lost, uses the row's kind for the same priority. Nothing else about
+delivery changes: notices still go out in order, at the same rate.
+
+Not built: a higher sending rate for the email queue (a notice to many recipients still takes about
+half a second per recipient per worker process), and priorities for other kinds.

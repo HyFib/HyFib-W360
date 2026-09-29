@@ -6,6 +6,7 @@ import { Keyring, ManualClock, uuidv7 } from '@w360/core';
 import { QUEUES } from '@w360/contracts';
 import { authorizedTenantScope, emailOutbox, eq, invitations, sql, systemScope } from '@w360/db';
 import {
+  EMAIL_PRIORITY,
   EmailSendError,
   JobSigner,
   PgBossJobQueue,
@@ -266,6 +267,37 @@ async function createOutboxRow(to: string): Promise<string> {
 }
 
 describe('email outbox delivery', () => {
+  it('queues emails someone is waiting for ahead of notices', async () => {
+    const jobs = new PgBossJobQueue(boss);
+    const notice = await dbs.app.run(systemScope, (tx) =>
+      enqueueEmail({ keyring, jobs, signer }, tx, {
+        to: 'notice@example.test',
+        payload: { kind: 'tenant.notice', companyName: 'Acme', subject: 'A notice', lines: ['x'] },
+      }),
+    );
+    const reset = await dbs.app.run(systemScope, (tx) =>
+      enqueueEmail({ keyring, jobs, signer }, tx, {
+        to: 'reset@example.test',
+        payload: {
+          kind: 'auth.reset_password',
+          name: 'Test',
+          url: 'https://app.example.test/reset?token=x',
+        },
+      }),
+    );
+    const verify = await createOutboxRow('waiting@example.test');
+    const { rows } = await dbs.adminPool.query<{ singleton_key: string; priority: number }>(
+      `SELECT singleton_key, priority FROM pgboss.job WHERE name = $1 AND singleton_key = ANY($2)`,
+      [QUEUES.emailSend.name, [notice, reset, verify]],
+    );
+    expect(Object.fromEntries(rows.map((r) => [r.singleton_key, r.priority]))).toEqual({
+      [notice]: EMAIL_PRIORITY.notice,
+      [reset]: EMAIL_PRIORITY.waitedFor,
+      [verify]: EMAIL_PRIORITY.waitedFor,
+    });
+    expect(EMAIL_PRIORITY.waitedFor).toBeGreaterThan(EMAIL_PRIORITY.notice);
+  });
+
   it('delivers once, records the provider id and erases the encrypted payload', async () => {
     const id = await createOutboxRow('deliver@example.test');
     const sender = new FakeSender();
@@ -334,7 +366,10 @@ describe('email outbox delivery', () => {
       await processEmailOutbox({ db: dbs.app, keyring, sender, clock: new ManualClock(t0) }, id),
     ).toBe('not_claimable');
     const later = new ManualClock(new Date(t0.getTime() + 121_000));
-    expect(await findStaleOutboxRows({ db: dbs.app, clock: later })).toContain(id);
+    expect(await findStaleOutboxRows({ db: dbs.app, clock: later })).toContainEqual({
+      id,
+      kind: 'auth.verify_email',
+    });
     expect(await processEmailOutbox({ db: dbs.app, keyring, sender, clock: later }, id)).toBe(
       'sent',
     );

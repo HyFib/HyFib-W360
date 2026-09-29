@@ -135,7 +135,10 @@ so grants issued after the transfer would silently grant nothing (migration 0002
 payload bound (AAD) to the row id. The worker claims a row with a short lease (`sending`,
 `locked_until`), sends via the SMTP adapter outside any transaction, then records `sent` and erases
 the payload. Transient failures return the row to `pending` and pg-boss retries with backoff;
-permanent SMTP 5xx or exhausted attempts mark `failed`. Delivery is at-least-once.
+permanent SMTP 5xx or exhausted attempts mark `failed`. Delivery is at-least-once. Emails someone
+is waiting for on a page (confirming an address, resetting a password) are queued at a higher
+priority than notices, also when the outbox sweep signals a lost one again, so they do not wait
+behind a burst of notices (ADR-069).
 
 ## 6. Messaging pipeline **[built — verified against a local Graph stand-in; no live Meta traffic yet]**
 

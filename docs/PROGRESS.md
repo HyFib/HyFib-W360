@@ -31,7 +31,15 @@ address, so addresses stayed in `ops.rate_limit_buckets` without end.
   the isolation suite; e2e `api-keys.spec.ts`: a burst of 120 requests on one key refused with 429,
   `Retry-After: 1` and `rate_limited`, and served again after the wait. Time is moved by setting a
   bucket's last use back, never by waiting.
-- **Docs:** ADR-068; ARCHITECTURE §6N; SECURITY (Phase 5 rules); THREAT-MODEL
+- **Found while verifying: emails someone is waiting for go first (ADR-069).** In the full local e2e
+  run, `step-up.spec.ts` on mobile-chromium waited more than 30 seconds for its sign-up's
+  confirmation email: the settlement spec had just queued its alert to 73 platform owners (the
+  reused local database's), and the email queue sends about two emails a second. The address
+  confirmation and the password reset are now queued at priority 10 and other emails at 0, and the
+  outbox sweep signals a lost row again at its kind's priority (`findStaleOutboxRows` returns the
+  kind). A new test in `jobs.test.ts` checks the jobs' priorities; 4 deliberate regressions
+  (no priority, every email waited for, the reset left out, the sweep without the kind) are caught.
+- **Docs:** ADR-068 and ADR-069; ARCHITECTURE §5 and §6N; SECURITY (Phase 5 rules); THREAT-MODEL
   T70; RUNBOOKS (the buckets behind 429s); DATA-RETENTION (rate limit buckets); BACKLOG P5-08;
   FEATURE-MATRIX H-033. The e2e job's comment in CI counts the new tests.
 - **Mutation checks:** 19 regressions tried one at a time (the purge's fullness and refill checks and
@@ -45,14 +53,14 @@ address, so addresses stayed in `ops.rate_limit_buckets` without end.
 
 ### Test commands and results (local, 2026-09-29)
 
-| Command                                                                     | Result                                                                                                                                                                                                                                                                                                          |
-| --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                  |
-| `pnpm test` (unit)                                                          | 336 passed                                                                                                                                                                                                                                                                                                      |
-| `pnpm test:integration` (PostgreSQL 18.6)                                   | 455 passed, including the new `rate-limits.test.ts` (8)                                                                                                                                                                                                                                                         |
-| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 455 passed                                                                                                                                                                                                                                                                                                      |
-| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 87 of 88 passed in one full run (22.8 min), including `api-keys.spec.ts`'s burst on both projects; `step-up.spec.ts` on mobile-chromium waited more than 30 seconds for its sign-up's confirmation email behind a reconciliation alert to 73 platform owners (fixed in the next commit, ADR-069) |
-| Mutation checks                                                             | 19 regressions tried; all 19 make a test fail (17 of 18 in the first run, the 18th after a test was strengthened, and a 19th added then)                                                                                                                                                                        |
+| Command                                                                     | Result                                                                                                                                                                                                           |
+| --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                   |
+| `pnpm test` (unit)                                                          | 336 passed                                                                                                                                                                                                       |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 456 passed, including the new `rate-limits.test.ts` (8) and the priority test in `jobs.test.ts`                                                                                                                  |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 456 passed                                                                                                                                                                                                       |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 88 passed in one full run (23.2 min) with the email priority, including `api-keys.spec.ts`'s burst on both projects; the run before it had 87 of 88 (`step-up.spec.ts` on mobile-chromium, above) |
+| Mutation checks                                                             | 19 regressions tried; all 19 make a test fail (17 of 18 in the first run, the 18th after a test was strengthened, and a 19th added then)                                                                         |
 
 ### Known gaps
 
