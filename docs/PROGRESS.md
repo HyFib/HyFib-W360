@@ -40,6 +40,8 @@ helpdesk that closed a ticket left the WhatsApp conversation open until a member
   bot, cancels its queued question and leaves no waiting turn. e2e `api.spec.ts`: the key (created
   in settings with the new scope) resolves the conversation, a repeat answers the same, `pending` is
   refused, the inbox offers Reopen, the key reopens it and the inbox offers Resolve.
+- **CI:** the e2e job gets 95 minutes and its test step 85 (were 80 and 70): its 200 tests took 64.3
+  minutes on 28a774c, close to the step's limit, and one retry of a long test must still fit.
 - **Docs:** ADR-075; ARCHITECTURE (the public API); SECURITY (Phase 5 rules); THREAT-MODEL T93;
   RUNBOOKS (migration 0050, a troubleshooting entry); BACKLOG P5-08; FEATURE-MATRIX W-134 and H-033.
 - **Mutation checks:** 29 regressions tried one at a time, all make a test fail: the row lock, the

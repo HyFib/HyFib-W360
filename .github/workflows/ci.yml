@@ -77,16 +77,17 @@ jobs:
   e2e:
     name: End-to-end (Chromium, Firefox, WebKit, mobile)
     runs-on: ubuntu-24.04
-    # 200 tests run one at a time across four browser projects: 196 took 58.4 minutes on 5232313, 192
-    # took 51.7 on 2b3225c (one flaky test passed on its retry) and 180 took 54.0 on 736acb4. The
-    # usage, settlement, API key and refund request specs each wait per project for a worker's
-    # minute sweep to send an email: the rate change notice (since 3978329) and the key expiry
-    # reminder up to 90 seconds, the reconciliation and unsettled payment alerts, which go to every
-    # platform owner, up to 150; the refund request test waits for three sweeps (about 2 minutes).
-    # Runners vary (148 tests took 33.5 minutes on b2b7614; 160 took 45.9 on fb8efa6, including a
-    # 4-minute timeout and its retry), and one retry of a long test (the cart reminder test allows 5
-    # minutes) must still fit on a slow runner.
-    timeout-minutes: 80
+    # 200 tests run one at a time across four browser projects: they took 64.3 minutes on 28a774c,
+    # 196 took 58.4 on 5232313, 192 took 51.7 on 2b3225c (one flaky test passed on its retry) and
+    # 180 took 54.0 on 736acb4. The usage, settlement, API key and refund request specs each wait
+    # per project for a worker's minute sweep to send an email: the rate change notice (since
+    # 3978329) and the key expiry reminder up to 90 seconds, the reconciliation and unsettled
+    # payment alerts, which go to every platform owner, up to 150; the refund request test waits for
+    # three sweeps (about 2 minutes). Runners vary (148 tests took 33.5 minutes on b2b7614; 160 took
+    # 45.9 on fb8efa6, including a 4-minute timeout and its retry), and one retry of a long test
+    # (the cart reminder test allows 5 minutes) must still fit on a slow runner: the suite step
+    # stops at 85 minutes, the job at 95.
+    timeout-minutes: 95
     services:
       postgres:
         image: postgres:18-alpine
@@ -175,7 +176,7 @@ jobs:
       - run: pnpm exec playwright install --with-deps chromium firefox webkit
       # Stops before the job's limit, so a run that overruns still gets the steps below.
       - run: pnpm test:e2e
-        timeout-minutes: 70
+        timeout-minutes: 85
       - if: failure() || cancelled()
         run: cat "$RUNNER_TEMP/web.log" "$RUNNER_TEMP/worker.log"
       # Test data only: what the job queues and the stores held when the suite failed.
