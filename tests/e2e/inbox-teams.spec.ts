@@ -9,7 +9,7 @@ import {
   sendSignedWebhook,
   standInRequests,
 } from './messaging-support';
-import { expectNoHorizontalOverflow, signUpAndVerify, uniqueEmail } from './support';
+import { expectNoHorizontalOverflow, openFromNav, signUpAndVerify, uniqueEmail } from './support';
 
 const PASSWORD = 'correct horse battery staple 42';
 
@@ -146,8 +146,8 @@ test('teams route conversations, saved replies fill the composer and CSAT answer
   await expect(page.getByText(/answered with the best rating/)).toBeVisible({ timeout: 20_000 });
   await expect(page.getByRole('button', { name: 'Reopen' })).toBeVisible();
 
-  // Reports show the answer.
-  await page.goto(`/c/${slug}/reports`);
+  // Reports show the answer (the live inbox is left through the navigation, see openFromNav).
+  await openFromNav(page, 'Reports');
   await expect(stat(page, 'CSAT')).toContainText('100%');
   await expect(stat(page, 'CSAT response rate')).toContainText('1 of 1 delivered');
   await expectNoHorizontalOverflow(page);

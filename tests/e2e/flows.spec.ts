@@ -13,7 +13,7 @@ import {
   sendSignedWebhook,
   standInRequests,
 } from './messaging-support';
-import { expectNoHorizontalOverflow, signUpAndVerify, uniqueEmail } from './support';
+import { expectNoHorizontalOverflow, openFromNav, signUpAndVerify, uniqueEmail } from './support';
 
 const PASSWORD = 'correct horse battery staple 42';
 /** A host name that resolves to 127.0.0.1 on the test machine (see web-requests.spec.ts). */
@@ -61,10 +61,6 @@ async function newCompany(page: Page, prefix: string, name: string) {
   await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
   const channel = await connectTestChannel({ ownerEmail: email, slug });
   return { slug, ...channel };
-}
-
-async function openFromNav(page: Page, name: string) {
-  await page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name }).click();
 }
 
 /** Reloads until the worker has done its part at Meta and the page shows `text`. */

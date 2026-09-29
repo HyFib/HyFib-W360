@@ -4,7 +4,7 @@ import { Checkbox, Label } from '@w360/ui';
 import { updateCompanySecurityAction } from '@/app/actions/tenancy';
 import { ActionFailure, type ActionFailureState } from '@/components/action-failure';
 import { FormSuccess } from '@/components/form-status';
-import { ClientButton } from '@/components/client-form';
+import { ClientButton, useHydrated } from '@/components/client-form';
 
 export function CompanySecurityForm({
   slug,
@@ -15,6 +15,8 @@ export function CompanySecurityForm({
   requireMfaAllMembers: boolean;
   canEdit: boolean;
 }) {
+  // A box ticked before hydration would show ticked while `value` stayed unchanged (see useHydrated).
+  const hydrated = useHydrated();
   const [value, setValue] = useState(requireMfaAllMembers);
   const [error, setError] = useState<ActionFailureState | null>(null);
   const [saved, setSaved] = useState(false);
@@ -39,7 +41,7 @@ export function CompanySecurityForm({
           id="require-mfa"
           className="mt-0.5"
           checked={value}
-          disabled={!canEdit}
+          disabled={!canEdit || !hydrated}
           onChange={(e) => setValue(e.target.checked)}
         />
         <Label htmlFor="require-mfa" className="grid gap-1 font-normal">

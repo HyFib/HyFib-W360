@@ -142,6 +142,68 @@ window, as members do in the inbox.
   WhatsApp user id, and resolving or assigning conversations through the API are not built. Replies
   are verified against the Graph stand-in only.
 
+## 2026-09-29 — Fix: controlled inputs used before hydration
+
+Status: **Fixed and verified locally on macOS (Chromium, mobile Chromium, and `forms.spec.ts` also
+on WebKit and Firefox). CI on 0176322: 7 of 8 checks passed, including the four-browser end-to-end
+job; the secret scan failed on another branch's commit (see "CI" below).** A controlled input
+outside a `ClientForm` accepted input before React hydrated it, and that input never reached the
+component. PR #12 fixed the two-factor password field (the WebKit CI failure); this fixes every
+other such input.
+
+### Cause
+
+- React (19.3, as bundled by Next.js 16.3) keeps a value entered before hydration in the field and
+  records it as the field's current value, so no change reaches `onChange`: state keeps the
+  server-rendered value, and the next render of the field writes that value back.
+- Reproduced against a build of the unfixed code (e50c6fc) with the bundles held back, as in the
+  tests (Chromium): the company security checkbox ticked early showed ticked while Save stayed
+  disabled; an automation name typed early showed while the editor said "All changes saved" (Save
+  draft disabled) and reverted at the next edit; a contact erased after unticking "Keep the number
+  on the suppression list" early was still put on the suppression list.
+
+### Completed
+
+- **Disabled until hydration** (`useHydrated()`, as PR #12 did for the two-factor card):
+  - Settings → Security: "Require two-factor authentication for every member".
+  - Contact page: the erasure's "Keep the number on the suppression list".
+  - Automation editor: its fieldset, so every trigger and step field (`node-fields.tsx` renders
+    only inside it) and the step buttons.
+  - Automation simulator: the simulated contact's fields.
+  - Campaign review: the note to the submitter ("Send back for changes" needs it).
+  - Inbox conversation: the "Assigned to" and "Team" selects, which act on change like a
+    `ClientButton`.
+  - Platform: the reasons for retiring a plan version and withdrawing a rate card (their buttons
+    need 10 characters).
+- **Audit:** every `onChange` in `apps/web/src` written outside a `ClientForm` was checked. The rest
+  are rendered inside one by their parent (for example the segment builder, the invitation's role
+  picker, import columns, store and campaign variables) or only after a client-side change, which
+  implies hydration (dialogs, editing a member's roles, the two-factor code step, the simulator's
+  web request results). PR #12 fixed the two-factor password field.
+- `useHydrated()` now documents why such inputs wait for it, and the rule in `CLAUDE.md` covers
+  them: it named only `ClientForm` and `ClientButton`, which is how these were missed.
+- **e2e:** `forms.spec.ts` uses PR #12's `holdScripts` helper (copied verbatim before PR #12
+  merged) and adds three tests: the security checkbox; the erasure choice (unticked after
+  hydration, the number stays off the suppression list); and the automation editor, a step field
+  and the simulator (edits after hydration reach the simulated run and the saved draft). Against
+  the unfixed build, all three failed at "disabled before hydration".
+- **CI:** the secret scan checks every branch, so a made-up key prefix in a unit test on PR #12's
+  branch (e1908d4) failed this branch's scan. PR #12 reviewed it as a false positive (cb2ffc3);
+  that commit is cherry-picked here, so `.gitleaksignore` matches PR #12's exactly. gitleaks
+  8.30.1 run locally over every branch then finds nothing.
+
+### Test commands and results (local, 2026-09-29, macOS, Node 24.21, fresh database)
+
+| Command                                                                                | Result                                                                                                                                                                                                                                                                                                           |
+| -------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                   | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                   |
+| `pnpm test` (unit)                                                                     | 298 passed                                                                                                                                                                                                                                                                                                       |
+| `pnpm build`                                                                           | passes                                                                                                                                                                                                                                                                                                           |
+| `pnpm test:e2e forms.spec.ts --project=chromium --project=mobile-chromium --retries=0` | 8 passed (4 × 2). Against the unfixed build (Chromium): the 3 new tests failed, the sign-in test passed                                                                                                                                                                                                          |
+| `pnpm test:e2e forms.spec.ts --project=webkit --project=firefox --retries=0`           | 8 passed (4 × 2)                                                                                                                                                                                                                                                                                                 |
+| `pnpm test:e2e <specs> --project=chromium --project=mobile-chromium --retries=0`       | 24 passed, 2 skipped (5.9 min). The specs whose pages use the changed components: `automations`, `campaigns`, `contacts`, `inbox`, `inbox-teams`, `plans`, `stores` and `web-requests`; the skipped test is `web-requests.spec.ts` on both projects (`E2E_HTTP_HOST` needs a hosts entry this Mac does not have) |
+| After merging `main` (PR #12)                                                          | lint, format and typecheck pass; `pnpm test`: 336 passed; `pnpm build` passes; `forms.spec.ts` and `plans.spec.ts` on chromium and mobile-chromium: 12 passed (6 × 2), including PR #12's two-factor test                                                                                                        |
+
 ## 2026-09-29 — Phase 5: tested API rate limits, and full token buckets deleted (P5-08)
 
 Status: **Implemented and locally verified.** The public API's rate limits had no automated tests,
@@ -442,6 +504,114 @@ HyFib records from Razorpay (ADR-063) now has a receipt, like every paid top-up 
 
 - Tax invoices, credit notes and a staff view of receipts are not built; the operator's legal
   details and GSTIN are not configured.
+
+## 2026-09-28 — E2E flake: page loads cancelled by client refreshes (`NS_BINDING_ABORTED`)
+
+Status: **Fixed; verified locally in Chromium, Firefox and WebKit and in CI (run 36463659015 on
+bcab120: the four-project e2e job passed all 148 tests, none retried).** Firefox e2e runs kept
+failing their first attempt with `page.reload: NS_BINDING_ABORTED` (sometimes "maybe frame was
+detached?") and WebKit with "Navigation to X is interrupted by another navigation to
+/inbox/<id>?view=all&status=open"; the CI retry passed, so each cost time and could hide a real
+failure. Seen at `templates.spec.ts:46` (runs 36250486921, 36296307815, 36304744023, 36306569312,
+36319247525, 36383443074), `automations.spec.ts` lines 110, 113 and 137 (36285450839, 36293693134,
+36297851931, 36300232834; already fixed by e91c9fe and feecdaf) and `reports.spec.ts:68/72` in
+WebKit (36263083048, 36304744023, 36309770153). The Firefox stall entry below listed these failures
+as a known gap.
+
+### Cause
+
+When a page load starts (`page.goto`, `page.reload`, a native form submission), Firefox and WebKit
+cancel the current document's fetches at once; Chromium only does so at unload. Next.js treats a
+failed RSC fetch of a navigation, a refresh or a server action's follow-up as a failure and "falls
+back to browser navigation" (`fetch-server-response.js` returns the URL; `app-router.js` then calls
+`location.replace`/`assign` for the current page). Its `isPageUnloading` guard is set only on
+`pagehide`, which comes later, and the hard retry (`server-patch-reducer.js`) runs even when a newer
+navigation has replaced the refreshed page. That page load aborts the test's, and the browser ends
+up on the old page. Prefetch failures do not trigger it. Any client refresh in flight when a test
+(or a user) loads a page is therefore a trap:
+
+- **Template editor (`templates.spec.ts:46`).** After "Draft saved." the editor called
+  `router.refresh()`, although `updateTemplateDraftAction` already calls `refresh()` and its
+  response carries the refreshed page: a redundant second round trip, still in flight when the test
+  reloaded. The segment form and the campaign editor did the same after actions that also refresh.
+- **Leaving live inbox pages (`reports.spec.ts:72`, and `inbox-teams.spec.ts:150` likewise).** The
+  inbox refreshes itself on live events, and several can follow a reply (message created, sent,
+  assignment); waiting for "Sent to WhatsApp" did not guarantee that the last refresh was done.
+- **Inbox filters (found while reproducing; users are affected too).** "Apply filters" was a native
+  GET form, i.e. a page load: with a live refresh in flight, Next.js reloaded the unfiltered inbox
+  and the filters were silently dropped (WebKit trace below).
+
+### Fix
+
+- **No redundant client refreshes.** The template editor, segment form and campaign editor no longer
+  call `router.refresh()` after actions that call `refresh()`. They run the save in a transition and
+  set the result inside `startTransition` after the `await` (Next.js 16's `interactive-apps.md`, step
+  6), so "Draft saved." / "Segment saved." / "The review below is updated." appear together with the
+  refreshed render instead of before it. A dropped connection now shows "… could not be saved
+  because the connection failed. Try again." and keeps the form's input; before, the rejection was
+  unhandled and nothing was shown, and inside a transition it would have reached the root error
+  page and discarded the input. The client refreshes that remain are needed: live updates, a sending
+  campaign's 15-second refresh, conflicts (the refused action refreshed nothing) and session
+  revocation through the auth client. ARCHITECTURE §3.4 records the rule.
+- **Inbox filters use `next/form`:** applying them is a client-side navigation, like the view links,
+  which does not cancel a refresh in flight.
+- **Tests leave live inbox pages through the main navigation.** `openFromNav` is now one helper in
+  `tests/e2e/support.ts` (it was copied in four specs) with the explanation; `reports.spec.ts` and
+  `inbox-teams.spec.ts` use it instead of `page.goto`. (`main` made the same change to
+  `reports.spec.ts` in e8b892c after WebKit failed there again on 2bdead7; the merge keeps its URL
+  check on the shared helper.) `templates.spec.ts` waits for "Sent to WhatsApp" through the
+  conversation's live update instead of reloading the conversation inside `toPass`, where a reload
+  aborted this way would have been retried silently.
+- **A reload no longer races its own request.** After "Submit for review" the templates,
+  campaigns, stores and API specs reloaded at once, which cancelled the submission's request (seen
+  in a Firefox trace; the server had already received it); they now wait until the returned page
+  has no draft buttons. After "Refresh from Meta" the campaigns, stores and API specs now wait for
+  "Refresh requested", as the templates spec already did.
+- **The same rule for code merged from `main` (PR #12).** `billing-usage.spec.ts` left a live
+  conversation with `page.goto` right after a live update ("Delivered"); it now uses `openFromNav`.
+  The platform's subscription cancel form refreshed after `cancelTenantSubscriptionAction`, which
+  already calls `refresh()`; the client refresh is gone (no test drives that form).
+
+No test was skipped, quarantined or given a longer timeout.
+
+### Test commands and results (local, 2026-09-28, macOS; Playwright 1.63 with Chromium 153, Firefox 155, WebKit 26.6)
+
+To make the race reproducible, a local proxy held the router's RSC GETs (navigations and refreshes,
+not prefetches) for 600 ms before they reached the web server: an investigation harness, not
+committed. At local speed `templates.spec.ts` passed 20/20 before the fix, because the refresh ended
+before the reload began; the CI runners are slower. A diagnostic spec (not committed either) started
+a live refresh on an inbox conversation and then left the page. The investigation ran on the tree
+before this branch was rebased onto `main` (b807407); rows marked "Rebased" ran on this branch on
+top of `main` at e20df5a, which brings the Phase 5 specs.
+
+| Command / check                                                            | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                       | Rebased: 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `pnpm test` (unit)                                                         | 298 passed with `main` merged again at e50c6fc (PR #11 fixed the egress fallback test for macOS; only that test and PROGRESS changed). Rebased on e20df5a: 297 passed, and that test timed out on macOS, where 127.0.0.2 is not a loopback address                                                                                                                                                                                                                                                                                                                                                    |
+| `pnpm test:integration` (PostgreSQL 18.6)                                  | Rebased: 388 passed (26 files); before the rebase 282 (18 files). No server code changed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `pnpm build`                                                               | Rebased: passes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| Before the fix, with the proxy                                             | `templates.spec.ts` failed 10/10 at line 46 (`page.reload: NS_BINDING_ABORTED`, once "maybe frame was detached?"). Trace: the action's POST, the client refresh cancelled, "Failed to fetch RSC payload … Falling back to browser navigation", the reload aborted by the fallback load of the same page. `inbox-teams.spec.ts` failed 1 of 3 in WebKit at "Apply filters" (the live refresh cancelled by the form's page load, then the unfiltered inbox loaded again) and passed 3/3 in Firefox; `reports.spec.ts` passed 3/3 in both, as no refresh happened to be in flight when it left the inbox |
+| After the fix, with the proxy                                              | `templates.spec.ts` 10/10 in Firefox (trace: no request between the save's POST and the reload); `templates`, `reports`, `inbox-teams`, `automations` and `campaigns` specs 4 times each in Firefox and WebKit: 40/40 without retries                                                                                                                                                                                                                                                                                                                                                                 |
+| Diagnostic: leaving the inbox during a live refresh                        | `page.goto`: fails 2/2 in Firefox (`NS_BINDING_ABORTED`) and 2/2 in WebKit ("interrupted by another navigation to …/inbox/<id>?view=all&status=open"), passes 2/2 in Chromium. `openFromNav`: passes 2/2 in Firefox and WebKit. "Apply filters": the native form fails 4/4 in Firefox and WebKit (the filters never apply), `next/form` passes 4/4. `openFromNav` followed at once by a page load: passes 4/4, and fails 1 of 2 in WebKit when the inbox refresh is held longer (2 s) than the navigation                                                                                             |
+| Diagnostic: the changed forms                                              | In Chromium, Firefox and WebKit: "Segment saved." appears with the renamed heading already rendered; with the action's request aborted, the segment form and the template editor show the connection message, keep the input and then save normally                                                                                                                                                                                                                                                                                                                                                   |
+| Rebased, with the proxy                                                    | `templates.spec.ts` 5/5 in Firefox and 3/3 in WebKit; `api.spec.ts` 2/2 in each                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `pnpm test:e2e --retries=0` (all four projects, no proxy)                  | Rebased: 136 passed, 12 skipped (the web request, webhook and Flows data endpoint tests in each project call a target through `E2E_HTTP_HOST`, which needs the hosts entry CI adds), 0 failed, 25.8 min. Before the rebase: 104 passed, 8 skipped, 0 failed, 16.2 min                                                                                                                                                                                                                                                                                                                                 |
+| CI, run 36463659015 on bcab120 (before `main` was merged again at 26db147) | Lint, types and unit tests, integration on PostgreSQL 17 and 18, build, audit and secret scan passed; the four-project e2e job passed all 148 tests (36.8 min), none retried                                                                                                                                                                                                                                                                                                                                                                                                                          |
+
+### Known gaps
+
+- Next.js's fallback still affects people, not only tests: in Firefox and WebKit, reloading or
+  typing an address while one of the remaining client refreshes is in flight (live inbox, a
+  sending campaign, a conflict, session revocation) ends on the current page. Avoiding that needs a
+  Next.js change (for example setting `isPageUnloading` when a navigation starts, or treating a
+  cancelled fetch as a cancellation); `node_modules` is not patched.
+- Leaving through the app navigation lets the inbox's last refresh finish in the background. A page
+  load that starts before it ends still meets it, and the hard retry then loads the old inbox page
+  even though the app has moved on; this needs the refresh to outlast the navigation (seen 1 of 2 in
+  WebKit with inbox refreshes held for 2 s). The specs check the new page's data before any page
+  load.
+- The other native GET forms (reports, contacts, CRM tasks, commerce lists) are unchanged: their
+  pages do not refresh themselves.
 
 ## 2026-09-28 — Phase 5: paying for plans by Razorpay subscription (P5-07, P5-01)
 
@@ -1305,10 +1475,8 @@ changed.
 ### Known gaps
 
 - Firefox end-to-end runs do not enforce COOP until the Playwright upgrade; Chromium and WebKit do.
-- The `NS_BINDING_ABORTED` failures above remain and pass on retry. `templates.spec.ts` reloads just
-  after the template editor's `router.refresh()`, which repeats the refresh its save action already
-  asked for; tests that navigate straight after an in-page refresh should wait for the page to
-  settle or move through the app's links.
+- The `NS_BINDING_ABORTED` failures above are fixed: see "E2E flake: page loads cancelled by client
+  refreshes" (2026-09-28) above.
 
 ## 2026-09-28 — Phase 5: platform operations console (P5-10)
 

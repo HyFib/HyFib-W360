@@ -10,7 +10,7 @@ import {
   submitCampaignAction,
   updateGuardrailsAction,
 } from '@/app/actions/campaigns';
-import { ClientButton, ClientForm } from '@/components/client-form';
+import { ClientButton, ClientForm, useHydrated } from '@/components/client-form';
 import { FormError, FormSuccess } from '@/components/form-status';
 
 export function CreateCampaignForm({ slug }: { slug: string }) {
@@ -158,6 +158,9 @@ export function ApprovalActions({
   canApprove: boolean;
   canWithdraw: boolean;
 }) {
+  // The note stays disabled until hydration: one typed before would never reach `note`, leaving
+  // "Send back for changes" disabled (see useHydrated).
+  const hydrated = useHydrated();
   const [note, setNote] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -186,6 +189,7 @@ export function ApprovalActions({
               rows={2}
               maxLength={500}
               value={note}
+              disabled={!hydrated}
               onChange={(e) => setNote(e.target.value)}
             />
           )}

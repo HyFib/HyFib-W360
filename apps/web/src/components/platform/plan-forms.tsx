@@ -15,7 +15,7 @@ import {
   setTenantPlanAction,
   updatePlanDraftAction,
 } from '@/app/actions/platform';
-import { ClientButton, ClientForm } from '@/components/client-form';
+import { ClientButton, ClientForm, useHydrated } from '@/components/client-form';
 import { FormError, FormSuccess } from '@/components/form-status';
 
 /** A plan version's terms as form text (money in rupees; empty means none or no limit). */
@@ -292,6 +292,9 @@ export function PlanVersionActions({
   companies: number;
 }) {
   const router = useRouter();
+  // The reason stays disabled until hydration: one typed before would never reach `reason`,
+  // leaving the retire button disabled (see useHydrated).
+  const hydrated = useHydrated();
   const [reason, setReason] = useState('');
   const [error, setError] = useState<string | null>(null);
   const fail = (r: { ok: boolean; message?: string }) => {
@@ -334,6 +337,7 @@ export function PlanVersionActions({
                 {...aria}
                 value={reason}
                 maxLength={500}
+                disabled={!hydrated}
                 onChange={(e) => setReason(e.target.value)}
               />
             )}
@@ -477,7 +481,6 @@ export function PlanTaxForm({ current }: { current: number | null }) {
 
 /** Cancels the company's plan subscription at Razorpay at once (platform owners, ADR-063). */
 export function CancelTenantSubscriptionForm({ tenantId }: { tenantId: string }) {
-  const router = useRouter();
   const [reason, setReason] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [issues, setIssues] = useState<Issues>({});
@@ -523,8 +526,8 @@ export function CancelTenantSubscriptionForm({ tenantId }: { tenantId: string })
                 setIssues(issuesOf(r));
                 return;
               }
+              // The action refreshes the page on the server; a client refresh would repeat it.
               setReason('');
-              router.refresh();
             });
           }}
         />

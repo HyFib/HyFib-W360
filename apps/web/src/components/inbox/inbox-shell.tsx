@@ -1,3 +1,4 @@
+import Form from 'next/form';
 import Link from 'next/link';
 import type { ReactNode } from 'react';
 import { Badge, Button, Input, Label, Select } from '@w360/ui';
@@ -131,7 +132,9 @@ export function InboxShell({
           )}
         </nav>
         {mentionsActive ? null : (
-          <form method="get" action={base} className="grid gap-2" aria-label="Filter conversations">
+          // Applied with a client-side navigation, like the view links: a page load would cancel a
+          // live refresh in flight, and Next.js would answer by loading the unfiltered page again.
+          <Form action={base} className="grid gap-2" aria-label="Filter conversations">
             <input type="hidden" name="view" value={query.view} />
             <input type="hidden" name="status" value={query.status} />
             <div className="grid grid-cols-2 gap-2">
@@ -194,7 +197,7 @@ export function InboxShell({
                 Apply filters
               </Button>
             </div>
-          </form>
+          </Form>
         )}
         {list ?? (
           <ConversationList

@@ -1,6 +1,5 @@
 'use client';
-import { useMemo, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useMemo, useState, useTransition } from 'react';
 import type { RenderedTemplate } from '@w360/domain/template-definition';
 import { Button, Checkbox, Field, Input, Select } from '@w360/ui';
 import { updateCampaignAction } from '@/app/actions/campaigns';
@@ -83,7 +82,6 @@ export function CampaignEditor({
   timezones: string[];
   currencies: string[];
 }) {
-  const router = useRouter();
   const [c, setC] = useState(campaign);
   const [audienceKind, setAudienceKind] = useState<'segment' | 'conditions'>(
     campaign.audienceDefinition || segments.length === 0 ? 'conditions' : 'segment',
@@ -96,7 +94,7 @@ export function CampaignEditor({
   );
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const [busy, startTransition] = useTransition();
 
   const update = (patch: Partial<EditableCampaign>) => {
     setSaved(false);
@@ -133,47 +131,53 @@ export function CampaignEditor({
     });
   };
 
-  async function submit(event: React.FormEvent) {
+  function submit(event: React.FormEvent) {
     event.preventDefault();
-    setBusy(true);
     setError(null);
     setSaved(false);
-    try {
-      const result = await updateCampaignAction(slug, c.id, {
-        expectedVersion: c.version,
-        name: c.name,
-        channelAccountId: c.channelAccountId,
-        templateId: template ? template.id : null,
-        variables: { header, body },
-        audience:
-          audienceKind === 'segment'
-            ? c.segmentId
-              ? { kind: 'segment', segmentId: c.segmentId }
-              : { kind: 'none' }
-            : { kind: 'conditions', definition },
-        schedule: {
-          kind: c.scheduleKind,
-          ...(c.scheduleKind === 'later' ? { local: c.scheduledLocal } : {}),
-          timezone: c.timezone,
-        },
-        window: c.windowStart && c.windowEnd ? { start: c.windowStart, end: c.windowEnd } : null,
-        ratePerMinute: c.ratePerMinute,
-        maxMessages: c.maxMessages,
-        budget:
-          c.budgetCurrency && c.budgetAmount
-            ? { amount: c.budgetAmount, currency: c.budgetCurrency }
-            : null,
-        stopAfterHours: c.stopAfterHours,
-      });
-      if (!result.ok) setError(result.message);
-      else {
-        setSaved(true);
-        setC((prev) => ({ ...prev, version: prev.version + 1 }));
-        router.refresh();
+    // The action refreshes the page on the server (the review below comes with its response); the
+    // result is set inside the transition so the message appears together with that render.
+    startTransition(async () => {
+      try {
+        const result = await updateCampaignAction(slug, c.id, {
+          expectedVersion: c.version,
+          name: c.name,
+          channelAccountId: c.channelAccountId,
+          templateId: template ? template.id : null,
+          variables: { header, body },
+          audience:
+            audienceKind === 'segment'
+              ? c.segmentId
+                ? { kind: 'segment', segmentId: c.segmentId }
+                : { kind: 'none' }
+              : { kind: 'conditions', definition },
+          schedule: {
+            kind: c.scheduleKind,
+            ...(c.scheduleKind === 'later' ? { local: c.scheduledLocal } : {}),
+            timezone: c.timezone,
+          },
+          window: c.windowStart && c.windowEnd ? { start: c.windowStart, end: c.windowEnd } : null,
+          ratePerMinute: c.ratePerMinute,
+          maxMessages: c.maxMessages,
+          budget:
+            c.budgetCurrency && c.budgetAmount
+              ? { amount: c.budgetAmount, currency: c.budgetCurrency }
+              : null,
+          stopAfterHours: c.stopAfterHours,
+        });
+        startTransition(() => {
+          if (!result.ok) setError(result.message);
+          else {
+            setSaved(true);
+            setC((prev) => ({ ...prev, version: prev.version + 1 }));
+          }
+        });
+      } catch {
+        startTransition(() =>
+          setError('The draft could not be saved because the connection failed. Try again.'),
+        );
       }
-    } finally {
-      setBusy(false);
-    }
+    });
   }
 
   return (
