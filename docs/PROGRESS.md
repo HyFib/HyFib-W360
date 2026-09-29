@@ -1,5 +1,74 @@
 # Progress
 
+## 2026-09-29 — Phase 5: reminders before API keys expire (P5-08)
+
+Status: **Implemented and locally verified (email through the local outbox and Mailpit only).** A
+key that expired stopped its integration without warning, and its expiry showed only on Settings →
+API keys; now owners and administrators are emailed a week before.
+
+### Completed
+
+- **Design (ADR-067):** a key that can still be used, was not rotated and expires within 7 days is
+  reminded once, to the company's active owners and administrators (the roles that manage keys):
+  its name and public prefix (never a token), when it expires in the company's time zone, who
+  created it, when it was last used, how to rotate it, and a link to Settings → API keys. Companies
+  being deleted get none; suspended and restricted companies do (their keys still read).
+- **Migration 0040:** `app.api_keys.expiry_reminded_at` (column grants to `w360_app`), the key's
+  guard replaced by one that also keeps the mark once set, a partial index, and
+  `ops.api_key_expiry_reminders_due` (company and key ids only; `w360_app` only; owned by
+  `w360_definer`).
+- **Domain:** `api/expiry-reminders.ts` (the reminder's text, the per-key reminder that locks, checks
+  and marks the key in its company's scope in the transaction that queues the emails, and the sweep
+  that lists due keys); `apiKeyExpiresSoon` and `API_KEY_REMINDER_DAYS` in the browser-safe model;
+  the key list returns `expiryRemindedAt`; the company export classifies the new column.
+- **Worker:** the minute messaging sweep sends the reminders and logs each failure (retried the next
+  minute).
+- **Web:** Settings → API keys says owners and administrators are emailed 7 days before a key
+  expires, marks keys that expire soon and shows when the reminder was emailed.
+- **Tests:** 6 unit tests (which keys expire soon, the reminder's text, a one-line subject, the
+  rendered email with the name escaped); 4 integration tests in `api.test.ts` (recipients and
+  content in the company's time zone, once, a key coming within the week later, the listing's
+  window; revoked, rotated, expired, reminded and distant keys and companies being deleted left out
+  after a re-check in the company's scope, suspended and restricted companies reminded; overlapping
+  reminders and sweeps; the kept mark); the listing's grants in the isolation suite; e2e
+  `api-keys.spec.ts` (a key created in settings, its expiry brought forward by a fixture step, the
+  mark on the page, the owner's email from the worker's sweep, and when it was emailed).
+- **Fix to `settlement-recon.spec.ts`:** in the full local run, its chromium test waited 90 seconds
+  for the platform owner's alert and missed it by 0.8 seconds. The worker sent the alert on the
+  sweep after the check finished, to every platform owner in the database: 73 in the reused local
+  database, which the email queue delivered in 37 seconds. The wait is now 150 seconds (one sweep
+  plus the fan-out); with it the spec passed on both projects.
+- **Docs:** ADR-067; ARCHITECTURE §6N; SECURITY (Public API row and Phase 5 rules); THREAT-MODEL
+  T67; RUNBOOKS (a reminder that did not come, migration 0040, and the stale "monthly quotas are not
+  built" under 429 corrected); DATA-RETENTION; BACKLOG P5-08; FEATURE-MATRIX H-033. The e2e job's
+  comment in CI counts the new tests.
+- **Mutation checks:** 24 regressions tried one at a time (the listing's revoked, rotated, reminded,
+  expired, window and company-status conditions, the guard, the listing's grant, the per-key
+  company, reminded, expiring-soon, lock and mark steps, the recipients, the time zone, the subject,
+  the prefix, the creator, an unused key, the 7-day boundary, rotated and expired keys in
+  `apiKeyExpiresSoon`). 23 made a test fail in the first run; the lower bound of the listing's
+  window was not tested until a key expiring within a day was added, and now all 24 do.
+
+### Test commands and results (local, 2026-09-29)
+
+| Command                                                                     | Result                                                                                                                                                                        |
+| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                |
+| `pnpm test` (unit)                                                          | 336 passed, including the new `api/expiry-reminders.test.ts` (6)                                                                                                              |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 447 passed, including the 4 new tests in `api.test.ts`                                                                                                                        |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 447 passed                                                                                                                                                                    |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / 85 of 86 passed in one full run (22.3 min), including `api-keys.spec.ts` on both projects; the 86th passed after the fix to `settlement-recon.spec.ts` (above) |
+| Mutation checks                                                             | 24 regressions tried; all 24 make a test fail (23 in the first run, the 24th after a test was added)                                                                          |
+
+### Known gaps
+
+- One reminder per key, 7 days ahead; a second reminder closer to the expiry, other channels and
+  alerts for expired keys still being presented are not built. A key's expiry cannot be extended;
+  rotation renews it.
+- Found while fixing the spec: the email queue sends about two emails a second per worker process
+  (each of its four slots takes one job, and pg-boss waits two seconds between fetches). A notice to
+  many recipients at once takes that long to deliver; the queue's settings are not changed here.
+
 ## 2026-09-29 — Phase 5: alerts for reconciliation findings (P5-05)
 
 Status: **Implemented and locally verified (email through the local outbox and Mailpit only; Razorpay

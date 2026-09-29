@@ -31,6 +31,8 @@ export const apiKeys = appSchema.table('api_keys', {
   revokedAt: tz('revoked_at'),
   revokedByUserId: text('revoked_by_user_id'),
   replacedByKeyId: uuid('replaced_by_key_id'),
+  /** When owners and administrators were emailed that the key expires soon (ADR-067). */
+  expiryRemindedAt: tz('expiry_reminded_at'),
 });
 
 /** Stored responses of requests sent with an Idempotency-Key (24 hours). */

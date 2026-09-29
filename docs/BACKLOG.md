@@ -369,9 +369,11 @@ verification, app review, Embedded Signup configuration).
   contacts (cursor pages, create or existing), consent with evidence and message status; idempotency
   keys, per-key, per-company and failed-authentication rate limits, 64 KB bodies, an OpenAPI 3.1
   document from the validation schemas, Settings → API keys; monthly API requests and API access
-  by plan (ADR-061, see P5-01). Remaining: session, media and interactive messages, conversation
-  and message lists, starting automations (W-086), bulk sends in one call, IP allowlists, key expiry
-  reminders, per-key quotas, tests of the rate limits.
+  by plan (ADR-061, see P5-01); **[reminders before keys expire built, locally verified]** (ADR-067:
+  owners and administrators emailed once, 7 days before a usable key that was not rotated expires,
+  with its name and prefix, never a token; marked on Settings → API keys). Remaining: session,
+  media and interactive messages, conversation and message lists, starting automations (W-086),
+  bulk sends in one call, IP allowlists, per-key quotas, tests of the rate limits.
 - **P5-09 Outgoing webhooks** **[built, locally verified; delivered to local test receivers only]**
   (ADR-053): up to 10 endpoints per company (`developer.manage`) for `message.received`,
   `message.status`, `consent.changed` and `template.status_changed`, captured by database triggers

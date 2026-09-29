@@ -2,9 +2,11 @@ import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
 import {
   API_KEY_LIMITS,
+  API_KEY_REMINDER_DAYS,
   API_LIMITS,
   API_SCOPE_INFO,
   API_SCOPE_KEYS,
+  apiKeyExpiresSoon,
   can,
   hasRecentSignIn,
   RECENT_SIGN_IN_MINUTES,
@@ -41,6 +43,7 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
   const grantable = API_SCOPE_KEYS.filter((s) => can(ctx, API_SCOPE_INFO[s].permission));
   const activeCount = keys.filter((k) => k.state === 'active').length;
   const prefixes = new Map(keys.map((k) => [k.id, k.keyPrefix]));
+  const now = clock.now();
   return (
     <div className="grid grid-cols-1 gap-6">
       <Card>
@@ -109,7 +112,8 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
           <CardTitle>API keys</CardTitle>
           <CardDescription>
             {activeCount} of {API_KEY_LIMITS.activeKeys} active keys. A key’s secret part is shown
-            only when it is created; the list shows its public prefix.
+            only when it is created; the list shows its public prefix. Owners and administrators are
+            emailed {API_KEY_REMINDER_DAYS} days before a key expires, unless it was rotated.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -124,6 +128,9 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="font-medium">{k.name}</span>
                       <Badge tone={badge.tone}>{badge.label}</Badge>
+                      {apiKeyExpiresSoon(k, now) ? (
+                        <Badge tone="warning">Expires soon</Badge>
+                      ) : null}
                       {k.replacedByKeyId ? (
                         <Badge tone="neutral">
                           Rotated to {prefixes.get(k.replacedByKeyId) ?? 'a new key'}
@@ -168,6 +175,12 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
                               : 'never'}
                         </dd>
                       </div>
+                      {k.expiryRemindedAt ? (
+                        <div>
+                          <dt className="inline">Expiry reminder emailed </dt>
+                          <dd className="inline">{formatDateTime(k.expiryRemindedAt, tz)}</dd>
+                        </div>
+                      ) : null}
                     </dl>
                     <ApiKeyActions
                       slug={ctx.tenant.slug}

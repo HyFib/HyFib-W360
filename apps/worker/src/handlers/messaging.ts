@@ -1,5 +1,6 @@
 import type { Job } from 'pg-boss';
 import { QUEUES } from '@w360/contracts';
+import { toError } from '@w360/core';
 import { authorizedTenantScope } from '@w360/db';
 import {
   applyMessagingRetention,
@@ -13,6 +14,7 @@ import {
   purgeApiIdempotencyKeys,
   purgeDeadLetters,
   recoverExpiredSend,
+  remindExpiringApiKeys,
   routeDueConversations,
 } from '@w360/domain';
 import type { WorkerRuntime } from '../runtime';
@@ -144,7 +146,8 @@ export function channelOnboardHandler(rt: WorkerRuntime) {
  * Every minute: re-signal webhook receipts and send intents whose signal was lost, settle send
  * intents whose worker died (before dispatch: re-queued; after dispatch: unknown outcome, never an
  * automatic resend), signal automation runs and task reminders that are due or lost their
- * signal, and route waiting conversations of round-robin teams.
+ * signal, route waiting conversations of round-robin teams, and remind companies of API keys that
+ * expire soon.
  */
 export function messagingSweepHandler(rt: WorkerRuntime) {
   return async (): Promise<void> => {
@@ -204,6 +207,20 @@ export function messagingSweepHandler(rt: WorkerRuntime) {
     const idempotencyKeys = await purgeApiIdempotencyKeys(rt.db);
     if (idempotencyKeys > 0)
       rt.logger.info({ idempotencyKeys }, 'expired API idempotency keys deleted');
+    // Reminders before API keys expire (ADR-067).
+    const keyReminders = await remindExpiringApiKeys({
+      db: rt.db,
+      clock: rt.clock,
+      notices: rt.notices,
+    });
+    for (const failure of keyReminders.failed) {
+      rt.logger.warn(
+        { tenantId: failure.tenantId, keyId: failure.keyId, err: toError(failure.error).message },
+        'API key expiry reminder failed; will retry',
+      );
+    }
+    if (keyReminders.reminded > 0)
+      rt.logger.info({ reminded: keyReminders.reminded }, 'API key expiry reminders emailed');
     const deadLettersPurged = await purgeDeadLetters(rt.db);
     if (deadLettersPurged > 0) rt.logger.info({ deadLettersPurged }, 'old dead letters deleted');
     const webhooks = await sweepWebhooks(rt);

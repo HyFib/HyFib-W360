@@ -90,6 +90,8 @@ export interface ApiKeyView {
   lastUsedAt: Date | null;
   revokedAt: Date | null;
   replacedByKeyId: string | null;
+  /** When owners and administrators were emailed that the key expires soon (ADR-067). */
+  expiryRemindedAt: Date | null;
   state: 'active' | 'revoked' | 'expired';
 }
 
@@ -172,6 +174,7 @@ export function createApiKeysService(deps: { db: Database; clock: Clock }) {
               lastUsedAt: apiKeys.lastUsedAt,
               revokedAt: apiKeys.revokedAt,
               replacedByKeyId: apiKeys.replacedByKeyId,
+              expiryRemindedAt: apiKeys.expiryRemindedAt,
             })
             .from(apiKeys)
             .leftJoin(users, eq(users.id, apiKeys.createdByUserId))

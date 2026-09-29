@@ -152,10 +152,12 @@ describe('database roles', () => {
     expect(await can('w360_app', 'app.tenant_entitlements(uuid)')).toBe(true);
     expect(await can('w360_platform', 'app.tenant_entitlements(uuid)')).toBe(true);
     expect(await can('w360_auth', 'app.tenant_entitlements(uuid)')).toBe(false);
-    // Public API (0024): the key lookup and the idempotency sweep, for the runtime app role only.
+    // Public API (0024): the key lookup and the idempotency sweep, for the runtime app role only,
+    // and the listing of keys due an expiry reminder (0040), for the worker.
     for (const fn of [
       'ops.api_key_authenticate(text)',
       'ops.purge_api_idempotency_keys(integer)',
+      'ops.api_key_expiry_reminders_due(integer,integer)',
     ]) {
       expect(await can('w360_app', fn), fn).toBe(true);
       expect(await can('w360_auth', fn), fn).toBe(false);

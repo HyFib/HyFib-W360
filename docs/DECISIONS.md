@@ -1947,3 +1947,38 @@ Decision:
 Not built: alerts for paid top-ups that no settlement shows (the reconciliation page lists them),
 a digest schedule or thresholds, alerts to other channels (chat, pager), and alerts for other
 platform conditions (the operations console shows them).
+
+## ADR-067 Reminders before API keys expire (2026-09-29)
+
+Context: API keys (ADR-052) are created to expire after 30, 90 or 365 days, or never. When a key
+expires, the public API refuses the integration using it without warning; the expiry shows only on
+Settings → API keys, which nobody opens while an integration works.
+
+Decision:
+
+- **Which keys:** a key that can still be used (not revoked, not expired), was not rotated, and
+  expires within the next 7 days. A rotated key is left out: its shortened expiry (at most 72 hours
+  of overlap) was chosen by whoever rotated it, and the new key is reminded in its turn. Keys that
+  never expire need no reminder.
+- **Who:** the company's active owners and administrators, the roles that manage keys
+  (`developer.manage`), as for disabled webhook endpoints. Companies being deleted get none (their
+  keys no longer work); suspended and restricted companies do, because their keys still read.
+- **What:** the key's name and public prefix (never a token, which HyFib does not keep), when it
+  expires in the company's time zone, who created it and when, when it was last used or that it
+  has not been used, how to rotate it (same name, scopes and expiry period, up to 72 hours of
+  overlap), and a link to Settings → API keys. The key's name is put on one line for the subject.
+- **Once:** `app.api_keys.expiry_reminded_at` records when the reminder was queued; the key's guard
+  keeps it once set. The minute messaging sweep lists due keys through
+  `ops.api_key_expiry_reminders_due` (a definer function returning company and key ids only,
+  executable by the runtime role only, over a partial index), then locks and checks each key again
+  in its company's own scope before marking it in the transaction that queues the emails: a key
+  revoked, rotated or expired after the listing, or a company being deleted, gets nothing, and two
+  sweeps at once send one reminder. A failure rolls back and the next sweep tries again; other keys
+  are not held up. An expiry can only come sooner, and only through rotation, so a key is reminded
+  at most once.
+- Settings → API keys marks keys that expire soon and says when the reminder was emailed. The mark
+  is exported with the company's keys and deleted with them (ADR-055).
+
+Not built: a second reminder closer to the expiry, reminders to other members or by other channels,
+extending a key's expiry (rotation is the way to renew a key), and alerts when an expired key is
+still being presented.

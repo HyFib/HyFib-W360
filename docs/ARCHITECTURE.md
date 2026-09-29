@@ -842,11 +842,19 @@ true`); the same key with another request (method, path and body hashed) answers
   (`ops.api_quota_reached`), and once before, at 80% of the limit (ADR-062).
 - **OpenAPI** (`api/openapi.ts`): `GET /api/v1/openapi.json` (no key; cacheable 5 minutes) is built
   from the zod schemas that validate requests; a unit test checks it against the route handlers.
+- **Expiry reminders (0040, ADR-067):** the minute messaging sweep (`api/expiry-reminders.ts`) lists,
+  through the definer function `ops.api_key_expiry_reminders_due` (company and key ids only, over a
+  partial index), keys that can still be used, were not rotated, expire within 7 days and were not
+  reminded, of companies not being deleted. Each key is locked and checked again in its company's
+  scope, then `expiry_reminded_at` is set (kept by the key's guard) in the transaction that queues a
+  company notice to its active owners and administrators: the key's name and prefix, its expiry in
+  the company's time zone, its author, its last use and how to rotate it. A failure rolls back and
+  is retried by the next sweep without holding up other keys.
 - **Web:** Settings → API keys (`developer.manage`): the month's API requests and the plan's limit
   (or that the plan leaves the API out), the base URL and an example, the keys with state, prefix,
-  scopes, author, last use and expiry; creation with the scopes the member may grant; the new token
-  shown once with a copy button (kept only in the page's memory); rotation with an overlap;
-  revocation.
+  scopes, author, last use and expiry, a mark on keys that expire within 7 days and when their
+  reminder was emailed; creation with the scopes the member may grant; the new token shown once
+  with a copy button (kept only in the page's memory); rotation with an overlap; revocation.
 - **Not built yet:** session, media and interactive messages, listing conversations and messages,
   starting automations, OAuth apps, IP allowlists per key, packs of extra API requests and per-key
   quotas. Outgoing webhooks are section 6O.

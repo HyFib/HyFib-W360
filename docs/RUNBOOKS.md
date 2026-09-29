@@ -972,6 +972,12 @@ retried the next minute). A company being deleted is skipped. Check `app.tenant_
 company (`status`, `trial_ends_at`, `period_end`, `grace_ends_at`): the database's clock decides
 what is due.
 
+**Migration 0040 failed.** It runs in one transaction, so a failure applies nothing. It adds
+`app.api_keys.expiry_reminded_at` (with column grants to `w360_app`), replaces the key's guard
+function with one that also keeps the reminder mark, adds a partial index and
+`ops.api_key_expiry_reminders_due` (granted to `w360_app`, then handed to `w360_definer`). A
+failure usually means the bootstrap roles are missing or migration 0024 was changed by hand.
+
 **Migration 0039 failed.** It runs in one transaction, so a failure applies nothing. It adds
 `ops.settlement_recon_runs.alerted_attempt` (runs already finished are marked as emailed) and the
 listing, mark and recipients functions for reconciliation alerts (granted to `w360_app`, then
@@ -1017,8 +1023,19 @@ rotated, never recovered. Many failed attempts from one address answer 429 for a
 every 5 seconds after a burst of 20).
 
 **429 "Too many requests".** Each key allows bursts of 50 requests and 10 a second, each company 200
-and 30 a second; wait for `Retry-After` and retry with the same `Idempotency-Key`. Monthly quotas
-are not built.
+and 30 a second; wait for `Retry-After` and retry with the same `Idempotency-Key`. A 429 with the
+reason `quota_exceeded` means the plan's API requests for the month are used up (ADR-061): the
+requests work again when the next usage period starts, or with a larger plan.
+
+**An API key expired without a reminder, or the reminder came twice.** Owners and administrators
+are emailed once, 7 days before a key expires (ADR-067): `app.api_keys.expiry_reminded_at` says when
+the reminder was queued, and Settings → API keys shows it. Keys that never expire, rotated keys (the
+new key is reminded instead), revoked keys and keys of companies being deleted get none, and a key
+created or rotated to expire within 7 days is reminded within a minute. The messaging sweep logs
+`API key expiry reminders emailed` with the count, and `API key expiry reminder failed; will retry`
+with the company and key ids (nothing is marked, and the next minute tries again). Queued emails go
+out through the email outbox like every other notice. A key is renewed by rotating it; its expiry
+cannot be extended.
 
 **"This Idempotency-Key was already used with a different request" (422).** The integration reused
 a key for another message; each new message needs a new key (for example a UUID), and only retries

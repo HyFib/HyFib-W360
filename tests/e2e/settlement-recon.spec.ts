@@ -146,7 +146,10 @@ test('a platform owner reconciles a settled day: a payment HyFib missed is credi
   await expect(page.getByRole('heading', { name: 'Needs a person (1)' })).toBeVisible();
   const other = page.getByRole('row').filter({ hasText: stranger });
   await expect(other).toContainText('Not HyFib’s');
-  // Platform owners are emailed about the day by the worker's minute billing sweep (ADR-066).
+  // Platform owners are emailed about the day by the worker's minute billing sweep (ADR-066): by
+  // the sweep after the check finished (up to a minute later), one email per platform owner in the
+  // database through the email queue (about two a second). A database kept between runs keeps
+  // every earlier run's owners (73 once locally: 37 seconds of emails).
   const dayLabel = new Intl.DateTimeFormat('en-IN', {
     dateStyle: 'medium',
     timeZone: 'UTC',
@@ -155,7 +158,7 @@ test('a platform owner reconciles a settled day: a payment HyFib missed is credi
     email,
     'Settlement reconciliation',
     `${dayLabel}: 1 transaction waits for a person (1 is not HyFib’s).`,
-    90_000,
+    150_000,
   );
   expect(alert).toContain('/platform/reconciliation');
   expect(alert).not.toContain(stranger);
