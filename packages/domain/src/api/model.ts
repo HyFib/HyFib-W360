@@ -18,6 +18,7 @@ export const API_SCOPE_KEYS = [
   'conversations.read',
   'conversations.write',
   'automations.start',
+  'webhooks.manage',
 ] as const satisfies readonly ApiScope[];
 
 /**
@@ -85,6 +86,13 @@ export const API_SCOPE_INFO: Record<
     description:
       'Start published automations made to start through the API, for one contact at a time with the inputs they need, and read and stop the runs keys started. They message contacts who have not written first, with templates.',
     permission: 'automations.publish',
+    writes: true,
+  },
+  'webhooks.manage': {
+    label: 'Manage webhook endpoints',
+    description:
+      "Add webhook endpoints that receive the company's events, including what contacts write, and read, change, rotate the secret of and delete the endpoints keys added. Owners and administrators are emailed when a key adds one.",
+    permission: 'developer.manage',
     writes: true,
   },
 };

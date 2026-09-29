@@ -919,6 +919,14 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   object, and `replyButtonsContent` and `listContent` what the inbox stores (no ids). A tap's
   `reply` (webhooks and the API's messages, `tappedReplySchema`) carries `type` and a row's
   `description` from the stored `interactiveType` and reply.
+- **Webhook endpoints through the API (ADR-081):** `createApiWebhookEndpoints`
+  (`api/webhook-endpoints.ts`) serves `/webhook-endpoints` for `webhooks.manage` keys with the
+  settings service's own steps (`checkedWebhookUrl`, `insertWebhookEndpoint` under the company's
+  endpoint lock, `lockWebhookEndpoint`, `rotateWebhookEndpointSecret`,
+  `setWebhookEndpointEnabled`), limited to endpoints whose `created_by_api_key_id` is set (keys see
+  and manage only what keys added). Adding and rotating run inside `idempotent`, whose `kept`
+  argument stores the response with `secret: null` for replays. Adding queues a `tenant.notice` to
+  owners and administrators (`deletionRecipients`) in the same transaction; audit rows name the key.
 - **Keyset cursors** (`encodeKeysetCursor`, `exactTimestamp`): a cursor carries the last row's
   timestamp as PostgreSQL keeps it, to the microsecond, and its id, and pages compare
   `(time, id) < (cursor time, cursor id)`; cursors made with milliseconds still read. Cursors built

@@ -1000,6 +1000,14 @@ retried the next minute). A company being deleted is skipped. Check `app.tenant_
 company (`status`, `trial_ends_at`, `period_end`, `grace_ends_at`): the database's clock decides
 what is due.
 
+**Migration 0059 failed.** It runs in one transaction, so a failure applies nothing: it widens
+the check on `app.api_keys.scopes` to allow `webhooks.manage` (up to ten scopes), makes
+`app.webhook_endpoints.created_by_user_id` optional, and adds `created_by_api_key_id` with the check
+`webhook_endpoints_creator` (exactly one creator) and a composite foreign key to `app.api_keys`,
+both validated at once (a company has at most 10 endpoints). A failure usually means the scope
+check was renamed or changed by hand; no stored endpoint can break the new check, since each has a
+member as its creator.
+
 **Migration 0057 or 0058 failed.** 0057 runs in one transaction, so a failure applies nothing: it
 replaces `automation_runs_end` on `app.automation_runs`, `NOT VALID`, with a check that also allows
 the reason `stopped_by_api`. A failure usually means the check was renamed or changed by hand.
@@ -1235,9 +1243,20 @@ A 412 `window_closed` means the number has not written in the last 24 hours, as 
 message that fails after it was queued shows WhatsApp's error on `GET /api/v1/messages/{id}` and in
 the inbox; limits Meta applies beyond its published description would show there first.
 
+**An endpoint added through the API is refused, missing or unexpected.** A 422 names the field:
+an https address (no credentials, port 443 or from 1024; `http://` and loopback only where local
+and test configuration allow them), at least one event from the list, a description up to 200
+characters; the address cannot change (add a new endpoint and delete the old one). A 412 means the
+company has 10 endpoints, members' included. A key that cannot find an endpoint (404) is looking
+at one a member added in settings: keys see only what keys added. A retry with the same
+`Idempotency-Key` answers `secret: null` by design: rotate the secret to get a new one. Owners and
+administrators are emailed whenever a key adds an endpoint; if nobody expected it, delete it in
+Settings → Webhooks (which names the key) and revoke the key, then check the audit log for what
+else the key did (`actor_type = 'api_key'`).
+
 **The company is suspended or its plan ended.** Keys keep reading; creating contacts, recording
-consent, sending, and starting and stopping automations answer 423 until the company is active
-again.
+consent, sending, starting and stopping automations and managing webhook endpoints answer 423 until
+the company is active again.
 
 **Migration 0024 failed.** It runs in one transaction. It creates the two tables, the guard trigger,
 the two SECURITY DEFINER functions (granted to `w360_app` before their ownership moves to

@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -10,7 +10,12 @@ import {
   randomWaId,
   sendSignedWebhook,
 } from './messaging-support';
-import { expectNoHorizontalOverflow, signUpAndVerify, uniqueEmail } from './support';
+import {
+  expectNoHorizontalOverflow,
+  signUpAndVerify,
+  uniqueEmail,
+  waitForEmailContaining,
+} from './support';
 
 const PASSWORD = 'correct horse battery staple 42';
 /**
@@ -177,4 +182,91 @@ test('an endpoint added in settings receives signed events, replays and a rotate
   await page.getByRole('button', { name: 'Delete endpoint' }).click();
   await expect(page.getByText('No endpoints yet.')).toBeVisible();
   expect(forUs()).toHaveLength(4);
+});
+
+test('an API key adds its own endpoint over HTTP: owners are emailed, settings name the key, events arrive signed with its secret, and the key turns it off and deletes it (ADR-081)', async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(180_000);
+  const email = uniqueEmail('apihooks');
+  const slug = `apihooks-${Date.now().toString(36)}`;
+  const path = `/hooks/${slug}/crm-token-1234`;
+  const forUs = () => received.filter((r) => r.path === path);
+  await signUpAndVerify(page, { name: 'Asha Api', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('Hook Clinic');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+
+  // An owner creates a key that manages webhook endpoints.
+  await page.goto(`/c/${slug}/settings/api-keys`);
+  await page.getByLabel('Name', { exact: true }).fill('CRM connector');
+  await page.getByRole('checkbox', { name: /Manage webhook endpoints/ }).check();
+  await page.getByRole('button', { name: 'Create API key' }).click();
+  const token = await page.getByLabel('API key', { exact: true }).inputValue();
+  await page.getByRole('button', { name: 'I have stored the key' }).click();
+  const auth = { Authorization: `Bearer ${token}` };
+
+  // The key adds an endpoint once per Idempotency-Key; its secret is in the first answer only.
+  const idempotencyKey = randomUUID();
+  const body = {
+    url: `http://${HOST}:${port}${path}`,
+    events: ['message.received', 'contact.created'],
+    description: 'CRM sync',
+  };
+  const created = await request.post('/api/v1/webhook-endpoints', {
+    headers: { ...auth, 'Idempotency-Key': idempotencyKey },
+    data: body,
+  });
+  expect(created.status()).toBe(201);
+  const { data } = (await created.json()) as { data: { id: string; secret: string | null } };
+  expect(data.secret).toMatch(/^whsec_[A-Za-z0-9_-]{43}$/);
+  const retry = await request.post('/api/v1/webhook-endpoints', {
+    headers: { ...auth, 'Idempotency-Key': idempotencyKey },
+    data: body,
+  });
+  expect(retry.status()).toBe(201);
+  expect(retry.headers()['idempotent-replayed']).toBe('true');
+  expect(((await retry.json()) as { data: { id: string; secret: null } }).data).toMatchObject({
+    id: data.id,
+    secret: null,
+  });
+  const listed = await request.get('/api/v1/webhook-endpoints', { headers: auth });
+  expect(((await listed.json()) as { data: { id: string }[] }).data.map((e) => e.id)).toEqual([
+    data.id,
+  ]);
+
+  // The owner is emailed about it (the host, never the address's path).
+  const notice = await waitForEmailContaining(
+    email,
+    'Webhook endpoint added through the API',
+    'CRM connector',
+  );
+  expect(notice).toContain(`added a webhook endpoint at ${HOST}`);
+  expect(notice).toContain('It receives: Message received, Contact added.');
+  expect(notice).not.toContain('crm-token-1234');
+
+  // Settings name the key, and a test event arrives signed with the secret the key was given.
+  await page.goto(`/c/${slug}/settings/webhooks`);
+  await expect(page.getByText(`http://${HOST}:${port}${path}`)).toBeVisible();
+  await expect(page.getByText(/by the API key “CRM connector” \(w360_[a-z0-9]+_…\)/)).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+  await page.getByRole('button', { name: `Send test event to ${HOST}` }).click();
+  await expect(async () => expect(forUs()).toHaveLength(1)).toPass({ timeout: 30_000 });
+  expect(signatureValid(forUs()[0]!.headers, forUs()[0]!.body, data.secret!)).toBe(true);
+
+  // The key turns the endpoint off, then deletes it.
+  const off = await request.patch(`/api/v1/webhook-endpoints/${data.id}`, {
+    headers: auth,
+    data: { enabled: false },
+  });
+  expect(((await off.json()) as { data: { status: string } }).data.status).toBe('disabled');
+  await page.reload();
+  await expect(page.getByText('Off', { exact: true })).toBeVisible();
+  const deleted = await request.delete(`/api/v1/webhook-endpoints/${data.id}`, { headers: auth });
+  expect(deleted.status()).toBe(200);
+  await page.reload();
+  await expect(page.getByText('No endpoints yet.')).toBeVisible();
+  expect(forUs()).toHaveLength(1);
 });

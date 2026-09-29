@@ -2530,3 +2530,45 @@ Decision:
 Not built: media headers, call-to-action URL buttons (not in the spec's list of interactive types,
 M-043), product and catalog messages, location requests, replies quoting a message, and editing or
 deleting sent messages.
+
+## ADR-081 Managing webhook endpoints through the public API (2026-09-29)
+
+Context: webhook endpoints are managed only in Settings → Webhooks (ADR-053), by members who hold
+`developer.manage`, after a recent sign-in (ADR-056). An integration that installs itself into a
+company (a CRM connector, a helpdesk app, the company's own order system) had to ask a member to
+paste its receiver's address, copy the secret back to it, and remember to delete the endpoint when
+it was uninstalled. WATI's API manages endpoints (W-139; title-level evidence only).
+
+Decision:
+
+- **A new scope,** `webhooks.manage` ("Manage webhook endpoints"), granted only by members who hold
+  `developer.manage` (owners and administrators, who manage endpoints in settings and read every
+  conversation, so an endpoint for `message.received` gives the key nothing its grantor could not
+  see). It writes, so it is refused while the company is suspended or restricted.
+- **Keys manage only the endpoints keys added,** whichever key of the company added them (a
+  rotated key keeps managing its endpoints, as keys read runs any key started, ADR-077). Endpoints
+  members added are not found through the API: their addresses can carry a receiver's own token,
+  and they stay under members' control. Members keep full control of every endpoint, whoever added
+  it; Settings → Webhooks names the key that added one.
+- **Operations** under `/api/v1/webhook-endpoints`: list, add (`url`, `events`, `description`),
+  read one, change (`events`, `description`, `enabled`), delete, and rotate the secret. The address
+  cannot change: moving is a new endpoint, announced like any other.
+- **Secrets are shown once.** Adding and rotating need an `Idempotency-Key`; the response kept for
+  a retry holds `secret: null`, never the secret (the idempotency table is not encrypted). A lost
+  secret is replaced by rotating; the previous one signs too for 24 hours, as in settings.
+- **The same rules as settings,** through the same code: the egress guard's address rules (https,
+  no credentials, port 443 or from 1024; private and local addresses are refused when a delivery
+  connects), 10 endpoints per company in all, members' included, under the company's endpoint lock,
+  and the same audit actions, as the key, with the request id and `source: api`.
+- **Owners and administrators are emailed when a key adds an endpoint,** with the key's name and
+  prefix, the address's host (never its path), the events and a link to Settings → Webhooks, queued
+  in the transaction that adds it. A key has no recent sign-in to check, and a new endpoint is where
+  customers' messages start to go; a leaked key cannot add one unseen.
+- **Migration 0059:** the scope check allows `webhooks.manage` (up to ten scopes);
+  `created_by_user_id` becomes optional and `created_by_api_key_id` (a composite foreign key to the
+  key) records a key, with a check that exactly one of them is set. The runtime role inserts both
+  through its table grant and can update neither.
+
+Not built: deliveries, replays and test events through the API, changing an address, managing
+members' endpoints, filters beyond the event type, and notices when a key changes or deletes an
+endpoint (the audit log records them).

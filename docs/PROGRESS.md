@@ -1,5 +1,74 @@
 # Progress
 
+## 2026-09-29 — Phase 5: managing webhook endpoints through the public API (P5-08, P5-09, ADR-081)
+
+Status: **Implemented and locally verified with local test receivers (no customer data).** Webhook
+endpoints were managed only in Settings → Webhooks, so an integration that installs itself into a
+company had to ask a member to paste its receiver's address and copy the secret back (W-139).
+
+### Completed
+
+- **Design (ADR-081):** a `webhooks.manage` scope, granted only by owners and administrators (who
+  hold `developer.manage` and read every conversation); keys see and manage only the endpoints keys
+  added, whichever key of the company added them; members' endpoints are not found. Secrets are
+  shown once: adding and rotating need an `Idempotency-Key`, and the response kept for a retry holds
+  `secret: null`. The address cannot change. Owners and administrators are emailed when a key adds
+  an endpoint.
+- **Migration 0059:** the scope check allows `webhooks.manage`; `created_by_user_id` becomes
+  optional and `created_by_api_key_id` (composite foreign key to the key) records a key, with a
+  check that exactly one creator is set.
+- **Domain:** `api/webhook-endpoints.ts` (list, read, add, change, delete, rotate); the settings
+  service's steps shared (`checkedWebhookUrl`, `insertWebhookEndpoint`, `lockWebhookEndpoint` with
+  `keysOnly`, `rotateWebhookEndpointSecret`, `setWebhookEndpointEnabled`); `idempotent` keeps a
+  redacted response when asked; the announcement's text (`endpointAnnouncement`); the export
+  classifies the new column.
+- **Web:** the routes under `/api/v1/webhook-endpoints`; Settings → Webhooks names the key that
+  added an endpoint; Settings → API keys offers the scope and its introduction names endpoints; the
+  Idempotency-Key refusal no longer speaks of sends only.
+- **Tests:** unit (the scope, who grants it, the bodies, the announcement's text, the scope checked
+  first for every operation, the OpenAPI entries). Integration in `api-webhook-endpoints.test.ts`
+  with a local receiver: an endpoint added once per key with the secret in the first answer only
+  and never kept for replays, the key recorded and audited, owners and administrators emailed (not
+  agents, and never the address's path), settings naming the key, a delivery signed with the given
+  secret; keys limited to what keys added (another key of the company manages it, members' and
+  other companies' endpoints are not found); changes, turning off (the waiting delivery fails) and
+  on, a rotation once per key with both secrets signing, deletion with its history, every step
+  audited as the key; refusals (the scope, bad bodies, the address rules, the address unchangeable,
+  the limit of 10 with members' endpoints, suspended and restricted companies); the creator check,
+  the key belonging to the company, and the runtime role unable to change the creator. e2e
+  `webhooks.spec.ts`: a key created in settings adds its endpoint over HTTP (a retry without the
+  secret), the owner's email, settings naming the key, a signed test event, the key turning it off
+  and deleting it.
+- **Docs:** ADR-081; ARCHITECTURE (the public API); SECURITY (Phase 5 rules); THREAT-MODEL T99;
+  RUNBOOKS (migration 0059, a troubleshooting entry, suspended companies); BACKLOG P5-08;
+  FEATURE-MATRIX W-139, H-033 and H-014.
+- **Mutation checks:** 24 regressions tried one at a time; all make a test fail. 23 in the database
+  and domain: members' endpoints found by keys (in the lock, in lists and reads); the secret kept
+  for replays of an addition or a rotation, or `idempotent` keeping the whole body; no announcement,
+  or one naming the full address or event keys; audited as the system or without its source; listing
+  without the scope; the scope not writing, or granted by another permission; the address
+  changeable; the state not changed; an empty description kept; no limit of endpoints; the address
+  not checked; no creator check; no foreign key to the key; the scope check not widened; settings
+  not naming the key; the secret not nullable in the OpenAPI document. 1 in the web layer through
+  the e2e test: Settings → Webhooks not naming the key.
+
+### Test commands and results (local, 2026-09-29)
+
+| Command                                                                                                                                                           | Result                                                                                                                                   |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                              | 0 problems / all files formatted / all workspace packages pass                                                                           |
+| `pnpm test` (unit)                                                                                                                                                | 383 passed, including 6 new in `api/api.test.ts`                                                                                         |
+| `pnpm test:integration` (PostgreSQL 18.6)                                                                                                                         | 526 passed, including 5 new in `api-webhook-endpoints.test.ts`                                                                           |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                                                                                                         | 526 passed                                                                                                                               |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` on `webhooks.spec.ts`, `api-keys.spec.ts`, `api.spec.ts` and `webhook-events.spec.ts` | build passes / 22 passed: 11 tests on each project (4.3 min), on a local database created for the day's runs with migration 0059 applied |
+| Mutation checks                                                                                                                                                   | 24 regressions tried; all make a test fail                                                                                               |
+
+### Known gaps
+
+- Not built: deliveries, replays and test events through the API, changing an address, managing
+  members' endpoints, filters beyond the event type, notices when a key changes or deletes an
+  endpoint (the audit log records them).
+
 ## 2026-09-29 — Phase 5: reply buttons and list messages through the public API (P5-08, ADR-080)
 
 Status: **Implemented and locally verified against the Graph stand-in (no customer data).**

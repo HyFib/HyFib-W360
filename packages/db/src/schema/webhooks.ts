@@ -41,7 +41,9 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
   failingSince: tz('failing_since'),
   lastSuccessAt: tz('last_success_at'),
   lastFailureAt: tz('last_failure_at'),
-  createdByUserId: text('created_by_user_id').notNull(),
+  /** The member who created the endpoint in settings, or the key that created it (ADR-081). */
+  createdByUserId: text('created_by_user_id'),
+  createdByApiKeyId: uuid('created_by_api_key_id'),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });

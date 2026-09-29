@@ -409,12 +409,17 @@ verification, app review, Embedded Signup configuration).
   it is); **[buttons and lists built, locally verified against the Graph stand-in]** (ADR-080: a
   `messages.reply` key also sends up to 3 reply buttons or a list of up to 10 rows to a contact who
   wrote in the last 24 hours, within Meta's limits and with its own ids, never HyFib's `w360…`; taps
-  come back with `reply.type` and a row's description). Remaining: media and reaction messages,
+  come back with `reply.type` and a row's description); **[webhook endpoints through the API
+  built, locally verified]** (ADR-081, W-139: a `webhooks.manage` key, granted only by owners and
+  administrators, adds, reads, changes, rotates the secret of and deletes the endpoints keys added,
+  never members' ones; secrets shown once and never kept for replays; owners and administrators
+  emailed about each endpoint a key adds). Remaining: media and reaction messages,
   call-to-action and product messages through the API, replies to a given message, assigning
   conversations, notes, member and team names, media downloads, a message feed across
   conversations, starting or stopping runs for many contacts in one call, bulk sends in one call,
-  networks for the whole company, per-key quotas, limits per endpoint, and dropping the
-  one-argument key lookup kept for rolling deploys (0051).
+  networks for the whole company, per-key quotas, limits per endpoint, webhook deliveries,
+  replays and test events through the API, and dropping the one-argument key lookup kept for
+  rolling deploys (0051).
 - **P5-09 Outgoing webhooks** **[built, locally verified; delivered to local test receivers only]**
   (ADR-053): up to 10 endpoints per company (`developer.manage`) for `message.received`,
   `message.status`, `consent.changed` and `template.status_changed`, captured by database triggers

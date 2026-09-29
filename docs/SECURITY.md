@@ -496,6 +496,14 @@ Phase 5 rules (Public API, P5-08):
   automation and survey ids do, and a tap on a survey-like id would not reopen the conversation or
   open a reply turn. Meta's limits are checked before anything is read; ids reach Meta only, and the
   inbox stores titles.
+- Webhook endpoints through the API (ADR-081) need `webhooks.manage`, which only members holding
+  `developer.manage` grant (they manage endpoints in settings and read every conversation), and an
+  active company. Keys see and manage only endpoints keys added (members' endpoints answer 404, so
+  a key never learns an address that carries another receiver's token); the address rules, the
+  limit of 10 and the audit actions are the settings service's own. Secrets are shown once: the
+  response kept for an `Idempotency-Key` stores `secret: null`. Owners and administrators are emailed
+  the key, the host and the events whenever a key adds an endpoint, since a key has no recent
+  sign-in to check. Addresses cannot change through the API.
 - Only the token's SHA-256 is stored; the runtime role cannot read it. The token is shown once in
   the browser and kept only in the page's memory; it is never logged, and audit entries carry the
   public prefix only.

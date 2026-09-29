@@ -141,7 +141,11 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                         <dt className="inline">Added </dt>
                         <dd className="inline">
                           {formatDateTime(e.createdAt, tz)}
-                          {e.createdBy ? ` by ${e.createdBy}` : ''}
+                          {e.createdByKey
+                            ? ` by the API key “${e.createdByKey.name}” (${e.createdByKey.keyPrefix}_…)`
+                            : e.createdBy
+                              ? ` by ${e.createdBy}`
+                              : ''}
                         </dd>
                       </div>
                     </dl>

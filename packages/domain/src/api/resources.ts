@@ -354,6 +354,8 @@ export async function idempotent(
   idempotency: IdempotencyInput | null,
   now: Date,
   work: () => Promise<{ status: number; body: Record<string, unknown> }>,
+  /** What is kept for a replay, when not the whole body (a secret is shown once, ADR-081). */
+  kept: (body: Record<string, unknown>) => Record<string, unknown> = (body) => body,
 ): Promise<ApiResponse> {
   let claimed: string | null = null;
   if (idempotency) {
@@ -362,7 +364,12 @@ export async function idempotent(
     claimed = claim.claimed;
   }
   const result = await work();
-  if (claimed) await storeIdempotentResponse(tx, ctx, claimed, result);
+  if (claimed) {
+    await storeIdempotentResponse(tx, ctx, claimed, {
+      status: result.status,
+      body: kept(result.body),
+    });
+  }
   return { ...result, replayed: false };
 }
 

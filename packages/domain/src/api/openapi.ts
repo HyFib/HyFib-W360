@@ -7,7 +7,12 @@ import {
   MESSAGE_TYPES,
   type MessageStatus,
 } from '@w360/db';
-import { WEBHOOK_EVENT_INFO, WEBHOOK_LIMITS, WEBHOOK_RETRY_SECONDS } from '../webhooks/model';
+import {
+  WEBHOOK_EVENT_INFO,
+  WEBHOOK_EVENT_KEYS,
+  WEBHOOK_LIMITS,
+  WEBHOOK_RETRY_SECONDS,
+} from '../webhooks/model';
 import {
   automationRunEndedPayloadSchema,
   automationRunStartedPayloadSchema,
@@ -35,6 +40,10 @@ import {
   apiSendMessageSchema,
   apiSendTextSchema,
 } from './resources';
+import {
+  apiCreateWebhookEndpointSchema,
+  apiUpdateWebhookEndpointSchema,
+} from './webhook-endpoints';
 
 /**
  * The OpenAPI 3.1 document of the public API v1 (ADR-052), built from the zod schemas that
@@ -187,6 +196,45 @@ export const apiAutomationRunSchema = z.object({
     .describe('Why the run ended; null while it works.'),
   startedAt: z.iso.datetime(),
   endedAt: z.iso.datetime().nullable(),
+});
+
+export const apiWebhookEndpointSchema = z.object({
+  id: z.uuid(),
+  url: z.string(),
+  description: z.string().nullable(),
+  events: z.array(z.enum(WEBHOOK_EVENT_KEYS)),
+  status: z
+    .enum(['active', 'disabled'])
+    .describe('A disabled endpoint receives nothing until it is enabled again.'),
+  disabledReason: z
+    .enum(['manual', 'failing'])
+    .nullable()
+    .describe(
+      'Why it is disabled: turned off, or every delivery failed for 72 hours (owners and administrators were emailed).',
+    ),
+  failingSince: z.iso
+    .datetime()
+    .nullable()
+    .describe('Since when every delivery has failed; null after a success.'),
+  lastSuccessAt: z.iso.datetime().nullable(),
+  lastFailureAt: z.iso.datetime().nullable(),
+  secretVersion: z.number().int().describe('1, then one more at each rotation.'),
+  previousSecretExpiresAt: z.iso
+    .datetime()
+    .nullable()
+    .describe('Until when the previous secret also signs, after a rotation.'),
+  apiKeyId: z.uuid().describe('The API key that added the endpoint.'),
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime(),
+});
+
+export const apiWebhookEndpointWithSecretSchema = apiWebhookEndpointSchema.extend({
+  secret: z
+    .string()
+    .nullable()
+    .describe(
+      'The signing secret, in this response only: store it now. A retry with the same Idempotency-Key answers null; rotate the secret if it was lost.',
+    ),
 });
 
 export const apiErrorSchema = z.object({
@@ -601,6 +649,104 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
         },
       },
+      '/webhook-endpoints': {
+        get: {
+          operationId: 'listWebhookEndpoints',
+          summary: 'Webhook endpoints API keys added, oldest first',
+          description: `${scopeNote('webhooks.manage')} Endpoints members added in Settings → Webhooks are not listed: keys manage only the endpoints keys added, whichever key of the company added them.`,
+          responses: {
+            '200': {
+              description: "The endpoints (at most 10 per company, with members' ones).",
+              content: json({
+                type: 'object',
+                properties: { data: { type: 'array', items: ref('WebhookEndpoint') } },
+                required: ['data'],
+              }),
+            },
+            ...errors(401, 403, 423, 429, 500),
+          },
+        },
+        post: {
+          operationId: 'createWebhookEndpoint',
+          summary: 'Add a webhook endpoint',
+          description: [
+            `${scopeNote('webhooks.manage')} The endpoint receives the events it names, signed with its secret, from the next event on. The address must be https on the public internet: HyFib never calls private or local addresses. A company has at most ${WEBHOOK_LIMITS.endpoints} endpoints, members' included.`,
+            "The secret is in the first response only. One endpoint per `Idempotency-Key`: a retry answers with the endpoint and `secret: null`. The company's owners and administrators are emailed that the key added an endpoint, with its host and events.",
+          ].join('\n\n'),
+          parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }],
+          requestBody: { required: true, content: json(ref('CreateWebhookEndpoint')) },
+          responses: {
+            '201': {
+              description: 'The endpoint, with its secret.',
+              content: json(dataOf(ref('WebhookEndpointWithSecret'))),
+            },
+            ...errors(400, 401, 403, 412, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/webhook-endpoints/{id}': {
+        get: {
+          operationId: 'getWebhookEndpoint',
+          summary: 'A webhook endpoint an API key added',
+          description: scopeNote('webhooks.manage'),
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': { description: 'The endpoint.', content: json(dataOf(ref('WebhookEndpoint'))) },
+            ...errors(401, 403, 404, 423, 429, 500),
+          },
+        },
+        patch: {
+          operationId: 'updateWebhookEndpoint',
+          summary: 'Change the events, description or state of an endpoint',
+          description: `${scopeNote('webhooks.manage')} The address cannot change: add a new endpoint and delete this one. Turning an endpoint off fails the deliveries waiting for it; turning it on again starts its health afresh.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          requestBody: { required: true, content: json(ref('UpdateWebhookEndpoint')) },
+          responses: {
+            '200': { description: 'The endpoint.', content: json(dataOf(ref('WebhookEndpoint'))) },
+            ...errors(401, 403, 404, 415, 422, 423, 429, 500),
+          },
+        },
+        delete: {
+          operationId: 'deleteWebhookEndpoint',
+          summary: 'Delete an endpoint and its delivery history',
+          description: scopeNote('webhooks.manage'),
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': {
+              description: 'Deleted.',
+              content: json(
+                dataOf({
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string', format: 'uuid' },
+                    deleted: { const: true },
+                  },
+                  required: ['id', 'deleted'],
+                }),
+              ),
+            },
+            ...errors(401, 403, 404, 423, 429, 500),
+          },
+        },
+      },
+      '/webhook-endpoints/{id}/rotate-secret': {
+        post: {
+          operationId: 'rotateWebhookEndpointSecret',
+          summary: "Replace an endpoint's signing secret",
+          description: `${scopeNote('webhooks.manage')} The new secret is in this response only; the previous one signs too (a second \`v1\` in \`W360-Signature\`) for ${WEBHOOK_LIMITS.previousSecretHours} hours, so the receiver can switch without losing deliveries. One rotation per \`Idempotency-Key\`: a retry answers \`secret: null\`.`,
+          parameters: [
+            { $ref: '#/components/parameters/Id' },
+            { $ref: '#/components/parameters/IdempotencyKey' },
+          ],
+          responses: {
+            '200': {
+              description: 'The endpoint, with its new secret.',
+              content: json(dataOf(ref('WebhookEndpointWithSecret'))),
+            },
+            ...errors(400, 401, 403, 404, 423, 429, 500),
+          },
+        },
+      },
       '/messages/{id}': {
         get: {
           operationId: 'getMessage',
@@ -760,6 +906,10 @@ export function buildOpenApiDocument(serverUrl: string) {
         Automation: jsonSchema(apiAutomationSchema),
         AutomationRun: jsonSchema(apiAutomationRunSchema),
         StartAutomationRun: jsonSchema(apiStartAutomationSchema, 'input'),
+        WebhookEndpoint: jsonSchema(apiWebhookEndpointSchema),
+        WebhookEndpointWithSecret: jsonSchema(apiWebhookEndpointWithSecretSchema),
+        CreateWebhookEndpoint: jsonSchema(apiCreateWebhookEndpointSchema, 'input'),
+        UpdateWebhookEndpoint: jsonSchema(apiUpdateWebhookEndpointSchema, 'input'),
         Error: jsonSchema(apiErrorSchema),
         WebhookMessageReceived: jsonSchema(messageReceivedPayloadSchema),
         WebhookMessageStatus: jsonSchema(messageStatusPayloadSchema),
@@ -795,4 +945,10 @@ export const API_ROUTES = [
   ['post', '/automations/{id}/runs'],
   ['get', '/automation-runs/{id}'],
   ['post', '/automation-runs/{id}/stop'],
+  ['get', '/webhook-endpoints'],
+  ['post', '/webhook-endpoints'],
+  ['get', '/webhook-endpoints/{id}'],
+  ['patch', '/webhook-endpoints/{id}'],
+  ['delete', '/webhook-endpoints/{id}'],
+  ['post', '/webhook-endpoints/{id}/rotate-secret'],
 ] as const;

@@ -184,7 +184,7 @@ export async function handleApiRequest(
       const e = apiRequestError(
         400,
         'bad_request',
-        'Send an Idempotency-Key header (for example a UUID) so a retry never sends twice.',
+        'Send an Idempotency-Key header (for example a UUID) so a retry never does the work twice.',
         requestId,
       );
       return respond(e.status, e.body, requestId);

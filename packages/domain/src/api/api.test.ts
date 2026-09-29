@@ -32,6 +32,12 @@ import {
   apiSendMessage,
   apiSendTextSchema,
 } from './resources';
+import {
+  apiCreateWebhookEndpointSchema,
+  apiUpdateWebhookEndpointSchema,
+  createApiWebhookEndpoints,
+  endpointAnnouncement,
+} from './webhook-endpoints';
 
 describe('API tokens', () => {
   it('have a public prefix, a 256-bit secret and only their SHA-256 is kept', () => {
@@ -93,6 +99,7 @@ describe('API scopes', () => {
       'messages.reply',
       'conversations.write',
       'automations.start',
+      'webhooks.manage',
     ]);
     expect([...API_SEND_SCOPES]).toEqual(API_SCOPE_KEYS.filter((s) => s.startsWith('messages.')));
   });
@@ -105,6 +112,16 @@ describe('API scopes', () => {
     expect(API_SCOPE_INFO['conversations.read'].permission).toBe('inbox.read_all');
     expect(API_SCOPE_INFO['conversations.write'].permission).toBe('inbox.supervise');
     expect(API_SCOPE_INFO['automations.start'].permission).toBe('automations.publish');
+    expect(API_SCOPE_INFO['webhooks.manage'].permission).toBe('developer.manage');
+  });
+
+  it('let only members who manage webhook endpoints in settings grant webhooks.manage, who also read every conversation (ADR-081)', () => {
+    const granting = Object.entries(ROLE_PERMISSIONS).filter(([, permissions]) =>
+      permissions.has('developer.manage'),
+    );
+    expect(granting.map(([role]) => role).sort()).toEqual(['admin', 'owner']);
+    // An endpoint for message.received gets what contacts write: the grantors read it all already.
+    for (const [, permissions] of granting) expect(permissions.has('inbox.read_all')).toBe(true);
   });
 
   it('let only members who publish automations grant automations.start (ADR-077)', () => {
@@ -458,6 +475,112 @@ describe('reply buttons and lists (ADR-080)', () => {
       }).catch((caught: unknown) => caught);
       expect(isAppError(error) && error.code, body.type).toBe('forbidden');
     }
+  });
+});
+
+describe('webhook endpoints through the API (ADR-081)', () => {
+  it('take an address, events and a description, events in the settings order and once each', () => {
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        url: ' https://hooks.example.com/w360 ',
+        events: ['contact.created', 'message.received', 'contact.created'],
+        description: '  CRM sync ',
+      }),
+    ).toEqual({
+      url: 'https://hooks.example.com/w360',
+      events: ['message.received', 'contact.created'],
+      description: 'CRM sync',
+    });
+    for (const body of [
+      { events: ['message.received'] },
+      { url: 'https://hooks.example.com', events: [] },
+      { url: 'https://hooks.example.com', events: ['message.deleted'] },
+      { url: 'https://hooks.example.com', events: ['message.received'], secret: 'whsec_mine' },
+      {
+        url: 'https://hooks.example.com',
+        events: ['message.received'],
+        description: 'x'.repeat(201),
+      },
+      { url: `https://hooks.example.com/${'x'.repeat(2048)}`, events: ['message.received'] },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+  });
+
+  it('change the events, description or state, never the address, and need something to change', () => {
+    expect(apiUpdateWebhookEndpointSchema.parse({ enabled: false })).toEqual({ enabled: false });
+    expect(apiUpdateWebhookEndpointSchema.parse({ description: '' })).toEqual({ description: '' });
+    for (const body of [{}, { url: 'https://elsewhere.example.com' }, { events: [] }]) {
+      expect(apiUpdateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+  });
+
+  it('announce a key’s endpoint by its host and events, with the key’s name and prefix and the company’s time', () => {
+    // A made-up prefix: the public part of a key, which settings list and the email names.
+    const prefix = 'w360_abcdefghijkl';
+    expect(
+      endpointAnnouncement({
+        keyName: 'Zap connector',
+        keyPrefix: prefix,
+        host: 'hooks.example.com',
+        events: ['message.received', 'contact.created'],
+        at: new Date('2026-09-29T10:15:00Z'),
+        timeZone: 'Asia/Kolkata',
+      }),
+    ).toEqual({
+      subject: 'Webhook endpoint added through the API',
+      lines: [
+        'The API key “Zap connector” (w360_abcdefghijkl_…) added a webhook endpoint at hooks.example.com on 29 September 2026 at 15:45 GMT+5:30. It receives: Message received, Contact added.',
+        'If you did not expect this, delete the endpoint in Settings, Webhooks, and revoke the key in Settings, API keys.',
+      ],
+    });
+  });
+
+  it('need the scope, checked before anything is read', async () => {
+    const endpoints = createApiWebhookEndpoints({} as never);
+    const ctx = {
+      tenant: { id: 't', status: 'active' },
+      key: { id: 'k', scopes: new Set(['contacts.read']) },
+    } as unknown as ApiContext;
+    const idempotency = { key: 'k-1', requestHash: 'h' };
+    for (const call of [
+      () => endpoints.list(ctx),
+      () => endpoints.get(ctx, 'e'),
+      () => endpoints.create(ctx, {}, idempotency),
+      () => endpoints.update(ctx, 'e', {}),
+      () => endpoints.remove(ctx, 'e'),
+      () => endpoints.rotateSecret(ctx, 'e', idempotency),
+    ]) {
+      const error: unknown = await call().catch((caught: unknown) => caught);
+      expect(isAppError(error) && error.code).toBe('forbidden');
+    }
+  });
+
+  it('are described with the secret shown once and a body without the address for changes', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const paths = doc.paths as Record<string, Record<string, { parameters?: unknown[] }>>;
+    expect(paths['/webhook-endpoints']?.post?.parameters).toEqual([
+      { $ref: '#/components/parameters/IdempotencyKey' },
+    ]);
+    expect(paths['/webhook-endpoints/{id}/rotate-secret']?.post?.parameters).toContainEqual({
+      $ref: '#/components/parameters/IdempotencyKey',
+    });
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const withSecret = schemas.WebhookEndpointWithSecret as {
+      properties: Record<string, { type?: unknown }>;
+    };
+    expect(withSecret.properties.secret?.type).toEqual(['string', 'null']);
+    const update = schemas.UpdateWebhookEndpoint as {
+      properties: Record<string, unknown>;
+      additionalProperties: unknown;
+    };
+    expect(Object.keys(update.properties).sort()).toEqual(['description', 'enabled', 'events']);
+    expect(update.additionalProperties).toBe(false);
   });
 });
 

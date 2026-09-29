@@ -25,6 +25,7 @@ import {
   RazorpayClient,
   createApiKeysService,
   createWebhooksService,
+  createApiWebhookEndpoints,
   createAutomationService,
   createCommerceService,
   createStoreService,
@@ -66,6 +67,7 @@ import {
   type TenantContext,
   type ApiKeysService,
   type WebhooksService,
+  type ApiWebhookEndpoints,
   type AutomationService,
   type CommerceService,
   type CrmService,
@@ -163,6 +165,8 @@ export interface Runtime {
   apiKeys: ApiKeysService;
   /** Company webhook endpoints and their deliveries (Settings → Webhooks). */
   webhooks: WebhooksService;
+  /** Webhook endpoints API keys add and manage (ADR-081). */
+  apiWebhookEndpoints: ApiWebhookEndpoints;
   reports: ReportsService;
   automations: AutomationService;
   /** Domains and secrets for the automation HTTP step. */
@@ -310,12 +314,20 @@ async function init(): Promise<Runtime> {
     razorpay: razorpayClient,
   });
   const apiKeys = createApiKeysService({ db, clock: systemClock });
+  // http:// and loopback endpoints only where configuration allows them (local and test).
+  const webhookEgress = { allowLoopbackForTests: config.W360_EGRESS_ALLOW_LOOPBACK ?? false };
   const webhooks = createWebhooksService({
     db,
     clock: systemClock,
     keyring,
-    // http:// and loopback endpoints only where configuration allows them (local and test).
-    egressPolicy: { allowLoopbackForTests: config.W360_EGRESS_ALLOW_LOOPBACK ?? false },
+    egressPolicy: webhookEgress,
+  });
+  const apiWebhookEndpoints = createApiWebhookEndpoints({
+    ...outbox,
+    db,
+    clock: systemClock,
+    egressPolicy: webhookEgress,
+    appBaseUrl: config.APP_BASE_URL,
   });
   const reports = createReportsService({ db, clock: systemClock });
   const automations = createAutomationService({
@@ -455,6 +467,7 @@ async function init(): Promise<Runtime> {
     planAdmin,
     apiKeys,
     webhooks,
+    apiWebhookEndpoints,
     reports,
     automations,
     webRequests,
