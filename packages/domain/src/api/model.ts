@@ -14,6 +14,7 @@ export const API_SCOPE_KEYS = [
   'contacts.write',
   'messages.send',
   'messages.send_marketing',
+  'messages.reply',
 ] as const satisfies readonly ApiScope[];
 
 /**
@@ -55,7 +56,21 @@ export const API_SCOPE_INFO: Record<
     permission: 'campaigns.send',
     writes: true,
   },
+  'messages.reply': {
+    label: 'Reply with text',
+    description:
+      'Send text messages to contacts who wrote to the number in the last 24 hours, and read the status of messages the API sent.',
+    permission: 'inbox.reply',
+    writes: true,
+  },
 };
+
+/** The scopes that send messages; any of them reads the status of messages the API sent. */
+export const API_SEND_SCOPES = [
+  'messages.send',
+  'messages.send_marketing',
+  'messages.reply',
+] as const satisfies readonly ApiScope[];
 
 /** Days until a new key expires; 0 means it does not expire. */
 export const API_KEY_EXPIRY_DAYS = [30, 90, 365, 0] as const;
@@ -72,6 +87,8 @@ export const API_KEY_LIMITS = {
 export const API_LIMITS = {
   bodyBytes: 65_536,
   pageSize: 100,
+  /** A text message's characters, as WhatsApp and the inbox allow. */
+  textLength: 4096,
   idempotencyKeyLength: 255,
   idempotencyHours: 24,
   keyRate: { capacity: 50, refillPerSecond: 10 },

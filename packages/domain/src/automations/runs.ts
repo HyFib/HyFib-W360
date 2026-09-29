@@ -336,12 +336,13 @@ export async function endRun(tx: Tx, run: AutomationRun, input: EndRunInput): Pr
 }
 
 export type HumanTakeoverReason =
-  'agent_replied' | 'assigned' | 'take_over' | 'conversation_resolved';
+  'agent_replied' | 'assigned' | 'take_over' | 'conversation_resolved' | 'api_replied';
 
 /**
  * Ends the conversation's active run because a person acted: replied, assigned it, took it over or
- * resolved it. Call with the conversation row locked, before the person's change is written. A
- * test run is not ended by assigning the conversation to the member testing it.
+ * resolved it; or because a reply was sent through the public API (ADR-070), which takes the
+ * conversation over the same way. Call with the conversation row locked, before the change is
+ * written. A test run is not ended by assigning the conversation to the member testing it.
  */
 export async function endRunForHuman(
   tx: Tx,

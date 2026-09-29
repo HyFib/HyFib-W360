@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { isAppError, sha256Hex, systemClock, uuidv7, type Clock } from '@w360/core';
+import { QUEUES } from '@w360/contracts';
 import { authorizedTenantScope, channelAccounts, sql } from '@w360/db';
 import {
   API_KEY_LIMITS,
@@ -13,11 +14,14 @@ import {
   apiListContacts,
   apiListTemplates,
   apiRecordConsent,
+  apiSendMessage,
   apiSendTemplate,
   authenticateApiToken,
   createApiKeysService,
   createCampaignsService,
   createConsentService,
+  createContactsService,
+  createInboxService,
   createTemplatesService,
   generateApiToken,
   outboxAad,
@@ -48,8 +52,9 @@ import {
  * keys (scopes, the limit of active keys, rotation with an overlap, revocation), authentication
  * through the definer function, scopes and company status, idempotent requests (replays, a key
  * reused for another request, concurrent retries, failures, expiry), contacts and consent, template
- * sends with the members' checks and the send pipeline, message status, the idempotency sweep,
- * isolation between companies, and reminders before keys expire (ADR-067).
+ * sends with the members' checks and the send pipeline, text replies within the 24-hour window
+ * (ADR-070), message status, the idempotency sweep, isolation between companies, and reminders
+ * before keys expire (ADR-067).
  */
 let fx: WhatsAppFixture;
 let keys: ApiKeysService;
@@ -803,6 +808,7 @@ describe('template sends', () => {
     expect(first.status).toBe(201);
     const queued = first.body.data as { id: string; contactId: string; channelId: string };
     expect(queued).toMatchObject({
+      type: 'template',
       status: 'queued',
       channelId: c.channelAccountId,
       templateId: utility.id,
@@ -864,6 +870,7 @@ describe('template sends', () => {
     const status = await apiGetMessage(deps(), ctx, queued.id);
     expect(status).toMatchObject({
       id: queued.id,
+      type: 'template',
       status: 'accepted',
       to: '+919811100020',
       templateId: utility.id,
@@ -1104,6 +1111,333 @@ describe('template sends', () => {
     const failed = await apiGetMessage(deps(), ctx, (mine.body.data as { id: string }).id);
     expect(failed.status).toBe('failed');
     expect(failed.error).toMatchObject({ code: '131026' });
+  });
+});
+
+describe('text replies (ADR-070)', () => {
+  /** An inbound message from `waId`, sent `secondsAgo` seconds ago by WhatsApp's timestamp. */
+  async function wrote(company: Company, waId: string, secondsAgo = 0) {
+    const timestamp = Math.floor(Date.now() / 1000) - secondsAgo;
+    await fx.deliver(
+      fx.messagesBody(company, { messages: [{ waId, text: 'Where is my order?', timestamp }] }),
+    );
+  }
+  const reply = (to: string, text = 'It ships today.', extra: Record<string, unknown> = {}) => ({
+    type: 'text',
+    to,
+    text,
+    ...extra,
+  });
+  const idOf = (response: { body: Record<string, unknown> }) =>
+    (response.body.data as { id: string }).id;
+  const reason = (error: unknown) => apiErrorResponse(error, 'r').body.error.reason;
+
+  async function conversationWith(company: Company, phone: string) {
+    const [row] = await fx.query<{
+      id: string;
+      status: string;
+      assigned_membership_id: string | null;
+      unread_count: number;
+      last_message_preview: string | null;
+    }>(
+      `SELECT cv.id, cv.status, cv.assigned_membership_id, cv.unread_count, cv.last_message_preview
+         FROM app.conversations cv
+         JOIN app.contacts ct ON ct.tenant_id = cv.tenant_id AND ct.id = cv.contact_id
+        WHERE cv.tenant_id = $1 AND ct.phone_e164 = $2 AND cv.channel_account_id = $3`,
+      [company.tenant.id, phone, company.channelAccountId],
+    );
+    if (!row) throw new Error('no conversation');
+    return row;
+  }
+
+  it('reply once per Idempotency-Key to a number that wrote in the last 24 hours, through the send pipeline', async () => {
+    const c = await fx.company();
+    const { ctx, id: keyId } = await apiKey(c, ['messages.reply'], 'Helpdesk');
+    const waId = '919811100040';
+    await wrote(c, waId);
+    const before = await conversationWith(c, `+${waId}`);
+
+    const first = await apiSendMessage(deps(), ctx, reply(`+${waId}`), idem('text-1', 'text-1'));
+    expect(first.status).toBe(201);
+    const queued = first.body.data as { id: string; contactId: string };
+    expect(queued).toEqual({
+      id: expect.any(String),
+      type: 'text',
+      status: 'queued',
+      contactId: expect.any(String),
+      channelId: c.channelAccountId,
+    });
+    const replay = await apiSendMessage(deps(), ctx, reply(`+${waId}`), idem('text-1', 'text-1'));
+    expect(replay).toEqual({ ...first, replayed: true });
+    // One signed send job for the worker.
+    const jobs = await fx.query<{ singleton_key: string }>(
+      `SELECT j.singleton_key FROM pgboss.job j
+         JOIN app.send_intents si ON si.id::text = j.singleton_key
+        WHERE j.name = $1 AND si.message_id = $2`,
+      [QUEUES.messageSend.name, queued.id],
+    );
+    expect(jobs).toHaveLength(1);
+
+    const [message] = await fx.query(
+      `SELECT m.type, m.content, m.sender_type, m.api_key_id, m.sender_membership_id,
+              m.conversation_id, m.template_id, si.request, si.actor_user_id
+         FROM app.messages m
+         JOIN app.send_intents si ON si.tenant_id = m.tenant_id AND si.message_id = m.id
+        WHERE m.id = $1`,
+      [queued.id],
+    );
+    expect(message).toEqual({
+      type: 'text',
+      content: { text: 'It ships today.' },
+      sender_type: 'api',
+      api_key_id: keyId,
+      sender_membership_id: null,
+      conversation_id: before.id,
+      template_id: null,
+      request: {
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to: waId,
+        type: 'text',
+        text: { body: 'It ships today.', preview_url: false },
+      },
+      actor_user_id: null,
+    });
+    // Not a member's reply: the conversation keeps its status, assignee and unread count, and the
+    // customer still waits for a member.
+    expect(await conversationWith(c, `+${waId}`)).toEqual({
+      ...before,
+      last_message_preview: 'It ships today.',
+    });
+    const turns = await fx.query<{ end_reason: string | null }>(
+      'SELECT end_reason FROM app.conversation_turns WHERE conversation_id = $1',
+      [before.id],
+    );
+    expect(turns).toEqual([{ end_reason: null }]);
+    // Members see which key sent it.
+    const thread = await createInboxService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+    }).getConversation(await fx.ctx(c, c.owner), before.id);
+    expect(thread.messages.find((m) => m.id === queued.id)).toMatchObject({
+      senderType: 'api',
+      senderName: null,
+      apiKeyName: 'Helpdesk',
+    });
+
+    // A link preview when asked for.
+    const withLink = await apiSendMessage(
+      deps(),
+      ctx,
+      reply(`+${waId}`, 'Track it at https://example.com/t/1', { previewUrl: true }),
+      idem('text-2', 'text-2'),
+    );
+    expect(await sendAll(c)).toEqual(['accepted', 'accepted']);
+    const sent = fx.standIn.state.requests.filter(
+      (r) => r.path.endsWith('/messages') && (r.body as { to?: string } | undefined)?.to === waId,
+    );
+    expect(sent.map((r) => (r.body as { type: string; text: unknown }).text)).toEqual([
+      { body: 'It ships today.', preview_url: false },
+      { body: 'Track it at https://example.com/t/1', preview_url: true },
+    ]);
+    expect(await apiGetMessage(deps(), ctx, queued.id)).toEqual({
+      id: queued.id,
+      type: 'text',
+      status: 'accepted',
+      statusAt: expect.any(String),
+      to: `+${waId}`,
+      templateId: null,
+      templateName: null,
+      channelId: c.channelAccountId,
+      contactId: queued.contactId,
+      error: null,
+      createdAt: expect.any(String),
+    });
+    expect((await apiGetMessage(deps(), ctx, idOf(withLink))).type).toBe('text');
+  });
+
+  it('refuse, with one answer, numbers that did not write to the number in the last 24 hours', async () => {
+    const c = await fx.company();
+    const { ctx, id: keyId } = await apiKey(c, ['messages.reply']);
+    const send = (input: Record<string, unknown>, key: string, clock?: Clock) =>
+      apiSendMessage(deps(clock), ctx, input, idem(key, key));
+
+    // Not a contact.
+    const unknown = await expectAppError(
+      send(reply('+919811100041'), 'w-1'),
+      'precondition_failed',
+      /has not written to this WhatsApp number in the last 24 hours/,
+    );
+    expect(reason(unknown)).toBe('window_closed');
+    const sameAnswer = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'precondition_failed');
+      expect(apiErrorResponse(error, 'r').body.error).toEqual(
+        apiErrorResponse(unknown, 'r').body.error,
+      );
+    };
+    // A contact who never wrote.
+    const contacts = await apiKey(c, ['contacts.write']);
+    await apiCreateContact(deps(), contacts.ctx, { phone: '+919811100042' }, null);
+    await sameAnswer(send(reply('+919811100042'), 'w-2'));
+    // Last wrote 24 hours and a second ago; just under 24 hours is answered, until it passes.
+    await wrote(c, '919811100043', 24 * 3600 + 1);
+    await sameAnswer(send(reply('+919811100043'), 'w-3'));
+    await wrote(c, '919811100044', 24 * 3600 - 60);
+    expect((await send(reply('+919811100044'), 'w-4')).status).toBe(201);
+    await sameAnswer(send(reply('+919811100044'), 'w-5', at(new Date(Date.now() + 61_000))));
+    // An erased contact.
+    await wrote(c, '919811100047');
+    const erased = await conversationWith(c, '+919811100047');
+    const [erasedContact] = await fx.query<{ contact_id: string }>(
+      'SELECT contact_id FROM app.conversations WHERE id = $1',
+      [erased.id],
+    );
+    await createContactsService({ db: fx.dbs.app, clock: systemClock }).eraseContact(
+      await fx.ctx(c, c.owner),
+      { contactId: erasedContact!.contact_id, suppress: false },
+    );
+    await sameAnswer(send(reply('+919811100047'), 'w-6'));
+
+    // The key's scope, the company's state and the body.
+    const templatesOnly = await apiKey(c, ['messages.send', 'messages.send_marketing']);
+    await expectAppError(
+      apiSendMessage(deps(), templatesOnly.ctx, reply('+919811100044'), idem('w-7', 'w-7')),
+      'forbidden',
+      /messages\.reply/,
+    );
+    // A body without a type is a template send (the template is unknown here).
+    await expectAppError(
+      apiSendMessage(
+        deps(),
+        templatesOnly.ctx,
+        { to: '+919811100044', templateId: uuidv7() },
+        idem('w-7b', 'w-7b'),
+      ),
+      'not_found',
+    );
+    await expectAppError(
+      apiSendMessage(
+        deps(),
+        { ...ctx, tenant: { ...ctx.tenant, status: 'restricted' } },
+        reply('+919811100044'),
+        idem('w-8', 'w-8'),
+      ),
+      'tenant_suspended',
+    );
+    await expectAppError(
+      send(reply('+919811100044', 'x'.repeat(4097)), 'w-9'),
+      'validation_failed',
+    );
+    await expectAppError(send(reply('+919811100044', '   '), 'w-10'), 'validation_failed');
+    await expectAppError(send(reply('98110'), 'w-11'), 'validation_failed');
+    await expectAppError(
+      send({ ...reply('+919811100044'), templateId: uuidv7() }, 'w-12'),
+      'validation_failed',
+    );
+    await expectAppError(
+      send({ ...reply('+919811100044'), type: 'image' }, 'w-13'),
+      'validation_failed',
+    );
+
+    // Refusals write nothing: one message and one stored response, from the reply that was sent.
+    const stored = await fx.query<{ idempotency_key: string }>(
+      'SELECT idempotency_key FROM app.api_idempotency_keys WHERE api_key_id = $1',
+      [keyId],
+    );
+    expect(stored.map((r) => r.idempotency_key)).toEqual(['w-4']);
+    const sentByKey = await fx.query('SELECT id FROM app.messages WHERE api_key_id = $1', [keyId]);
+    expect(sentByKey).toHaveLength(1);
+  });
+
+  it('go from the number the contact wrote to', async () => {
+    const c = await fx.company();
+    const { ctx } = await apiKey(c, ['messages.reply']);
+    const send = (input: Record<string, unknown>, key: string) =>
+      apiSendMessage(deps(), ctx, input, idem(key, key));
+    await wrote(c, '919811100048');
+    const second = await addNumber(c, 'active');
+    const off = await addNumber(c, 'disconnected');
+    await expectAppError(
+      send(reply('+919811100048'), 'n-1'),
+      'validation_failed',
+      /several WhatsApp numbers/,
+    );
+    // The contact wrote to the first number, not the second.
+    const elsewhere = await expectAppError(
+      send(reply('+919811100048', 'Hi', { from: second }), 'n-2'),
+      'precondition_failed',
+    );
+    expect(reason(elsewhere)).toBe('window_closed');
+    await expectAppError(
+      send(reply('+919811100048', 'Hi', { from: uuidv7() }), 'n-3'),
+      'not_found',
+    );
+    await expectAppError(
+      send(reply('+919811100048', 'Hi', { from: off }), 'n-4'),
+      'precondition_failed',
+      /not active/,
+    );
+    const sent = await send(reply('+919811100048', 'Hi', { from: c.channelAccountId }), 'n-5');
+    expect(sent.body.data).toMatchObject({ channelId: c.channelAccountId });
+  });
+
+  it('are checked again when the worker sends: a window that closed in between fails the message', async () => {
+    const c = await fx.company();
+    const { ctx } = await apiKey(c, ['messages.reply']);
+    await wrote(c, '919811100049', 24 * 3600 - 30);
+    const sent = await apiSendMessage(deps(), ctx, reply('+919811100049'), idem('l-1', 'l-1'));
+    const [intent] = await fx.query<{ id: string }>(
+      'SELECT id FROM app.send_intents WHERE message_id = $1',
+      [idOf(sent)],
+    );
+    const result = await processSendIntent(
+      {
+        ...deps(at(new Date(Date.now() + 60_000))),
+        keyring: fx.keyring,
+        graph: fx.graph,
+        rate: sendRate,
+      },
+      authorizedTenantScope(c.tenant.id, null),
+      intent!.id,
+    );
+    expect(result.outcome).toBe('failed');
+    expect(await apiGetMessage(deps(), ctx, idOf(sent))).toMatchObject({
+      type: 'text',
+      status: 'failed',
+      error: { code: 'window_closed' },
+    });
+    expect(
+      fx.standIn.state.requests.filter(
+        (r) => (r.body as { to?: string } | undefined)?.to === '919811100049',
+      ),
+    ).toEqual([]);
+  });
+
+  it('reach only the company’s own contacts and numbers', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const mine = await apiKey(c, ['messages.reply']);
+    const theirs = await apiKey(other, ['messages.reply']);
+    await wrote(c, '919811100050');
+    const refused = await expectAppError(
+      apiSendMessage(deps(), theirs.ctx, reply('+919811100050'), idem('i-1', 'i-1')),
+      'precondition_failed',
+    );
+    expect(reason(refused)).toBe('window_closed');
+    await expectAppError(
+      apiSendMessage(
+        deps(),
+        theirs.ctx,
+        reply('+919811100050', 'Hi', { from: c.channelAccountId }),
+        idem('i-2', 'i-2'),
+      ),
+      'not_found',
+    );
+    const sent = await apiSendMessage(deps(), mine.ctx, reply('+919811100050'), idem('i-3', 'i-3'));
+    await expectAppError(apiGetMessage(deps(), theirs.ctx, idOf(sent)), 'not_found');
+    expect((await apiGetMessage(deps(), mine.ctx, idOf(sent))).status).toBe('queued');
   });
 });
 

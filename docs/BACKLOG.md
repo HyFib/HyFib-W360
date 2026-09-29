@@ -374,9 +374,13 @@ verification, app review, Embedded Signup configuration).
   with its name and prefix, never a token; marked on Settings → API keys); **[rate limits tested,
   full buckets deleted, locally verified]** (ADR-068: integration tests of the buckets and each
   limit, an e2e burst refused with 429; buckets full again deleted every minute, so failed-
-  authentication addresses are kept only while they limit). Remaining: session, media and
-  interactive messages, conversation and message lists, starting automations (W-086), bulk sends in
-  one call, IP allowlists, per-key quotas, limits per endpoint.
+  authentication addresses are kept only while they limit); **[text replies built, locally
+  verified against the Graph stand-in]** (ADR-070: a `messages.reply` key sends free-form text to a
+  contact who wrote to the number in the last 24 hours, refused otherwise with one answer; it ends a
+  running automation and marks the message with its key, and the customer keeps waiting for a
+  member). Remaining: media, interactive and reaction messages, replies to a given message,
+  conversation and message lists, resolving or assigning conversations, starting automations
+  (W-086), bulk sends in one call, IP allowlists, per-key quotas, limits per endpoint.
 - **P5-09 Outgoing webhooks** **[built, locally verified; delivered to local test receivers only]**
   (ADR-053): up to 10 endpoints per company (`developer.manage`) for `message.received`,
   `message.status`, `consent.changed` and `template.status_changed`, captured by database triggers

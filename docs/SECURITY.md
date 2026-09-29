@@ -436,8 +436,9 @@ Phase 5 rules (Public API, P5-08):
 - Members with `developer.manage` (owners and administrators) create, rotate and revoke the
   company's API keys; a key belongs to the company, not to its author. Each scope needs the
   permission a member needs for the same work: `templates.read`, `contacts.read`, `contacts.write`,
-  `inbox.reply` for `messages.send` (utility templates) and `campaigns.send` for
-  `messages.send_marketing`. Nobody grants a key more than they hold, and rotating needs the same.
+  `inbox.reply` for `messages.send` (utility templates) and `messages.reply` (text replies, ADR-070),
+  and `campaigns.send` for `messages.send_marketing`. Nobody grants a key more than they hold, and
+  rotating needs the same. A key keeps the scopes it was created with.
 - A request acts for the key's company only, as the key: its company comes from the key found by
   the token's hash, never from the path, body or headers, and data access runs in that company's
   scope (RLS). Audit rows name the key (`api_key`). Writing scopes are refused while the company is
@@ -445,6 +446,13 @@ Phase 5 rules (Public API, P5-08):
 - Template sends through the API apply the members' template-send checks (approval, category scope,
   consent, suppression, erasure, the marketing frequency cap) and are checked again before dispatch.
   The API can read the status only of messages sent through the API.
+- Text replies through the API (ADR-070) go only to an existing contact who wrote to that number in
+  the last 24 hours, checked under the conversation's row lock and again by the send worker; they
+  never create a contact. A number that is not a contact, has no conversation on the number, was
+  erased or last wrote earlier gets one answer (412, `window_closed`), so the refusal tells a key
+  without `contacts.read` no more than a sent reply would. A reply ends an automation handling the
+  conversation, as a member's reply does, and is marked with its key in the inbox and in status
+  reads and webhooks.
 - Only the token's SHA-256 is stored; the runtime role cannot read it. The token is shown once in
   the browser and kept only in the page's memory; it is never logged, and audit entries carry the
   public prefix only.

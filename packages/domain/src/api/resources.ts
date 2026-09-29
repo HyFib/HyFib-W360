@@ -23,13 +23,14 @@ import {
   type Tx,
 } from '@w360/db';
 import { recordSystemAudit } from '../audit';
+import { endRunForHuman } from '../automations/runs';
 import { lockCampaignSends, marketingCapReached } from '../campaigns/frequency-cap';
 import { checkTemplateEligibility, recordConsentEvents } from '../consent/service';
 import { normalizeEmail, normalizeTag } from '../contacts/fields';
 import { normalizePhone, phoneFromWaId, waRecipientFromPhone } from '../contacts/phone';
 import { contactForPhone } from '../contacts/service';
 import { emitTenantEvent } from '../messaging/events';
-import type { OutboundDeps } from '../messaging/outbound';
+import { SERVICE_WINDOW_MS, type OutboundDeps } from '../messaging/outbound';
 import { STATUS_RANK } from '../messaging/status';
 import {
   buildTemplateSend,
@@ -45,7 +46,7 @@ import {
   type ApiResponse,
   type IdempotencyInput,
 } from './idempotency';
-import { API_LIMITS } from './model';
+import { API_LIMITS, API_SEND_SCOPES } from './model';
 
 /**
  * The resources of the public API v1 (ADR-052). The zod schemas below validate requests and are
@@ -97,6 +98,7 @@ const variableValue = z.string().trim().min(1).max(TEMPLATE_LIMITS.parameterValu
 
 export const apiSendMessageSchema = z
   .object({
+    type: z.literal('template').optional().describe('`template`, the default.'),
     to: phoneField,
     templateId: z.uuid().describe('A template id from GET /api/v1/templates.'),
     from: z
@@ -113,6 +115,33 @@ export const apiSendMessageSchema = z
       .strict()
       .default({ header: [], body: [] })
       .describe('Values for the template’s {{1}}, {{2}}… in order.'),
+  })
+  .strict();
+
+/** A free-form text reply to a contact who wrote in the last 24 hours (ADR-070). */
+export const apiSendTextSchema = z
+  .object({
+    type: z.literal('text'),
+    to: phoneField,
+    from: z
+      .uuid()
+      .optional()
+      .describe(
+        'The id of the WhatsApp number the contact wrote to; optional when the company has one active number.',
+      ),
+    text: z
+      .string({ error: 'Give the text' })
+      .trim()
+      .min(1, 'Give the text')
+      .max(
+        API_LIMITS.textLength,
+        `Text messages are limited to ${API_LIMITS.textLength} characters`,
+      )
+      .describe('The message.'),
+    previewUrl: z
+      .boolean()
+      .default(false)
+      .describe('Whether WhatsApp may show a preview of the first link in the text.'),
   })
   .strict();
 
@@ -139,6 +168,7 @@ export interface ApiTemplate {
 
 export interface ApiMessage {
   id: string;
+  type: 'template' | 'text';
   status: string;
   statusAt: string;
   to: string | null;
@@ -496,6 +526,37 @@ export async function apiRecordConsent(
 }
 
 /**
+ * The WhatsApp number a send uses: the one named by `from`, or the company's only active number.
+ * Its state is checked by the caller, after checks that name the number's account.
+ */
+async function sendingNumber(tx: Tx, ctx: ApiContext, from: string | undefined) {
+  const numbers = await tx
+    .select({
+      id: channelAccounts.id,
+      status: channelAccounts.status,
+      whatsappAccountId: channelAccounts.whatsappAccountId,
+    })
+    .from(channelAccounts)
+    .where(
+      and(
+        eq(channelAccounts.tenantId, ctx.tenant.id),
+        from ? eq(channelAccounts.id, from) : eq(channelAccounts.status, 'active'),
+      ),
+    );
+  const channel = numbers.length === 1 ? numbers[0] : undefined;
+  if (!channel) {
+    if (from) throw notFound('WhatsApp number');
+    throw new AppError(
+      'validation_failed',
+      numbers.length === 0
+        ? 'The company has no active WhatsApp number.'
+        : 'The company has several WhatsApp numbers: say which one to send from (from).',
+    );
+  }
+  return channel;
+}
+
+/**
  * Sends an approved template to a number (the contact is created when new) with the same checks as
  * members' template sends: erasure, suppression, consent for the template's category, the
  * marketing frequency cap, and the template's and number's state. Exactly one send per idempotency
@@ -544,29 +605,7 @@ export async function apiSendTemplate(
         );
       }
 
-      const numbers = await tx
-        .select({
-          id: channelAccounts.id,
-          status: channelAccounts.status,
-          whatsappAccountId: channelAccounts.whatsappAccountId,
-        })
-        .from(channelAccounts)
-        .where(
-          and(
-            eq(channelAccounts.tenantId, ctx.tenant.id),
-            data.from ? eq(channelAccounts.id, data.from) : eq(channelAccounts.status, 'active'),
-          ),
-        );
-      const channel = numbers.length === 1 ? numbers[0] : undefined;
-      if (!channel) {
-        if (data.from) throw notFound('WhatsApp number');
-        throw new AppError(
-          'validation_failed',
-          numbers.length === 0
-            ? 'The company has no active WhatsApp number.'
-            : 'The company has several WhatsApp numbers: say which one to send from (from).',
-        );
-      }
+      const channel = await sendingNumber(tx, ctx, data.from);
       if (channel.whatsappAccountId !== template.whatsappAccountId) {
         throw new AppError(
           'validation_failed',
@@ -708,6 +747,7 @@ export async function apiSendTemplate(
         body: {
           data: {
             id: messageId,
+            type: 'template',
             status: 'queued',
             contactId,
             channelId: channel.id,
@@ -719,13 +759,193 @@ export async function apiSendTemplate(
   );
 }
 
+/** The refusal for a number the reply cannot reach (ADR-070). */
+const windowClosed = () =>
+  new AppError(
+    'precondition_failed',
+    'This number has not written to this WhatsApp number in the last 24 hours, so only approved templates can be sent to it.',
+    { details: { apiReason: 'window_closed' } },
+  );
+
+/**
+ * Sends a free-form text message to a contact who wrote to the number in the last 24 hours, as the
+ * inbox's reply does (ADR-070). The contact is never created: a number that is not a contact, has
+ * no conversation on the number, was erased, or last wrote more than 24 hours ago gets one answer,
+ * so the refusal tells a key without `contacts.read` nothing more than a sent reply would. The
+ * reply takes the conversation over from an automation handling it (its queued messages are
+ * cancelled), but it is not a member's reply: the conversation keeps waiting for a member. Exactly
+ * one send per idempotency key; the window is checked again when the worker sends.
+ */
+export async function apiSendText(
+  deps: OutboundDeps,
+  ctx: ApiContext,
+  input: unknown,
+  idempotency: IdempotencyInput,
+): Promise<ApiResponse> {
+  assertScope(ctx, 'messages.reply');
+  const data = parseInput(apiSendTextSchema, input);
+  const phone = explicitPhone(data.to);
+  const now = deps.clock.now();
+  return deps.db.run(ctx.scope, (tx) =>
+    idempotent(tx, ctx, idempotency, now, async () => {
+      const channel = await sendingNumber(tx, ctx, data.from);
+      if (channel.status !== 'active') {
+        throw new AppError('precondition_failed', 'This WhatsApp number is not active.');
+      }
+      const [contact] = await tx
+        .select({ id: contacts.id })
+        .from(contacts)
+        .where(
+          and(
+            eq(contacts.tenantId, ctx.tenant.id),
+            eq(contacts.phoneE164, phone),
+            isNull(contacts.erasedAt),
+          ),
+        );
+      if (!contact) throw windowClosed();
+      // Locked like a member's reply: serialised with assignments, other replies and the
+      // automation's own steps on the conversation.
+      const [conversation] = await tx
+        .select({ id: conversations.id, lastInboundAt: conversations.lastInboundAt })
+        .from(conversations)
+        .where(
+          and(
+            eq(conversations.tenantId, ctx.tenant.id),
+            eq(conversations.channelAccountId, channel.id),
+            eq(conversations.contactId, contact.id),
+          ),
+        )
+        .for('update');
+      if (
+        !conversation?.lastInboundAt ||
+        now.getTime() - conversation.lastInboundAt.getTime() > SERVICE_WINDOW_MS
+      ) {
+        throw windowClosed();
+      }
+      const [identity] = await tx
+        .select({ waId: contactIdentities.waId })
+        .from(contactIdentities)
+        .where(
+          and(
+            eq(contactIdentities.tenantId, ctx.tenant.id),
+            eq(contactIdentities.contactId, contact.id),
+            eq(contactIdentities.whatsappAccountId, channel.whatsappAccountId),
+            isNotNull(contactIdentities.waId),
+          ),
+        )
+        .limit(1);
+      if (!identity?.waId) {
+        throw new AppError(
+          'unsupported',
+          'This contact wrote from a WhatsApp user id without a phone number. Sending to user ids is not enabled until Meta’s request format is verified.',
+        );
+      }
+
+      await endRunForHuman(tx, {
+        tenantId: ctx.tenant.id,
+        conversationId: conversation.id,
+        reason: 'api_replied',
+        actorMembershipId: null,
+        now,
+      });
+      const messageId = uuidv7();
+      const intentId = uuidv7();
+      await tx.insert(messages).values({
+        id: messageId,
+        tenantId: ctx.tenant.id,
+        conversationId: conversation.id,
+        channelAccountId: channel.id,
+        direction: 'outbound',
+        type: 'text',
+        content: { text: data.text },
+        status: 'queued',
+        statusRank: STATUS_RANK.queued,
+        senderType: 'api',
+        apiKeyId: ctx.key.id,
+      });
+      await tx.insert(sendIntents).values({
+        id: intentId,
+        tenantId: ctx.tenant.id,
+        messageId,
+        channelAccountId: channel.id,
+        request: {
+          messaging_product: 'whatsapp',
+          recipient_type: 'individual',
+          to: identity.waId,
+          type: 'text',
+          text: { body: data.text, preview_url: data.previewUrl },
+        },
+        actorUserId: null,
+      });
+      await tx
+        .update(conversations)
+        .set({
+          lastMessageAt: now,
+          lastMessagePreview: data.text.slice(0, 200),
+          version: sql`${conversations.version} + 1`,
+        })
+        .where(
+          and(eq(conversations.tenantId, ctx.tenant.id), eq(conversations.id, conversation.id)),
+        );
+      await emitTenantEvent(tx, ctx.tenant.id, {
+        type: 'message.created',
+        conversationId: conversation.id,
+        payload: { messageId },
+      });
+      await deps.jobs.enqueue(
+        tx,
+        QUEUES.messageSend.name,
+        deps.signer.sign({
+          kind: 'message.send',
+          tenantId: ctx.tenant.id,
+          actorUserId: null,
+          ref: intentId,
+        }),
+        { singletonKey: intentId, group: { id: channel.id } },
+      );
+      return {
+        status: 201,
+        body: {
+          data: {
+            id: messageId,
+            type: 'text',
+            status: 'queued',
+            contactId: contact.id,
+            channelId: channel.id,
+          },
+        },
+      };
+    }),
+  );
+}
+
+/** POST /api/v1/messages: a template (the default) or a text reply, by the body's `type`. */
+export async function apiSendMessage(
+  deps: OutboundDeps,
+  ctx: ApiContext,
+  input: unknown,
+  idempotency: IdempotencyInput,
+): Promise<ApiResponse> {
+  const type =
+    input !== null && typeof input === 'object' && !Array.isArray(input)
+      ? (input as { type?: unknown }).type
+      : undefined;
+  if (type === 'text') return apiSendText(deps, ctx, input, idempotency);
+  if (type === undefined || type === 'template') {
+    return apiSendTemplate(deps, ctx, input, idempotency);
+  }
+  throw new AppError('validation_failed', 'Send a template or a text message.', {
+    issues: [{ path: 'type', message: 'Use template or text.' }],
+  });
+}
+
 /** The status of a message the API sent (any key of the company). */
 export async function apiGetMessage(
   deps: Pick<OutboundDeps, 'db'>,
   ctx: ApiContext,
   messageId: string,
 ): Promise<ApiMessage> {
-  if (!ctx.key.scopes.has('messages.send') && !ctx.key.scopes.has('messages.send_marketing'))
+  if (!API_SEND_SCOPES.some((scope) => ctx.key.scopes.has(scope)))
     assertScope(ctx, 'messages.send');
   if (!z.uuid().safeParse(messageId).success) throw notFound('Message');
   const row = await deps.db.run(
@@ -734,6 +954,7 @@ export async function apiGetMessage(
       const [m] = await tx
         .select({
           id: messages.id,
+          type: messages.type,
           status: messages.status,
           statusAt: messages.statusAt,
           content: messages.content,
@@ -776,6 +997,7 @@ export async function apiGetMessage(
   const template = (row.content as { template?: { name?: string } }).template;
   return {
     id: row.id,
+    type: row.type === 'text' ? 'text' : 'template',
     status: row.status,
     statusAt: row.statusAt.toISOString(),
     to: row.phone,

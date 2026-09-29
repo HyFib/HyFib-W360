@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { AppError, forbidden, notFound, uuidv7, type Clock } from '@w360/core';
 import {
   and,
+  apiKeys,
   asc,
   channelAccounts,
   contactIdentities,
@@ -481,6 +482,7 @@ export function createInboxService(deps: InboxDeps) {
               senderType: messages.senderType,
               senderMembershipId: messages.senderMembershipId,
               senderName: users.name,
+              apiKeyName: apiKeys.name,
               createdAt: messages.createdAt,
               providerTimestamp: messages.providerTimestamp,
             })
@@ -493,6 +495,10 @@ export function createInboxService(deps: InboxDeps) {
               ),
             )
             .leftJoin(users, eq(users.id, memberships.userId))
+            .leftJoin(
+              apiKeys,
+              and(eq(apiKeys.tenantId, messages.tenantId), eq(apiKeys.id, messages.apiKeyId)),
+            )
             .where(
               and(
                 eq(messages.tenantId, ctx.tenant.id),

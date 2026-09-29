@@ -2,8 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { expect, test } from './fixtures';
 import {
   connectTestChannel,
+  inboundMessage,
   messagingConfigured,
   randomWaId,
+  sendSignedWebhook,
   standInRequests,
 } from './messaging-support';
 import { expectNoHorizontalOverflow, signUpAndVerify, uniqueEmail } from './support';
@@ -82,7 +84,7 @@ test('an API key created in settings sends an approved template once, and stops 
   const doc = await request.get('/api/v1/openapi.json');
   expect(doc.status()).toBe(200);
   expect(doc.headers()['cache-control']).toBe('public, max-age=300');
-  expect((await doc.json()).paths['/messages'].post.operationId).toBe('sendTemplate');
+  expect((await doc.json()).paths['/messages'].post.operationId).toBe('sendMessage');
   const anonymous = await request.get('/api/v1/templates');
   expect(anonymous.status()).toBe(401);
   expect(anonymous.headers()['www-authenticate']).toBe('Bearer');
@@ -165,4 +167,77 @@ test('an API key created in settings sends an approved template once, and stops 
   await expect(page.getByText('Revoked', { exact: true }).first()).toBeVisible();
   const afterRevoke = await request.get('/api/v1/templates', { headers: auth });
   expect(afterRevoke.status()).toBe(401);
+});
+
+test('a key with the reply scope answers a customer who wrote, and the inbox shows the reply came through the API', async ({
+  page,
+  request,
+}) => {
+  const email = uniqueEmail('apireply');
+  const slug = `apireply-${Date.now().toString(36)}`;
+  await signUpAndVerify(page, { name: 'Rhea Reply', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('Reply Traders');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+  const { wabaId, phoneNumberId } = await connectTestChannel({ ownerEmail: email, slug });
+
+  await page.goto(`/c/${slug}/settings/api-keys`);
+  await page.getByLabel('Name', { exact: true }).fill('Helpdesk');
+  await page.getByRole('checkbox', { name: /Reply with text/ }).check();
+  await page.getByRole('button', { name: 'Create API key' }).click();
+  const token = await page.getByLabel('API key', { exact: true }).inputValue();
+  await page.getByRole('button', { name: 'I have stored the key' }).click();
+  const auth = { Authorization: `Bearer ${token}` };
+  const post = (data: Record<string, unknown>) =>
+    request.post('/api/v1/messages', {
+      headers: { ...auth, 'Idempotency-Key': randomUUID() },
+      data,
+    });
+
+  // The customer writes, and the worker brings the message into the inbox.
+  const waId = randomWaId();
+  await sendSignedWebhook(
+    request,
+    inboundMessage(wabaId, phoneNumberId, waId, 'Where is my order A-1001?'),
+  );
+  await page.goto(`/c/${slug}/inbox`);
+  const conversation = page.getByRole('link', { name: /Priya Customer/ });
+  await expect(conversation).toBeVisible({ timeout: 20_000 });
+
+  // The integration replies with text; a number that never wrote is refused, and so are templates.
+  const reply = { type: 'text', to: `+${waId}`, text: 'Order A-1001 ships today.' };
+  const sent = await post(reply);
+  expect(sent.status()).toBe(201);
+  const queued = (await sent.json()).data as { id: string; type: string; status: string };
+  expect(queued).toMatchObject({ type: 'text', status: 'queued' });
+  const stranger = await post({ ...reply, to: `+${randomWaId()}` });
+  expect(stranger.status()).toBe(412);
+  expect((await stranger.json()).error.reason).toBe('window_closed');
+  const template = await post({ to: `+${waId}`, templateId: randomUUID() });
+  expect(template.status()).toBe(403);
+
+  // The worker sends it to WhatsApp once.
+  await expect(async () => {
+    const status = await request.get(`/api/v1/messages/${queued.id}`, { headers: auth });
+    expect((await status.json()).data).toMatchObject({ type: 'text', status: 'accepted' });
+  }).toPass({ timeout: 30_000 });
+  const toCustomer = (await standInRequests(request)).filter(
+    (r) =>
+      r.path === `/v26.0/${phoneNumberId}/messages` &&
+      (r.body as { to?: string } | null)?.to === waId,
+  );
+  expect(toCustomer.map((r) => r.body)).toEqual([
+    expect.objectContaining({
+      type: 'text',
+      text: { body: 'Order A-1001 ships today.', preview_url: false },
+    }),
+  ]);
+
+  // Members see the reply in the conversation, marked with the key that sent it.
+  await conversation.click();
+  const thread = page.getByRole('list', { name: /^Messages with/ });
+  await expect(thread.getByText('Order A-1001 ships today.')).toBeVisible({ timeout: 20_000 });
+  await expect(thread.getByText('· API (Helpdesk)')).toBeVisible();
+  await expectNoHorizontalOverflow(page);
 });

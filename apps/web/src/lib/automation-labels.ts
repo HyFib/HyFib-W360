@@ -25,6 +25,7 @@ export const END_REASONS: Record<string, string> = {
   agent_replied: 'A member replied, so the automation stopped.',
   assigned: 'The conversation was assigned to a member.',
   take_over: 'A member took the conversation over.',
+  api_replied: 'A reply was sent through the API, so the automation stopped.',
   stopped_by_member: 'A member stopped the run.',
   conversation_resolved: 'The conversation was resolved.',
   opted_out: 'The customer opted out.',

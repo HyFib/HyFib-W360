@@ -1,13 +1,16 @@
 import { randomInt } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 import { PgBoss, type Job } from 'pg-boss';
-import { isAppError, systemClock, type Clock } from '@w360/core';
+import { isAppError, sha256Hex, systemClock, uuidv7, type Clock } from '@w360/core';
 import { QUEUES } from '@w360/contracts';
 import { authorizedTenantScope, type Database } from '@w360/db';
 import {
   advanceAutomationRun,
+  apiSendText,
   applyAutomationRetention,
+  authenticateApiToken,
   authorizeJob,
+  createApiKeysService,
   createAutomationService,
   createBusinessHoursService,
   createContactsService,
@@ -724,6 +727,77 @@ describe('automation runs', () => {
       end_reason: 'conversation_resolved',
     });
     expect((await turns(conv4)).filter((t) => t.end_reason === null)).toEqual([]);
+  });
+
+  it('lets a reply through the public API take the conversation over from the bot, which then waits for a member (ADR-070)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    await publish(owner, 'Menu', keyword('menu'), menuGraph());
+    const created = await createApiKeysService({ db: fx.dbs.app, clock: systemClock }).create(
+      owner,
+      { name: 'Helpdesk', scopes: ['messages.reply'], expiresInDays: 0 },
+    );
+    const key = await authenticateApiToken(fx.dbs.app, created.token, uuidv7());
+    if (!key) throw new Error('a new key does not authenticate');
+
+    // The integration replies while the bot's question is still queued: the run ends as taken
+    // over and the bot's message is cancelled before it leaves.
+    const hal = waId();
+    const conv = await inbound(c, hal, 'menu');
+    const run = await onlyRun(conv);
+    await advance(c, run.id);
+    expect((await botMessages(conv)).map((m) => m.status)).toEqual(['queued']);
+    const reply = await apiSendText(
+      runnerDeps(),
+      key,
+      { type: 'text', to: `+${hal}`, text: 'Hi Hal, your order ships today.' },
+      { key: 'reply-1', requestHash: sha256Hex('reply-1') },
+    );
+    expect(reply.status).toBe(201);
+    expect(await onlyRun(conv)).toMatchObject({ status: 'taken_over', end_reason: 'api_replied' });
+    const [ended] = await fx.query<{ ended_by_membership_id: string | null }>(
+      'SELECT ended_by_membership_id FROM app.automation_runs WHERE id = $1',
+      [run.id],
+    );
+    expect(ended?.ended_by_membership_id).toBeNull();
+    expect((await stepLog(run.id)).at(-1)).toMatchObject({
+      outcome: 'taken_over',
+      detail: 'api_replied',
+    });
+    expect((await botMessages(conv)).map((m) => [m.status, m.error_code])).toEqual([
+      ['canceled', 'bot_stopped'],
+    ]);
+    // Not an answer from a person: the conversation now waits for a member.
+    expect((await turns(conv)).at(-1)).toMatchObject({
+      start_reason: 'handoff',
+      end_reason: null,
+    });
+    expect((await conversation(conv)).assigned_membership_id).toBeNull();
+
+    // Only the integration's text leaves; a late automation job does nothing.
+    expect(await sendQueued(c, conv)).toEqual(['accepted']);
+    const toHal = fx.standIn.state.requests.filter(
+      (r) => (r.body as { to?: unknown } | undefined)?.to === hal,
+    );
+    expect(toHal.map((r) => r.body)).toEqual([
+      expect.objectContaining({
+        type: 'text',
+        text: { body: 'Hi Hal, your order ships today.', preview_url: false },
+      }),
+    ]);
+    expect((await advance(c, run.id)).outcome).toBe('idle');
+
+    // A member's reply answers the hand-off turn.
+    await queueTextMessage(runnerDeps(), agent, {
+      conversationId: conv,
+      text: 'Hal, anything else I can help with?',
+      clientKey: `k${randomInt(1e9)}xxxxxxxx`,
+    });
+    expect((await turns(conv)).at(-1)).toMatchObject({
+      start_reason: 'handoff',
+      end_reason: 'replied',
+    });
   });
 
   it('applies business-hours filters, cooldowns and the hourly cap, and skips assigned conversations', async () => {

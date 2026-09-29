@@ -2034,3 +2034,45 @@ delivery changes: notices still go out in order, at the same rate.
 
 Not built: a higher sending rate for the email queue (a notice to many recipients still takes about
 half a second per recipient per worker process), and priorities for other kinds.
+
+## ADR-070 Text replies through the public API (2026-09-29)
+
+Context: integrations receive customers' messages through the `message.received` webhook (ADR-053)
+but could answer only with approved templates through `POST /api/v1/messages` (ADR-052). Inside
+WhatsApp's customer service window, 24 hours after the customer's last message, members answer in
+the inbox with free-form text; an integration (a helpdesk, an order system, a company's own
+assistant) could not.
+
+Decision:
+
+- **A new scope,** `messages.reply` ("Reply with text"), granted only by members who hold
+  `inbox.reply`, as for `messages.send`. Keys keep their scopes (the key guard), so no existing key
+  gains it; migration 0042 widens the scopes check.
+- **One operation:** `POST /api/v1/messages` takes `type`: `template`, the default, so existing
+  requests are unchanged, or `text`, with `to`, an optional `from` (the number the contact wrote
+  to; optional with one active number), `text` (1 to 4,096 characters, trimmed) and `previewUrl`
+  (off unless asked for). The OpenAPI operation is renamed from `sendTemplate` to `sendMessage`
+  before any release, with a `oneOf` body. Any other `type` is refused.
+- **Only inside the window:** a text goes to an existing contact with a conversation on that number
+  whose last message is at most 24 hours old, checked under the conversation's row lock, with the
+  same `Idempotency-Key` rules as templates. A number that is not a contact, has no conversation
+  there, was erased or last wrote more than 24 hours ago gets one answer, 412 with reason
+  `window_closed`, so a key without `contacts.read` learns no more than a sent reply would tell it.
+  The contact is never created. The worker checks the window again before sending, as for the
+  inbox, and a message whose window closed in between fails with `window_closed`.
+- **Sent like a member's reply:** to the contact's WhatsApp id for the number's account, through the
+  send pipeline and its per-number rate. The message has `sender_type = 'api'` and the key, so
+  `GET /messages/{id}` (now with `type`), status webhooks and the inbox, which shows "API (key
+  name)", tell where it came from.
+- **It takes the conversation over from an automation,** as a member's reply does: the run ends as
+  taken over (`api_replied`, migration 0042) and its queued messages are cancelled, so the bot and
+  the integration never answer at once.
+- **It is not a member's reply:** the conversation keeps its status, assignee and unread count, and
+  a customer waiting for a member keeps waiting. Reply turns and the Inbox SLA metrics are
+  unchanged, and an automation ended by the API opens a hand-off turn like other take-overs. An
+  integration's acknowledgement ("we got your message") must not hide a customer who still waits
+  for a person; members resolve conversations an integration answered in full.
+
+Not built: media, location, interactive (buttons and lists) and reaction messages through the API;
+replying to a given message (context); contacts known only by a WhatsApp user id (the API addresses
+numbers); resolving or assigning conversations through the API; conversation and message lists.

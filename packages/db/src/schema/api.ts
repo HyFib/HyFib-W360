@@ -10,6 +10,7 @@ export const API_SCOPES = [
   'contacts.write',
   'messages.send',
   'messages.send_marketing',
+  'messages.reply',
 ] as const;
 export type ApiScope = (typeof API_SCOPES)[number];
 

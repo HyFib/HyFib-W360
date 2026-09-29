@@ -9,7 +9,12 @@ import {
   templateStatusPayloadSchema,
 } from '../webhooks/payloads';
 import { API_LIMITS, API_SCOPE_INFO, API_SCOPE_KEYS } from './model';
-import { apiConsentSchema, apiContactCreateSchema, apiSendMessageSchema } from './resources';
+import {
+  apiConsentSchema,
+  apiContactCreateSchema,
+  apiSendMessageSchema,
+  apiSendTextSchema,
+} from './resources';
 
 /**
  * The OpenAPI 3.1 document of the public API v1 (ADR-052), built from the zod schemas that
@@ -50,10 +55,11 @@ export const apiTemplateSchema = z.object({
 
 export const apiQueuedMessageSchema = z.object({
   id: z.uuid(),
+  type: z.enum(['template', 'text']),
   status: z.literal('queued'),
   contactId: z.uuid(),
   channelId: z.uuid(),
-  templateId: z.uuid(),
+  templateId: z.uuid().optional().describe('The template sent, for templates.'),
 });
 
 /** The states of an outbound message (the `received` state is for inbound messages only). */
@@ -72,6 +78,7 @@ const OUTBOUND_STATUSES = [
 
 export const apiMessageSchema = z.object({
   id: z.uuid(),
+  type: z.enum(['template', 'text']),
   status: z
     .enum(OUTBOUND_STATUSES)
     .describe(
@@ -98,7 +105,9 @@ export const apiErrorSchema = z.object({
     reason: z
       .string()
       .optional()
-      .describe('A finer reason: idempotency_key_reused, not_in_plan or quota_exceeded.'),
+      .describe(
+        'A finer reason: idempotency_key_reused, not_in_plan, quota_exceeded or window_closed.',
+      ),
     issues: z.array(z.object({ path: z.string(), message: z.string() })).optional(),
   }),
   requestId: z.string(),
@@ -129,7 +138,7 @@ const errors = (...statuses: number[]) =>
             403: "The key lacks the scope this needs, or the company's plan does not include the API (reason not_in_plan).",
             404: 'Not found in the company.',
             409: 'The request conflicts with the current state.',
-            412: 'A condition for sending or saving is not met (consent, suppression, state).',
+            412: 'A condition for sending or saving is not met (consent, suppression, state). With reason window_closed, the number has not written to the WhatsApp number in the last 24 hours, so only templates can be sent to it.',
             415: 'The body must be JSON (Content-Type: application/json).',
             422: 'The request body or parameters are invalid.',
             423: 'The company is suspended or its plan has ended: reading only.',
@@ -177,7 +186,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       title: 'HyFib W360 API',
       version: '1.0.0',
       description: [
-        'Send approved WhatsApp templates, manage contacts and consent, and read message status for your company.',
+        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, manage contacts and consent, and read message status for your company.',
         '',
         'Authenticate with `Authorization: Bearer <API key>`; keys are created in Settings → API keys and belong to the company.',
         `Scopes: ${API_SCOPE_KEYS.map((s) => `\`${s}\` (${API_SCOPE_INFO[s].label.toLowerCase()})`).join(', ')}.`,
@@ -302,11 +311,18 @@ export function buildOpenApiDocument(serverUrl: string) {
       },
       '/messages': {
         post: {
-          operationId: 'sendTemplate',
-          summary: 'Send an approved template',
-          description: `${scopeNote('messages.send', 'messages.send_marketing')} Utility templates need \`messages.send\`, marketing templates \`messages.send_marketing\`. The contact is created when new; consent, the suppression list and the marketing frequency cap are checked.`,
+          operationId: 'sendMessage',
+          summary: 'Send an approved template, or a text reply',
+          description: [
+            `${scopeNote('messages.send', 'messages.send_marketing', 'messages.reply')}`,
+            'A template (`type` `template` or left out): utility templates need `messages.send`, marketing templates `messages.send_marketing`. The contact is created when new; consent, the suppression list and the marketing frequency cap are checked.',
+            'A text reply (`type` `text`) needs `messages.reply` and goes only to a number that wrote to the WhatsApp number in the last 24 hours (WhatsApp’s customer service window); otherwise it is refused with reason `window_closed`, and nothing tells whether the number is a contact. It stops an automation answering the conversation, and the conversation keeps waiting for a member of the team. The window is checked again when the message is sent.',
+          ].join('\n\n'),
           parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }],
-          requestBody: { required: true, content: json(ref('SendTemplate')) },
+          requestBody: {
+            required: true,
+            content: json({ oneOf: [ref('SendTemplate'), ref('SendText')] }),
+          },
           responses: {
             '201': {
               description: 'Queued for sending.',
@@ -320,7 +336,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         get: {
           operationId: 'getMessage',
           summary: 'The status of a message sent through the API',
-          description: scopeNote('messages.send', 'messages.send_marketing'),
+          description: scopeNote('messages.send', 'messages.send_marketing', 'messages.reply'),
           parameters: [{ $ref: '#/components/parameters/Id' }],
           responses: {
             '200': { description: 'The message.', content: json(dataOf(ref('Message'))) },
@@ -422,6 +438,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         Consent: jsonSchema(apiConsentSchema, 'input'),
         Template: jsonSchema(apiTemplateSchema),
         SendTemplate: jsonSchema(apiSendMessageSchema, 'input'),
+        SendText: jsonSchema(apiSendTextSchema, 'input'),
         QueuedMessage: jsonSchema(apiQueuedMessageSchema),
         Message: jsonSchema(apiMessageSchema),
         Error: jsonSchema(apiErrorSchema),

@@ -1,5 +1,75 @@
 # Progress
 
+## 2026-09-29 — Phase 5: text replies through the public API (P5-08, ADR-070)
+
+Status: **Implemented and locally verified against the Graph stand-in.** Integrations received
+customers' messages through webhooks but could answer only with approved templates. A key with the
+new `messages.reply` scope now sends free-form text inside WhatsApp's 24-hour customer service
+window, as members do in the inbox.
+
+### Completed
+
+- **Design (ADR-070):** one operation, `POST /api/v1/messages`, with `type` `template` (the default,
+  so existing requests are unchanged) or `text`; a new scope granted by members who hold
+  `inbox.reply`; one answer (412 `window_closed`) for every number a reply cannot reach; the reply
+  takes the conversation over from an automation but is not a member's reply, so the customer keeps
+  waiting for a member. Closing the reply turn on an API reply was considered and rejected: an
+  integration's acknowledgement ("we got your message") would then hide a customer who still waits
+  for a person, and every turn-based metric definition would change meaning.
+- **Migration 0042:** the API key scopes check allows `messages.reply` (up to six scopes); the
+  automation run end check allows `api_replied` for a run taken over.
+- **Domain:** `apiSendText` (the scope, the number, the contact by number, the conversation locked,
+  the window, the contact's WhatsApp id for the number's account, the automation taken over, the
+  message with the key, the send intent and the signed `message.send` job, one send per
+  `Idempotency-Key`); `apiSendMessage` (by `type`, any other type refused); the number lookup shared
+  with template sends; `type` in queued and read messages; the OpenAPI operation `sendMessage` with a
+  `oneOf` body and the `window_closed` reason; the inbox thread names the key of messages sent through
+  the API.
+- **Web:** Settings → API keys offers "Reply with text"; the inbox marks such messages "API (key
+  name)"; the automation run page explains `api_replied`.
+- **Tests:** unit tests of the text schema, the dispatcher refusing other types, the scopes and the
+  OpenAPI document (operation, `oneOf`, scopes, the 412 reason). 5 integration tests in
+  `api.test.ts`: a reply sent once per key through the Graph stand-in (its key, request, signed job,
+  unchanged conversation, the customer still waiting, the inbox's key name, a link preview, the
+  status read); one answer for an unknown number, a contact who never wrote, a last message 24 hours
+  and a second ago or a minute past the window, and an erased contact, with the scope, a restricted
+  company, bad bodies and a body without `type` sent as a template, and nothing written for a
+  refusal; the number the contact wrote to; the window checked again when sending; another company's
+  key, number and message. One in `automations.test.ts`: the bot's queued question cancelled, the run
+  taken over as `api_replied` by nobody, then a hand-off turn a member's reply answers. e2e
+  `api.spec.ts`: a key created with "Reply with text" answers a customer who wrote, a stranger is
+  refused with `window_closed` and a template with 403, WhatsApp gets the text once, and the inbox
+  shows it with the key's name.
+- **Also:** RUNBOOKS gains the note for migration 0041, missing from the last slice, beside 0042's.
+- **Docs:** ADR-070; ARCHITECTURE §6N; SECURITY (Phase 5 API rules); THREAT-MODEL T69 and new T89;
+  RUNBOOKS (a refused reply, an automation stopped by a reply, migrations 0041 and 0042); BACKLOG
+  P5-08; FEATURE-MATRIX W-134 and H-033; the e2e job's comment in CI (180 tests).
+- **Mutation checks:** 25 regressions tried one at a time, 23 make a test fail (the scope, an inactive
+  number, the window's length and its check, the conversation's number, the automation take-over and
+  its reason, the key on the message, link previews, the conversation's unread count and preview,
+  the send job, idempotency, routing by type and its default, the type in status reads, the send
+  scopes, the reply scope's write flag and permission, the refusal's reason and sameness, the inbox's
+  key name, the template response's type). The other two cannot be observed: the erased-contact
+  filter (erasure clears the number the lookup uses) and the identity's account filter (a contact's
+  identities on two accounts carry the same WhatsApp id).
+
+### Test commands and results (local, 2026-09-29)
+
+| Command | Result |
+| --- | --- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck` | 0 problems / all files formatted / all workspace packages pass |
+| `pnpm test` (unit) | 339 passed |
+| `pnpm test:integration` (PostgreSQL 18.6) | 462 passed, including 5 new tests in `api.test.ts` and 1 in `automations.test.ts` |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker) | 462 passed |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | E2ERESULT |
+| Mutation checks | 25 regressions tried; 23 make a test fail, 2 cannot be observed (above) |
+
+### Known gaps
+
+- Media, interactive and reaction messages, replies to a given message, contacts known only by a
+  WhatsApp user id, and resolving or assigning conversations through the API are not built. Replies
+  are verified against the Graph stand-in only.
+
 ## 2026-09-29 — Phase 5: tested API rate limits, and full token buckets deleted (P5-08)
 
 Status: **Implemented and locally verified.** The public API's rate limits had no automated tests,

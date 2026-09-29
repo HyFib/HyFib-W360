@@ -805,7 +805,7 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `_` + 32 random bytes in base64url; only the hash is stored and the token is shown once. Members
   with `developer.manage` create keys (name, scopes, expiry of 30, 90 or 365 days or none) and may
   grant a scope only when they hold its permission (`templates.read`, `contacts.read`,
-  `contacts.write`, `inbox.reply` for `messages.send`, `campaigns.send` for
+  `contacts.write`, `inbox.reply` for `messages.send` and `messages.reply`, `campaigns.send` for
   `messages.send_marketing`); at most 20 active keys per company, counted under an advisory lock.
   Rotation creates a key with the same name, scopes and lifetime and lets the old one work for 0 to
   72 hours (0 revokes it); revocation is immediate. Each change is audited without the token.
@@ -831,7 +831,17 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   given as `from`, or the only active one; the template's account; erasure, suppression, consent and
   the marketing frequency cap under the campaign runner's lock), a conversation created resolved,
   a send intent without a user and the `message.send` job, re-checked before dispatch like every
-  template send; the status of messages the API sent.
+  template send; the status of messages the API sent, with their type.
+- **Text replies (0042, ADR-070):** `POST /messages` with `type: "text"` (`apiSendMessage` picks
+  `apiSendText`; no `type` is a template) needs `messages.reply`. It finds an existing, not erased
+  contact by number and locks its conversation on the number (`from`, or the only active one); a
+  last message older than 24 hours, no conversation there or an unknown number all answer 412
+  `window_closed`, and no contact is created. The text (up to 4,096 characters, `preview_url` off
+  unless asked) goes to the contact's WhatsApp id for the number's account as a message with
+  `sender_type = 'api'` and the key, a send intent without a user and the `message.send` job; the
+  send worker checks the window again. The reply ends an automation handling the conversation as
+  taken over (`api_replied`, cancelling its queued messages) but is not a member's reply: status,
+  assignee, unread count and reply turns stay, and the inbox marks the message "API (key name)".
 - **Idempotency** (`api/idempotency.ts`): `POST /messages` needs an `Idempotency-Key` (optional on
   `POST /contacts`). The key's row is inserted in the request's own transaction, so a concurrent
   retry waits on the unique index and then replays the stored response (`Idempotent-Replayed:
@@ -861,9 +871,10 @@ true`); the same key with another request (method, path and body hashed) answers
   scopes, author, last use and expiry, a mark on keys that expire within 7 days and when their
   reminder was emailed; creation with the scopes the member may grant; the new token shown once
   with a copy button (kept only in the page's memory); rotation with an overlap; revocation.
-- **Not built yet:** session, media and interactive messages, listing conversations and messages,
-  starting automations, OAuth apps, IP allowlists per key, packs of extra API requests and per-key
-  quotas. Outgoing webhooks are section 6O.
+- **Not built yet:** media, interactive and reaction messages, replies to a given message, listing
+  conversations and messages, resolving or assigning conversations, starting automations, OAuth
+  apps, IP allowlists per key, packs of extra API requests and per-key quotas. Outgoing webhooks are
+  section 6O.
 
 ## 6O. Outgoing webhooks **[built — verified with local test receivers only; no customer endpoints yet]**
 

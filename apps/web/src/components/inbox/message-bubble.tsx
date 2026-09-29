@@ -14,6 +14,8 @@ export interface ThreadMessage {
   errorTitle: string | null;
   senderType: string;
   senderName: string | null;
+  /** The API key that sent the message, for messages sent through the public API. */
+  apiKeyName: string | null;
   createdAt: string;
   providerTimestamp: string | null;
 }
@@ -312,7 +314,9 @@ export function MessageBubble({
                 ? 'Automatic message'
                 : message.senderType === 'bot'
                   ? 'Automation replied'
-                  : `${message.senderName ?? 'Your team'} replied`
+                  : message.senderType === 'api'
+                    ? 'Sent through the API'
+                    : `${message.senderName ?? 'Your team'} replied`
             : 'Customer wrote'}
           :{' '}
         </span>
@@ -323,6 +327,9 @@ export function MessageBubble({
             <span>· {storeMessageLabel(message.content) ?? 'Sent automatically'}</span>
           ) : null}
           {outbound && message.senderType === 'bot' ? <span>· Automation</span> : null}
+          {outbound && message.senderType === 'api' ? (
+            <span>· API{message.apiKeyName ? ` (${message.apiKeyName})` : ''}</span>
+          ) : null}
           {outbound && message.senderName && message.senderType !== 'system' ? (
             <span>· {message.senderName}</span>
           ) : null}
