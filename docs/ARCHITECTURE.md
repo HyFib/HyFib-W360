@@ -1030,6 +1030,14 @@ true`); the same key with another request (method, path and body hashed) answers
   then the company's status for writing scopes. Creating a key checks its scopes against the plan
   (`assertScopesInPlan`); rotating keeps them. `authenticateApiToken`, used by the tests, loads the
   plan's scopes without counting a request.
+- **Monthly requests per key (0073, ADR-097):** `consumeApiRequest` (`plans/entitlements.ts`) also
+  counts each admitted request for its key in `app.api_key_usage` (one row per key and usage
+  period), before the company's count and in the same transaction: one upsert below the key's
+  `monthly_request_limit` when it has one (429 `rate_limited`, reason `key_quota_exceeded`, nothing
+  counted for the company), then the company's; a company refusal rolls back to a savepoint taken
+  before the key's count. Keys lock before companies, for every request. The keys service sets the
+  limit at creation, changes it for an active key after a recent sign-in (`setMonthlyLimit`,
+  audited `api_key.limit_changed`), copies it on rotation, and lists each key's count this period.
 - **OpenAPI** (`api/openapi.ts`): `GET /api/v1/openapi.json` (no key; cacheable 5 minutes) is built
   from the zod schemas that validate requests; a unit test checks it against the route handlers.
 - **Expiry reminders (0040, ADR-067):** the minute messaging sweep (`api/expiry-reminders.ts`) lists,
@@ -1043,12 +1051,14 @@ true`); the same key with another request (method, path and body hashed) answers
 - **Web:** Settings → API keys (`developer.manage`): the month's API requests and the plan's limit
   (or that the plan leaves the API out), the base URL and an example, the keys with state, prefix,
   scopes, author, last use and expiry, a mark on keys that expire within 7 days and when their
-  reminder was emailed; creation with the scopes the member may grant; the new token shown once
-  with a copy button (kept only in the page's memory); rotation with an overlap; revocation.
-- **Not built yet:** media, interactive and reaction messages, replies to a given message, listing
-  conversations and messages, resolving or assigning conversations, starting automations, OAuth
-  apps, IP allowlists per key, packs of extra API requests and per-key quotas. Outgoing webhooks are
-  section 6O.
+  reminder was emailed, each key's requests this period and its own monthly limit (marked when
+  reached, changed in a dialog); creation with the scopes the member may grant, allowed addresses
+  and a monthly limit; the new token shown once with a copy button (kept only in the page's
+  memory); rotation with an overlap; revocation.
+- **Not built yet:** media and call-to-action messages, taking reactions back, assigning many
+  conversations or starting many runs in one call, bulk sends, media downloads, statuses changed
+  since a time, networks for the whole company, limits and availability per endpoint, OAuth apps
+  and packs of extra API requests (BACKLOG P5-08). Outgoing webhooks are section 6O.
 
 ## 6O. Outgoing webhooks **[built — verified with local test receivers only; no customer endpoints yet]**
 

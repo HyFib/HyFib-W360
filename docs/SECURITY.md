@@ -568,6 +568,13 @@ Phase 5 rules (Public API, P5-08):
   status. New keys cannot be given such a scope; existing keys keep theirs and are refused them while
   the plan leaves them out. The list belongs to the plan version (checked by the table, unchangeable
   once published) and is set by platform owners.
+- Each counted request is also counted for its key (ADR-097), in the same transaction and before
+  the company's count, below the key's own monthly limit when it has one: a request its key refuses
+  (429, `key_quota_exceeded`) takes nothing from the company, and one the company refuses is taken
+  back from the key, so a refused request counts for neither. The limit is set and changed only by
+  members with `developer.manage` after a recent sign-in, audited; the runtime role adds to a
+  key's count but cannot move it to another key or period or delete it, and a count belongs to a
+  key of the same company.
 
 Phase 5 rules (outgoing webhooks, P5-09):
 

@@ -1549,9 +1549,11 @@ describe('OpenAPI document', () => {
   it('names the plan refusals in the 403 and 429 responses and the error reason', () => {
     const responses = paths['/contacts']?.get?.responses as Record<string, { description: string }>;
     expect(responses['403']?.description).toContain('not_in_plan');
-    expect(responses['429']?.description).toContain('quota_exceeded');
+    expect(responses['429']?.description).toContain('reason quota_exceeded');
+    // A key's own monthly limit (ADR-097).
+    expect(responses['429']?.description).toContain('reason key_quota_exceeded');
     expect(JSON.stringify(doc.components)).toContain(
-      'ip_not_allowed, not_in_plan, quota_exceeded or window_closed',
+      'ip_not_allowed, key_quota_exceeded, not_in_plan, quota_exceeded or window_closed',
     );
     expect(responses['403']?.description).toContain('ip_not_allowed');
   });

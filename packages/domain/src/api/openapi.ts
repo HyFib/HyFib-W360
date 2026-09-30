@@ -367,7 +367,7 @@ export const apiErrorSchema = z.object({
       .string()
       .optional()
       .describe(
-        'A finer reason: automation_busy, automation_limit, automation_paused, automation_quota, automation_unavailable, channel_unavailable, conversation_assigned, idempotency_key_reused, ip_not_allowed, not_in_plan, quota_exceeded or window_closed.',
+        'A finer reason: automation_busy, automation_limit, automation_paused, automation_quota, automation_unavailable, channel_unavailable, conversation_assigned, idempotency_key_reused, ip_not_allowed, key_quota_exceeded, not_in_plan, quota_exceeded or window_closed.',
       ),
     issues: z.array(z.object({ path: z.string(), message: z.string() })).optional(),
   }),
@@ -403,7 +403,7 @@ const errors = (...statuses: number[]) =>
             415: 'The body must be JSON (Content-Type: application/json).',
             422: 'The request body or parameters are invalid.',
             423: 'The company is suspended or its plan has ended: reading only.',
-            429: "Too many requests: wait for Retry-After seconds. With reason quota_exceeded, the plan's API requests for the month are used up, and Retry-After counts the seconds until the next month's period starts.",
+            429: "Too many requests: wait for Retry-After seconds. With reason quota_exceeded, the plan's API requests for the month are used up; with reason key_quota_exceeded, the key's own monthly limit is (set in Settings → API keys). Either way Retry-After counts the seconds until the next month's period starts.",
             500: 'Something went wrong on our side; retry later (with the same Idempotency-Key).',
           }[status] ?? 'Error',
         content: json(ref('Error')),

@@ -1163,6 +1163,14 @@ and 30 a second; wait for `Retry-After` and retry with the same `Idempotency-Key
 reason `quota_exceeded` means the plan's API requests for the month are used up (ADR-061): the
 requests work again when the next usage period starts, or with a larger plan.
 
+**429 with the reason `key_quota_exceeded`.** The key used up its own monthly limit (ADR-097); the
+company's other keys are not affected, and requests the key was refused are not counted for the
+company. Settings → API keys shows each key's requests this period, marks a key whose limit is
+reached, and lets an owner or administrator (after a recent sign-in) raise or remove the limit: it
+applies from the next request, to the requests already counted. Otherwise the key works again when
+the next usage period starts. The audit log records each change (`api_key.limit_changed`, with the
+limits before and after). A rotated key keeps its predecessor's limit and counts from zero.
+
 **403 `not_in_plan` naming a scope.** The company's plan leaves that scope out (ADR-092). The key
 keeps the scope: requests that need it work again, with no change to the key, once the company is
 on a plan version that includes it (a published version's scopes never change, so this is a new

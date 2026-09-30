@@ -117,6 +117,8 @@ export const API_KEY_LIMITS = {
   /** Networks a key may list (ADR-076), and the characters of the settings field that lists them. */
   allowedNetworks: 20,
   allowedNetworksText: 2000,
+  /** The highest monthly request limit a key can be given (ADR-097), as the plan's limit. */
+  monthlyRequests: 1_000_000_000,
 } as const;
 
 export const API_LIMITS = {

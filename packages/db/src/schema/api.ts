@@ -1,4 +1,4 @@
-import { cidr, jsonb, smallint, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { cidr, integer, jsonb, smallint, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 import { appSchema } from './tenancy';
 
 const tz = (name: string) => timestamp(name, { withTimezone: true, mode: 'date' });
@@ -40,6 +40,17 @@ export const apiKeys = appSchema.table('api_keys', {
   expiryRemindedAt: tz('expiry_reminded_at'),
   /** The networks the key accepts requests from (ADR-076); null accepts any address. */
   allowedNetworks: cidr('allowed_networks').array(),
+  /** The key's own monthly request limit (ADR-097); null when only the plan limits it. */
+  monthlyRequestLimit: integer('monthly_request_limit'),
+});
+
+/** Requests each key made in each usage period of its company (ADR-097, migration 0073). */
+export const apiKeyUsage = appSchema.table('api_key_usage', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  apiKeyId: uuid('api_key_id').notNull(),
+  periodStart: tz('period_start').notNull(),
+  used: integer('used').notNull(),
 });
 
 /** Stored responses of requests sent with an Idempotency-Key (24 hours). */

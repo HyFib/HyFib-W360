@@ -101,8 +101,8 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
             <code className="font-mono text-xs">Authorization: Bearer &lt;key&gt;</code>. Sending a
             message needs an <code className="font-mono text-xs">Idempotency-Key</code> header, so a
             retry never sends twice. Each key can make {API_LIMITS.keyRate.refillPerSecond} requests
-            a second, and can be limited to the addresses your systems call from. The full reference
-            is the{' '}
+            a second, and can be limited to the addresses your systems call from and to a number of
+            requests a month. The full reference is the{' '}
             <a
               className="font-medium underline underline-offset-4"
               href="/api/v1/openapi.json"
@@ -156,6 +156,11 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
                           Rotated to {prefixes.get(k.replacedByKeyId) ?? 'a new key'}
                         </Badge>
                       ) : null}
+                      {k.state === 'active' &&
+                      k.monthlyRequestLimit !== null &&
+                      k.requestsThisPeriod >= k.monthlyRequestLimit ? (
+                        <Badge tone="warning">Monthly limit reached</Badge>
+                      ) : null}
                     </div>
                     <p className="font-mono text-xs">{k.keyPrefix}_…</p>
                     <p className="flex flex-wrap gap-1">
@@ -180,6 +185,18 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
                       ) : (
                         'any address'
                       )}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      Requests this period:{' '}
+                      <span className="text-foreground">
+                        {k.requestsThisPeriod.toLocaleString('en-IN')}
+                        {k.monthlyRequestLimit === null
+                          ? ''
+                          : ` of ${k.monthlyRequestLimit.toLocaleString('en-IN')}`}
+                      </span>{' '}
+                      {k.monthlyRequestLimit === null
+                        ? '(no limit of its own)'
+                        : '(its own monthly limit)'}
                     </p>
                     <dl className="grid gap-x-4 gap-y-1 text-xs text-muted-foreground sm:grid-cols-2">
                       <div>
@@ -225,6 +242,7 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
                       rotatable={inPlan && k.state === 'active' && !k.replacedByKeyId}
                       revocable={k.state === 'active'}
                       allowedNetworks={k.state === 'active' ? k.allowedNetworks : undefined}
+                      monthlyRequestLimit={k.state === 'active' ? k.monthlyRequestLimit : undefined}
                     />
                   </li>
                 );

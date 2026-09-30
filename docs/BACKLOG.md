@@ -438,13 +438,18 @@ verification, app review, Embedded Signup configuration).
   and moving conversations built, locally verified]** (ADR-093: `conversations.write` gives a
   conversation to a member who can answer it, unassigns it or moves it to a team, routed as the
   inbox routes it; `conversations.read` lists those members, by name, and the teams; conversations
-  name their member and team by id; the inbox now offers and accepts only such members too).
+  name their member and team by id; the inbox now offers and accepts only such members too);
+  **[monthly limits per key built, locally verified]** (ADR-097: every admitted request is counted
+  for its key in the company's usage period, and a key may have its own monthly limit, set at
+  creation and changed after a recent sign-in; a request its key refuses (429
+  `key_quota_exceeded`) counts for neither the key nor the company, nor one the company refuses;
+  Settings → API keys shows each key's requests this period).
   Remaining: media messages, call-to-action messages through the API, taking reactions back,
   assigning many conversations at once, media downloads, statuses changed since a time, starting or
   stopping runs for many contacts in one call, bulk sends in one call, networks for the whole
-  company, per-key quotas, limits per endpoint, availability per single endpoint (plans choose per
-  scope since ADR-092), and dropping the one-argument key lookup kept for rolling deploys (0051).
-  Replaying many deliveries in one call is built with P5-09 (ADR-095).
+  company, limits per endpoint, availability per single endpoint (plans choose per scope since
+  ADR-092), warnings before a key's own limit, and dropping the one-argument key lookup kept for
+  rolling deploys (0051). Replaying many deliveries in one call is built with P5-09 (ADR-095).
 - **P5-09 Outgoing webhooks** **[built, locally verified; delivered to local test receivers only]**
   (ADR-053): up to 10 endpoints per company (`developer.manage`) for `message.received`,
   `message.status`, `consent.changed` and `template.status_changed`, captured by database triggers

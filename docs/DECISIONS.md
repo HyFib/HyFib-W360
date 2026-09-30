@@ -3271,3 +3271,41 @@ Not built: an email when the worker itself stops (an alert the worker sends cann
 its liveness and readiness probes are for it, see DEPLOYMENT, and the console says when the last
 check was), a reminder while a queue stays late, an email when it has caught up, limits changed
 without a release, and trends of waits over time.
+
+## ADR-097 Monthly request limits per API key (2026-09-30)
+
+Context: a company's plan limits the API requests of the whole company in a month (ADR-061), and
+the rate limits (ADR-068) bound each key only by the second. One integration (a partner's feed, a
+script run in a loop) could use up the month's requests every other integration of the company
+needs, and nobody could tell which key used what: keys showed only when they were last used.
+
+Decision:
+
+- **Counted per key:** every request the API admits is also counted for the key that made it, in
+  `app.api_key_usage` (one row per key and period), in the company's usage period (ADR-061), so a
+  key's month is the plan's month. Keys without a limit are counted too, so Settings → API keys
+  shows each key's requests this period.
+- **A key's own limit:** optional, a whole number from 1 to a billion (`api_keys.monthly_request_limit`,
+  null for none). Set when the key is created and changed later for an active key, by owners and
+  administrators (`developer.manage`) after a recent sign-in (ADR-056), like its addresses
+  (ADR-076); the change applies from the key's next request, to the requests already counted this
+  period, and is audited with the limits before and after (`api_key.limit_changed`; a creation's
+  audit entry carries the limit). A rotated key's successor keeps the limit, and its own requests
+  are counted from zero: the same people manage both, so this is no way around a limit they could
+  change anyway.
+- **Admission:** in the transaction that counts the company's request (ADR-061), the key's count
+  is taken first, below its limit (one upsert, atomic whatever runs in parallel), then the
+  company's; a request its key refuses takes nothing from the company, as with the rate limits,
+  and a request the company refuses is taken back from its key (a savepoint), so a refused request
+  counts for neither. Every request locks its key's row before its company's, so requests cannot
+  deadlock. A key that used up its month gets 429 `rate_limited` with reason `key_quota_exceeded`,
+  the limit and when requests are accepted again in the message, and Retry-After until the next
+  period; with both used up, the key's refusal is the one given.
+- **Access and data:** the runtime role reads the counts, adds to them and cannot move them to
+  another key or period or delete them (column grants); a count belongs to a key of the same
+  company (a composite foreign key). The counts are in the company export and are deleted with the
+  company, before its keys.
+
+Not built: warnings before a key's limit (the company's warning at 80% stays, ADR-062), emails
+when a key's month is used up, per-key limits per endpoint, and per-key usage on HyFib's platform
+pages.

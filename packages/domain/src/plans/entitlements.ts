@@ -1,6 +1,7 @@
 import { AppError, uuidv7 } from '@w360/core';
 import {
   and,
+  apiKeys,
   automations,
   channelAccounts,
   eq,
@@ -323,24 +324,63 @@ export function assertScopesInPlan(
 }
 
 export type ApiRequestCount =
-  | { ok: true; used: number; limit: number | null; apiScopes: ReadonlySet<ApiScope> | null }
-  | { ok: false; reason: 'not_in_plan' | 'quota_exceeded'; limit: number; periodEnd: Date };
+  | {
+      ok: true;
+      /** The company's requests this period, this one included, and the plan's limit. */
+      used: number;
+      limit: number | null;
+      /** The key's requests this period, this one included, and its own limit (ADR-097). */
+      keyUsed: number;
+      keyLimit: number | null;
+      apiScopes: ReadonlySet<ApiScope> | null;
+    }
+  | {
+      ok: false;
+      reason: 'not_in_plan' | 'quota_exceeded' | 'key_quota_exceeded';
+      limit: number;
+      periodEnd: Date;
+    };
 
 /**
- * Counts one public API request in the month's usage period (ADR-061), atomically and never beyond
- * the limit, whatever runs in parallel; counted without a limit too, so the month's use is known.
- * Refuses when the plan leaves the API out (limit 0) or the month's requests are used up; otherwise
- * gives the scopes the plan includes (ADR-092), which the request is then held to.
+ * Counts one public API request in the month's usage period (ADR-061), for the company and for the
+ * key that made it (ADR-097), atomically and never beyond either limit, whatever runs in parallel;
+ * counted without a limit too, so the month's use is known. Refuses when the plan leaves the API
+ * out (limit 0), the key's own requests for the month are used up, or the company's are; a request
+ * refused counts for neither. Otherwise gives the scopes the plan includes (ADR-092), which the
+ * request is then held to.
  */
 export async function consumeApiRequest(
   tx: Tx,
   tenantId: string,
+  keyId: string,
   now: Date,
 ): Promise<ApiRequestCount> {
   const entitlements = await loadEntitlements(tx, tenantId);
   const limit = entitlements.limits.apiRequests;
   const { start, end } = usagePeriod(entitlements.usageAnchor, now);
   if (limit === 0) return { ok: false, reason: 'not_in_plan', limit, periodEnd: end };
+  const [key] = await tx
+    .select({ limit: apiKeys.monthlyRequestLimit })
+    .from(apiKeys)
+    .where(and(eq(apiKeys.tenantId, tenantId), eq(apiKeys.id, keyId)));
+  if (!key) throw new Error('The API key of an authenticated request was not found.');
+  const keyLimit = key.limit;
+  // The key first, as the rate limits (ADR-068): a request its key refuses takes nothing from the
+  // company. Every request locks its key's row before the company's, so they cannot deadlock.
+  await tx.execute(sql`savepoint api_request_count`);
+  const counted = await tx.execute<{ used: number }>(
+    sql`insert into app.api_key_usage as u (id, tenant_id, api_key_id, period_start, used)
+        values (${uuidv7()}::uuid, ${tenantId}::uuid, ${keyId}::uuid,
+                ${start.toISOString()}::timestamptz, 1)
+        on conflict (tenant_id, api_key_id, period_start)
+        do update set used = u.used + 1
+        where ${keyLimit === null ? sql`true` : sql`u.used < ${keyLimit}`}
+        returning u.used`,
+  );
+  const keyRow = counted.rows[0];
+  if (!keyRow) {
+    return { ok: false, reason: 'key_quota_exceeded', limit: keyLimit ?? 0, periodEnd: end };
+  }
   const res = await tx.execute<{ used: number }>(
     sql`insert into app.usage_counters as u (id, tenant_id, metric, period_start, used)
         values (${uuidv7()}::uuid, ${tenantId}::uuid, 'api_requests',
@@ -351,7 +391,18 @@ export async function consumeApiRequest(
         returning u.used`,
   );
   const row = res.rows[0];
-  return row
-    ? { ok: true, used: row.used, limit, apiScopes: entitlements.apiScopes }
-    : { ok: false, reason: 'quota_exceeded', limit: limit ?? 0, periodEnd: end };
+  if (!row) {
+    // The company refuses it: the key's count goes back to what it was.
+    await tx.execute(sql`rollback to savepoint api_request_count`);
+    return { ok: false, reason: 'quota_exceeded', limit: limit ?? 0, periodEnd: end };
+  }
+  await tx.execute(sql`release savepoint api_request_count`);
+  return {
+    ok: true,
+    used: row.used,
+    limit,
+    keyUsed: keyRow.used,
+    keyLimit,
+    apiScopes: entitlements.apiScopes,
+  };
 }

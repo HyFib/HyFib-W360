@@ -1,5 +1,89 @@
 # Progress
 
+## 2026-09-30 — Phase 5: monthly request limits per API key (P5-08, ADR-097)
+
+Status: **Implemented and locally verified (test data only).** A company's plan limits the API
+requests of the whole company in a month (ADR-061), so one integration could use up the month's
+requests every other integration needs, and nobody could see which key used what.
+
+### Completed
+
+- **Design (ADR-097):** every request the API admits is also counted for its key, in the company's
+  usage period; a key may have its own monthly limit (1 to a billion, or none), set at creation,
+  changed for an active key after a recent sign-in (audited) and kept on rotation, where the new
+  key counts from zero. The key's count comes first, in the transaction that counts the company's:
+  a request its key refuses (429, `key_quota_exceeded`) takes nothing from the company, and one the
+  company refuses is taken back from the key, so a refused request counts for neither.
+- **Migration 0073:** `app.api_keys.monthly_request_limit` (checked 1 to a billion; the runtime role
+  reads and updates it); `app.api_key_usage` (one row per key and period, a composite foreign key to
+  the company's key, row security, the runtime role adding to counts but unable to move or delete
+  them); deleted with the company before its keys (deletion step 855).
+- **Domain:** `consumeApiRequest` counts the key below its limit and then the company, rolling the
+  key's count back to a savepoint when the company refuses; `admitApiRequest` gives the key's
+  refusal with the limit, the period's end and Retry-After; the keys service takes a limit at
+  creation, changes it (`setMonthlyLimit`, audited `api_key.limit_changed`), copies it on rotation
+  and lists each key's requests this period; the OpenAPI document names the new reason; the company
+  export includes the counts and the limit.
+- **Web:** Settings → API keys shows each key's requests this period with its own limit, marks a
+  key whose limit is reached, and takes a limit when creating a key and in a "Limit" dialog.
+- **Tests:**
+  - Unit: the OpenAPI document names `key_quota_exceeded` in the 429 response and the reasons.
+  - Integration in `api-quota.test.ts` (5 new, 1 extended):
+    - counting apart: keys with and without a limit, eight requests at once admitting three of a
+      three-request key, the refusals (message, Retry-After) uncounted for the company, the next
+      period counting from zero while the list shows the current one;
+    - a refusal by the key or by the company counted for neither; the key's refusal given when both
+      are used up;
+    - three keys sending 24 requests at once admit exactly the company's ten, each key within its
+      own limit and its count what was admitted;
+    - changing the limit: at once, to the requests already counted, the same limit a no-op, emptied,
+      thousands separators; audited before and after, and on creation; refused with a stale
+      sign-in, without `developer.manage`, for another company, for bad input and for a revoked
+      key; rotation keeping the limit and counting from zero;
+    - grants and isolation: counts read only in their company, never moved to another key or period
+      nor deleted by the runtime role, a count's key the company's, the limit's check;
+    - the ADR-061 test of a plan without the API now also checks that nothing is counted for the key.
+  - e2e `api-keys.spec.ts`: a key created with a limit of three is refused on the fourth request
+    (429, `key_quota_exceeded`, Retry-After), the page marks it and counts the company's three, and
+    raising the limit, then removing it, lets requests through again.
+- **Docs:** ADR-097; SECURITY; THREAT-MODEL T115; RUNBOOKS (429 `key_quota_exceeded`); ARCHITECTURE
+  (and its outdated list of what the API lacks); DATA-RETENTION; BACKLOG P5-08; FEATURE-MATRIX W-136
+  and H-039.
+- **Mutation checks:** 31 regressions tried one at a time (3 through the e2e test), all caught.
+  - 7 in counting: a key's limit not enforced or off by one; a company refusal kept in the key's
+    count; keys without a limit not counted; a key counted per request time rather than per
+    period; the company counted before the key without taking it back; the key counted when the
+    plan leaves the API out.
+  - 3 in the refusal: given as the company's; without Retry-After; missing from the OpenAPI
+    document.
+  - 11 in the keys service: a new key given no limit; the limit missing from the creation's audit
+    entry; a rotated key without its limit; changes without a recent sign-in, by members without
+    `developer.manage`, to a revoked key, unaudited, or audited for the same limit; a limit of 0,
+    or any number text, accepted; each period of a key listed.
+  - 7 in the schema and export: counts movable to another key, deletable, naming another company's
+    key or without row security; limits outside 1 to a billion stored; counts not deleted with the
+    company or left out of the export.
+  - 3 through the e2e test: the create form sending no limit; a used-up key not marked; the limit
+    dialog saving the old limit.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                     | Result                                                                                                                                                                                  |
+| --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | the first lint flagged a loose `== null` in the settings component, replaced by explicit checks; then 0 problems / all files formatted / all workspace packages pass                    |
+| `pnpm test` (unit)                                                          | 434 passed; the OpenAPI test first failed on the new reason, and now expects it                                                                                                         |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 583 passed, including 5 new in `api-quota.test.ts`; the grants test first matched the mapped error's text ("Operation not permitted.") instead of PostgreSQL's, and now reads the cause |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 583 passed                                                                                                                                                                              |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / `api-keys.spec.ts` and `api-quota.spec.ts`: 12 passed (2.2 min), on the local database created for the day's runs, migrated to 0073                                      |
+| Mutation checks                                                             | 31 regressions tried (3 through the e2e test), all caught                                                                                                                               |
+
+### Known gaps
+
+- Not built: warnings before a key's own limit (the company's warning at 80% stays, ADR-062), an
+  email when a key's month is used up, limits per endpoint for a key, and per-key usage on HyFib's
+  platform pages.
+- A rotated key counts from zero, by design: the same members manage limits and rotation.
+
 ## 2026-09-30 — Phase 5: queue waits and alerts for late queues (P5-10, ADR-096)
 
 Status: **Implemented and locally verified (test data only; alerts go to the local test mailbox).**

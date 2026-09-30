@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { isAppError, systemClock, uuidv7, type Clock } from '@w360/core';
+import { authorizedTenantScope, sql } from '@w360/db';
 import {
   API_NOT_IN_PLAN,
   API_SCOPE_KEYS,
@@ -19,6 +20,7 @@ import {
   type ApiScope,
   type BillingNoticeDeps,
   type PlatformActor,
+  type TenantContext,
 } from '@w360/domain';
 import { createUser } from './helpers';
 import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './whatsapp-fixture';
@@ -29,7 +31,8 @@ import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './what
  * once, refused once the month's are used (with Retry-After until the next period), counted again
  * from the next period, a plan change taking effect at once, a plan without the API refusing every
  * request and new or rotated keys, one notice per period, published versions unchangeable, and
- * companies counted apart. Also the API scopes a plan includes (ADR-092).
+ * companies counted apart. Also the API scopes a plan includes (ADR-092), and each key's requests
+ * counted apart under its own monthly limit (ADR-097).
  */
 let fx: WhatsAppFixture;
 beforeAll(async () => {
@@ -227,6 +230,12 @@ describe('monthly API requests by plan', () => {
       [c.tenant.id],
     );
     expect(counted.rowCount).toBe(0);
+    // Nor for its key (ADR-097).
+    const keyCounted = await fx.dbs.adminPool.query(
+      `SELECT 1 FROM app.api_key_usage WHERE tenant_id = $1`,
+      [c.tenant.id],
+    );
+    expect(keyCounted.rowCount).toBe(0);
     expect((await usage(c)).limits.apiRequests).toBe(0);
 
     const companyOwner = await fx.ctx(c, c.owner);
@@ -527,5 +536,254 @@ describe('API scopes by plan (ADR-092)', () => {
     expect([...rows[0]!.def.matchAll(/'([a-z_.]+)'::text/g)].map((m) => m[1])).toEqual([
       ...API_SCOPE_KEYS,
     ]);
+  });
+});
+
+describe('monthly request limits per key (ADR-097)', () => {
+  /** A key of the company with its own monthly limit ('' for none), and its request context. */
+  async function limitedKey(c: Company, monthlyRequestLimit: string) {
+    const owner = await fx.ctx(c, c.owner);
+    const created = await keys().create(owner, {
+      name: 'Limited key',
+      scopes: ['contacts.read'],
+      expiresInDays: 0,
+      monthlyRequestLimit,
+    });
+    const ctx = await authenticateApiToken(fx.dbs.app, created.token, uuidv7());
+    if (!ctx) throw new Error('a new key does not authenticate');
+    return { ...created, ctx };
+  }
+
+  /** Each key's requests this period and its own limit, as Settings → API keys lists them. */
+  async function keyCounts(c: Company) {
+    const list = await keys().list(await fx.ctx(c, c.owner));
+    // One line per key, whatever periods it was counted in.
+    expect(new Set(list.map((k) => k.id)).size).toBe(list.length);
+    return Object.fromEntries(
+      list.map((k) => [k.id, [k.requestsThisPeriod, k.monthlyRequestLimit] as const]),
+    );
+  }
+
+  const keyRefusal = (limit: number, periodEnd: Date, now: Date) => ({
+    ok: false,
+    status: 429,
+    code: 'rate_limited',
+    reason: 'key_quota_exceeded',
+    message: `This API key allows ${limit.toLocaleString('en-US')} requests a month, and all are used. Requests are accepted again from ${periodEnd.toISOString()}, or once the key's limit is raised in Settings → API keys.`,
+    retryAfterSeconds: Math.ceil((periodEnd.getTime() - now.getTime()) / 1000),
+  });
+
+  it("counts each key's requests apart, and never admits more than a key's limit, even all at once", async () => {
+    const c = await fx.company();
+    const open = await limitedKey(c, '');
+    const limited = await limitedKey(c, '3');
+    expect(await admit(open.ctx)).toMatchObject({ ok: true });
+    expect(await admit(open.ctx)).toMatchObject({ ok: true });
+    const now = new Date();
+    const results = await Promise.all(Array.from({ length: 8 }, () => admit(limited.ctx, now)));
+    expect(results.filter((r) => r.ok)).toHaveLength(3);
+    const { periodEnd, used } = (await usage(c)).apiRequests;
+    expect(results.filter((r) => !r.ok)).toEqual(
+      Array.from({ length: 5 }, () => keyRefusal(3, periodEnd, now)),
+    );
+    // What the key refused is not counted for the company either.
+    expect(used).toBe(5);
+    expect(await keyCounts(c)).toEqual({ [open.id]: [2, null], [limited.id]: [3, 3] });
+
+    // The key's next period, the company's, counts from zero; the list shows the current one.
+    expect(await admit(limited.ctx, periodEnd)).toMatchObject({ ok: true });
+    expect(await keyCounts(c)).toEqual({ [open.id]: [2, null], [limited.id]: [3, 3] });
+    const rows = await fx.query<{ used: number }>(
+      `SELECT used FROM app.api_key_usage WHERE tenant_id = $1 AND api_key_id = $2
+        ORDER BY period_start`,
+      [c.tenant.id, limited.id],
+    );
+    expect(rows).toEqual([{ used: 3 }, { used: 1 }]);
+  });
+
+  it('counts a request refused by its key or by its company for neither', async () => {
+    const owner = await platformOwner();
+    const c = await fx.company();
+    const wide = await limitedKey(c, '5');
+    const narrow = await limitedKey(c, '1');
+    await activePlan(owner, c, await publishedPlan(owner, '2'));
+    expect(await admit(narrow.ctx)).toMatchObject({ ok: true });
+    expect(await admit(narrow.ctx)).toMatchObject({ ok: false, reason: 'key_quota_exceeded' });
+    expect((await usage(c)).apiRequests.used).toBe(1);
+    expect(await admit(wide.ctx)).toMatchObject({ ok: true });
+    // The company's month is used up: its refusals leave the key's count as it was.
+    expect(await admit(wide.ctx)).toMatchObject({ ok: false, reason: 'quota_exceeded' });
+    expect(await admit(wide.ctx)).toMatchObject({ ok: false, reason: 'quota_exceeded' });
+    expect((await usage(c)).apiRequests.used).toBe(2);
+    expect(await keyCounts(c)).toEqual({ [wide.id]: [1, 5], [narrow.id]: [1, 1] });
+    // With both used up, the key's refusal is the one given.
+    expect(await admit(narrow.ctx)).toMatchObject({ ok: false, reason: 'key_quota_exceeded' });
+  });
+
+  it("admits exactly the company's limit across keys at once, each within its own", async () => {
+    const owner = await platformOwner();
+    const c = await fx.company();
+    const a = await limitedKey(c, '4');
+    const b = await limitedKey(c, '4');
+    const open = await limitedKey(c, '');
+    await activePlan(owner, c, await publishedPlan(owner, '10'));
+    const now = new Date();
+    const results = await Promise.all(
+      [a, b, open].flatMap((k) =>
+        Array.from({ length: 8 }, async () => [k.id, await admit(k.ctx, now)] as const),
+      ),
+    );
+    const admitted = (id: string) => results.filter(([k, r]) => k === id && r.ok).length;
+    expect(admitted(a.id)).toBeLessThanOrEqual(4);
+    expect(admitted(b.id)).toBeLessThanOrEqual(4);
+    expect(results.filter(([, r]) => r.ok)).toHaveLength(10);
+    expect((await usage(c)).apiRequests.used).toBe(10);
+    // Each key counted what was admitted: the company's refusals were taken back from its keys.
+    expect(await keyCounts(c)).toEqual({
+      [a.id]: [admitted(a.id), 4],
+      [b.id]: [admitted(b.id), 4],
+      [open.id]: [admitted(open.id), null],
+    });
+  });
+
+  it("changes an active key's limit after a recent sign-in, audited, and carries it to the rotated key", async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const key = await limitedKey(c, '2');
+    const set = (ctx: TenantContext, monthlyRequestLimit: string, keyId = key.id) =>
+      keys().setMonthlyLimit(ctx, { keyId, monthlyRequestLimit });
+    const audit = async () =>
+      (
+        await fx.query<{ metadata: Record<string, unknown> }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE action = 'api_key.limit_changed' AND subject_id = $1 ORDER BY occurred_at, id`,
+          [key.id],
+        )
+      ).map((r) => r.metadata);
+
+    expect(await admit(key.ctx)).toMatchObject({ ok: true });
+    expect(await admit(key.ctx)).toMatchObject({ ok: true });
+    expect(await admit(key.ctx)).toMatchObject({ ok: false, reason: 'key_quota_exceeded' });
+    // A new limit applies at once, to the requests already counted this period.
+    expect(await set(owner, '3')).toEqual({ monthlyRequestLimit: 3 });
+    expect(await admit(key.ctx)).toMatchObject({ ok: true });
+    expect(await admit(key.ctx)).toMatchObject({ ok: false, reason: 'key_quota_exceeded' });
+    // The same limit again changes nothing and records nothing; emptied, only the plan limits it.
+    expect(await set(owner, ' 3 ')).toEqual({ monthlyRequestLimit: 3 });
+    expect(await set(owner, '')).toEqual({ monthlyRequestLimit: null });
+    expect(await admit(key.ctx)).toMatchObject({ ok: true });
+    expect(await set(owner, '1,000,000')).toEqual({ monthlyRequestLimit: 1_000_000 });
+    expect(await audit()).toEqual([
+      { keyPrefix: key.keyPrefix, from: 2, to: 3 },
+      { keyPrefix: key.keyPrefix, from: 3, to: null },
+      { keyPrefix: key.keyPrefix, from: null, to: 1_000_000 },
+    ]);
+    const [created] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE action = 'api_key.created' AND subject_id = $1`,
+      [key.id],
+    );
+    expect(created?.metadata).toMatchObject({ keyPrefix: key.keyPrefix, monthlyRequestLimit: 2 });
+
+    // A stale sign-in, a member who does not manage keys, another company and bad input.
+    const stale: TenantContext = { ...owner, signedInAt: new Date(Date.now() - 16 * 60_000) };
+    await expectAppError(set(stale, '5'), 'step_up_required');
+    await expectAppError(set(await fx.ctx(c, c.agent), '5'), 'forbidden');
+    await expectAppError(set(await fx.ctx(other, other.owner), '5'), 'not_found');
+    const invalid =
+      "A key's monthly limit is a whole number of requests from 1 to 1,000,000,000, or empty for none.";
+    for (const bad of ['0', '-1', '1.5', '1e3', 'ten', '1000000001']) {
+      const error = await expectAppError(set(owner, bad), 'validation_failed');
+      expect(isAppError(error) && error.issues).toEqual([
+        { path: 'monthlyRequestLimit', message: invalid },
+      ]);
+    }
+    await expectAppError(
+      keys().create(owner, {
+        name: 'Zero',
+        scopes: ['contacts.read'],
+        expiresInDays: 0,
+        monthlyRequestLimit: '0',
+      }),
+      'validation_failed',
+    );
+    expect((await keyCounts(c))[key.id]).toEqual([4, 1_000_000]);
+
+    // Rotation keeps the limit, and the new key's requests are counted from zero.
+    await set(owner, '1');
+    const rotated = await keys().rotate(owner, { keyId: key.id, overlapHours: 1 });
+    const rotatedCtx = await authenticateApiToken(fx.dbs.app, rotated.token, uuidv7());
+    if (!rotatedCtx) throw new Error('the rotated key does not authenticate');
+    expect(await admit(rotatedCtx)).toMatchObject({ ok: true });
+    expect(await admit(rotatedCtx)).toMatchObject({ ok: false, reason: 'key_quota_exceeded' });
+    expect((await keyCounts(c))[rotated.id]).toEqual([1, 1]);
+    // Only an active key's limit changes.
+    await keys().revoke(owner, { keyId: rotated.id });
+    await expectAppError(
+      set(owner, '9', rotated.id),
+      'conflict',
+      'Only the limit of an active key can be changed.',
+    );
+  });
+
+  it("keeps each key's counts to its company, and to what the runtime role may do", async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const key = await limitedKey(c, '');
+    const otherKey = await limitedKey(other, '');
+    expect(await admit(key.ctx)).toMatchObject({ ok: true });
+    const inCompany = <T>(tenantId: string, query: ReturnType<typeof sql>) =>
+      fx.dbs.app.run(authorizedTenantScope(tenantId, null), async (tx) => {
+        const res = await tx.execute<T & Record<string, unknown>>(query);
+        return res.rows;
+      });
+    /** The PostgreSQL message behind a mapped error ("Operation not permitted." hides it). */
+    const refusal = async (promise: Promise<unknown>): Promise<string> => {
+      try {
+        await promise;
+      } catch (error) {
+        let current: unknown = error;
+        while (current instanceof Error) {
+          if (
+            'code' in current &&
+            typeof current.code === 'string' &&
+            /^[0-9A-Z]{5}$/.test(current.code)
+          )
+            return current.message;
+          current = current.cause;
+        }
+        throw error;
+      }
+      throw new Error('expected the statement to be refused');
+    };
+    expect(
+      await inCompany<{ used: number }>(c.tenant.id, sql`select used from app.api_key_usage`),
+    ).toEqual([{ used: 1 }]);
+    expect(await inCompany(other.tenant.id, sql`select used from app.api_key_usage`)).toEqual([]);
+    // Counts are added to, never moved to another key or period, nor deleted.
+    for (const statement of [
+      sql`update app.api_key_usage set api_key_id = api_key_id`,
+      sql`update app.api_key_usage set period_start = now()`,
+      sql`delete from app.api_key_usage`,
+    ]) {
+      expect(await refusal(inCompany(c.tenant.id, statement))).toMatch(/permission denied/);
+    }
+    // A count belongs to a key of the same company.
+    await expect(
+      fx.dbs.adminPool.query(
+        `INSERT INTO app.api_key_usage (id, tenant_id, api_key_id, period_start, used)
+         VALUES ($1, $2, $3, now(), 1)`,
+        [uuidv7(), c.tenant.id, otherKey.id],
+      ),
+    ).rejects.toThrow(/api_key_usage_key_fk/);
+    // The table refuses a limit outside 1 to a billion.
+    for (const limit of [0, 1_000_000_001]) {
+      await expect(
+        fx.dbs.adminPool.query(`UPDATE app.api_keys SET monthly_request_limit = $2 WHERE id = $1`, [
+          key.id,
+          limit,
+        ]),
+      ).rejects.toThrow(/api_keys_monthly_request_limit_check/);
+    }
   });
 });

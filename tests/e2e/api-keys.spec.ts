@@ -201,3 +201,72 @@ test('a key limited to listed addresses refuses requests from other addresses un
   expect((await from('203.0.113.5')).status()).toBe(200);
   await expectNoHorizontalOverflow(page);
 });
+
+test('a key with its own monthly limit is refused once it is used up, until the limit is raised', async ({
+  page,
+  request,
+}) => {
+  const email = uniqueEmail('keylimit');
+  const suffix = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`;
+  const slug = `keylimit-${suffix}`;
+  const companyName = `Key Limit Co ${suffix}`;
+  await signUpAndVerify(page, { name: 'Kiran Limit', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill(companyName);
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page.getByRole('heading', { name: companyName })).toBeVisible();
+
+  // A partner's key allowed three requests a month of its own (ADR-097); the company's plan has
+  // no monthly limit.
+  await page.goto(`/c/${slug}/settings/api-keys`);
+  await page.getByLabel('Name', { exact: true }).fill('Partner feed');
+  await page.getByRole('checkbox', { name: /Read contacts/ }).check();
+  await page.getByLabel('Monthly request limit (optional)').fill('3');
+  await page.getByRole('button', { name: 'Create API key' }).click();
+  const token = await page.getByLabel('API key', { exact: true }).inputValue();
+  await page.getByRole('button', { name: 'I have stored the key' }).click();
+  await expect(
+    page.getByText(/Requests this period:\s*0 of 3\s*\(its own monthly limit\)/),
+  ).toBeVisible();
+
+  const call = () =>
+    request.get('/api/v1/contacts', { headers: { Authorization: `Bearer ${token}` } });
+  for (let i = 0; i < 3; i += 1) expect((await call()).status()).toBe(200);
+  const refused = await call();
+  expect(refused.status()).toBe(429);
+  expect(Number(refused.headers()['retry-after'])).toBeGreaterThan(0);
+  const body = (await refused.json()) as {
+    error: { code: string; reason: string; message: string };
+  };
+  expect(body.error).toMatchObject({ code: 'rate_limited', reason: 'key_quota_exceeded' });
+  expect(body.error.message).toContain('This API key allows 3 requests a month');
+
+  // The page shows the key used up; the refused request is not counted for the company.
+  await page.reload();
+  await expect(page.getByText(/Requests this period:\s*3 of 3/)).toBeVisible();
+  await expect(page.getByText('Monthly limit reached', { exact: true })).toBeVisible();
+  await expect(
+    page.getByText(/:\s*3\s*API requests; your plan has no monthly limit\./),
+  ).toBeVisible();
+
+  // The owner raises the key's limit; the next request is accepted at once.
+  await page.getByRole('button', { name: 'Limit for Partner feed' }).click();
+  const dialog = page.getByRole('alertdialog');
+  await dialog.getByLabel('Monthly request limit (optional)').fill('5');
+  await dialog.getByRole('button', { name: 'Save limit' }).click();
+  await expect(
+    page.getByText(/Requests this period:\s*3 of 5\s*\(its own monthly limit\)/),
+  ).toBeVisible();
+  await expect(page.getByText('Monthly limit reached', { exact: true })).toHaveCount(0);
+  expect((await call()).status()).toBe(200);
+
+  // Emptied, only the plan limits the key.
+  await page.getByRole('button', { name: 'Limit for Partner feed' }).click();
+  await page.getByRole('alertdialog').getByLabel('Monthly request limit (optional)').fill('');
+  await page.getByRole('alertdialog').getByRole('button', { name: 'Save limit' }).click();
+  await expect(page.getByText(/\(no limit of its own\)/)).toBeVisible();
+  expect((await call()).status()).toBe(200);
+  await page.reload();
+  await expect(page.getByText(/Requests this period:\s*5\s*\(no limit of its own\)/)).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+});

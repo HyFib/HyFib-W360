@@ -38,6 +38,10 @@ export const EXPORT_EXCLUDED_TABLES: Readonly<Record<string, string>> = {
 
 export const EXPORT_TABLES: readonly ExportTableSpec[] = [
   {
+    table: 'app.api_key_usage',
+    columns: ['id', 'api_key_id', 'period_start', 'used'],
+  },
+  {
     table: 'app.api_keys',
     columns: [
       'id',
@@ -53,6 +57,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'replaced_by_key_id',
       'expiry_reminded_at',
       'allowed_networks',
+      'monthly_request_limit',
     ],
     omitted: { token_hash: "Only a hash of the key's token." },
   },
