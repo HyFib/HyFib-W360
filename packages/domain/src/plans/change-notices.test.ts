@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { NOTICE_LINE_MAX, emailPayloadSchema, renderEmail } from '../email/templates';
-import { planChangeNotice, type PlanChangeFacts } from './change-notices';
+import {
+  planChangeNotice,
+  subscriptionCancelNotice,
+  type PlanChangeFacts,
+  type SubscriptionCancelFacts,
+} from './change-notices';
 
 const base: PlanChangeFacts = {
   companyName: 'Acme Traders',
@@ -100,5 +105,81 @@ describe('the email about a plan HyFib staff set (ADR-100)', () => {
     expect(email.html).toContain('HyFib changed the plan of &lt;Acme&gt; &amp; Co');
     expect(email.html).not.toContain('<Acme>');
     expect(email.html).toContain(`href="${url}"`);
+  });
+});
+
+const cancelled: SubscriptionCancelFacts = {
+  companyName: 'Acme Traders',
+  planName: 'Growth',
+  cancelledAt: new Date('2026-09-30T20:00:00Z'),
+  plan: { kind: 'paid', periodEnd: new Date('2026-10-30T18:30:00Z') },
+  reason: 'Customer asked by phone, ticket 882',
+  timeZone: 'Asia/Kolkata',
+};
+
+describe('the email about a plan subscription HyFib staff cancelled (ADR-101)', () => {
+  it('tells that nothing more is charged, the period paid in the company’s time zone and the reason', () => {
+    expect(subscriptionCancelNotice(cancelled)).toEqual({
+      subject: 'HyFib cancelled your plan subscription',
+      lines: [
+        'HyFib cancelled the Razorpay subscription for the Growth plan of Acme Traders on 1 Oct 2026, so nothing more is charged.',
+        'The period it paid runs until 31 Oct 2026; the plan then ends, and Billing shows how to continue.',
+        "HyFib's reason: Customer asked by phone, ticket 882",
+      ],
+    });
+    expect(subscriptionCancelNotice({ ...cancelled, timeZone: 'Europe/London' }).lines).toEqual([
+      'HyFib cancelled the Razorpay subscription for the Growth plan of Acme Traders on 30 Sept 2026, so nothing more is charged.',
+      'The period it paid runs until 30 Oct 2026; the plan then ends, and Billing shows how to continue.',
+      "HyFib's reason: Customer asked by phone, ticket 882",
+    ]);
+  });
+
+  it('tells the grace days after the last period paid, or that the plan is not changed', () => {
+    const grace = subscriptionCancelNotice({
+      ...cancelled,
+      plan: {
+        kind: 'grace',
+        periodEnd: new Date('2026-09-25T18:30:00Z'),
+        graceEndsAt: new Date('2026-10-02T18:30:00Z'),
+      },
+    });
+    expect(grace.lines[1]).toBe(
+      'Its last paid period ended on 26 Sept 2026, and the plan ends when its grace days end on 3 Oct 2026; Billing shows how to continue.',
+    );
+    const unchanged = subscriptionCancelNotice({
+      ...cancelled,
+      plan: { kind: 'unchanged' },
+      reason: '  ',
+    });
+    // A blank reason is left out.
+    expect(unchanged.lines).toEqual([
+      'HyFib cancelled the Razorpay subscription for the Growth plan of Acme Traders on 1 Oct 2026, so nothing more is charged.',
+      'This does not change the company’s plan; the plan card in Billing shows it.',
+    ]);
+    expect(subscriptionCancelNotice({ ...cancelled, reason: null }).lines).toHaveLength(2);
+  });
+
+  it('keeps a long reason and the longest names within a billing notice', () => {
+    const reason = `${'Cancelled at the customer’s request after the call '.repeat(9)}end`;
+    expect(reason.length).toBeGreaterThan(450);
+    const companyName = 'A'.repeat(120);
+    const notice = subscriptionCancelNotice({
+      ...cancelled,
+      companyName,
+      planName: 'P'.repeat(80),
+      reason,
+    });
+    expect(notice.lines.slice(2).join(' ')).toBe(`HyFib's reason: ${reason}`);
+    const payload = {
+      kind: 'billing.notice' as const,
+      companyName,
+      subject: notice.subject,
+      lines: notice.lines,
+      url: 'https://app.example.test/c/acme/billing',
+    };
+    expect(emailPayloadSchema.safeParse(payload).success).toBe(true);
+    expect(renderEmail(payload).subject).toBe(
+      `HyFib cancelled your plan subscription · ${companyName}`,
+    );
   });
 });

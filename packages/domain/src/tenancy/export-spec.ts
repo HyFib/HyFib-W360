@@ -1333,6 +1333,10 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'synced_at',
       'updated_at',
     ],
+    omitted: {
+      staff_cancel_notice_due:
+        "The worker's mark of a cancellation by staff not emailed yet (ADR-101); the cancellation itself is exported.",
+    },
   },
   {
     table: 'app.rate_change_notices',

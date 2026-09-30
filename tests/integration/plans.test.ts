@@ -23,6 +23,7 @@ import {
   sweepPlanStates,
   type AutomationTrigger,
   type BillingNoticeDeps,
+  type PlanChangeNoticeResult,
   type PlatformActor,
   type TenantContext,
 } from '@w360/domain';
@@ -1126,7 +1127,21 @@ describe('isolation', () => {
 });
 
 describe('plan change notices (ADR-100)', () => {
-  const notify = () => notifyStaffPlanChanges({ db: fx.dbs.app, notices: notices() });
+  /**
+   * Every change due, as successive minute sweeps would tell them: a sweep takes the 50 oldest,
+   * and other files leave staff changes of their own companies behind.
+   */
+  const notify = async (): Promise<PlanChangeNoticeResult> => {
+    const total: PlanChangeNoticeResult = { notified: 0, superseded: 0, failed: [] };
+    for (let sweep = 0; sweep < 20; sweep += 1) {
+      const result = await notifyStaffPlanChanges({ db: fx.dbs.app, notices: notices() });
+      total.notified += result.notified;
+      total.superseded += result.superseded;
+      total.failed.push(...result.failed);
+      if (result.notified + result.superseded === 0 || result.failed.length > 0) break;
+    }
+    return total;
+  };
   /** The plan change emails queued for the company, decrypted, oldest first. */
   async function changeEmails(tenantId: string) {
     const { rows } = await fx.dbs.adminPool.query<{

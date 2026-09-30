@@ -1,5 +1,101 @@
 # Progress
 
+## 2026-09-30 — Phase 5: emails when HyFib staff cancel a company's plan subscription (P5-07, ADR-101)
+
+Status: **Implemented and locally verified (test data only).** A platform owner can cancel a
+company's Razorpay subscription at once (ADR-063), for example before changing its plan. The
+cancellation was audited in both audit logs, but nobody at the company was told until the plan
+ended, while the company's own cancellations email its billing managers (a known gap of ADR-100).
+
+### Completed
+
+- **Design (ADR-101):** the company's active billing managers (owners and members with the billing
+  role) get one email, "HyFib cancelled your plan subscription", with the plan and the day in the
+  company's time zone, that nothing more is charged, what the plan keeps and HyFib's reason (the one
+  the company's audit log shows). What the plan keeps is read from the plan state when the email
+  goes out: the period the subscription paid, still running (the plan then ends, without grace
+  days); the grace days after the last period it paid; or neither (a trial, a plan staff set since,
+  or a plan that already ended), which the cancellation does not change. A period or grace days the
+  plan sweep has not moved on yet are not told as running. The company's own cancellations and
+  those of a company deletion are not marked.
+- **Migration 0078:** `app.plan_subscriptions.staff_cancel_notice_due` (false by default; the
+  platform role may update it, the runtime role no column) with a partial index;
+  `ops.plan_subscription_cancel_notices_due` lists the marked subscriptions, oldest cancellation
+  first, not companies being deleted; `app.take_plan_subscription_cancel_notice(subscription)` takes
+  one in the company's own scope, locking the company row first, and returns true only for the call
+  that cleared the mark. Both SECURITY DEFINER with a pinned `search_path`, executable by the runtime
+  role only; the definer may update that one column (with a policy for it).
+- **Domain:** `cancelTenantSubscription` marks the cancellation; `plans/change-notices.ts` has the
+  email's text (`subscriptionCancelNotice`) and the sweep (`notifyStaffSubscriptionCancellations`),
+  which reads the reason from the cancellation's entry in the company's audit log and the plan state,
+  in the transaction that takes the notice and queues the emails.
+- **Worker:** the minute billing sweep tells the cancellations after the staff plan changes, logging
+  the count and each failure (it is told the next minute).
+- **Web:** the platform form's reason says it is emailed to the company's billing managers.
+- **Tests:**
+  - Unit (`change-notices.test.ts`, 3 new): the paid period in the company's time zone with the
+    reason; the grace days, and a plan the cancellation does not change, without a blank reason; a
+    long reason and the longest company and plan names within a billing notice.
+  - Integration (`plan-subscriptions.test.ts`, 6 new):
+    - once to the owner, with the paid period, the reason and the Billing link; the next sweep sends
+      nothing;
+    - nothing for the company's own cancellation or a deletion's; a company being deleted not
+      listed (its mark kept); two sweeps at once tell a cancellation once;
+    - the plan as it is when the email goes out: grace days after the last paid period; a plan staff
+      set after cancelling, a period and grace days the plan sweep had not moved on, told as not
+      changed;
+    - two cancellations of one company before a sweep, each told with its own reason and plan;
+    - the runtime role can neither set nor clear the mark; taking needs a company scope and takes
+      only that company's notice, once;
+    - the company row locked before the subscription: while another transaction holds the company
+      row, the waiting notice holds nothing on the subscription (`FOR UPDATE NOWAIT` succeeds).
+  - The isolation suite lists both functions among those only the runtime role may execute.
+  - e2e (`plan-subscription.spec.ts`): after the owner cancels at the end of the period, a platform
+    owner cancels at once from the company's platform page with a reason, and the test waits for the
+    email to the owner through the worker's sweep and Mailpit, with the reason and the paid period.
+- **Docs:** ADR-101; SECURITY (platform roles); THREAT-MODEL T65; RUNBOOKS (cancelling, a company
+  not told, migration 0078); ARCHITECTURE; BACKLOG P5-01 and P5-07; FEATURE-MATRIX H-041.
+- **Found while finishing:**
+  - Checking the plan transitions before writing the email's second line: a plan past due has
+    already passed its period's end (its grace days run), and a plan staff set after the
+    cancellation is not on the subscription's period, so "paid until the period's end" would have
+    been wrong for both. The line now follows the plan state.
+  - The first full integration run on PostgreSQL 18 failed the ADR-100 test of a plan change's
+    email, and running `plan-subscriptions.test.ts` before `plans.test.ts` reproduced it. A sweep
+    takes the 50 oldest changes, and with this part's tests the companies that files run earlier
+    put on plans passed 50, so the test's own company was not reached. Both notice tests now repeat
+    the sweep until nothing is left to tell, as the minute sweeps would. The same run had passed on
+    PostgreSQL 17.
+- **Mutation checks:** 21 regressions tried one at a time, all caught (1 through the e2e test).
+  - 10 in the migration: the company row not locked first; the mark not cleared when taken; a
+    notice taken again after it was taken; another company's notice taken; taking without a company
+    scope; companies being deleted listed; the runtime role allowed to set the mark; the definer
+    unable to clear it; the take function, or the due list, granted to PUBLIC.
+  - 5 in the domain: staff cancellations not marked; the company's own cancellation marked; the
+    take function's answer ignored; the reason left out; the reason read from another
+    cancellation's audit entry.
+  - 5 in what the email tells: dates in UTC rather than the company's time zone; a period told as
+    running after it ended; a plan staff set since told as paid; grace days told as an unchanged
+    plan, or as running after they ended.
+  - 1 through the e2e test: the worker never telling.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                                                                                                                                  | Result                                                                                         |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                                     | clean                                                                                          |
+| `pnpm test`                                                                                                                                                                              | 448 passed                                                                                     |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                                                                      | 603 passed on each, after the notice tests' sweeps were made to reach every due notice (above) |
+| `pnpm build` and `pnpm test:e2e` for `plan-subscription.spec.ts` and `plans.spec.ts` on chromium and mobile-chromium, on the local database created for the day's runs, migrated to 0078 | 4 passed (5.7 min), the plan subscription test waiting for the email of a staff cancellation   |
+| Mutation checks                                                                                                                                                                          | 21 regressions, all caught (listed above)                                                      |
+| gitleaks 8.30.1 on the commit                                                                                                                                                            | no leaks                                                                                       |
+
+### Known gaps
+
+- There is no choice of recipients. A subscription that ends at Razorpay without a cancellation in
+  HyFib (for example one cancelled in the Razorpay Dashboard) is not emailed; the plan sweep's email
+  tells the company when its plan ends.
+
 ## 2026-09-30 — Phase 5: emails to companies about plans HyFib staff set (P5-01, ADR-100)
 
 Status: **Implemented and locally verified (test data only).** Staff changes to a company's plan

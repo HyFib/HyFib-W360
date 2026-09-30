@@ -793,7 +793,12 @@ company's audit log and emailed to its billing managers (ADR-100). The platform 
 change (`app.tenant_plans.staff_notice_version`, a column grant); the worker queues the emails from
 the company's own scope (`ops.plan_change_notices_due`, and `app.take_plan_change_notice`, which
 takes only the current company's notice), so the platform role gains no outbox, queue or
-member-address access, and the runtime role can neither set nor clear the mark. Reactivating a
+member-address access, and the runtime role can neither set nor clear the mark. A platform owner's
+cancellation of a company's subscription is told the same way (ADR-101): the platform role marks it
+(`app.plan_subscriptions.staff_cancel_notice_due`), and the worker lists the marks
+(`ops.plan_subscription_cancel_notices_due`) and takes each in the company's own scope
+(`app.take_plan_subscription_cancel_notice`, which clears only the current company's mark and needs
+the definer's update grant on that one column). Reactivating a
 suspended company whose plan has lapsed makes it restricted, and only a plan change lifts a
 restriction.
 

@@ -299,10 +299,11 @@ verification, app review, Embedded Signup configuration).
   the key has, new keys cannot be given one, existing keys keep theirs and are marked);
   **[emails about plans staff set built, locally verified]** (ADR-100: the company's billing
   managers are emailed once about each plan HyFib staff set, with the plan now, its dates and
-  add-ons and HyFib's reason, from the worker's minute sweep).
+  add-ons and HyFib's reason, from the worker's minute sweep); **[emails when staff cancel a
+  subscription built, locally verified]** (ADR-101, see P5-07).
   Remaining: billing that starts when a trial ends, self-serve plan changes and higher-plan trials,
-  proration, plan invoices, thresholds chosen per company, in-app notices, emails when staff cancel
-  a subscription, packs of extra API requests and AI credits (Phase 6).
+  proration, plan invoices, thresholds chosen per company, in-app notices, packs of extra API
+  requests and AI credits (Phase 6).
 - **P5-02 Ledger** **[built, locally verified]**: accounts, append-only journal balanced at commit,
   balances by trigger, holds, settlements, releases (expiry sweep), refunds and chargebacks as
   compensating postings; INR paise; monthly statements computed from the ledger (ADR-057).
@@ -373,7 +374,7 @@ verification, app review, Embedded Signup configuration).
   active for each cycle Razorpay reports paid, fetched and checked by HyFib (Checkout, webhooks,
   hourly and daily checks, before period ends); failed charges, stopped retries, cancelling at the
   end of the period, staff cancelling at once, deletion cancelling at Razorpay, plan payments in
-  the daily reconciliation); **[plan payment receipts built, locally verified]** (ADR-064: a receipt page per plan payment with the plan, add-ons, billing period and tax, not a tax invoice, linked from Billing and the payment email); **[rate change notices built, locally verified]** (ADR-065: billing managers emailed once when a published card for the company's billing currency takes effect within 7 days, with what it changes). Remaining: invoices (tax review), refunds of
+  the daily reconciliation); **[plan payment receipts built, locally verified]** (ADR-064: a receipt page per plan payment with the plan, add-ons, billing period and tax, not a tax invoice, linked from Billing and the payment email); **[rate change notices built, locally verified]** (ADR-065: billing managers emailed once when a published card for the company's billing currency takes effect within 7 days, with what it changes); **[emails when staff cancel a subscription built, locally verified]** (ADR-101: the company's billing managers are emailed once when a platform owner cancels its subscription, with HyFib's reason and what the plan keeps, from the worker's minute sweep). Remaining: invoices (tax review), refunds of
   plan payments, billing from the end of a trial, plan and add-on changes with proration, pausing,
   offers, Razorpay test-mode checks (RELEASE-CHECKLIST).
 - **P5-08 Public API** **[built, locally verified; sends through the Graph stand-in only]**

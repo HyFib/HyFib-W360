@@ -1352,7 +1352,12 @@ WHERE used < limit`), per monthly period from `usage_anchor`; the sweep announce
   ends such a period as canceled without grace days. Platform owners set the tax and cancel a
   company's subscription at once (`/platform/tenants/<id>`), staff plan changes are refused while a
   subscription is live, and company deletion cancels it at Razorpay (§6Q). Billing managers are
-  emailed about payments, failed charges (`pending`), stopped retries (`halted`) and cancels. Each
+  emailed about payments, failed charges (`pending`), stopped retries (`halted`) and cancels: the
+  company's own at once, and a platform owner's by the minute billing sweep, as the platform role
+  cannot queue email (`staff_cancel_notice_due`, 0078, ADR-101: listed by
+  `ops.plan_subscription_cancel_notices_due`, taken by `app.take_plan_subscription_cancel_notice()`
+  in the company's scope, company row first, in the transaction that queues the emails, with the
+  reason from the company's audit log and what the plan keeps, read from its plan state). Each
   plan payment has a receipt page (`billing/plan-payments/<id>`, ADR-064) computed from the payment
   and its subscription, linked from the payments table and the payment email; not a tax invoice.
 - **Ledger (0004_billing):** one INR wallet per company with five accounts (`wallet_available`,

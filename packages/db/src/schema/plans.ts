@@ -155,6 +155,11 @@ export const planSubscriptions = appSchema.table('plan_subscriptions', {
   createdAt: tz('created_at').notNull().defaultNow(),
   syncedAt: tz('synced_at'),
   updatedAt: tz('updated_at').notNull().defaultNow(),
+  /**
+   * A cancellation by HyFib staff the company's billing managers were not emailed about yet
+   * (ADR-101, migration 0078); the worker's sweep clears it.
+   */
+  staffCancelNoticeDue: boolean('staff_cancel_notice_due').notNull().default(false),
 });
 
 /** A paid invoice of a subscription: the charge and the billing cycle it paid for (0037). */

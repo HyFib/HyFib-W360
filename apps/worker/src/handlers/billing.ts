@@ -19,6 +19,7 @@ import {
   notifyRefundRequestDeclines,
   notifyStaffDeletions,
   notifyStaffPlanChanges,
+  notifyStaffSubscriptionCancellations,
   processCreditRefund,
   processRazorpayReceipt,
   reconcileTopup,
@@ -193,10 +194,10 @@ export function settlementReconHandler(rt: WorkerRuntime) {
 /**
  * Every minute: move plans whose trial, paid period or grace period ended to their next state
  * (after syncing the Razorpay subscription that paid the period, ADR-063) and announce reached
- * automation run limits (ADR-051); tell billing managers of plans HyFib staff set (ADR-100); email
- * billing managers before Meta's rates for their currency
- * change (ADR-065) and platform owners about reconciliation days that need a person or failed
- * (ADR-066); re-signal Razorpay receipts whose signal was lost, reconcile
+ * automation run limits (ADR-051); tell billing managers of plans HyFib staff set (ADR-100) and of
+ * subscriptions staff cancelled (ADR-101); email billing managers before Meta's rates for their
+ * currency change (ADR-065) and platform owners about reconciliation days that need a person or
+ * failed (ADR-066); re-signal Razorpay receipts whose signal was lost, reconcile
  * open manual top-ups, due auto-recharge attempts and due plan subscriptions with Razorpay (the
  * backstop for missed webhooks), queue due steps of staff credit refunds (ADR-058) and the
  * settlement reconciliations owed (ADR-059), start auto-recharge checks for companies below their
@@ -244,6 +245,24 @@ export function billingSweepHandler(rt: WorkerRuntime) {
         { notified: staffPlans.notified, superseded: staffPlans.superseded },
         'plan change notices',
       );
+    }
+    // Subscriptions platform owners cancelled (ADR-101), told the same way.
+    const staffCancels = await notifyStaffSubscriptionCancellations({
+      db: rt.db,
+      notices: rt.notices,
+    });
+    for (const failure of staffCancels.failed) {
+      rt.logger.warn(
+        {
+          tenantId: failure.tenantId,
+          subscriptionId: failure.subscriptionId,
+          err: toError(failure.error).message,
+        },
+        'subscription cancellation notice failed for a company; will retry',
+      );
+    }
+    if (staffCancels.notified > 0) {
+      rt.logger.info({ notified: staffCancels.notified }, 'subscription cancellation notices');
     }
     // Rate change notices (ADR-065), reconciliation alerts (ADR-066, ADR-071) and company deletions
     // (ADR-055) run whether or not Razorpay is configured.

@@ -1,8 +1,8 @@
 import { createHmac, randomBytes } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest';
 import { PgBoss } from 'pg-boss';
 import { Keyring, isAppError, uuidv7, type Clock, type RazorpayConfig } from '@w360/core';
-import { authorizedTenantScope, sql } from '@w360/db';
+import { authorizedTenantScope, sql, systemScope } from '@w360/db';
 import {
   JobSigner,
   PgBossJobQueue,
@@ -11,6 +11,7 @@ import {
   createPlanAdminService,
   createPlanSubscriptionService,
   dayOf,
+  notifyStaffSubscriptionCancellations,
   outboxAad,
   processRazorpayReceipt,
   resolveTenantContext,
@@ -21,6 +22,7 @@ import {
   type BillingNoticeDeps,
   type BillingProviderDeps,
   type PlatformActor,
+  type SubscriptionCancelNoticeResult,
   type TenantContext,
 } from '@w360/domain';
 import {
@@ -1254,6 +1256,314 @@ describe('cancelling', () => {
     expect(
       await cancelPlanSubscriptionForDeletion({ db: dbs.app, clock, razorpay }, scope),
     ).toBeNull();
+  });
+});
+
+describe('staff cancellation notices (ADR-101)', () => {
+  /** Every cancellation due, as successive minute sweeps would tell them (50 at a time). */
+  const notify = async (): Promise<SubscriptionCancelNoticeResult> => {
+    const total: SubscriptionCancelNoticeResult = { notified: 0, failed: [] };
+    for (let sweep = 0; sweep < 20; sweep += 1) {
+      const result = await notifyStaffSubscriptionCancellations({
+        db: dbs.app,
+        notices: notices(),
+      });
+      total.notified += result.notified;
+      total.failed.push(...result.failed);
+      if (result.notified === 0 || result.failed.length > 0) break;
+    }
+    return total;
+  };
+  const cancelEmails = async (tenantId: string) =>
+    (await billingEmails(tenantId)).filter(
+      (e) => e.subject === 'HyFib cancelled your plan subscription',
+    );
+  const markOf = async (subscriptionId: string) =>
+    (
+      await adminQuery<{ due: boolean }>(
+        'SELECT staff_cancel_notice_due AS due FROM app.plan_subscriptions WHERE id = $1',
+        [subscriptionId],
+      )
+    )[0]!.due;
+
+  it('tells the billing managers once that HyFib cancelled, with the paid period and the reason', async () => {
+    offsetMs = 0;
+    const c = await trialing();
+    const { start } = await subscribed(c);
+    const reason = 'Customer asked by phone, ticket 882';
+    await admin().cancelTenantSubscription(owner, { tenantId: c.tenantId, reason });
+    expect(await markOf(start.subscriptionId)).toBe(true);
+
+    expect(await notify()).toMatchObject({ failed: [] });
+    const emails = await cancelEmails(c.tenantId);
+    expect(emails.map((e) => e.to)).toEqual([c.owner.email]);
+    expect(emails[0]!.lines[0]).toMatch(
+      /^HyFib cancelled the Razorpay subscription for the Growth plan of .+ on \d{1,2} \w+ \d{4}, so nothing more is charged\.$/,
+    );
+    // The plan is still on the period the subscription paid.
+    expect((await planState(c.tenantId)).status).toBe('active');
+    expect(emails[0]!.lines[1]).toMatch(
+      /^The period it paid runs until \d{1,2} \w+ \d{4}; the plan then ends, and Billing shows how to continue\.$/,
+    );
+    expect(emails[0]!.lines).toContain(`HyFib's reason: ${reason}`);
+    expect(emails[0]!.url).toBe(`http://localhost:3000/c/${c.slug}/billing`);
+    expect(await markOf(start.subscriptionId)).toBe(false);
+
+    // Told once.
+    await notify();
+    expect(await cancelEmails(c.tenantId)).toHaveLength(1);
+  });
+
+  it('tells nothing of the company’s own or a deletion’s cancellation, and two sweeps tell one once', async () => {
+    offsetMs = 0;
+    const own = await trialing();
+    const ownSub = await subscribed(own);
+    await service().cancel(own.ctx);
+    expect(await markOf(ownSub.start.subscriptionId)).toBe(false);
+    const deleting = await trialing();
+    const deletingSub = await subscribed(deleting);
+    await cancelPlanSubscriptionForDeletion(
+      { db: dbs.app, clock, razorpay },
+      authorizedTenantScope(deleting.tenantId, null),
+    );
+    expect(await markOf(deletingSub.start.subscriptionId)).toBe(false);
+
+    // A company being deleted after staff cancelled is not listed.
+    const leaving = await trialing();
+    const leavingSub = await subscribed(leaving);
+    await admin().cancelTenantSubscription(owner, {
+      tenantId: leaving.tenantId,
+      reason: 'Closing the account, ticket 883',
+    });
+    await adminQuery(`UPDATE app.tenants SET status = 'pending_deletion' WHERE id = $1`, [
+      leaving.tenantId,
+    ]);
+    const due = await dbs.app.run(
+      systemScope,
+      (tx) =>
+        tx.execute<{ subscription_id: string }>(
+          sql`select subscription_id from ops.plan_subscription_cancel_notices_due(500)`,
+        ),
+      { accessMode: 'read only' },
+    );
+    expect(due.rows.map((r) => r.subscription_id)).not.toContain(leavingSub.start.subscriptionId);
+
+    const twice = await trialing();
+    await subscribed(twice);
+    await admin().cancelTenantSubscription(owner, {
+      tenantId: twice.tenantId,
+      reason: 'Customer asked by email, ticket 884',
+    });
+    const [first, second] = await Promise.all([notify(), notify()]);
+    expect([...first.failed, ...second.failed]).toEqual([]);
+    expect(await cancelEmails(twice.tenantId)).toHaveLength(1);
+    for (const c of [own, deleting, leaving]) {
+      expect(await cancelEmails(c.tenantId)).toEqual([]);
+    }
+    expect(await markOf(leavingSub.start.subscriptionId)).toBe(true);
+  });
+
+  it('tells the plan as it is when the email goes out: grace days, or a plan the cancellation leaves', async () => {
+    offsetMs = 0;
+    const secondLine = async (c: Company) => {
+      const emails = await cancelEmails(c.tenantId);
+      expect(emails).toHaveLength(1);
+      return emails[0]!.lines[1];
+    };
+    // Grace days after the last period the subscription paid.
+    const late = await trialing();
+    await subscribed(late);
+    await admin().cancelTenantSubscription(owner, {
+      tenantId: late.tenantId,
+      reason: 'Customer asked by phone, ticket 887',
+    });
+    await adminQuery(
+      `UPDATE app.tenant_plans
+          SET status = 'past_due', period_start = now() - interval '32 days',
+              period_end = now() - interval '2 days', grace_ends_at = now() + interval '5 days'
+        WHERE tenant_id = $1`,
+      [late.tenantId],
+    );
+    // A plan staff set after cancelling.
+    const moved = await trialing();
+    await subscribed(moved);
+    await admin().cancelTenantSubscription(owner, {
+      tenantId: moved.tenantId,
+      reason: 'Moving to a larger plan, ticket 888',
+    });
+    const view = await admin().tenantPlan(owner, moved.tenantId);
+    await admin().setTenantPlan(owner, {
+      tenantId: moved.tenantId,
+      version: view.state.version,
+      reason: 'Moving the company to a larger plan',
+      status: 'active',
+      planId: moved.planId,
+      periodStart: day(0),
+      periodEnd: day(60),
+    });
+    // A period the plan sweep has not moved on yet.
+    const lapsed = await trialing();
+    await subscribed(lapsed);
+    await admin().cancelTenantSubscription(owner, {
+      tenantId: lapsed.tenantId,
+      reason: 'Customer asked by email, ticket 889',
+    });
+    await adminQuery(
+      `UPDATE app.tenant_plans
+          SET period_start = now() - interval '31 days', period_end = now() - interval '1 minute'
+        WHERE tenant_id = $1`,
+      [lapsed.tenantId],
+    );
+
+    // Grace days the plan sweep has not moved on yet.
+    const lapsedGrace = await trialing();
+    await subscribed(lapsedGrace);
+    await admin().cancelTenantSubscription(owner, {
+      tenantId: lapsedGrace.tenantId,
+      reason: 'Customer asked by email, ticket 890',
+    });
+    await adminQuery(
+      `UPDATE app.tenant_plans
+          SET status = 'past_due', period_start = now() - interval '40 days',
+              period_end = now() - interval '10 days', grace_ends_at = now() - interval '1 minute'
+        WHERE tenant_id = $1`,
+      [lapsedGrace.tenantId],
+    );
+
+    expect(await notify()).toMatchObject({ failed: [] });
+    expect(await secondLine(late)).toMatch(
+      /^Its last paid period ended on \d{1,2} \w+ \d{4}, and the plan ends when its grace days end on \d{1,2} \w+ \d{4}; Billing shows how to continue\.$/,
+    );
+    for (const c of [moved, lapsed, lapsedGrace]) {
+      expect(await secondLine(c)).toBe(
+        'This does not change the company’s plan; the plan card in Billing shows it.',
+      );
+    }
+  });
+
+  it('two cancellations before a sweep are each told, with their own reason', async () => {
+    offsetMs = 0;
+    const c = await trialing();
+    const first = await subscribed(c);
+    await admin().cancelTenantSubscription(owner, {
+      tenantId: c.tenantId,
+      reason: 'First subscription stopped, ticket 891',
+    });
+    // Staff put the company back on a trial, and it pays again by a new subscription.
+    const view = await admin().tenantPlan(owner, c.tenantId);
+    await admin().setTenantPlan(owner, {
+      tenantId: c.tenantId,
+      version: view.state.version,
+      reason: 'Trial again after the call',
+      status: 'trialing',
+      planId: c.planId,
+      trialEndsOn: day(10),
+      extraSeats: '2',
+    });
+    const second = await subscribed(c);
+    expect(second.start.subscriptionId).not.toBe(first.start.subscriptionId);
+    await admin().cancelTenantSubscription(owner, {
+      tenantId: c.tenantId,
+      reason: 'Second subscription stopped, ticket 892',
+    });
+
+    expect(await notify()).toMatchObject({ failed: [] });
+    const emails = await cancelEmails(c.tenantId);
+    expect(emails).toHaveLength(2);
+    const told = (reason: string) =>
+      emails.find((e) => e.lines.includes(`HyFib's reason: ${reason}`));
+    // The first subscription no longer paid the plan; the second one's period still runs.
+    expect(told('First subscription stopped, ticket 891')?.lines[1]).toBe(
+      'This does not change the company’s plan; the plan card in Billing shows it.',
+    );
+    expect(told('Second subscription stopped, ticket 892')?.lines[1]).toMatch(
+      /^The period it paid runs until /,
+    );
+  });
+
+  it('is marked only by staff and taken only in the company’s own scope', async () => {
+    offsetMs = 0;
+    const c = await trialing();
+    const { start } = await subscribed(c);
+    const other = await trialing();
+    await admin().cancelTenantSubscription(owner, {
+      tenantId: c.tenantId,
+      reason: 'Customer asked by phone, ticket 885',
+    });
+    const inScope = <T extends Record<string, unknown>>(
+      tenantId: string,
+      query: ReturnType<typeof sql>,
+    ) =>
+      dbs.app.run(authorizedTenantScope(tenantId, null), async (tx) => {
+        const res = await tx.execute<T>(query);
+        return res.rows;
+      });
+    // The runtime role can neither set nor clear the mark.
+    for (const value of [true, false]) {
+      expect(
+        (
+          await refusal(
+            inScope(
+              c.tenantId,
+              sql`update app.plan_subscriptions set staff_cancel_notice_due = ${value}`,
+            ),
+          )
+        ).code,
+      ).toBe('forbidden');
+    }
+    const take = (tenantId: string) =>
+      inScope<{ taken: boolean }>(
+        tenantId,
+        sql`select app.take_plan_subscription_cancel_notice(${start.subscriptionId}::uuid) as taken`,
+      );
+    await expect(
+      dbs.app.run(systemScope, (tx) =>
+        tx.execute(
+          sql`select app.take_plan_subscription_cancel_notice(${start.subscriptionId}::uuid)`,
+        ),
+      ),
+    ).rejects.toThrow();
+    expect(await take(other.tenantId)).toEqual([{ taken: false }]);
+    expect(await markOf(start.subscriptionId)).toBe(true);
+    expect(await take(c.tenantId)).toEqual([{ taken: true }]);
+    expect(await take(c.tenantId)).toEqual([{ taken: false }]);
+  });
+
+  it('locks the company before its subscription, so a staff change during a notice waits for it', async () => {
+    offsetMs = 0;
+    const c = await trialing();
+    const { start } = await subscribed(c);
+    await admin().cancelTenantSubscription(owner, {
+      tenantId: c.tenantId,
+      reason: 'Customer asked by phone, ticket 886',
+    });
+    const holder = await dbs.adminPool.connect();
+    let sending: Promise<unknown> | undefined;
+    try {
+      await holder.query('BEGIN');
+      await holder.query('SELECT 1 FROM app.tenants WHERE id = $1 FOR UPDATE', [c.tenantId]);
+      const [lock] = (await holder.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows;
+      sending = notify();
+      await vi.waitFor(
+        async () => {
+          const [waiting] = await adminQuery<{ n: number }>(
+            'SELECT count(*)::int AS n FROM pg_stat_activity a WHERE $1 = ANY (pg_blocking_pids(a.pid))',
+            [lock!.pid],
+          );
+          if (waiting!.n < 1) throw new Error('the notice is not waiting yet');
+        },
+        { timeout: 4_000, interval: 20 },
+      );
+      // The waiting notice holds nothing on the subscription.
+      await holder.query('SELECT 1 FROM app.plan_subscriptions WHERE id = $1 FOR UPDATE NOWAIT', [
+        start.subscriptionId,
+      ]);
+    } finally {
+      await holder.query('COMMIT');
+      holder.release();
+    }
+    expect(await sending).toMatchObject({ failed: [] });
+    expect(await cancelEmails(c.tenantId)).toHaveLength(1);
   });
 });
 

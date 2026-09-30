@@ -925,6 +925,17 @@ logs `plan change notices` with the counts, and `plan change notice failed for a
 retry` with the company id on failure (the change is told the next minute). If the email was
 queued, follow section 2 (Email not arriving).
 
+**A company says it was not told that HyFib cancelled its subscription (ADR-101).** The same sweep
+emails the company's active owners and billing members "HyFib cancelled your plan subscription"
+after a platform owner cancels it, with the reason and what the plan keeps (the period the
+subscription paid, its grace days, or that the plan is not changed). The company's own
+cancellations send their own email ("Your HyFib plan subscription is cancelled"); those of a
+company deletion send none. A cancellation not told yet has
+`app.plan_subscriptions.staff_cancel_notice_due` set; it stays set for a company being deleted. The
+worker logs `subscription cancellation notices` with the count, and `subscription cancellation
+notice failed for a company; will retry` with the company and subscription ids on failure (it is
+told the next minute). If the email was queued, follow section 2 (Email not arriving).
+
 **Paying for plans by Razorpay subscription (ADR-063).** Turn it on only after Razorpay activated
 Subscriptions (and Flash Checkout, which Subscriptions need) on HyFib's account and the webhook
 sends the `subscription.*` events (`docs/DEPLOYMENT.md`): set `RAZORPAY_SUBSCRIPTIONS_ENABLED=true`
@@ -955,7 +966,8 @@ every time (RBI rules, Razorpay's FAQ): a charge that stays unpaid for that reas
 one at the end of the paid period, otherwise at once). Platform owners cancel at once on the
 company's platform page with a reason (needed before changing the company's plan, which staff
 cannot do while a subscription is live); the paid period stands and the plan then ends as canceled,
-without grace days. A company that cancelled pays again from Billing once the paid period has ended
+without grace days, and the company's billing managers are emailed the reason (ADR-101). A company
+that cancelled pays again from Billing once the paid period has ended
 (there is no resume). Deleting a company cancels its subscription first; a failure shows as "Plan
 subscription at Razorpay: failed" in the deletion's provider outcomes: cancel it in the Razorpay
 Dashboard.
@@ -1411,6 +1423,15 @@ already stored: a short `ACCESS EXCLUSIVE` lock on the keys table), creates `app
 row security and its grants, and registers deletion step 855 with the definer's grants and
 policies. A failure usually means a lock wait on `app.api_keys` timed out (run the migrations again
 when requests are quieter) or the bootstrap roles are missing.
+
+**Migration 0078 failed.** It runs in one transaction, so a failure applies nothing. It adds
+`staff_cancel_notice_due` to `app.plan_subscriptions` (a boolean defaulting to false, so no rows are
+rewritten) with a partial index, the platform role's update grant on it,
+`ops.plan_subscription_cancel_notices_due` and `app.take_plan_subscription_cancel_notice` (granted
+to `w360_app`, then handed to `w360_definer`), and the definer's update grant and policy for that
+column. A failure usually means the bootstrap roles are missing or a lock wait on
+`app.plan_subscriptions` timed out: run the migrations again. Cancellations made before it are not
+told.
 
 **Migration 0077 failed.** It runs in one transaction, so a failure applies nothing. It adds
 `staff_notice_version` to `app.tenant_plans` with a check and a partial index (a short lock on the

@@ -3415,3 +3415,43 @@ Decision:
 Not built: emails when staff cancel a company's subscription, a choice of recipients, notices in
 the product beyond the plan card, and emails for plan changes the company makes itself (its
 subscription emails cover those).
+
+## ADR-101 Emails to companies when HyFib staff cancel their plan subscription (2026-09-30)
+
+Context: a platform owner can cancel a company's Razorpay subscription at once from the company's
+platform page, with a reason (ADR-063), for example before changing its plan, which staff cannot do
+while a subscription is live. The cancellation went to both audit logs, but nobody at the company
+was told: a company's own cancellation emails its billing managers, while a cancellation by staff
+stopped the charges without a word until the plan ended (listed as not built in ADR-100 and P5-01).
+
+Decision:
+
+- **Who and what:** the company's active billing managers (owners and members with the billing
+  role) get one email, "HyFib cancelled your plan subscription": the plan and the day (in the
+  company's time zone), that nothing more is charged, what the plan keeps, and HyFib's reason (the
+  one the company's audit log shows). What the plan keeps is read from the plan state when the email
+  goes out: a period the subscription paid that is still running ("runs until …; the plan then
+  ends", as `app.apply_plan_transition` ends it as canceled, without grace days), the grace days
+  after the last period it paid (when its charges had failed), or neither (a trial, a plan staff set
+  since, or a plan that already ended), which the cancellation does not change. A period or grace
+  days the plan sweep has not moved on yet (Razorpay did not answer) are not told as running. The
+  email links to Billing, which shows how to continue; the platform form says the reason is emailed.
+- **Marked by the cancellation, sent by the worker:** as for plan changes (ADR-100), the platform
+  role cannot queue email, so a cancellation by staff sets
+  `app.plan_subscriptions.staff_cancel_notice_due` (migration 0078; the platform role may update
+  that column, the runtime role no column). The worker's minute billing sweep lists marked
+  subscriptions after the staff plan changes (`ops.plan_subscription_cancel_notices_due`, oldest
+  first, not companies being deleted) and takes each one in the company's own scope
+  (`app.take_plan_subscription_cancel_notice(subscription)`, true only for the call that cleared the
+  mark), in the transaction that queues the emails: each cancellation is told at most once, and two
+  sweeps at once tell it once. The company's own cancellations (which email it already) and those
+  of a company deletion are never marked.
+- **Lock order:** taking the notice locks the company row before the subscription: the emails'
+  outbox rows reference the company row, and staff plan changes and the plan sweep lock it first.
+  Only a cancelled subscription is taken, and the subscription sync never applies a period for
+  one, so the sync's own order (the subscription, then the company row for a period it applies)
+  cannot meet it.
+
+Not built: a choice of recipients, and emails for subscriptions that end at Razorpay without a
+cancellation in HyFib (for example one cancelled in the Razorpay Dashboard); the plan sweep's email
+tells the company when its plan ends.

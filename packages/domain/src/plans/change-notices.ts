@@ -1,6 +1,10 @@
 import {
+  and,
+  auditEvents,
   authorizedTenantScope,
+  desc,
   eq,
+  planSubscriptions,
   plans,
   sql,
   systemScope,
@@ -167,6 +171,167 @@ export async function notifyStaffPlanChanges(
       else if (outcome === 'superseded') result.superseded += 1;
     } catch (error) {
       result.failed.push({ tenantId, error });
+    }
+  }
+  return result;
+}
+
+/** A subscription HyFib staff cancelled, as the email to the billing managers tells it (ADR-101). */
+export interface SubscriptionCancelFacts {
+  companyName: string;
+  planName: string;
+  cancelledAt: Date;
+  /**
+   * What the cancellation leaves of the company's plan: a period the subscription paid that is still
+   * running, the grace days after the last period it paid, or neither (a trial, a plan staff set or
+   * a plan that already ended), which the cancellation does not change.
+   */
+  plan:
+    | { kind: 'paid'; periodEnd: Date }
+    | { kind: 'grace'; periodEnd: Date; graceEndsAt: Date }
+    | { kind: 'unchanged' };
+  /** The reason staff gave, which the company's audit log shows too. */
+  reason: string | null;
+  timeZone: string;
+}
+
+/**
+ * The email to a company's billing managers about the plan subscription HyFib staff cancelled at
+ * once (ADR-101): nothing more is charged, what the plan keeps, and HyFib's reason.
+ */
+export function subscriptionCancelNotice(facts: SubscriptionCancelFacts): {
+  subject: string;
+  lines: string[];
+} {
+  const day = (at: Date) =>
+    new Intl.DateTimeFormat('en-IN', { dateStyle: 'medium', timeZone: facts.timeZone }).format(at);
+  let plan: string;
+  switch (facts.plan.kind) {
+    case 'paid':
+      plan = `The period it paid runs until ${day(facts.plan.periodEnd)}; the plan then ends, and Billing shows how to continue.`;
+      break;
+    case 'grace':
+      plan = `Its last paid period ended on ${day(facts.plan.periodEnd)}, and the plan ends when its grace days end on ${day(facts.plan.graceEndsAt)}; Billing shows how to continue.`;
+      break;
+    case 'unchanged':
+      plan = 'This does not change the company’s plan; the plan card in Billing shows it.';
+      break;
+  }
+  const reason = facts.reason?.trim();
+  return {
+    subject: 'HyFib cancelled your plan subscription',
+    lines: [
+      `HyFib cancelled the Razorpay subscription for the ${facts.planName} plan of ${facts.companyName} on ${day(facts.cancelledAt)}, so nothing more is charged.`,
+      plan,
+      ...(reason ? splitEmailText(`HyFib's reason: ${reason}`, NOTICE_LINE_MAX.billing) : []),
+    ],
+  };
+}
+
+export interface SubscriptionCancelNoticeResult {
+  notified: number;
+  /** Companies whose notice failed; it rolled back and is due again on the next sweep. */
+  failed: { tenantId: string; subscriptionId: string; error: unknown }[];
+}
+
+/**
+ * The minute sweep's emails about plan subscriptions HyFib staff cancelled (ADR-101), as for plan
+ * changes (ADR-100): each notice is taken in the company's own scope, in the transaction that
+ * queues the emails to its billing managers. A company that fails is reported and tried again the
+ * next minute.
+ */
+export async function notifyStaffSubscriptionCancellations(
+  deps: PlanChangeNoticeDeps,
+  limit = 50,
+): Promise<SubscriptionCancelNoticeResult> {
+  const due = await deps.db.run(
+    systemScope,
+    (tx) =>
+      tx.execute<{ tenant_id: string; subscription_id: string }>(
+        sql`select tenant_id, subscription_id from ops.plan_subscription_cancel_notices_due(${limit}::int)`,
+      ),
+    { accessMode: 'read only' },
+  );
+  const result: SubscriptionCancelNoticeResult = { notified: 0, failed: [] };
+  for (const { tenant_id: tenantId, subscription_id: subscriptionId } of due.rows) {
+    // Tenant and subscription ids come from the cancellations staff made, never from a request.
+    const scope = authorizedTenantScope(tenantId, null);
+    try {
+      const told = await deps.db.run(scope, async (tx) => {
+        const taken = await tx.execute<{ taken: boolean }>(
+          sql`select app.take_plan_subscription_cancel_notice(${subscriptionId}::uuid) as taken`,
+        );
+        if (taken.rows[0]?.taken !== true) return false;
+        const [row] = await tx
+          .select({
+            companyName: tenants.name,
+            timeZone: tenants.timezone,
+            planName: plans.name,
+            cancelledAt: planSubscriptions.cancelRequestedAt,
+          })
+          .from(planSubscriptions)
+          .innerJoin(tenants, eq(tenants.id, planSubscriptions.tenantId))
+          .innerJoin(plans, eq(plans.id, planSubscriptions.planId))
+          .where(
+            and(eq(planSubscriptions.tenantId, tenantId), eq(planSubscriptions.id, subscriptionId)),
+          );
+        // The notice was taken from this row in this transaction: it cannot be missing.
+        if (!row?.cancelledAt) throw new Error('The cancelled subscription has no cancellation');
+        const [state] = await tx
+          .select({
+            status: tenantPlans.status,
+            periodEnd: tenantPlans.periodEnd,
+            graceEndsAt: tenantPlans.graceEndsAt,
+            subscriptionId: tenantPlans.subscriptionId,
+            // A period or grace days the plan sweep has not moved on yet (Razorpay did not answer)
+            // are not told as running; the sweep's own email tells the company when the plan ends.
+            periodRunning: sql<boolean>`${tenantPlans.periodEnd} > now()`,
+            graceRunning: sql<boolean>`${tenantPlans.graceEndsAt} > now()`,
+          })
+          .from(tenantPlans)
+          .where(eq(tenantPlans.tenantId, tenantId));
+        // Staff record the reason in the company's audit log with the cancellation.
+        const [audit] = await tx
+          .select({ metadata: auditEvents.metadata })
+          .from(auditEvents)
+          .where(
+            and(
+              eq(auditEvents.tenantId, tenantId),
+              eq(auditEvents.action, 'platform.plan_subscription_cancelled'),
+              eq(auditEvents.subjectId, subscriptionId),
+            ),
+          )
+          .orderBy(desc(auditEvents.occurredAt))
+          .limit(1);
+        const reason = (audit?.metadata as { reason?: unknown } | undefined)?.reason;
+        // The plan still on a period this subscription paid ends with it; any other plan state
+        // (a trial, a plan staff set since, an ended plan) is not changed by the cancellation.
+        let plan: SubscriptionCancelFacts['plan'] = { kind: 'unchanged' };
+        if (state?.subscriptionId === subscriptionId && state.periodEnd) {
+          if (state.status === 'active' && state.periodRunning) {
+            plan = { kind: 'paid', periodEnd: state.periodEnd };
+          } else if (state.status === 'past_due' && state.graceEndsAt && state.graceRunning) {
+            plan = { kind: 'grace', periodEnd: state.periodEnd, graceEndsAt: state.graceEndsAt };
+          }
+        }
+        await notifyBillingManagers(
+          deps.notices,
+          tx,
+          scope,
+          subscriptionCancelNotice({
+            companyName: row.companyName,
+            planName: row.planName,
+            cancelledAt: row.cancelledAt,
+            plan,
+            reason: typeof reason === 'string' ? reason : null,
+            timeZone: row.timeZone,
+          }),
+        );
+        return true;
+      });
+      if (told) result.notified += 1;
+    } catch (error) {
+      result.failed.push({ tenantId, subscriptionId, error });
     }
   }
   return result;

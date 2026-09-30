@@ -456,6 +456,8 @@ export function createPlanAdminService(deps: {
             endedAt: now,
             cancelRequestedAt: now,
             cancelledByUserId: actor.userId,
+            // The worker emails the company's billing managers about it (ADR-101).
+            staffCancelNoticeDue: true,
           })
           .where(
             and(

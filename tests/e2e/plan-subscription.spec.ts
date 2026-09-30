@@ -9,6 +9,7 @@ import {
   turnOnTwoFactor,
   uniqueEmail,
   waitForEmail,
+  waitForEmailContaining,
 } from './support';
 
 const PASSWORD = 'correct horse battery staple 42';
@@ -164,6 +165,29 @@ test('a company pays for its plan by subscription, a renewal counts from Razorpa
     await expect(paying.getByRole('button', { name: 'Cancel subscription' })).toHaveCount(0);
     await waitForEmail(email, 'Your HyFib plan subscription is cancelled');
     await expectNoHorizontalOverflow(page);
+
+    // A platform owner then cancels it at once; the worker tells the billing managers why, and
+    // that the paid period stands (ADR-101).
+    await page.goto(`/platform?q=${slug}`);
+    await page.getByRole('link', { name: companyName }).click();
+    await page
+      .getByRole('region', { name: 'Plan subscription' })
+      .getByLabel('Reason')
+      .fill('Customer asked by phone to stop now, ticket 9002');
+    await page.getByRole('button', { name: 'Cancel subscription now' }).click();
+    await page
+      .getByRole('alertdialog')
+      .getByRole('button', { name: 'Cancel subscription' })
+      .click();
+    await expect(page.getByRole('button', { name: 'Cancel subscription now' })).toHaveCount(0);
+    const told = await waitForEmailContaining(
+      email,
+      'HyFib cancelled your plan subscription',
+      "HyFib's reason: Customer asked by phone to stop now, ticket 9002",
+      90_000,
+    );
+    expect(told).toContain('so nothing more is charged.');
+    expect(told).toMatch(/The period it paid runs until \d{1,2} \w+ \d{4}; the plan then ends/);
   } finally {
     // The tax is platform-wide: leave it as the other tests expect (not set).
     await page.goto('/platform/plans');
