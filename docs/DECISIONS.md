@@ -3379,3 +3379,39 @@ Decision:
 Not built: exceptions for single keys, networks per scope or endpoint, hostnames, time windows,
 and alerts or a list of refused requests (the web server logs each refusal with the key and
 company).
+
+## ADR-100 Emails to companies about plans HyFib staff set (2026-09-30)
+
+Context: platform staff put a company on a plan, start or extend its trial, set a paid period,
+change its add-ons, make it complimentary or end its plan from the company's platform page
+(ADR-051). Each change was audited in both audit logs, but nobody at the company was told: the plan
+sweep emails billing managers when a trial or period ends (ADR-051), and subscriptions email about
+payments (ADR-063), while a change by staff could restrict the company without warning (listed as
+not built under P5-01: plan-change emails to companies).
+
+Decision:
+
+- **Who and what:** the company's active billing managers (owners and members with the billing
+  role, as for the other billing notices) get one email per change, "HyFib changed your plan", with
+  what the plan is now: a trial and its end, a paid period and its days (in the company's time
+  zone), complimentary access, or an ended plan and what that pauses; the add-ons it includes; and
+  HyFib's reason, which the company's audit log already showed. It links to Billing. The platform
+  form says that the reason is emailed.
+- **Marked by the change, sent by the worker:** the platform role cannot queue email (ADR-090), so a
+  staff change sets `app.tenant_plans.staff_notice_version` to the version it writes (migration
+  0077; the platform role may update that column, the runtime role no column). The worker's minute
+  billing sweep lists the companies with a mark (`ops.plan_change_notices_due`, not companies being
+  deleted), and takes each company's notice in its own scope
+  (`app.take_plan_change_notice()`), in the transaction that queues the emails: the mark is cleared,
+  so a change is told at most once, and two sweeps at once tell it once.
+- **The latest state, or nothing:** two changes before the sweep make one email with the plan as it
+  is. A change that the plan sweep (a trial or period that ended) or a subscription replaced before
+  the email went out is not told, as their own emails tell the company the newer state; the same
+  plan saved again changes nothing and tells nothing.
+- **Lock order:** taking the notice locks the company row before the plan state, as staff changes
+  and the plan sweep do; the emails' outbox rows reference the company row, so the other order
+  could deadlock with a staff change.
+
+Not built: emails when staff cancel a company's subscription, a choice of recipients, notices in
+the product beyond the plan card, and emails for plan changes the company makes itself (its
+subscription emails cover those).

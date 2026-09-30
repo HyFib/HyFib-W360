@@ -1411,6 +1411,10 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'version',
       'subscription_id',
     ],
+    omitted: {
+      staff_notice_version:
+        "The worker's mark of a staff change not emailed yet (ADR-100); the change itself is exported.",
+    },
   },
   {
     table: 'app.topups',

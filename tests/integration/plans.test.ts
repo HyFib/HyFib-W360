@@ -1,7 +1,7 @@
 import { randomInt } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { isAppError, systemClock, uuidv7, type Clock } from '@w360/core';
-import { authorizedTenantScope, channelAccounts, sql } from '@w360/db';
+import { authorizedTenantScope, channelAccounts, sql, systemScope } from '@w360/db';
 import {
   announceRunLimit,
   assertCan,
@@ -17,6 +17,8 @@ import {
   createTeamsService,
   createTenancyService,
   dayOf,
+  notifyStaffPlanChanges,
+  outboxAad,
   resolveTenantContext,
   sweepPlanStates,
   type AutomationTrigger,
@@ -1120,5 +1122,215 @@ describe('isolation', () => {
       'forbidden',
       /platform administrator required/,
     );
+  });
+});
+
+describe('plan change notices (ADR-100)', () => {
+  const notify = () => notifyStaffPlanChanges({ db: fx.dbs.app, notices: notices() });
+  /** The plan change emails queued for the company, decrypted, oldest first. */
+  async function changeEmails(tenantId: string) {
+    const { rows } = await fx.dbs.adminPool.query<{
+      id: string;
+      to_address: string;
+      payload_ciphertext: string;
+    }>(
+      `SELECT id, to_address, payload_ciphertext FROM ops.email_outbox
+        WHERE tenant_id = $1 AND kind = 'billing.notice' ORDER BY created_at, id`,
+      [tenantId],
+    );
+    return rows
+      .map((r) => ({
+        to: r.to_address,
+        ...(JSON.parse(fx.keyring.decryptString(r.payload_ciphertext, outboxAad(r.id))) as {
+          subject: string;
+          lines: string[];
+          url: string;
+        }),
+      }))
+      .filter((e) => e.subject === 'HyFib changed your plan');
+  }
+  const mark = async (tenantId: string) =>
+    (
+      await fx.dbs.adminPool.query<{ staff_notice_version: number | null; version: number }>(
+        `SELECT staff_notice_version, version FROM app.tenant_plans WHERE tenant_id = $1`,
+        [tenantId],
+      )
+    ).rows[0]!;
+  /** A fixture company with a billing manager besides its owner, and an administrator. */
+  async function companyWithBilling() {
+    const c = await fx.company();
+    const billing = await createUser(fx.dbs, { name: 'Billing Person' });
+    const administrator = await createUser(fx.dbs, { name: 'Admin Person' });
+    for (const [user, role] of [
+      [billing, 'billing'],
+      [administrator, 'admin'],
+    ] as const) {
+      const { token } = await invite(fx.dbs, c.tenant, c.owner, user.email, [role]);
+      await acceptInvitation(fx.dbs, user, token);
+    }
+    return { ...c, billing };
+  }
+
+  it('tells the billing managers once about a plan staff set, with its period, add-ons and reason', async () => {
+    const owner = await staff('platform_owner');
+    const operator = await staff('platform_operator');
+    const planId = await publishedPlan(owner, { seatPrice: '499', seatsMax: '10' });
+    const c = await companyWithBilling();
+    await activePlan(operator, c.tenant.id, planId, { extraSeats: 2 });
+    const state = await mark(c.tenant.id);
+    expect(state.staff_notice_version).toBe(state.version);
+
+    expect(await notify()).toMatchObject({ failed: [] });
+    const emails = await changeEmails(c.tenant.id);
+    expect(emails.map((e) => e.to).sort()).toEqual([c.billing.email, c.owner.email].sort());
+    const [email] = emails;
+    expect(email!.lines[0]).toMatch(/^HyFib changed the plan of .+ on \d{1,2} \w+ \d{4}\.$/);
+    expect(email!.lines[1]).toMatch(
+      /^It is now on the Growth plan, for the paid period from \d{1,2} \w+ \d{4} to \d{1,2} \w+ \d{4}\.$/,
+    );
+    expect(email!.lines).toContain('It includes 2 extra seats on top of the plan.');
+    expect(email!.lines).toContain("HyFib's reason: Invoice INV-1001 paid by bank transfer");
+    expect(email!.url).toBe(`http://localhost:3000/c/${c.tenant.slug}/billing`);
+    expect((await mark(c.tenant.id)).staff_notice_version).toBeNull();
+
+    // Told once: the next sweep has nothing for the company.
+    await notify();
+    expect(await changeEmails(c.tenant.id)).toHaveLength(2);
+  });
+
+  it('tells two changes before the sweep once, the same plan again never, and a replaced change never', async () => {
+    const owner = await staff('platform_owner');
+    const operator = await staff('platform_operator');
+    const planId = await publishedPlan(owner);
+    const c = await fx.company();
+    await putOnPlan(operator, c.tenant.id, { status: 'trialing', planId, trialEndsOn: day(5) });
+    await activePlan(operator, c.tenant.id, planId);
+    await notify();
+    const emails = await changeEmails(c.tenant.id);
+    expect(emails).toHaveLength(1);
+    expect(emails[0]!.lines[1]).toMatch(/^It is now on the Growth plan, for the paid period/);
+
+    // The same plan again changes nothing, so nothing is told.
+    await activePlan(operator, c.tenant.id, planId);
+    expect((await mark(c.tenant.id)).staff_notice_version).toBeNull();
+
+    // A trial staff set, which the plan sweep ends before the notice goes out: the sweep's own
+    // email tells the company, and the replaced change is not told.
+    await putOnPlan(operator, c.tenant.id, { status: 'trialing', planId, trialEndsOn: day(2) });
+    await fx.dbs.adminPool.query(
+      `UPDATE app.tenant_plans SET trial_ends_at = now() - interval '1 minute' WHERE tenant_id = $1`,
+      [c.tenant.id],
+    );
+    expect((await sweep()).failed).toEqual([]);
+    expect((await planRow(c.tenant.id)).status).toBe('expired');
+    const replaced = await notify();
+    expect(replaced.failed).toEqual([]);
+    expect(replaced.superseded).toBeGreaterThanOrEqual(1);
+    expect(await changeEmails(c.tenant.id)).toHaveLength(1);
+    expect((await mark(c.tenant.id)).staff_notice_version).toBeNull();
+  });
+
+  it('leaves out companies being deleted, and two sweeps at once tell a change once', async () => {
+    const owner = await staff('platform_owner');
+    const planId = await publishedPlan(owner);
+    const leaving = await fx.company();
+    const staying = await fx.company();
+    await activePlan(owner, leaving.tenant.id, planId);
+    await activePlan(owner, staying.tenant.id, planId);
+    await fx.dbs.adminPool.query(
+      `UPDATE app.tenants SET status = 'pending_deletion' WHERE id = $1`,
+      [leaving.tenant.id],
+    );
+    const due = async () =>
+      (
+        await fx.dbs.app.run(
+          systemScope,
+          (tx) =>
+            tx.execute<{ tenant_id: string }>(
+              sql`select tenant_id from ops.plan_change_notices_due(500)`,
+            ),
+          { accessMode: 'read only' },
+        )
+      ).rows.map((r) => r.tenant_id);
+    expect(await due()).toContain(staying.tenant.id);
+    expect(await due()).not.toContain(leaving.tenant.id);
+
+    const [first, second] = await Promise.all([notify(), notify()]);
+    expect([...first!.failed, ...second!.failed]).toEqual([]);
+    expect(await changeEmails(staying.tenant.id)).toHaveLength(1);
+    expect(await changeEmails(leaving.tenant.id)).toHaveLength(0);
+    expect((await mark(leaving.tenant.id)).staff_notice_version).not.toBeNull();
+  });
+
+  it('locks the company before its plan state, so a staff change during a notice waits for it', async () => {
+    const owner = await staff('platform_owner');
+    const planId = await publishedPlan(owner);
+    const c = await fx.company();
+    await activePlan(owner, c.tenant.id, planId);
+    // Another transaction holds the company row as a staff change does, before its plan state.
+    const holder = await fx.dbs.adminPool.connect();
+    let sending: Promise<unknown> | undefined;
+    try {
+      await holder.query('BEGIN');
+      await holder.query('SELECT 1 FROM app.tenants WHERE id = $1 FOR UPDATE', [c.tenant.id]);
+      const [lock] = (await holder.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows;
+      sending = notify();
+      await vi.waitFor(
+        async () => {
+          const [waiting] = await fx.query<{ n: number }>(
+            'SELECT count(*)::int AS n FROM pg_stat_activity a WHERE $1 = ANY (pg_blocking_pids(a.pid))',
+            [lock!.pid],
+          );
+          if (waiting!.n < 1) throw new Error('the notice is not waiting yet');
+        },
+        { timeout: 4_000, interval: 20 },
+      );
+      // The waiting notice holds nothing on the plan state, which the staff change locks next.
+      await holder.query('SELECT 1 FROM app.tenant_plans WHERE tenant_id = $1 FOR UPDATE NOWAIT', [
+        c.tenant.id,
+      ]);
+    } finally {
+      await holder.query('COMMIT');
+      holder.release();
+    }
+    expect(await sending).toMatchObject({ failed: [] });
+    expect(await changeEmails(c.tenant.id)).toHaveLength(1);
+  });
+
+  it('is marked only by staff changes and taken only in the company’s own scope', async () => {
+    const owner = await staff('platform_owner');
+    const planId = await publishedPlan(owner);
+    const a = await fx.company();
+    const b = await fx.company();
+    await activePlan(owner, a.tenant.id, planId);
+    await activePlan(owner, b.tenant.id, planId);
+    // The runtime role can neither set nor clear the mark.
+    await expectAppError(
+      fx.dbs.app.run(authorizedTenantScope(a.tenant.id, a.owner.id), (tx) =>
+        tx.execute(sql`update app.tenant_plans set staff_notice_version = null`),
+      ),
+      'forbidden',
+    );
+    // Taking needs a company scope and takes only that company's notice.
+    await expect(
+      fx.dbs.app.run(systemScope, (tx) => tx.execute(sql`select app.take_plan_change_notice()`)),
+    ).rejects.toThrow();
+    const taken = await fx.dbs.app.run(authorizedTenantScope(a.tenant.id, null), (tx) =>
+      tx.execute<{ due: boolean | null }>(sql`select app.take_plan_change_notice() as due`),
+    );
+    expect(taken.rows).toEqual([{ due: true }]);
+    expect((await mark(a.tenant.id)).staff_notice_version).toBeNull();
+    expect((await mark(b.tenant.id)).staff_notice_version).not.toBeNull();
+    const again = await fx.dbs.app.run(authorizedTenantScope(a.tenant.id, null), (tx) =>
+      tx.execute<{ due: boolean | null }>(sql`select app.take_plan_change_notice() as due`),
+    );
+    expect(again.rows).toEqual([{ due: null }]);
+    // The table refuses a mark beyond the plan state's version.
+    await expect(
+      fx.dbs.adminPool.query(
+        'UPDATE app.tenant_plans SET staff_notice_version = version + 1 WHERE tenant_id = $1',
+        [b.tenant.id],
+      ),
+    ).rejects.toThrow(/tenant_plans_staff_notice_version_check/);
   });
 });

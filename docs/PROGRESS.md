@@ -1,5 +1,95 @@
 # Progress
 
+## 2026-09-30 — Phase 5: emails to companies about plans HyFib staff set (P5-01, ADR-100)
+
+Status: **Implemented and locally verified (test data only).** Staff changes to a company's plan
+(ADR-051) were audited in both audit logs, but nobody at the company was told, although ending a
+plan restricts the company at once.
+
+### Completed
+
+- **Design (ADR-100):** the company's active billing managers (owners and members with the billing
+  role) get one email per staff change, "HyFib changed your plan", with the plan now (a trial and
+  its end, a paid period and its days in the company's time zone, complimentary access, or an ended
+  plan and what that pauses), its add-ons and HyFib's reason, linking to Billing. Two changes before
+  the sweep make one email with the latest; a change the plan sweep or a subscription replaced
+  before the email went out is not told (their own emails are); the same plan saved again tells
+  nothing.
+- **Migration 0077:** `app.tenant_plans.staff_notice_version` (checked to be at most the plan
+  state's version; the platform role may update it, the runtime role no column) with a partial
+  index; `ops.plan_change_notices_due` lists the companies with a mark, oldest change first, not
+  companies being deleted; `app.take_plan_change_notice()` takes the company's notice in its own
+  scope, locking the company row before the plan state (the order staff changes and the plan sweep
+  use, as the emails' outbox rows reference the company row), clears the mark and says whether the
+  plan is still the one staff set. Both SECURITY DEFINER with a pinned `search_path`, executable by
+  the runtime role only.
+- **Domain:** `setTenantPlan` marks the version it writes; `plans/change-notices.ts` has the
+  email's text (`planChangeNotice`) and the sweep (`notifyStaffPlanChanges`), which takes each
+  notice in the transaction that queues the emails to the billing managers.
+- **Worker:** the minute billing sweep tells the changes right after the plan sweep, logging the
+  counts and each failure (the change is told the next minute).
+- **Web:** the platform plan form's reason is labelled "emailed to the billing managers, and shown
+  in the company’s audit log".
+- **Tests:**
+  - Unit (`change-notices.test.ts`, 5): a paid period in the company's time zone with the reason;
+    a trial, complimentary access and an ended plan (without its add-ons); add-ons counted; a long
+    reason split within the notice's lines, and a state without its dates refused; the rendered
+    billing notice with the company's name escaped.
+  - Integration (`plans.test.ts`, 5 new):
+    - once to the owner and the billing member (not the administrator) with the paid period, the
+      add-ons, the reason and the Billing link; the next sweep sends nothing;
+    - two changes before the sweep told once with the latest; the same plan again not marked; a
+      trial the plan sweep ended before the notice not told, and counted as replaced;
+    - a company being deleted not listed (its mark kept); two sweeps at once tell a change once;
+    - the company row locked before the plan state: while another transaction holds the company
+      row, the waiting notice holds nothing on the plan state (`FOR UPDATE NOWAIT` succeeds);
+    - the runtime role cannot clear the mark; taking needs a company scope and takes only that
+      company's notice; the table refuses a mark beyond the version.
+  - The isolation suite lists both functions among those only the runtime role may execute.
+  - e2e (`plans.spec.ts`): after staff put the company on a paid period and later end the plan,
+    the test waits for both emails to the owner through the worker's sweep and Mailpit, with the
+    plan, the reason and the Billing link. The specs using the reason field follow its new label.
+- **Docs:** ADR-100; SECURITY (platform roles); THREAT-MODEL T65; RUNBOOKS (a company not told,
+  migration 0077); ARCHITECTURE; BACKLOG P5-01; FEATURE-MATRIX H-032.
+- **Found while finishing:** the first full integration run failed the company export's
+  classification test, which requires every column of a company table to be exported or left out
+  with a reason: `staff_notice_version` is now left out as the worker's mark (the change itself is
+  exported). The same run failed the ADR-099 test of two first changes once on PostgreSQL 17: it
+  ordered the audit entries by time, but both transactions begin before either takes the lock, so
+  their audit times need not follow the order they ran in. The test now follows the entries'
+  chain (amended into the ADR-099 commit before it was pushed).
+- **Mutation checks:** 19 regressions tried one at a time, 18 caught (1 through the e2e test).
+  - 10 in the migration: the company row not locked first; the mark not cleared when taken; a
+    replaced change told; companies being deleted listed; taking clearing every company's mark;
+    taking without a company scope; the runtime role allowed to set the mark; a mark beyond the
+    version stored; the take function granted to PUBLIC; the platform role unable to mark.
+  - 4 in the domain: staff changes not marked; a replaced change emailed, or not counted as
+    replaced; the reason left out.
+  - 3 in the email's text: the add-ons left out; dates in UTC rather than the company's time zone;
+    a trial worded as a paid period.
+  - 1 through the e2e test: the worker never telling.
+  - Not observable: removing the migration's `REVOKE EXECUTE … FROM PUBLIC` on the take function,
+    as the default privileges of migration 0002 already withhold it (the isolation suite checks
+    that nothing is executable by PUBLIC, and catches an explicit grant).
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                                                                                                                                                       | Result                                                                             |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                                                          | clean; the format check first flagged two long lines in the notice module, wrapped |
+| `pnpm test`                                                                                                                                                                                                   | 445 passed                                                                         |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                                                                                           | 597 passed on each, after the two failures described above were fixed              |
+| `pnpm build` and `pnpm test:e2e` for `plans.spec.ts`, `api-quota.spec.ts` and `plan-subscription.spec.ts` on chromium and mobile-chromium, on the local database created for the day's runs, migrated to 0077 | 8 passed (4.2 min), the plans test waiting for both emails                         |
+| Mutation checks                                                                                                                                                                                               | 19 regressions, 18 caught, 1 not observable (listed above)                         |
+| gitleaks 8.30.1 on the commit                                                                                                                                                                                 | no leaks                                                                           |
+
+### Known gaps
+
+- Staff cancelling a company's subscription is not emailed to the company, and there is no choice
+  of recipients or notice in the product beyond the plan card.
+- A change the plan sweep or a subscription replaced within the minute is not told: their own
+  emails describe the newer state.
+
 ## 2026-09-30 — Phase 5: addresses for all of a company's API keys (P5-08, ADR-099)
 
 Status: **Implemented and locally verified (test data only).** A key can be held to the networks

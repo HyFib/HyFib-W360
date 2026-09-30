@@ -1,0 +1,104 @@
+import { describe, expect, it } from 'vitest';
+import { NOTICE_LINE_MAX, emailPayloadSchema, renderEmail } from '../email/templates';
+import { planChangeNotice, type PlanChangeFacts } from './change-notices';
+
+const base: PlanChangeFacts = {
+  companyName: 'Acme Traders',
+  status: 'active',
+  planName: 'Growth',
+  trialEndsAt: null,
+  periodStart: new Date('2026-09-30T18:30:00Z'),
+  periodEnd: new Date('2026-10-30T18:30:00Z'),
+  extraSeats: 0,
+  extraNumbers: 0,
+  runPacks: 0,
+  changedAt: new Date('2026-09-30T20:00:00Z'),
+  reason: 'Invoice INV-1001 paid by bank transfer',
+  timeZone: 'Asia/Kolkata',
+};
+
+describe('the email about a plan HyFib staff set (ADR-100)', () => {
+  it('tells a paid period in the company’s time zone, with HyFib’s reason', () => {
+    expect(planChangeNotice(base)).toEqual({
+      subject: 'HyFib changed your plan',
+      lines: [
+        'HyFib changed the plan of Acme Traders on 1 Oct 2026.',
+        'It is now on the Growth plan, for the paid period from 1 Oct 2026 to 31 Oct 2026.',
+        "HyFib's reason: Invoice INV-1001 paid by bank transfer",
+        'The plan card in Billing shows the limits that apply and what the company used this month.',
+      ],
+    });
+    expect(planChangeNotice({ ...base, timeZone: 'Europe/London' }).lines[1]).toBe(
+      'It is now on the Growth plan, for the paid period from 30 Sept 2026 to 30 Oct 2026.',
+    );
+  });
+
+  it('tells a trial, complimentary access and an ended plan', () => {
+    const trial = planChangeNotice({
+      ...base,
+      status: 'trialing',
+      periodStart: null,
+      periodEnd: null,
+      trialEndsAt: new Date('2026-10-14T18:30:00Z'),
+    });
+    expect(trial.lines[1]).toBe('It is now on a trial of the Growth plan until 15 Oct 2026.');
+    const free = planChangeNotice({
+      ...base,
+      status: 'complimentary',
+      planName: null,
+      periodStart: null,
+      periodEnd: null,
+    });
+    expect(free.lines[1]).toBe(
+      'It now has complimentary access from HyFib: no limits and every module.',
+    );
+    const ended = planChangeNotice({ ...base, status: 'canceled', extraSeats: 2 });
+    expect(ended.lines[1]).toBe(
+      'HyFib ended the Growth plan: sending messages, campaigns and automations is paused until the company is put on a plan again. Its data is kept, and members can still review and export it.',
+    );
+    // An ended plan's add-ons are not offered as included.
+    expect(ended.lines.join(' ')).not.toContain('extra seat');
+  });
+
+  it('lists the add-ons, each counted', () => {
+    expect(planChangeNotice({ ...base, extraSeats: 1 }).lines[2]).toBe(
+      'It includes 1 extra seat on top of the plan.',
+    );
+    expect(
+      planChangeNotice({ ...base, extraSeats: 2, extraNumbers: 1, runPacks: 1_200 }).lines[2],
+    ).toBe(
+      'It includes 2 extra seats, 1 extra WhatsApp number and 1,200 automation run packs on top of the plan.',
+    );
+    expect(planChangeNotice({ ...base, extraNumbers: 3, runPacks: 1 }).lines[2]).toBe(
+      'It includes 3 extra WhatsApp numbers and 1 automation run pack on top of the plan.',
+    );
+  });
+
+  it('keeps a long reason within the notice’s lines, and a state without its dates is an error', () => {
+    const reason = `${'Renewed after the quarterly review with the customer '.repeat(9)}end`;
+    expect(reason.length).toBeGreaterThan(450);
+    const { lines } = planChangeNotice({ ...base, reason });
+    const told = lines.filter((l) => !l.startsWith('HyFib changed') && !l.startsWith('It '));
+    expect(told.every((l) => l.length <= NOTICE_LINE_MAX.billing)).toBe(true);
+    expect(told.slice(0, -1).join(' ')).toBe(`HyFib's reason: ${reason}`);
+    expect(() => planChangeNotice({ ...base, periodEnd: null })).toThrow(/no period end/);
+  });
+
+  it('renders as a billing notice linking Billing, with the company’s name escaped', () => {
+    const notice = planChangeNotice({ ...base, companyName: '<Acme> & Co' });
+    const url = 'https://app.example.test/c/acme/billing';
+    const payload = {
+      kind: 'billing.notice' as const,
+      companyName: '<Acme> & Co',
+      subject: notice.subject,
+      lines: notice.lines,
+      url,
+    };
+    expect(emailPayloadSchema.safeParse(payload).success).toBe(true);
+    const email = renderEmail(payload);
+    expect(email.subject).toBe('HyFib changed your plan · <Acme> & Co');
+    expect(email.html).toContain('HyFib changed the plan of &lt;Acme&gt; &amp; Co');
+    expect(email.html).not.toContain('<Acme>');
+    expect(email.html).toContain(`href="${url}"`);
+  });
+});

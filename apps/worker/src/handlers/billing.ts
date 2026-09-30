@@ -18,6 +18,7 @@ import {
   findStaleReceipts,
   notifyRefundRequestDeclines,
   notifyStaffDeletions,
+  notifyStaffPlanChanges,
   processCreditRefund,
   processRazorpayReceipt,
   reconcileTopup,
@@ -192,7 +193,8 @@ export function settlementReconHandler(rt: WorkerRuntime) {
 /**
  * Every minute: move plans whose trial, paid period or grace period ended to their next state
  * (after syncing the Razorpay subscription that paid the period, ADR-063) and announce reached
- * automation run limits (ADR-051); email billing managers before Meta's rates for their currency
+ * automation run limits (ADR-051); tell billing managers of plans HyFib staff set (ADR-100); email
+ * billing managers before Meta's rates for their currency
  * change (ADR-065) and platform owners about reconciliation days that need a person or failed
  * (ADR-066); re-signal Razorpay receipts whose signal was lost, reconcile
  * open manual top-ups, due auto-recharge attempts and due plan subscriptions with Razorpay (the
@@ -226,6 +228,21 @@ export function billingSweepHandler(rt: WorkerRuntime) {
       rt.logger.info(
         { transitioned: plans.transitioned, announced: plans.announced },
         'plan sweep',
+      );
+    }
+    // Plans HyFib staff set (ADR-100): the company's billing managers are told from here, as the
+    // platform role cannot queue email. After the plan sweep, so a change it replaced is not told.
+    const staffPlans = await notifyStaffPlanChanges({ db: rt.db, notices: rt.notices });
+    for (const failure of staffPlans.failed) {
+      rt.logger.warn(
+        { tenantId: failure.tenantId, err: toError(failure.error).message },
+        'plan change notice failed for a company; will retry',
+      );
+    }
+    if (staffPlans.notified + staffPlans.superseded > 0) {
+      rt.logger.info(
+        { notified: staffPlans.notified, superseded: staffPlans.superseded },
+        'plan change notices',
       );
     }
     // Rate change notices (ADR-065), reconciliation alerts (ADR-066, ADR-071) and company deletions

@@ -1046,6 +1046,8 @@ export function createPlanAdminService(deps: {
             changedByUserId: actor.userId,
             changedAt: now,
             version: current.version + 1,
+            // The worker emails the company's billing managers about this version (ADR-100).
+            staffNoticeVersion: current.version + 1,
           })
           .where(eq(tenantPlans.id, current.id));
 

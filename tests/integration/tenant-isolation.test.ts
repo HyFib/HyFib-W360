@@ -129,9 +129,9 @@ describe('database roles', () => {
       expect(await can('w360_platform', fn), fn).toBe(false);
     }
     // Plans (0023): the sweep functions for the worker (with the API request notice of 0035, the
-    // warnings of 0036, the subscription functions of 0037 and the rate change notices of 0038),
-    // the usage counts for platform staff, the entitlements for both, and the plan-state triggers
-    // for nobody.
+    // warnings of 0036, the subscription functions of 0037, the rate change notices of 0038 and the
+    // notices of staff changes of 0077), the usage counts for platform staff, the entitlements for
+    // both, and the plan-state triggers for nobody.
     for (const fn of [
       'ops.plan_transitions_due(integer)',
       'ops.usage_limits_reached(integer)',
@@ -142,6 +142,8 @@ describe('database roles', () => {
       'ops.billing_resolve_plan_payment(text)',
       'app.apply_plan_subscription_period(uuid,uuid)',
       'ops.rate_change_notices_due(integer,integer)',
+      'ops.plan_change_notices_due(integer)',
+      'app.take_plan_change_notice()',
     ]) {
       expect(await can('w360_app', fn), fn).toBe(true);
       expect(await can('w360_auth', fn), fn).toBe(false);

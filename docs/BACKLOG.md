@@ -296,10 +296,13 @@ verification, app review, Embedded Signup configuration).
   Razorpay subscription built, locally verified against the stand-in]** (ADR-063, see P5-07);
   **[API scopes by plan built, locally verified]** (ADR-092, W-137: a version includes every API
   scope or only those chosen; requests needing another are refused with 403 `not_in_plan` whatever
-  the key has, new keys cannot be given one, existing keys keep theirs and are marked).
+  the key has, new keys cannot be given one, existing keys keep theirs and are marked);
+  **[emails about plans staff set built, locally verified]** (ADR-100: the company's billing
+  managers are emailed once about each plan HyFib staff set, with the plan now, its dates and
+  add-ons and HyFib's reason, from the worker's minute sweep).
   Remaining: billing that starts when a trial ends, self-serve plan changes and higher-plan trials,
-  proration, plan invoices, thresholds chosen per company, in-app notices, plan-change emails to
-  companies, packs of extra API requests and AI credits (Phase 6).
+  proration, plan invoices, thresholds chosen per company, in-app notices, emails when staff cancel
+  a subscription, packs of extra API requests and AI credits (Phase 6).
 - **P5-02 Ledger** **[built, locally verified]**: accounts, append-only journal balanced at commit,
   balances by trigger, holds, settlements, releases (expiry sweep), refunds and chargebacks as
   compensating postings; INR paise; monthly statements computed from the ledger (ADR-057).

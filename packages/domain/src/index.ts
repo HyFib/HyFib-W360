@@ -46,6 +46,7 @@ export * from './plans/model';
 export * from './plans/entitlements';
 export * from './plans/service';
 export * from './plans/sweep';
+export * from './plans/change-notices';
 export * from './platform/plans';
 export * from './api';
 export * from './webhooks';

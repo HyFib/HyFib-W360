@@ -91,6 +91,11 @@ export const tenantPlans = appSchema.table('tenant_plans', {
   version: integer('version').notNull().default(1),
   /** The subscription that paid the current period; null for periods staff set (ADR-063). */
   subscriptionId: uuid('subscription_id'),
+  /**
+   * The version staff set that the company's billing managers were not emailed about yet
+   * (ADR-100, migration 0077); the worker's sweep clears it.
+   */
+  staffNoticeVersion: integer('staff_notice_version'),
 });
 
 export const PLAN_SUBSCRIPTION_STATUSES = [

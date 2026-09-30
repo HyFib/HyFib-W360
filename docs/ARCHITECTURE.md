@@ -1301,7 +1301,12 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   company is created (a trial of `ops.plan_settings.default_trial_plan_id`, else complimentary) and
   written afterwards only by platform staff (`setTenantPlan`, with both audit logs and a version
   check) and by `app.apply_plan_transition`, which the minute billing sweep calls in the company's
-  scope for trials, paid periods and grace periods that have ended (notices to billing managers). An
+  scope for trials, paid periods and grace periods that have ended (notices to billing managers). A
+  staff change marks the version it writes (`staff_notice_version`, 0077, ADR-100), and the same
+  sweep emails the billing managers about it (`notifyStaffPlanChanges`: listed by
+  `ops.plan_change_notices_due`, taken by `app.take_plan_change_notice()` in the company's scope,
+  company row first, in the transaction that queues the emails; a change replaced first is not
+  told). An
   expired or canceled plan sets `tenants.status = 'restricted'` through a trigger; restricted
   behaves like suspended (`ALLOWED_WHEN_SUSPENDED`, jobs deferred, sweeps skip it, public
   lookups still resolve), suspension wins, and a plan that gives access again lifts it.

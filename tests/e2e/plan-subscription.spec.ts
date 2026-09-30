@@ -74,7 +74,7 @@ test('a company pays for its plan by subscription, a renewal counts from Razorpa
     await page.getByLabel('Trial ends on').fill(dayFromNow(10));
     await page.getByLabel('Extra seats').fill('2');
     await page
-      .getByLabel('Reason (shown in the company’s audit log)')
+      .getByLabel('Reason (emailed to the billing managers, and shown in the company’s audit log)')
       .fill('Trial agreed on the sales call');
     await page.getByRole('button', { name: 'Save plan' }).click();
     await expect(page.getByText('The company’s plan was changed.')).toBeVisible();

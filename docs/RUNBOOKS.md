@@ -910,9 +910,20 @@ new checks hold for existing rows; a failure usually means the bootstrap roles a
 **Putting a company on a plan.** Platform → the company → Plan: choose a trial of a published
 version until a day, a paid period of one (from a day until a day, in the company's time zone; the
 period ends at the start of the "until" day), complimentary access, or end the plan. Give the
-invoice or ticket as the reason: it is shown in the company's audit log. A form older than the
-current plan state is refused ("The plan changed while you were editing"); reload. Nothing is
-charged in HyFib: set the period after the payment is settled elsewhere.
+invoice or ticket as the reason: it is shown in the company's audit log and emailed to its
+billing managers. A form older than the current plan state is refused ("The plan changed while you
+were editing"); reload. Nothing is charged in HyFib: set the period after the payment is settled
+elsewhere.
+
+**A company says it was not told of a plan change (ADR-100).** The worker's minute billing sweep
+emails the company's active owners and billing members "HyFib changed your plan" after each staff
+change, with the plan now, its dates and add-ons and the reason. Two changes within a minute make
+one email with the latest; a change the plan sweep or a subscription replaced before the sweep ran
+is not told (their own emails are). A change not told yet has
+`app.tenant_plans.staff_notice_version` set; it stays set for a company being deleted. The worker
+logs `plan change notices` with the counts, and `plan change notice failed for a company; will
+retry` with the company id on failure (the change is told the next minute). If the email was
+queued, follow section 2 (Email not arriving).
 
 **Paying for plans by Razorpay subscription (ADR-063).** Turn it on only after Razorpay activated
 Subscriptions (and Flash Checkout, which Subscriptions need) on HyFib's account and the webhook
@@ -1400,6 +1411,13 @@ already stored: a short `ACCESS EXCLUSIVE` lock on the keys table), creates `app
 row security and its grants, and registers deletion step 855 with the definer's grants and
 policies. A failure usually means a lock wait on `app.api_keys` timed out (run the migrations again
 when requests are quieter) or the bootstrap roles are missing.
+
+**Migration 0077 failed.** It runs in one transaction, so a failure applies nothing. It adds
+`staff_notice_version` to `app.tenant_plans` with a check and a partial index (a short lock on the
+table, one row per company), the platform role's update grant on it, and
+`ops.plan_change_notices_due` and `app.take_plan_change_notice` (granted to `w360_app`, then handed
+to `w360_definer`). A failure usually means the bootstrap roles are missing or a lock wait on
+`app.tenant_plans` timed out: run the migrations again. Staff changes made before it are not told.
 
 **Migration 0076 failed.** It runs in one transaction, so a failure applies nothing, and the
 authentication function stays as it was. It creates `app.api_settings` with row security, its grants
