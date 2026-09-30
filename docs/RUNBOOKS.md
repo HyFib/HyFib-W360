@@ -1387,6 +1387,25 @@ same name exists. 0056 validates the type check without blocking writes; it fail
 event has a type outside the list, which no code writes: look for the row by `type` before running
 it again.
 
+**Order events (ADR-085).** An endpoint that takes `order.received` or `order.status_changed` hears
+of WhatsApp orders only: store orders (Shopify, WooCommerce) send nothing, since the store reports
+them itself. Every status change is sent whoever makes it: a member (confirm, fulfil, cancel, ask
+for payment) or the worker applying a Payment Link's outcome (paid, or back to confirmed when the
+link ends unpaid). A receiver that sees `paidAt` on an early event is reading the order as it was
+when that event was delivered; `order.status` and `order.previousStatus` are the change itself, and
+the latest change has the latest `createdAt`. A receiver that asks for the Payment Link address or
+Razorpay's payment id: payloads never carry them; the order page shows the link. A missing note on
+an order whose contact was erased is expected: erasure clears it (and sends no order event). The
+event keeps the order id and the status before a change in `app.webhook_events.detail`.
+
+**Migration 0063 or 0064 failed.** 0063 runs in one transaction, so a failure applies nothing: it
+widens the event type checks (the one on `app.webhook_events` `NOT VALID`) and adds the capture
+function and the two triggers on `app.commerce_orders`. A failure usually means a check was renamed
+by hand (`webhook_endpoints_event_types_check`, `webhook_events_type_check`) or a trigger of the
+same name exists. 0064 validates the type check without blocking writes; it fails only if a stored
+event has a type outside the list, which no code writes: look for the row by `type` before running
+it again.
+
 ## 10P. Platform operations console
 
 `/platform/ops` is for platform owners and operators (MFA). It shows counts, states, error codes,

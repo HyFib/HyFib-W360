@@ -1041,6 +1041,14 @@ true`); the same key with another request (method, path and body hashed) answers
   when delivered: the run (what started it, the API key for `api` runs, the automation's name now,
   the status and end as captured), the conversation id, the contact and the number; never the run's
   answers or inputs.
+- **Order events** (migrations 0063–0064, ADR-085): triggers on `app.commerce_orders` capture
+  `order.received` when a WhatsApp order is recorded and `order.status_changed` when an update
+  changes its status (a member, or the payment worker applying a Payment Link's outcome), through
+  `app.capture_webhook_event` (the order id, and the status before a change, in `detail`). Erasure
+  clears the note without touching the status, so it captures nothing. Their payloads are built
+  when delivered: the order with its items in cart order and amounts in minor units (the statuses
+  as captured, the note null once erased), the conversation id, the contact and the number; never
+  Payment Link or Razorpay payment details. Store orders send nothing.
 - **Dispatch:** the worker's LISTEN connection (`apps/worker/src/webhook-listener.ts`) turns a
   notification into a lookup of active companies with due deliveries (`ops.webhook_dispatch_due`,
   SECURITY DEFINER), at most one lookup every 250 ms; the per-minute messaging sweep does the same
@@ -1050,8 +1058,8 @@ true`); the same key with another request (method, path and body hashed) answers
 - **Delivery** (`webhooks/delivery.ts`): the job claims up to 10 due deliveries (`FOR UPDATE SKIP
 LOCKED`; pending ones due now, then `delivering` ones whose lease expired), builds each payload
   from the company's current data (`webhooks/payloads.ts`; an erased contact has no number or name,
-  a message, conversation, contact or run that is gone ends the delivery as `event_gone`), signs
-  it, sets the lease (the 10 s egress deadline plus 35 s) and commits. The POSTs go through the
+  a message, conversation, contact, run or order that is gone ends the delivery as `event_gone`),
+  signs it, sets the lease (the 10 s egress deadline plus 35 s) and commits. The POSTs go through the
   egress client (DNS pinned, private, loopback, link-local, metadata and reserved addresses refused,
   no redirects, 64 KB sent, responses read up to 256 KB and discarded) with no transaction open.
   Each outcome is recorded in its own transaction, locking the endpoint before the delivery; an

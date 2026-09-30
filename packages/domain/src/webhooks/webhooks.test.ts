@@ -1,6 +1,6 @@
 import { createHmac } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { AUTOMATION_END_REASONS } from '@w360/db';
+import { AUTOMATION_END_REASONS, ORDER_STATUSES } from '@w360/db';
 import { apiContactSchema } from '../api/contact-view';
 import { buildOpenApiDocument } from '../api/openapi';
 import { renderEmail } from '../email/templates';
@@ -25,6 +25,8 @@ import {
   inboundSummary,
   messageReceivedPayloadSchema,
   messageStatusPayloadSchema,
+  orderReceivedPayloadSchema,
+  orderStatusChangedPayloadSchema,
   pingPayloadSchema,
   tappedReplySchema,
   templateStatusPayloadSchema,
@@ -379,6 +381,82 @@ describe('webhook payload schemas', () => {
     }
   });
 
+  it('describe the order events (ADR-085)', () => {
+    const order = {
+      id: base.id,
+      reference: 'K7M2QX9P',
+      status: 'received',
+      previousStatus: null,
+      messageId: '0192a1b2-0000-7000-8000-000000000007',
+      catalogId: '5550001',
+      currency: 'INR',
+      subtotalMinor: 28_998,
+      itemCount: 2,
+      droppedItems: 0,
+      customerNote: 'Please gift wrap',
+      items: [
+        {
+          retailerId: 'sku-1',
+          name: 'Masala chai',
+          quantity: 2,
+          unitPriceMinor: 1_999,
+          currency: 'INR',
+        },
+        { retailerId: 'sku-9', name: null, quantity: 1, unitPriceMinor: 25_000, currency: 'INR' },
+      ],
+      receivedAt: base.createdAt,
+      paidAt: null,
+    };
+    const received = {
+      ...base,
+      type: 'order.received',
+      data: { order, conversation, contact, channel },
+    };
+    expect(orderReceivedPayloadSchema.safeParse(received).success).toBe(true);
+    // Every status an order can reach is described, with the one before it.
+    for (const status of ORDER_STATUSES) {
+      expect(
+        orderStatusChangedPayloadSchema.safeParse({
+          ...received,
+          type: 'order.status_changed',
+          data: {
+            ...received.data,
+            order: { ...order, status, previousStatus: 'confirmed', paidAt: base.createdAt },
+          },
+        }).success,
+        status,
+      ).toBe(true);
+    }
+    // An order without a total (an unreadable price, mixed currencies) or a note is described too.
+    expect(
+      orderReceivedPayloadSchema.safeParse({
+        ...received,
+        data: {
+          ...received.data,
+          order: {
+            ...order,
+            currency: null,
+            subtotalMinor: null,
+            droppedItems: 1,
+            customerNote: null,
+            items: [{ ...order.items[0], unitPriceMinor: null, currency: null }],
+          },
+        },
+      }).success,
+    ).toBe(true);
+    // Each type has its own body; an unknown status or a fractional amount is not described.
+    expect(orderStatusChangedPayloadSchema.safeParse(received).success).toBe(false);
+    for (const change of [{ status: 'shipped' }, { subtotalMinor: 289.98 }]) {
+      expect(
+        orderReceivedPayloadSchema.safeParse({
+          ...received,
+          data: { ...received.data, order: { ...order, ...change } },
+        }).success,
+        JSON.stringify(change),
+      ).toBe(false);
+    }
+  });
+
   it('refuse a body of another type or with an unknown status', () => {
     expect(pingPayloadSchema.safeParse({ ...base, type: 'message.status', data: {} }).success).toBe(
       false,
@@ -456,6 +534,8 @@ describe('the OpenAPI document', () => {
       'contact.erased',
       'automation.run_started',
       'automation.run_ended',
+      'order.received',
+      'order.status_changed',
     ]);
     const schemas = doc.components.schemas as Record<string, unknown>;
     const parameters = doc.components.parameters as Record<string, { name: string }>;

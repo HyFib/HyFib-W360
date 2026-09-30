@@ -26,6 +26,8 @@ import {
   tappedReplySchema,
   messageReceivedPayloadSchema,
   messageStatusPayloadSchema,
+  orderReceivedPayloadSchema,
+  orderStatusChangedPayloadSchema,
   pingPayloadSchema,
   templateStatusPayloadSchema,
 } from '../webhooks/payloads';
@@ -974,6 +976,18 @@ export function buildOpenApiDocument(serverUrl: string) {
         `${WEBHOOK_EVENT_INFO['automation.run_ended'].description} Deliveries are not ordered: the end of a short run can arrive before its start, so compare run.startedAt and run.endedAt.`,
         'WebhookAutomationRunEnded',
       ),
+      'order.received': webhook(
+        'webhookOrderReceived',
+        WEBHOOK_EVENT_INFO['order.received'].label,
+        `${WEBHOOK_EVENT_INFO['order.received'].description} The order message itself is also sent as message.received (type order). Amounts are integers in the currency’s minor units.`,
+        'WebhookOrderReceived',
+      ),
+      'order.status_changed': webhook(
+        'webhookOrderStatusChanged',
+        WEBHOOK_EVENT_INFO['order.status_changed'].label,
+        `${WEBHOOK_EVENT_INFO['order.status_changed'].description} order.status and order.previousStatus are the change; the rest is the order when the event is delivered. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
+        'WebhookOrderStatusChanged',
+      ),
       ping: webhook(
         'webhookPing',
         'Test event',
@@ -1073,6 +1087,8 @@ export function buildOpenApiDocument(serverUrl: string) {
         WebhookContactErased: jsonSchema(contactErasedPayloadSchema),
         WebhookAutomationRunStarted: jsonSchema(automationRunStartedPayloadSchema),
         WebhookAutomationRunEnded: jsonSchema(automationRunEndedPayloadSchema),
+        WebhookOrderReceived: jsonSchema(orderReceivedPayloadSchema),
+        WebhookOrderStatusChanged: jsonSchema(orderStatusChangedPayloadSchema),
         WebhookPing: jsonSchema(pingPayloadSchema),
       },
     },

@@ -447,9 +447,12 @@ verification, app review, Embedded Signup configuration).
   what started the run, the API key for runs started through the API, the status and end reason;
   test runs send nothing; no answers or inputs). **[Endpoints, deliveries, test events and replays
   through the API built, locally verified]** (ADR-081, ADR-083: for the endpoints API keys add; see
-  P5-08). Remaining: filters beyond the event type (such as by automation), custom headers, mutual
-  TLS, fixed egress addresses, custom field changes, member and team identities, events for
-  campaigns, orders and each step of a run, load tests.
+  P5-08). **[WhatsApp order events built, locally verified]** (ADR-085: `order.received` with the
+  cart, amounts in minor units and the customer's note, and `order.status_changed` with the status
+  before it, whoever changes it, Razorpay's payment through the worker included; no Payment Link or
+  payment details). Remaining: filters beyond the event type (such as by automation or status),
+  custom headers, mutual TLS, fixed egress addresses, custom field changes, member and team
+  identities, events for campaigns, store orders, Payment Links and each step of a run, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,

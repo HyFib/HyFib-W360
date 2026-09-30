@@ -26,29 +26,39 @@ import {
   conversationStatusPayloadSchema,
   createApiKeysService,
   createAutomationService,
+  createCommerceService,
   createContactsService,
   createInboxService,
   createTemplatesService,
   createWebhooksService,
   messageReceivedPayloadSchema,
+  orderReceivedPayloadSchema,
+  orderStatusChangedPayloadSchema,
+  processCommerceSync,
+  processPaymentAccountCheck,
+  processPaymentLink,
   processSendIntent,
   processTemplateSubmit,
   processWebhookDeliveries,
   syncTemplates,
+  WEBHOOK_EVENT_KEYS,
   type AutomationTrigger,
+  type CatalogSyncDeps,
   type TemplateDefinition,
   type TenantContext,
   type WebhookEventType,
 } from '@w360/domain';
+import { startRazorpayStandIn, type RazorpayStandIn } from '../support/razorpay-stand-in';
 import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './whatsapp-fixture';
 
 /**
- * Webhook events for conversations and contacts (ADR-074) and automation runs (ADR-078) against
- * real PostgreSQL and a local receiver: capture by the triggers from every kind of change, one
- * contact event per contact and transaction (savepoints included), erasure sending only
- * `contact.erased`, the start and end of live runs (not test runs), delivery to the endpoints that
- * take each type, payloads built when delivered, and the capture function's limits for the company
- * role.
+ * Webhook events for conversations and contacts (ADR-074), automation runs (ADR-078) and WhatsApp
+ * orders (ADR-085) against real PostgreSQL and a local receiver: capture by the triggers from every
+ * kind of change, one contact event per contact and transaction (savepoints included), erasure
+ * sending only `contact.erased`, the start and end of live runs (not test runs), orders and every
+ * status change whoever makes it (members, Razorpay through the worker), delivery to the endpoints
+ * that take each type, payloads built when delivered, and the capture function's limits for the
+ * company role.
  */
 let fx: WhatsAppFixture;
 let receiver: Server;
@@ -143,7 +153,7 @@ interface EventRow extends Record<string, unknown> {
 }
 
 /** The company's captured events of the given types, oldest first, with their delivery counts. */
-const eventsOf = (c: Company, prefix: 'conversation.' | 'contact.' | 'automation.') =>
+const eventsOf = (c: Company, prefix: 'conversation.' | 'contact.' | 'automation.' | 'order.') =>
   fx.query<EventRow>(
     `SELECT e.id, e.type, e.status, e.detail, e.conversation_id, e.contact_id,
             (SELECT count(*)::int FROM app.webhook_deliveries d
@@ -1074,5 +1084,351 @@ describe('automation run events (ADR-078)', () => {
       ),
     ).toEqual([{ state: 'failed', attempts: 0, last_error: 'event_gone' }]);
     expect(bodiesAt(hook.path)).toEqual([]);
+  });
+});
+
+describe('order events (ADR-085)', () => {
+  let rzp: RazorpayStandIn;
+  let merchants = 0;
+  beforeAll(async () => {
+    rzp = await startRazorpayStandIn({ keyId: 'rzp_test_platform0085', keySecret: 'platform' });
+  });
+  afterAll(async () => {
+    await rzp?.close();
+  });
+
+  const commerce = () =>
+    createCommerceService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+      keyring: fx.keyring,
+      appBaseUrl: 'https://app.w360.test',
+      allowLiveKeys: false,
+    });
+  const commerceWorker = (): CatalogSyncDeps => ({
+    db: fx.dbs.app,
+    keyring: fx.keyring,
+    graph: fx.graph,
+    clock: systemClock,
+    razorpayBaseUrl: rzp.baseUrl,
+    jobs: fx.jobs(),
+    signer: fx.signer,
+  });
+  const scopeOf = (c: Company) => authorizedTenantScope(c.tenant.id, null);
+
+  /** A catalog read from Meta with products sku-1 and sku-2 (Product 001, Product 002). */
+  async function syncedCatalog(c: Company, catalogId: string) {
+    fx.standIn.state.catalogs.set(c.wabaId, [
+      { id: catalogId, name: 'Main catalog', product_count: 2 },
+    ]);
+    fx.standIn.state.catalogProducts.set(
+      catalogId,
+      [1, 2].map((n) => ({
+        id: String(850_000 + n),
+        retailer_id: `sku-${n}`,
+        name: `Product 00${n}`,
+        price: `₹${n * 10}.00`,
+        currency: 'INR',
+        availability: 'in stock',
+        review_status: 'approved',
+      })),
+    );
+    await commerce().requestSync(await fx.ctx(c, c.owner), {
+      whatsappAccountId: c.whatsappAccountId,
+    });
+    expect(await processCommerceSync(commerceWorker(), scopeOf(c), c.whatsappAccountId)).toBe(
+      'done',
+    );
+  }
+
+  /** A cart the customer sends from the catalog through the Meta webhook pipeline; its order. */
+  async function sendCart(
+    c: Company,
+    from: string,
+    catalogId: string,
+    items: { retailerId: string; quantity: number; price: number }[],
+    text = '',
+  ) {
+    await fx.deliver(
+      fx.messagesBody(c, {
+        messages: [
+          {
+            waId: from,
+            type: 'order',
+            extra: {
+              order: {
+                catalog_id: catalogId,
+                text,
+                product_items: items.map((i) => ({
+                  product_retailer_id: i.retailerId,
+                  quantity: i.quantity,
+                  item_price: i.price,
+                  currency: 'INR',
+                })),
+              },
+            },
+          },
+        ],
+      }),
+    );
+    const [order] = await fx.query<{
+      id: string;
+      reference: string;
+      message_id: string;
+      conversation_id: string;
+      contact_id: string;
+      version: number;
+    }>(
+      `SELECT o.id, o.reference, o.message_id, o.conversation_id, o.contact_id, o.version
+         FROM app.commerce_orders o
+         JOIN app.contact_identities i ON i.tenant_id = o.tenant_id AND i.contact_id = o.contact_id
+        WHERE o.tenant_id = $1 AND i.wa_id = $2 ORDER BY o.created_at DESC LIMIT 1`,
+      [c.tenant.id, from],
+    );
+    if (!order) throw new Error('order not recorded');
+    return order;
+  }
+
+  const orderVersion = async (orderId: string) =>
+    (
+      await fx.query<{ version: number }>('SELECT version FROM app.commerce_orders WHERE id = $1', [
+        orderId,
+      ])
+    )[0]!.version;
+
+  async function setOrderStatus(
+    ctx: TenantContext,
+    orderId: string,
+    status: 'confirmed' | 'fulfilled' | 'cancelled',
+  ) {
+    await commerce().setOrderStatus(ctx, {
+      id: orderId,
+      expectedVersion: await orderVersion(orderId),
+      status,
+    });
+  }
+
+  it('sends each order with its cart and every status change with the status before it, from members and from Razorpay', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    await syncedCatalog(c, '5558501');
+    const orders = await addEndpoint(c, ['order.received', 'order.status_changed']);
+    const changes = await addEndpoint(c, ['order.status_changed']);
+    const messagesOnly = await addEndpoint(c, ['message.received']);
+
+    // The customer sends a cart: an item HyFib has not read from Meta, then one from the catalog.
+    const from = waId();
+    const order = await sendCart(
+      c,
+      from,
+      '5558501',
+      [
+        { retailerId: 'sku-9', quantity: 1, price: 250 },
+        { retailerId: 'sku-1', quantity: 2, price: 19.99 },
+      ],
+      'Please gift wrap',
+    );
+
+    // A member confirms it and asks for payment; Razorpay reports the link paid; it is fulfilled.
+    await setOrderStatus(agent, order.id, 'confirmed');
+    const keyId = `rzp_test_orderevents${String((merchants += 1)).padStart(2, '0')}`;
+    rzp.addMerchant(keyId, 'order-events-secret');
+    await commerce().savePaymentAccount(owner, {
+      keyId,
+      keySecret: 'order-events-secret',
+      webhookSecret: 'order-events-hook',
+    });
+    const [account] = await fx.query<{ id: string }>(
+      'SELECT id FROM app.commerce_payment_accounts WHERE tenant_id = $1',
+      [c.tenant.id],
+    );
+    expect(await processPaymentAccountCheck(commerceWorker(), scopeOf(c), account!.id)).toBe(
+      'done',
+    );
+    const { linkId } = await commerce().requestPayment(agent, {
+      id: order.id,
+      expectedVersion: await orderVersion(order.id),
+    });
+    expect(await processPaymentLink(commerceWorker(), scopeOf(c), linkId)).toBe('done');
+    const [link] = await fx.query<{ provider_link_id: string }>(
+      'SELECT provider_link_id FROM app.commerce_payment_links WHERE id = $1',
+      [linkId],
+    );
+    rzp.payLink(link!.provider_link_id);
+    expect(await processPaymentLink(commerceWorker(), scopeOf(c), linkId)).toBe('done');
+    await setOrderStatus(agent, order.id, 'fulfilled');
+
+    // One event per change, each to the endpoints that take its type.
+    const events = await eventsOf(c, 'order.');
+    expect(events.map((e) => [e.type, e.status, e.detail, e.deliveries])).toEqual([
+      ['order.received', 'received', { orderId: order.id }, 1],
+      ['order.status_changed', 'confirmed', { orderId: order.id, previousStatus: 'received' }, 2],
+      [
+        'order.status_changed',
+        'awaiting_payment',
+        { orderId: order.id, previousStatus: 'confirmed' },
+        2,
+      ],
+      [
+        'order.status_changed',
+        'paid',
+        { orderId: order.id, previousStatus: 'awaiting_payment' },
+        2,
+      ],
+      ['order.status_changed', 'fulfilled', { orderId: order.id, previousStatus: 'paid' }, 2],
+    ]);
+    expect(events.every((e) => e.conversation_id === order.conversation_id)).toBe(true);
+    expect(events.every((e) => e.contact_id === order.contact_id)).toBe(true);
+
+    await deliverDue(c);
+    const bodies = bodiesAt(orders.path);
+    expect(bodies.map((b) => b.id)).toEqual(events.map((e) => e.id));
+    expect(orderReceivedPayloadSchema.safeParse(bodies[0]).success).toBe(true);
+    for (const body of bodies.slice(1)) {
+      expect(orderStatusChangedPayloadSchema.safeParse(body).success).toBe(true);
+    }
+    // The cart in the customer's order, with the names HyFib knew; the rest as the order is now.
+    const [paid] = await fx.query<{ paid_at: Date; received_at: Date }>(
+      'SELECT paid_at, received_at FROM app.commerce_orders WHERE id = $1',
+      [order.id],
+    );
+    expect(bodies[0]).toMatchObject({
+      type: 'order.received',
+      data: {
+        order: {
+          id: order.id,
+          reference: order.reference,
+          status: 'received',
+          previousStatus: null,
+          messageId: order.message_id,
+          catalogId: '5558501',
+          currency: 'INR',
+          subtotalMinor: 28_998,
+          itemCount: 2,
+          droppedItems: 0,
+          customerNote: 'Please gift wrap',
+          receivedAt: paid!.received_at.toISOString(),
+          paidAt: paid!.paid_at.toISOString(),
+        },
+        conversation: { id: order.conversation_id },
+        contact: { id: order.contact_id, phone: `+${from}`, name: 'Priya Customer' },
+        channel: { id: c.channelAccountId },
+      },
+    });
+    expect((bodies[0]!.data.order as { items: unknown }).items).toEqual([
+      { retailerId: 'sku-9', name: null, quantity: 1, unitPriceMinor: 25_000, currency: 'INR' },
+      {
+        retailerId: 'sku-1',
+        name: 'Product 001',
+        quantity: 2,
+        unitPriceMinor: 1_999,
+        currency: 'INR',
+      },
+    ]);
+    expect(
+      bodies.slice(1).map((b) => {
+        const { status, previousStatus } = b.data.order as Record<string, unknown>;
+        return [status, previousStatus];
+      }),
+    ).toEqual([
+      ['confirmed', 'received'],
+      ['awaiting_payment', 'confirmed'],
+      ['paid', 'awaiting_payment'],
+      ['fulfilled', 'paid'],
+    ]);
+    // An endpoint for status changes hears only those; one for messages hears the order message
+    // and nothing of the order.
+    expect(bodiesAt(changes.path).map((b) => b.id)).toEqual(events.slice(1).map((e) => e.id));
+    const messageBodies = bodiesAt(messagesOnly.path);
+    expect(messageBodies.map((b) => [b.type, (b.data.message as { id: string }).id])).toEqual([
+      ['message.received', order.message_id],
+    ]);
+    expect(messageBodies[0]!.data.message).toMatchObject({ type: 'order' });
+  });
+
+  it('sends an erased contact’s orders without their number, name or note, captures nothing without an endpoint for orders, and fails a delivery whose order is gone', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    // No endpoint takes order events: an order and its change capture nothing.
+    await addEndpoint(c, ['message.received', 'conversation.status_changed', 'contact.updated']);
+    const quiet = await sendCart(c, waId(), '5558502', [
+      { retailerId: 'sku-1', quantity: 1, price: 10 },
+    ]);
+    await setOrderStatus(owner, quiet.id, 'cancelled');
+    expect(await eventsOf(c, 'order.')).toEqual([]);
+
+    const hook = await addEndpoint(c, ['order.received', 'order.status_changed']);
+    const from = waId();
+    const order = await sendCart(
+      c,
+      from,
+      '5558502',
+      [{ retailerId: 'sku-1', quantity: 3, price: 10 }],
+      'Ring 98450 12345 at the gate',
+    );
+    await setOrderStatus(owner, order.id, 'confirmed');
+    // Erasure clears the note without changing the order's status: it captures nothing more.
+    await contactsService().eraseContact(owner, { contactId: order.contact_id, suppress: false });
+    expect((await eventsOf(c, 'order.')).map((e) => [e.type, e.status, e.deliveries])).toEqual([
+      ['order.received', 'received', 1],
+      ['order.status_changed', 'confirmed', 1],
+    ]);
+
+    // Both bodies are built when delivered, after the erasure; the order and its amounts stay.
+    await deliverDue(c);
+    const bodies = bodiesAt(hook.path);
+    expect(bodies.map((b) => b.type)).toEqual(['order.received', 'order.status_changed']);
+    for (const body of bodies) {
+      expect(body.data.contact).toEqual({ id: order.contact_id, phone: null, name: null });
+      expect(body.data.order).toMatchObject({
+        id: order.id,
+        customerNote: null,
+        subtotalMinor: 3_000,
+        items: [
+          { retailerId: 'sku-1', name: null, quantity: 3, unitPriceMinor: 1_000, currency: 'INR' },
+        ],
+      });
+      expect(JSON.stringify(body)).not.toContain(from.slice(2));
+      expect(JSON.stringify(body)).not.toContain('98450');
+    }
+
+    // An event whose order no longer exists fails without an attempt.
+    const gone = await addEndpoint(c, ['order.status_changed']);
+    const eventId = uuidv7();
+    await fx.dbs.app.run(authorizedTenantScope(c.tenant.id, null), async (tx) => {
+      await tx.insert(webhookEvents).values({
+        id: eventId,
+        tenantId: c.tenant.id,
+        type: 'order.status_changed',
+        conversationId: order.conversation_id,
+        status: 'fulfilled',
+        detail: { orderId: uuidv7(), previousStatus: 'confirmed' },
+      });
+      await tx.insert(webhookDeliveries).values({
+        id: uuidv7(),
+        tenantId: c.tenant.id,
+        endpointId: gone.id,
+        eventId,
+      });
+    });
+    await deliverDue(c);
+    expect(
+      await fx.query(
+        'SELECT state, attempts, last_error FROM app.webhook_deliveries WHERE endpoint_id = $1',
+        [gone.id],
+      ),
+    ).toEqual([{ state: 'failed', attempts: 0, last_error: 'event_gone' }]);
+    expect(bodiesAt(gone.path)).toEqual([]);
+
+    // An endpoint can take every event type, orders included.
+    const everything = await addEndpoint(c, [...WEBHOOK_EVENT_KEYS]);
+    expect(
+      await fx.query('SELECT event_types FROM app.webhook_endpoints WHERE id = $1', [
+        everything.id,
+      ]),
+    ).toEqual([{ event_types: [...WEBHOOK_EVENT_KEYS] }]);
   });
 });

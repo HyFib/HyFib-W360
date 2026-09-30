@@ -7,6 +7,7 @@ import {
   connectTestChannel,
   inboundMessage,
   messagingConfigured,
+  orderMessage,
   randomWaId,
   sendSignedWebhook,
   standInRequests,
@@ -280,5 +281,115 @@ test('automation run events reach an endpoint: a live run starts and ends, and a
   ).toEqual([
     ['automation.run_ended', 'keyword', `+${second}`],
     ['automation.run_started', 'keyword', `+${second}`],
+  ]);
+});
+
+/** An order event body, as far as this test reads it. */
+interface OrderEventBody {
+  type: string;
+  data: {
+    order: {
+      id: string;
+      reference: string;
+      status: string;
+      previousStatus: string | null;
+    } & Record<string, unknown>;
+    contact: { phone: string | null } & Record<string, unknown>;
+  };
+}
+
+test('order events reach an endpoint: a customer sends a cart, and a member confirms and fulfils the order', async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(180_000);
+  const email = uniqueEmail('hookord');
+  const slug = `hookord-${Date.now().toString(36)}`;
+  const path = `/orders/${slug}`;
+  const forUs = () =>
+    received
+      .filter((r) => r.path === path)
+      .map((r) => ({ ...r, json: JSON.parse(r.body) as OrderEventBody }));
+  await signUpAndVerify(page, { name: 'Omar Orders', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('Order Traders');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+  const { wabaId, phoneNumberId } = await connectTestChannel({ ownerEmail: email, slug });
+
+  // An endpoint for the two order events.
+  await page.goto(`/c/${slug}/settings/webhooks`);
+  await page.getByLabel('Endpoint URL').fill(`http://${HOST}:${port}${path}`);
+  await page.getByRole('checkbox', { name: /Order received/ }).check();
+  await page.getByRole('checkbox', { name: /Order status/ }).check();
+  await page.getByRole('button', { name: 'Add endpoint' }).click();
+  const secretField = page.getByLabel('Signing secret');
+  await expect(secretField).toBeVisible();
+  const secret = await secretField.inputValue();
+  await page.getByRole('button', { name: 'I have stored the secret' }).click();
+
+  // A customer sends a cart from the company's WhatsApp catalog.
+  const customer = randomWaId();
+  await sendSignedWebhook(
+    request,
+    orderMessage(wabaId, phoneNumberId, customer, {
+      catalogId: '5558503',
+      text: 'Please deliver after 6 pm',
+      items: [
+        { retailerId: 'chai-1', quantity: 2, price: 120 },
+        { retailerId: 'chai-2', quantity: 1, price: 80.5 },
+      ],
+    }),
+  );
+  await expect(async () => expect(forUs()).toHaveLength(1)).toPass({ timeout: 30_000 });
+  const cart = forUs()[0]!;
+  expect(signatureValid(cart.headers, cart.body, secret)).toBe(true);
+  expect(cart.headers['w360-event-type']).toBe('order.received');
+  expect(cart.json.data).toMatchObject({
+    order: {
+      status: 'received',
+      previousStatus: null,
+      catalogId: '5558503',
+      currency: 'INR',
+      subtotalMinor: 32_050,
+      itemCount: 2,
+      droppedItems: 0,
+      customerNote: 'Please deliver after 6 pm',
+      items: [
+        { retailerId: 'chai-1', quantity: 2, unitPriceMinor: 12_000, currency: 'INR' },
+        { retailerId: 'chai-2', quantity: 1, unitPriceMinor: 8_050, currency: 'INR' },
+      ],
+      paidAt: null,
+    },
+    contact: { phone: `+${customer}`, name: 'Priya Customer' },
+  });
+  const { id: orderId, reference } = cart.json.data.order;
+
+  // A member opens the order from the chat, confirms it, then marks it fulfilled.
+  await page.goto(`/c/${slug}/inbox`);
+  await page.getByRole('link', { name: /Priya Customer/ }).click();
+  await page.getByRole('link', { name: reference, exact: true }).click();
+  await page.getByRole('button', { name: 'Confirm order' }).click();
+  await expect(page.getByText('Confirmed', { exact: true }).first()).toBeVisible();
+  await expect(async () => expect(forUs()).toHaveLength(2)).toPass({ timeout: 30_000 });
+  await page.getByRole('button', { name: 'Mark fulfilled' }).click();
+  await expect(page.getByText('Fulfilled', { exact: true }).first()).toBeVisible();
+  await expect(async () => expect(forUs()).toHaveLength(3)).toPass({ timeout: 30_000 });
+  for (const event of forUs()) {
+    expect(signatureValid(event.headers, event.body, secret)).toBe(true);
+    expect(event.headers['w360-event-type']).toBe(event.json.type);
+  }
+  expect(
+    forUs()
+      .slice(1)
+      .map((e) => [
+        e.json.type,
+        e.json.data.order.id,
+        e.json.data.order.status,
+        e.json.data.order.previousStatus,
+      ]),
+  ).toEqual([
+    ['order.status_changed', orderId, 'confirmed', 'received'],
+    ['order.status_changed', orderId, 'fulfilled', 'confirmed'],
   ]);
 });

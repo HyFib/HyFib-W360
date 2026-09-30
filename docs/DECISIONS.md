@@ -2709,3 +2709,56 @@ Decision:
 Not built: reading notes through the API (members' notes would need their authors kept out),
 editing or deleting notes, mentions from keys, notes on contacts or deals, and a webhook event for
 notes.
+
+## ADR-085 Outgoing webhook events for WhatsApp orders (2026-09-30)
+
+Context: companies that sell from their WhatsApp catalog receive customers' carts as orders in
+HyFib (M-170): members confirm, fulfil or cancel them and ask for payment with a Payment Link from
+the company's own Razorpay account, which the worker marks paid only from the link it fetched
+(ADR-046). An order or delivery system learns of an order only from `message.received` (type
+`order`), which carries no items or total, and hears nothing when the order is paid or changes
+status; the public API does not read orders either.
+
+Decision:
+
+- **Two event types**, chosen per endpoint like the others (an endpoint may now take all 13):
+  - `order.received`: HyFib recorded a cart a customer sent from the company's WhatsApp catalog.
+  - `order.status_changed`: the order's status changed, whoever changed it: a member confirming,
+    fulfilling or cancelling it or asking for payment (waiting for payment), or the worker applying
+    what Razorpay reports for its Payment Link (paid, or back to confirmed when the link expired or
+    was cancelled unpaid, erasure's cancellation included).
+  - Store orders (the Shopify and WooCommerce copies of ADR-047) are not sent: they are copies of
+    orders the company's store already reports through its own webhooks.
+- **Capture** by two triggers on `app.commerce_orders`, after an insert and after an update of
+  `status` that changes it, in the transaction that makes the change, as ADR-053. They run with the
+  rights of whoever makes the change: the runtime role in the company's scope, the only role that
+  adds orders or changes their status (erasure, in its definer function, only clears the customer's
+  note and so sends nothing). The event keeps the order id, the conversation and contact, the status
+  it reports and, for a change, the status before it.
+- **Payloads are built when delivered** (ADR-053): `order` (id, reference, the status the event
+  reports and the one before it, null for `order.received`; the order message's id; the Meta
+  catalog; the currency, the subtotal and each unit price as integers in the currency's minor units,
+  null where HyFib could not work them out; the items read and the items left out; the customer's
+  note; each item's content id, the product name HyFib knew when the order was received, quantity,
+  unit price and currency; when it was received and paid), `conversation` (id), `contact` (id,
+  number and name, null once erased) and `channel`, as the other events. The two statuses are as
+  captured and the rest as when delivered: an event delivered after the payment names when it was
+  paid, and one delivered after the contact's erasure has no number, name or note (erasure clears
+  it). An order that no longer exists fails the delivery as `event_gone` (orders are kept until the
+  company is deleted, which removes its webhook history first).
+- **Money is never a float:** amounts are the integers HyFib stores; subtotals are capped at
+  5×10¹³ minor units when an order is read, well inside JSON's exact integer range.
+- **No payment details:** the Payment Link's id and address and Razorpay's payment ids are not
+  sent. The company's Razorpay account reports those to it directly, and a link's address is a way
+  to pay.
+- **Order:** deliveries are not ordered (ADR-053); the latest change is the one with the latest
+  `createdAt`, the time the status changed. Receivers deduplicate on the event id.
+- **Volume:** one event per order and one per status change, a handful per order at most.
+- **Migrations:** 0063 widens the endpoint check to 13 types and replaces the event type check
+  `NOT VALID` (as 0055 did), and adds the capture function (not executable by `PUBLIC`) and the two
+  triggers; 0064 validates the check without blocking writes. Endpoints can take the new types only
+  once this release's web app runs, after the migrations and the workers, so every worker
+  delivering them knows them.
+
+Not built: store order events, Payment Link events, reading or changing orders through the public
+API, catalog and product events, and filters by status.

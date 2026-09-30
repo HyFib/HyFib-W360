@@ -1,5 +1,80 @@
 # Progress
 
+## 2026-09-30 — Phase 5: webhook events for WhatsApp orders (P5-09, ADR-085)
+
+Status: **Implemented and locally verified with local test receivers (no customer data).** An order
+or delivery system learned of a WhatsApp order only from `message.received` (type `order`), without
+its items or total, and heard nothing when the order was paid or changed status.
+
+### Completed
+
+- **Design (ADR-085):** `order.received` when HyFib records a cart a customer sent from the
+  company's WhatsApp catalog, and `order.status_changed` with the status before it whenever the
+  status changes, whoever changes it: a member confirming, fulfilling or cancelling the order or
+  asking for payment, or the worker applying what Razorpay reports for its Payment Link (paid, or
+  back to confirmed when the link ends unpaid). Payloads are built when delivered: the order with
+  its items in cart order, amounts as integers in minor units, the customer's note and the product
+  names HyFib knew, then the conversation, contact and number; an erased contact's order is sent
+  without number, name or note, and no Payment Link address or Razorpay payment id is ever sent.
+  Store orders (Shopify, WooCommerce) are not sent.
+- **Migrations 0063–0064:** the endpoint check takes all 13 types; the event type check is
+  replaced `NOT VALID` in 0063 and validated in 0064 without blocking writes; the capture function
+  (not executable by `PUBLIC`) and two triggers on `app.commerce_orders` (after an insert, and
+  after an update that changes `status`; erasure clearing the note sends nothing).
+- **Domain:** the two types in `WEBHOOK_EVENT_TYPES`, `WEBHOOK_EVENT_KEYS` and
+  `WEBHOOK_EVENT_INFO`; `orderReceivedPayloadSchema` and `orderStatusChangedPayloadSchema`, and the
+  order read (`orderOf`) in `webhooks/payloads.ts`; the OpenAPI webhooks `order.received` and
+  `order.status_changed` (`WebhookOrderReceived`, `WebhookOrderStatusChanged`).
+- **Web:** Settings → Webhooks offers "Order received" and "Order status" (from the shared list)
+  and its introduction names orders.
+- **Tests:** unit (both payload schemas: every order status, an order without a total or note,
+  fractional amounts and unknown statuses refused; the OpenAPI list and body schemas). Integration
+  in `webhook-events.test.ts` (Razorpay stand-in and local receiver): a cart from a catalog read
+  from Meta, then a member's confirmation, a payment request, Razorpay reporting the link paid
+  (through the worker) and the member's fulfilment, each captured once with the status before it
+  and delivered to the endpoints that take its type (an endpoint for messages hears only the order
+  message), items in cart order with the names HyFib knew, amounts in minor units, `paidAt` as
+  delivered; an erased contact's order and its change delivered without number, name or note,
+  erasure capturing nothing, nothing captured without an endpoint that takes order events, a gone
+  order failing as `event_gone` without an attempt, and an endpoint taking all 13 types. e2e
+  `webhook-events.spec.ts`: an endpoint chosen in settings receives a signed `order.received` for a
+  cart sent through the Meta webhook, then signed changes as a member confirms and fulfils the order
+  from the chat.
+- **Docs:** ADR-085; ARCHITECTURE (outgoing webhooks); SECURITY (controls, Phase 5 rules);
+  THREAT-MODEL T103; RUNBOOKS (order events, migrations 0063–0064); DATA-RETENTION (outgoing
+  webhooks, orders); BACKLOG P5-09; FEATURE-MATRIX H-014 and W-138 (which now names every kind of
+  event).
+- **Mutation checks:** 24 regressions tried one at a time; 23 make a test fail. 22 of 23 in the
+  database and domain: no event when an order is recorded, or when its status changes; any update of
+  an order captured (erasure clearing the note included); the status before a change not kept; a
+  change reporting the old status; changes captured as `order.received`; endpoints refused the
+  order types, or limited to 11 types; events refused the order types; the customer's note copied
+  into the event (and so sent after an erasure); items sorted by content id instead of cart order;
+  items of every order of the company; the status as the order is now instead of as captured; no
+  status before a change in the body; amounts in major units; a gone order not detected; the paid
+  time not read; fractional amounts described; the order events not offered to endpoints;
+  `order.received` or its body schema missing from the OpenAPI document; the database type list
+  without `order.status_changed` (caught by the type check). The other, dropping the explicit
+  `REVOKE … FROM PUBLIC`, cannot be observed: default privileges (migration 0002) already withhold
+  EXECUTE from PUBLIC, which the isolation suite checks. 1 in the web layer through the e2e test:
+  the endpoint form not offering the order events.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                     | Result                                                                                                                                                                   |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                           |
+| `pnpm test` (unit)                                                          | 397 passed, including 1 new in `webhooks/webhooks.test.ts`                                                                                                               |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 538 passed, including 2 new in `webhook-events.test.ts`                                                                                                                  |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 538 passed                                                                                                                                                               |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / on `webhook-events.spec.ts` and `webhooks.spec.ts`: 12 passed (2.4 min), on a local database created for the day's runs with migrations 0063–0064 applied |
+| Mutation checks                                                             | 24 regressions tried (1 through the e2e test); 23 make a test fail, and the other (a redundant REVOKE) cannot be observed                                                |
+
+### Known gaps
+
+- Not built: store order events, Payment Link events, reading or changing orders through the public
+  API, catalog and product events, filters by status.
+
 ## 2026-09-29 — Phase 5: internal notes through the public API (P5-08, ADR-084)
 
 Status: **Implemented and locally verified (no customer data).** An integration that works beside

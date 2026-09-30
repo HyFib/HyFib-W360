@@ -3,7 +3,10 @@ import { appSchema } from './tenancy';
 
 const tz = (name: string) => timestamp(name, { withTimezone: true, mode: 'date' });
 
-/** Event types an endpoint can receive (ADR-053, ADR-074); `ping` is only sent as a test. */
+/**
+ * Event types an endpoint can receive (ADR-053, ADR-074, ADR-078, ADR-085); `ping` is only sent as
+ * a test.
+ */
 export const WEBHOOK_EVENT_TYPES = [
   'message.received',
   'message.status',
@@ -16,6 +19,8 @@ export const WEBHOOK_EVENT_TYPES = [
   'contact.erased',
   'automation.run_started',
   'automation.run_ended',
+  'order.received',
+  'order.status_changed',
 ] as const;
 export type WebhookEventType = (typeof WEBHOOK_EVENT_TYPES)[number];
 

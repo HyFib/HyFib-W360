@@ -3,7 +3,7 @@ import type { WebhookEventType } from '@w360/db';
 export type { WebhookEventType } from '@w360/db';
 
 /**
- * Outgoing webhooks (P5-09, ADR-053, ADR-074, ADR-078): the parts the settings page and the
+ * Outgoing webhooks (P5-09, ADR-053, ADR-074, ADR-078, ADR-085): the parts the settings page and the
  * services share. Pure definitions without server dependencies, so pages can use them in the
  * browser.
  */
@@ -20,6 +20,8 @@ export const WEBHOOK_EVENT_KEYS = [
   'contact.erased',
   'automation.run_started',
   'automation.run_ended',
+  'order.received',
+  'order.status_changed',
 ] as const satisfies readonly WebhookEventType[];
 
 export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; description: string }> =
@@ -74,6 +76,16 @@ export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; descr
       label: 'Automation ended',
       description:
         'An automation run ended: completed, handed to people, taken over, stopped or failed, with the reason.',
+    },
+    'order.received': {
+      label: 'Order received',
+      description:
+        'A customer sent a cart from your WhatsApp catalog: the order with its items, total and note.',
+    },
+    'order.status_changed': {
+      label: 'Order status',
+      description:
+        'A WhatsApp order was confirmed, fulfilled or cancelled, is waiting for payment, was paid through its Payment Link, or went back to confirmed when the link ended unpaid.',
     },
   };
 

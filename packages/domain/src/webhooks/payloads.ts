@@ -1,27 +1,32 @@
 import { z } from 'zod';
 import {
   and,
+  asc,
   AUTOMATION_END_REASONS,
   AUTOMATION_RUN_STATUSES,
   automationRuns,
   automations,
   channelAccounts,
+  commerceOrderItems,
+  commerceOrders,
   contacts,
   CONVERSATION_STATUSES,
   conversations,
   eq,
   messageTemplates,
   messages,
+  ORDER_STATUSES,
   type Tx,
   type WebhookEventType,
 } from '@w360/db';
 import { apiContactColumns, apiContactSchema, toApiContact } from '../api/contact-view';
+import { COMMERCE_LIMITS } from '../commerce/model';
 import { findAnsweredMessageId } from '../messaging/reply-context';
 
 /**
- * The JSON bodies of outgoing webhooks (ADR-053, ADR-074, ADR-078). The zod schemas describe them
- * in the OpenAPI document; `buildWebhookPayload` builds them from an event when it is delivered,
- * reading the company's current data (an erased contact has no number or name).
+ * The JSON bodies of outgoing webhooks (ADR-053, ADR-074, ADR-078, ADR-085). The zod schemas
+ * describe them in the OpenAPI document; `buildWebhookPayload` builds them from an event when it is
+ * delivered, reading the company's current data (an erased contact has no number or name).
  */
 
 const contactSchema = z.object({
@@ -266,6 +271,80 @@ export const automationRunEndedPayloadSchema = envelope(
   webhookRunDataSchema,
 );
 
+const orderStatusSchema = z.enum(ORDER_STATUSES);
+
+const webhookOrderSchema = z.object({
+  id: z.uuid(),
+  reference: z
+    .string()
+    .describe('The short reference members and the customer quote, like K7M2QX9P.'),
+  status: orderStatusSchema.describe(
+    'The status this event reports: received for order.received, the new status for a change.',
+  ),
+  previousStatus: orderStatusSchema
+    .nullable()
+    .describe('The status before it; null for order.received.'),
+  messageId: z.uuid().describe('The order message, as message.received names it.'),
+  catalogId: z.string().describe('The Meta catalog the cart came from.'),
+  currency: z
+    .string()
+    .nullable()
+    .describe('ISO 4217, like INR; null when the items are in different currencies.'),
+  subtotalMinor: z
+    .number()
+    .int()
+    .nullable()
+    .describe(
+      'The items’ total in the currency’s minor units (paise for INR); null when a price could not be read, the currencies differ or items were left out.',
+    ),
+  itemCount: z.number().int().describe('The items read from the cart.'),
+  droppedItems: z
+    .number()
+    .int()
+    .describe(
+      `Cart items that could not be read or were beyond the limit of ${COMMERCE_LIMITS.orderItems}.`,
+    ),
+  customerNote: z
+    .string()
+    .nullable()
+    .describe(
+      'The note the customer sent with the cart; null if none or once the contact is erased.',
+    ),
+  items: z.array(
+    z.object({
+      retailerId: z.string().describe('The item’s content id (SKU) in the catalog.'),
+      name: z
+        .string()
+        .nullable()
+        .describe('The product’s name when the order was received; null if it was not known.'),
+      quantity: z.number().int(),
+      unitPriceMinor: z
+        .number()
+        .int()
+        .nullable()
+        .describe('In the currency’s minor units; null when the price could not be read.'),
+      currency: z.string().nullable(),
+    }),
+  ),
+  receivedAt: z.iso.datetime(),
+  paidAt: z.iso
+    .datetime()
+    .nullable()
+    .describe('When Razorpay reported it paid, if it is paid when the event is delivered.'),
+});
+const webhookOrderDataSchema = z.object({
+  order: webhookOrderSchema,
+  conversation: z.object({ id: z.uuid() }),
+  contact: contactSchema,
+  channel: channelSchema,
+});
+
+export const orderReceivedPayloadSchema = envelope('order.received', webhookOrderDataSchema);
+export const orderStatusChangedPayloadSchema = envelope(
+  'order.status_changed',
+  webhookOrderDataSchema,
+);
+
 export const pingPayloadSchema = envelope(
   'ping',
   z.object({ endpointId: z.uuid(), message: z.string() }),
@@ -489,6 +568,51 @@ async function runOf(tx: Tx, tenantId: string, runId: string | null) {
   return row ?? null;
 }
 
+/** A WhatsApp order with its items in cart order and its number, in the company. */
+async function orderOf(tx: Tx, tenantId: string, orderId: string | null) {
+  if (!orderId || !z.uuid().safeParse(orderId).success) return null;
+  const [row] = await tx
+    .select({
+      id: commerceOrders.id,
+      reference: commerceOrders.reference,
+      messageId: commerceOrders.messageId,
+      conversationId: commerceOrders.conversationId,
+      contactId: commerceOrders.contactId,
+      catalogId: commerceOrders.metaCatalogId,
+      currency: commerceOrders.currency,
+      subtotalMinor: commerceOrders.subtotalMinor,
+      itemCount: commerceOrders.itemCount,
+      droppedItems: commerceOrders.droppedItems,
+      customerNote: commerceOrders.customerNote,
+      receivedAt: commerceOrders.receivedAt,
+      paidAt: commerceOrders.paidAt,
+      channelId: commerceOrders.channelAccountId,
+      channelPhone: channelAccounts.displayPhoneNumber,
+    })
+    .from(commerceOrders)
+    .leftJoin(
+      channelAccounts,
+      and(
+        eq(channelAccounts.tenantId, commerceOrders.tenantId),
+        eq(channelAccounts.id, commerceOrders.channelAccountId),
+      ),
+    )
+    .where(and(eq(commerceOrders.tenantId, tenantId), eq(commerceOrders.id, orderId)));
+  if (!row) return null;
+  const items = await tx
+    .select({
+      retailerId: commerceOrderItems.retailerId,
+      name: commerceOrderItems.name,
+      quantity: commerceOrderItems.quantity,
+      unitPriceMinor: commerceOrderItems.unitPriceMinor,
+      currency: commerceOrderItems.currency,
+    })
+    .from(commerceOrderItems)
+    .where(and(eq(commerceOrderItems.tenantId, tenantId), eq(commerceOrderItems.orderId, orderId)))
+    .orderBy(asc(commerceOrderItems.position));
+  return { ...row, items };
+}
+
 const sentBy = (senderType: string | undefined) =>
   senderType === 'agent' ||
   senderType === 'bot' ||
@@ -499,8 +623,8 @@ const sentBy = (senderType: string | undefined) =>
 
 /**
  * The body delivered for an event, built from the company's data now. Throws when the message,
- * conversation, contact or run an event names no longer exists (it cannot be described); callers
- * fail the delivery.
+ * conversation, contact, run or order an event names no longer exists (it cannot be described);
+ * callers fail the delivery.
  */
 export async function buildWebhookPayload(
   tx: Tx,
@@ -609,6 +733,38 @@ export async function buildWebhookPayload(
         },
       };
     }
+    case 'order.received':
+    case 'order.status_changed': {
+      // The status and the one before it as captured; the rest as it is now (an erased
+      // contact's note is gone).
+      const order = await orderOf(tx, tenantId, str(event.detail.orderId));
+      if (!order) throw new WebhookEventGoneError();
+      return {
+        ...base,
+        data: {
+          order: {
+            id: order.id,
+            reference: order.reference,
+            status: event.status,
+            previousStatus:
+              event.type === 'order.status_changed' ? str(event.detail.previousStatus) : null,
+            messageId: order.messageId,
+            catalogId: order.catalogId,
+            currency: order.currency,
+            subtotalMinor: order.subtotalMinor,
+            itemCount: order.itemCount,
+            droppedItems: order.droppedItems,
+            customerNote: order.customerNote,
+            items: order.items,
+            receivedAt: order.receivedAt.toISOString(),
+            paidAt: order.paidAt?.toISOString() ?? null,
+          },
+          conversation: { id: order.conversationId },
+          contact: await contactOf(tx, tenantId, order.contactId),
+          channel: { id: order.channelId, phone: order.channelPhone ?? null },
+        },
+      };
+    }
     case 'message.received':
     case 'message.status': {
       const message = await messageContext(tx, tenantId, event.messageId);
@@ -664,8 +820,8 @@ export async function buildWebhookPayload(
 }
 
 /**
- * The message, conversation, contact or run an event names was deleted (retention); the delivery
- * fails as `event_gone`.
+ * The message, conversation, contact, run or order an event names was deleted (retention); the
+ * delivery fails as `event_gone`.
  */
 export class WebhookEventGoneError extends Error {
   constructor() {
