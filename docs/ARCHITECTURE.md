@@ -960,6 +960,15 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `conversation_notes_author` keeps exactly one author, `conversation_notes_api_key_fk` ties the key
   to the company, and `conversation_notes_api_key_idx` (0061, built concurrently) serves the foreign
   key.
+- **Products through the API (ADR-086):** `POST /messages` with `type` `product`,
+  `product_list` or `catalog` (`apiSendProducts`) takes the same path as other replies
+  (`sendReply`), with two additions: a `precheck` run first in the transaction refuses a plan
+  without Commerce (`loadEntitlements`, reason `not_in_plan`), and the reply's `build` resolves the
+  content ids against the catalogs of the sending number's WhatsApp account (`catalogProducts`: not
+  disconnected, not removed at Meta, all in one catalog, `catalogId` choosing between catalogs that
+  share an id). `productInteractive` (`commerce/model.ts`) builds the Graph `interactive` object for
+  the inbox and the API alike, and the message stores `content.products` as the inbox's product
+  sends do.
 - **Keyset cursors** (`encodeKeysetCursor`, `exactTimestamp`): a cursor carries the last row's
   timestamp as PostgreSQL keeps it, to the microsecond, and its id, and pages compare
   `(time, id) < (cursor time, cursor id)`; cursors made with milliseconds still read. Cursors built

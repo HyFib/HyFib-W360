@@ -5,6 +5,8 @@ import {
   and,
   asc,
   channelAccounts,
+  commerceCatalogs,
+  commerceProducts,
   contactIdentities,
   contactTags,
   contacts,
@@ -25,6 +27,11 @@ import {
 import { recordSystemAudit } from '../audit';
 import { endRunForHuman } from '../automations/runs';
 import { lockCampaignSends, marketingCapReached } from '../campaigns/frequency-cap';
+import {
+  COMMERCE_LIMITS,
+  productInteractive,
+  type ResolvedProductMessage,
+} from '../commerce/model';
 import { checkTemplateEligibility, recordConsentEvents } from '../consent/service';
 import { normalizeEmail, normalizeTag } from '../contacts/fields';
 import { normalizePhone, phoneFromWaId, waRecipientFromPhone } from '../contacts/phone';
@@ -47,6 +54,7 @@ import {
   isSingleEmoji,
 } from '../messaging/reply-context';
 import { STATUS_RANK } from '../messaging/status';
+import { loadEntitlements } from '../plans/entitlements';
 import {
   buildTemplateSend,
   fromMetaComponents,
@@ -351,6 +359,117 @@ export const apiSendReactionSchema = z
       .describe(
         'One emoji, such as 👍, from Unicode’s recommended set: skin tones, flags and keycaps count as one.',
       ),
+  })
+  .strict();
+
+/** A product's content id in a catalog (its retailer id), exactly as Meta keeps it (ADR-086). */
+const retailerIdField = z
+  .string({ error: 'Give the product’s content id' })
+  .min(1, 'Give the product’s content id')
+  .max(100, 'Content ids are limited to 100 characters')
+  .describe(
+    'The product’s content id (its SKU) in the catalog, exactly as Commerce Manager shows it.',
+  );
+
+const productFrame = {
+  to: phoneField,
+  from: replyFromField,
+  replyTo: quoteField,
+  catalogId: z
+    .string()
+    .regex(/^[0-9]{1,32}$/, 'Give the Meta catalog id (digits only)')
+    .optional()
+    .describe(
+      'The Meta catalog the products are in; needed only when more than one catalog connected to the WhatsApp number has all the content ids.',
+    ),
+  footer: interactiveText('footer', COMMERCE_LIMITS.footerLength)
+    .optional()
+    .describe('Small text shown below the body.'),
+};
+
+/** One product from a catalog of the number, to a contact who wrote in the last 24 hours (ADR-086). */
+export const apiSendProductSchema = z
+  .object({
+    type: z.literal('product'),
+    ...productFrame,
+    retailerId: retailerIdField,
+    body: interactiveText('body', COMMERCE_LIMITS.bodyLength)
+      .optional()
+      .describe('Text shown with the product.'),
+  })
+  .strict();
+
+/** Up to 30 products in sections, to a contact who wrote in the last 24 hours (ADR-086). */
+export const apiSendProductListSchema = z
+  .object({
+    type: z.literal('product_list'),
+    ...productFrame,
+    header: interactiveText('header', COMMERCE_LIMITS.headerLength).describe(
+      'The heading shown above the products.',
+    ),
+    body: interactiveText('body', COMMERCE_LIMITS.bodyLength).describe('The message.'),
+    sections: z
+      .array(
+        z
+          .object({
+            title: interactiveText('section title', COMMERCE_LIMITS.sectionTitleLength)
+              .optional()
+              .describe('Required when there is more than one section.'),
+            retailerIds: z
+              .array(retailerIdField)
+              .min(1, 'Give each section at least one product')
+              .max(
+                COMMERCE_LIMITS.productsPerMessage,
+                `A message has at most ${COMMERCE_LIMITS.productsPerMessage} products`,
+              ),
+          })
+          .strict(),
+      )
+      .min(1, 'Give at least one section')
+      .max(COMMERCE_LIMITS.sections, `A message has at most ${COMMERCE_LIMITS.sections} sections`)
+      .describe(
+        `The products, in sections: at most ${COMMERCE_LIMITS.productsPerMessage} in all, each once, all from one catalog.`,
+      ),
+  })
+  .strict()
+  .superRefine((data, ctx) => {
+    const products = data.sections.flatMap((section, s) =>
+      section.retailerIds.map((id, i) => ({ id, path: ['sections', s, 'retailerIds', i] })),
+    );
+    if (products.length > COMMERCE_LIMITS.productsPerMessage) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['sections'],
+        message: `A message has at most ${COMMERCE_LIMITS.productsPerMessage} products in all`,
+      });
+    }
+    if (data.sections.length > 1) {
+      data.sections.forEach((section, s) => {
+        if (!section.title) {
+          ctx.addIssue({
+            code: 'custom',
+            path: ['sections', s, 'title'],
+            message: 'Give each section a title when there is more than one',
+          });
+        }
+      });
+    }
+    refineUnique(
+      ctx,
+      products.map(({ id, path }) => ({ path, key: id })),
+      'Give each product once',
+    );
+  });
+
+/** The number's catalog, opened from a product's picture (ADR-086). */
+export const apiSendCatalogSchema = z
+  .object({
+    type: z.literal('catalog'),
+    ...productFrame,
+    thumbnailRetailerId: retailerIdField.describe(
+      'The content id of the product whose picture the message shows.',
+    ),
+    body: interactiveText('body', COMMERCE_LIMITS.bodyLength).describe('The message.'),
   })
   .strict();
 
@@ -968,19 +1087,27 @@ async function answeredMessage(
 }
 
 /** What a reply stores and sends (ADR-070, ADR-080, ADR-082). */
+interface BuiltReply {
+  content: Record<string, unknown>;
+  preview: string;
+  request: Record<string, unknown>;
+}
+
 interface ApiReply {
   type: 'text' | 'interactive' | 'reaction';
   /** The message the reply quotes, or the reaction is for, as the request names it. */
   replyTo: string | undefined;
+  /** Checks that do not depend on the number, made first (the plan's modules). */
+  precheck?: (tx: Tx) => Promise<void>;
   /**
    * The message's stored content (as the inbox shows it), the conversation's preview, and the
-   * Graph request's `type` and its object, given the WhatsApp id of the message named by `replyTo`.
+   * Graph request's `type` and its object, given the WhatsApp id of the message named by `replyTo`
+   * and the WhatsApp account of the number it is sent from.
    */
-  build(answered: string | null): {
-    content: Record<string, unknown>;
-    preview: string;
-    request: Record<string, unknown>;
-  };
+  build(
+    answered: string | null,
+    sending: { tx: Tx; whatsappAccountId: string },
+  ): BuiltReply | Promise<BuiltReply>;
 }
 
 /**
@@ -1005,6 +1132,7 @@ async function sendReply(
   const now = deps.clock.now();
   return deps.db.run(ctx.scope, (tx) =>
     idempotent(tx, ctx, idempotency, now, async () => {
+      if (reply.precheck) await reply.precheck(tx);
       const channel = await sendingNumber(tx, ctx, target.from);
       if (channel.status !== 'active') {
         throw new AppError('precondition_failed', 'This WhatsApp number is not active.');
@@ -1074,7 +1202,10 @@ async function sendReply(
           now,
         });
       }
-      const built = reply.build(answered);
+      const built = await reply.build(answered, {
+        tx,
+        whatsappAccountId: channel.whatsappAccountId,
+      });
       const messageId = uuidv7();
       const intentId = uuidv7();
       await tx.insert(messages).values({
@@ -1236,8 +1367,174 @@ export async function apiSendReaction(
 }
 
 /**
+ * The products a message names by content id, in one catalog connected to the sending number's
+ * WhatsApp account, neither disconnected nor removed at Meta (ADR-086). `catalogId` picks the
+ * catalog when two of them hold the ids. Unknown ids are refused by name.
+ */
+async function catalogProducts(
+  tx: Tx,
+  tenantId: string,
+  whatsappAccountId: string,
+  retailerIds: string[],
+  catalogId: string | undefined,
+): Promise<{ catalogId: string; names: Map<string, string> }> {
+  const rows = await tx
+    .select({
+      retailerId: commerceProducts.retailerId,
+      name: commerceProducts.name,
+      catalogId: commerceCatalogs.metaCatalogId,
+    })
+    .from(commerceProducts)
+    .innerJoin(
+      commerceCatalogs,
+      and(
+        eq(commerceCatalogs.tenantId, commerceProducts.tenantId),
+        eq(commerceCatalogs.id, commerceProducts.catalogId),
+      ),
+    )
+    .where(
+      and(
+        eq(commerceProducts.tenantId, tenantId),
+        inArray(commerceProducts.retailerId, retailerIds),
+        eq(commerceCatalogs.whatsappAccountId, whatsappAccountId),
+        isNull(commerceCatalogs.disconnectedAt),
+        isNull(commerceProducts.removedAt),
+        catalogId ? eq(commerceCatalogs.metaCatalogId, catalogId) : undefined,
+      ),
+    );
+  const refuse = (path: string, message: string) =>
+    new AppError('validation_failed', message, { issues: [{ path, message }] });
+  const known = new Set(rows.map((r) => r.retailerId));
+  const missing = retailerIds.filter((id) => !known.has(id));
+  if (missing.length > 0) {
+    throw refuse(
+      'products',
+      `Not in a catalog of this WhatsApp number${catalogId ? ' with that id' : ''}: ${missing.slice(0, 5).join(', ')}${missing.length > 5 ? ', …' : ''}`,
+    );
+  }
+  const complete = [...new Set(rows.map((r) => r.catalogId))].filter((c) =>
+    retailerIds.every((id) => rows.some((r) => r.catalogId === c && r.retailerId === id)),
+  );
+  const [chosen, other] = complete;
+  if (!chosen) throw refuse('products', 'Give products from one catalog.');
+  if (other) {
+    throw refuse(
+      'catalogId',
+      'More than one catalog of this WhatsApp number has these products: name one with catalogId.',
+    );
+  }
+  return {
+    catalogId: chosen,
+    names: new Map(rows.filter((r) => r.catalogId === chosen).map((r) => [r.retailerId, r.name])),
+  };
+}
+
+type ApiProductInput =
+  | z.infer<typeof apiSendProductSchema>
+  | z.infer<typeof apiSendProductListSchema>
+  | z.infer<typeof apiSendCatalogSchema>;
+
+/**
+ * A product, several products or the catalog (ADR-086), as the inbox sends them (P4-06); see
+ * `sendReply`. The company's plan must include Commerce.
+ */
+export async function apiSendProducts(
+  deps: OutboundDeps,
+  ctx: ApiContext,
+  input: unknown,
+  idempotency: IdempotencyInput,
+): Promise<ApiResponse> {
+  assertScope(ctx, 'messages.reply');
+  const type =
+    input !== null && typeof input === 'object' && !Array.isArray(input)
+      ? (input as { type?: unknown }).type
+      : undefined;
+  const data: ApiProductInput =
+    type === 'product'
+      ? parseInput(apiSendProductSchema, input)
+      : type === 'product_list'
+        ? parseInput(apiSendProductListSchema, input)
+        : parseInput(apiSendCatalogSchema, input);
+  const retailerIds =
+    data.type === 'product'
+      ? [data.retailerId]
+      : data.type === 'catalog'
+        ? [data.thumbnailRetailerId]
+        : data.sections.flatMap((s) => s.retailerIds);
+  return sendReply(deps, ctx, data, idempotency, {
+    type: 'interactive',
+    replyTo: data.replyTo,
+    precheck: async (tx) => {
+      const entitlements = await loadEntitlements(tx, ctx.tenant.id);
+      if (!entitlements.modules.has('commerce')) {
+        throw new AppError('forbidden', "Your company's plan does not include Commerce.", {
+          details: { apiReason: 'not_in_plan' },
+        });
+      }
+    },
+    build: async (_answered, sending) => {
+      const found = await catalogProducts(
+        sending.tx,
+        ctx.tenant.id,
+        sending.whatsappAccountId,
+        retailerIds,
+        data.catalogId,
+      );
+      const footer = data.footer ?? '';
+      const resolved: ResolvedProductMessage =
+        data.type === 'product'
+          ? {
+              kind: 'product',
+              catalogId: found.catalogId,
+              retailerId: data.retailerId,
+              body: data.body ?? '',
+              footer,
+            }
+          : data.type === 'catalog'
+            ? {
+                kind: 'catalog',
+                thumbnailRetailerId: data.thumbnailRetailerId,
+                body: data.body,
+                footer,
+              }
+            : {
+                kind: 'product_list',
+                catalogId: found.catalogId,
+                header: data.header,
+                body: data.body,
+                footer,
+                sections: data.sections.map((s) => ({
+                  title: s.title ?? '',
+                  retailerIds: s.retailerIds,
+                })),
+              };
+      const names = retailerIds.map((id) => found.names.get(id) ?? id);
+      return {
+        // Stored as the inbox stores the products it sends, so the thread shows them alike.
+        content: {
+          products: {
+            kind: resolved.kind,
+            names,
+            ...(resolved.kind === 'product_list' ? { header: resolved.header } : {}),
+            body: resolved.body,
+            footer,
+          },
+        },
+        preview:
+          resolved.kind === 'catalog'
+            ? '[Catalog]'
+            : resolved.kind === 'product'
+              ? `[Product] ${names[0] ?? ''}`
+              : `[Products] ${names.length}`,
+        request: { type: 'interactive', interactive: productInteractive(resolved) },
+      };
+    },
+  });
+}
+
+/**
  * POST /api/v1/messages: a template (the default), or a reply inside the service window as text,
- * reply buttons, a list or a reaction, by the body's `type`.
+ * reply buttons, a list, products (ADR-086) or a reaction, by the body's `type`.
  */
 export async function apiSendMessage(
   deps: OutboundDeps,
@@ -1253,14 +1550,22 @@ export async function apiSendMessage(
   if (type === 'buttons') return apiSendButtons(deps, ctx, input, idempotency);
   if (type === 'list') return apiSendList(deps, ctx, input, idempotency);
   if (type === 'reaction') return apiSendReaction(deps, ctx, input, idempotency);
+  if (type === 'product' || type === 'product_list' || type === 'catalog') {
+    return apiSendProducts(deps, ctx, input, idempotency);
+  }
   if (type === undefined || type === 'template') {
     return apiSendTemplate(deps, ctx, input, idempotency);
   }
   throw new AppError(
     'validation_failed',
-    'Send a template, a text, buttons, a list or a reaction.',
+    'Send a template, a text, buttons, a list, products or a reaction.',
     {
-      issues: [{ path: 'type', message: 'Use template, text, buttons, list or reaction.' }],
+      issues: [
+        {
+          path: 'type',
+          message: 'Use template, text, buttons, list, product, product_list, catalog or reaction.',
+        },
+      ],
     },
   );
 }

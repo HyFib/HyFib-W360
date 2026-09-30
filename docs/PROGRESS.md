@@ -1,5 +1,87 @@
 # Progress
 
+## 2026-09-30 — Phase 5: product messages through the public API (P5-08, ADR-086)
+
+Status: **Implemented and locally verified (no customer data).** Members send products from the
+company's WhatsApp catalogs in the inbox, but an integration answering a customer who asked about
+something to buy (a store, a chatbot, a recommendation system) could send only text, buttons, lists
+and reactions through the API, so it sent a link as text.
+
+### Completed
+
+- **Design (ADR-086):** three more reply types on `POST /api/v1/messages` under `messages.reply`
+  (now "Reply with text, buttons, lists, products and reactions"): `product` (one product, with an
+  optional body and footer), `product_list` (a header, a body, an optional footer and up to 10
+  sections of products, 30 in all, each once, titled when there are several) and `catalog` (the
+  catalog, opened from a product's picture). They follow every rule of replies (only to a number
+  that wrote in the last 24 hours, one answer otherwise, the automation ended, one message per
+  `Idempotency-Key`, `replyTo` quoting a message) and need Commerce in the plan (403 `not_in_plan`,
+  checked first). Products are named by content id (`retailerId`) and found only among the catalogs
+  HyFib read for the sending number's WhatsApp account, connected and not removed at Meta, all from
+  one catalog (`catalogId` names it when two hold the ids); unknown ids are refused by name (422 on
+  `products`). No migration.
+- **Domain:** `apiSendProductSchema`, `apiSendProductListSchema` and `apiSendCatalogSchema` with the
+  inbox's limits (`COMMERCE_LIMITS`); `apiSendProducts`, dispatched by `apiSendMessage`;
+  `catalogProducts` resolves the ids; `sendReply` gains a `precheck` run first and passes the
+  transaction and the number's WhatsApp account to `build`; `productInteractive` (shared with the
+  inbox's `buildProductMessageRequest`) builds the Graph object; the message stores
+  `content.products` as the inbox's product sends do, so the thread shows it named as the key's. The
+  OpenAPI document gains `SendProduct`, `SendProductList` and `SendCatalog`, the products paragraph
+  and the 403 reason; the scope's label and description name products.
+- **Web:** Settings → API keys' introduction names products; the inbox bubble already shows
+  `content.products` (its comment now says so).
+- **Tests:** unit (the three bodies with Meta's limits and every refusal: missing and long content
+  ids, catalog ids that are not digits, long body, footer, header and section titles, a header on
+  one product, untitled sections, more than 30 products or 10 sections, a product twice, a catalog
+  without a body or thumbnail; content ids kept exactly as given; the scope checked before anything
+  is read for each type; the OpenAPI bodies and description). Integration in `api.test.ts` (Graph
+  stand-in): a product, a product list and the catalog once per `Idempotency-Key` (a retry replayed)
+  through the send pipeline, with the Graph requests, the stored content and names, the key named in
+  the inbox, the preview and the status read back; refusals storing nothing: unknown ids, a product
+  removed at Meta, a disconnected catalog, another company's catalog and another WhatsApp account's
+  catalog (a second account of the company), a content id in two catalogs without `catalogId`, ids
+  split across catalogs, a `catalogId` without the id, then the named catalog's product and name
+  sent; a closed window; a plan without Commerce refused before the window, then sent once Commerce
+  is in the plan. e2e `commerce.spec.ts`: a key created in settings sends a product over HTTP, the
+  Graph stand-in receives it with the catalog found, and the chat shows it with the key's name;
+  `api.spec.ts` follows the scope's new label.
+- **Docs:** ADR-086; ARCHITECTURE (the public API); SECURITY (Phase 5 rules); THREAT-MODEL T104;
+  RUNBOOKS (products refused or failing); BACKLOG P5-08; FEATURE-MATRIX W-134 and H-033.
+- **Mutation checks:** 35 regressions tried one at a time; all make a test fail. 34 in the domain
+  and API: a plan without Commerce not refused, refused only after the number and its window,
+  checked for another module, or refused without its reason; products of the company's other
+  WhatsApp accounts, of disconnected catalogs or removed at Meta found; `catalogId` ignored; unknown
+  ids not named, or not refused as unknown; one of two catalogs picked silently; products of several
+  catalogs taken as one; names read from every catalog; content ids stored as the names; the list's
+  header not stored; the catalog's preview; the catalog found not sent; a product's body, the footer
+  or section titles dropped; product messages stored as text; catalog messages not routed; products
+  sent without the reply scope; more than 30 products in all; several sections without titles; a
+  product given twice; content ids trimmed; any catalog id; a longer body than Meta's; unknown
+  fields accepted; the catalog body or the products paragraph left out of the OpenAPI document; a
+  product message without its body or a catalog message without its thumbnail. One, names read from
+  every catalog, was missed at first: a catalog named with `catalogId` returns only its own rows, so
+  the test now also sends, without `catalogId`, ids that only one catalog holds in full. The account
+  filter is observable because the test gives the company a second WhatsApp account with a catalog
+  of its own. 1 in the web layer through the e2e test: Settings → API keys' introduction not naming
+  products.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                     | Result                                                                                                                      |
+| --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                              |
+| `pnpm test` (unit)                                                          | 399 passed, including 2 new in `api/api.test.ts`                                                                            |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 540 passed, including 2 new in `api.test.ts`                                                                                |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 540 passed                                                                                                                  |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / on `api.spec.ts` and `commerce.spec.ts`: 12 passed (2.4 min), on a local database created for the day's runs |
+| Mutation checks                                                             | 35 regressions tried (1 through the e2e test); all make a test fail                                                         |
+
+### Known gaps
+
+- Not built: Flows, call-to-action and order messages through the API, product names or prices in
+  the request, reading catalogs and products through the API, and products outside the customer
+  service window (templates with product buttons).
+
 ## 2026-09-30 — Fix: the email outbox lease test in a busy test database
 
 Status: **Fixed and verified locally (PostgreSQL 18.6 and 17.11).** The integration test "a worker

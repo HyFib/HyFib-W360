@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { isAppError, sha256Hex, systemClock, uuidv7, type Clock } from '@w360/core';
 import { QUEUES } from '@w360/contracts';
-import { authorizedTenantScope, channelAccounts, sql } from '@w360/db';
+import { authorizedTenantScope, channelAccounts, sql, whatsappAccounts } from '@w360/db';
 import {
   API_KEY_LIMITS,
   API_KEY_REMINDER_DAYS,
@@ -34,6 +34,7 @@ import {
   createApiKeysService,
   createAutomationService,
   createCampaignsService,
+  createCommerceService,
   createConsentService,
   createContactsService,
   createCsatService,
@@ -41,9 +42,11 @@ import {
   createPlanAdminService,
   createTemplatesService,
   createWebhooksService,
+  credentialAad,
   dayOf,
   generateApiToken,
   outboxAad,
+  processCommerceSync,
   processSendIntent,
   processTemplateSubmit,
   purgeApiIdempotencyKeys,
@@ -2030,6 +2033,488 @@ describe('quotes and reactions (ADR-082)', () => {
     expect(keysStored.map((r) => r.idempotency_key)).toEqual(['r-1', 'r-2', 'r-3', 'r-4']);
     const sentByKey = await fx.query('SELECT id FROM app.messages WHERE api_key_id = $1', [keyId]);
     expect(sentByKey).toHaveLength(4);
+  });
+});
+
+describe('product messages (ADR-086)', () => {
+  const commerce = () =>
+    createCommerceService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+      keyring: fx.keyring,
+      appBaseUrl: 'https://app.example.test',
+      allowLiveKeys: false,
+    });
+  const catalogDeps = () => ({
+    db: fx.dbs.app,
+    keyring: fx.keyring,
+    graph: fx.graph,
+    clock: systemClock,
+    razorpayBaseUrl: 'http://127.0.0.1:9',
+    jobs: fx.jobs(),
+    signer: fx.signer,
+  });
+
+  /**
+   * A WhatsApp account's catalogs at Meta, each with its products, read by HyFib (Commerce →
+   * Catalogs). The company's first account unless another is given.
+   */
+  async function catalogs(
+    c: Company,
+    entries: { id: string; products: [string, string][] }[],
+    account = { wabaId: c.wabaId, whatsappAccountId: c.whatsappAccountId },
+  ) {
+    fx.standIn.state.catalogs.set(
+      account.wabaId,
+      entries.map((e) => ({ id: e.id, name: `Catalog ${e.id}`, product_count: e.products.length })),
+    );
+    for (const e of entries) {
+      fx.standIn.state.catalogProducts.set(
+        e.id,
+        e.products.map(([retailerId, name], i) => ({
+          id: `${e.id}${i}`,
+          retailer_id: retailerId,
+          name,
+          price: '₹100.00',
+          currency: 'INR',
+          availability: 'in stock',
+          review_status: 'approved',
+        })),
+      );
+    }
+    await commerce().requestSync(await fx.ctx(c, c.owner), {
+      whatsappAccountId: account.whatsappAccountId,
+    });
+    expect(
+      await processCommerceSync(
+        catalogDeps(),
+        authorizedTenantScope(c.tenant.id, null),
+        account.whatsappAccountId,
+      ),
+    ).toBe('done');
+  }
+
+  /** Another WhatsApp account of the company, connected with the same token, without numbers. */
+  async function secondAccount(c: Company) {
+    const whatsappAccountId = uuidv7();
+    const wabaId = nextExternalId();
+    await fx.dbs.app.run(authorizedTenantScope(c.tenant.id, c.owner.id), async (tx) => {
+      await tx.insert(whatsappAccounts).values({
+        id: whatsappAccountId,
+        tenantId: c.tenant.id,
+        wabaId,
+        name: 'Second account',
+        status: 'connected',
+        credentialCiphertext: fx.keyring.encrypt(
+          c.token,
+          credentialAad(c.tenant.id, whatsappAccountId),
+        ),
+      });
+      await tx.execute(
+        sql`select app.bind_provider_asset('meta_whatsapp', 'waba', ${wabaId}, ${whatsappAccountId}::uuid, null)`,
+      );
+    });
+    return { wabaId, whatsappAccountId };
+  }
+
+  async function wrote(c: Company, waId: string, secondsAgo = 0) {
+    const timestamp = Math.floor(Date.now() / 1000) - secondsAgo;
+    await fx.deliver(
+      fx.messagesBody(c, { messages: [{ waId, text: 'What tea do you have?', timestamp }] }),
+    );
+  }
+
+  const idOf = (response: { body: Record<string, unknown> }) =>
+    (response.body.data as { id: string }).id;
+  const reasonOf = (error: unknown) => apiErrorResponse(error, 'r').body.error.reason;
+  const issuesOf = (error: unknown) =>
+    (apiErrorResponse(error, 'r').body.error as { issues?: { path: string; message: string }[] })
+      .issues ?? [];
+
+  let planCodes = 0;
+  /** Puts the company on a published plan with the given modules (P5-01), as platform staff would. */
+  async function onPlan(c: Company, modules: string[]) {
+    const staff = await createUser(fx.dbs, { twoFactor: true });
+    await fx.dbs.ownerPool.query(
+      `INSERT INTO ops.platform_admins (user_id, role) VALUES ($1, 'platform_owner')`,
+      [staff.id],
+    );
+    const actor: PlatformActor = {
+      userId: staff.id,
+      role: 'platform_owner',
+      correlationId: uuidv7(),
+    };
+    const plans = createPlanAdminService({ platformDb: fx.dbs.platform, clock: systemClock });
+    planCodes += 1;
+    const { id } = await plans.createPlan(actor, {
+      code: `shop-api-${Date.now().toString(36)}-${planCodes}`,
+      name: 'Shop plan',
+      price: '999',
+      intervalMonths: '1',
+      trialDays: '0',
+      graceDays: '7',
+      seatsIncluded: '10',
+      numbersIncluded: '5',
+      modules,
+    });
+    await plans.publishPlan(actor, id);
+    const view = await plans.tenantPlan(actor, c.tenant.id);
+    await plans.setTenantPlan(actor, {
+      tenantId: c.tenant.id,
+      version: view.state.version,
+      status: 'active',
+      planId: id,
+      periodStart: dayOf(new Date(), 'Asia/Kolkata'),
+      periodEnd: dayOf(new Date(Date.now() + 30 * 86_400_000), 'Asia/Kolkata'),
+      reason: 'Plan for the API product message tests',
+    });
+  }
+
+  it('send a product, several products and the catalog once per Idempotency-Key, as the inbox sends them', async () => {
+    const c = await fx.company();
+    const { ctx, id: keyId } = await apiKey(c, ['messages.reply'], 'Shop');
+    await catalogs(c, [
+      {
+        id: '5558601',
+        products: [
+          ['chai-1', 'Masala chai'],
+          ['chai-2', 'Ginger biscuits'],
+          ['chai-3', 'Clay cup'],
+        ],
+      },
+    ]);
+    const waId = '919811100601';
+    await wrote(c, waId);
+    const to = `+${waId}`;
+    const product = {
+      type: 'product',
+      to,
+      retailerId: 'chai-1',
+      body: 'Our best seller',
+      footer: 'Tea house',
+    };
+    const list = {
+      type: 'product_list',
+      to,
+      header: 'Tea time',
+      body: 'Goes well with chai',
+      sections: [
+        { title: 'Tea', retailerIds: ['chai-1'] },
+        { title: 'Snacks', retailerIds: ['chai-2', 'chai-3'] },
+      ],
+    };
+    const menu = { type: 'catalog', to, thumbnailRetailerId: 'chai-3', body: 'See our menu' };
+    const sent = [
+      await apiSendMessage(deps(), ctx, product, idem('product-1', 'product-1')),
+      await apiSendMessage(deps(), ctx, list, idem('product-2', 'product-2')),
+      await apiSendMessage(deps(), ctx, menu, idem('product-3', 'product-3')),
+    ];
+    for (const response of sent) {
+      expect(response.status).toBe(201);
+      expect(response.body.data).toEqual({
+        id: expect.any(String),
+        type: 'interactive',
+        status: 'queued',
+        contactId: expect.any(String),
+        channelId: c.channelAccountId,
+      });
+    }
+    // A retry answers as the first request did and queues nothing more.
+    expect(await apiSendMessage(deps(), ctx, list, idem('product-2', 'product-2'))).toEqual({
+      ...sent[1],
+      replayed: true,
+    });
+    const stored = await fx.query(
+      `SELECT m.id, m.type, m.content, m.sender_type, m.api_key_id, si.request
+         FROM app.messages m
+         JOIN app.send_intents si ON si.tenant_id = m.tenant_id AND si.message_id = m.id
+        WHERE m.id = ANY($1::uuid[])
+        ORDER BY m.created_at`,
+      [sent.map(idOf)],
+    );
+    const request = (interactive: unknown) => ({
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to: waId,
+      type: 'interactive',
+      interactive,
+    });
+    const common = { type: 'interactive', sender_type: 'api', api_key_id: keyId };
+    expect(stored).toEqual([
+      {
+        id: idOf(sent[0]!),
+        ...common,
+        // Stored as the inbox stores the products it sends, with the names HyFib read from Meta.
+        content: {
+          products: {
+            kind: 'product',
+            names: ['Masala chai'],
+            body: 'Our best seller',
+            footer: 'Tea house',
+          },
+        },
+        request: request({
+          type: 'product',
+          body: { text: 'Our best seller' },
+          footer: { text: 'Tea house' },
+          action: { catalog_id: '5558601', product_retailer_id: 'chai-1' },
+        }),
+      },
+      {
+        id: idOf(sent[1]!),
+        ...common,
+        content: {
+          products: {
+            kind: 'product_list',
+            names: ['Masala chai', 'Ginger biscuits', 'Clay cup'],
+            header: 'Tea time',
+            body: 'Goes well with chai',
+            footer: '',
+          },
+        },
+        request: request({
+          type: 'product_list',
+          header: { type: 'text', text: 'Tea time' },
+          body: { text: 'Goes well with chai' },
+          action: {
+            catalog_id: '5558601',
+            sections: [
+              { title: 'Tea', product_items: [{ product_retailer_id: 'chai-1' }] },
+              {
+                title: 'Snacks',
+                product_items: [
+                  { product_retailer_id: 'chai-2' },
+                  { product_retailer_id: 'chai-3' },
+                ],
+              },
+            ],
+          },
+        }),
+      },
+      {
+        id: idOf(sent[2]!),
+        ...common,
+        content: {
+          products: { kind: 'catalog', names: ['Clay cup'], body: 'See our menu', footer: '' },
+        },
+        request: request({
+          type: 'catalog_message',
+          body: { text: 'See our menu' },
+          action: {
+            name: 'catalog_message',
+            parameters: { thumbnail_product_retailer_id: 'chai-3' },
+          },
+        }),
+      },
+    ]);
+    // The Graph stand-in, which checks product messages against the catalogs, accepts all three.
+    expect(await sendAll(c)).toEqual(['accepted', 'accepted', 'accepted']);
+    const [conv] = await fx.query<{ id: string; last_message_preview: string }>(
+      `SELECT cv.id, cv.last_message_preview FROM app.conversations cv
+         JOIN app.messages m ON m.tenant_id = cv.tenant_id AND m.conversation_id = cv.id
+        WHERE m.id = $1`,
+      [idOf(sent[2]!)],
+    );
+    expect(conv?.last_message_preview).toBe('[Catalog]');
+    // Members see which key sent them.
+    const thread = await createInboxService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+    }).getConversation(await fx.ctx(c, c.owner), conv!.id);
+    expect(thread.messages.find((m) => m.id === idOf(sent[0]!))).toMatchObject({
+      senderType: 'api',
+      apiKeyName: 'Shop',
+    });
+    expect((await apiGetMessage(deps(), ctx, idOf(sent[1]!))).status).toBe('accepted');
+  });
+
+  it('refuse products the number cannot send, catalogs it cannot tell apart and a plan without Commerce, storing nothing', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const { ctx } = await apiKey(c, ['messages.reply'], 'Shop');
+    await catalogs(c, [
+      {
+        id: '5558602',
+        products: [
+          ['chai-1', 'Masala chai'],
+          ['cup-1', 'Clay cup'],
+          ['old-1', 'Old mug'],
+        ],
+      },
+      {
+        id: '5558603',
+        products: [
+          ['chai-1', 'Masala chai (winter)'],
+          ['snack-1', 'Biscuits'],
+        ],
+      },
+      { id: '5558604', products: [['gone-1', 'Tea towel']] },
+    ]);
+    await catalogs(other, [{ id: '5558605', products: [['theirs-1', 'Their tea']] }]);
+    // The company's other WhatsApp account has a catalog of its own, which this number cannot send.
+    await catalogs(
+      c,
+      [{ id: '5558606', products: [['elsewhere-1', 'Tea of the other account']] }],
+      await secondAccount(c),
+    );
+    // Meta no longer lists a product, and a catalog was disconnected from the number.
+    await fx.query(
+      `UPDATE app.commerce_products SET removed_at = now() WHERE tenant_id = $1 AND retailer_id = 'old-1'`,
+      [c.tenant.id],
+    );
+    await fx.query(
+      `UPDATE app.commerce_catalogs SET disconnected_at = now() WHERE tenant_id = $1 AND meta_catalog_id = '5558604'`,
+      [c.tenant.id],
+    );
+    const waId = '919811100602';
+    await wrote(c, waId);
+    const to = `+${waId}`;
+    const send = (body: Record<string, unknown>, key: string) =>
+      apiSendMessage(deps(), ctx, { to, ...body }, idem(key, key));
+    const refusedFor = async (
+      body: Record<string, unknown>,
+      key: string,
+      path: string,
+      message: RegExp,
+    ) => {
+      const error = await expectAppError(send(body, key), 'validation_failed', message);
+      expect(issuesOf(error).map((i) => i.path)).toEqual([path]);
+    };
+
+    for (const [retailerId, key] of [
+      ['nope-1', 'unknown'],
+      ['old-1', 'removed'],
+      ['gone-1', 'disconnected'],
+      ['theirs-1', 'other-company'],
+      ['elsewhere-1', 'other-account'],
+    ] as const) {
+      await refusedFor(
+        { type: 'product', retailerId },
+        `refuse-${key}`,
+        'products',
+        new RegExp(`Not in a catalog of this WhatsApp number: ${retailerId}`),
+      );
+    }
+    // A content id in two catalogs needs the catalog named; ids in different catalogs are refused.
+    await refusedFor(
+      { type: 'product', retailerId: 'chai-1' },
+      'refuse-two',
+      'catalogId',
+      /name one with catalogId/,
+    );
+    await refusedFor(
+      {
+        type: 'product_list',
+        header: 'Mixed',
+        body: 'Both',
+        sections: [{ retailerIds: ['cup-1', 'snack-1'] }],
+      },
+      'refuse-mixed',
+      'products',
+      /Give products from one catalog/,
+    );
+    await refusedFor(
+      { type: 'product', retailerId: 'snack-1', catalogId: '5558602' },
+      'refuse-wrong-catalog',
+      'products',
+      /with that id: snack-1/,
+    );
+    /** The Graph action and the names a send stored. */
+    const sentOf = async (response: { body: Record<string, unknown> }) => {
+      const [row] = await fx.query<{
+        request: { interactive: { action: Record<string, unknown> } };
+        content: { products: { names: string[] } };
+      }>(
+        `SELECT si.request, m.content
+           FROM app.send_intents si
+           JOIN app.messages m ON m.tenant_id = si.tenant_id AND m.id = si.message_id
+          WHERE si.message_id = $1`,
+        [idOf(response)],
+      );
+      return { action: row?.request.interactive.action, names: row?.content.products.names };
+    };
+    const named = await send(
+      { type: 'product', retailerId: 'chai-1', catalogId: '5558602' },
+      'send-named',
+    );
+    expect(named.status).toBe(201);
+    // The product's name is the one in the catalog named.
+    expect(await sentOf(named)).toEqual({
+      action: { catalog_id: '5558602', product_retailer_id: 'chai-1' },
+      names: ['Masala chai'],
+    });
+    // Without catalogId, the one catalog holding every id is used, though another holds one of them.
+    const whole = await send(
+      {
+        type: 'product_list',
+        header: 'Chai set',
+        body: 'Tea and a cup',
+        sections: [{ retailerIds: ['chai-1', 'cup-1'] }],
+      },
+      'send-whole',
+    );
+    expect(whole.status).toBe(201);
+    expect(await sentOf(whole)).toEqual({
+      action: {
+        catalog_id: '5558602',
+        sections: [
+          { product_items: [{ product_retailer_id: 'chai-1' }, { product_retailer_id: 'cup-1' }] },
+        ],
+      },
+      names: ['Masala chai', 'Clay cup'],
+    });
+
+    // A number whose window closed gets the replies' single answer.
+    const late = '919811100603';
+    await wrote(c, late, 25 * 3600);
+    const closed = await expectAppError(
+      apiSendMessage(
+        deps(),
+        ctx,
+        { type: 'product', to: `+${late}`, retailerId: 'cup-1' },
+        idem('late', 'late'),
+      ),
+      'precondition_failed',
+    );
+    expect(reasonOf(closed)).toBe('window_closed');
+
+    // A plan without Commerce is refused first, even to a number whose window closed.
+    await onPlan(c, []);
+    const notInPlan = await expectAppError(
+      apiSendMessage(
+        deps(),
+        ctx,
+        { type: 'product', to: `+${late}`, retailerId: 'cup-1' },
+        idem('no-commerce', 'no-commerce'),
+      ),
+      'forbidden',
+      /does not include Commerce/,
+    );
+    expect(reasonOf(notInPlan)).toBe('not_in_plan');
+    await onPlan(c, ['commerce']);
+    expect((await send({ type: 'product', retailerId: 'cup-1' }, 'with-commerce')).status).toBe(
+      201,
+    );
+
+    // Only the three sends went through; no refusal kept a message or an idempotency key.
+    const kept = await fx.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM app.messages WHERE tenant_id = $1 AND api_key_id IS NOT NULL`,
+      [c.tenant.id],
+    );
+    expect(kept).toEqual([{ n: 3 }]);
+    const keysKept = await fx.query<{ idempotency_key: string }>(
+      `SELECT idempotency_key FROM app.api_idempotency_keys WHERE tenant_id = $1 ORDER BY idempotency_key`,
+      [c.tenant.id],
+    );
+    expect(keysKept.map((k) => k.idempotency_key)).toEqual([
+      'send-named',
+      'send-whole',
+      'with-commerce',
+    ]);
   });
 });
 

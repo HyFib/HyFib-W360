@@ -2762,3 +2762,48 @@ Decision:
 
 Not built: store order events, Payment Link events, reading or changing orders through the public
 API, catalog and product events, and filters by status.
+
+## ADR-086 Product messages through the public API (2026-09-30)
+
+Context: members send products from the company's WhatsApp catalogs in the inbox (a product, up to
+30 products in sections, or the catalog; ADR-046, research M-169), and the API could send text,
+buttons, lists and reactions (ADR-070, ADR-080, ADR-082) but no products. A store, a chatbot or a
+recommendation system answering a customer who asked about something to buy had to send a link as
+text.
+
+Decision:
+
+- **Three reply types** on `POST /api/v1/messages`, under `messages.reply` (now "Reply with text,
+  buttons, lists, products and reactions"): `product` (one product, with an optional body and
+  footer), `product_list` (a header, a body, an optional footer and 1 to 10 sections of products,
+  at most 30 in all, each once, sections titled when there is more than one) and `catalog` (the
+  catalog, opened from a product's picture, with a body and an optional footer). Keys that already
+  hold the scope can send them from this release: every role that grants it (holding
+  `inbox.reply`) also holds `commerce.read` and sends products from the inbox.
+- **The rules of replies:** the same path as text, buttons and lists (`sendReply`): only to a number
+  that wrote to the WhatsApp number in the last 24 hours, one answer (`window_closed`) for every
+  number it cannot reach, the conversation locked, the automation answering it ended, the message
+  marked with its key, one message per `Idempotency-Key`, the window checked again at send; a
+  `replyTo` quotes a message as for the other replies (the schema gives every message type
+  `context`, research M-183).
+- **Commerce in the plan:** products need the Commerce module, as in the inbox; a plan without it
+  is refused first (403, reason `not_in_plan`), before the number is looked up.
+- **Products by content id:** the API names products as the company's catalog does (`retailerId`,
+  exactly as Meta keeps it), not by HyFib's ids, which the API never shows. They are looked up
+  among the catalogs HyFib read for the sending number's WhatsApp account (Commerce → Catalogs),
+  still connected and not removed at Meta; all must be in one catalog, which `catalogId` (Meta's
+  id) names when more than one catalog holds them all (a catalog holding only some of them does not
+  count). Unknown ids are refused by name (422, path
+  `products`), so an integration learns which of its products HyFib cannot send; ids in another
+  WhatsApp account's, another company's or a disconnected catalog are unknown.
+- **Stored and shown as the inbox's:** the message stores the kind, the product names HyFib knew,
+  the header, body and footer (`content.products`), so the thread shows it as it shows members'
+  product sends, named as the key's; the Graph request is built by the same function as the inbox's
+  (`productInteractive`).
+- **Limits** are the inbox's (`COMMERCE_LIMITS`: header 60, body 1,024, footer 60 and section title
+  24 characters, 10 sections, 30 products), checked before anything is read.
+
+Not built: Flows, call-to-action and order messages through the API (`cta_url` is not in the spec
+Meta publishes, research M-043), product names or prices in the request, reading catalogs and
+products through the API, and sending products outside the customer service window (templates with
+product buttons).

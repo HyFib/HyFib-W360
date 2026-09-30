@@ -524,6 +524,14 @@ Phase 5 rules (Public API, P5-08):
   erasure takes, so no note outlives an erasure; erased contacts' and other companies'
   conversations answer 404. The database keeps exactly one author per note, which the runtime role
   cannot change.
+- Products through the API (ADR-086) follow every rule of replies (`messages.reply`, an active
+  company, only contacts who wrote in the last 24 hours with one answer for every number it cannot
+  reach, the window checked again at send), and need Commerce in the company's plan, checked before
+  the number is looked up. Products are found by content id only among the catalogs HyFib read for
+  the sending number's WhatsApp account, still connected and not removed at Meta: products of
+  another WhatsApp account's, another company's or a disconnected catalog are refused like unknown
+  ids, and the catalog sent to Meta is always the one found, never taken from the request
+  unchecked.
 - Only the token's SHA-256 is stored; the runtime role cannot read it. The token is shown once in
   the browser and kept only in the page's memory; it is never logged, and audit entries carry the
   public prefix only.

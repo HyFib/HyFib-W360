@@ -162,7 +162,7 @@ function Body({
         typeof c.products === 'object' && c.products !== null ? c.products : null
       ) as Record<string, unknown> | null;
       if (products) {
-        // Products sent from the inbox (a product, a product list or the catalog).
+        // Products sent from the inbox or the API (a product, a product list or the catalog).
         const names = Array.isArray(products.names)
           ? (products.names as unknown[]).map((n) => text(n) ?? 'Unnamed product')
           : [];

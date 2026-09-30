@@ -51,7 +51,7 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
         <CardHeader>
           <CardTitle>Using the API</CardTitle>
           <CardDescription>
-            Your systems can send approved templates and replies (text, buttons, lists and
+            Your systems can send approved templates and replies (text, buttons, lists, products and
             reactions, quoting a message if they like), create contacts, record consent, read,
             resolve and reopen conversations and add notes to them, start and stop automations, add
             webhook endpoints and follow their deliveries, and read message status through the HyFib

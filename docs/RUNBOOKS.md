@@ -1268,6 +1268,19 @@ back through the API. The inbox shows a quote above a reply and names the messag
 for; it shows no quote when the quoted message is not in the conversation (sent before HyFib had
 the number, or deleted by retention), and the API then gives `replyTo: null`.
 
+**Products sent through the API are refused or fail.** A 403 with reason `not_in_plan` means the
+company's plan does not include Commerce. A 422 on `products` names the content ids HyFib cannot
+send: ids are matched exactly (case and spaces included) against the catalogs HyFib read for the
+WhatsApp number in Commerce → Catalogs; a product added at Meta since the last read appears after
+"Read from Meta", and products Meta no longer lists or catalogs disconnected from the number are
+not sent. A 422 on `catalogId` means more than one catalog of the number holds all the ids: name
+the one to use with its Meta id. "Give products from one catalog" means no catalog holds them all.
+Other 422s name Meta's limits (header up to 60 characters, body up to 1,024, footer up to 60,
+section titles up to 24 and required with more than one section, 10 sections, 30 products, each
+once). A 412 `window_closed` means the number has not written in the last 24 hours, as for any
+reply. A message that fails after it was queued shows WhatsApp's error on
+`GET /api/v1/messages/{id}` and in the inbox.
+
 **An endpoint added through the API is refused, missing or unexpected.** A 422 names the field:
 an https address (no credentials, port 443 or from 1024; `http://` and loopback only where local
 and test configuration allow them), at least one event from the list, a description up to 200

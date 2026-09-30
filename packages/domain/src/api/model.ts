@@ -61,9 +61,9 @@ export const API_SCOPE_INFO: Record<
     writes: true,
   },
   'messages.reply': {
-    label: 'Reply with text, buttons, lists and reactions',
+    label: 'Reply with text, buttons, lists, products and reactions',
     description:
-      'Send text, reply buttons, list messages and reactions to contacts who wrote to the number in the last 24 hours, quoting their messages if wanted, and read the status of messages the API sent.',
+      'Send text, reply buttons, list messages, products from the company’s WhatsApp catalogs and reactions to contacts who wrote to the number in the last 24 hours, quoting their messages if wanted, and read the status of messages the API sent.',
     permission: 'inbox.reply',
     writes: true,
   },

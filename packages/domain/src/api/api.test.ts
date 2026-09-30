@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import type { z } from 'zod';
 import { AppError, isAppError, sha256Hex } from '@w360/core';
 import { API_SCOPES } from '@w360/db';
 import { PERMISSIONS, ROLE_PERMISSIONS } from '../authz/permissions';
@@ -42,8 +43,11 @@ import {
 } from '../messaging/reply-context';
 import {
   apiSendButtonsSchema,
+  apiSendCatalogSchema,
   apiSendListSchema,
   apiSendMessage,
+  apiSendProductListSchema,
+  apiSendProductSchema,
   apiSendReactionSchema,
   apiSendTextSchema,
 } from './resources';
@@ -580,6 +584,107 @@ describe('reply buttons and lists (ADR-080)', () => {
   });
 });
 
+describe('product messages (ADR-086)', () => {
+  const to = '+919876543210';
+  const product = { type: 'product', to, retailerId: 'chai-1' };
+  const productList = {
+    type: 'product_list',
+    to,
+    header: 'Tea time',
+    body: 'Goes well with chai',
+    sections: [
+      { title: 'Tea', retailerIds: ['chai-1', 'chai-2'] },
+      { title: 'Snacks', retailerIds: ['biscuit-1'] },
+    ],
+  };
+  const catalog = { type: 'catalog', to, thumbnailRetailerId: 'chai-1', body: 'Our menu' };
+
+  it('take products by content id, with Meta’s limits', () => {
+    expect(apiSendProductSchema.parse({ ...product, body: '  Our best seller  ' })).toMatchObject({
+      retailerId: 'chai-1',
+      body: 'Our best seller',
+    });
+    expect(apiSendProductListSchema.safeParse(productList).success).toBe(true);
+    expect(apiSendCatalogSchema.safeParse(catalog).success).toBe(true);
+    // A content id is taken exactly as given; a catalog id is Meta's digits.
+    expect(apiSendProductSchema.parse({ ...product, retailerId: ' sku 1 ' }).retailerId).toBe(
+      ' sku 1 ',
+    );
+    const refused: [z.ZodType, unknown, string][] = [
+      [apiSendProductSchema, { ...product, retailerId: '' }, 'no content id'],
+      [apiSendProductSchema, { ...product, retailerId: 'x'.repeat(101) }, 'a long content id'],
+      [apiSendProductSchema, { ...product, catalogId: 'main' }, 'a catalog id not in digits'],
+      [apiSendProductSchema, { ...product, body: 'x'.repeat(1025) }, 'a long body'],
+      [apiSendProductSchema, { ...product, footer: 'x'.repeat(61) }, 'a long footer'],
+      [apiSendProductSchema, { ...product, header: 'Tea' }, 'a header on one product'],
+      [apiSendProductListSchema, { ...productList, header: ' ' }, 'no header'],
+      [apiSendProductListSchema, { ...productList, body: undefined }, 'no body'],
+      [
+        apiSendProductListSchema,
+        { ...productList, sections: [{ retailerIds: ['a'] }, { retailerIds: ['b'] }] },
+        'untitled sections',
+      ],
+      [
+        apiSendProductListSchema,
+        { ...productList, sections: [{ title: 'x'.repeat(25), retailerIds: ['a'] }] },
+        'a long section title',
+      ],
+      [
+        apiSendProductListSchema,
+        {
+          ...productList,
+          sections: [
+            { title: 'A', retailerIds: Array.from({ length: 16 }, (_, i) => `a-${i}`) },
+            { title: 'B', retailerIds: Array.from({ length: 15 }, (_, i) => `b-${i}`) },
+          ],
+        },
+        'more than 30 products',
+      ],
+      [
+        apiSendProductListSchema,
+        {
+          ...productList,
+          sections: Array.from({ length: 11 }, (_, i) => ({
+            title: `S${i}`,
+            retailerIds: [`p${i}`],
+          })),
+        },
+        'more than 10 sections',
+      ],
+      [
+        apiSendProductListSchema,
+        {
+          ...productList,
+          sections: [
+            { title: 'A', retailerIds: ['chai-1'] },
+            { title: 'B', retailerIds: ['chai-1'] },
+          ],
+        },
+        'a product twice',
+      ],
+      [apiSendCatalogSchema, { ...catalog, body: '' }, 'a catalog without a body'],
+      [apiSendCatalogSchema, { ...catalog, thumbnailRetailerId: undefined }, 'no thumbnail'],
+    ];
+    for (const [schema, body, why] of refused) {
+      expect(schema.safeParse(body).success, why).toBe(false);
+    }
+  });
+
+  it('need the reply scope, checked before anything is read', async () => {
+    const ctx = {
+      tenant: { id: 't', status: 'active' },
+      key: { id: 'k', scopes: new Set(['messages.send']) },
+    } as unknown as ApiContext;
+    for (const body of [product, productList, catalog]) {
+      const error: unknown = await apiSendMessage({} as never, ctx, body, {
+        key: 'k-1',
+        requestHash: 'h',
+      }).catch((caught: unknown) => caught);
+      expect(isAppError(error) && error.code, body.type).toBe('forbidden');
+    }
+  });
+});
+
 describe('quotes and reactions (ADR-082)', () => {
   const messageId = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f01';
   const reaction = { type: 'reaction', to: '+919876543210', replyTo: messageId, emoji: '👍' };
@@ -1069,7 +1174,7 @@ describe('OpenAPI document', () => {
     expect(responses['403']?.description).toContain('ip_not_allowed');
   });
 
-  it('sends a template or a reply (text, buttons, list, reaction) from one operation, naming the window refusal', () => {
+  it('sends a template or a reply (text, buttons, list, products, reaction) from one operation, naming the window refusal', () => {
     const send = paths['/messages']?.post as unknown as {
       operationId: string;
       description: string;
@@ -1083,6 +1188,9 @@ describe('OpenAPI document', () => {
         { $ref: '#/components/schemas/SendText' },
         { $ref: '#/components/schemas/SendButtons' },
         { $ref: '#/components/schemas/SendList' },
+        { $ref: '#/components/schemas/SendProduct' },
+        { $ref: '#/components/schemas/SendProductList' },
+        { $ref: '#/components/schemas/SendCatalog' },
         { $ref: '#/components/schemas/SendReaction' },
       ],
     });
@@ -1102,10 +1210,34 @@ describe('OpenAPI document', () => {
     >;
     expect(schemas.SendReaction?.required?.sort()).toEqual(['emoji', 'replyTo', 'to', 'type']);
     expect(schemas.SendReaction?.additionalProperties).toBe(false);
-    for (const name of ['SendText', 'SendButtons', 'SendList']) {
+    for (const name of [
+      'SendText',
+      'SendButtons',
+      'SendList',
+      'SendProduct',
+      'SendProductList',
+      'SendCatalog',
+    ]) {
       expect(schemas[name]?.properties?.replyTo?.format, name).toBe('uuid');
       expect(schemas[name]?.required, name).not.toContain('replyTo');
     }
+    // Products (ADR-086) are named by content id; the plan and the catalog rules are stated.
+    expect(schemas.SendProduct?.required?.sort()).toEqual(['retailerId', 'to', 'type']);
+    expect(schemas.SendProductList?.required?.sort()).toEqual([
+      'body',
+      'header',
+      'sections',
+      'to',
+      'type',
+    ]);
+    expect(schemas.SendCatalog?.required?.sort()).toEqual([
+      'body',
+      'thumbnailRetailerId',
+      'to',
+      'type',
+    ]);
+    expect(send.description).toContain('Commerce');
+    expect(send.description).toContain('`catalogId`');
     expect(schemas.Message?.properties?.type?.enum).toContain('reaction');
     expect(schemas.QueuedMessage?.properties?.type?.enum).toContain('reaction');
     expect(schemas.Message?.properties?.replyTo).toBeDefined();

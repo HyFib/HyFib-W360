@@ -356,10 +356,12 @@ test('a key sends reply buttons and a list to a customer who wrote: the inbox sh
   const { wabaId, phoneNumberId } = await connectTestChannel({ ownerEmail: email, slug });
 
   await page.goto(`/c/${slug}/settings/api-keys`);
-  await expect(page.getByText(/replies \(text, buttons, lists and\s+reactions/)).toBeVisible();
+  await expect(
+    page.getByText(/replies \(text, buttons, lists, products\s+and reactions/),
+  ).toBeVisible();
   await page.getByLabel('Name', { exact: true }).fill('Booking');
   await page
-    .getByRole('checkbox', { name: /Reply with text, buttons, lists and reactions/ })
+    .getByRole('checkbox', { name: /Reply with text, buttons, lists, products and reactions/ })
     .check();
   await page.getByRole('checkbox', { name: /Read conversations/ }).check();
   await page.getByRole('button', { name: 'Create API key' }).click();
@@ -506,7 +508,7 @@ test('a key quotes a customer’s message and reacts to it: the inbox shows both
   await page.goto(`/c/${slug}/settings/api-keys`);
   await page.getByLabel('Name', { exact: true }).fill('Front desk');
   await page
-    .getByRole('checkbox', { name: /Reply with text, buttons, lists and reactions/ })
+    .getByRole('checkbox', { name: /Reply with text, buttons, lists, products and reactions/ })
     .check();
   await page.getByRole('checkbox', { name: /Read conversations/ }).check();
   await page.getByRole('button', { name: 'Create API key' }).click();
