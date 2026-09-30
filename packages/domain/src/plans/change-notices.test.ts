@@ -159,6 +159,27 @@ describe('the email about a plan subscription HyFib staff cancelled (ADR-101)', 
     expect(subscriptionCancelNotice({ ...cancelled, reason: null }).lines).toHaveLength(2);
   });
 
+  it('tells the trial the payments were to start after, going on or over (ADR-102)', () => {
+    const trialEndsAt = new Date('2026-10-14T18:30:00Z');
+    expect(
+      subscriptionCancelNotice({
+        ...cancelled,
+        plan: { kind: 'trial', trialEndsAt, ended: false },
+      }).lines[1],
+    ).toBe(
+      'Its payments were to start when the trial ends on 15 Oct 2026. The trial goes on until then; Billing shows how to continue after it.',
+    );
+    expect(
+      subscriptionCancelNotice({
+        ...cancelled,
+        plan: { kind: 'trial', trialEndsAt, ended: true },
+        timeZone: 'Europe/London',
+      }).lines[1],
+    ).toBe(
+      'Its payments were to start when the trial ended on 14 Oct 2026, so the trial is over; Billing shows how to continue.',
+    );
+  });
+
   it('keeps a long reason and the longest names within a billing notice', () => {
     const reason = `${'Cancelled at the customer’s request after the call '.repeat(9)}end`;
     expect(reason.length).toBeGreaterThan(450);

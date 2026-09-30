@@ -867,16 +867,19 @@ export class RazorpayClient {
   }
 
   /**
-   * POST /v1/subscriptions (R-064), starting at once (no `start_at`): Checkout takes the first
-   * cycle's charge. `expireBy` (Unix seconds) closes the authorisation; `customerNotify` lets
-   * Razorpay tell the payer about charges. No idempotency key: a subscription whose creation went
-   * unanswered is never authorised, because no one learns its id before `expireBy` passes.
+   * POST /v1/subscriptions (R-064). Without `startAt` it starts at once: Checkout takes the first
+   * cycle's charge. With `startAt` (Unix seconds, in the future) Checkout only authenticates the
+   * payment method and Razorpay charges the first cycle from then (R-119, ADR-102). `expireBy` (Unix
+   * seconds) closes the authorisation; `customerNotify` lets Razorpay tell the payer about charges.
+   * No idempotency key: a subscription whose creation went unanswered is never authorised, because
+   * no one learns its id before `expireBy` passes.
    */
   createSubscription(input: {
     planId: string;
     totalCount: number;
     expireBy: number;
     customerNotify: boolean;
+    startAt?: number;
     notes?: Record<string, string>;
   }) {
     return this.request(
@@ -889,6 +892,7 @@ export class RazorpayClient {
           quantity: 1,
           expire_by: input.expireBy,
           customer_notify: input.customerNotify,
+          ...(input.startAt !== undefined ? { start_at: input.startAt } : {}),
           ...(input.notes ? { notes: input.notes } : {}),
         },
       },

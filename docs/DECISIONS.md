@@ -1844,7 +1844,7 @@ quarantined for a person); and how a quarterly plan behaves on domestic cards, w
 Razorpay registers "as presented" for frequencies other than weekly, monthly and yearly. The
 release checklist has the test-mode checks.
 
-Not built: billing that starts at the end of a trial, self-serve plan and add-on changes with
+Not built: billing that starts at the end of a trial (since ADR-102), self-serve plan and add-on changes with
 proration, pausing, offers, plan payment receipts (since ADR-064) and GST invoices, refunds of plan payments, and
 emails about a subscription beyond charges, failures and endings.
 
@@ -3455,3 +3455,58 @@ Decision:
 Not built: a choice of recipients, and emails for subscriptions that end at Razorpay without a
 cancellation in HyFib (for example one cancelled in the Razorpay Dashboard); the plan sweep's email
 tells the company when its plan ends.
+
+## ADR-102 Paying for a plan from the end of the trial (2026-09-30)
+
+Context: a company on a trial that started paying by subscription (ADR-063) was charged in
+Checkout at once, and its paid period started then: the rest of the trial was lost, and the page
+said so. A company had no reason to pay before the trial's last day, and one that forgot then lost
+its plan. A Razorpay subscription can start in the future (`start_at`): Checkout then only
+authorises the payment method, the subscription is `authenticated`, and Razorpay starts the first
+billing cycle and charges it at that time, which Razorpay itself calls a trial period (R-119).
+
+Decision:
+
+- **When:** a company whose trial ends at least 48 hours ahead starts its subscription at the
+  trial's end (`start_at`, stored as `starts_at`); a nearer trial end is charged at once, as before.
+  Razorpay starts a card debit with the bank's notice to the payer 36 hours before it (R-073,
+  R-119), so a nearer first charge could not be notified in time. Billing names the day on the
+  button ("Pay ₹… per month from …") and says that Checkout checks the payment method now, that any
+  amount taken for the check is refunded (Razorpay documents no amount, so none is stated), and that
+  nothing is charged for the plan before the trial ends.
+- **Authorised, not paid:** Checkout's signed response prompts a fetch, as before; an authenticated
+  subscription with a start records no payment and leaves the plan state alone, so the trial goes on
+  with its limits. The billing managers are emailed once ("Payments for your HyFib plan start when
+  the trial ends": the amount, the day and how often), and Billing shows the day. Staff plan changes
+  stay refused while the subscription may be charged, as for any live one, so the trial's end cannot
+  move away from the start.
+- **The first charge:** Razorpay makes the subscription `active` when the first cycle starts and
+  then charges it (R-119). The recorded charge makes the plan active for Razorpay's cycle through
+  the definer function of ADR-063, which ends the trial and restarts the usage period.
+- **The trial waits for the charge:** without it, the trial's end would expire the plan in the
+  minutes before Razorpay's charge is recorded. A trial whose company has a subscription starting
+  at the trial's end that may still be charged (`authenticated`, `active` or `pending`) waits for
+  that charge until the plan version's grace days have passed, as a paid period waits for its
+  renewal. One SQL function, `app.trial_charge_wait_until` (migration 0079), holds the rule for the
+  plan transition, the sweep's due list and the plan card ("The trial ended on …. Everything keeps
+  working while Razorpay makes the first charge, until … at the latest."). A failed first charge's
+  email says until when. After the grace days the trial ends as before, and its email says the plan
+  is paid once Razorpay's first charge goes through; a later charge still makes the plan active.
+- **Missed events:** once the first charge is due, the sweep asks Razorpay hourly until a paid
+  cycle is recorded, as after a paid cycle ends.
+- **Cancelling:** before the start, the company cancels at once: nothing was charged, and the trial
+  goes on. After the start, HyFib asks Razorpay first, so a charge made but not yet heard of is
+  recorded, the period it paid stands and the subscription ends with it (as for any active one); if
+  Razorpay does not answer, nothing is cancelled and the company is asked to try again. A
+  cancellation racing Razorpay's charge in the moment between that check and the cancel can still
+  leave a charge on a cancelled subscription: the daily reconciliation reports it as a plan payment
+  not recorded (ADR-059), for a person to refund. Staff cancellations are emailed as before
+  (ADR-101), naming the trial the payments were to start after: going on, or over when it ended
+  waiting for the first charge.
+
+Uncertain: whether Razorpay accepts an `expire_by` (HyFib's one-hour Checkout window) earlier than
+the start, which its example puts after it, and the amount of the authentication payment. The
+release checklist has the test-mode check (R-119).
+
+Not built: moving the start when staff extend a trial (they cancel the subscription first, as for
+other plan changes), and payments starting on a day other than the trial's end.

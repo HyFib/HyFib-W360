@@ -183,12 +183,14 @@ export interface SubscriptionCancelFacts {
   cancelledAt: Date;
   /**
    * What the cancellation leaves of the company's plan: a period the subscription paid that is still
-   * running, the grace days after the last period it paid, or neither (a trial, a plan staff set or
-   * a plan that already ended), which the cancellation does not change.
+   * running, the grace days after the last period it paid, the trial its payments were to start
+   * after (ADR-102), or none of these (a plan staff set or a plan that already ended), which the
+   * cancellation does not change.
    */
   plan:
     | { kind: 'paid'; periodEnd: Date }
     | { kind: 'grace'; periodEnd: Date; graceEndsAt: Date }
+    | { kind: 'trial'; trialEndsAt: Date; ended: boolean }
     | { kind: 'unchanged' };
   /** The reason staff gave, which the company's audit log shows too. */
   reason: string | null;
@@ -212,6 +214,11 @@ export function subscriptionCancelNotice(facts: SubscriptionCancelFacts): {
       break;
     case 'grace':
       plan = `Its last paid period ended on ${day(facts.plan.periodEnd)}, and the plan ends when its grace days end on ${day(facts.plan.graceEndsAt)}; Billing shows how to continue.`;
+      break;
+    case 'trial':
+      plan = facts.plan.ended
+        ? `Its payments were to start when the trial ended on ${day(facts.plan.trialEndsAt)}, so the trial is over; Billing shows how to continue.`
+        : `Its payments were to start when the trial ends on ${day(facts.plan.trialEndsAt)}. The trial goes on until then; Billing shows how to continue after it.`;
       break;
     case 'unchanged':
       plan = 'This does not change the company’s plan; the plan card in Billing shows it.';
@@ -268,6 +275,8 @@ export async function notifyStaffSubscriptionCancellations(
             timeZone: tenants.timezone,
             planName: plans.name,
             cancelledAt: planSubscriptions.cancelRequestedAt,
+            startsAt: planSubscriptions.startsAt,
+            paidCount: planSubscriptions.paidCount,
           })
           .from(planSubscriptions)
           .innerJoin(tenants, eq(tenants.id, planSubscriptions.tenantId))
@@ -280,9 +289,11 @@ export async function notifyStaffSubscriptionCancellations(
         const [state] = await tx
           .select({
             status: tenantPlans.status,
+            trialEndsAt: tenantPlans.trialEndsAt,
             periodEnd: tenantPlans.periodEnd,
             graceEndsAt: tenantPlans.graceEndsAt,
             subscriptionId: tenantPlans.subscriptionId,
+            trialRunning: sql<boolean>`${tenantPlans.trialEndsAt} > now()`,
             // A period or grace days the plan sweep has not moved on yet (Razorpay did not answer)
             // are not told as running; the sweep's own email tells the company when the plan ends.
             periodRunning: sql<boolean>`${tenantPlans.periodEnd} > now()`,
@@ -304,8 +315,10 @@ export async function notifyStaffSubscriptionCancellations(
           .orderBy(desc(auditEvents.occurredAt))
           .limit(1);
         const reason = (audit?.metadata as { reason?: unknown } | undefined)?.reason;
-        // The plan still on a period this subscription paid ends with it; any other plan state
-        // (a trial, a plan staff set since, an ended plan) is not changed by the cancellation.
+        // The plan still on a period this subscription paid ends with it. A trial its payments were
+        // to start after (ADR-102) goes on to its end, or is over if it ended waiting for the first
+        // charge (the plan sweep may have ended it already). Any other plan state (a plan staff set
+        // since, an ended plan) is not changed by the cancellation.
         let plan: SubscriptionCancelFacts['plan'] = { kind: 'unchanged' };
         if (state?.subscriptionId === subscriptionId && state.periodEnd) {
           if (state.status === 'active' && state.periodRunning) {
@@ -313,6 +326,17 @@ export async function notifyStaffSubscriptionCancellations(
           } else if (state.status === 'past_due' && state.graceEndsAt && state.graceRunning) {
             plan = { kind: 'grace', periodEnd: state.periodEnd, graceEndsAt: state.graceEndsAt };
           }
+        } else if (
+          (state?.status === 'trialing' || state?.status === 'expired') &&
+          state.trialEndsAt &&
+          row.paidCount === 0 &&
+          row.startsAt?.getTime() === state.trialEndsAt.getTime()
+        ) {
+          plan = {
+            kind: 'trial',
+            trialEndsAt: state.trialEndsAt,
+            ended: state.status === 'expired' || !state.trialRunning,
+          };
         }
         await notifyBillingManagers(
           deps.notices,

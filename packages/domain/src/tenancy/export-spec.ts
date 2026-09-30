@@ -1322,6 +1322,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'current_start',
       'current_end',
       'charge_at',
+      'starts_at',
       'paid_count',
       'ended_at',
       'cancel_at_period_end',

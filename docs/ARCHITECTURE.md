@@ -1360,6 +1360,19 @@ WHERE used < limit`), per monthly period from `usage_anchor`; the sweep announce
   reason from the company's audit log and what the plan keeps, read from its plan state). Each
   plan payment has a receipt page (`billing/plan-payments/<id>`, ADR-064) computed from the payment
   and its subscription, linked from the payments table and the payment email; not a tax invoice.
+- **Paying from the end of the trial (0079, ADR-102) [built]:** `planPaymentStart` offers a trial
+  that ends at least 48 hours ahead a subscription starting at the trial's end: its `starts_at`
+  (written once) is sent as Razorpay's `start_at`, Checkout only authorises the payment method
+  (`authenticated`, no payment recorded, `confirmCheckout` answers `scheduled`), and the first
+  charge at the start makes the plan active through `app.apply_plan_subscription_period`, as any
+  paid cycle. `app.trial_charge_wait_until(tenant)` (an ordinary SQL function, run by the company's
+  scope and by the definer functions) is the one rule by which an ended trial waits for that charge:
+  while a subscription starting at the trial's end is `authenticated`, `active` or `pending`, until
+  the plan version's grace days have passed. `app.apply_plan_transition` and
+  `ops.plan_transitions_due` leave a waiting trial alone, the plan card shows until when, and
+  `ops.plan_subscriptions_due` re-reads a due first charge hourly until a paid cycle is recorded.
+  The company's cancel before the start is at once; after it, the subscription is synced first, so
+  a charge already made is kept and cancelled at the end of its cycle.
 - **Ledger (0004_billing):** one INR wallet per company with five accounts (`wallet_available`,
   `wallet_held`, `payment_clearing`, `service_revenue`, `dispute_losses`). `ledger_transactions` and
   `ledger_entries` are append-only (trigger), balances are maintained by trigger from the entries,

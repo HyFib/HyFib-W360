@@ -1,5 +1,144 @@
 # Progress
 
+## 2026-09-30 — Phase 5: paying for a plan from the end of the trial (P5-01/P5-07, ADR-102)
+
+Status: **Implemented and locally verified against the Razorpay stand-in (test data only).** A
+company on a trial that started paying by subscription (ADR-063) was charged in Checkout at once,
+and the rest of its trial was lost (Billing said so). Razorpay subscriptions can start in the
+future (`start_at`), which Razorpay documents as its way to give a trial (R-119).
+
+### Completed
+
+- **Research (R-119, read 2026-09-30 from Razorpay's documentation repository):** `start_at`; a
+  subscription without an add-on is `authenticated` after Checkout's authentication transaction,
+  becomes `active` when its first cycle starts and is then charged; the authentication payment is
+  auto-refunded; a card debit starts with the bank's notice 36 hours before it; either side may
+  cancel before the start. Not documented, and recorded as unconfirmed: whether an `expire_by`
+  earlier than `start_at` is accepted, and the authentication payment's amount (the release
+  checklist has the test-mode check).
+- **Design (ADR-102):** a trial ending at least 48 hours ahead is paid from its end; a nearer one is
+  charged at once, as before. Checkout only authorises; nothing is recorded until Razorpay reports a
+  paid cycle, and the first charge makes the plan active through the definer function of ADR-063.
+  The ended trial waits for that charge while the subscription is `authenticated`, `active` or
+  `pending`, for at most the plan version's grace days. After the start, the company's cancel asks
+  Razorpay first, so a charge made but not yet heard of keeps its paid period.
+- **Migration 0079:** `app.plan_subscriptions.starts_at` (written once; no role may update it; after
+  the subscription's creation); `app.trial_charge_wait_until(tenant)`, the one wait rule (an ordinary
+  SQL function granted to the runtime and definer roles only); `app.apply_plan_transition` and
+  `ops.plan_transitions_due` leave a waiting trial alone; `ops.plan_subscriptions_due` asks Razorpay
+  hourly once a first charge is due, until a paid cycle is recorded.
+- **Domain:** `planPaymentStart` (the 48-hour rule) in the offer; the start records `starts_at` and
+  sends `start_at`; `confirmCheckout` answers `scheduled`; the sync emails "Payments for your HyFib
+  plan start when the trial ends" once, and a failed first charge's email says until when everything
+  keeps working; the plan sweep syncs the company's live subscription before a trial would end, and
+  its emails no longer say "paid again" for a trial's first charge; the plan overview's
+  `trialWaitsUntil`; the company's cancel asks Razorpay first after the start and words its email by
+  whether the trial goes on; the staff cancellation email (ADR-101) names the trial the payments were
+  to start after, going on or over.
+- **Web:** Billing's offer names the first charge's day on the button and in the text (the payment
+  method is checked now, any amount taken for the check is refunded, nothing is charged before the
+  trial ends); the subscription panel shows the first charge's day or that it is due, "The first
+  charge failed", "Finish setting up payments", and a cancel description that says whether the trial
+  goes on; the plan card says the trial's payments start when it ends, or that an ended trial is
+  waiting for the first charge and until when; Checkout's `scheduled` answer has its own notice.
+  The company's platform page shows the first charge's day, and its note says the company pays from
+  the trial's end.
+- **Export:** `starts_at` is exported with the company's subscriptions.
+- **Stand-in (tests only):** a subscription with `start_at` ahead is authenticated in Checkout with a
+  refunded payment that pays no invoice; the first charge covers the cycle from the start.
+- **Tests:**
+  - Unit: `planPaymentStart` at exactly 48 hours, just under, past, without a trial end and for
+    every other plan state; the staff cancellation email's trial line, going on and over; the
+    Razorpay client sends `start_at`.
+  - Integration (`plan-subscriptions.test.ts`, 9 new, and the existing tests kept on the pay-now path
+    with a trial ending within two days):
+    - the offer's start, `start_at` sent, Checkout authorising only, nothing recorded, the trial
+      unchanged, one email however many events and syncs, a second start and staff plan changes
+      refused, no hourly check before the start;
+    - the ended trial held by the transition and the due list, the plan card's wait, the hourly
+      check (also for `active` before a paid cycle), the first charge found by the sweep making the
+      plan active from the trial's end, and the hourly check stopping;
+    - a failed first charge: the email's wait, the trial held within the grace days, ended after
+      them with the trial wording, and a later charge still paying for the plan;
+    - the wait rule itself, read in the company's scope: each subscription status, a start at
+      another time, the grace days, the start's check constraint;
+    - cancelling before the start (nothing charged, the trial goes on, it can pay again), after the
+      start with a charge HyFib had not heard of (kept, cancelled at the period's end), after the
+      start with none (at once, the trial ends), and with Razorpay not answering the check (nothing
+      cancelled);
+    - a missed first charge found before the trial would end; Razorpay stopping its retries ending
+      the wait;
+    - a payment window still open when a trial ends not counted as paying (the email says to pay in
+      billing);
+    - the staff cancellation email for a trial going on, and for one the plan sweep ended first.
+  - e2e (`plan-subscription.spec.ts`): after the staff cancellation, staff put the company on a
+    longer trial; the owner pays from the trial's end in the fake Checkout, Billing shows the
+    subscription authorised with its first charge day and the plan card's wording, the email
+    arrives, staff see the first charge's day on the company's platform page, and the owner cancels
+    with the trial going on (the dialog and the email say so).
+- **Docs:** ADR-102 (and ADR-063's not-built list); research R-119 and two unconfirmed points;
+  RELEASE-CHECKLIST (test-mode check); SECURITY; THREAT-MODEL T87, T88; RUNBOOKS (a trial paid from
+  its end, cancelling, the hourly check, migration 0079); ARCHITECTURE; DATA-RETENTION; BACKLOG P5-01
+  and P5-07; FEATURE-MATRIX W-006, H-041.
+- **Found while finishing:**
+  - Razorpay's states page says a subscription becomes `active` when its first cycle starts and is
+    then charged, so `active` without a paid cycle is waited for and checked hourly too.
+  - A company cancelling just after the start could have been cancelled at once while Razorpay's
+    charge was already made: the charge would not have been recorded for the cancelled subscription.
+    The cancel now asks Razorpay first; the moment between that check and the cancel remains, and
+    the daily reconciliation reports such a charge (RUNBOOKS).
+  - The plan sweep's email and the plan card said a company with a live subscription would be
+    "paid again", and the staff cancellation email told any trial as "not changed": both are wrong
+    for a trial waiting for its first charge, and now say what happens.
+  - Widening the plan sweep's check for a paying subscription (it only looked at the one linked to
+    the plan's period) first counted a payment window left open as paying, so a trial ending during
+    an unfinished Checkout would have been told it gets paid automatically. It now counts only
+    subscriptions Razorpay can charge without the payer; a test and two mutations cover it.
+    Billing's plan card likewise shows a payment still being started or in Checkout as a payment
+    to finish below, not as a subscription that pays the plan.
+- **Mutation checks:** 44 regressions tried one at a time (41, then 3 more after the fixes found while
+  finishing), all caught (4 through the e2e test).
+  - 15 in the migration: the ended trial not held by the transition; the due list still listing a
+    waiting trial; a halted subscription holding the trial; a pending first charge not holding it; a
+    subscription starting at another time holding it; the wait not bounded by the grace days, or a
+    day shorter than them; a due first charge not checked hourly, or not while `active`; still
+    checked hourly after the first charge; checked every minute before the start; a start before the
+    subscription allowed; the wait function granted to PUBLIC (caught by the isolation suite); the
+    company scope, or the definer functions, unable to read the wait.
+  - 22 in the domain: a trial always charged at once; a trial exactly 48 hours ahead charged at
+    once; a plan other than a trial paid from a trial's end; `start_at` not sent; the start not
+    recorded; a scheduled Checkout told as processing; the scheduled email never sent, or sent on
+    every sync; an authorised subscription not synced before the trial would end; the first charge
+    always told as ahead; the cancel not asking Razorpay first, ignoring Razorpay not answering, or
+    skipping the check once the charge is due; the cancel email saying the trial goes on after it
+    ended; the failed first charge email without the wait; the stopped first charge email saying
+    "paid again"; the plan card never showing the wait, or showing one before the trial ends; the
+    sweep's emails missing a subscription not linked to the plan (before and after the fix below);
+    a payment window still open counted as paying; the trial's end email saying "paid again".
+  - 3 in the staff cancellation email: the trial never told; a trial the plan sweep ended told as
+    unchanged; an ended trial told as going on.
+  - 4 through the e2e test: the pay button without the first charge's day; the plan card saying
+    "paid by subscription" during the trial; the cancel dialog saying the subscription ends now;
+    staff not shown the first charge.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                                                                                                                                  | Result                                                                                                             |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                                     | clean                                                                                                              |
+| `pnpm test`                                                                                                                                                                              | 451 passed                                                                                                         |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                                                                      | 612 passed on each                                                                                                 |
+| `pnpm build` and `pnpm test:e2e` for `plan-subscription.spec.ts` and `plans.spec.ts` on chromium and mobile-chromium, on the local database created for the day's runs, migrated to 0079 | 4 passed (5.6 min), the plan subscription test paying from the end of a longer trial and cancelling before it ends |
+| Mutation checks                                                                                                                                                                          | 44 regressions, all caught (listed above)                                                                          |
+| gitleaks 8.30.1 on the commit                                                                                                                                                            | no leaks                                                                                                           |
+
+### Known gaps
+
+- Staff cannot extend a trial under a subscription that starts at its end (they cancel it first, as
+  for other plan changes), and payments cannot start on another day.
+- Razorpay test mode has not been run: whether it accepts an `expire_by` before the start is the
+  first check (RELEASE-CHECKLIST).
+
 ## 2026-09-30 — Phase 5: emails when HyFib staff cancel a company's plan subscription (P5-07, ADR-101)
 
 Status: **Implemented and locally verified (test data only).** A platform owner can cancel a

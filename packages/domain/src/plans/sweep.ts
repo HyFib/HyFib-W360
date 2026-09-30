@@ -11,8 +11,6 @@ import {
   inArray,
   planSettings,
   planSubscriptions,
-  tenantPlans,
-  LIVE_PLAN_SUBSCRIPTION_STATUSES,
   type TenantPlanStatus,
   type TenantScope,
   type Tx,
@@ -53,25 +51,28 @@ async function companyFacts(tx: Tx, tenantId: string, planId: string | null) {
   return { planName: plan?.name ?? 'your', day };
 }
 
-/** Whether the subscription that paid the company's plan may still be charged (ADR-063). */
+/**
+ * Whether the company pays for its plan by a subscription Razorpay may still charge without the payer
+ * acting (ADR-063): the one that paid its period, or one whose first charge was due at the trial's
+ * end (ADR-102). One still waiting for Checkout does not count. A company has at most one.
+ */
 async function subscriptionLive(tx: Tx, tenantId: string): Promise<boolean> {
-  const [linked] = await tx
+  const [live] = await tx
     .select({ id: planSubscriptions.id })
-    .from(tenantPlans)
-    .innerJoin(
-      planSubscriptions,
-      and(
-        eq(planSubscriptions.tenantId, tenantPlans.tenantId),
-        eq(planSubscriptions.id, tenantPlans.subscriptionId),
-      ),
-    )
+    .from(planSubscriptions)
     .where(
       and(
-        eq(tenantPlans.tenantId, tenantId),
-        inArray(planSubscriptions.status, [...LIVE_PLAN_SUBSCRIPTION_STATUSES]),
+        eq(planSubscriptions.tenantId, tenantId),
+        inArray(planSubscriptions.status, [
+          'authenticated',
+          'active',
+          'pending',
+          'halted',
+          'paused',
+        ]),
       ),
     );
-  return Boolean(linked);
+  return Boolean(live);
 }
 
 /** Whether platform owners set the tax on plan prices (paying for plans needs it, ADR-063). */
@@ -169,7 +170,9 @@ export async function sweepPlanStates(deps: PlanSweepDeps, limit = 200): Promise
                 : `The ${planName} plan ended on ${day(now)}.`,
               'Sending messages, campaigns and automations is paused. Your data is kept, and you can still review and export it.',
               subscribed
-                ? 'The plan is paid again once a Razorpay charge goes through (the payer can change the card through the link in Razorpay’s email), or cancel the subscription in billing and pay again.'
+                ? row.previous_status === 'trialing'
+                  ? 'The plan is paid once Razorpay’s first charge goes through (the payer can change the card through the link in Razorpay’s email), or cancel the subscription in billing and pay again.'
+                  : 'The plan is paid again once a Razorpay charge goes through (the payer can change the card through the link in Razorpay’s email), or cancel the subscription in billing and pay again.'
                 : payHere
                   ? 'Pay for the plan in billing, or ask HyFib to choose a plan, to continue.'
                   : 'Ask HyFib to choose a plan to continue.',

@@ -28,6 +28,7 @@ import { assertCan, type TenantContext } from '../authz/context';
 import { assertRecentSignIn } from '../authz/step-up';
 import {
   planPaymentQuote,
+  planPaymentStart,
   PLAN_PAYMENT_UNAVAILABLE_TEXT,
   type PlanPaymentQuote,
   type PlanPaymentUnavailable,
@@ -62,6 +63,11 @@ const INVOICE_PAGE_SIZE = 100;
 /** More pages than five years of monthly invoices. */
 const INVOICE_MAX_PAGES = 12;
 const PERIODS = { 1: 'monthly', 3: 'quarterly', 12: 'yearly' } as const;
+const EVERY: Record<number, string> = {
+  1: 'every month',
+  3: 'every three months',
+  12: 'every year',
+};
 const PAYMENT_ID_RE = /^pay_[A-Za-z0-9]{1,40}$/;
 const PAYMENT_METHOD_RE = /^[a-z_]{1,32}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -87,6 +93,12 @@ export interface PlanSubscriptionSummary {
   failureReason: string | null;
   authorizeBy: Date;
   createdAt: Date;
+  /** When the first charge is due, at the trial's end (ADR-102); null: charged in Checkout. */
+  startsAt: Date | null;
+  /** Billing cycles Razorpay has charged. */
+  paidCount: number;
+  /** Its first charge, due at the trial's end, is still ahead (ADR-102). */
+  firstChargeAhead: boolean;
   /** Checkout can still authorise it: created and its window is open. */
   checkoutOpen: boolean;
 }
@@ -101,7 +113,13 @@ export interface PlanPaymentRecord {
 }
 
 export type PlanPaymentOffer =
-  | { available: true; quote: PlanPaymentQuote; intervalMonths: number }
+  | {
+      available: true;
+      quote: PlanPaymentQuote;
+      intervalMonths: number;
+      /** A trial far enough away is paid from its end (ADR-102); null: charged at once. */
+      startsAt: Date | null;
+    }
   | { available: false; reason: PlanPaymentUnavailable };
 
 /**
@@ -181,6 +199,9 @@ function summary(row: SubscriptionRow, now: Date): PlanSubscriptionSummary {
     failureReason: row.failureReason,
     authorizeBy: row.authorizeBy,
     createdAt: row.createdAt,
+    startsAt: row.startsAt,
+    paidCount: row.paidCount,
+    firstChargeAhead: row.startsAt !== null && row.paidCount === 0 && now < row.startsAt,
     checkoutOpen:
       row.status === 'created' && row.providerSubscriptionId !== null && now < row.authorizeBy,
   };
@@ -195,6 +216,7 @@ async function offerIn(
   tenantId: string,
   enabled: boolean,
   liveSeen: boolean,
+  now: Date,
 ): Promise<{ offer: PlanPaymentOffer; planName: string | null }> {
   const [company] = await tx
     .select({ status: tenants.status })
@@ -234,7 +256,12 @@ async function offerIn(
   const quote = planPaymentQuote(plan, state, settings.planTaxBp);
   if (!quote.ok) return no(quote.reason);
   return {
-    offer: { available: true, quote: quote.quote, intervalMonths: plan.intervalMonths },
+    offer: {
+      available: true,
+      quote: quote.quote,
+      intervalMonths: plan.intervalMonths,
+      startsAt: planPaymentStart(state, now),
+    },
     planName,
   };
 }
@@ -502,7 +529,10 @@ export async function syncPlanSubscription(
     }
     const becamePending = status === 'pending' && current.status !== 'pending';
     const becameHalted = status === 'halted' && current.status !== 'halted';
-    if (period === 'applied' || becamePending || becameHalted) {
+    // Authorised in Checkout, to be charged first when the trial ends (ADR-102).
+    const becameScheduled =
+      status === 'authenticated' && current.status !== 'authenticated' && current.startsAt !== null;
+    if (period === 'applied' || becamePending || becameHalted || becameScheduled) {
       const day = await companyDay(tx, tenantId);
       const planName = await planNameOf(tx, row.planId);
       const amount = displayMoney(BigInt(row.amountMinor), 'INR');
@@ -527,19 +557,38 @@ export async function syncPlanSubscription(
           ],
         });
       } else if (becamePending) {
+        // A trial waiting for its first charge (ADR-102) says how long it waits.
+        const wait =
+          after?.startsAt && after.paidCount === 0
+            ? ((
+                await tx.execute<{ until: Date | string | null }>(
+                  sql`select app.trial_charge_wait_until(${tenantId}::uuid) as until`,
+                )
+              ).rows[0]?.until ?? null)
+            : null;
         await notifyBillingManagers(deps.notices, tx, scope, {
           subject: 'A payment for your HyFib plan failed',
           lines: [
             `Razorpay could not charge ${amount} for the ${planName} plan and will try again.`,
-            'The payer can change the card through the link in Razorpay’s email.',
+            wait
+              ? `Everything keeps working until ${day(new Date(wait))} while Razorpay tries again; the payer can change the card through the link in Razorpay’s email.`
+              : 'The payer can change the card through the link in Razorpay’s email.',
           ],
         });
-      } else {
+      } else if (becameHalted) {
         await notifyBillingManagers(deps.notices, tx, scope, {
           subject: 'Payments for your HyFib plan have stopped',
           lines: [
             `Razorpay could not charge ${amount} for the ${planName} plan and has stopped trying.`,
-            'The payer can change the card through the link in Razorpay’s email; the plan is paid again once a charge goes through. You can also cancel the subscription in billing and pay again.',
+            `The payer can change the card through the link in Razorpay’s email; the plan is paid${(after?.paidCount ?? 0) > 0 ? ' again' : ''} once a charge goes through. You can also cancel the subscription in billing and pay again.`,
+          ],
+        });
+      } else if (current.startsAt) {
+        await notifyBillingManagers(deps.notices, tx, scope, {
+          subject: 'Payments for your HyFib plan start when the trial ends',
+          lines: [
+            `Razorpay charges ${amount} for the ${planName} plan on ${day(current.startsAt)}, when the trial ends, and ${EVERY[row.intervalMonths] ?? 'each period'} after that until the subscription is cancelled in billing.`,
+            'Nothing is charged for the plan before then, and the trial goes on as it is.',
           ],
         });
       }
@@ -656,35 +705,36 @@ export async function sweepPlanSubscriptions(
 }
 
 /**
- * The subscription that paid the company's current period, when it may still be charged: synced
- * before the plan sweep moves an ended period on (a renewal whose webhook was missed then counts).
+ * The company's subscription that may still be charged, synced before the plan sweep moves an ended
+ * period or trial on: the one that paid the current period (a renewal whose webhook was missed then
+ * counts), or one whose first charge was due at the trial's end (ADR-102). A company has at most one
+ * live subscription; one still in Checkout is left alone.
  */
 export async function syncPlanSubscriptionOfPlan(
   deps: BillingProviderDeps,
   scope: TenantScope,
 ): Promise<void> {
-  const [linked] = await deps.db.run(
+  const [live] = await deps.db.run(
     scope,
     (tx) =>
       tx
         .select({ id: planSubscriptions.id })
-        .from(tenantPlans)
-        .innerJoin(
-          planSubscriptions,
-          and(
-            eq(planSubscriptions.tenantId, tenantPlans.tenantId),
-            eq(planSubscriptions.id, tenantPlans.subscriptionId),
-          ),
-        )
+        .from(planSubscriptions)
         .where(
           and(
-            eq(tenantPlans.tenantId, scope.tenantId),
-            inArray(planSubscriptions.status, [...LIVE]),
+            eq(planSubscriptions.tenantId, scope.tenantId),
+            inArray(planSubscriptions.status, [
+              'authenticated',
+              'active',
+              'pending',
+              'halted',
+              'paused',
+            ]),
           ),
         ),
     { accessMode: 'read only' },
   );
-  if (linked) await syncPlanSubscription(deps, scope, linked.id);
+  if (live) await syncPlanSubscription(deps, scope, live.id);
 }
 
 /**
@@ -808,7 +858,7 @@ export function createPlanSubscriptionService(deps: PlanSubscriptionServiceDeps)
         ctx.scope,
         async (tx) => {
           const live = await liveRow(tx, ctx.tenant.id);
-          const { offer } = await offerIn(tx, ctx.tenant.id, enabled(), Boolean(live));
+          const { offer } = await offerIn(tx, ctx.tenant.id, enabled(), Boolean(live), now);
           const [shown] = live
             ? [live]
             : await tx
@@ -976,7 +1026,7 @@ export function createPlanSubscriptionService(deps: PlanSubscriptionServiceDeps)
               'Your company already pays for its plan by subscription.',
             );
           }
-          const { offer, planName } = await offerIn(tx, ctx.tenant.id, true, false);
+          const { offer, planName } = await offerIn(tx, ctx.tenant.id, true, false, now);
           if (!offer.available) {
             throw new AppError('precondition_failed', PLAN_PAYMENT_UNAVAILABLE_TEXT[offer.reason]);
           }
@@ -1003,6 +1053,8 @@ export function createPlanSubscriptionService(deps: PlanSubscriptionServiceDeps)
               totalCount: (PLAN_SUBSCRIPTION_YEARS * 12) / offer.intervalMonths,
               authorizeBy: new Date(now.getTime() + PLAN_SUBSCRIPTION_AUTHORIZE_MS),
               createdByUserId: ctx.user.id,
+              // A trial far enough away is paid from its end (ADR-102).
+              startsAt: offer.startsAt,
             })
             .returning();
           if (!row) throw new Error('subscription was not recorded');
@@ -1018,6 +1070,7 @@ export function createPlanSubscriptionService(deps: PlanSubscriptionServiceDeps)
                 amountMinor: offer.quote.totalMinor,
                 taxBp: offer.quote.taxBp,
                 intervalMonths: offer.intervalMonths,
+                startsAt: offer.startsAt?.toISOString() ?? null,
               },
             },
             meta,
@@ -1075,6 +1128,7 @@ export function createPlanSubscriptionService(deps: PlanSubscriptionServiceDeps)
           totalCount: row.totalCount,
           expireBy: Math.floor(row.authorizeBy.getTime() / 1000),
           customerNotify: true,
+          ...(row.startsAt ? { startAt: Math.floor(row.startsAt.getTime() / 1000) } : {}),
           notes,
         });
         if (!sub.ok) return fail(`Razorpay did not create the subscription: ${sub.description}`);
@@ -1113,7 +1167,7 @@ export function createPlanSubscriptionService(deps: PlanSubscriptionServiceDeps)
     async confirmCheckout(
       ctx: TenantContext,
       input: { subscriptionId: string; paymentId: string; signature: string },
-    ): Promise<{ status: 'active' | 'processing' | 'failed' }> {
+    ): Promise<{ status: 'active' | 'scheduled' | 'processing' | 'failed' }> {
       assertCan(ctx, 'billing.manage');
       const { razorpay, config } = provider();
       const where = and(
@@ -1158,6 +1212,10 @@ export function createPlanSubscriptionService(deps: PlanSubscriptionServiceDeps)
           if (state?.status === 'active' && state.subscriptionId === row.id) {
             return { status: 'active' as const };
           }
+          // Authorised, and first charged when the trial ends (ADR-102).
+          if (after?.status === 'authenticated' && after.startsAt) {
+            return { status: 'scheduled' as const };
+          }
           return after && ENDED.includes(after.status)
             ? { status: 'failed' as const }
             : { status: 'processing' as const };
@@ -1177,10 +1235,29 @@ export function createPlanSubscriptionService(deps: PlanSubscriptionServiceDeps)
       assertCan(ctx, 'billing.manage');
       assertRecentSignIn(ctx, clock.now());
       const { razorpay } = provider();
-      const row = await db.run(ctx.scope, (tx) => liveRow(tx, ctx.tenant.id), {
+      let row = await db.run(ctx.scope, (tx) => liveRow(tx, ctx.tenant.id), {
         accessMode: 'read only',
       });
       if (!row) throw new AppError('not_found', 'There is no subscription to cancel.');
+      // A first charge due at the trial's end (ADR-102) may have been made without HyFib hearing of
+      // it yet: Razorpay is asked first, so a charged subscription is cancelled at the end of the
+      // period it paid rather than at once.
+      if (
+        row.startsAt &&
+        row.startsAt <= clock.now() &&
+        row.paidCount === 0 &&
+        (row.status === 'authenticated' || row.status === 'active' || row.status === 'pending')
+      ) {
+        await syncPlanSubscription(providerDeps(razorpay), ctx.scope, row.id).catch(
+          (error: unknown) => {
+            throw error instanceof TransientProviderError ? unavailable() : error;
+          },
+        );
+        row = await db.run(ctx.scope, (tx) => liveRow(tx, ctx.tenant.id), {
+          accessMode: 'read only',
+        });
+        if (!row) throw new AppError('not_found', 'There is no subscription to cancel.');
+      }
       if (row.status === 'creating' || !row.providerSubscriptionId) {
         throw new AppError(
           'conflict',
@@ -1238,9 +1315,15 @@ export function createPlanSubscriptionService(deps: PlanSubscriptionServiceDeps)
           subject: 'Your HyFib plan subscription is cancelled',
           lines: [
             `${ctx.user.name} cancelled the subscription for the ${planName} plan. Nothing more is charged.`,
-            atPeriodEnd && row.currentEnd
-              ? `The plan ends on ${day(row.currentEnd)}, at the end of the paid period.`
-              : 'The plan keeps any period already paid, then ends.',
+            atPeriodEnd && row.currentEnd && row.paidCount === 0
+              ? `Razorpay’s first charge is under way: if it goes through, the plan stays paid until ${day(row.currentEnd)}, then ends.`
+              : atPeriodEnd && row.currentEnd
+                ? `The plan ends on ${day(row.currentEnd)}, at the end of the paid period.`
+                : row.startsAt && row.paidCount === 0
+                  ? row.startsAt > now
+                    ? `Nothing was charged for it, and the trial goes on until ${day(row.startsAt)}.`
+                    : `Nothing was charged for it, and the trial ended on ${day(row.startsAt)}.`
+                  : 'The plan keeps any period already paid, then ends.',
           ],
         });
       });

@@ -176,6 +176,12 @@ made. This checklist records the evidence required per gate; unchecked items blo
       quarterly plan authorised on a domestic card (as-presented, R-116); a charge above ₹15,000
       asks for the payer's approval (R-117); a settled plan payment matched by the daily
       reconciliation
+- [ ] Paying for a plan from the end of the trial (ADR-102) in Razorpay test mode: a subscription
+      for a trial ending more than 48 hours ahead is created with `start_at` at the trial's end and
+      an `expire_by` before it (R-119, unconfirmed point 27); Checkout's authentication makes it
+      `authenticated` with no invoice paid; the first charge at the start activates the plan from
+      the trial's end, and a failed one leaves the trial waiting for the plan's grace days;
+      cancelling before the start charges nothing and the trial goes on
 - [ ] Tenant-isolation and security gates passing in CI on the release commit
 - [ ] Measured load behaviour against the test envelope (k6 results)
 - [ ] Backup restoration drill performed and timings recorded (RPO/RTO)

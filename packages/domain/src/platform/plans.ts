@@ -817,6 +817,9 @@ export function createPlanAdminService(deps: {
             failureReason: planSubscriptions.failureReason,
             createdAt: planSubscriptions.createdAt,
             syncedAt: planSubscriptions.syncedAt,
+            // The first charge, due at the trial's end (ADR-102).
+            startsAt: planSubscriptions.startsAt,
+            paidCount: planSubscriptions.paidCount,
           })
           .from(planSubscriptions)
           .where(

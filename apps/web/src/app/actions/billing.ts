@@ -179,7 +179,7 @@ export async function startPlanSubscriptionAction(
 export async function confirmPlanSubscriptionAction(
   slug: string,
   input: { subscriptionId: string; paymentId: string; signature: string },
-): Promise<ActionResult<{ status: 'active' | 'processing' | 'failed' }>> {
+): Promise<ActionResult<{ status: 'active' | 'scheduled' | 'processing' | 'failed' }>> {
   return runAction(async () => {
     const ctx = await tenantForAction(slug);
     const { planPayments } = await getRuntime();

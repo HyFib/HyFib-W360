@@ -98,8 +98,11 @@ export function PlanCard({
 }: {
   overview: CompanyPlanOverview;
   timeZone: string;
-  /** Whether the company pays by subscription, or can pay for its plan here (ADR-063). */
-  payment?: 'subscribed' | 'offered' | null;
+  /**
+   * Whether the company pays by subscription (ADR-063), has one whose payments start when the
+   * trial ends (ADR-102), or can pay for its plan here.
+   */
+  payment?: 'subscribed' | 'from_trial_end' | 'offered' | null;
 }) {
   const { plan, usage, status } = overview;
   const payHere = payment === 'offered';
@@ -116,15 +119,21 @@ export function PlanCard({
           {status === 'complimentary'
             ? 'Complimentary access from HyFib: no limits and every module.'
             : status === 'trialing'
-              ? `Trial until ${day(overview.trialEndsAt)}.`
+              ? overview.trialWaitsUntil
+                ? `The trial ended on ${day(overview.trialEndsAt)}. Everything keeps working while Razorpay makes the first charge, until ${day(overview.trialWaitsUntil)} at the latest.`
+                : `Trial until ${day(overview.trialEndsAt)}.`
               : status === 'active' || status === 'past_due'
                 ? `Paid period ${day(overview.periodStart)} to ${day(overview.periodEnd)}.`
                 : 'The plan has ended.'}{' '}
-          {payment === 'subscribed'
-            ? 'Paid by subscription through Razorpay.'
-            : payHere
-              ? 'HyFib sets plans; you can pay for yours below.'
-              : 'HyFib sets plans and periods; there is nothing to pay here for the plan.'}
+          {overview.trialWaitsUntil
+            ? null
+            : payment === 'from_trial_end'
+              ? 'Payments by subscription through Razorpay start when the trial ends.'
+              : payment === 'subscribed'
+                ? 'Paid by subscription through Razorpay.'
+                : payHere
+                  ? 'HyFib sets plans; you can pay for yours below.'
+                  : 'HyFib sets plans and periods; there is nothing to pay here for the plan.'}
         </CardDescription>
       </CardHeader>
       <CardContent className="grid gap-6">
@@ -145,9 +154,11 @@ export function PlanCard({
           >
             Sending messages, campaigns and automations is paused. Your data is kept, and you can
             still review and export it.{' '}
-            {payHere
-              ? 'Pay for the plan below, or ask HyFib to choose a plan, to continue.'
-              : 'Ask HyFib to choose a plan to continue.'}
+            {payment === 'subscribed'
+              ? 'The plan is paid once a Razorpay charge goes through (the payer can change the card through the link in Razorpay’s email), or cancel the subscription below and pay again.'
+              : payHere
+                ? 'Pay for the plan below, or ask HyFib to choose a plan, to continue.'
+                : 'Ask HyFib to choose a plan to continue.'}
           </Alert>
         ) : null}
         {plan ? (

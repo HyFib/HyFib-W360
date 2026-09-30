@@ -32,7 +32,7 @@ test('a company pays for its plan by subscription, a renewal counts from Razorpa
   page,
   request,
 }) => {
-  test.setTimeout(240_000);
+  test.setTimeout(300_000);
   const email = uniqueEmail('plansub');
   const suffix = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`;
   const slug = `plansub-${suffix}`;
@@ -65,14 +65,15 @@ test('a company pays for its plan by subscription, a renewal counts from Razorpa
     await page.getByRole('alertdialog').getByRole('button', { name: 'Publish' }).click();
     await expect(page.getByText('published', { exact: true }).first()).toBeVisible();
 
-    // The company is on a trial of it with two extra seats.
+    // The company is on a trial of it with two extra seats, ending within two days: paying is
+    // charged at once (ADR-102).
     await page.goto(`/platform?q=${slug}`);
     await page.getByRole('link', { name: companyName }).click();
     await page.getByLabel('The company gets').selectOption('trialing');
     await page
       .getByLabel('Plan', { exact: true })
       .selectOption({ label: `Growth (grow-${suffix} v1)` });
-    await page.getByLabel('Trial ends on').fill(dayFromNow(10));
+    await page.getByLabel('Trial ends on').fill(dayFromNow(2));
     await page.getByLabel('Extra seats').fill('2');
     await page
       .getByLabel('Reason (emailed to the billing managers, and shown in the company’s audit log)')
@@ -188,6 +189,65 @@ test('a company pays for its plan by subscription, a renewal counts from Razorpa
     );
     expect(told).toContain('so nothing more is charged.');
     expect(told).toMatch(/The period it paid runs until \d{1,2} \w+ \d{4}; the plan then ends/);
+
+    // Staff put the company on a longer trial; paying for it now starts at the trial's end
+    // (ADR-102): Checkout only authorises the card, and nothing is charged before then.
+    await page.reload();
+    await page.getByLabel('The company gets').selectOption('trialing');
+    await page
+      .getByLabel('Plan', { exact: true })
+      .selectOption({ label: `Growth (grow-${suffix} v1)` });
+    await page.getByLabel('Trial ends on').fill(dayFromNow(10));
+    await page.getByLabel('Extra seats').fill('2');
+    await page
+      .getByLabel('Reason (emailed to the billing managers, and shown in the company’s audit log)')
+      .fill('Longer trial agreed on the renewal call');
+    await page.getByRole('button', { name: 'Save plan' }).click();
+    await expect(page.getByText('The company’s plan was changed.')).toBeVisible();
+    await page.goto(`/c/${slug}/billing`);
+    await expect(paying.getByText(/when the trial ends, and ₹1,414\.82 every month/)).toBeVisible();
+    await paying
+      .getByRole('button', { name: /^Pay ₹1,414\.82 per month from \d{1,2} \w+ \d{4}$/ })
+      .click();
+    // The panel shows the new subscription (the cancelled one before it).
+    await expect(paying.getByText('Authorised', { exact: true })).toBeVisible({ timeout: 30_000 });
+    await expect(
+      paying.getByText(
+        /Razorpay charges for the first period on \d{1,2} \w+ \d{4}, when the trial ends/,
+      ),
+    ).toBeVisible();
+    await expect(
+      page.getByText('Payments by subscription through Razorpay start when the trial ends.'),
+    ).toBeVisible();
+    await waitForEmail(email, 'Payments for your HyFib plan start when the trial ends');
+    await expectNoHorizontalOverflow(page);
+
+    // Staff see when the first charge is due.
+    await page.goto(`/platform?q=${slug}`);
+    await page.getByRole('link', { name: companyName }).click();
+    await expect(
+      page.getByRole('region', { name: 'Plan subscription' }).getByText(/, when the trial ends$/),
+    ).toBeVisible();
+    await expect(
+      page.getByText('Paying by Razorpay subscription from the trial’s end'),
+    ).toBeVisible();
+    await page.goto(`/c/${slug}/billing`);
+
+    // Cancelled before the trial ends: nothing was charged, and the trial goes on.
+    await paying.getByRole('button', { name: 'Cancel subscription' }).click();
+    const confirm = page.getByRole('alertdialog');
+    await expect(
+      confirm.getByText(/Nothing is charged, and the trial goes on until/),
+    ).toBeVisible();
+    await confirm.getByRole('button', { name: 'Cancel subscription' }).click();
+    await expect(paying.getByRole('button', { name: 'Cancel subscription' })).toHaveCount(0);
+    const stopped = await waitForEmailContaining(
+      email,
+      'Your HyFib plan subscription is cancelled',
+      'Nothing was charged for it, and the trial goes on until',
+      90_000,
+    );
+    expect(stopped).toMatch(/the trial goes on until \d{1,2} \w+ \d{4}\./);
   } finally {
     // The tax is platform-wide: leave it as the other tests expect (not set).
     await page.goto('/platform/plans');

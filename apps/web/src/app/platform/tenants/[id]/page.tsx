@@ -349,7 +349,14 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
               ) : null}
             </div>
             {planView.subscription?.live ? (
-              <Alert tone="info" title="Paid by Razorpay subscription">
+              <Alert
+                tone="info"
+                title={
+                  planView.subscription.startsAt && planView.subscription.paidCount === 0
+                    ? 'Paying by Razorpay subscription from the trial’s end'
+                    : 'Paid by Razorpay subscription'
+                }
+              >
                 Plan changes wait until the subscription is cancelled (below), so a company is never
                 charged for a plan it is no longer on.
               </Alert>
@@ -409,6 +416,12 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
                       {planView.subscription.cancelAtPeriodEnd ? ' · cancelled at its end' : ''}
                     </dd>
                   </div>
+                  {planView.subscription.startsAt && planView.subscription.paidCount === 0 ? (
+                    <div>
+                      <dt className="text-muted-foreground">First charge</dt>
+                      <dd>{formatDate(planView.subscription.startsAt, tz)}, when the trial ends</dd>
+                    </div>
+                  ) : null}
                   <div>
                     <dt className="text-muted-foreground">Razorpay subscription</dt>
                     <dd className="break-all font-mono text-xs">

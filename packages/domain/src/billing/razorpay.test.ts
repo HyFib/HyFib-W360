@@ -509,6 +509,28 @@ describe('RazorpayClient subscriptions', () => {
       expire_by: 1_790_003_600,
       customer_notify: true,
     });
+    // With a start, Razorpay charges the first cycle from then (ADR-102).
+    const later = clientReturning(() =>
+      json(
+        200,
+        subscription({ status: 'created', current_start: null, current_end: null, paid_count: 0 }),
+      ),
+    );
+    await later.client.createSubscription({
+      planId: 'plan_Def456',
+      totalCount: 60,
+      expireBy: 1_790_003_600,
+      customerNotify: true,
+      startAt: 1_790_200_000,
+    });
+    expect(later.seen[0]!.body).toEqual({
+      plan_id: 'plan_Def456',
+      total_count: 60,
+      quantity: 1,
+      expire_by: 1_790_003_600,
+      customer_notify: true,
+      start_at: 1_790_200_000,
+    });
     const cancel = clientReturning(() =>
       json(200, subscription({ status: 'cancelled', ended_at: 1_790_500_000 })),
     );

@@ -948,8 +948,8 @@ why for the last two.
 **A company paid but its plan did not change.** Open the company's platform page → Plan
 subscription: status, cycle, last checked and any note. The plan changes only when Razorpay reports
 the cycle paid, fetched by HyFib: after Checkout, on each `subscription.*` or `payment.*` webhook, and
-by the minute sweep (every live subscription at least daily, hourly once its cycle has ended, and
-just before the plan sweep would move the period on). The worker logs `plan subscription check
+by the minute sweep (every live subscription at least daily, hourly once its cycle has ended or its
+first charge is due, and just before the plan sweep would move the period on). The worker logs `plan subscription check
 failed; will retry` with the subscription id when Razorpay cannot answer; it is tried again. A note such as "Razorpay
 returned a subscription for another plan" or a payment Razorpay reports for another amount means
 the records disagree: compare with the Razorpay Dashboard before doing anything by hand, and never
@@ -962,11 +962,28 @@ a later successful charge makes it active again. The company can also cancel the
 pay again. Charges above ₹15,000 on Indian cards wait for the payer's approval through their bank
 every time (RBI rules, Razorpay's FAQ): a charge that stays unpaid for that reason looks the same.
 
+**A trial paid from its end (ADR-102).** A company whose trial ends more than two days ahead pays
+from the trial's end: Checkout only authorises the card, the company's platform page → Plan
+subscription shows "Authorised" and the day of the first charge, and the plan stays a trial. At the
+trial's end Razorpay charges the first cycle, and the plan becomes active once HyFib records it (the
+webhook, or the sweep's hourly check once the charge is due). Until then the ended trial waits, for
+at most the plan version's grace days, and Billing says until when. A trial still waiting: check
+`SELECT status, starts_at, paid_count, synced_at, failure_reason FROM app.plan_subscriptions WHERE
+tenant_id = … ORDER BY created_at DESC LIMIT 1`; `authenticated`, `active` and `pending` wait (the
+last one while Razorpay retries a failed first charge), anything else ends the trial at the next
+sweep. After the grace days the trial expires; a later charge still makes the plan active. A
+company that cancelled just as the first charge was made may show "a payment of a HyFib plan
+subscription that syncing the subscription did not record" in the daily reconciliation: the charge
+is on a cancelled subscription and HyFib gave no period for it, so refund it in the Dashboard.
+
 **Cancelling a company's subscription.** Owners and billing managers cancel in Billing (an active
 one at the end of the paid period, otherwise at once). Platform owners cancel at once on the
 company's platform page with a reason (needed before changing the company's plan, which staff
 cannot do while a subscription is live); the paid period stands and the plan then ends as canceled,
-without grace days, and the company's billing managers are emailed the reason (ADR-101). A company
+without grace days, and the company's billing managers are emailed the reason (ADR-101). A
+subscription paid from a trial's end is cancelled at once by the company before its start (nothing
+was charged, and the trial goes on); after the start HyFib asks Razorpay first, and one already
+charged is cancelled at the end of the period it paid (ADR-102). A company
 that cancelled pays again from Billing once the paid period has ended
 (there is no resume). Deleting a company cancels its subscription first; a failure shows as "Plan
 subscription at Razorpay: failed" in the deletion's provider outcomes: cancel it in the Razorpay
@@ -1423,6 +1440,15 @@ already stored: a short `ACCESS EXCLUSIVE` lock on the keys table), creates `app
 row security and its grants, and registers deletion step 855 with the definer's grants and
 policies. A failure usually means a lock wait on `app.api_keys` timed out (run the migrations again
 when requests are quieter) or the bootstrap roles are missing.
+
+**Migration 0079 failed.** It runs in one transaction, so a failure applies nothing. It adds
+`starts_at` to `app.plan_subscriptions` (nullable, with a check validated against the rows stored: a
+short lock on the table), creates `app.trial_charge_wait_until` (granted to `w360_app` and
+`w360_definer`), and rebuilds `app.apply_plan_transition`, `ops.plan_transitions_due` and
+`ops.plan_subscriptions_due`: `w360_definer` drops each, and the migration role recreates it, grants
+it to `w360_app` and hands it back to `w360_definer`. A failure usually means the bootstrap roles
+are missing or a lock wait on `app.plan_subscriptions` timed out: run the migrations again. Web and
+worker images from before it keep charging trials at once; the new images need it (migrate first).
 
 **Migration 0078 failed.** It runs in one transaction, so a failure applies nothing. It adds
 `staff_cancel_notice_due` to `app.plan_subscriptions` (a boolean defaulting to false, so no rows are
