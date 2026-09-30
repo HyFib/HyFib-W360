@@ -525,7 +525,10 @@ Phase 5 rules (Public API, P5-08):
   answer 404 when listed, read or replayed. A delivery shows how sending went (status, attempts,
   HTTP status, error code, duration), never a body: payloads are not stored. Test events and
   replays need an `Idempotency-Key`, go only to an endpoint that is on, through the egress guard,
-  and use the settings service's own steps; a replay is audited as the key.
+  and use the settings service's own steps; a replay is audited as the key. Replaying an
+  endpoint's failed deliveries in one call (ADR-095) follows the same rules, queues at most 500
+  events per call (each once, even when two calls race: the endpoint's row is locked first) and is
+  audited once per call with the count.
 - Notes through the API (ADR-084) need `conversations.write` (granted by members holding
   `inbox.supervise`, who read every note) and an active company. A note is internal: WhatsApp never
   receives it and it changes nothing about the conversation; the inbox names the key, and a key's
@@ -569,8 +572,9 @@ Phase 5 rules (Public API, P5-08):
 Phase 5 rules (outgoing webhooks, P5-09):
 
 - Members with `developer.manage` (owners and administrators) add, edit, turn off, delete and test
-  the company's webhook endpoints, rotate their secrets and replay deliveries; API keys with
-  `webhooks.manage` do the same for the endpoints keys added (ADR-081, ADR-083). Every change is
+  the company's webhook endpoints, rotate their secrets and replay deliveries, one at a time or an
+  endpoint's failed ones together (ADR-095); API keys with `webhooks.manage` do the same for the
+  endpoints keys added (ADR-081, ADR-083). Every change is
   audited with the endpoint's host only; the full URL (which may carry a receiver's token) and the
   secret are never logged.
 - An endpoint's URL must pass the egress guard's rules when saved (https, no credentials, port 443

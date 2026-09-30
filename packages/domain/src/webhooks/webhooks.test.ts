@@ -14,9 +14,11 @@ import {
   WEBHOOK_EVENT_INFO,
   WEBHOOK_EVENT_KEYS,
   WEBHOOK_LIMITS,
+  WEBHOOK_REPLAY_PERIODS,
   WEBHOOK_RETRY_SECONDS,
   webhookErrorLabel,
   webhookHost,
+  webhookReplaySummary,
   webhookRetryDelaySeconds,
 } from './model';
 import {
@@ -700,6 +702,28 @@ describe('the endpoint-disabled email', () => {
     expect(email.text).toContain('https://app.example.com/c/acme/settings/webhooks');
     expect(email.html).toContain('Acme &lt;Traders&gt;');
     expect(email.html).not.toContain('<Traders>');
+  });
+});
+
+describe('replaying failed deliveries (ADR-095)', () => {
+  it('offers periods up to the deliveries kept, and says what a replay queued', () => {
+    expect(WEBHOOK_REPLAY_PERIODS.map((p) => [p.key, p.hours])).toEqual([
+      ['1h', 1],
+      ['24h', 24],
+      ['7d', 168],
+      ['30d', 720],
+    ]);
+    expect(Math.max(...WEBHOOK_REPLAY_PERIODS.map((p) => p.hours))).toBe(
+      WEBHOOK_LIMITS.retentionDays * 24,
+    );
+    expect(webhookReplaySummary({ queued: 0, more: false })).toBe(
+      'No failed deliveries to replay from that period.',
+    );
+    expect(webhookReplaySummary({ queued: 1, more: false })).toBe('Replaying 1 delivery.');
+    expect(webhookReplaySummary({ queued: 12, more: false })).toBe('Replaying 12 deliveries.');
+    expect(webhookReplaySummary({ queued: 500, more: true })).toBe(
+      'Replaying 500 deliveries. More failed deliveries remain: replay again to queue the next ones.',
+    );
   });
 });
 

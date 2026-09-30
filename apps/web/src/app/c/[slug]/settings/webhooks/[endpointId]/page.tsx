@@ -3,7 +3,11 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { can, webhookErrorLabel, webhookHost, type WebhookDeliveryView } from '@w360/domain';
 import { Badge, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
-import { ReplayDeliveryButton, WebhookEndpointForm } from '@/components/settings/webhooks';
+import {
+  ReplayDeliveryButton,
+  ReplayFailedDeliveriesForm,
+  WebhookEndpointForm,
+} from '@/components/settings/webhooks';
 import { formatDateTime } from '@/lib/format';
 import { getRuntime } from '@/server/runtime';
 import { requireTenant } from '@/server/session';
@@ -55,7 +59,8 @@ export default async function WebhookEndpointPage({
           <CardTitle className="break-all">Deliveries to {host}</CardTitle>
           <CardDescription>
             The latest 100{failedOnly ? ' failed' : ''} deliveries, newest first. A replay sends the
-            same event again as a new delivery, with the same event id.
+            same event again as a new delivery, with the same event id. Replaying failed deliveries
+            sends every event whose deliveries all failed in the period again, 500 at a time.
             {active ? '' : ' Turn the endpoint on to replay deliveries.'}
           </CardDescription>
         </CardHeader>
@@ -77,6 +82,9 @@ export default async function WebhookEndpointPage({
               </Link>
             )}
           </p>
+          {active ? (
+            <ReplayFailedDeliveriesForm slug={ctx.tenant.slug} endpointId={endpointId} />
+          ) : null}
           {deliveries.length === 0 ? (
             <p className="text-sm text-muted-foreground">
               {failedOnly ? 'No failed deliveries.' : 'No deliveries yet.'}

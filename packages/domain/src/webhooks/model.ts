@@ -112,7 +112,32 @@ export const WEBHOOK_LIMITS = {
   /** An endpoint failing without a success for this long is disabled at its next failure. */
   disableAfterHours: 72,
   retentionDays: 30,
+  /** Failed deliveries replayed in one call at most (ADR-095); another call queues the next ones. */
+  replayBatch: 500,
 } as const;
+
+/**
+ * The periods Settings → Webhooks replays failed deliveries from (ADR-095), up to the deliveries
+ * HyFib keeps. The API takes any time instead.
+ */
+export const WEBHOOK_REPLAY_PERIODS = [
+  { key: '1h', label: 'the last hour', hours: 1 },
+  { key: '24h', label: 'the last 24 hours', hours: 24 },
+  { key: '7d', label: 'the last 7 days', hours: 7 * 24 },
+  { key: '30d', label: 'the last 30 days', hours: WEBHOOK_LIMITS.retentionDays * 24 },
+] as const;
+
+export type WebhookReplayPeriod = (typeof WEBHOOK_REPLAY_PERIODS)[number]['key'];
+
+/** What a replay of failed deliveries did, in the words Settings → Webhooks shows it. */
+export function webhookReplaySummary(result: { queued: number; more: boolean }): string {
+  if (result.queued === 0) return 'No failed deliveries to replay from that period.';
+  const queued =
+    result.queued === 1 ? 'Replaying 1 delivery.' : `Replaying ${result.queued} deliveries.`;
+  return result.more
+    ? `${queued} More failed deliveries remain: replay again to queue the next ones.`
+    : queued;
+}
 
 /** The wait after each failed attempt: after the first, 1 minute; after the seventh, 24 hours. */
 export const WEBHOOK_RETRY_SECONDS = [60, 300, 1_800, 7_200, 21_600, 43_200, 86_400] as const;

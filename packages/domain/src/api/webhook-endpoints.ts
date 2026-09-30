@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { notFound, type Clock } from '@w360/core';
+import { AppError, notFound, type Clock } from '@w360/core';
 import type { EgressPolicy } from '@w360/core/egress';
 import {
   and,
@@ -31,6 +31,7 @@ import {
   insertWebhookEndpoint,
   lockWebhookEndpoint,
   queueWebhookTest,
+  replayFailedWebhookDeliveries,
   replayWebhookDelivery,
   rotateWebhookEndpointSecret,
   setWebhookEndpointEnabled,
@@ -132,6 +133,20 @@ export interface ApiWebhookDelivery {
   replayOf: string | null;
   createdAt: string;
 }
+
+/** Replaying an endpoint's failed deliveries (ADR-095). */
+export const apiReplayFailedDeliveriesSchema = z
+  .object({
+    since: z.iso
+      .datetime({
+        offset: true,
+        error: 'Give since as a date and time, such as 2026-09-30T08:00:00Z',
+      })
+      .describe(
+        'Replay the failed deliveries queued at or after this time. Deliveries are kept 30 days.',
+      ),
+  })
+  .strict();
 
 export const apiWebhookDeliveryListQuerySchema = z
   .object({
@@ -235,6 +250,9 @@ const endpointId = (id: string) => {
   if (!z.uuid().safeParse(id).success) throw notFound('Webhook endpoint');
   return id;
 };
+
+const invalidSince = (message: string) =>
+  new AppError('validation_failed', message, { issues: [{ path: 'since', message }] });
 
 const deliveryId = (id: string) => {
   if (!z.uuid().safeParse(id).success) throw notFound('Delivery');
@@ -630,6 +648,45 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
           return {
             status: 201,
             body: { data: await readDelivery(tx, ctx, replayed.deliveryId) },
+          };
+        }),
+      );
+    },
+
+    /**
+     * POST /api/v1/webhook-endpoints/{id}/replay-failed: every event whose deliveries to the
+     * endpoint all failed since `since`, delivered again, at most 500 per call and once per
+     * `Idempotency-Key` (ADR-095). Answered with how many were queued and whether more remain.
+     * Audited as the key, once per call.
+     */
+    async replayFailed(
+      ctx: ApiContext,
+      id: string,
+      input: unknown,
+      idempotency: IdempotencyInput,
+    ): Promise<ApiResponse> {
+      assertScope(ctx, 'webhooks.manage');
+      endpointId(id);
+      const { since } = parseInput(apiReplayFailedDeliveriesSchema, input);
+      const now = clock.now();
+      const from = new Date(since);
+      if (from.getTime() > now.getTime()) {
+        throw invalidSince('Give a time in the past.');
+      }
+      return db.run(ctx.scope, (tx) =>
+        idempotent(tx, ctx, idempotency, now, async () => {
+          const replayed = await replayFailedWebhookDeliveries(tx, ctx.tenant.id, id, from, {
+            keysOnly: true,
+          });
+          await audit(tx, ctx, 'webhook.deliveries_replayed', id, {
+            host: webhookHost(replayed.endpoint.url),
+            since: from.toISOString(),
+            queued: replayed.queued,
+            more: replayed.more,
+          });
+          return {
+            status: 200,
+            body: { data: { queued: replayed.queued, more: replayed.more } },
           };
         }),
       );

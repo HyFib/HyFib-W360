@@ -1,16 +1,20 @@
 'use client';
 import { useId, useState } from 'react';
-import { Alert, Button, Checkbox, Field, Input, Label } from '@w360/ui';
+import { Alert, Button, Checkbox, Field, Input, Label, Select } from '@w360/ui';
 import { ConfirmDialog } from '@w360/ui/client';
 import {
   WEBHOOK_EVENT_INFO,
   WEBHOOK_EVENT_KEYS,
   WEBHOOK_LIMITS,
+  WEBHOOK_REPLAY_PERIODS,
+  webhookReplaySummary,
   type WebhookEventType,
+  type WebhookReplayPeriod,
 } from '@w360/domain/webhook-model';
 import {
   createWebhookEndpointAction,
   deleteWebhookEndpointAction,
+  replayFailedWebhookDeliveriesAction,
   replayWebhookDeliveryAction,
   rotateWebhookSecretAction,
   sendWebhookTestAction,
@@ -366,5 +370,63 @@ export function ReplayDeliveryButton({
       </div>
       <ActionFailure failure={error} />
     </div>
+  );
+}
+
+/**
+ * Replays the endpoint's failed deliveries from a chosen period, 500 at most at a time (ADR-095):
+ * one new delivery per event whose deliveries all failed.
+ */
+export function ReplayFailedDeliveriesForm({
+  slug,
+  endpointId,
+}: {
+  slug: string;
+  endpointId: string;
+}) {
+  const selectId = useId();
+  const [period, setPeriod] = useState<WebhookReplayPeriod>('24h');
+  const [error, setError] = useState<ActionFailureState | null>(null);
+  const [done, setDone] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  return (
+    <ClientForm
+      className="grid gap-2"
+      aria-label="Replay failed deliveries"
+      onSubmit={(event) => {
+        event.preventDefault();
+        setBusy(true);
+        setError(null);
+        setDone(null);
+        void replayFailedWebhookDeliveriesAction(slug, endpointId, period).then((r) => {
+          setBusy(false);
+          if (r.ok) setDone(webhookReplaySummary(r.data));
+          else setError(r);
+        });
+      }}
+    >
+      <div className="flex flex-wrap items-end gap-2">
+        <div className="grid gap-1">
+          <Label htmlFor={selectId}>Failed deliveries from</Label>
+          <Select
+            id={selectId}
+            className="w-auto min-w-40"
+            value={period}
+            onChange={(event) => setPeriod(event.target.value as WebhookReplayPeriod)}
+          >
+            {WEBHOOK_REPLAY_PERIODS.map((p) => (
+              <option key={p.key} value={p.key}>
+                {p.label}
+              </option>
+            ))}
+          </Select>
+        </div>
+        <Button type="submit" size="sm" variant="outline" disabled={busy}>
+          Replay failed deliveries
+        </Button>
+      </div>
+      <FormSuccess message={done} />
+      <ActionFailure failure={error} />
+    </ClientForm>
   );
 }

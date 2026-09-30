@@ -1,5 +1,90 @@
 # Progress
 
+## 2026-09-30 — Phase 5: replaying an endpoint's failed deliveries in one call (P5-09, ADR-095)
+
+Status: **Implemented and locally verified (no customer data; webhooks delivered to local test
+receivers only).** After a receiver's outage its failed deliveries could be replayed only one at a
+time, in Settings → Webhooks or one API call each (ADR-083): hundreds of clicks or calls after a
+day's outage.
+
+### Completed
+
+- **Design (ADR-095):** for one endpoint that is on, every event whose deliveries to it all failed,
+  from the deliveries queued since a chosen time: one new delivery per event, replaying its latest
+  failed delivery (`replayOf`), oldest event first, at most 500 per call, the answer saying how many
+  were queued and whether more remain. Left out: events delivered or waiting to be (a replay queued
+  earlier included), `event_gone` failures (they would fail again at once) and test events. The
+  endpoint's row is locked first, as for one replay, so calls at the same time queue each event
+  once. One audit entry per call. No migration: the existing indexes and grants serve it.
+- **Domain:** `replayFailedWebhookDeliveries` (webhooks service; `DISTINCT ON` the event over the
+  endpoint's deliveries in the period, reading one row more than it queues); the settings
+  service's `replayFailed` (`developer.manage`; the last hour, 24 hours, 7 days or 30 days,
+  `WEBHOOK_REPLAY_PERIODS`); the API service's `replayFailed` (`webhooks.manage`, endpoints keys
+  added, `since` a time with its offset and in the past, inside `idempotent`);
+  `webhookReplaySummary`; the audit action `webhook.deliveries_replayed` with the host, the time
+  from, the count and whether more remain, as the member or as the key.
+- **Web:** "Replay failed deliveries" on an endpoint's page in Settings → Webhooks while it is on (a
+  period, then what was queued); `POST /api/v1/webhook-endpoints/{id}/replay-failed` with an
+  `Idempotency-Key`; the OpenAPI document (`replayFailedWebhookDeliveries`,
+  `ReplayFailedDeliveries`, `FailedReplay`).
+- **Tests:**
+  - Unit: the periods (up to the 30 days kept) and the summaries; the API body (a time with its
+    offset, nothing else), a time still to come refused before anything is read, the scope checked
+    first, the OpenAPI entry.
+  - Integration in `webhooks.test.ts` (3 new):
+    - three messages and a test event whose first attempts failed, failed for good when the
+      endpoint was turned off: refused while it is off; once on, the two messages replayed (the third failed
+      with `event_gone`, the test event left out), each naming the delivery it replays; a second
+      call while they wait queues nothing; delivered with their event ids, after which nothing is
+      left; another endpoint's failures untouched; one audit entry per call;
+    - 501 failed events: nothing from the last hour seen two hours later, 500 from the last day
+      (the oldest, `more` true), then the last one;
+    - refusals (a member without `developer.manage`, an unknown period, another company); a call
+      waiting while another transaction holds the endpoint and queues the first two events again,
+      then queueing only the other three.
+  - Integration in `api-webhook-endpoints.test.ts` (1 new): two failed events replayed through the
+    API once per Idempotency-Key, audited as the key; nothing queued while they wait; refusals (a
+    time still to come naming `since`, a time that is not one, other fields, a key without the
+    scope, an endpoint a member added, an endpoint that is off), none queueing anything.
+  - e2e `webhooks.spec.ts`: a receiver down while two customers write, the endpoint turned off and
+    on again, one replay from the endpoint's page: both events arrive again with their event ids,
+    the page shows them delivered, and a second replay says there is nothing left.
+- **Docs:** ADR-095; SECURITY (API and webhooks); THREAT-MODEL T113; RUNBOOKS (turned-off endpoint;
+  a replay that queued fewer events than expected); ARCHITECTURE; BACKLOG P5-08 and P5-09;
+  FEATURE-MATRIX W-138 and W-139.
+- **Mutation checks:** 22 regressions tried one at a time; all make a test fail.
+  - 13 in the webhooks service: an endpoint that is off replayed to; events delivered or waiting
+    replayed again; gone events or test events replayed; other endpoints' failures replayed to this
+    one; the period ignored; no cap per call; `more` never said; newest first; the replay not
+    naming the delivery it replays; the endpoint locked `FOR KEY SHARE`, which does not make a
+    concurrent call wait; members without `developer.manage` replaying; the settings replay not
+    audited.
+  - 2 in the model: the 30-day period covering a week; one delivery summarised as many.
+  - 7 in the API: keys replaying to endpoints members added; a time still to come taken; no scope
+    needed; the same Idempotency-Key running again; no audit; other fields taken; the route left
+    out of the OpenAPI document.
+  - The first run missed the weaker lock: its race test started two calls together, and they had
+    not overlapped. The test now holds the endpoint in another transaction and waits until the
+    replay is blocked by it, and the mutation is caught.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                          |
+| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / the first run flagged two type errors in the new tests, which Vitest does not check (a cast in `api.test.ts`, a helper's parameter type in `webhooks.test.ts`); after both fixes all workspace packages pass |
+| `pnpm test` (unit)                                                          | 429 passed                                                                                                                                                                                                                                      |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 572 passed, including 3 new in `webhooks.test.ts` and 1 in `api-webhook-endpoints.test.ts`                                                                                                                                                      |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 572 passed                                                                                                                                                                                                                                      |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / `webhooks.spec.ts`, `webhook-events.spec.ts` and `api.spec.ts`: 30 passed (6.0 min), on the local database created for the day's runs (no new migration)                                                                         |
+| Mutation checks                                                             | 22 regressions tried; all make a test fail, once the race test holds the endpoint in another transaction (the first run missed a weaker lock)                                                                                                   |
+
+### Known gaps
+
+- Not built: replays across endpoints, choosing event types or single deliveries to replay in bulk,
+  replaying succeeded deliveries in bulk, and scheduled replays.
+- A replay of hundreds of events delays events captured meanwhile by a few minutes (the worker
+  sends ten at a time for the company, oldest first), by design.
+
 ## 2026-09-30 — Phase 5: webhook conversation events name the member and team (P5-09, ADR-094)
 
 Status: **Implemented and locally verified (no customer data; webhooks delivered to local test

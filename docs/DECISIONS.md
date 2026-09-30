@@ -3187,3 +3187,40 @@ Decision:
 Not built: member names or emails in bodies, events for a member's availability or a team's
 settings, conversations started, `createdAt` finer than the millisecond, and filters beyond the
 event type.
+
+## ADR-095 Replaying an endpoint's failed deliveries in one call (2026-09-30)
+
+Context: when a receiver is down, its deliveries fail after their eight attempts (ADR-053), or at
+once when HyFib turns the endpoint off after 72 hours of failures or a member turns it off. Once
+the receiver is back, members replayed failed deliveries one at a time in Settings → Webhooks and
+keys one per call (ADR-083): after a day's outage, hundreds of clicks or calls ("replaying many
+deliveries in one call", not built in ADR-083 and P5-08).
+
+Decision:
+
+- **What is replayed:** for one endpoint that is on, every event whose deliveries to it all
+  failed, from the deliveries queued since a chosen time: one new delivery per event, replaying
+  its latest failed delivery (`replayOf`), oldest event first. Left out: events delivered since,
+  or with a delivery still waiting or being attempted (a replay already queued included);
+  deliveries that failed because what the event names no longer exists (`event_gone`, which
+  would fail again at once); and test events.
+- **At most 500 per call.** The answer says how many were queued and whether more remain;
+  another call queues the next ones, since those queued are waiting and so left out.
+- **Where:** Settings → Webhooks, on an endpoint's deliveries (`developer.manage`): "Replay
+  failed deliveries" from the last hour, 24 hours, 7 days or 30 days (the deliveries HyFib keeps).
+  And keys with `webhooks.manage`, for the endpoints keys added (ADR-083):
+  `POST /api/v1/webhook-endpoints/{id}/replay-failed` with `since` (a time with its offset, in
+  the past), once per `Idempotency-Key`, answered 200 with `queued` and `more`. An endpoint that
+  is off is refused (412), as for one replay.
+- **Order and races:** the endpoint's row is locked first, as for one replay, so two calls at
+  the same time queue each event once: the second waits, then finds the first's replays waiting.
+- **Delivery:** the worker sends them as it sends every delivery, ten at a time for the company
+  and 200 per job before handing over (ADR-053), so a receiver just back is not flooded; events
+  captured meanwhile wait behind the replays.
+- **Audit:** one entry per call, `webhook.deliveries_replayed`, with the host, the time from, the
+  count and whether more remain, as the member or as the key (`source: api`).
+- **No migration:** the existing indexes serve the query (deliveries by endpoint and time, and
+  by event), and the roles already read deliveries and insert them in the company's scope.
+
+Not built: replays across endpoints, choosing event types or single deliveries to replay in
+bulk, replaying succeeded deliveries in bulk, and scheduled replays.

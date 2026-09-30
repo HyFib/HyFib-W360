@@ -441,10 +441,10 @@ verification, app review, Embedded Signup configuration).
   name their member and team by id; the inbox now offers and accepts only such members too).
   Remaining: media messages, call-to-action messages through the API, taking reactions back,
   assigning many conversations at once, media downloads, statuses changed since a time, starting or
-  stopping runs for many contacts in one call, bulk sends in one call, replaying many deliveries in
-  one call, networks for the whole company, per-key quotas, limits per endpoint, availability per
-  single endpoint (plans choose per scope since ADR-092), and dropping the one-argument key lookup
-  kept for rolling deploys (0051).
+  stopping runs for many contacts in one call, bulk sends in one call, networks for the whole
+  company, per-key quotas, limits per endpoint, availability per single endpoint (plans choose per
+  scope since ADR-092), and dropping the one-argument key lookup kept for rolling deploys (0051).
+  Replaying many deliveries in one call is built with P5-09 (ADR-095).
 - **P5-09 Outgoing webhooks** **[built, locally verified; delivered to local test receivers only]**
   (ADR-053): up to 10 endpoints per company (`developer.manage`) for `message.received`,
   `message.status`, `consent.changed` and `template.status_changed`, captured by database triggers
@@ -472,10 +472,15 @@ verification, app review, Embedded Signup configuration).
   for every change of the member with the member before and after, a new
   `conversation.team_changed` for every change of the team, whoever makes it, a team's deletion
   included; ids as `GET /members` and `GET /teams` list them, no names or emails; stamped with the
-  time each change is captured). Remaining: filters beyond the event type (such as by automation or
-  status), custom headers, mutual TLS, fixed egress addresses, custom field changes, delivery
-  counts in campaign events, events for store orders, Payment Links and each step of a run,
-  `createdAt` finer than the millisecond, load tests.
+  time each change is captured). **[Replaying an endpoint's failed deliveries in one call built,
+  locally verified]** (ADR-095: every event whose deliveries to an endpoint that is on all failed
+  since a chosen time, 500 at most per call, oldest first, each once, from Settings → Webhooks or
+  `POST /webhook-endpoints/{id}/replay-failed`; events delivered or waiting, gone events and test
+  events left out; audited once per call). Remaining: filters beyond the event type (such as by
+  automation or status), custom headers, mutual TLS, fixed egress addresses, custom field changes,
+  delivery counts in campaign events, events for store orders, Payment Links and each step of a
+  run, `createdAt` finer than the millisecond, replays across endpoints or by event type, load
+  tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,

@@ -61,6 +61,7 @@ import {
 import {
   apiCreateWebhookEndpointSchema,
   apiUpdateWebhookEndpointSchema,
+  apiReplayFailedDeliveriesSchema,
   apiWebhookDeliveryListQuerySchema,
   createApiWebhookEndpoints,
   endpointAnnouncement,
@@ -1230,6 +1231,88 @@ describe('webhook endpoints through the API (ADR-081)', () => {
   });
 });
 
+describe("replaying an endpoint's failed deliveries through the API (ADR-095)", () => {
+  it('takes a time with its offset, and nothing else', () => {
+    for (const since of ['2026-09-30T08:00:00Z', '2026-09-30T13:30:00.123+05:30']) {
+      expect(apiReplayFailedDeliveriesSchema.parse({ since })).toEqual({ since });
+    }
+    for (const body of [
+      {},
+      { since: 'yesterday' },
+      { since: '2026-09-30' },
+      { since: '2026-09-30T08:00:00Z', until: '2026-09-30T09:00:00Z' },
+    ]) {
+      expect(apiReplayFailedDeliveriesSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+  });
+
+  it('refuses a time still to come before anything is read', async () => {
+    const endpoints = createApiWebhookEndpoints({
+      clock: { now: () => new Date('2026-09-30T08:00:00Z') },
+    } as never);
+    const ctx = {
+      tenant: { id: 't', status: 'active' },
+      key: { id: 'k', scopes: new Set(['webhooks.manage']) },
+      planScopes: null,
+    } as unknown as ApiContext;
+    const error: unknown = await endpoints
+      .replayFailed(
+        ctx,
+        '0192a1b2-0000-7000-8000-000000000001',
+        { since: '2026-09-30T08:00:01Z' },
+        { key: 'k-1', requestHash: 'h' },
+      )
+      .catch((caught: unknown) => caught);
+    expect(isAppError(error) && error.code).toBe('validation_failed');
+    expect(isAppError(error) && error.issues).toEqual([
+      { path: 'since', message: 'Give a time in the past.' },
+    ]);
+  });
+
+  it('is described: once per Idempotency-Key, 500 at most, the endpoint on', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const op = (
+      doc.paths as unknown as Record<
+        string,
+        Record<
+          string,
+          {
+            operationId: string;
+            description: string;
+            parameters: unknown[];
+            requestBody: unknown;
+            responses: Record<string, unknown>;
+          }
+        >
+      >
+    )['/webhook-endpoints/{id}/replay-failed']?.post;
+    expect(op?.operationId).toBe('replayFailedWebhookDeliveries');
+    expect(op?.parameters).toContainEqual({ $ref: '#/components/parameters/IdempotencyKey' });
+    expect(op?.description).toContain('at most 500 per call');
+    expect(Object.keys(op?.responses ?? {})).toEqual(
+      expect.arrayContaining(['200', '404', '412', '422']),
+    );
+    expect(op?.requestBody).toEqual({
+      required: true,
+      content: {
+        'application/json': { schema: { $ref: '#/components/schemas/ReplayFailedDeliveries' } },
+      },
+    });
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    expect(schemas.ReplayFailedDeliveries).toMatchObject({
+      required: ['since'],
+      additionalProperties: false,
+    });
+    expect(Object.keys((schemas.FailedReplay as { properties: object }).properties)).toEqual([
+      'queued',
+      'more',
+    ]);
+  });
+});
+
 describe('webhook deliveries through the API (ADR-083)', () => {
   it('need the scope, checked before anything is read', async () => {
     const endpoints = createApiWebhookEndpoints({} as never);
@@ -1244,6 +1327,7 @@ describe('webhook deliveries through the API (ADR-083)', () => {
       () => endpoints.getDelivery(ctx, 'd'),
       () => endpoints.sendTest(ctx, 'e', idempotency),
       () => endpoints.replay(ctx, 'd', idempotency),
+      () => endpoints.replayFailed(ctx, 'e', { since: 'x' }, idempotency),
     ]) {
       const error: unknown = await call().catch((caught: unknown) => caught);
       expect(isAppError(error) && error.code).toBe('forbidden');

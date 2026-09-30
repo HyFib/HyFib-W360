@@ -34,6 +34,8 @@ test.skip(
 let receiver: Server;
 let port = 0;
 const received: { path: string; headers: IncomingHttpHeaders; body: string }[] = [];
+/** Paths the receiver answers with 500, as a receiver that is down. */
+const down = new Set<string>();
 
 test.beforeAll(async () => {
   receiver = createServer((req, res) => {
@@ -42,7 +44,7 @@ test.beforeAll(async () => {
     req.on('data', (chunk: string) => (body += chunk));
     req.on('end', () => {
       received.push({ path: req.url ?? '', headers: req.headers, body });
-      res.writeHead(204);
+      res.writeHead(down.has(req.url ?? '') ? 500 : 204);
       res.end();
     });
   });
@@ -181,6 +183,71 @@ test('an endpoint added in settings receives signed events, replays and a rotate
   await page.getByRole('button', { name: `Delete ${HOST}` }).click();
   await page.getByRole('button', { name: 'Delete endpoint' }).click();
   await expect(page.getByText('No endpoints yet.')).toBeVisible();
+  expect(forUs()).toHaveLength(4);
+});
+
+test('a receiver that was down gets its failed events again with one replay from settings (ADR-095)', async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(180_000);
+  const email = uniqueEmail('hookdown');
+  const slug = `hookdown-${Date.now().toString(36)}`;
+  const path = `/hooks/${slug}`;
+  const forUs = () => received.filter((r) => r.path === path);
+  await signUpAndVerify(page, { name: 'Dev Down', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('Down Traders');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+  const { wabaId, phoneNumberId } = await connectTestChannel({ ownerEmail: email, slug });
+
+  await page.goto(`/c/${slug}/settings/webhooks`);
+  await page.getByLabel('Endpoint URL').fill(`http://${HOST}:${port}${path}`);
+  await page.getByRole('checkbox', { name: /Message received/ }).check();
+  await page.getByRole('button', { name: 'Add endpoint' }).click();
+  await page.getByRole('button', { name: 'I have stored the secret' }).click();
+
+  // The receiver is down while two customers write: both first attempts fail.
+  down.add(path);
+  for (const text of ['Where is my order?', 'Can I change my address?']) {
+    await sendSignedWebhook(request, inboundMessage(wabaId, phoneNumberId, randomWaId(), text));
+  }
+  await expect(async () => expect(forUs()).toHaveLength(2)).toPass({ timeout: 30_000 });
+  const failedIds = forUs().map((r) => String(r.headers['w360-event-id']));
+
+  // Turned off (what is waiting fails) and on again once the receiver is back.
+  await page.getByRole('button', { name: `Turn off ${HOST}` }).click();
+  await page.getByRole('button', { name: 'Turn off', exact: true }).click();
+  await expect(page.getByText('Off', { exact: true })).toBeVisible();
+  down.delete(path);
+  await page.getByRole('button', { name: `Turn on ${HOST}` }).click();
+  await expect(page.getByText('On', { exact: true })).toBeVisible();
+
+  // One replay from the endpoint's page sends both events again, with the same event ids.
+  await page.getByRole('link', { name: `Deliveries and settings for ${HOST}` }).click();
+  const deliveries = page.getByRole('list', { name: 'Deliveries' }).getByRole('listitem');
+  await expect(deliveries.filter({ hasText: 'Failed' })).toHaveCount(2);
+  await page.getByLabel('Failed deliveries from').selectOption({ label: 'the last hour' });
+  await page.getByRole('button', { name: 'Replay failed deliveries' }).click();
+  await expect(page.getByText('Replaying 2 deliveries.')).toBeVisible();
+  await expect(async () => expect(forUs()).toHaveLength(4)).toPass({ timeout: 30_000 });
+  expect(
+    forUs()
+      .slice(2)
+      .map((r) => String(r.headers['w360-event-id']))
+      .sort(),
+  ).toEqual([...failedIds].sort());
+  await expect(async () => {
+    await page.reload();
+    await expect(page.getByText('Replay', { exact: true })).toHaveCount(2, { timeout: 1_000 });
+  }).toPass({ timeout: 30_000 });
+  await expect(deliveries.filter({ hasText: 'Delivered' })).toHaveCount(2);
+  await expectNoHorizontalOverflow(page);
+
+  // Delivered now, nothing is left to replay.
+  await page.getByRole('button', { name: 'Replay failed deliveries' }).click();
+  await expect(page.getByText('No failed deliveries to replay from that period.')).toBeVisible();
   expect(forUs()).toHaveLength(4);
 });
 

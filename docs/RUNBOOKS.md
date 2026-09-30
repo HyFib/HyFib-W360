@@ -1381,10 +1381,21 @@ it twice and deduplicates on the event id).
 deliveries were marked failed (`endpoint_disabled`), owners and administrators got the
 "Webhook endpoint turned off" email, and the audit log has `webhook.endpoint_auto_disabled`. Fix the
 receiver, turn the endpoint on (its health starts afresh), send a test event, then replay the
-failed deliveries that are still needed (within 30 days) from its deliveries page, filtered to
-failed ones. For an endpoint a key added, the integration can do the same through the API
-(ADR-083): `GET /webhook-endpoints/{id}/deliveries?status=failed`, then
-`POST /webhook-deliveries/{id}/replay` for each.
+failed deliveries still needed (within 30 days): on its deliveries page, "Replay failed
+deliveries" from the last hour, day, week or 30 days sends every event whose deliveries all failed
+again, 500 at a time (ADR-095; press again while it says more remain), and single deliveries can
+be replayed from the same page. For an endpoint a key added, the integration can do the same
+through the API: `POST /webhook-endpoints/{id}/replay-failed` with `since` (repeat while `more` is
+true), or `POST /webhook-deliveries/{id}/replay` for one (ADR-083).
+
+**A replay of failed deliveries queued fewer events than expected (ADR-095).** It leaves out
+events already delivered or waiting to be (a replay queued earlier included), deliveries that
+failed with `event_gone` (the message, contact, run, order or campaign no longer exists, so a
+replay would fail again at once), test events, and deliveries queued before the period chosen or
+deleted after 30 days. A 412 means the endpoint is off. Each call is audited as
+`webhook.deliveries_replayed` with the host, the time from, the count and whether more remained.
+The replays go out ten at a time with the company's other deliveries, so a large one delays new
+events by a few minutes at most.
 
 **The receiver rejects signatures.** It must compute HMAC-SHA256 over the exact raw body bytes
 prefixed with the `t` value and a dot, compare in constant time against any `v1` value, and allow a
