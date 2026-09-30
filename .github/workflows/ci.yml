@@ -77,18 +77,20 @@ jobs:
   e2e:
     name: End-to-end (Chromium, Firefox, WebKit, mobile)
     runs-on: ubuntu-24.04
-    # Tests run one at a time across four browser projects: 224 took 71.1 minutes on aceb7a0, 220
-    # took 65.3 on c1b45aa, 216 took 61.2 on 76b0eff, 212 took 64.0 on afcb21d and 61.0 on b453b6c,
-    # 208 took 66.5 on da91fc3 (one flaky test passed on its retry on b453b6c and da91fc3), 200
-    # took 64.3 on 28a774c and 180 took 54.0 on 736acb4. The usage, settlement, API key and refund
-    # request specs each wait per project for a worker's minute sweep to send an email: the rate
-    # change notice (since 3978329) and the key expiry reminder up to 90 seconds, the reconciliation
-    # and unsettled payment alerts, which go to every platform owner, up to 150; the refund request
-    # test waits for three sweeps (about 2 minutes). Runners vary (148 tests took 33.5 minutes on
-    # b2b7614; 160 took 45.9 on fb8efa6, including a 4-minute timeout and its retry), each slice adds
-    # about 4 tests, and one retry of a long test (the cart reminder test allows 5 minutes) must
-    # still fit on a slow runner: the suite step stops at 100 minutes, the job at 110.
-    timeout-minutes: 110
+    # Tests run one at a time across four browser projects: 260 took 91.1 minutes on 57bc896, 224
+    # took 71.1 on aceb7a0, 220 took 65.3 on c1b45aa, 216 took 61.2 on 76b0eff, 212 took 64.0 on
+    # afcb21d and 61.0 on b453b6c, 208 took 66.5 on da91fc3 (one flaky test passed on its retry on
+    # b453b6c and da91fc3), 200 took 64.3 on 28a774c and 180 took 54.0 on 736acb4. The usage,
+    # settlement, API key and refund request specs each wait per project for a worker's minute sweep
+    # to send an email: the rate change notice (since 3978329) and the key expiry reminder up to 90
+    # seconds, the reconciliation and unsettled payment alerts, which go to every platform owner, up
+    # to 150; the refund request test waits for three sweeps (about 2 minutes), the plans test for
+    # two staff plan changes' emails and the plan subscription test for a staff cancellation's
+    # (ADR-100, ADR-101). Runners vary (148 tests took 33.5 minutes on b2b7614; 160 took 45.9 on
+    # fb8efa6, including a 4-minute timeout and its retry), each slice adds about 4 tests, and one
+    # retry of a long test (the cart reminder test allows 5 minutes) must still fit on a slow
+    # runner: the suite step stops at 140 minutes, the job at 150.
+    timeout-minutes: 150
     services:
       postgres:
         image: postgres:18-alpine
@@ -177,7 +179,7 @@ jobs:
       - run: pnpm exec playwright install --with-deps chromium firefox webkit
       # Stops before the job's limit, so a run that overruns still gets the steps below.
       - run: pnpm test:e2e
-        timeout-minutes: 100
+        timeout-minutes: 140
       - if: failure() || cancelled()
         run: cat "$RUNNER_TEMP/web.log" "$RUNNER_TEMP/worker.log"
       # Test data only: what the job queues and the stores held when the suite failed.
