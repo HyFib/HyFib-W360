@@ -1505,8 +1505,9 @@ migrations again.
 
 ## 10Q. Company export and deletion
 
-Owners use Settings → Company data (ADR-055). Nothing here is done by staff: staff cannot start,
-speed up or cancel a deletion, and the export is only for the company's owners.
+Owners use Settings → Company data (ADR-055). Platform owners can also schedule a company's
+deletion and cancel the ones staff scheduled (ADR-090, below); nobody can speed a deletion up, and
+the export is only for the company's owners.
 
 **An export fails or is cut short.** The file is complete only if its last line is
 `{"end":true,...}`. A second export while one runs answers 409; each start is audited
@@ -1518,8 +1519,26 @@ ends an export whose reader stops reading for a minute.
 **A deletion is scheduled.** The company is `pending_deletion` until `due_at` (14 days) and works as
 suspended. Any owner cancels in Settings → Company data until the run starts; after that the page
 says it can no longer be cancelled. The register is `ops.tenant_deletions` (the company's platform
-page shows it). A company that asks HyFib to stop a deletion before it starts: an owner cancels; if
-no owner can, suspend handling of the request and escalate (there is no staff cancellation).
+page shows it). A company that asks HyFib to stop an owner's deletion before it starts: an owner
+cancels; staff cannot cancel an owner's deletion, so if no owner can, escalate before it is due.
+
+**Deleting a company for HyFib (ADR-090).** For a company whose owners asked support to delete it
+and cannot do it themselves, or whose service HyFib ends. Confirm the request or the decision
+outside the product first (who asked, through which channel, the ticket), as for an MFA reset. A
+platform owner opens the company's platform page, "Delete the company", writes the reason (10 to
+1,000 characters: the owners and administrators read it, in their email and on every page of the
+company, so no internal notes) and types the company address. The company is `pending_deletion` at
+once and deleted 14 days later by the same job; its owners can still export meanwhile. Operators
+see the card but cannot schedule. The owners and administrators are emailed by the worker's minute
+sweep (`staff deletion notices emailed` in the worker log; a failure logs `staff deletion notice
+failed for a company; will retry` and is tried again the next minute). Both audit logs record it
+(`platform.tenant_deletion_scheduled`, with the reason).
+
+**Cancelling a deletion HyFib scheduled.** Only a platform owner, only before the run starts, from
+the Deletion card on the company's platform page, with a reason the company reads (emailed the same
+way). The company returns to the status it had (a suspension stays, a lapsed plan restricts). Owners
+cannot cancel it: their page tells them to contact HyFib support. Staff cannot cancel a deletion an
+owner asked for.
 
 **A deletion is running or stuck.** The minute billing sweep queues a `tenant.delete` job for every
 due or unfinished deletion (`company deletions due` in the worker log); each run deletes for up to
@@ -1539,6 +1558,13 @@ grants and security events stay. Meta events for its numbers are quarantined as 
 
 **Migration 0028 failed.** It runs in one transaction and needs the bootstrap roles; fix the cause
 and run the migrations again.
+
+**Migration 0067 failed.** It adds columns to `ops.tenant_deletions` (existing rows become owners'
+deletions; nothing is rewritten), replaces `app.cancel_tenant_deletion` (dropped as `w360_definer`
+and recreated, as in 0011) and adds the staff and notice functions, in one transaction. A failure
+rolls it all back: fix the cause (usually the bootstrap roles) and run the migrations again. Web
+servers of the previous release keep working: they read none of the new columns and call the owners'
+cancel with the same signature.
 
 ## 11. Compromised company (tenant) or account
 

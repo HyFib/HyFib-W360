@@ -1,5 +1,104 @@
 # Progress
 
+## 2026-09-30 — Phase 5: company deletion started by HyFib staff (P5-11, ADR-090)
+
+Status: **Implemented and locally verified (no customer data).** Only a company's owners could
+delete it (ADR-055). A company whose owners asked HyFib support to delete it, or whose service HyFib
+ends, could only be suspended, and its data was then kept with no end.
+
+### Completed
+
+- **Design (ADR-090):** platform owners schedule a company's deletion on its platform page by
+  typing the company address and a reason of 10 to 1,000 characters, which the company reads. The
+  grace is the same 14 days as an owner's deletion, the company works as if suspended meanwhile
+  (members read, owners export), and the same resumable `tenant.delete` job runs it. Whoever
+  scheduled a deletion cancels it: a platform owner cancels a staff deletion before it starts, with
+  a reason the company reads; owners cannot cancel it, and staff cannot cancel an owner's deletion.
+  Operators see a deletion and cannot act.
+- **Migration 0067:** the deletion register gains `requested_by` (`owner` by default, so older rows
+  are owners'), `reason`, `cancelled_by`, `cancel_reason` and the two notice marks. Checks make a
+  staff deletion carry its reason and a cancellation's `cancelled_by` equal `requested_by`. The
+  company reads who scheduled a deletion and HyFib's words (column grants), never who at HyFib.
+  New functions: `ops.platform_request_tenant_deletion` and `ops.platform_cancel_tenant_deletion`
+  (platform owners, both audit logs), `ops.tenant_status_after_deletion` (the status a cancellation
+  restores, now shared with the owners' cancel), `ops.tenant_deletion_notices_due` and
+  `app.tenant_deletion_mark_notified` (the notice sweep). `app.cancel_tenant_deletion` now refuses a
+  staff deletion and records `cancelled_by = 'owner'`.
+- **Domain:** `scheduleTenantDeletion` and `cancelTenantDeletion` in the platform service (input
+  and role checked before any query, and again in SQL). `notifyStaffDeletions` emails the owners and
+  administrators of a staff schedule or cancellation from the worker's minute sweep, each notice
+  marked once in the company's own scope in the transaction that queues its emails. The company's
+  deletion view shows who scheduled it and HyFib's reason, and not the staff member's name. The
+  final "Company deleted" email says HyFib deleted the company and gives the reason. Reasons go
+  through `splitEmailText`.
+- **Web and worker:**
+  - The company's platform page: a "Delete the company" card for platform owners, the deletion card
+    saying who scheduled it (with the reason and any cancellation), and the cancel form for a staff
+    deletion.
+  - The company's banner and Settings → Company data: HyFib's reason, and "Only HyFib can cancel
+    this deletion" in place of the cancel button.
+  - The worker's billing sweep runs the notice sweep.
+- **Tests:**
+  - Unit: the platform service refuses operators and bad input before the database.
+  - Integration in `company-data.test.ts` (4 new tests):
+    - Scheduling: needs a platform owner, the address and a reason (checked in SQL too); both audit
+      logs; the company's deletion view gives the reason and not the staff member; owners and
+      administrators emailed (not agents), once; owners can neither cancel nor ask again.
+    - Cancelling: by a platform owner, restoring a suspension or a lapsed plan; staff cannot cancel
+      an owner's deletion or a started one, and owners cannot cancel a staff deletion.
+    - Notices: kept to the company's own scope and told once, even with two sweeps at once. Owners'
+      deletions and deleted companies are not listed. The register's checks hold.
+    - Running: a staff deletion's run and its last email.
+  - The owners' cancel records `cancelled_by`. Function grants in the isolation suite.
+  - e2e `company-data.spec.ts`: a platform owner schedules the deletion. The company reads the
+    reason in the banner and on Company data and cannot cancel, and the owner gets the worker's
+    email. The platform owner cancels, with its email.
+- **Docs:** ADR-090 (ADR-055 annotated); SECURITY (permission matrix, platform roles, staff-started
+  deletion); THREAT-MODEL T108; RUNBOOKS 10Q (staff deletions, migration 0067); DATA-RETENTION;
+  ARCHITECTURE 6Q; BACKLOG P5-11; FEATURE-MATRIX H-015.
+- **Threat model statuses corrected:** 15 rows (T86, T89, T93, T96 to T107) carried a status "L"
+  that the legend does not define. Each is mitigated and tested locally, so they now read "M".
+- **Mutation checks:** 37 regressions tried one at a time; all make a test fail.
+  - 24 in SQL:
+    - operators scheduling or cancelling; any reason; no address typed; a company already being
+      deleted scheduled again; the deletion recorded as an owner's; the owners' status reason;
+      either audit log of a schedule dropped; due in 7 days;
+    - staff cancelling an owner's or a started deletion; a suspension or a lapsed plan not restored;
+      no platform audit for a staff cancellation; owners cancelling HyFib's deletion; an owner's
+      cancel not recorded as the owner's;
+    - the sweep listing owners' deletions or deleted companies; the mark taken in any company's
+      scope or marked twice; the company not granted the reason; the register taking a
+      cancellation by the other side or a staff deletion without a reason.
+  - 10 in the domain: the staff member named to the company; the reason hidden from it; the
+    schedule email without the reason; agents told; the mark's answer ignored; a cancellation told
+    as a schedule; operators passing the service; a three-character reason taken; the last email
+    saying the owners asked for a staff deletion, or without HyFib's reason.
+  - 3 in the web layer, through the e2e test: Company data offering owners the cancel button for
+    HyFib's deletion; the banner saying an owner can cancel it; the worker not running the notice
+    sweep.
+  - Two, the sweep listing owners' deletions or deleted companies, first made no test fail. The
+    mark refuses an owner's deletion, and a deleted company has no one left to email. The tests
+    now read the sweep's own listing and check the mark after the sweep, and both are caught.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                     | Result                                                                                                                                      |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                              |
+| `pnpm test` (unit)                                                          | 414 passed, including 2 new in `platform/service.test.ts`                                                                                   |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 551 passed, including 4 new in `company-data.test.ts`                                                                                       |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 551 passed                                                                                                                                  |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / on `company-data.spec.ts`: 6 passed (6.1 min), on the local database created for the day's runs, with migration 0067 applied |
+| Mutation checks                                                             | 37 regressions tried (3 through the e2e test); all make a test fail, two only once the tests read the sweep's own listing                   |
+
+### Known gaps
+
+- Not built: a shorter grace for staff, starting the job early, deleting a company without its
+  owners being told, staff cancelling an owner's deletion, and selecting companies to delete in
+  bulk (for example inactive trials).
+- As with owners' deletions: legal and tax review of the kept records, and live Meta, Shopify and
+  Razorpay verification of the provider clean-up.
+
 ## 2026-09-30 — Fix: refund decline emails with a long note
 
 Status: **Fixed and verified locally (PostgreSQL 18.6 and 17.11).** A platform owner may decline a

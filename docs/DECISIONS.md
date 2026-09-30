@@ -1365,7 +1365,8 @@ starts the next run until the company is finished. A run:
    `deleted-<id>` so the old address can be used again) and the register is completed. The
    owners and administrators recorded at the start get an email (addressed to them, not stored
    with the company). Platform staff see the register's dates, runs, row count and provider
-   outcomes on the company's platform page; they cannot start, speed up or cancel a deletion.
+   outcomes on the company's platform page; they cannot start, speed up or cancel a deletion (since
+   ADR-090, platform owners schedule a deletion, and cancel the ones staff scheduled).
 
 **Kept after deletion:** the tombstone company row; billing and tax records (wallet, ledger,
 top-ups, card mandates with only safe card metadata, auto-recharge attempts, the Razorpay customer
@@ -1398,7 +1399,7 @@ worker's `company deleted` log lines (RUNBOOKS §8).
   0022); both are frozen again.
 
 **Not built:** a shorter grace period,
-deletion started by platform staff, deleting media files (no media storage exists), a stored export
+deletion started by platform staff (since ADR-090), deleting media files (no media storage exists), a stored export
 with a download link, and other export formats.
 
 **Migration 0028** adds the register and the step order, the deletion functions with their scoped
@@ -2936,3 +2937,53 @@ Decision:
 
 Not built: notes across conversations (the message feed of ADR-088 is for messages), editing or
 deleting notes, member names and mentions, and notes in webhooks.
+
+## ADR-090 Company deletion started by HyFib staff (2026-09-30)
+
+Context: only a company's owners could delete it (ADR-055); staff could neither start, speed up nor
+cancel a deletion, which ADR-055 left as not built. A company whose owners asked HyFib support to
+delete it (they left the business, or cannot sign in any more), or whose service HyFib ends, could
+only be suspended, and its data was then kept with no end.
+
+Decision:
+
+- **Who:** platform owners only (`ops.platform_admins.role = 'platform_owner'`, with two-factor like
+  all platform staff), as for refunds (ADR-058). Operators see a company's deletion and cannot act.
+- **How:** on the company's platform page, a platform owner types the company address (as owners
+  do) and a reason of 10 to 1,000 characters, which the company reads: it is emailed to the
+  owners and administrators and shown on every page of the company and in Settings → Company data.
+  `ops.platform_request_tenant_deletion` checks the platform owner, the reason, the company's
+  status and the address, records the deletion (`requested_by = 'platform'`, the reason), puts the
+  company in `pending_deletion` and writes both audit logs (the company's names "HyFib platform
+  staff", never the staff member).
+- **The same grace and the same job:** due 14 days later, the company working as if suspended
+  meanwhile (members read, owners export, nothing is sent), then the resumable `tenant.delete` job
+  of ADR-055 with its provider clean-up, batches, tombstone and kept records. Nobody can shorten the
+  grace or start the job early; a refund in progress still holds it back (ADR-058).
+- **Whoever scheduled it cancels it:** owners cancel an owner's deletion, as before
+  (`app.cancel_tenant_deletion`, which now refuses a staff deletion); a platform owner cancels a
+  staff deletion before it starts, with a reason the company reads
+  (`ops.platform_cancel_tenant_deletion`), and cannot cancel an owner's: that deletion is the
+  company's decision. The register enforces it too: a cancellation's `cancelled_by` must equal
+  `requested_by`. Cancelling restores the status recorded at the schedule, with the plan applied
+  again (a suspension stays, a lapsed plan restricts), one rule shared by both functions
+  (`ops.tenant_status_after_deletion`).
+- **Telling the company:** the platform role cannot queue email (it has no outbox or queue grants,
+  and should not read members' addresses), so the worker's minute sweep tells the owners and
+  administrators of a staff deletion and of a staff cancellation, as it tells billing managers of a
+  declined refund request (ADR-073): `ops.tenant_deletion_notices_due` lists what was not told,
+  oldest first (a schedule before its cancellation), and each notice is marked in the company's own
+  scope (`app.tenant_deletion_mark_notified`) in the transaction that queues its emails, so it is
+  told once. A company deleted before a notice went out is not told afterwards. The final "Company
+  deleted" email says HyFib deleted it, with the reason. HyFib's reasons, like refund notes, may be
+  longer than an email line; they are split over lines (`splitEmailText`).
+- **What the company reads:** `requested_by`, `reason`, `cancelled_by` and `cancel_reason` (column
+  grants): who scheduled it and HyFib's words, never who at HyFib. The existing column grants are
+  unchanged.
+- **Older rows:** deletions scheduled before this migration are owners' (`requested_by` defaults to
+  `owner`); those cancelled before it have no `cancelled_by`, and only owners could cancel them. No
+  row is rewritten (the register forces row security, so a migration could not update it anyway).
+
+Not built: a shorter grace for staff, starting the job early, deleting a company without its
+owners being told, staff cancelling an owner's deletion, reasons kept only for staff, and
+selecting companies to delete in bulk (for example inactive trials).

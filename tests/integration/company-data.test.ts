@@ -21,6 +21,7 @@ import {
   createRefundRequestsService,
   createStoreService,
   findDueTenantDeletions,
+  notifyStaffDeletions,
   outboxAad,
   processCreditRefund,
   processStoreJob,
@@ -157,6 +158,29 @@ const runDeps = (overrides: Partial<DeletionRunDeps> = {}): DeletionRunDeps => (
 });
 const platform = () =>
   createPlatformService({ db: fx.dbs.app, platformDb: fx.dbs.platform, clock: systemClock });
+const tellStaffDeletions = () =>
+  notifyStaffDeletions({ db: fx.dbs.app, outbox: outbox(), appBaseUrl: APP_BASE });
+/** The deletions whose notices the sweep would tell now, from its own listing. */
+const noticesDue = async (): Promise<string[]> =>
+  (
+    await fx.dbs.app.run(systemScope, (tx) =>
+      tx.execute<{ deletion_id: string }>(
+        sql`select deletion_id from ops.tenant_deletion_notices_due(500)`,
+      ),
+    )
+  ).rows.map((r) => r.deletion_id);
+
+/** A platform owner (ADR-090): the only staff who schedule and cancel a company's deletion. */
+async function platformOwner(): Promise<PlatformActor> {
+  const user = await createUser(fx.dbs, { twoFactor: true });
+  await fx.dbs.ownerPool.query(
+    `INSERT INTO ops.platform_admins (user_id, role) VALUES ($1, 'platform_owner')`,
+    [user.id],
+  );
+  return { userId: user.id, role: 'platform_owner', correlationId: uuidv7() };
+}
+
+const STAFF_REASON = 'Your service ended under clause 9 of the terms; ticket 5120.';
 
 async function expectAppError(promise: Promise<unknown>, code: string, message?: RegExp) {
   try {
@@ -769,7 +793,13 @@ describe('asking for a deletion', () => {
     await deletions().request(ownerA, { confirm: a.tenant.slug });
     expect(await deletions().cancel(await fx.ctx(a, a.owner))).toEqual({ status: 'active' });
     expect(await tenantRow(a.tenant.id)).toMatchObject({ status: 'active', status_reason: null });
-    expect(await deletionRow(a.tenant.id)).toMatchObject({ cancelled_by_user_id: a.owner.id });
+    expect(await deletionRow(a.tenant.id)).toMatchObject({
+      cancelled_by_user_id: a.owner.id,
+      requested_by: 'owner',
+      cancelled_by: 'owner',
+      reason: null,
+      cancel_reason: null,
+    });
     expect(await auditActions(a.tenant.id)).toContain('tenant.deletion_cancelled');
     expect((await emails({ tenantId: a.tenant.id })).map((e) => e.payload.subject)).toContain(
       'Company deletion cancelled',
@@ -825,6 +855,338 @@ describe('asking for a deletion', () => {
     expect(await deletions().status(waiting)).toMatchObject({ started: true });
     await expectAppError(deletions().cancel(waiting), 'precondition_failed', /can no longer/);
     expect(await tenantRow(started.tenant.id)).toMatchObject({ status: 'pending_deletion' });
+  });
+});
+
+describe('a deletion HyFib staff schedule (ADR-090)', () => {
+  it('is for platform owners typing the company address, with a reason the company reads', async () => {
+    const staffOwner = await platformOwner();
+    const c = await fx.company();
+    const adminUser = await member(c, 'admin', 'Admin Person');
+    const agentUser = await member(c, 'agent', 'Agent Person');
+    const input = { tenantId: c.tenant.id, confirm: c.tenant.slug, reason: STAFF_REASON };
+
+    // Operators cannot, in the service or through the database function.
+    await expectAppError(platform().scheduleTenantDeletion(staff, input), 'forbidden');
+    await expect(
+      fx.dbs.platform.run(staff.userId, (tx) =>
+        tx.execute(sql`select * from ops.platform_request_tenant_deletion(${c.tenant.id}::uuid,
+          ${c.tenant.slug}, ${STAFF_REASON}, 'test')`),
+      ),
+    ).rejects.toThrow(/Only a platform owner/);
+    await expectAppError(
+      platform().scheduleTenantDeletion(staffOwner, { ...input, confirm: 'not-the-slug' }),
+      'precondition_failed',
+      /company address exactly/,
+    );
+    await expectAppError(
+      platform().scheduleTenantDeletion(staffOwner, { ...input, reason: 'Too short' }),
+      'validation_failed',
+    );
+    await expectAppError(
+      platform().scheduleTenantDeletion(staffOwner, { ...input, reason: 'x'.repeat(1001) }),
+      'validation_failed',
+    );
+    // The database function checks the reason itself.
+    await expect(
+      fx.dbs.platform.run(staffOwner.userId, (tx) =>
+        tx.execute(sql`select * from ops.platform_request_tenant_deletion(${c.tenant.id}::uuid,
+          ${c.tenant.slug}, ${'  short  '}, 'test')`),
+      ),
+    ).rejects.toThrow(/reason of 10 to 1,000/);
+    await expectAppError(
+      platform().scheduleTenantDeletion(staffOwner, { ...input, tenantId: uuidv7() }),
+      'not_found',
+    );
+    expect(await tenantRow(c.tenant.id)).toMatchObject({ status: 'active' });
+
+    const before = Date.now();
+    const { deletionId, dueAt } = await platform().scheduleTenantDeletion(staffOwner, {
+      ...input,
+      confirm: ` ${c.tenant.slug} `,
+      reason: `  ${STAFF_REASON}  `,
+    });
+    const days = (dueAt.getTime() - before) / 86_400_000;
+    expect(days).toBeGreaterThan(13.99);
+    expect(days).toBeLessThan(14.01);
+    expect(await tenantRow(c.tenant.id)).toMatchObject({
+      status: 'pending_deletion',
+      status_reason: 'HyFib scheduled the company for deletion.',
+    });
+    expect(await deletionRow(c.tenant.id)).toMatchObject({
+      id: deletionId,
+      requested_by: 'platform',
+      requested_by_user_id: staffOwner.userId,
+      reason: STAFF_REASON,
+      previous_status: 'active',
+      started_at: null,
+      scheduled_notified_at: null,
+    });
+    // Both audit logs, the company's naming no one.
+    const [platformEvent] = await fx.query<{ reason: string; actor_user_id: string }>(
+      `SELECT reason, actor_user_id FROM ops.platform_audit_events
+        WHERE target_tenant_id = $1 AND action = 'platform.tenant_deletion_scheduled'`,
+      [c.tenant.id],
+    );
+    expect(platformEvent).toEqual({ reason: STAFF_REASON, actor_user_id: staffOwner.userId });
+    const [companyEvent] = await fx.query<{ actor_type: string; metadata: { reason: string } }>(
+      `SELECT actor_type, metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'platform.tenant_deletion_scheduled'`,
+      [c.tenant.id],
+    );
+    expect(companyEvent).toMatchObject({
+      actor_type: 'platform_admin',
+      metadata: { deletionId, reason: STAFF_REASON },
+    });
+
+    // The platform transaction queues no email: the worker's minute sweep tells the owners and
+    // administrators, once.
+    const prefix = `tenant-deletion:${deletionId}:scheduled:`;
+    expect(await emails({ dedupePrefix: prefix })).toEqual([]);
+    expect((await tellStaffDeletions()).failed).toEqual([]);
+    const told = await emails({ dedupePrefix: prefix });
+    expect(told.map((e) => e.to).sort()).toEqual([c.owner.email, adminUser.email].sort());
+    expect(told.map((e) => e.to)).not.toContain(agentUser.email);
+    for (const email of told) {
+      expect(email.tenantId).toBe(c.tenant.id);
+      expect(email.payload.subject).toBe('HyFib scheduled the company for deletion');
+      expect(email.payload.lines?.[0]).toMatch(
+        new RegExp(
+          `^HyFib scheduled Company ${c.tenant.slug} for deletion\\. It will be deleted on .+\\.$`,
+        ),
+      );
+      expect(email.payload.lines).toContain(`HyFib's reason: ${STAFF_REASON}`);
+      expect(email.payload.lines).toContain(
+        'Only HyFib can cancel this deletion. Contact HyFib support to discuss it.',
+      );
+    }
+    expect((await deletionRow(c.tenant.id))!.scheduled_notified_at).toBeInstanceOf(Date);
+    expect((await tellStaffDeletions()).failed).toEqual([]);
+    expect(await emails({ dedupePrefix: prefix })).toHaveLength(2);
+
+    // The company sees HyFib's reason, never who at HyFib; its owners cannot cancel, or ask again.
+    const waiting = await fx.ctx(c, c.owner);
+    expect(await deletions().status(waiting)).toEqual({
+      id: deletionId,
+      requestedAt: expect.any(Date),
+      dueAt,
+      requestedBy: 'platform',
+      requestedByName: null,
+      reason: STAFF_REASON,
+      started: false,
+    });
+    await expectAppError(deletions().cancel(waiting), 'precondition_failed', /only HyFib/);
+    await expect(
+      fx.dbs.app.run(authorizedTenantScope(c.tenant.id, c.owner.id), (tx) =>
+        tx.execute(sql`select app.cancel_tenant_deletion()`),
+      ),
+    ).rejects.toThrow(/only HyFib can cancel/);
+    await expectAppError(
+      deletions().request(waiting, { confirm: c.tenant.slug }),
+      'precondition_failed',
+      /already being deleted/,
+    );
+    await expectAppError(
+      platform().scheduleTenantDeletion(staffOwner, input),
+      'precondition_failed',
+      /already being deleted/,
+    );
+    expect(await tenantRow(c.tenant.id)).toMatchObject({ status: 'pending_deletion' });
+    // The same job deletes it when it is due.
+    expect(await findDueTenantDeletions(fx.dbs.app, 100)).not.toContain(c.tenant.id);
+    await makeDue(c.tenant.id);
+    expect(await findDueTenantDeletions(fx.dbs.app, 100)).toContain(c.tenant.id);
+    // Staff see who scheduled it and why.
+    expect(await platform().tenantDeletion(staff, c.tenant.id)).toMatchObject({
+      id: deletionId,
+      requestedBy: 'platform',
+      reason: STAFF_REASON,
+      cancelledBy: null,
+    });
+  });
+
+  it('is cancelled by a platform owner before it starts, bringing back the company’s status', async () => {
+    const staffOwner = await platformOwner();
+    const cancel = (tenantId: string, reason = 'Settled with the owners on the phone today.') =>
+      platform().cancelTenantDeletion(staffOwner, { tenantId, reason });
+
+    // Scheduled and cancelled before the sweep ran: the company hears of both, in order.
+    const a = await fx.company();
+    const { deletionId } = await platform().scheduleTenantDeletion(staffOwner, {
+      tenantId: a.tenant.id,
+      confirm: a.tenant.slug,
+      reason: STAFF_REASON,
+    });
+    await expectAppError(
+      platform().cancelTenantDeletion(staff, { tenantId: a.tenant.id, reason: STAFF_REASON }),
+      'forbidden',
+    );
+    await expect(
+      fx.dbs.platform.run(staff.userId, (tx) =>
+        tx.execute(sql`select ops.platform_cancel_tenant_deletion(${a.tenant.id}::uuid,
+          ${STAFF_REASON}, 'test')`),
+      ),
+    ).rejects.toThrow(/Only a platform owner/);
+    await expectAppError(cancel(a.tenant.id, 'short'), 'validation_failed');
+    expect(await cancel(a.tenant.id)).toEqual({ status: 'active' });
+    expect(await tenantRow(a.tenant.id)).toMatchObject({ status: 'active', status_reason: null });
+    expect(await deletionRow(a.tenant.id)).toMatchObject({
+      id: deletionId,
+      cancelled_by: 'platform',
+      cancelled_by_user_id: staffOwner.userId,
+      cancel_reason: 'Settled with the owners on the phone today.',
+    });
+    expect(await auditActions(a.tenant.id)).toEqual(
+      expect.arrayContaining([
+        'platform.tenant_deletion_scheduled',
+        'platform.tenant_deletion_cancelled',
+      ]),
+    );
+    const [cancelled] = await fx.query<{ reason: string; metadata: { restoredStatus: string } }>(
+      `SELECT reason, metadata FROM ops.platform_audit_events
+        WHERE target_tenant_id = $1 AND action = 'platform.tenant_deletion_cancelled'`,
+      [a.tenant.id],
+    );
+    expect(cancelled).toMatchObject({
+      reason: 'Settled with the owners on the phone today.',
+      metadata: { deletionId, restoredStatus: 'active' },
+    });
+    expect((await tellStaffDeletions()).failed).toEqual([]);
+    const told = await emails({ dedupePrefix: `tenant-deletion:${deletionId}:` });
+    expect(told.map((e) => e.payload.subject)).toEqual([
+      'HyFib scheduled the company for deletion',
+      'Company deletion cancelled',
+    ]);
+    expect(told[1]!.payload.lines).toEqual([
+      expect.stringMatching(
+        new RegExp(
+          `^HyFib cancelled the deletion of Company ${a.tenant.slug} on .+\\. It works as before\\.$`,
+        ),
+      ),
+      "HyFib's reason: Settled with the owners on the phone today.",
+    ]);
+    expect(await deletions().status(await fx.ctx(a, a.owner))).toBeNull();
+    await expectAppError(cancel(a.tenant.id), 'precondition_failed', /not being deleted/);
+
+    // A company HyFib had suspended stays suspended, with HyFib's reason.
+    const s = await fx.company();
+    await fx.query(
+      `UPDATE app.tenants SET status = 'suspended', status_reason = 'Spam complaints under review.'
+        WHERE id = $1`,
+      [s.tenant.id],
+    );
+    await platform().scheduleTenantDeletion(staffOwner, {
+      tenantId: s.tenant.id,
+      confirm: s.tenant.slug,
+      reason: STAFF_REASON,
+    });
+    expect(await deletionRow(s.tenant.id)).toMatchObject({ previous_status: 'suspended' });
+    expect(await cancel(s.tenant.id)).toEqual({ status: 'suspended' });
+    expect(await tenantRow(s.tenant.id)).toMatchObject({
+      status: 'suspended',
+      status_reason: 'Spam complaints under review.',
+    });
+
+    // A company whose plan ended while it waited is restricted.
+    const r = await fx.company();
+    await platform().scheduleTenantDeletion(staffOwner, {
+      tenantId: r.tenant.id,
+      confirm: r.tenant.slug,
+      reason: STAFF_REASON,
+    });
+    const planId = uuidv7();
+    await fx.query(
+      `INSERT INTO ops.plans (id, code, version, name, price_minor, interval_months,
+         seats_included, numbers_included, created_by_user_id, status, published_at,
+         published_by_user_id)
+       VALUES ($1, $2, 1, 'Lapsed plan', 0, 1, 5, 1, $3, 'published', now(), $3)`,
+      [planId, `lapsed-${randomInt(1_000_000)}`, staff.userId],
+    );
+    await fx.query(
+      `UPDATE app.tenant_plans SET status = 'expired', plan_id = $2 WHERE tenant_id = $1`,
+      [r.tenant.id, planId],
+    );
+    expect(await cancel(r.tenant.id)).toEqual({ status: 'restricted' });
+    expect(await tenantRow(r.tenant.id)).toMatchObject({
+      status: 'restricted',
+      status_reason: 'The plan ended.',
+    });
+
+    // An owner's deletion is the company's decision: staff cannot cancel it.
+    const o = await fx.company();
+    await deletions().request(await fx.ctx(o, o.owner), { confirm: o.tenant.slug });
+    await expectAppError(cancel(o.tenant.id), 'precondition_failed', /only the company's owners/);
+    expect(await tenantRow(o.tenant.id)).toMatchObject({ status: 'pending_deletion' });
+
+    // Once the worker has started, nobody can cancel.
+    const started = await fx.company();
+    await platform().scheduleTenantDeletion(staffOwner, {
+      tenantId: started.tenant.id,
+      confirm: started.tenant.slug,
+      reason: STAFF_REASON,
+    });
+    await makeDue(started.tenant.id);
+    await fx.dbs.app.run(systemScope, (tx) =>
+      tx.execute(sql`select * from ops.start_tenant_deletion(${started.tenant.id}::uuid)`),
+    );
+    await expectAppError(cancel(started.tenant.id), 'precondition_failed', /can no longer/);
+    expect(await tenantRow(started.tenant.id)).toMatchObject({ status: 'pending_deletion' });
+  });
+
+  it('keeps each notice to the company’s own scope, once, and the register consistent', async () => {
+    const staffOwner = await platformOwner();
+    const c = await fx.company();
+    const { deletionId } = await platform().scheduleTenantDeletion(staffOwner, {
+      tenantId: c.tenant.id,
+      confirm: c.tenant.slug,
+      reason: STAFF_REASON,
+    });
+    // Another company's scope marks nothing; an unknown notice is refused.
+    const stranger = await fx.company();
+    const mark = (scopeTenant: string, notice: string) =>
+      fx.dbs.app.run(authorizedTenantScope(scopeTenant, null), (tx) =>
+        tx.execute<{ marked: boolean }>(
+          sql`select app.tenant_deletion_mark_notified(${deletionId}::uuid, ${notice}) as marked`,
+        ),
+      );
+    expect((await mark(stranger.tenant.id, 'scheduled')).rows[0]!.marked).toBe(false);
+    // Nothing to cancel yet: the cancellation notice cannot be marked.
+    expect((await mark(c.tenant.id, 'cancelled')).rows[0]!.marked).toBe(false);
+    await expect(mark(c.tenant.id, 'deleted')).rejects.toThrow(/Unknown deletion notice/);
+    expect((await deletionRow(c.tenant.id))!.scheduled_notified_at).toBeNull();
+    // Two sweeps at once tell it once.
+    const [x, y] = await Promise.all([tellStaffDeletions(), tellStaffDeletions()]);
+    expect(x.failed.concat(y.failed)).toEqual([]);
+    expect(await emails({ dedupePrefix: `tenant-deletion:${deletionId}:scheduled:` })).toHaveLength(
+      1,
+    );
+    // An owner's deletion is told in the owner's transaction, never by the sweep, which does not
+    // even list it: listed, it would come back every minute, taking the places of staff notices.
+    const o = await fx.company();
+    const owned = await deletions().request(await fx.ctx(o, o.owner), { confirm: o.tenant.slug });
+    await tellStaffDeletions();
+    expect(
+      await emails({ dedupePrefix: `tenant-deletion:${owned.deletionId}:scheduled:` }),
+    ).toEqual([]);
+    expect(await noticesDue()).not.toContain(owned.deletionId);
+    // The register refuses a staff deletion without its reason, and a cancellation by the side
+    // that did not schedule it.
+    await expect(
+      fx.query(`UPDATE ops.tenant_deletions SET reason = NULL WHERE id = $1`, [deletionId]),
+    ).rejects.toThrow(/tenant_deletions_reason_chk/);
+    await expect(
+      fx.query(
+        `UPDATE ops.tenant_deletions SET cancelled_at = now(), cancelled_by = 'owner' WHERE id = $1`,
+        [deletionId],
+      ),
+    ).rejects.toThrow(/tenant_deletions_cancelled_by_chk/);
+    await expect(
+      fx.query(
+        `UPDATE ops.tenant_deletions SET cancelled_at = now(), cancelled_by = 'platform',
+           cancel_reason = 'Cancelled by staff in a test.' WHERE id = $1`,
+        [owned.deletionId],
+      ),
+    ).rejects.toThrow(/tenant_deletions_cancelled_by_chk/);
   });
 });
 
@@ -1018,6 +1380,7 @@ describe('running a deletion', () => {
     expect(told.every((e) => e.tenantId === null && e.payload.subject === 'Company deleted')).toBe(
       true,
     );
+    expect(told[0]!.payload.lines?.[0]).toMatch(/was deleted at the request of its owners on /);
 
     // The other company is untouched.
     expect(await rowCounts(other.c.tenant.id, tables)).toEqual(otherBefore);
@@ -1060,6 +1423,36 @@ describe('running a deletion', () => {
       attempts: 1,
       cancelledAt: null,
     });
+  });
+
+  it('deletes a company HyFib scheduled and says so, with the reason, in the last email', async () => {
+    const staffOwner = await platformOwner();
+    const c = await fx.company();
+    const { deletionId } = await platform().scheduleTenantDeletion(staffOwner, {
+      tenantId: c.tenant.id,
+      confirm: c.tenant.slug,
+      reason: STAFF_REASON,
+    });
+    await makeDue(c.tenant.id);
+    const result = await runTenantDeletion(runDeps(), c.tenant.id);
+    expect(result.outcome).toBe('finished');
+    expect(await tenantRow(c.tenant.id)).toMatchObject({ status: 'deleted' });
+    const told = await emails({ dedupePrefix: `tenant-deletion:${deletionId}:finished:` });
+    expect(told.map((e) => e.to)).toEqual([c.owner.email]);
+    expect(told[0]!.payload.lines?.slice(0, 2)).toEqual([
+      expect.stringMatching(
+        new RegExp(
+          `^HyFib deleted Company ${c.tenant.slug} on .+, as it wrote when it scheduled the deletion\\.$`,
+        ),
+      ),
+      `HyFib's reason: ${STAFF_REASON}`,
+    ]);
+    // A notice not sent before the company was deleted is not sent afterwards: the sweep does not
+    // list it, so it stays unsent rather than marked sent to nobody.
+    expect(await noticesDue()).not.toContain(deletionId);
+    await tellStaffDeletions();
+    expect(await emails({ dedupePrefix: `tenant-deletion:${deletionId}:scheduled:` })).toEqual([]);
+    expect((await deletionRow(c.tenant.id))!.scheduled_notified_at).toBeNull();
   });
 
   it('resumes an interrupted run without visiting the providers again', async () => {

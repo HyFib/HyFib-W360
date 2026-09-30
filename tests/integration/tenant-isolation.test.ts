@@ -207,6 +207,29 @@ describe('database roles', () => {
       expect(await can('w360_app', fn), fn).toBe(false);
       expect(await can('w360_auth', fn), fn).toBe(false);
     }
+    // Company deletion started by staff (0067): scheduling and cancelling for platform staff; the
+    // notice sweep, its mark and owners' cancelling for the runtime app role; the shared rule for the
+    // status a cancelled deletion restores only inside the definer functions.
+    for (const fn of [
+      'ops.platform_request_tenant_deletion(uuid,text,text,text)',
+      'ops.platform_cancel_tenant_deletion(uuid,text,text)',
+    ]) {
+      expect(await can('w360_platform', fn), fn).toBe(true);
+      expect(await can('w360_app', fn), fn).toBe(false);
+      expect(await can('w360_auth', fn), fn).toBe(false);
+    }
+    for (const fn of [
+      'ops.tenant_deletion_notices_due(integer)',
+      'app.tenant_deletion_mark_notified(uuid,text)',
+      'app.cancel_tenant_deletion()',
+    ]) {
+      expect(await can('w360_app', fn), fn).toBe(true);
+      expect(await can('w360_auth', fn), fn).toBe(false);
+      expect(await can('w360_platform', fn), fn).toBe(false);
+    }
+    for (const role of ['w360_app', 'w360_auth', 'w360_platform']) {
+      expect(await can(role, 'ops.tenant_status_after_deletion(uuid,text,text)'), role).toBe(false);
+    }
     // Outgoing webhooks (0025, 0047): the dispatch and retention sweeps for the worker; capture,
     // which the triggers call as the role making the change (the runtime role, or a definer
     // function); the trigger functions for nobody.

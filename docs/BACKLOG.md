@@ -482,9 +482,12 @@ verification, app review, Embedded Signup configuration).
   deleted at Razorpay), batched deletion in foreign-key order, a tombstone company row, billing
   records and plan history kept, final emails. Also fixed: erasure now redacts past send requests,
   public entry points serve companies pending deletion, and the ended-run guard freezes two columns
-  again (step-up re-authentication for both since ADR-056). Remaining: staff-started
-  deletion, stored exports, other formats, a deletion job run on staging, legal review of the kept
-  records.
+  again (step-up re-authentication for both since ADR-056). **[Staff-started deletion built,
+  locally verified]** (ADR-090: platform owners schedule a company's deletion on its platform page
+  with the address typed and a reason the owners and administrators are emailed and read in the
+  company; the same 14 days and job; whoever scheduled a deletion cancels it, so owners cannot
+  cancel HyFib's and staff cannot cancel an owner's). Remaining: stored exports, other formats, a
+  deletion job run on staging, legal review of the kept records.
 
 ## Phase 6 — AI, calling, channels, connectors, enterprise
 

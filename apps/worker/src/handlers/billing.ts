@@ -17,6 +17,7 @@ import {
   findDueSettlementRecons,
   findStaleReceipts,
   notifyRefundRequestDeclines,
+  notifyStaffDeletions,
   processCreditRefund,
   processRazorpayReceipt,
   reconcileTopup,
@@ -310,6 +311,27 @@ export function billingSweepHandler(rt: WorkerRuntime) {
     }
     const deletions = await sweepTenantDeletions(rt);
     if (deletions > 0) rt.logger.info({ deletions }, 'company deletions due');
+    // Deletions HyFib staff scheduled or cancelled (ADR-090): the company's owners and
+    // administrators are told from here, as the platform role cannot queue email.
+    const staffDeletions = await notifyStaffDeletions({
+      db: rt.db,
+      outbox: rt.notices.outbox,
+      appBaseUrl: rt.notices.appBaseUrl,
+    });
+    for (const failure of staffDeletions.failed) {
+      rt.logger.warn(
+        {
+          tenantId: failure.tenantId,
+          deletionId: failure.deletionId,
+          notice: failure.notice,
+          err: toError(failure.error).message,
+        },
+        'staff deletion notice failed for a company; will retry',
+      );
+    }
+    if (staffDeletions.notified > 0) {
+      rt.logger.info({ notices: staffDeletions.notified }, 'staff deletion notices emailed');
+    }
     const released = await releaseExpiredHolds(rt.db);
     const deps = providerDeps(rt);
     if (!deps) {

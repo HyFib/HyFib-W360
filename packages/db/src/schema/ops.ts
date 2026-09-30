@@ -154,4 +154,14 @@ export const tenantDeletions = opsSchema.table('tenant_deletions', {
   providerCleanupAt: tz('provider_cleanup_at'),
   rowsDeleted: bigint('rows_deleted', { mode: 'number' }).notNull().default(0),
   completedAt: tz('completed_at'),
+  /** Who scheduled the deletion (ADR-090): an owner, or HyFib staff with `reason`. */
+  requestedBy: text('requested_by', { enum: ['owner', 'platform'] })
+    .notNull()
+    .default('owner'),
+  reason: text('reason'),
+  /** Who cancelled it; empty on deletions cancelled before ADR-090 (owners only then). */
+  cancelledBy: text('cancelled_by', { enum: ['owner', 'platform'] }),
+  cancelReason: text('cancel_reason'),
+  scheduledNotifiedAt: tz('scheduled_notified_at'),
+  cancelledNotifiedAt: tz('cancelled_notified_at'),
 });

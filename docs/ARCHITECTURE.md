@@ -1180,6 +1180,17 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   company in `pending_deletion`, which the permission layer treats like a suspension; the company
   layout shows a banner. `app.cancel_tenant_deletion` restores the status (a suspension stays, a
   lapsed plan restricts) until the run starts.
+- **Staff deletion** (ADR-090, migration 0067, `platform/service.ts`): a platform owner schedules
+  a deletion from the company's platform page (typed address, a reason the company reads) through
+  `ops.platform_request_tenant_deletion`, and cancels one staff scheduled through
+  `ops.platform_cancel_tenant_deletion`; the register records `requested_by`, the reason,
+  `cancelled_by` and the cancel reason, and whoever scheduled a deletion cancels it (the owners'
+  function refuses staff deletions). Both cancel functions restore the status through
+  `ops.tenant_status_after_deletion`. The worker's minute billing sweep emails the owners and
+  administrators (`notifyStaffDeletions`: `ops.tenant_deletion_notices_due`, then
+  `app.tenant_deletion_mark_notified` in the company's scope with the emails), because the platform
+  role cannot queue email. The banner, Settings → Company data and the final email name HyFib and
+  its reason instead of an owner.
 - **Run** (`tenancy/deletion-run.ts`, worker `handlers/tenancy.ts`): the minute billing sweep calls
   `ops.tenant_deletions_due` and queues a signed `tenant.delete` job per company (`exclusive`,
   singleton per company, retried with backoff). A run calls `ops.start_tenant_deletion` (first time:
@@ -1200,11 +1211,13 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   plan payments, the register, support
   grants and security events (the catalog tests list them); people's accounts.
 - **Web:** Settings → Company data (owners: export link, deletion form with the typed address, the
-  pending state with the due date and a cancel button, the started state); the platform company page
-  shows the register (dates, runs, rows deleted, provider outcomes).
+  pending state with the due date and a cancel button, or HyFib's reason without one, the started
+  state); the platform company page shows the register (dates, runs, rows deleted, provider
+  outcomes, who scheduled and cancelled it and why) and, for platform owners, the forms to schedule
+  and cancel a staff deletion.
 - **Step-up:** exporting and asking for the deletion need a sign-in within the last 15 minutes
   (ADR-056).
-- **Not built yet:** staff-started deletion, stored exports and other formats.
+- **Not built yet:** stored exports and other formats.
 
 ## 7. Commercial model and billing **[built: plans and entitlements, paying for plans by Razorpay subscription, wallet, top-ups, auto-recharge, statements and receipts, usage and rates, staff refunds of unused credit, daily settlement reconciliation — verified against a local Razorpay stand-in only; tax invoices planned]**
 

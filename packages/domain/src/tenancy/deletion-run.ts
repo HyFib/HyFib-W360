@@ -12,6 +12,7 @@ import {
   paymentMandates,
   sql,
   systemScope,
+  tenantDeletions,
   tenants,
   users,
   whatsappAccounts,
@@ -25,6 +26,7 @@ import { cancelPendingAutoRecharge } from '../billing/attempts';
 import { cancelPlanSubscriptionForDeletion } from '../billing/plan-subscriptions';
 import type { RazorpayClient } from '../billing/razorpay';
 import { enqueueEmail, type OutboxDeps } from '../email/outbox';
+import { NOTICE_LINE_MAX, splitEmailText } from '../email/templates';
 import { credentialAad } from '../messaging/credentials';
 import type { GraphClient } from '../messaging/graph';
 import { removeStoreForDeletion, type StoreWorkerDeps } from '../stores/worker';
@@ -279,6 +281,7 @@ async function notifyDeleted(
   started: StartedDeletion,
   cleanup: TenantDeletionCleanup[],
   timeZone: string,
+  origin: { byStaff: boolean; reason: string | null },
 ): Promise<void> {
   if (started.notifyUserIds.length === 0) return;
   const people = await tx
@@ -287,8 +290,14 @@ async function notifyDeleted(
     .where(inArray(users.id, started.notifyUserIds));
   const failed = cleanup.filter((item) => item.outcome === 'failed');
   const woo = cleanup.filter((item) => item.kind === 'woocommerce_store');
+  const when = formatCompanyTime(deps.clock.now(), timeZone);
   const lines = [
-    `${started.companyName} was deleted at the request of its owners on ${formatCompanyTime(deps.clock.now(), timeZone)}.`,
+    origin.byStaff
+      ? `HyFib deleted ${started.companyName} on ${when}, as it wrote when it scheduled the deletion.`
+      : `${started.companyName} was deleted at the request of its owners on ${when}.`,
+    ...(origin.byStaff && origin.reason
+      ? splitEmailText(`HyFib's reason: ${origin.reason}`, NOTICE_LINE_MAX.tenant)
+      : []),
     "Its members, contacts, conversations, messages, templates, campaigns, automations and other data were deleted. Copies in HyFib's encrypted backups are removed when those backups expire.",
     'Billing records are kept as the law requires. Your own HyFib account is not deleted.',
   ];
@@ -359,10 +368,24 @@ export async function runTenantDeletion(
   const scope = authorizedTenantScope(tenantId, null);
   const [company] = await deps.db.run(
     scope,
-    (tx) => tx.select({ timezone: tenants.timezone }).from(tenants).where(eq(tenants.id, tenantId)),
+    (tx) =>
+      tx
+        .select({
+          timezone: tenants.timezone,
+          requestedBy: tenantDeletions.requestedBy,
+          reason: tenantDeletions.reason,
+        })
+        .from(tenants)
+        .innerJoin(
+          tenantDeletions,
+          and(eq(tenantDeletions.tenantId, tenants.id), eq(tenantDeletions.id, started.deletionId)),
+        )
+        .where(eq(tenants.id, tenantId)),
     { accessMode: 'read only' },
   );
   const timeZone = company?.timezone ?? 'UTC';
+  // Who scheduled it (ADR-090): the last email says so, with HyFib's reason for a staff deletion.
+  const origin = { byStaff: company?.requestedBy === 'platform', reason: company?.reason ?? null };
 
   let cleanup = started.providerCleanup;
   if (!started.providerCleanupDone) {
@@ -391,7 +414,7 @@ export async function runTenantDeletion(
         sql`select ops.finish_tenant_deletion(${tenantId}::uuid) as finished`,
       );
       if (done.rows[0]?.finished !== true) return null;
-      await notifyDeleted(deps, tx, started, cleanup, timeZone);
+      await notifyDeleted(deps, tx, started, cleanup, timeZone, origin);
       return cleanup;
     });
     // Null: a row was written while the run deleted (the next pass removes it).

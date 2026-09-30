@@ -95,7 +95,11 @@ they are not a statement of legal compliance. Retention jobs are phase 5–7 unl
 
 Company deletion is built (ADR-055): an owner types the company address; the company is
 `pending_deletion` for 14 days (works as suspended; any owner can cancel until the job starts);
-then the worker deletes it.
+then the worker deletes it. A platform owner can also schedule it (ADR-090), typing the address and
+a reason the owners and administrators are emailed and read in the company: the same 14 days, the
+same job and the same records kept; only a platform owner cancels such a deletion. The deletion
+register keeps who scheduled and cancelled it and HyFib's reasons with the register's other
+columns.
 
 1. **Application deletion** **[built]:** the `tenant.delete` job deletes every row of the
    company's deletable tables (`ops.tenant_deletion_steps`, children before parents, a batch per

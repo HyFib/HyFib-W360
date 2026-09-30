@@ -2,11 +2,14 @@ import { z } from 'zod';
 import type { Clock } from '@w360/core';
 import {
   and,
+  authorizedTenantScope,
   eq,
   isNull,
   memberships,
   sql,
+  systemScope,
   tenantDeletions,
+  tenants,
   users,
   type Database,
   type Tx,
@@ -15,15 +18,20 @@ import { assertCan, type TenantContext } from '../authz/context';
 import { assertRecentSignIn } from '../authz/step-up';
 import { recordAudit, type RequestMeta } from '../audit';
 import { enqueueEmail, type OutboxDeps } from '../email/outbox';
+import { NOTICE_LINE_MAX, splitEmailText } from '../email/templates';
 import { parseInput } from '../validation';
 
 /**
- * Company deletion requested by an owner (P5-11, ADR-055). The company is due for deletion 14 days
- * after the request (set in `app.request_tenant_deletion`) and works as if suspended until then;
- * owners can cancel until the worker starts the deletion. Every owner and administrator is emailed
- * at each step.
+ * Company deletion requested by an owner (P5-11, ADR-055) or scheduled by HyFib staff (ADR-090).
+ * The company is due for deletion 14 days after the request (set in `app.request_tenant_deletion`
+ * and `ops.platform_request_tenant_deletion`) and works as if suspended until then; whoever
+ * scheduled it can cancel until the worker starts the deletion (owners their own, platform owners
+ * HyFib's). Every owner and administrator is emailed at each step.
  */
 export const DELETION_GRACE_DAYS = 14;
+
+/** A staff deletion's reason, and a staff cancellation's: the company reads both. */
+export const STAFF_DELETION_REASON = { min: 10, max: 1000 } as const;
 
 export interface CompanyDeletionDeps extends OutboxDeps {
   db: Database;
@@ -35,7 +43,12 @@ export interface CompanyDeletionView {
   id: string;
   requestedAt: Date;
   dueAt: Date;
+  /** An owner asked for it, or HyFib staff scheduled it (ADR-090); only they can cancel it. */
+  requestedBy: 'owner' | 'platform';
+  /** The owner who asked; never the staff member. */
   requestedByName: string | null;
+  /** HyFib's reason, for a deletion staff scheduled. */
+  reason: string | null;
   /** The worker has started: it can no longer be cancelled. */
   started: boolean;
 }
@@ -59,6 +72,15 @@ export function formatCompanyTime(at: Date, timeZone: string): string {
     timeZone,
     timeZoneName: 'short',
   }).format(at);
+}
+
+/** What a company is once its deletion is cancelled, for the email. */
+function statusSentence(status: string): string {
+  return status === 'restricted'
+    ? 'It is restricted because its plan has ended.'
+    : status === 'suspended'
+      ? 'It remains suspended by HyFib.'
+      : 'It works as before.';
 }
 
 /** Active owners and administrators, who hear about every step of a deletion. */
@@ -97,6 +119,8 @@ export function createCompanyDeletionService(deps: CompanyDeletionDeps) {
               requestedAt: tenantDeletions.requestedAt,
               dueAt: tenantDeletions.dueAt,
               startedAt: tenantDeletions.startedAt,
+              requestedBy: tenantDeletions.requestedBy,
+              reason: tenantDeletions.reason,
               requestedByName: users.name,
             })
             .from(tenantDeletions)
@@ -111,11 +135,15 @@ export function createCompanyDeletionService(deps: CompanyDeletionDeps) {
         { accessMode: 'read only' },
       );
       if (!row) return null;
+      const byOwner = row.requestedBy === 'owner';
       return {
         id: row.id,
         requestedAt: row.requestedAt,
         dueAt: row.dueAt,
-        requestedByName: row.requestedByName,
+        requestedBy: row.requestedBy,
+        // Staff are never named to companies ("HyFib platform staff" in the audit log too).
+        requestedByName: byOwner ? row.requestedByName : null,
+        reason: byOwner ? null : row.reason,
         started: row.startedAt !== null,
       };
     },
@@ -196,12 +224,7 @@ export function createCompanyDeletionService(deps: CompanyDeletionDeps) {
           meta,
         );
         const now = formatCompanyTime(deps.clock.now(), ctx.tenant.timezone);
-        const state =
-          status === 'restricted'
-            ? 'It is restricted because its plan has ended.'
-            : status === 'suspended'
-              ? 'It remains suspended by HyFib.'
-              : 'It works as before.';
+        const state = statusSentence(status);
         for (const person of await deletionRecipients(tx, ctx.tenant.id)) {
           await enqueueEmail(deps, tx, {
             to: person.email,
@@ -225,3 +248,108 @@ export function createCompanyDeletionService(deps: CompanyDeletionDeps) {
 }
 
 export type CompanyDeletionService = ReturnType<typeof createCompanyDeletionService>;
+
+export interface StaffDeletionNoticeDeps {
+  db: Database;
+  outbox: OutboxDeps;
+  appBaseUrl: string;
+}
+
+/**
+ * The minute sweep's emails about deletions HyFib staff scheduled or cancelled (ADR-090): the
+ * platform role cannot queue email, so the worker tells the company's owners and administrators,
+ * each notice marked in the company's own scope in the transaction that queues its emails. A
+ * company that fails is reported and tried again the next minute.
+ */
+export async function notifyStaffDeletions(
+  deps: StaffDeletionNoticeDeps,
+  limit = 50,
+): Promise<{
+  notified: number;
+  failed: { tenantId: string; deletionId: string; notice: string; error: unknown }[];
+}> {
+  const due = await deps.db.run(
+    systemScope,
+    (tx) =>
+      tx.execute<{ tenant_id: string; deletion_id: string; notice: 'scheduled' | 'cancelled' }>(
+        sql`select tenant_id, deletion_id, notice from ops.tenant_deletion_notices_due(${limit}::int)`,
+      ),
+    { accessMode: 'read only' },
+  );
+  let notified = 0;
+  const failed: { tenantId: string; deletionId: string; notice: string; error: unknown }[] = [];
+  for (const { tenant_id: tenantId, deletion_id: deletionId, notice } of due.rows) {
+    // Tenant ids come from the deletion register, never from a request.
+    const scope = authorizedTenantScope(tenantId, null);
+    try {
+      const told = await deps.db.run(scope, async (tx) => {
+        const marked = await tx.execute<{ marked: boolean }>(
+          sql`select app.tenant_deletion_mark_notified(${deletionId}::uuid, ${notice}) as marked`,
+        );
+        if (marked.rows[0]?.marked !== true) return false;
+        const [row] = await tx
+          .select({
+            requestedAt: tenantDeletions.requestedAt,
+            dueAt: tenantDeletions.dueAt,
+            reason: tenantDeletions.reason,
+            cancelledAt: tenantDeletions.cancelledAt,
+            cancelReason: tenantDeletions.cancelReason,
+            companyName: tenants.name,
+            slug: tenants.slug,
+            timezone: tenants.timezone,
+            status: tenants.status,
+          })
+          .from(tenantDeletions)
+          .innerJoin(tenants, eq(tenants.id, tenantDeletions.tenantId))
+          .where(and(eq(tenantDeletions.tenantId, tenantId), eq(tenantDeletions.id, deletionId)));
+        if (!row) return false;
+        const at = (date: Date) => formatCompanyTime(date, row.timezone);
+        const url = `${deps.appBaseUrl}/c/${row.slug}/settings/data`;
+        const email =
+          notice === 'scheduled'
+            ? {
+                subject: 'HyFib scheduled the company for deletion',
+                lines: [
+                  `HyFib scheduled ${row.companyName} for deletion. It will be deleted on ${at(row.dueAt)}.`,
+                  ...splitEmailText(`HyFib's reason: ${row.reason ?? ''}`, NOTICE_LINE_MAX.tenant),
+                  'Until then the company works as if suspended: members can still read its data and owners can download an export in Settings, Company data, but nothing is sent.',
+                  'After that date its contacts, conversations, messages, templates, campaigns, automations and other data are deleted and cannot be recovered. Billing records are kept as the law requires.',
+                  'Only HyFib can cancel this deletion. Contact HyFib support to discuss it.',
+                ],
+                actionLabel: 'Review the deletion',
+              }
+            : {
+                subject: 'Company deletion cancelled',
+                lines: [
+                  `HyFib cancelled the deletion of ${row.companyName} on ${at(row.cancelledAt ?? row.requestedAt)}. ${statusSentence(row.status)}`,
+                  ...splitEmailText(
+                    `HyFib's reason: ${row.cancelReason ?? ''}`,
+                    NOTICE_LINE_MAX.tenant,
+                  ),
+                ],
+                actionLabel: 'Open company settings',
+              };
+        for (const person of await deletionRecipients(tx, tenantId)) {
+          await enqueueEmail(deps.outbox, tx, {
+            to: person.email,
+            tenantId,
+            dedupeKey: `tenant-deletion:${deletionId}:${notice}:${person.userId}`,
+            payload: {
+              kind: 'tenant.notice',
+              companyName: row.companyName,
+              subject: email.subject,
+              lines: email.lines,
+              url,
+              actionLabel: email.actionLabel,
+            },
+          });
+        }
+        return true;
+      });
+      if (told) notified += 1;
+    } catch (error) {
+      failed.push({ tenantId, deletionId, notice, error });
+    }
+  }
+  return { notified, failed };
+}
