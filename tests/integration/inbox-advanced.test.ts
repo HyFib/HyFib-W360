@@ -428,6 +428,39 @@ describe('availability and leaving members', () => {
   });
 });
 
+describe('assignment', () => {
+  it('offers and accepts only members who can answer conversations (ADR-093)', async () => {
+    const { c, owner, agents } = await setup(0);
+    const inbox = inboxService();
+    const a = agents[0]!;
+    const marketer = await fx.ctx(c, c.marketer);
+    const analystUser = await createUser(fx.dbs, { name: 'Ana Analyst' });
+    const { token } = await invite(fx.dbs, c.tenant, c.owner, analystUser.email, ['analyst']);
+    await acceptInvitation(fx.dbs, analystUser, token);
+    const analyst = await fx.ctx(c, analystUser);
+    // The picker leaves out the marketer and the analyst, who cannot open the inbox.
+    expect((await inbox.assignableMembers(owner)).map((m) => m.membershipId).sort()).toEqual(
+      [owner.membership.id, a.membershipId].sort(),
+    );
+    const conv = await inbound(c, waId());
+    const { version } = await conversation(conv.id);
+    for (const membershipId of [marketer.membership.id, analyst.membership.id]) {
+      await expectAppError(
+        inbox.assign(owner, { conversationId: conv.id, membershipId, expectedVersion: version }),
+        'validation_failed',
+        /role can reply in the inbox/,
+      );
+    }
+    expect(await conversation(conv.id)).toMatchObject({ assigned: null, version });
+    await inbox.assign(owner, {
+      conversationId: conv.id,
+      membershipId: a.membershipId,
+      expectedVersion: version,
+    });
+    expect((await conversation(conv.id)).assigned).toBe(a.membershipId);
+  });
+});
+
 describe('conversation cases', () => {
   it('open on creation and reopening, close on resolve, and cannot be rewritten', async () => {
     const { c, agents } = await setup(0);

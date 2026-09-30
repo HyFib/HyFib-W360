@@ -368,20 +368,22 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 
 - **Model** (`packages/domain/src/automations/graph.ts`, browser-safe): a trigger (a message is or
   contains a keyword; a customer starts a conversation; any customer message; optionally only while
-  the business is open or closed; a cooldown per conversation; or started by a store's order
-  messages, §6M) and a graph of typed steps: send a message, ask with reply buttons (Meta's limits:
+  the business is open or closed; a cooldown per conversation; started by a store's order messages,
+  §6M; or started through the API with the inputs it declares, §6N) and a graph of typed steps: send a message, ask with reply buttons (Meta's limits:
   1–3 buttons, titles ≤ 20, body ≤ 1024, header and footer ≤ 60; research M-157/M-159), ask a
   question (any text, a number or an email; retries; answer saved under a name), send a template and
   ask with a template (an approved utility or marketing template with its variables as texts; the
   asking step branches on each quick-reply button, any other reply and no reply; ADR-050), condition
   (answers, contact fields, tags, business hours), update contact (tags, custom fields), wait
   (≤ 24 h), hand off to people (a team, or routed like a new case), end. Texts may use `{{name}}`,
-  `{{company}}`, `{{answer.<name>}}` and, in automations started by order messages,
-  `{{order.<field>}}`. `checkGraph` rejects missing targets, unsaved answers, unknown or misplaced
+  `{{company}}`, `{{answer.<name>}}`, in automations started by order messages
+  `{{order.<field>}}`, and in automations started through the API `{{input.<name>}}`. `checkGraph`
+  rejects missing targets, unsaved answers, unknown or misplaced
   placeholders, missing teams or fields, loops that never pass through a question or a wait, empty
   template variables, templates HyFib cannot send or whose variables, buttons or account no longer
   match (checked against the company's synced templates), and, in automations started by order
-  messages, a message or question that some path reaches before the customer replied. A wait or a
+  messages or through the API, a message or question that some path reaches before the customer
+  replied; an automation started through the API must be limited to one number (`triggerIssues`). A wait or a
   question timeout over 23 hours warns only when a message that is not a template can follow it
   before a reply (templates need no window, so a run can follow up a day or more later).
 - **Interpreter** (`automations/interpreter.ts`): a pure function (graph, run state, event, facts)
@@ -410,7 +412,8 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   frequency cap under the campaign runner's company lock, which the runner only tries: busy, the step
   runs again two seconds later), contact updates as single statements, hand-off routing — appends
   the step log row and stores the position. A run started by order messages reads its order for
-  each step with texts and may run while its conversation stays resolved as it was at the start. A queued bot message holds the run
+  each step with texts; it, and a run started through the API, may run while its conversation stays
+  resolved as it was at the start. A queued bot message holds the run
   (`pending_message_id`) until the send worker records Meta's acceptance and signals the run; a
   rejected, cancelled, unknown or late (10 minutes) send, or a failure Meta reports later, fails the
   run (`send_failed`) and hands the conversation to people, so a run never moves on or completes on
@@ -816,13 +819,20 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   with `developer.manage` create keys (name, scopes, expiry of 30, 90 or 365 days or none) and may
   grant a scope only when they hold its permission (`templates.read`, `contacts.read`,
   `contacts.write`, `inbox.reply` for `messages.send` and `messages.reply`, `campaigns.send` for
-  `messages.send_marketing`, `inbox.read_all` for `conversations.read`); at most 20 active keys per
-  company, counted under an advisory lock.
-  Rotation creates a key with the same name, scopes and lifetime and lets the old one work for 0 to
-  72 hours (0 revokes it); revocation is immediate. Each change is audited without the token.
+  `messages.send_marketing`, `inbox.read_all` for `conversations.read`, `inbox.supervise` for
+  `conversations.write`, `automations.publish` for `automations.start`); at most 20 active keys
+  per company, counted under an advisory lock.
+  Rotation creates a key with the same name, scopes, lifetime and networks and lets the old one work
+  for 0 to 72 hours (0 revokes it); revocation is immediate. Each change is audited without the
+  token. A key may list up to 20 networks it accepts requests from (`allowed_networks cidr[]`, 0051,
+  ADR-076): checked for shape in the service, canonicalised by PostgreSQL (`pg_input_is_valid`,
+  `::cidr`), editable for an active key with a recent sign-in (`setAllowedNetworks`, audited).
 - **Requests** (`apps/web/src/server/api.ts`): the bearer token is checked by shape, then through
-  the definer function; the request acts in its company's scope as the key (`ApiContext`, no user),
-  so no company id is ever read from the request. Failed authentication is limited per client
+  the definer function with the client's address (`authenticateApiRequest`,
+  `ops.api_key_authenticate(hash, inet)`): a key whose networks do not contain the address (or any
+  key with networks when the address is unknown) answers 403 `ip_not_allowed`, is not marked used and
+  counts as a failed authentication for the address; the request acts in its company's scope as the
+  key (`ApiContext`, no user), so no company id is ever read from the request. Failed authentication is limited per client
   address (bursts of 20, one every 5 seconds), then each key (bursts of 50, 10 a second) and each
   company (bursts of 200, 30 a second) have token buckets (`admitFailedApiAuthentication`,
   `admitApiRate` in `api/rate-limits.ts`; a request its key refuses takes nothing from the
@@ -858,7 +868,8 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   status, contact, number and `updatedSince`), `GET /conversations/{id}` and
   `GET /conversations/{id}/messages` (newest first), all in `api/conversations.ts`. Conversations
   join their contact, so an erased contact's conversation is neither listed nor read (404). A
-  conversation says whether a member is assigned (not who), the unread count, the last message and
+  conversation says whether a member is assigned (and, since ADR-093, the member's and the team's
+  ids), the unread count, the last message and
   inbound times and when the 24-hour window ends; a message reads in the webhooks' words
   (`inboundSummary` for inbound; for outbound the text, a template's rendered body or an interactive
   message's body), with who sent it (`agent`, `bot`, `campaign`, `api`, `system`), the key for API
@@ -866,6 +877,130 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   row's `updated_at`, which its trigger stamps with the transaction's start, so integrations are
   told to overlap their passes. `conversations_created_idx` (0045, built concurrently) serves the
   pages.
+- **Resolving and reopening (0050, ADR-075):** `PATCH /conversations/{id}` with the `status`
+  `resolved` or `open` needs `conversations.write` (`apiUpdateConversation`, which also assigns and
+  moves conversations since ADR-093). It locks the
+  conversation row `FOR UPDATE`, as the inbox's `setStatus` does, checks the contact is not erased
+  (404 otherwise), and answers the conversation unchanged when it already has the status. Otherwise
+  resolving ends an active automation run (`conversation_resolved`, no member) and sets `resolved_at`
+  and an unread count of 0, reopening clears `resolved_at`; the version goes up, the live
+  `conversation.status` event is emitted and the change is audited as the key
+  (`conversation.status_changed`, `source: api`). The existing triggers do the rest: the reply turn
+  and the case close without a member (`app.current_user_id()` is empty in the key's scope), a
+  reopen opens a case, and the webhook event is captured. No satisfaction survey is queued.
+- **Automations started through the API (0052–0054, ADR-077):** `automations.start` (writes,
+  granted by members holding `automations.publish`) opens `GET /automations` (published automations
+  whose trigger is `api`, with their inputs and number), `POST /automations/{id}/runs` (an
+  `Idempotency-Key` is required) and `GET /automation-runs/{id}`, in `api/automations.ts`. A start
+  runs in the idempotency key's transaction: it locks the automation `FOR SHARE`, checks the
+  published version (trigger `api`, active, the inputs `apiInputValues` accepts; a marketing
+  template needs `messages.send_marketing`), the number, the contact (`contactForPhone` with source
+  `api`, then `checkTemplateEligibility` for utility: suppression, erasure, opt-out), the
+  conversation (created resolved, locked `FOR UPDATE`; not assigned, no active run, fewer than 10
+  runs in the hour) and the plan (`consumeAutomationRun`), each refusal with its reason. The run row
+  has `trigger_type = 'api'`, `api_key_id` and the inputs as `input.<name>` variables; the step log,
+  the live `automation.started` event, the audit entry (as the key, without the inputs) and the
+  run's first job follow in the same transaction. `automation_runs_api_key` keeps `api_key_id` set
+  exactly for `api` runs, the run guard keeps it fixed, and `automation_runs_api_key_idx` (0053,
+  built concurrently) serves the foreign key.
+- **Stopping runs through the API (0057–0058, ADR-079):** `POST /automation-runs/{id}/stop` with
+  `automations.start` (`apiStopAutomationRun`) finds a run keys of the company started, locks the
+  conversation `FOR UPDATE` and then the active run (`lockActiveRun`), and ends it with `endRun` as
+  `stopped`/`stopped_by_api`: queued bot messages and web requests not yet made are cancelled, and
+  the conversation is not routed (the turn trigger opens a hand-off turn when it is open). The step
+  log and the audit entry (as the key) follow in the same transaction; a run that has ended is
+  answered as it is. 0057 replaces `automation_runs_end` `NOT VALID` to allow the reason; 0058
+  validates it.
+- **Buttons and lists through the API (ADR-080):** `POST /messages` with `type` `buttons` or `list`
+  (`apiSendButtons`, `apiSendList`) takes the same path as a text reply (`sendReply`: the contact
+  who wrote in the last 24 hours, the conversation locked `FOR UPDATE`, the automation ended as
+  `api_replied`, the message marked with its key, one signed send job per idempotency key). The
+  limits are `INTERACTIVE_LIMITS` (`messaging/interactive.ts`, from research M-157, M-159, M-179),
+  checked by the request schemas together with unique titles and ids, 10 rows in all and ids not
+  starting with `w360`; `replyButtonsInteractive` and `listInteractive` build the Graph `interactive`
+  object, and `replyButtonsContent` and `listContent` what the inbox stores (no ids). A tap's
+  `reply` (webhooks and the API's messages, `tappedReplySchema`) carries `type` and a row's
+  `description` from the stored `interactiveType` and reply.
+- **Webhook endpoints through the API (ADR-081):** `createApiWebhookEndpoints`
+  (`api/webhook-endpoints.ts`) serves `/webhook-endpoints` for `webhooks.manage` keys with the
+  settings service's own steps (`checkedWebhookUrl`, `insertWebhookEndpoint` under the company's
+  endpoint lock, `lockWebhookEndpoint`, `rotateWebhookEndpointSecret`,
+  `setWebhookEndpointEnabled`), limited to endpoints whose `created_by_api_key_id` is set (keys see
+  and manage only what keys added). Adding and rotating run inside `idempotent`, whose `kept`
+  argument stores the response with `secret: null` for replays. Adding queues a `tenant.notice` to
+  owners and administrators (`deletionRecipients`) in the same transaction; audit rows name the key.
+- **Quotes and reactions through the API (ADR-082):** `replyTo` on a text, buttons or a list, and
+  `type` `reaction` (`apiSendReaction`), take the same path as other replies (`sendReply`); after
+  the conversation is locked, `answeredMessage` finds the named message in that conversation and
+  `answerProblem` (`messaging/reply-context.ts`) decides whether it can be quoted (a WhatsApp id,
+  not a reaction or a notice, a business message accepted and not failed) or reacted to (the
+  contact's, from the last 30 days). A quote adds `context.message_id` to the Graph request and
+  keeps the id in `context_external_id`; a reaction stores `{emoji, message_id}` as inbound
+  reactions do, and does not end the automation. Reading, the message a message answers is joined
+  by WhatsApp id within the conversation (`answeredMessages`, `answeredJoin`: a reaction's
+  `content->>'message_id'`, otherwise `context_external_id`, on `messages_external_uq`), for the
+  API's messages, `GET /messages/{id}` and the inbox thread (`messageSnippet`,
+  `messaging/message-text.ts`); the `message.received` payload looks it up when delivered
+  (`findAnsweredMessageId`).
+- **Webhook deliveries through the API (ADR-083):** `createApiWebhookEndpoints` also serves an
+  endpoint's deliveries (`GET /webhook-endpoints/{id}/deliveries`, exact keyset pages on
+  `(created_at, id)`, optionally by state), one delivery (`GET /webhook-deliveries/{id}`), test
+  events (`POST /webhook-endpoints/{id}/test`) and replays (`POST /webhook-deliveries/{id}/replay`),
+  for endpoints whose `created_by_api_key_id` is set. The settings service shares its steps:
+  `queueWebhookTest` inserts a `ping` event and its delivery for an endpoint locked and on;
+  `replayWebhookDelivery` finds the delivery (with `keysOnly`, only one to an endpoint a key
+  added), locks the endpoint, refuses a delivery still being attempted or an endpoint that is off,
+  and inserts a new delivery of the same event with `replay_of`; both lists select
+  `webhookDeliveryColumns` joined to the event (`deliveryEventJoin`). Test events and replays run
+  inside `idempotent`; a replay's audit row names the key.
+- **Replaying failed deliveries (ADR-095):** `replayFailedWebhookDeliveries` (webhooks service)
+  locks the endpoint (refused when off), selects for each event the latest failed delivery to it
+  queued since the given time (`DISTINCT ON (event_id)` over `webhook_deliveries_endpoint_idx`),
+  drops `event_gone` failures, `ping` events and events with any delivery to the endpoint that did
+  not fail (`webhook_deliveries_event_idx`), and inserts up to `WEBHOOK_LIMITS.replayBatch` (500)
+  new deliveries oldest event first, reading one more row to say whether more remain. Settings
+  (`webhooks.replayFailed`, a period) and the API (`POST /webhook-endpoints/{id}/replay-failed`,
+  `since`, inside `idempotent`, `keysOnly`) call it and audit once per call.
+- **Notes through the API (0060–0062, ADR-084):** `POST /conversations/{id}/notes` with
+  `conversations.write` (`apiAddConversationNote`, `api/conversations.ts`) runs inside `idempotent`:
+  it locks the conversation `FOR UPDATE` (the order erasure takes), checks that it is visible (the
+  contact not erased), inserts the note with `author_api_key_id` and emits `conversation.note`. The
+  inbox thread reads notes with left joins to the member and the key (`authorName`, `apiKeyName`);
+  `NOTE_MAX_LENGTH` (`messaging/notes.ts`) bounds members' notes and keys' alike.
+  `conversation_notes_author` keeps exactly one author, `conversation_notes_api_key_fk` ties the key
+  to the company, and `conversation_notes_api_key_idx` (0061, built concurrently) serves the foreign
+  key.
+- **Products through the API (ADR-086):** `POST /messages` with `type` `product`,
+  `product_list` or `catalog` (`apiSendProducts`) takes the same path as other replies
+  (`sendReply`), with two additions: a `precheck` run first in the transaction refuses a plan
+  without Commerce (`loadEntitlements`, reason `not_in_plan`), and the reply's `build` resolves the
+  content ids against the catalogs of the sending number's WhatsApp account (`catalogProducts`: not
+  disconnected, not removed at Meta, all in one catalog, `catalogId` choosing between catalogs that
+  share an id). `productInteractive` (`commerce/model.ts`) builds the Graph `interactive` object for
+  the inbox and the API alike, and the message stores `content.products` as the inbox's product
+  sends do.
+- **Message feed (ADR-088):** `GET /messages` (`apiListMessages`, `conversations.read`) pages the
+  company's messages across conversations newest first on exact keyset cursors, joined to their
+  conversation and contact (erased contacts' conversations left out), with `direction`,
+  `channelId` (the message's own `channel_account_id`) and `since`. Each message is built by
+  `toApiMessage`, shared with a conversation's messages. `messages_tenant_created_idx` (0008) serves
+  the order; since the filters are not in it, a page reads at most `API_MESSAGE_FEED_WINDOW` (2,000)
+  messages: a first read finds the window's last message (`OFFSET 1999`), the second reads the
+  matches between it and the cursor, and both run in one repeatable-read, read-only transaction. A
+  short page's cursor is the window's last message.
+- **Reading notes (ADR-089):** `GET /conversations/{id}/notes` (`apiListConversationNotes`,
+  `conversations.read`) checks the conversation is visible (the contact not erased), then pages
+  `conversation_notes` newest first on exact keyset cursors. `writtenBy` comes from which author
+  column is set (`author_api_key_id` for a key, `author_membership_id` for a member; the database
+  keeps exactly one); member ids and `note_mentions` are never read.
+- **Assigning and moving conversations (ADR-093):** `PATCH /conversations/{id}`
+  (`apiUpdateConversation`, `conversations.write`) takes `status`, `assigneeId` and `teamId` and,
+  with the conversation row locked, changes the team, then the member, then the status, each as the
+  inbox does (events, audit as the key, `endRunForHuman` for an assignment). A member is checked and
+  locked for share by `lockAssignableMember` and a team by `lockTeam` (`inbox/routing.ts`), which the
+  inbox's `assign` and `setTeam` use too; a team move without a member ends with `routeConversation`.
+  `GET /members` and `GET /teams` (`api/members.ts`, `conversations.read`) page the members routing
+  would take (active, `INBOX_WORKER_ROLES`) and the teams, oldest first on exact keyset cursors.
 - **Keyset cursors** (`encodeKeysetCursor`, `exactTimestamp`): a cursor carries the last row's
   timestamp as PostgreSQL keeps it, to the microsecond, and its id, and pages compare
   `(time, id) < (cursor time, cursor id)`; cursors made with milliseconds still read. Cursors built
@@ -887,6 +1022,14 @@ true`); the same key with another request (method, path and body hashed) answers
   up answers 429 `rate_limited` with reason `quota_exceeded` and `Retry-After` until the next
   period. The minute plan sweep emails the billing managers once per period
   (`ops.api_quota_reached`), and once before, at 80% of the limit (ADR-062).
+- **API scopes by plan (0069, ADR-092):** `ops.plans.api_scopes` is empty for every scope or the
+  scopes the version includes; `app.tenant_entitlements` returns them. `admitApiRequest` takes the
+  authenticated key (`ApiKeyContext`) and returns the request's `ApiContext` with `planScopes`, so
+  a handler only runs with a context admitted under the plan. `hasScope`, `assertScope` and
+  `assertAnyScope` (`api/context.ts`) check the key's scopes, then the plan's (403 `not_in_plan`),
+  then the company's status for writing scopes. Creating a key checks its scopes against the plan
+  (`assertScopesInPlan`); rotating keeps them. `authenticateApiToken`, used by the tests, loads the
+  plan's scopes without counting a request.
 - **OpenAPI** (`api/openapi.ts`): `GET /api/v1/openapi.json` (no key; cacheable 5 minutes) is built
   from the zod schemas that validate requests; a unit test checks it against the route handlers.
 - **Expiry reminders (0040, ADR-067):** the minute messaging sweep (`api/expiry-reminders.ts`) lists,
@@ -928,6 +1071,42 @@ true`); the same key with another request (method, path and body hashed) answers
   role in the company's scope, or a definer function such as `app.erase_contact`), so row security
   keeps each event in its row's company, and a rolled-back change leaves none. A delivery insert
   sends an empty `w360_webhooks` notification.
+- **Conversation and contact events** (migrations 0047–0049, ADR-074): triggers on
+  `app.conversations` (`conversation.status_changed` with the status before;
+  `conversation.assignment_changed` for every change of the member and, since 0070 (ADR-094),
+  `conversation.team_changed` for every change of the team, each with the ids before and after and
+  stamped with the time it is captured), `app.contacts` (`contact.created`; `contact.updated` for the name, number or email;
+  `contact.erased`) and `app.contact_tags` (`contact.updated`). Contact events go through
+  `app.capture_contact_webhook_event`: `contact.created` and `contact.updated` are captured when an
+  active endpoint takes either, once per contact and top-level transaction (`captured_xact`, found
+  by a partial index built concurrently), and `contact.erased` first deletes what its own
+  transaction captured for the contact, so an erasure (which removes the tags first) sends only
+  that. Their payloads are built when delivered: conversation events as the message events are,
+  contact events with the API's contact (`api/contact-view.ts`, shared with the public API) and
+  `erased`, an erased contact keeping its id, source and creation time only.
+- **Automation run events** (migrations 0055–0056, ADR-078): triggers on `app.automation_runs`
+  capture `automation.run_started` when a live run is inserted and `automation.run_ended` when one
+  moves from running or waiting to an ended status, through `app.capture_webhook_event` (the run and
+  automation ids, and the end reason, in `detail`). Test runs send nothing. Their payloads are built
+  when delivered: the run (what started it, the API key for `api` runs, the automation's name now,
+  the status and end as captured), the conversation id, the contact and the number; never the run's
+  answers or inputs.
+- **Order events** (migrations 0063–0064, ADR-085): triggers on `app.commerce_orders` capture
+  `order.received` when a WhatsApp order is recorded and `order.status_changed` when an update
+  changes its status (a member, or the payment worker applying a Payment Link's outcome), through
+  `app.capture_webhook_event` (the order id, and the status before a change, in `detail`). Erasure
+  clears the note without touching the status, so it captures nothing. Their payloads are built
+  when delivered: the order with its items in cart order and amounts in minor units (the statuses
+  as captured, the note null once erased), the conversation id, the contact and the number; never
+  Payment Link or Razorpay payment details. Store orders send nothing.
+- **Campaign events** (migrations 0065–0066, ADR-087): a trigger on `app.campaigns` captures
+  `campaign.status_changed` when an update changes a campaign's status (a member submitting,
+  withdrawing, rejecting, approving, pausing, resuming or cancelling it, or the runner starting,
+  pausing or completing it), through `app.capture_webhook_event` (the campaign id, the status before
+  it and a pause or completion reason, in `detail`), stamped with `clock_timestamp()` so that a
+  start and a pause made in one runner transaction keep their order. Their payloads are built when
+  delivered: the campaign's name, template, times and counters now, the statuses and reason as
+  captured, and the number; never a recipient or a member.
 - **Dispatch:** the worker's LISTEN connection (`apps/worker/src/webhook-listener.ts`) turns a
   notification into a lookup of active companies with due deliveries (`ops.webhook_dispatch_due`,
   SECURITY DEFINER), at most one lookup every 250 ms; the per-minute messaging sweep does the same
@@ -937,15 +1116,15 @@ true`); the same key with another request (method, path and body hashed) answers
 - **Delivery** (`webhooks/delivery.ts`): the job claims up to 10 due deliveries (`FOR UPDATE SKIP
 LOCKED`; pending ones due now, then `delivering` ones whose lease expired), builds each payload
   from the company's current data (`webhooks/payloads.ts`; an erased contact has no number or name,
-  a message that no longer exists ends the delivery as `event_gone`), signs it, sets the lease (the
-  10 s egress deadline plus 35 s) and commits. The POSTs go through the egress client (DNS pinned,
-  private, loopback, link-local, metadata and reserved addresses refused, no redirects, 64 KB sent,
-  responses read up to 256 KB and discarded) with no transaction open. Each outcome is recorded in
-  its own transaction, locking the endpoint before the delivery; an outcome whose attempt no longer
-  owns the delivery (lease expired and re-claimed, or the endpoint deleted) is dropped. A 2xx answer
-  succeeds; anything else is retried at 1 min, 5 min, 30 min, 2 h, 6 h, 12 h and 24 h, and the eighth
-  failure fails the delivery; an interrupted delivery with no attempt left fails as `interrupted`.
-  After 200 attempts a job queues its successor.
+  a message, conversation, contact, run or order that is gone ends the delivery as `event_gone`),
+  signs it, sets the lease (the 10 s egress deadline plus 35 s) and commits. The POSTs go through the
+  egress client (DNS pinned, private, loopback, link-local, metadata and reserved addresses refused,
+  no redirects, 64 KB sent, responses read up to 256 KB and discarded) with no transaction open.
+  Each outcome is recorded in its own transaction, locking the endpoint before the delivery; an
+  outcome whose attempt no longer owns the delivery (lease expired and re-claimed, or the endpoint
+  deleted) is dropped. A 2xx answer succeeds; anything else is retried at 1 min, 5 min, 30 min, 2 h,
+  6 h, 12 h and 24 h, and the eighth failure fails the delivery; an interrupted delivery with no
+  attempt left fails as `interrupted`. After 200 attempts a job queues its successor.
 - **Signing:** `W360-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256 of "<t>.<body>">`, one `v1` per
   secret (the previous secret also signs for 24 hours after a rotation), with `W360-Event-Id`,
   `W360-Event-Type`, `W360-Delivery-Id`, `W360-Delivery-Attempt` and `User-Agent:
@@ -999,17 +1178,35 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
 - **Health and signals** (`platform/ops-model.ts`) are pure functions over those facts with HyFib's
   own thresholds (ADR-054): a company is `critical`, `warning` or `ok`, and a signal asks for a
   review; nothing is suspended automatically.
-- **Repairs:** retrying a Meta or Razorpay receipt that failed all attempts or was quarantined, while
-  its body is still kept (`ops.platform_retry_webhook_receipt`: back to pending with no attempts;
-  the minute sweep processes it again, idempotently), and resolving a quarantine entry with a
-  written resolution. Both need a reason and write `ops.platform_audit_events` in the same
-  transaction.
+- **Repairs:** retrying a Meta or Razorpay receipt that used all its attempts (it failed the 12th, or
+  its worker stopped during it: `ops.webhook_receipt_exhausted`, migration 0068) or was
+  quarantined, while its body is still kept (`ops.platform_retry_webhook_receipt`: back to pending
+  with no attempts; the minute sweep processes it again, idempotently), and resolving a quarantine
+  entry with a written resolution. Both need a reason and write `ops.platform_audit_events` in the
+  same transaction.
+- **Failure alerts** (ADR-091, migration 0068, `platform/failure-alerts.ts`): the minute messaging
+  sweep emails every platform administrator about each dead letter, each receipt that used all its
+  attempts and each unresolved quarantine entry, once (`alerted_at` marks set by
+  `ops.mark_failure_alert` in the transaction that queues the emails) and at most every 15 minutes
+  (`ops.platform_alerts`), with counts by queue, provider and reason only. A retry clears the
+  receipt's mark. The console shows when staff were emailed about each item and when the last alert
+  went out.
+- **Queue waits** (ADR-096, migration 0072, `platform/queue-waits.ts`): after the failure alert, the
+  minute messaging sweep reads, for each queue the catalog declares, the jobs pg-boss would hand to a
+  worker (`state < 'active'`, due, not held by a dependency: pg-boss's partial claim index serves it)
+  and the oldest one's due time, and records them with the queue's `maxWaitMinutes` through
+  `ops.record_queue_waits` into `ops.queue_waits` (late at the limit, until under half of it).
+  `alertLateQueues` then marks late queues not yet told through `ops.mark_queue_alert` (at most every
+  15 minutes, `ops.platform_alerts` kind `queues`; fresh checks only) in the transaction that queues
+  one `platform.notice` email to every platform administrator. The Queues tab and the overview read
+  `ops.queue_waits` as the platform role.
 - **Web:** `/platform/ops` (Overview, Onboarding, Integrations, Queues, Signals, Usage over 7, 30 or
   90 days) and a health card on each company's platform page. Every page re-checks the platform
   actor. The functions read every company on each view, which suits the test envelope; paging and
   precomputed rollups come with growth.
-- **Not built yet:** alerts, trends, quality updates from Meta's quality webhook, API request counts,
-  exports, the age of the oldest waiting job, redrive from the console, and acknowledging issues.
+- **Not built yet:** other alerts (a company's failing integrations) and other channels, trends,
+  quality updates from Meta's quality webhook, API request counts, exports, redrive from the
+  console, and acknowledging issues.
 
 ## 6Q. Company export and deletion **[built — providers verified against the local Graph, Shopify and Razorpay stand-ins only]**
 
@@ -1028,6 +1225,17 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   company in `pending_deletion`, which the permission layer treats like a suspension; the company
   layout shows a banner. `app.cancel_tenant_deletion` restores the status (a suspension stays, a
   lapsed plan restricts) until the run starts.
+- **Staff deletion** (ADR-090, migration 0067, `platform/service.ts`): a platform owner schedules
+  a deletion from the company's platform page (typed address, a reason the company reads) through
+  `ops.platform_request_tenant_deletion`, and cancels one staff scheduled through
+  `ops.platform_cancel_tenant_deletion`; the register records `requested_by`, the reason,
+  `cancelled_by` and the cancel reason, and whoever scheduled a deletion cancels it (the owners'
+  function refuses staff deletions). Both cancel functions restore the status through
+  `ops.tenant_status_after_deletion`. The worker's minute billing sweep emails the owners and
+  administrators (`notifyStaffDeletions`: `ops.tenant_deletion_notices_due`, then
+  `app.tenant_deletion_mark_notified` in the company's scope with the emails), because the platform
+  role cannot queue email. The banner, Settings → Company data and the final email name HyFib and
+  its reason instead of an owner.
 - **Run** (`tenancy/deletion-run.ts`, worker `handlers/tenancy.ts`): the minute billing sweep calls
   `ops.tenant_deletions_due` and queues a signed `tenant.delete` job per company (`exclusive`,
   singleton per company, retried with backoff). A run calls `ops.start_tenant_deletion` (first time:
@@ -1048,11 +1256,13 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   plan payments, the register, support
   grants and security events (the catalog tests list them); people's accounts.
 - **Web:** Settings → Company data (owners: export link, deletion form with the typed address, the
-  pending state with the due date and a cancel button, the started state); the platform company page
-  shows the register (dates, runs, rows deleted, provider outcomes).
+  pending state with the due date and a cancel button, or HyFib's reason without one, the started
+  state); the platform company page shows the register (dates, runs, rows deleted, provider
+  outcomes, who scheduled and cancelled it and why) and, for platform owners, the forms to schedule
+  and cancel a staff deletion.
 - **Step-up:** exporting and asking for the deletion need a sign-in within the last 15 minutes
   (ADR-056).
-- **Not built yet:** staff-started deletion, stored exports and other formats.
+- **Not built yet:** stored exports and other formats.
 
 ## 7. Commercial model and billing **[built: plans and entitlements, paying for plans by Razorpay subscription, wallet, top-ups, auto-recharge, statements and receipts, usage and rates, staff refunds of unused credit, daily settlement reconciliation — verified against a local Razorpay stand-in only; tax invoices planned]**
 
@@ -1215,6 +1425,33 @@ payment_requested → succeeded`; before each provider call it is written as `un
   definer functions that settle the hold. A due company deletion waits until no refund is open
   (the worker checks before it starts). Statements label the hold "Reserved for a refund" and its
   release "Refund reservation released"; the Billing page and the receipt show refunds in progress.
+
+- **Refund requests from companies and the platform refunds list (0046, ADR-073) [built]:** a
+  member with `billing.manage` and a sign-in within 15 minutes asks from a paid top-up's receipt for
+  a refund of part or all of it, with a reason (10 to 1,000 characters). The service takes a
+  per-company advisory lock, counts the company's requests of the last 24 hours (at most 5) and
+  checks the top-up, what is left of it, a refund of it in progress and the unused credit
+  (`wallet_available`); a company being deleted cannot ask. It inserts the open request with only
+  the columns the company role may insert (a column grant: an inserted row is always `open`, with no
+  decision), and the partial unique index `credit_refund_requests_one_open_uq` keeps one open
+  request per top-up. The company can withdraw an open request (a restrictive policy lets its role
+  move `open` only to `withdrawn`). A request moves no money and holds no credit.
+  `/platform/refunds` lists the requests (open, decided or all) with the company, the top-up, its
+  payment date, what is left of it, the company's unused credit now and whether a refund of it is
+  running (`ops.platform_credit_refund_requests`), and every refund of service credit across
+  companies (`ops.platform_credit_refunds`), both newest first on exact keyset pages (the request
+  time as microsecond text and the id, ADR-072). Operators read; only a platform owner decides.
+  `ops.platform_decide_credit_refund_request` locks the open request. Approving calls
+  `ops.platform_request_credit_refund` (ADR-058) for the request's amount in the same transaction, so
+  every check runs again under its locks, and links the refund; a request that no longer fits is
+  refused with the reason and stays open. Declining needs a note the company reads. Both are in the
+  platform audit log. The minute billing sweep emails platform owners once about requests not yet
+  announced (a count only; `ops.credit_refund_requests_mark_announced` marks them in the
+  transaction that queues the emails, and nothing is marked while there is no platform owner), and
+  a company's billing managers once about a declined request, with the note
+  (`app.credit_refund_request_mark_decline_notified`, in the company's own scope). An approved
+  request needs no email of its own: the refund's emails follow. The receipt shows the requests,
+  the decision note and the refund's state; who decided is platform-only (no column grant).
 
 - **Daily settlement reconciliation (0034, ADR-059) [built]:** the minute billing sweep calls
   `ops.settlement_recon_due` with the latest day it may reconcile (the previous day in India from

@@ -25,12 +25,14 @@ import {
   RazorpayClient,
   createApiKeysService,
   createWebhooksService,
+  createApiWebhookEndpoints,
   createAutomationService,
   createCommerceService,
   createStoreService,
   createStoreMessagesService,
   createCrmService,
   createBillingService,
+  createRefundRequestsService,
   createBillingHistoryService,
   createBusinessHoursService,
   createCampaignsService,
@@ -65,11 +67,13 @@ import {
   type TenantContext,
   type ApiKeysService,
   type WebhooksService,
+  type ApiWebhookEndpoints,
   type AutomationService,
   type CommerceService,
   type CrmService,
   type BillingService,
   type BillingHistoryService,
+  type RefundRequestsService,
   type BusinessHoursService,
   type CampaignsService,
   type CsatService,
@@ -161,6 +165,8 @@ export interface Runtime {
   apiKeys: ApiKeysService;
   /** Company webhook endpoints and their deliveries (Settings → Webhooks). */
   webhooks: WebhooksService;
+  /** Webhook endpoints API keys add and manage (ADR-081). */
+  apiWebhookEndpoints: ApiWebhookEndpoints;
   reports: ReportsService;
   automations: AutomationService;
   /** Domains and secrets for the automation HTTP step. */
@@ -191,6 +197,8 @@ export interface Runtime {
   /** Paying for plans with Razorpay Subscriptions (ADR-063). */
   planPayments: PlanSubscriptionService;
   billingHistory: BillingHistoryService;
+  /** Refunds of unused credit asked for by the company (ADR-073). */
+  refundRequests: RefundRequestsService;
   events: TenantEventHub;
   shutdown(): Promise<void>;
 }
@@ -306,12 +314,20 @@ async function init(): Promise<Runtime> {
     razorpay: razorpayClient,
   });
   const apiKeys = createApiKeysService({ db, clock: systemClock });
+  // http:// and loopback endpoints only where configuration allows them (local and test).
+  const webhookEgress = { allowLoopbackForTests: config.W360_EGRESS_ALLOW_LOOPBACK ?? false };
   const webhooks = createWebhooksService({
     db,
     clock: systemClock,
     keyring,
-    // http:// and loopback endpoints only where configuration allows them (local and test).
-    egressPolicy: { allowLoopbackForTests: config.W360_EGRESS_ALLOW_LOOPBACK ?? false },
+    egressPolicy: webhookEgress,
+  });
+  const apiWebhookEndpoints = createApiWebhookEndpoints({
+    ...outbox,
+    db,
+    clock: systemClock,
+    egressPolicy: webhookEgress,
+    appBaseUrl: config.APP_BASE_URL,
   });
   const reports = createReportsService({ db, clock: systemClock });
   const automations = createAutomationService({
@@ -412,6 +428,7 @@ async function init(): Promise<Runtime> {
     notices: { outbox, appBaseUrl: config.APP_BASE_URL },
   });
   const billingHistory = createBillingHistoryService({ db, clock: systemClock });
+  const refundRequests = createRefundRequestsService({ db, clock: systemClock });
   const events = createTenantEventHub({ connectionString: config.DATABASE_URL_APP, logger });
 
   logger.info({ env: config.APP_ENV }, 'web runtime initialised');
@@ -450,6 +467,7 @@ async function init(): Promise<Runtime> {
     planAdmin,
     apiKeys,
     webhooks,
+    apiWebhookEndpoints,
     reports,
     automations,
     webRequests,
@@ -468,6 +486,7 @@ async function init(): Promise<Runtime> {
     billing,
     planPayments,
     billingHistory,
+    refundRequests,
     events,
     async shutdown() {
       await events.close();

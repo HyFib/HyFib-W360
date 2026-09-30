@@ -111,6 +111,7 @@ export function AutomationSimulator({
   teams,
   templates,
   storeEvent,
+  apiInputs,
 }: {
   /** Null when the steps have structural errors. */
   graph: AutomationGraph | null;
@@ -119,6 +120,8 @@ export function AutomationSimulator({
   templates: EditorTemplate[];
   /** Started by order messages: the run reads a sample order. */
   storeEvent: boolean;
+  /** Started through the API: the run starts with a sample value for each input. */
+  apiInputs: string[] | null;
 }) {
   // The simulated contact's fields stay disabled until hydration (see useHydrated).
   const hydrated = useHydrated();
@@ -291,7 +294,13 @@ export function AutomationSimulator({
   const start = () => {
     setEntries([]);
     setStatus('idle');
-    const first = initialRunState(graph);
+    // A call gives every input; the simulator gives each a sample value (ADR-077).
+    const first = {
+      ...initialRunState(graph),
+      variables: Object.fromEntries(
+        (apiInputs ?? []).map((input) => [`input.${input}`, `sample ${input}`]),
+      ),
+    };
     process(first, { kind: 'continue' }, [{ who: 'note', text: 'Started.' }]);
   };
 
@@ -589,6 +598,15 @@ export function AutomationSimulator({
           />
           Business is open
         </label>
+        {apiInputs && apiInputs.length > 0 ? (
+          <div className="grid gap-1 text-xs text-muted-foreground">
+            <p className="font-medium text-foreground">Sample inputs</p>
+            <p>
+              {apiInputs.map((input) => `${input}: “sample ${input}”`).join(', ')}, as if a call
+              gave them.
+            </p>
+          </div>
+        ) : null}
         {storeEvent ? (
           <div className="grid gap-1 text-xs text-muted-foreground">
             <p className="font-medium text-foreground">Sample order</p>

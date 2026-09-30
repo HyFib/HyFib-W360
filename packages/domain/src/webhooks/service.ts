@@ -4,9 +4,11 @@ import { AppError, notFound, uuidv7, type Clock, type Keyring } from '@w360/core
 import { EgressError, parseEgressUrl, type EgressPolicy } from '@w360/core/egress';
 import {
   and,
+  apiKeys,
   desc,
   eq,
   gt,
+  isNotNull,
   sql,
   users,
   webhookDeliveries,
@@ -21,7 +23,7 @@ import { recordAudit, type RequestMeta } from '../audit';
 import { assertCan, type TenantContext } from '../authz/context';
 import { assertRecentSignIn } from '../authz/step-up';
 import { parseInput } from '../validation';
-import { WEBHOOK_EVENT_KEYS, WEBHOOK_LIMITS, webhookHost } from './model';
+import { WEBHOOK_EVENT_KEYS, WEBHOOK_LIMITS, WEBHOOK_REPLAY_PERIODS, webhookHost } from './model';
 
 /** Binds an endpoint's secret to its company, the endpoint and the secret's version. */
 export const webhookSecretAad = (tenantId: string, endpointId: string, version: number) =>
@@ -32,7 +34,7 @@ export function generateWebhookSecret(): string {
   return `whsec_${randomBytes(32).toString('base64url')}`;
 }
 
-const eventTypesSchema = z
+export const webhookEventTypesSchema = z
   .array(z.enum(WEBHOOK_EVENT_KEYS, { error: 'Choose events from the list' }))
   .min(1, 'Choose at least one event')
   .transform((chosen) => WEBHOOK_EVENT_KEYS.filter((e) => chosen.includes(e)));
@@ -49,12 +51,18 @@ const endpointSchema = z.object({
     .max(WEBHOOK_LIMITS.descriptionLength, 'Keep the description under 200 characters')
     .optional()
     .default(''),
-  eventTypes: eventTypesSchema,
+  eventTypes: webhookEventTypesSchema,
 });
 const endpointIdSchema = z.object({ endpointId: z.uuid() });
 const updateSchema = endpointSchema.extend({ endpointId: z.uuid() });
 const enabledSchema = endpointIdSchema.extend({ enabled: z.boolean() });
 const deliveryIdSchema = z.object({ deliveryId: z.uuid() });
+const replayFailedSchema = endpointIdSchema.extend({
+  period: z.enum(
+    WEBHOOK_REPLAY_PERIODS.map((p) => p.key),
+    { error: 'Choose a period from the list' },
+  ),
+});
 
 export interface WebhookEndpointView {
   id: string;
@@ -71,13 +79,17 @@ export interface WebhookEndpointView {
   /** Until when the previous secret also signs; null when it no longer does. */
   previousSecretExpiresAt: Date | null;
   createdAt: Date;
+  /** The member who added the endpoint in settings (null once their account is gone). */
   createdBy: string | null;
+  /** The API key that added it through the API (ADR-081). */
+  createdByKey: { name: string; keyPrefix: string } | null;
   /** Deliveries created in the last 24 hours, by state. */
   recent: Record<WebhookDeliveryState, number>;
 }
 
 export interface WebhookDeliveryView {
   id: string;
+  endpointId: string;
   eventId: string;
   eventType: string;
   state: WebhookDeliveryState;
@@ -96,7 +108,10 @@ const invalidUrl = (message: string) =>
   new AppError('validation_failed', message, { issues: [{ path: 'url', message }] });
 
 /** The URL as it will be called, after the egress guard's rules (https, no credentials, ports). */
-function checkedUrl(raw: string, policy: Pick<EgressPolicy, 'allowLoopbackForTests'>) {
+export function checkedWebhookUrl(
+  raw: string,
+  policy: Pick<EgressPolicy, 'allowLoopbackForTests'>,
+) {
   let target: ReturnType<typeof parseEgressUrl>;
   try {
     target = parseEgressUrl(raw, policy);
@@ -121,12 +136,14 @@ async function lockEndpoints(tx: Tx, tenantId: string): Promise<void> {
 /**
  * Locks an endpoint for a change. Writers lock the endpoint before its deliveries. `no key update`
  * (the default) still lets the capture triggers add deliveries meanwhile; deleting needs `update`.
+ * `keysOnly` finds only endpoints API keys created (ADR-081): others are not found.
  */
-async function lockEndpoint(
+export async function lockWebhookEndpoint(
   tx: Tx,
   tenantId: string,
   endpointId: string,
   strength: 'no key update' | 'update' = 'no key update',
+  options: { keysOnly?: boolean } = {},
 ) {
   const [endpoint] = await tx
     .select({
@@ -137,10 +154,120 @@ async function lockEndpoint(
       secretCiphertext: webhookEndpoints.secretCiphertext,
     })
     .from(webhookEndpoints)
-    .where(and(eq(webhookEndpoints.tenantId, tenantId), eq(webhookEndpoints.id, endpointId)))
+    .where(
+      and(
+        eq(webhookEndpoints.tenantId, tenantId),
+        eq(webhookEndpoints.id, endpointId),
+        options.keysOnly ? isNotNull(webhookEndpoints.createdByApiKeyId) : undefined,
+      ),
+    )
     .for(strength);
   if (!endpoint) throw notFound('Webhook endpoint');
   return endpoint;
+}
+
+type LockedWebhookEndpoint = Awaited<ReturnType<typeof lockWebhookEndpoint>>;
+
+/** Who creates an endpoint: a member in settings, or an API key (ADR-081). */
+export type WebhookEndpointCreator = { userId: string } | { apiKeyId: string };
+
+/**
+ * Stores a new endpoint with its first secret, under the company's endpoint lock, refusing one
+ * more than the limit. The URL was checked by `checkedWebhookUrl`. The secret is returned once.
+ */
+export async function insertWebhookEndpoint(
+  tx: Tx,
+  keyring: Keyring,
+  tenantId: string,
+  input: {
+    url: string;
+    description: string | null;
+    eventTypes: WebhookEventType[];
+    creator: WebhookEndpointCreator;
+  },
+): Promise<{ id: string; secret: string }> {
+  await lockEndpoints(tx, tenantId);
+  const [row] = await tx
+    .select({ n: sql<number>`count(*)::int` })
+    .from(webhookEndpoints)
+    .where(eq(webhookEndpoints.tenantId, tenantId));
+  if ((row?.n ?? 0) >= WEBHOOK_LIMITS.endpoints) {
+    throw new AppError(
+      'precondition_failed',
+      `A company can have ${WEBHOOK_LIMITS.endpoints} webhook endpoints. Delete one first.`,
+    );
+  }
+  const id = uuidv7();
+  const secret = generateWebhookSecret();
+  await tx.insert(webhookEndpoints).values({
+    id,
+    tenantId,
+    url: input.url,
+    description: input.description,
+    eventTypes: input.eventTypes,
+    secretCiphertext: keyring.encrypt(secret, webhookSecretAad(tenantId, id, 1)),
+    createdByUserId: 'userId' in input.creator ? input.creator.userId : null,
+    createdByApiKeyId: 'apiKeyId' in input.creator ? input.creator.apiKeyId : null,
+  });
+  return { id, secret };
+}
+
+/**
+ * A new secret for a locked endpoint, returned once. The previous one keeps signing (a second `v1`
+ * signature) for 24 hours, so a receiver can switch without losing deliveries.
+ */
+export async function rotateWebhookEndpointSecret(
+  tx: Tx,
+  keyring: Keyring,
+  tenantId: string,
+  endpoint: LockedWebhookEndpoint,
+  now: Date,
+): Promise<{ secret: string; version: number }> {
+  const secret = generateWebhookSecret();
+  const version = endpoint.secretVersion + 1;
+  await tx
+    .update(webhookEndpoints)
+    .set({
+      secretCiphertext: keyring.encrypt(secret, webhookSecretAad(tenantId, endpoint.id, version)),
+      secretVersion: version,
+      previousSecretCiphertext: endpoint.secretCiphertext,
+      previousSecretExpiresAt: new Date(
+        now.getTime() + WEBHOOK_LIMITS.previousSecretHours * 3_600_000,
+      ),
+      updatedAt: now,
+    })
+    .where(and(eq(webhookEndpoints.tenantId, tenantId), eq(webhookEndpoints.id, endpoint.id)));
+  return { secret, version };
+}
+
+/**
+ * Turns a locked endpoint off (its pending deliveries fail) or on again (health starts afresh).
+ * Nothing changes when it already is; the count of failed deliveries is returned.
+ */
+export async function setWebhookEndpointEnabled(
+  tx: Tx,
+  tenantId: string,
+  endpoint: LockedWebhookEndpoint,
+  enabled: boolean,
+  now: Date,
+): Promise<{ changed: boolean; failed: number }> {
+  if ((endpoint.state === 'active') === enabled) return { changed: false, failed: 0 };
+  await tx
+    .update(webhookEndpoints)
+    .set(
+      enabled
+        ? {
+            state: 'active',
+            disabledReason: null,
+            disabledAt: null,
+            failingSince: null,
+            updatedAt: now,
+          }
+        : { state: 'disabled', disabledReason: 'manual', disabledAt: now, updatedAt: now },
+    )
+    .where(and(eq(webhookEndpoints.tenantId, tenantId), eq(webhookEndpoints.id, endpoint.id)));
+  const failed = enabled ? 0 : await failPendingDeliveries(tx, tenantId, endpoint.id);
+  return { changed: true, failed };
 }
 
 /**
@@ -164,6 +291,168 @@ export async function failPendingDeliveries(
     )
     .returning({ id: webhookDeliveries.id });
   return failed.length;
+}
+
+/** A delivery as Settings → Webhooks and the API list it (ADR-053, ADR-083). */
+export const webhookDeliveryColumns = {
+  id: webhookDeliveries.id,
+  endpointId: webhookDeliveries.endpointId,
+  eventId: webhookDeliveries.eventId,
+  eventType: webhookEvents.type,
+  state: webhookDeliveries.state,
+  attempts: webhookDeliveries.attempts,
+  nextAttemptAt: webhookDeliveries.nextAttemptAt,
+  lastAttemptAt: webhookDeliveries.lastAttemptAt,
+  lastStatusCode: webhookDeliveries.lastStatusCode,
+  lastError: webhookDeliveries.lastError,
+  lastDurationMs: webhookDeliveries.lastDurationMs,
+  deliveredAt: webhookDeliveries.deliveredAt,
+  replayOf: webhookDeliveries.replayOf,
+  createdAt: webhookDeliveries.createdAt,
+};
+
+/** The join from a delivery to its event, which every delivery has. */
+export const deliveryEventJoin = and(
+  eq(webhookEvents.tenantId, webhookDeliveries.tenantId),
+  eq(webhookEvents.id, webhookDeliveries.eventId),
+);
+
+/**
+ * Queues a `ping` event for an endpoint the caller locked, which must be on (settings, and keys
+ * for the endpoints keys added, ADR-083).
+ */
+export async function queueWebhookTest(
+  tx: Tx,
+  tenantId: string,
+  endpoint: Pick<LockedWebhookEndpoint, 'id' | 'state'>,
+): Promise<{ eventId: string; deliveryId: string }> {
+  if (endpoint.state !== 'active') {
+    throw new AppError('precondition_failed', 'Turn the endpoint on to send it a test event.');
+  }
+  const eventId = uuidv7();
+  const deliveryId = uuidv7();
+  await tx.insert(webhookEvents).values({ id: eventId, tenantId, type: 'ping', detail: {} });
+  await tx
+    .insert(webhookDeliveries)
+    .values({ id: deliveryId, tenantId, endpointId: endpoint.id, eventId });
+  return { eventId, deliveryId };
+}
+
+/**
+ * Delivers a finished delivery's event again, as a new delivery to the same endpoint, which must
+ * be on; the endpoint is locked first. With `keysOnly`, only deliveries to endpoints keys added
+ * are found (ADR-083): any other is refused as unknown, like one that does not exist.
+ */
+export async function replayWebhookDelivery(
+  tx: Tx,
+  tenantId: string,
+  deliveryId: string,
+  options: { keysOnly?: boolean } = {},
+): Promise<{ endpoint: LockedWebhookEndpoint; deliveryId: string }> {
+  const [delivery] = await tx
+    .select({
+      endpointId: webhookDeliveries.endpointId,
+      eventId: webhookDeliveries.eventId,
+      state: webhookDeliveries.state,
+    })
+    .from(webhookDeliveries)
+    .innerJoin(
+      webhookEndpoints,
+      and(
+        eq(webhookEndpoints.tenantId, webhookDeliveries.tenantId),
+        eq(webhookEndpoints.id, webhookDeliveries.endpointId),
+      ),
+    )
+    .where(
+      and(
+        eq(webhookDeliveries.tenantId, tenantId),
+        eq(webhookDeliveries.id, deliveryId),
+        options.keysOnly ? isNotNull(webhookEndpoints.createdByApiKeyId) : undefined,
+      ),
+    );
+  if (!delivery) throw notFound('Delivery');
+  const endpoint = await lockWebhookEndpoint(tx, tenantId, delivery.endpointId);
+  if (!(['succeeded', 'failed'] as WebhookDeliveryState[]).includes(delivery.state)) {
+    throw new AppError('conflict', 'This delivery is still being attempted.');
+  }
+  if (endpoint.state !== 'active') {
+    throw new AppError('precondition_failed', 'Turn the endpoint on to replay deliveries.');
+  }
+  const newId = uuidv7();
+  await tx.insert(webhookDeliveries).values({
+    id: newId,
+    tenantId,
+    endpointId: delivery.endpointId,
+    eventId: delivery.eventId,
+    replayOf: deliveryId,
+  });
+  return { endpoint, deliveryId: newId };
+}
+
+/** What a replay of an endpoint's failed deliveries queued (ADR-095). */
+export interface WebhookFailedReplay {
+  /** New deliveries queued, one per event. */
+  queued: number;
+  /** Whether more failed deliveries were left for another call. */
+  more: boolean;
+}
+
+/**
+ * Delivers again, as new deliveries to the same endpoint (which must be on), every event whose
+ * deliveries to it all failed, from deliveries queued since `since`: one per event, replaying its
+ * latest failed delivery, oldest event first, at most `WEBHOOK_LIMITS.replayBatch` (ADR-095). Left
+ * out: events delivered since or with a delivery still waiting or being attempted (a replay already
+ * queued included), deliveries that failed because what the event names no longer exists
+ * (`event_gone`, which would fail again at once) and test events. The endpoint is locked first, so
+ * calls at the same time queue each event once. With `keysOnly`, only endpoints keys added are found
+ * (ADR-083).
+ */
+export async function replayFailedWebhookDeliveries(
+  tx: Tx,
+  tenantId: string,
+  endpointId: string,
+  since: Date,
+  options: { keysOnly?: boolean } = {},
+): Promise<WebhookFailedReplay & { endpoint: LockedWebhookEndpoint }> {
+  const endpoint = await lockWebhookEndpoint(tx, tenantId, endpointId, 'no key update', options);
+  if (endpoint.state !== 'active') {
+    throw new AppError('precondition_failed', 'Turn the endpoint on to replay deliveries.');
+  }
+  const failed = await tx.execute<{ id: string; event_id: string }>(sql`
+    select f.id, f.event_id
+      from (
+        select distinct on (d.event_id) d.id, d.event_id, d.last_error
+          from app.webhook_deliveries d
+         where d.tenant_id = ${tenantId} and d.endpoint_id = ${endpointId}
+           and d.state = 'failed' and d.created_at >= ${since.toISOString()}::timestamptz
+         order by d.event_id, d.created_at desc, d.id desc
+      ) f
+      join app.webhook_events e on e.tenant_id = ${tenantId} and e.id = f.event_id
+     where f.last_error is distinct from 'event_gone'
+       and e.type <> 'ping'
+       and not exists (
+         select 1 from app.webhook_deliveries o
+          where o.tenant_id = ${tenantId} and o.event_id = f.event_id
+            and o.endpoint_id = ${endpointId} and o.state <> 'failed')
+     order by e.created_at, e.id
+     limit ${WEBHOOK_LIMITS.replayBatch + 1}`);
+  const replayed = failed.rows.slice(0, WEBHOOK_LIMITS.replayBatch);
+  if (replayed.length > 0) {
+    await tx.insert(webhookDeliveries).values(
+      replayed.map((row) => ({
+        id: uuidv7(),
+        tenantId,
+        endpointId,
+        eventId: row.event_id,
+        replayOf: row.id,
+      })),
+    );
+  }
+  return {
+    endpoint,
+    queued: replayed.length,
+    more: failed.rows.length > WEBHOOK_LIMITS.replayBatch,
+  };
 }
 
 /**
@@ -203,9 +492,18 @@ export function createWebhooksService(deps: {
               previousSecretExpiresAt: webhookEndpoints.previousSecretExpiresAt,
               createdAt: webhookEndpoints.createdAt,
               createdBy: users.name,
+              keyName: apiKeys.name,
+              keyPrefix: apiKeys.keyPrefix,
             })
             .from(webhookEndpoints)
             .leftJoin(users, eq(users.id, webhookEndpoints.createdByUserId))
+            .leftJoin(
+              apiKeys,
+              and(
+                eq(apiKeys.tenantId, webhookEndpoints.tenantId),
+                eq(apiKeys.id, webhookEndpoints.createdByApiKeyId),
+              ),
+            )
             .where(eq(webhookEndpoints.tenantId, ctx.tenant.id))
             .orderBy(desc(webhookEndpoints.createdAt), desc(webhookEndpoints.id));
           const counts = await tx
@@ -231,8 +529,10 @@ export function createWebhooksService(deps: {
             };
             for (const c of counts) if (c.endpointId === r.id) recent[c.state] = c.n;
             const previousSigns = r.previousSecretExpiresAt && r.previousSecretExpiresAt > now;
+            const { keyName, keyPrefix, ...endpoint } = r;
             return {
-              ...r,
+              ...endpoint,
+              createdByKey: keyName && keyPrefix ? { name: keyName, keyPrefix } : null,
               previousSecretExpiresAt: previousSigns ? r.previousSecretExpiresAt : null,
               recent,
             };
@@ -247,29 +547,13 @@ export function createWebhooksService(deps: {
       assertCan(ctx, 'developer.manage');
       assertRecentSignIn(ctx, clock.now());
       const data = parseInput(endpointSchema, input);
-      const { url, host } = checkedUrl(data.url, deps.egressPolicy);
-      const id = uuidv7();
-      const secret = generateWebhookSecret();
-      await db.run(ctx.scope, async (tx) => {
-        await lockEndpoints(tx, ctx.tenant.id);
-        const [row] = await tx
-          .select({ n: sql<number>`count(*)::int` })
-          .from(webhookEndpoints)
-          .where(eq(webhookEndpoints.tenantId, ctx.tenant.id));
-        if ((row?.n ?? 0) >= WEBHOOK_LIMITS.endpoints) {
-          throw new AppError(
-            'precondition_failed',
-            `A company can have ${WEBHOOK_LIMITS.endpoints} webhook endpoints. Delete one first.`,
-          );
-        }
-        await tx.insert(webhookEndpoints).values({
-          id,
-          tenantId: ctx.tenant.id,
+      const { url, host } = checkedWebhookUrl(data.url, deps.egressPolicy);
+      return db.run(ctx.scope, async (tx) => {
+        const { id, secret } = await insertWebhookEndpoint(tx, keyring, ctx.tenant.id, {
           url,
           description: data.description || null,
           eventTypes: data.eventTypes,
-          secretCiphertext: keyring.encrypt(secret, webhookSecretAad(ctx.tenant.id, id, 1)),
-          createdByUserId: ctx.user.id,
+          creator: { userId: ctx.user.id },
         });
         await recordAudit(
           tx,
@@ -282,17 +566,17 @@ export function createWebhooksService(deps: {
           },
           meta,
         );
+        return { id, secret };
       });
-      return { id, secret };
     },
 
     async update(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
       assertCan(ctx, 'developer.manage');
       assertRecentSignIn(ctx, clock.now());
       const data = parseInput(updateSchema, input);
-      const { url, host } = checkedUrl(data.url, deps.egressPolicy);
+      const { url, host } = checkedWebhookUrl(data.url, deps.egressPolicy);
       await db.run(ctx.scope, async (tx) => {
-        await lockEndpoint(tx, ctx.tenant.id, data.endpointId);
+        await lockWebhookEndpoint(tx, ctx.tenant.id, data.endpointId);
         await tx
           .update(webhookEndpoints)
           .set({
@@ -327,27 +611,15 @@ export function createWebhooksService(deps: {
       const data = parseInput(enabledSchema, input);
       const now = clock.now();
       await db.run(ctx.scope, async (tx) => {
-        const endpoint = await lockEndpoint(tx, ctx.tenant.id, data.endpointId);
-        if ((endpoint.state === 'active') === data.enabled) return;
-        await tx
-          .update(webhookEndpoints)
-          .set(
-            data.enabled
-              ? {
-                  state: 'active',
-                  disabledReason: null,
-                  disabledAt: null,
-                  failingSince: null,
-                  updatedAt: now,
-                }
-              : { state: 'disabled', disabledReason: 'manual', disabledAt: now, updatedAt: now },
-          )
-          .where(
-            and(eq(webhookEndpoints.tenantId, ctx.tenant.id), eq(webhookEndpoints.id, endpoint.id)),
-          );
-        const failed = data.enabled
-          ? 0
-          : await failPendingDeliveries(tx, ctx.tenant.id, endpoint.id);
+        const endpoint = await lockWebhookEndpoint(tx, ctx.tenant.id, data.endpointId);
+        const { changed, failed } = await setWebhookEndpointEnabled(
+          tx,
+          ctx.tenant.id,
+          endpoint,
+          data.enabled,
+          now,
+        );
+        if (!changed) return;
         await recordAudit(
           tx,
           ctx,
@@ -362,36 +634,21 @@ export function createWebhooksService(deps: {
       });
     },
 
-    /**
-     * A new secret, returned once. The previous one keeps signing (a second `v1` signature) for 24
-     * hours, so a receiver can switch without losing deliveries.
-     */
+    /** A new secret, returned once; see `rotateWebhookEndpointSecret`. */
     async rotateSecret(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
       assertCan(ctx, 'developer.manage');
       const now = clock.now();
       assertRecentSignIn(ctx, now);
       const { endpointId } = parseInput(endpointIdSchema, input);
-      const secret = generateWebhookSecret();
-      await db.run(ctx.scope, async (tx) => {
-        const endpoint = await lockEndpoint(tx, ctx.tenant.id, endpointId);
-        const version = endpoint.secretVersion + 1;
-        await tx
-          .update(webhookEndpoints)
-          .set({
-            secretCiphertext: keyring.encrypt(
-              secret,
-              webhookSecretAad(ctx.tenant.id, endpointId, version),
-            ),
-            secretVersion: version,
-            previousSecretCiphertext: endpoint.secretCiphertext,
-            previousSecretExpiresAt: new Date(
-              now.getTime() + WEBHOOK_LIMITS.previousSecretHours * 3_600_000,
-            ),
-            updatedAt: now,
-          })
-          .where(
-            and(eq(webhookEndpoints.tenantId, ctx.tenant.id), eq(webhookEndpoints.id, endpointId)),
-          );
+      return db.run(ctx.scope, async (tx) => {
+        const endpoint = await lockWebhookEndpoint(tx, ctx.tenant.id, endpointId);
+        const { secret, version } = await rotateWebhookEndpointSecret(
+          tx,
+          keyring,
+          ctx.tenant.id,
+          endpoint,
+          now,
+        );
         await recordAudit(
           tx,
           ctx,
@@ -403,8 +660,8 @@ export function createWebhooksService(deps: {
           },
           meta,
         );
+        return { secret };
       });
-      return { secret };
     },
 
     /** Deletes an endpoint and its delivery history. */
@@ -412,7 +669,7 @@ export function createWebhooksService(deps: {
       assertCan(ctx, 'developer.manage');
       const { endpointId } = parseInput(endpointIdSchema, input);
       await db.run(ctx.scope, async (tx) => {
-        const endpoint = await lockEndpoint(tx, ctx.tenant.id, endpointId, 'update');
+        const endpoint = await lockWebhookEndpoint(tx, ctx.tenant.id, endpointId, 'update');
         await tx
           .delete(webhookEndpoints)
           .where(
@@ -436,29 +693,13 @@ export function createWebhooksService(deps: {
     async sendTest(ctx: TenantContext, input: unknown) {
       assertCan(ctx, 'developer.manage');
       const { endpointId } = parseInput(endpointIdSchema, input);
-      const eventId = uuidv7();
-      const deliveryId = uuidv7();
-      await db.run(ctx.scope, async (tx) => {
-        const endpoint = await lockEndpoint(tx, ctx.tenant.id, endpointId);
-        if (endpoint.state !== 'active') {
-          throw new AppError(
-            'precondition_failed',
-            'Turn the endpoint on to send it a test event.',
-          );
-        }
-        await tx.insert(webhookEvents).values({
-          id: eventId,
-          tenantId: ctx.tenant.id,
-          type: 'ping',
-          detail: {},
-        });
-        await tx.insert(webhookDeliveries).values({
-          id: deliveryId,
-          tenantId: ctx.tenant.id,
-          endpointId,
-          eventId,
-        });
-      });
+      const { deliveryId } = await db.run(ctx.scope, async (tx) =>
+        queueWebhookTest(
+          tx,
+          ctx.tenant.id,
+          await lockWebhookEndpoint(tx, ctx.tenant.id, endpointId),
+        ),
+      );
       return { deliveryId };
     },
 
@@ -473,29 +714,9 @@ export function createWebhooksService(deps: {
         ctx.scope,
         async (tx) =>
           tx
-            .select({
-              id: webhookDeliveries.id,
-              eventId: webhookDeliveries.eventId,
-              eventType: webhookEvents.type,
-              state: webhookDeliveries.state,
-              attempts: webhookDeliveries.attempts,
-              nextAttemptAt: webhookDeliveries.nextAttemptAt,
-              lastAttemptAt: webhookDeliveries.lastAttemptAt,
-              lastStatusCode: webhookDeliveries.lastStatusCode,
-              lastError: webhookDeliveries.lastError,
-              lastDurationMs: webhookDeliveries.lastDurationMs,
-              deliveredAt: webhookDeliveries.deliveredAt,
-              replayOf: webhookDeliveries.replayOf,
-              createdAt: webhookDeliveries.createdAt,
-            })
+            .select(webhookDeliveryColumns)
             .from(webhookDeliveries)
-            .innerJoin(
-              webhookEvents,
-              and(
-                eq(webhookEvents.tenantId, webhookDeliveries.tenantId),
-                eq(webhookEvents.id, webhookDeliveries.eventId),
-              ),
-            )
+            .innerJoin(webhookEvents, deliveryEventJoin)
             .where(
               and(
                 eq(webhookDeliveries.tenantId, ctx.tenant.id),
@@ -513,49 +734,56 @@ export function createWebhooksService(deps: {
     async replay(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
       assertCan(ctx, 'developer.manage');
       const { deliveryId } = parseInput(deliveryIdSchema, input);
-      const newId = uuidv7();
-      await db.run(ctx.scope, async (tx) => {
-        const [delivery] = await tx
-          .select({
-            endpointId: webhookDeliveries.endpointId,
-            eventId: webhookDeliveries.eventId,
-            state: webhookDeliveries.state,
-          })
-          .from(webhookDeliveries)
-          .where(
-            and(
-              eq(webhookDeliveries.tenantId, ctx.tenant.id),
-              eq(webhookDeliveries.id, deliveryId),
-            ),
-          );
-        if (!delivery) throw notFound('Delivery');
-        const endpoint = await lockEndpoint(tx, ctx.tenant.id, delivery.endpointId);
-        if (!(['succeeded', 'failed'] as WebhookDeliveryState[]).includes(delivery.state)) {
-          throw new AppError('conflict', 'This delivery is still being attempted.');
-        }
-        if (endpoint.state !== 'active') {
-          throw new AppError('precondition_failed', 'Turn the endpoint on to replay deliveries.');
-        }
-        await tx.insert(webhookDeliveries).values({
-          id: newId,
-          tenantId: ctx.tenant.id,
-          endpointId: delivery.endpointId,
-          eventId: delivery.eventId,
-          replayOf: deliveryId,
-        });
+      return db.run(ctx.scope, async (tx) => {
+        const replayed = await replayWebhookDelivery(tx, ctx.tenant.id, deliveryId);
         await recordAudit(
           tx,
           ctx,
           {
             action: 'webhook.delivery_replayed',
             subjectType: 'webhook_endpoint',
-            subjectId: delivery.endpointId,
-            metadata: { deliveryId, newDeliveryId: newId },
+            subjectId: replayed.endpoint.id,
+            metadata: { deliveryId, newDeliveryId: replayed.deliveryId },
           },
           meta,
         );
+        return { deliveryId: replayed.deliveryId };
       });
-      return { deliveryId: newId };
+    },
+
+    /**
+     * Delivers again every event whose deliveries to an active endpoint all failed in the chosen
+     * period, 500 at most per call (ADR-095). Audited once, with the count.
+     */
+    async replayFailed(
+      ctx: TenantContext,
+      input: unknown,
+      meta: RequestMeta = {},
+    ): Promise<WebhookFailedReplay> {
+      assertCan(ctx, 'developer.manage');
+      const { endpointId, period } = parseInput(replayFailedSchema, input);
+      const hours = WEBHOOK_REPLAY_PERIODS.find((p) => p.key === period)?.hours ?? 1;
+      const since = new Date(clock.now().getTime() - hours * 3_600_000);
+      return db.run(ctx.scope, async (tx) => {
+        const replayed = await replayFailedWebhookDeliveries(tx, ctx.tenant.id, endpointId, since);
+        await recordAudit(
+          tx,
+          ctx,
+          {
+            action: 'webhook.deliveries_replayed',
+            subjectType: 'webhook_endpoint',
+            subjectId: endpointId,
+            metadata: {
+              host: webhookHost(replayed.endpoint.url),
+              since: since.toISOString(),
+              queued: replayed.queued,
+              more: replayed.more,
+            },
+          },
+          meta,
+        );
+        return { queued: replayed.queued, more: replayed.more };
+      });
     },
   };
 }

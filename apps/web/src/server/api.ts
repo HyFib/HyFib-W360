@@ -9,7 +9,7 @@ import {
   admitFailedApiAuthentication,
   apiErrorResponse,
   apiRequestError,
-  authenticateApiToken,
+  authenticateApiRequest,
   bearerToken,
   type ApiContext,
   type ApiResponse,
@@ -24,7 +24,7 @@ type Runtime = Awaited<ReturnType<typeof getRuntime>>;
 export interface ApiCall {
   ctx: ApiContext;
   runtime: Runtime;
-  /** The JSON body (POST), already parsed. */
+  /** The JSON body (POST, PATCH), already parsed. */
   body: unknown;
   /** The Idempotency-Key header with the request's hash, when the header was sent. */
   idempotency: IdempotencyInput | null;
@@ -52,11 +52,11 @@ function respond(
 }
 
 /**
- * Runs one public API request (ADR-052): authenticates the bearer key (failed attempts are limited
- * per client address), applies the key's and the company's rate limits, counts the request against
- * the plan's monthly API requests (ADR-061), reads a bounded JSON body,
- * checks the Idempotency-Key header, and turns results and errors into JSON responses. Tokens are
- * never logged.
+ * Runs one public API request (ADR-052): authenticates the bearer key from the client's address
+ * (failed attempts, and keys that do not accept the address (ADR-076), are limited per client
+ * address), applies the key's and the company's rate limits, counts the request against the plan's
+ * monthly API requests (ADR-061), reads a bounded JSON body, checks the Idempotency-Key header, and
+ * turns results and errors into JSON responses. Tokens are never logged.
  */
 export async function handleApiRequest(
   request: NextRequest,
@@ -69,16 +69,38 @@ export async function handleApiRequest(
   const path = request.nextUrl.pathname;
   try {
     const token = bearerToken(request.headers.get('authorization'));
-    const ctx = token ? await authenticateApiToken(runtime.db, token, requestId) : null;
-    if (!ctx) {
-      const ip = resolveClientIp(
-        request.headers.get('x-forwarded-for'),
-        request.headers.get('x-real-ip'),
-        runtime.trustedProxies,
-      );
+    const ip = resolveClientIp(
+      request.headers.get('x-forwarded-for'),
+      request.headers.get('x-real-ip'),
+      runtime.trustedProxies,
+    );
+    const auth = token ? await authenticateApiRequest(runtime.db, token, requestId, ip) : null;
+    if (!auth || 'refused' in auth) {
       if (!(await admitFailedApiAuthentication(runtime.db, ip))) {
         const e = apiRequestError(429, 'rate_limited', 'Too many failed attempts.', requestId);
         return respond(e.status, e.body, requestId, { 'Retry-After': '60' });
+      }
+      if (auth) {
+        log.info(
+          {
+            requestId,
+            method: request.method,
+            path,
+            tenantId: auth.tenantId,
+            apiKeyId: auth.keyId,
+          },
+          'api request refused: the key does not accept the address',
+        );
+        const e = apiRequestError(
+          403,
+          'forbidden',
+          ip
+            ? `This API key does not accept requests from ${ip}.`
+            : 'This API key accepts requests only from its listed addresses, and this request’s address could not be determined.',
+          requestId,
+          'ip_not_allowed',
+        );
+        return respond(e.status, e.body, requestId);
       }
       const e = apiRequestError(
         401,
@@ -88,14 +110,16 @@ export async function handleApiRequest(
       );
       return respond(e.status, e.body, requestId, { 'WWW-Authenticate': 'Bearer' });
     }
+    const key = auth.authenticated;
 
-    if (!(await admitApiRate(runtime.db, { keyId: ctx.key.id, tenantId: ctx.tenant.id }))) {
+    if (!(await admitApiRate(runtime.db, { keyId: key.key.id, tenantId: key.tenant.id }))) {
       const e = apiRequestError(429, 'rate_limited', 'Too many requests. Slow down.', requestId);
       return respond(e.status, e.body, requestId, { 'Retry-After': '1' });
     }
 
-    // The plan's monthly API requests (ADR-061): counted here, before the request is read.
-    const admission = await admitApiRequest(runtime.db, ctx, systemClock.now());
+    // The plan's monthly API requests (ADR-061): counted here, before the request is read. The
+    // handler gets the admitted context, which holds the request to the plan's scopes (ADR-092).
+    const admission = await admitApiRequest(runtime.db, key, systemClock.now());
     if (!admission.ok) {
       const e = apiRequestError(
         admission.status,
@@ -113,6 +137,7 @@ export async function handleApiRequest(
           : { 'Retry-After': String(admission.retryAfterSeconds) },
       );
     }
+    const { ctx } = admission;
 
     let body: unknown = undefined;
     let raw = '';
@@ -161,7 +186,7 @@ export async function handleApiRequest(
       const e = apiRequestError(
         400,
         'bad_request',
-        'Send an Idempotency-Key header (for example a UUID) so a retry never sends twice.',
+        'Send an Idempotency-Key header (for example a UUID) so a retry never does the work twice.',
         requestId,
       );
       return respond(e.status, e.body, requestId);

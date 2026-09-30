@@ -25,7 +25,20 @@ export interface QueueDefinition {
   deadLetter?: string;
   /** Hours to keep completed jobs for diagnostics. */
   deleteAfterHours: number;
+  /**
+   * Minutes a job may wait for a worker before the queue is late and platform staff are emailed
+   * (ADR-096); `DEFAULT_MAX_WAIT_MINUTES` when not given. Longer only for queues of long jobs run
+   * one or two at a time, where a burst of work waits by design.
+   */
+  maxWaitMinutes?: number;
 }
+
+/** A job normally starts within seconds; one waiting this long means the queue is not keeping up. */
+export const DEFAULT_MAX_WAIT_MINUTES = 15;
+
+/** Minutes a queue's jobs may wait before the queue is late (ADR-096). */
+export const queueMaxWaitMinutes = (queue: QueueDefinition): number =>
+  queue.maxWaitMinutes ?? DEFAULT_MAX_WAIT_MINUTES;
 
 export const QUEUES = {
   emailSend: {
@@ -141,6 +154,7 @@ export const QUEUES = {
     expireInSeconds: 900,
     deadLetter: 'dead-letter',
     deleteAfterHours: 168,
+    maxWaitMinutes: 60,
   },
   billingSweep: {
     name: 'ops.billing-sweep',
@@ -183,6 +197,7 @@ export const QUEUES = {
     expireInSeconds: 300,
     deadLetter: 'dead-letter',
     deleteAfterHours: 72,
+    maxWaitMinutes: 60,
   },
   campaignRun: {
     name: 'campaign.run',
@@ -283,6 +298,7 @@ export const QUEUES = {
     expireInSeconds: 300,
     deadLetter: 'dead-letter',
     deleteAfterHours: 168,
+    maxWaitMinutes: 60,
   },
   /** Advances one Payment Link at Razorpay: create it once, cancel it, or fetch its status. */
   commerceLink: {
@@ -322,6 +338,7 @@ export const QUEUES = {
     expireInSeconds: 300,
     deadLetter: 'dead-letter',
     deleteAfterHours: 72,
+    maxWaitMinutes: 60,
   },
   /**
    * One order message at its send time: checks the rule, the order, the template and the
@@ -355,6 +372,7 @@ export const QUEUES = {
     expireInSeconds: 900,
     deadLetter: 'dead-letter',
     deleteAfterHours: 24 * 7,
+    maxWaitMinutes: 60,
   },
   // Jobs that failed all their retries. The worker records each one in ops.dead_letters (ADR-054);
   // a recording that fails is retried, and the job stays in pg-boss for its retention either way.

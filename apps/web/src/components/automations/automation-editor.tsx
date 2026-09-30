@@ -25,6 +25,7 @@ import {
   parseGraph,
   parseTrigger,
   starterGraph,
+  triggerIssues,
   type AutomationGraph,
   type AutomationNode,
   type AutomationTrigger,
@@ -51,6 +52,8 @@ interface TriggerForm {
   match: 'exact' | 'contains';
   hours: TriggerHours;
   cooldownMinutes: number;
+  /** The inputs of an automation started through the API, separated by commas (ADR-077). */
+  inputs: string;
 }
 
 function triggerForm(trigger: AutomationTrigger | null): TriggerForm {
@@ -61,19 +64,32 @@ function triggerForm(trigger: AutomationTrigger | null): TriggerForm {
       match: 'contains',
       hours: 'any',
       cooldownMinutes: 60,
+      inputs: '',
     };
+  const fromMessages = trigger.type !== 'store_event' && trigger.type !== 'api';
   return {
     type: trigger.type,
     keywords: trigger.type === 'keyword' ? trigger.keywords.join(', ') : '',
     match: trigger.type === 'keyword' ? trigger.match : 'contains',
-    hours: trigger.type === 'store_event' ? 'any' : trigger.hours,
-    cooldownMinutes: trigger.type === 'store_event' ? 60 : trigger.cooldownMinutes,
+    hours: fromMessages ? trigger.hours : 'any',
+    cooldownMinutes: fromMessages ? trigger.cooldownMinutes : 60,
+    inputs: trigger.type === 'api' ? trigger.inputs.join(', ') : '',
   };
 }
 
 function triggerInput(form: TriggerForm): unknown {
   // Started by a store's order messages: the rule decides when (delay, sending hours).
   if (form.type === 'store_event') return { type: 'store_event' };
+  // Started through the API: each call gives the inputs (ADR-077).
+  if (form.type === 'api') {
+    return {
+      type: 'api',
+      inputs: form.inputs
+        .split(/[\s,]+/)
+        .map((i) => i.trim())
+        .filter(Boolean),
+    };
+  }
   const common = { hours: form.hours, cooldownMinutes: form.cooldownMinutes };
   if (form.type !== 'keyword') return { type: form.type, ...common };
   return {
@@ -306,6 +322,7 @@ export function AutomationEditor({
   }, [dirty]);
 
   const storeEvent = trigger.type === 'store_event';
+  const apiStart = trigger.type === 'api';
   const channelWhatsappAccountId =
     channels.find((c) => c.id === channelAccountId)?.whatsappAccountId ?? null;
   // Templates a step can send: approved utility or marketing ones HyFib supports, of the number's
@@ -321,6 +338,14 @@ export function AutomationEditor({
       ),
     [templates, channelWhatsappAccountId],
   );
+  const parsedTrigger = useMemo(() => parseTrigger(triggerInput(trigger)), [trigger]);
+  const apiInputs = useMemo(
+    () =>
+      parsedTrigger.ok && parsedTrigger.trigger.type === 'api'
+        ? parsedTrigger.trigger.inputs
+        : null,
+    [parsedTrigger],
+  );
   const refs = useMemo(
     () => ({
       teamIds: new Set(teams.map((t) => t.id)),
@@ -330,20 +355,21 @@ export function AutomationEditor({
       allowInsecureHttp: web.allowInsecureHttp,
       templates: new Map(templates.map((t) => [t.id, t])),
       storeEvent,
+      apiInputs: apiInputs ? new Set(apiInputs) : undefined,
       channelWhatsappAccountId,
     }),
-    [teams, fields, web, templates, storeEvent, channelWhatsappAccountId],
+    [teams, fields, web, templates, storeEvent, apiInputs, channelWhatsappAccountId],
   );
-  const parsedTrigger = useMemo(() => parseTrigger(triggerInput(trigger)), [trigger]);
   const parsedGraph = useMemo(() => parseGraph(graph), [graph]);
   const issues: GraphIssue[] = useMemo(() => {
     const list: GraphIssue[] = [];
     if (!parsedTrigger.ok)
       list.push({ level: 'error', nodeId: null, message: parsedTrigger.message });
+    else list.push(...triggerIssues(parsedTrigger.trigger, channelAccountId));
     if (parsedGraph.ok) list.push(...checkGraph(parsedGraph.graph, refs));
     else list.push(...parsedGraph.issues.map((i) => ({ level: 'error' as const, ...i })));
     return list;
-  }, [parsedTrigger, parsedGraph, refs]);
+  }, [parsedTrigger, parsedGraph, refs, channelAccountId]);
   const errors = issues.filter((i) => i.level === 'error');
   const structural = !parsedTrigger.ok || !parsedGraph.ok || !name.trim();
 
@@ -389,6 +415,7 @@ export function AutomationEditor({
     secrets: web.secrets,
     templates: usableTemplates,
     storeEvent,
+    apiInputs,
   };
   const templateStep = (t: NodeType) => t === 'send_template' || t === 'ask_template';
 
@@ -431,7 +458,8 @@ export function AutomationEditor({
               Automations start only in conversations nobody is assigned to and no other automation
               is handling. When several match, an exact keyword wins, then a keyword in the message,
               then a new conversation, then any message. An automation started by order messages
-              runs when a store’s rule chooses it for an order event.
+              runs when a store’s rule chooses it for an order event, and one started through the
+              API when your systems call it with a key.
             </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-4">
@@ -492,7 +520,7 @@ export function AutomationEditor({
                   </Select>
                 )}
               </Field>
-              {storeEvent ? null : (
+              {storeEvent || apiStart ? null : (
                 <Field id="trigger-hours" label="Business hours">
                   {(aria) => (
                     <Select
@@ -511,7 +539,7 @@ export function AutomationEditor({
                   )}
                 </Field>
               )}
-              {storeEvent ? null : (
+              {storeEvent || apiStart ? null : (
                 <Field
                   id="trigger-cooldown"
                   label="Not again for (minutes)"
@@ -561,6 +589,36 @@ export function AutomationEditor({
                   </ul>
                 </details>
               </Alert>
+            ) : null}
+            {apiStart ? (
+              <>
+                <Field
+                  id="trigger-inputs"
+                  label="Inputs"
+                  description={`Names separated by commas, such as appointment_time, doctor (at most ${AUTOMATION_LIMITS.apiInputs}). Every start gives a text for each; steps use them as {{input.<name>}}.`}
+                >
+                  {(aria) => (
+                    <Input
+                      {...aria}
+                      value={trigger.inputs}
+                      spellCheck={false}
+                      autoComplete="off"
+                      onChange={(e) =>
+                        change(() => setTrigger({ ...trigger, inputs: e.target.value }))
+                      }
+                    />
+                  )}
+                </Field>
+                <Alert tone="info">
+                  <p>
+                    Your systems start this automation for one contact at a time with an API key
+                    that has the “Start automations” scope (Settings → API keys), after it is
+                    published. It sends from the WhatsApp number chosen above. WhatsApp allows only
+                    templates until the customer replies, so start with a template step and continue
+                    from its reply branches.
+                  </p>
+                </Alert>
+              </>
             ) : null}
             {trigger.type === 'keyword' ? (
               <div className="grid gap-4 sm:grid-cols-[1fr_260px]">
@@ -833,6 +891,7 @@ export function AutomationEditor({
             teams={teams}
             templates={templates}
             storeEvent={storeEvent}
+            apiInputs={apiInputs}
           />
         </CardContent>
       </Card>

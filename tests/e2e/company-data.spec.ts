@@ -5,13 +5,17 @@ import type { Page } from '@playwright/test';
 import { expect, test } from './fixtures';
 import {
   expectNoHorizontalOverflow,
+  makePlatformOwner,
   platformConfigured,
   signUpAndVerify,
+  turnOnTwoFactor,
   uniqueEmail,
   waitForEmail,
 } from './support';
 
 const PASSWORD = 'correct horse battery staple 42';
+const STAFF_REASON = 'Your service ends under clause 9 of the terms, as agreed in ticket 5120.';
+const CANCEL_REASON = 'The owners settled the account with HyFib support today.';
 
 async function newCompany(page: Page, prefix: string) {
   const email = uniqueEmail(prefix);
@@ -117,4 +121,70 @@ test('when the deletion is due, the worker deletes the company and tells its own
   expect(text).toMatch(/was deleted at the request of its owners/);
   await page.goto(`/c/${slug}`);
   await expect(page.getByRole('heading', { name: 'Page not found' })).toBeVisible();
+});
+
+test('a platform owner schedules the deletion with a reason the company reads; only staff cancel it', async ({
+  page,
+}) => {
+  test.skip(!platformConfigured, 'needs DATABASE_URL_MIGRATE and E2E_DATABASE_URL_AUTH');
+  test.setTimeout(300_000);
+  const { email, slug, name } = await newCompany(page, 'staffdel');
+  // The same person is platform staff here too (a fixture step), with two-factor on.
+  await turnOnTwoFactor(page, PASSWORD);
+  await makePlatformOwner(email);
+
+  await page.goto(`/platform?q=${slug}`);
+  await page.getByRole('link', { name }).click();
+  const schedule = page.getByRole('form', { name: 'Schedule the company’s deletion' });
+  await schedule.getByLabel(/^Reason/).fill(STAFF_REASON);
+  const button = schedule.getByRole('button', { name: 'Schedule the deletion' });
+  await expect(button).toBeDisabled();
+  await schedule.getByLabel(`Type the company address (${slug}) to confirm`).fill(`${slug}x`);
+  await expect(button).toBeDisabled();
+  await schedule.getByLabel(`Type the company address (${slug}) to confirm`).fill(slug);
+  await button.click();
+  await expect(page.getByText(/^Scheduled by HyFib staff/)).toBeVisible();
+  await expect(page.locator('p', { hasText: STAFF_REASON })).toBeVisible();
+  await expect(schedule).toHaveCount(0);
+  await expectNoHorizontalOverflow(page);
+
+  // The worker's minute sweep emails the owners and administrators HyFib's reason.
+  const scheduled = await waitForEmail(email, 'HyFib scheduled the company for deletion', 150_000);
+  expect(scheduled).toContain(`HyFib's reason: ${STAFF_REASON}`);
+  expect(scheduled).toContain('Only HyFib can cancel this deletion.');
+
+  // The company reads the reason and has no way to cancel; the export stays.
+  await page.goto(`/c/${slug}/settings/data`);
+  await expect(page.getByText('This company is being deleted')).toBeVisible();
+  // The banner on every page says who scheduled it and why, and that only HyFib can cancel.
+  const banner = page.getByRole('alert').filter({ hasText: 'This company is being deleted' });
+  await expect(banner).toContainText(/It will be deleted on .+: HyFib scheduled the deletion\./);
+  await expect(banner).toContainText('Only HyFib can cancel the deletion.');
+  await expect(banner).toContainText(STAFF_REASON);
+  await expect(
+    page.getByText(/^This company will be deleted on .+, as HyFib scheduled on /),
+  ).toBeVisible();
+  await expect(page.locator('p', { hasText: STAFF_REASON })).toBeVisible();
+  await expect(
+    page.getByText('Only HyFib can cancel this deletion. Contact HyFib support to discuss it.'),
+  ).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Cancel the deletion' })).toHaveCount(0);
+  await expect(page.getByRole('link', { name: 'Download the export' })).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+
+  // A platform owner cancels it, with a reason; the company is back as it was.
+  await page.goto(`/platform?q=${slug}`);
+  await page.getByRole('link', { name }).click();
+  const cancel = page.getByRole('form', { name: 'Cancel HyFib’s deletion' });
+  await cancel.getByLabel(/^Reason for cancelling/).fill(CANCEL_REASON);
+  await cancel.getByRole('button', { name: 'Cancel the deletion' }).click();
+  await expect(page.locator('p', { hasText: CANCEL_REASON })).toBeVisible();
+  await expect(cancel).toHaveCount(0);
+  await expect(page.getByRole('form', { name: 'Schedule the company’s deletion' })).toBeVisible();
+  const cancelled = await waitForEmail(email, 'Company deletion cancelled', 150_000);
+  expect(cancelled).toContain(`HyFib's reason: ${CANCEL_REASON}`);
+  expect(cancelled).toContain('It works as before.');
+  await page.goto(`/c/${slug}/settings/data`);
+  await expect(page.getByText('This company is being deleted')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Delete the company' })).toBeVisible();
 });

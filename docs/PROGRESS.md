@@ -1,5 +1,1978 @@
 # Progress
 
+## 2026-09-30 — Phase 5: queue waits and alerts for late queues (P5-10, ADR-096)
+
+Status: **Implemented and locally verified (test data only; alerts go to the local test mailbox).**
+The operations console showed pg-boss's counts, which carry no age: a queue whose workers had
+stopped taking work looked like one with a few jobs in it, and nobody was told (ADR-091 left this
+out).
+
+### Completed
+
+- **Design (ADR-096):** for each declared queue, the jobs pg-boss would hand to a worker now and
+  since when the oldest has waited (pg-boss's own "ready"; jobs held by a dependency left out); a
+  limit per queue (15 minutes, 60 for template, catalog and store syncs, the settlement
+  reconciliation and company deletion); late at the limit until the wait is under half of it; every
+  platform administrator emailed once each time a queue becomes late, at most every 15 minutes, for
+  fresh checks only.
+- **Migration 0072:** `ops.queue_waits` (one row per queue, with checks on counts, limits and marks;
+  read by the worker and platform roles); `queues` added to `ops.platform_alerts`;
+  `ops.record_queue_waits` (lateness with the half-limit margin, re-arming, rows no check touched
+  for 7 days deleted) and `ops.mark_queue_alert` (the 15-minute gap under the row lock, fresh checks
+  only), SECURITY DEFINER and executable by the worker's role only.
+- **Contracts:** `maxWaitMinutes` in the queue catalog, `DEFAULT_MAX_WAIT_MINUTES`,
+  `queueMaxWaitMinutes`.
+- **Domain:** `checkQueueWaits` (reads `pgboss.job` through pg-boss's partial claim index, an
+  index-only scan checked with `EXPLAIN`), `alertLateQueues` and `lateQueueAlert`
+  (`platform/queue-waits.ts`); the console's queues and overview read the waits, limits, lateness
+  and whether the check is fresh.
+- **Worker:** the minute messaging sweep checks the queues and alerts after the failure alert,
+  logging late queues.
+- **Web:** Operations → Queues gains an "Oldest wait" column with a late badge and when staff were
+  emailed, each queue's limit, when the worker last checked, and a warning when it has stopped; the
+  overview gains a "Late queues" tile.
+- **Tests:**
+  - Unit (`queue-waits.test.ts`, 5): limits per queue, wait labels, the email's wording and order,
+    eight queues at most within a notice's limits, nobody to tell.
+  - Integration in `platform-ops.test.ts` (6 new, 1 updated):
+    - what waits: created, retried and due jobs, but not active, completed, deferred or held ones; a
+      queue within its limit on time; the oldest job's due time;
+    - one alert per late spell: not told again while late, the half-limit margin, re-armed under
+      half, the 15-minute gap, over once the job is taken;
+    - fresh checks only; one alert when two sweeps race; a queue falling behind right after an alert
+      waits; a sweep waits for another that holds the alert's row;
+    - the console's waits and limits for every declared queue, a late queue and the overview's
+      count, a stopped check;
+    - rows no check touched for 7 days forgotten;
+    - grants: the table read-only for both roles, the functions refused to platform staff, invalid
+      checks refused;
+    - the ADR-054 dead-letter test now expects the queue's wait limit in its policy.
+  - Isolation suite: both functions for the worker's role only.
+  - e2e `platform-ops.spec.ts`: the overview's Late queues tile; on the Queues tab, a check the worker
+    made since the test started, the oldest-wait column and the limits, with no warning.
+- **Docs:** ADR-096; SECURITY; THREAT-MODEL T114; RUNBOOKS §3 (queue lag and the late-queue email)
+  and §10P (late queues, migration 0072); ARCHITECTURE; DATA-RETENTION; BACKLOG P5-10;
+  FEATURE-MATRIX H-034.
+- **Mutation checks:** 28 regressions tried one at a time (1 through the e2e test); 27 make a test
+  fail, and the other (the record function's explicit REVOKE from PUBLIC) cannot be observed:
+  migration 0002's default privileges already keep every new function from PUBLIC.
+  - 12 in the migration: a queue within its limit counted late; no margin (on time again as soon as
+    under the limit); the alert not re-armed once on time; rows never forgotten; the late count
+    taking queues not checked; told again within 15 minutes of the last alert; the last alert's time
+    not kept; stale checks told; the alert's row not locked; on-time queues told; platform staff
+    unable to read the waits; and the redundant REVOKE.
+  - 6 in reading pg-boss: jobs taken by a worker, held by a dependency or not yet due counted as
+    waiting; the oldest job taken by its creation time; queues with nothing waiting not recorded;
+    every queue given the default limit.
+  - 4 in the email: marked with nobody to tell; the shortest wait first; eight queues named beside a
+    count; waits rounded up.
+  - 3 in the console: a stopped check shown as fresh; the console without waits; the overview
+    counting no late queue.
+  - 2 in the limits: company deletion given the default limit; the default limit an hour.
+  - 1 through the e2e test: the minute sweep checking no queue. Its first run was not caught: the
+    local database kept rows the unmutated worker had written minutes before, fresh enough for the
+    page. The test now waits for a check made since it started (the page's time, to the second),
+    and the mutation is caught.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                               |
+| --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | the first run flagged one non-null assertion in `platform/queue-waits.ts` (the single late queue's name in the subject), replaced by a checked destructuring; then 0 problems / all files formatted / all workspace packages pass                                    |
+| `pnpm test` (unit)                                                          | 434 passed, including 5 new in `queue-waits.test.ts`                                                                                                                                                                                                                 |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 578 passed, including 6 new in `platform-ops.test.ts`                                                                                                                                                                                                                |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 578 passed                                                                                                                                                                                                                                                           |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / `platform-ops.spec.ts`: 2 passed (29 s); the e2e mutation then showed it accepted a check an earlier run had made, so it now waits for one made since it started: 2 passed (40 s); on the local database created for the day's runs, migrated to 0072 |
+| Mutation checks                                                             | 28 regressions tried (1 through the e2e test); 27 make a test fail (the e2e one after the test change above), and the other (a redundant REVOKE) cannot be observed                                                                                                  |
+
+### Known gaps
+
+- Not built: an email when the worker itself stops (its liveness and readiness probes cover that,
+  and the console says when the last check was), a reminder while a queue stays late, an email when
+  it has caught up, limits changed without a release, and trends of waits over time.
+- The minute sweep checks the queues, so a queue is reported late up to a minute after it reaches
+  its limit.
+
+## 2026-09-30 — Phase 5: replaying an endpoint's failed deliveries in one call (P5-09, ADR-095)
+
+Status: **Implemented and locally verified (no customer data; webhooks delivered to local test
+receivers only).** After a receiver's outage its failed deliveries could be replayed only one at a
+time, in Settings → Webhooks or one API call each (ADR-083): hundreds of clicks or calls after a
+day's outage.
+
+### Completed
+
+- **Design (ADR-095):** for one endpoint that is on, every event whose deliveries to it all failed,
+  from the deliveries queued since a chosen time: one new delivery per event, replaying its latest
+  failed delivery (`replayOf`), oldest event first, at most 500 per call, the answer saying how many
+  were queued and whether more remain. Left out: events delivered or waiting to be (a replay queued
+  earlier included), `event_gone` failures (they would fail again at once) and test events. The
+  endpoint's row is locked first, as for one replay, so calls at the same time queue each event
+  once. One audit entry per call. No migration: the existing indexes and grants serve it.
+- **Domain:** `replayFailedWebhookDeliveries` (webhooks service; `DISTINCT ON` the event over the
+  endpoint's deliveries in the period, reading one row more than it queues); the settings
+  service's `replayFailed` (`developer.manage`; the last hour, 24 hours, 7 days or 30 days,
+  `WEBHOOK_REPLAY_PERIODS`); the API service's `replayFailed` (`webhooks.manage`, endpoints keys
+  added, `since` a time with its offset and in the past, inside `idempotent`);
+  `webhookReplaySummary`; the audit action `webhook.deliveries_replayed` with the host, the time
+  from, the count and whether more remain, as the member or as the key.
+- **Web:** "Replay failed deliveries" on an endpoint's page in Settings → Webhooks while it is on (a
+  period, then what was queued); `POST /api/v1/webhook-endpoints/{id}/replay-failed` with an
+  `Idempotency-Key`; the OpenAPI document (`replayFailedWebhookDeliveries`,
+  `ReplayFailedDeliveries`, `FailedReplay`).
+- **Tests:**
+  - Unit: the periods (up to the 30 days kept) and the summaries; the API body (a time with its
+    offset, nothing else), a time still to come refused before anything is read, the scope checked
+    first, the OpenAPI entry.
+  - Integration in `webhooks.test.ts` (3 new):
+    - three messages and a test event whose first attempts failed, failed for good when the
+      endpoint was turned off: refused while it is off; once on, the two messages replayed (the third failed
+      with `event_gone`, the test event left out), each naming the delivery it replays; a second
+      call while they wait queues nothing; delivered with their event ids, after which nothing is
+      left; another endpoint's failures untouched; one audit entry per call;
+    - 501 failed events: nothing from the last hour seen two hours later, 500 from the last day
+      (the oldest, `more` true), then the last one;
+    - refusals (a member without `developer.manage`, an unknown period, another company); a call
+      waiting while another transaction holds the endpoint and queues the first two events again,
+      then queueing only the other three.
+  - Integration in `api-webhook-endpoints.test.ts` (1 new): two failed events replayed through the
+    API once per Idempotency-Key, audited as the key; nothing queued while they wait; refusals (a
+    time still to come naming `since`, a time that is not one, other fields, a key without the
+    scope, an endpoint a member added, an endpoint that is off), none queueing anything.
+  - e2e `webhooks.spec.ts`: a receiver down while two customers write, the endpoint turned off and
+    on again, one replay from the endpoint's page: both events arrive again with their event ids,
+    the page shows them delivered, and a second replay says there is nothing left.
+- **Docs:** ADR-095; SECURITY (API and webhooks); THREAT-MODEL T113; RUNBOOKS (turned-off endpoint;
+  a replay that queued fewer events than expected); ARCHITECTURE; BACKLOG P5-08 and P5-09;
+  FEATURE-MATRIX W-138 and W-139.
+- **Mutation checks:** 22 regressions tried one at a time; all make a test fail.
+  - 13 in the webhooks service: an endpoint that is off replayed to; events delivered or waiting
+    replayed again; gone events or test events replayed; other endpoints' failures replayed to this
+    one; the period ignored; no cap per call; `more` never said; newest first; the replay not
+    naming the delivery it replays; the endpoint locked `FOR KEY SHARE`, which does not make a
+    concurrent call wait; members without `developer.manage` replaying; the settings replay not
+    audited.
+  - 2 in the model: the 30-day period covering a week; one delivery summarised as many.
+  - 7 in the API: keys replaying to endpoints members added; a time still to come taken; no scope
+    needed; the same Idempotency-Key running again; no audit; other fields taken; the route left
+    out of the OpenAPI document.
+  - The first run missed the weaker lock: its race test started two calls together, and they had
+    not overlapped. The test now holds the endpoint in another transaction and waits until the
+    replay is blocked by it, and the mutation is caught.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                          |
+| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / the first run flagged two type errors in the new tests, which Vitest does not check (a cast in `api.test.ts`, a helper's parameter type in `webhooks.test.ts`); after both fixes all workspace packages pass |
+| `pnpm test` (unit)                                                          | 429 passed                                                                                                                                                                                                                                      |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 572 passed, including 3 new in `webhooks.test.ts` and 1 in `api-webhook-endpoints.test.ts`                                                                                                                                                      |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 572 passed                                                                                                                                                                                                                                      |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / `webhooks.spec.ts`, `webhook-events.spec.ts` and `api.spec.ts`: 30 passed (6.0 min), on the local database created for the day's runs (no new migration)                                                                         |
+| Mutation checks                                                             | 22 regressions tried; all make a test fail, once the race test holds the endpoint in another transaction (the first run missed a weaker lock)                                                                                                   |
+
+### Known gaps
+
+- Not built: replays across endpoints, choosing event types or single deliveries to replay in bulk,
+  replaying succeeded deliveries in bulk, and scheduled replays.
+- A replay of hundreds of events delays events captured meanwhile by a few minutes (the worker
+  sends ten at a time for the company, oldest first), by design.
+
+## 2026-09-30 — Phase 5: webhook conversation events name the member and team (P5-09, ADR-094)
+
+Status: **Implemented and locally verified (no customer data; webhooks delivered to local test
+receivers only).** Since ADR-093 the API names a conversation's member and team and changes both,
+but webhooks said only whether a member was assigned, sent nothing when a conversation moved from
+one member to another, and nothing about teams.
+
+### Completed
+
+- **Design (ADR-094):** `conversation.assignment_changed` for every change of the member, with the
+  member before and after; a new `conversation.team_changed` for every change of the team, whoever
+  makes it, a team's deletion included (one event per conversation). Ids as `GET /members` and
+  `GET /teams` list them; no names, emails or roles. The change is as captured, the rest as
+  delivered; the status event also gives the member and team.
+- **Migration 0070:** the endpoint check takes 15 types; the event type check is replaced
+  `NOT VALID`; the conversation capture function and trigger are replaced: the trigger also fires
+  when the team changes, captures one event per fact that changed and stamps each with
+  `clock_timestamp()`, so two changes in one transaction keep their order (the campaign events'
+  approach). **0071** validates the check without blocking writes.
+- **Domain:** the new type in `WEBHOOK_EVENT_TYPES`, `WEBHOOK_EVENT_KEYS` and `WEBHOOK_EVENT_INFO`
+  ("Conversation team"); the payloads (`conversationTeamPayloadSchema`; `assigneeId` and
+  `previousAssigneeId` in the assignment event, `assigneeId` and `teamId` in the status event), built
+  when delivered; the OpenAPI entries, with the order receivers can rely on.
+- **Web:** Settings → Webhooks lists the new event (from the shared list); API keys with
+  `webhooks.manage` can choose it too.
+- **Tests:**
+  - Unit: the payload schemas (members named, both null for events captured before, the member
+    required, team ids only), the new webhook in the OpenAPI document and the list of event types.
+  - Integration in `webhook-events.test.ts` (1 replaced, 2 new):
+    - every change of the member (assigned, moved to another, none), with the members before and
+      after, delivered with the status and team as they are then;
+    - every change of the team: routing placing a new conversation in its number's team and giving
+      it a member in one statement (one event of each type), a member's move, an API key's move and
+      the team's deletion, each captured once and delivered to the endpoint;
+    - a request that takes the member off and moves the conversation to a round-robin team whose
+      routing gives it out again: two assignment events in one transaction, each stamped with its
+      own time and delivered in that order, with the team as delivered; the status event that
+      follows gives the member and team.
+  - Integration in `api.test.ts`: the ADR-093 test now expects the webhook for every change of the
+    member, naming both.
+  - e2e `webhook-events.spec.ts`: a member moves a conversation into a team and assigns it in the
+    inbox, then deletes the team: three signed events naming the team and the member.
+- **Docs:** ADR-094; SECURITY (webhooks); THREAT-MODEL T92, T111 and T112; RUNBOOKS (member and team
+  events; migrations 0070 and 0071); ARCHITECTURE; DATA-RETENTION; BACKLOG P5-09; FEATURE-MATRIX
+  W-138 and H-014.
+- **Also fixed (2bc8a7a, before ADR-091):** the commerce e2e catalog test was flaky on WebKit on
+  abc552a. It left the live inbox with a page load, which cancels the inbox's own refresh; Next.js
+  then reloads the current page and cuts off the test's navigation. It now leaves through the main
+  navigation and the settings tabs, as the new webhook test does.
+- **Mutation checks:** 25 regressions tried one at a time; 24 make a test fail, and the other (a
+  redundant REVOKE: 0047 revoked it and `CREATE OR REPLACE` keeps the grants) cannot be observed.
+  - 11 in the capture: moves between members not captured; the assignment event without the member
+    or the member before; the team event not captured, or naming the new team as the one before;
+    the trigger not firing when only the team changes (its column list or its condition);
+    assignment events stamped with the transaction's start; the new type refused by the endpoint or
+    the event check; endpoints still limited to 14 types.
+  - 9 in the payloads: the team body giving the team now rather than the change, or without the team
+    before or the member; the assignment body giving the member now, or without the member before
+    or the team; the status body without the member or the team; team events built as assignment
+    events.
+  - 4 in the schemas and the OpenAPI document: a team body taking any string as a team; an
+    assignment body without the member; endpoints unable to choose the new type; the OpenAPI
+    document without the team webhook. The first run missed the first two: the unit tests' invalid
+    bodies lacked other fields too, so they failed for another reason. Each now lacks only the field
+    under test, and both are caught.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted (after joining one line of `webhooks/payloads.ts` that the first run flagged) / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `pnpm test` (unit)                                                          | 425 passed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 568 passed, including 2 new and 1 replaced in `webhook-events.test.ts`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 568 passed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / first run on `webhook-events.spec.ts`, `webhooks.spec.ts`, `api.spec.ts`, `inbox-teams.spec.ts` and `inbox.spec.ts`: 32 passed and the new test failed on both projects (it looked for the team's delete button without opening the team's editor); after the fix, `webhook-events.spec.ts`: 10 passed (2.5 min); after the new test and the commerce test stopped leaving the live inbox with page loads, `webhook-events.spec.ts` and `commerce.spec.ts`: 12 passed (3.1 min); on the local database created for the day's runs, migrated to 0071 |
+| Mutation checks                                                             | 25 regressions tried; 24 make a test fail, and the other (a redundant REVOKE) cannot be observed                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+
+### Known gaps
+
+- Not built: member names or emails in bodies, events for a member's availability or a team's
+  settings, conversations started, `createdAt` finer than the millisecond, and filters beyond the
+  event type.
+- While the release rolls out, a worker of the previous release delivers assignment events in the
+  previous shape (`assigned` only), moves between members included.
+
+## 2026-09-30 — Phase 5: assigning conversations through the API (P5-08, ADR-093)
+
+Status: **Implemented and locally verified (no customer data).** An integration could read,
+answer, resolve and annotate conversations through the API, but not decide who answers them: the
+API named no members or teams, and the benchmark's API row listed assigning conversations as not
+built (W-134).
+
+### Completed
+
+- **Design (ADR-093):** `conversations.write` also gives a conversation to a member, unassigns it
+  or moves it to a team; `conversations.read` also lists the members conversations can be given to
+  and the teams. Conversations name their member and team by id. Every role that grants the first
+  holds `inbox.assign`, and every role that grants the second holds `members.read` (unit tests).
+- **Domain:**
+  - `apiUpdateConversation` (renamed from `apiSetConversationStatus`) takes `status`,
+    `assigneeId` and `teamId` and applies the team, then the member, then the status in one
+    transaction under the conversation's row lock, each as the inbox does: events, the audit as the
+    key, the automation taken over when a member is assigned, routing after a team move.
+  - `lockAssignableMember` and `lockTeam` (`inbox/routing.ts`) check the member (active, with a role
+    that answers conversations) and the team, locking their rows while the change is written; the
+    inbox's `assign` and `setTeam` use them too.
+  - `apiListMembers` and `apiListTeams` (`api/members.ts`) page the members routing would take (name,
+    teams, availability) and the teams (name, how they assign), oldest first.
+  - The conversation list filters by member and team, or those without one.
+  - **Fixed:** the inbox's assignment picker offered, and assigning accepted, members whose role
+    cannot open the inbox (marketers, analysts, billing managers).
+- **Web:** `GET /api/v1/members` and `GET /api/v1/teams`; the PATCH route calls the new service; the
+  scope labels on Settings → API keys; the OpenAPI document (`updateConversation` with
+  `UpdateConversation`, `listMembers`, `listTeams`, the conversation's new fields and filters).
+- **Tests:**
+  - Unit: who can grant both scopes; the body (a status the inbox sets, a member, a team or null, at
+    least one) and the list filters; refusals before any read; the OpenAPI entries.
+  - Integration in `api.test.ts` (5 new tests):
+    - members and teams paged, with names, teams and availability only, other roles, suspended
+      members and other companies left out, reads going on while the company is suspended;
+    - assigning, reassigning, unassigning and moving, audited as the key, heard live (with the
+      status event naming the new member), the assignment webhook for a member coming and going,
+      retries changing nothing, and the list filters;
+    - a team move routing an open conversation without a member, and leaving a named member, a
+      resolved conversation and an assigned one alone; the minute sweep giving an unassigned one
+      out again;
+    - every refusal (other roles, a suspended member, another company's member or team, unknown
+      ids) naming its field, with nothing in the request kept; other companies, suspended
+      companies and erased contacts;
+    - a member being suspended and a team being deleted in another transaction waited for and then
+      refused.
+  - Integration in `automations.test.ts`: a team move leaves the bot answering; an assignment takes
+    the conversation over, cancelling the bot's queued message.
+  - Integration in `inbox-advanced.test.ts`: the picker and assignment refuse members who cannot
+    answer conversations.
+  - e2e `api.spec.ts`: a key reads the members and the team, gives the conversation to the owner in
+    the team, and the inbox shows both; an unknown member is refused naming the field; unassigning
+    shows too.
+- **Docs:** ADR-093; SECURITY (public API; webhooks now say the API names members); THREAT-MODEL
+  T111; RUNBOOKS (a 422 naming `assigneeId` or `teamId`); ARCHITECTURE; BACKLOG P5-08;
+  FEATURE-MATRIX W-134 and H-033.
+- **Mutation checks:** 37 regressions tried one at a time; all make a test fail.
+  - 4 in the checks the API and the inbox share: any role, or a suspended member, given
+    conversations; the member or the team not locked while the change is written.
+  - 3 in the inbox: assigning without checking the member, the picker offering every member,
+    moving to a team without checking it.
+  - 16 in the update: the team or the member not checked; the automation left answering; no
+    routing after a team move, or routing before the request's status; the status event naming the
+    member the conversation had; the audit without its source, or naming the system; no live event
+    for an assignment or a team move, or one forgetting the member before; the member or team the
+    conversation already has set again; the conversation row not locked; `conversations.read`
+    enough to change it; an empty body taken.
+  - 4 in the conversation and the list: the conversation without its team or member; the member or
+    team filter ignored.
+  - 8 in the member and team lists: suspended members or every role listed; nobody available; no
+    teams; either list's cursor ignored; the member list without a scope; the team list needing
+    `conversations.write`.
+  - 1 in who grants the scopes: supervisors granting `conversations.write` without `inbox.assign`.
+  - 1 in the web, through the e2e test: `GET /members` answering with the teams.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                     | Result                                                                                                                                                                               |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                       |
+| `pnpm test` (unit)                                                          | 425 passed, including 3 new in `api/api.test.ts`                                                                                                                                     |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 566 passed, including 5 new in `api.test.ts`, 1 in `automations.test.ts` and 1 in `inbox-advanced.test.ts`                                                                           |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 566 passed                                                                                                                                                                           |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / on `api.spec.ts`, `api-keys.spec.ts`, `inbox.spec.ts`, `inbox-teams.spec.ts` and `crm.spec.ts`: 28 passed (5.9 min), on the local database created for the day's runs |
+| Mutation checks                                                             | 37 regressions tried (1 through the e2e test); all make a test fail                                                                                                                  |
+
+### Known gaps
+
+- Not built: webhooks naming the member and team (and so moves between members or teams),
+  assigning many conversations in one call, members' emails, team settings through the API, and a
+  precondition on the conversation's state.
+- The member list is paged by when members joined; there is no search by name.
+
+## 2026-09-30 — Phase 5: API scopes by plan (P5-01, P5-08, ADR-092)
+
+Status: **Implemented and locally verified (no customer data).** A plan version could leave the
+whole public API out (0 monthly requests, ADR-061) but not part of it. The benchmark documents which
+endpoints each plan can call (W-137); HyFib's endpoints are grouped by the scope they need, so a
+plan now chooses its scopes.
+
+### Completed
+
+- **Design (ADR-092):** a plan version includes every API scope, including scopes HyFib adds
+  later, or only the scopes platform owners choose. A request may use a scope only when its key has
+  it and the plan includes it; one the plan leaves out answers 403 `not_in_plan`, naming the scope.
+  New keys cannot be given such a scope; existing keys keep theirs, marked on Settings → API keys.
+- **Migration 0069:** `ops.plans.api_scopes` (NULL for every scope, so versions published before
+  keep what they gave), checked by the table (known scopes, not empty, none on a plan without the
+  API) and kept by the guard once published; `app.tenant_entitlements` returns it.
+- **Domain:**
+  - The admission that counts each request now returns the request's context with the plan's
+    scopes, and handlers run only with that admitted context.
+  - `hasScope`, `assertScope` and `assertAnyScope` check the key's scopes, then the plan's (before
+    the company's status). The places that read the key's scopes directly use them: the send
+    request's first check, a message's status, reading automation runs, and an automation that
+    sends marketing templates.
+  - Key creation checks the scopes against the plan; rotation keeps them.
+  - The platform plan service takes "every scope" or the chosen scopes, keeps them in the list's
+    order and copies them into a new version. The company's usage and the platform's view of a
+    company give the plan's scopes.
+- **Web:**
+  - The platform plan form ("The plan includes": every scope, or only those chosen), the plan
+    page and the company's platform page.
+  - Settings → API keys: the plan's scopes, keys' scopes marked "not in your plan", and scopes the
+    plan leaves out disabled in the form.
+  - The Billing plan card.
+  - The OpenAPI document describes the refusal.
+- **Tests:**
+  - Unit: the scope checks under a plan (the key first, then the plan, then the status; reads any
+    of several scopes allow) and the refusal's wording.
+  - Integration in `api-quota.test.ts` (3 new tests):
+    - requests held to the plan's scopes whatever the key has, for reads any sending scope allows
+      too, and plan changes both ways with the same key;
+    - new keys refused a scope outside the plan, existing keys kept and rotated with theirs, and
+      the company's and the platform's views of the plan's scopes;
+    - the form's choice kept in order, none on a plan without the API, the table's checks, the
+      guard of a published version, a new version starting from its scopes, and the table's list
+      of scopes equal to the API's.
+  - Integration in `api.test.ts`: starting an automation that sends marketing templates is refused
+    when the plan leaves out the marketing scope, whatever the key has.
+  - e2e `api-quota.spec.ts`: staff publish a plan without webhook management; the key still reads
+    contacts, its endpoint request is refused with `not_in_plan`, and the pages show the plan's
+    scopes and mark the key's.
+- **Docs:** ADR-092; SECURITY (public API); THREAT-MODEL T110; RUNBOOKS (a 403 naming a scope);
+  ARCHITECTURE; BACKLOG P5-01 and P5-08; FEATURE-MATRIX W-137 and H-039.
+- **Mutation checks:** 27 regressions tried one at a time; all make a test fail.
+  - 6 in SQL: the entitlements without the plan's scopes; the guard letting a published version's
+    scopes change; the table taking unknown scopes, an empty list, or scopes on a plan without the
+    API; platform staff unable to set a draft's scopes.
+  - 11 in the request's scope checks: the plan ignored by `hasScope`, `assertScope` or
+    `assertAnyScope`; the status checked before the plan; the refusal naming the first scope
+    rather than the one the key has; the admission, the counted request, the tests' contexts or
+    the entitlements dropping the plan's scopes; the scopes left out computed backwards; one scope
+    named as several.
+  - 9 in keys, automations and plans: a new key given scopes outside the plan; an automation with
+    marketing templates starting without the plan's marketing scope, or refused without saying
+    the plan leaves it out; the form's choice not kept, kept on a plan without the API, or no scope
+    accepted; a new version starting with every scope; the company's and the platform's views
+    without the plan's scopes.
+  - 1 in the web page, through the e2e test: Settings → API keys offering scopes the plan leaves
+    out.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                     | Result                                                                                                                                                                                           |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                   |
+| `pnpm test` (unit)                                                          | 422 passed, including 3 new in `api/api.test.ts`                                                                                                                                                 |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 559 passed, including 3 new in `api-quota.test.ts` and a new case in `api.test.ts`                                                                                                               |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 559 passed                                                                                                                                                                                       |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / on `api-quota.spec.ts`, `api-keys.spec.ts`, `plans.spec.ts` and `api.spec.ts`: 22 passed (4.6 min), on the local database created for the day's runs, with migration 0069 applied |
+| Mutation checks                                                             | 27 regressions tried (1 through the e2e test); all make a test fail                                                                                                                              |
+
+### Known gaps
+
+- Not built: availability per single endpoint rather than per scope, quotas per scope, telling
+  companies which scopes a plan change removes, and packs of scopes sold as add-ons.
+- Endpoints a key added keep receiving events, and runs a key started go on, after the plan drops
+  the scope: by design, since deliveries and runs are not API requests.
+
+## 2026-09-30 — Phase 5: alerts for work that failed for good (P5-10, ADR-091)
+
+Status: **Implemented and locally verified (no customer data).** The operations console listed dead
+letters, Meta and Razorpay webhook receipts that used all their attempts, and quarantined provider
+events (ADR-054), but nobody heard of them unless they looked. A receipt can be retried only while
+its body is kept (7 days), so a payment or a customer's message could be lost while the console
+waited.
+
+### Completed
+
+- **Design (ADR-091):** every platform administrator is emailed about each dead letter, each receipt
+  that used all its attempts and each unresolved quarantine entry, once, at most every 15 minutes,
+  with counts by queue, provider and reason only. A retried receipt that fails all its attempts
+  again is emailed again.
+- **A receipt nobody could see, fixed:** a receipt whose worker stopped during its 12th attempt
+  stayed `processing` after its lease ran out. The sweeper no longer signalled it, the console did
+  not list it and the retry refused it. One rule (`ops.webhook_receipt_exhausted`) now decides that
+  a receipt used its attempts, for the alert, the console and the retry: the console lists such a
+  receipt as "Failed all attempts" with the reason, and staff can retry it.
+- **Migration 0068:**
+  - an alert mark on dead letters, receipts and quarantine entries;
+  - `ops.platform_alerts` holding when the last alert went out;
+  - `ops.failure_alerts_due`, `ops.platform_failure_alert_recipients` and `ops.mark_failure_alert`
+    (SECURITY DEFINER, the worker's role only; the mark is row-locked, re-checks each item's mark,
+    and marks at most 1,000 items of each kind);
+  - `ops.platform_retry_webhook_receipt` replaced to take the stuck receipt and clear the mark.
+
+  Existing dead letters and erased receipts are marked as told. Receipts that can still be retried
+  and unresolved quarantine entries are emailed by the first sweep.
+
+- **Domain and worker:** `alertFailures` and the email (`platform/failure-alerts.ts`), run last in
+  the minute messaging sweep, so that a failure there holds back none of its other work. A queue's
+  name is cut at 40 characters in the email: the table allows 100, and a line longer than a
+  notice's 600 would fail the email, and so the alert, at every sweep. The console's receipt
+  listing uses the shared rule.
+- **Web:** Operations → Integrations says when the last alert went out, and shows when staff were
+  emailed about each receipt and quarantine entry. Operations → Queues shows the same for each dead
+  letter.
+- **Tests:**
+  - Unit: the email's wording, links and entry limit; the longest queue names, every provider and
+    every reason fitting a notice; nothing marked with nobody to tell.
+  - Integration in `platform-ops.test.ts` (5 new tests):
+    - each item told once to every administrator, both roles, with counts only; a resolved entry
+      not told; receipts still being processed or retried not told; the console showing when the
+      last alert went out and when staff were emailed about each item;
+    - the 15-minute gap, and two sweeps at once sending one alert;
+    - each kind told when it is the only one waiting;
+    - the stuck receipt listed, retried, and its alert re-armed; a receipt still processing its last
+      attempt neither listed nor retryable;
+    - the rule against the sweeper's limit, and the alert functions refused to platform staff.
+  - The isolation suite checks the new functions' grants.
+  - e2e `platform-ops.spec.ts` checks the Integrations page's alert line.
+- **Docs:** ADR-091; SECURITY (operations console); THREAT-MODEL T109; RUNBOOKS (failure alerts,
+  the stuck receipt, migration 0068); ARCHITECTURE 6P; BACKLOG P5-10; FEATURE-MATRIX H-034.
+- **Mutation checks:** 30 regressions tried one at a time; all make a test fail.
+  - 17 in SQL:
+    - the rule ignoring a stuck receipt, taking one still processing, or counting 11 attempts;
+    - no 15-minute gap, or the last alert's time not kept;
+    - dead letters or receipts told again; resolved quarantine entries told, or quarantine never
+      told; the due count leaving out each kind;
+    - platform owners only; platform staff running the mark;
+    - the retry not re-arming the alert, refusing a stuck receipt or taking one still processing.
+  - 7 in the domain: the sweep never alerting; marking with nobody to tell; no email queued; the
+    receipts line without the 7 days; every entry named on a line; long queue names kept whole; the
+    queues tab linked for receipts.
+  - 5 in the console's service: the listing ignoring the rule; hiding when the last alert went out,
+    or when staff were emailed about a receipt, a quarantine entry or a dead letter.
+  - 1 in the web page, through the e2e test: Integrations leaving out when the last alert went out.
+  - One, dead letters told again, first made no test fail. The next alert runs only when something
+    new waits, and in the test nothing did. The test now adds a new item and checks that nothing
+    already told is marked again.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                     | Result                                                                                                                                                                 |
+| --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                         |
+| `pnpm test` (unit)                                                          | 419 passed, including 5 new in `platform/failure-alerts.test.ts`                                                                                                       |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 556 passed, including 5 new in `platform-ops.test.ts`                                                                                                                  |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 556 passed                                                                                                                                                             |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / on `platform-ops.spec.ts` and `company-data.spec.ts`: 8 passed (5.8 min), on the local database created for the day's runs, with migration 0068 applied |
+| Mutation checks                                                             | 30 regressions tried (1 through the e2e test); all make a test fail, one only once the test added a new item                                                           |
+
+### Known gaps
+
+- Not built: alerts for a queue's oldest waiting job (pg-boss's counts carry no age), for a
+  company's failing integrations, other channels (chat, pager), and intervals chosen per alert.
+- The worker calling the alert is not observed by a test: the integration tests call the alert
+  directly, and an e2e check would wait on the global 15-minute gap.
+- The alert runs last in the minute messaging sweep: while an earlier step of that sweep fails, no
+  alert goes out either. The sweeps have no dead-letter queue (they run again each minute), so
+  their own failures are in the worker's logs only.
+
+## 2026-09-30 — Phase 5: company deletion started by HyFib staff (P5-11, ADR-090)
+
+Status: **Implemented and locally verified (no customer data).** Only a company's owners could
+delete it (ADR-055). A company whose owners asked HyFib support to delete it, or whose service HyFib
+ends, could only be suspended, and its data was then kept with no end.
+
+### Completed
+
+- **Design (ADR-090):** platform owners schedule a company's deletion on its platform page by
+  typing the company address and a reason of 10 to 1,000 characters, which the company reads. The
+  grace is the same 14 days as an owner's deletion, the company works as if suspended meanwhile
+  (members read, owners export), and the same resumable `tenant.delete` job runs it. Whoever
+  scheduled a deletion cancels it: a platform owner cancels a staff deletion before it starts, with
+  a reason the company reads; owners cannot cancel it, and staff cannot cancel an owner's deletion.
+  Operators see a deletion and cannot act.
+- **Migration 0067:** the deletion register gains `requested_by` (`owner` by default, so older rows
+  are owners'), `reason`, `cancelled_by`, `cancel_reason` and the two notice marks. Checks make a
+  staff deletion carry its reason and a cancellation's `cancelled_by` equal `requested_by`. The
+  company reads who scheduled a deletion and HyFib's words (column grants), never who at HyFib.
+  New functions: `ops.platform_request_tenant_deletion` and `ops.platform_cancel_tenant_deletion`
+  (platform owners, both audit logs), `ops.tenant_status_after_deletion` (the status a cancellation
+  restores, now shared with the owners' cancel), `ops.tenant_deletion_notices_due` and
+  `app.tenant_deletion_mark_notified` (the notice sweep). `app.cancel_tenant_deletion` now refuses a
+  staff deletion and records `cancelled_by = 'owner'`.
+- **Domain:** `scheduleTenantDeletion` and `cancelTenantDeletion` in the platform service (input
+  and role checked before any query, and again in SQL). `notifyStaffDeletions` emails the owners and
+  administrators of a staff schedule or cancellation from the worker's minute sweep, each notice
+  marked once in the company's own scope in the transaction that queues its emails. The company's
+  deletion view shows who scheduled it and HyFib's reason, and not the staff member's name. The
+  final "Company deleted" email says HyFib deleted the company and gives the reason. Reasons go
+  through `splitEmailText`.
+- **Web and worker:**
+  - The company's platform page: a "Delete the company" card for platform owners, the deletion card
+    saying who scheduled it (with the reason and any cancellation), and the cancel form for a staff
+    deletion.
+  - The company's banner and Settings → Company data: HyFib's reason, and "Only HyFib can cancel
+    this deletion" in place of the cancel button.
+  - The worker's billing sweep runs the notice sweep.
+- **Tests:**
+  - Unit: the platform service refuses operators and bad input before the database.
+  - Integration in `company-data.test.ts` (4 new tests):
+    - Scheduling: needs a platform owner, the address and a reason (checked in SQL too); both audit
+      logs; the company's deletion view gives the reason and not the staff member; owners and
+      administrators emailed (not agents), once; owners can neither cancel nor ask again.
+    - Cancelling: by a platform owner, restoring a suspension or a lapsed plan; staff cannot cancel
+      an owner's deletion or a started one, and owners cannot cancel a staff deletion.
+    - Notices: kept to the company's own scope and told once, even with two sweeps at once. Owners'
+      deletions and deleted companies are not listed. The register's checks hold.
+    - Running: a staff deletion's run and its last email.
+  - The owners' cancel records `cancelled_by`. Function grants in the isolation suite.
+  - e2e `company-data.spec.ts`: a platform owner schedules the deletion. The company reads the
+    reason in the banner and on Company data and cannot cancel, and the owner gets the worker's
+    email. The platform owner cancels, with its email.
+- **Docs:** ADR-090 (ADR-055 annotated); SECURITY (permission matrix, platform roles, staff-started
+  deletion); THREAT-MODEL T108; RUNBOOKS 10Q (staff deletions, migration 0067); DATA-RETENTION;
+  ARCHITECTURE 6Q; BACKLOG P5-11; FEATURE-MATRIX H-015.
+- **Threat model statuses corrected:** 15 rows (T86, T89, T93, T96 to T107) carried a status "L"
+  that the legend does not define. Each is mitigated and tested locally, so they now read "M".
+- **Mutation checks:** 37 regressions tried one at a time; all make a test fail.
+  - 24 in SQL:
+    - operators scheduling or cancelling; any reason; no address typed; a company already being
+      deleted scheduled again; the deletion recorded as an owner's; the owners' status reason;
+      either audit log of a schedule dropped; due in 7 days;
+    - staff cancelling an owner's or a started deletion; a suspension or a lapsed plan not restored;
+      no platform audit for a staff cancellation; owners cancelling HyFib's deletion; an owner's
+      cancel not recorded as the owner's;
+    - the sweep listing owners' deletions or deleted companies; the mark taken in any company's
+      scope or marked twice; the company not granted the reason; the register taking a
+      cancellation by the other side or a staff deletion without a reason.
+  - 10 in the domain: the staff member named to the company; the reason hidden from it; the
+    schedule email without the reason; agents told; the mark's answer ignored; a cancellation told
+    as a schedule; operators passing the service; a three-character reason taken; the last email
+    saying the owners asked for a staff deletion, or without HyFib's reason.
+  - 3 in the web layer, through the e2e test: Company data offering owners the cancel button for
+    HyFib's deletion; the banner saying an owner can cancel it; the worker not running the notice
+    sweep.
+  - Two, the sweep listing owners' deletions or deleted companies, first made no test fail. The
+    mark refuses an owner's deletion, and a deleted company has no one left to email. The tests
+    now read the sweep's own listing and check the mark after the sweep, and both are caught.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                     | Result                                                                                                                                      |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                              |
+| `pnpm test` (unit)                                                          | 414 passed, including 2 new in `platform/service.test.ts`                                                                                   |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 551 passed, including 4 new in `company-data.test.ts`                                                                                       |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 551 passed                                                                                                                                  |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / on `company-data.spec.ts`: 6 passed (6.1 min), on the local database created for the day's runs, with migration 0067 applied |
+| Mutation checks                                                             | 37 regressions tried (3 through the e2e test); all make a test fail, two only once the tests read the sweep's own listing                   |
+
+### Known gaps
+
+- Not built: a shorter grace for staff, starting the job early, deleting a company without its
+  owners being told, staff cancelling an owner's deletion, and selecting companies to delete in
+  bulk (for example inactive trials).
+- As with owners' deletions: legal and tax review of the kept records, and live Meta, Shopify and
+  Razorpay verification of the provider clean-up.
+
+## 2026-09-30 — Fix: refund decline emails with a long note
+
+Status: **Fixed and verified locally (PostgreSQL 18.6 and 17.11).** A platform owner may decline a
+company's refund request with a note of up to 1,000 characters (ADR-073), but a billing notice holds
+at most 500 characters a line and the note went on one line. With a note over 486 characters, the
+minute sweep's email to the billing managers failed its payload check every minute, so the company
+was never told of the decline (the sweep reported the failure and tried again). Found while writing
+the emails for company deletion started by staff, whose reasons are emailed too.
+
+### Completed
+
+- **Long notes split over lines:** `splitEmailText` (email templates) breaks text a person wrote into
+  lines within a notice's limit, between words (a word longer than a line is cut, never inside a
+  surrogate pair). The decline email puts the note through it, so a 1,000-character note arrives in
+  full over three lines. The limits now live in one place, `NOTICE_LINE_MAX`.
+- **Tests:** a decline with a 1,000-character note in the integration test of the decline email (it
+  failed before the fix with "Too big: expected string to have <=500 characters"), and unit tests of
+  the split.
+- **Mutation checks:** 6 regressions tried (the note on one line again, split at the company
+  notice's limit of 600, a line one character too long, surrogate pairs cut, line breaks kept, long
+  words kept whole); all make a test fail, the third only once a test at the exact limit was added.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                               | Result                                                                            |
+| --------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                  | 0 problems / all files formatted / all workspace packages pass                    |
+| `pnpm test` (unit)                                                    | 412 passed, including 6 new in `email/templates.test.ts`                          |
+| `tests/integration/refund-requests.test.ts` (PostgreSQL 18.6 / 17.11) | 17 passed / 17 passed; before the fix, the decline email test failed as described |
+
+## 2026-09-30 — Phase 5: reading internal notes through the public API (P5-08, ADR-089)
+
+Status: **Implemented and locally verified (no customer data).** Keys added notes to conversations
+(ADR-084) and members wrote them in the inbox, but no key could read them: a helpdesk kept in step
+with HyFib pushed its notes in and could not bring the team's back.
+
+### Completed
+
+- **Design (ADR-089):** `GET /api/v1/conversations/{id}/notes` (`listConversationNotes`) pages a
+  conversation's notes newest first on exact keyset cursors under `conversations.read`, which is
+  granted only by members who read every conversation's notes in the inbox. Each note says who
+  wrote it at the level the API names anyone: `writtenBy` `agent` (a member, as messages' `sentBy` says) or `api`, with the key for a
+  key's note; never which member, never whom it mentions. The note a key adds answers in the same
+  shape, now with `writtenBy: api` (ADR-084 is unreleased, so its `apiKeyId` becomes nullable
+  without breaking anyone). No migration.
+- **Domain:** `apiListConversationNotes` and `apiNoteListQuerySchema` in `api/conversations.ts`;
+  `ApiConversationNote` gains `writtenBy`; the OpenAPI operation `listConversationNotes` and the
+  `ConversationNote` schema with `writtenBy` and a nullable `apiKeyId`; the scope's description and
+  the API description name notes.
+- **Web:** `GET` on `/api/v1/conversations/{id}/notes` beside `POST`; Settings → API keys says keys
+  read conversations' notes.
+- **Tests:** unit (the query: a page and nothing else; the scope checked before anything is read, a
+  malformed id not looked up; the OpenAPI operation with its parameters and the note's shape, with
+  `writtenBy` and a nullable `apiKeyId`). Integration in `api.test.ts`: a member's note that
+  mentions another member, a key's note and two notes saved by one statement with the same time,
+  read newest first on pages of 1, 2 and 3 that never skip or repeat; the member's note without
+  the member or the mention, the key's as the key added it; an empty conversation; another
+  company's conversation, an erased contact's, an unknown id and a malformed one not found; the
+  scope and bad queries refused; the note a key adds now answering with `writtenBy: api`. e2e
+  `api.spec.ts`: after the key adds its note, a member adds one in the inbox and the key reads both,
+  newest first.
+- **Docs:** ADR-089; ARCHITECTURE (public API); SECURITY (Phase 5 rules); THREAT-MODEL T107;
+  RUNBOOKS (notes read through the API); BACKLOG P5-08; FEATURE-MATRIX H-033 and W-134.
+- **Mutation checks:** 18 regressions tried one at a time; 17 make a test fail. 16 of 17 in the domain: the
+  scope not checked; erased contacts' or other companies' conversations not refused; notes of every
+  conversation read; the cursor's own note again; oldest first; notes sharing a time in the other
+  order; no further pages seen; every note said to be an agent's; the key left out; the member named
+  on a member's note; the added note without `writtenBy`; unknown query fields; malformed ids looked
+  up; the operation, `writtenBy` or the sentence about members missing from the OpenAPI document.
+  The other, dropping the company from the query, cannot be observed: row security already keeps
+  other companies' notes out, which the test checks. 1 in the web layer through the e2e test: the
+  route answering POST only.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                      | Result                                                                                                                                                                                                                                          |
+| ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                         | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                  |
+| `pnpm test` (unit)                                                           | 406 passed, including 3 new in `api/api.test.ts`                                                                                                                                                                                                |
+| `pnpm test:integration` (PostgreSQL 18.6)                                    | first run: 546 passed and 1 failed (the email outbox lease test in `jobs.test.ts`, which this slice does not touch: the test's own fault, fixed below in "Fix: the email outbox lease test in a busy test database"); two more runs: 547 passed |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                    | 547 passed                                                                                                                                                                                                                                      |
+| `pnpm test:integration` once placed after that fix (PostgreSQL 18.6 / 17.11) | 547 passed / 547 passed                                                                                                                                                                                                                         |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium`  | build passes / on `api.spec.ts`: 10 passed (1.8 min), on the local database created for the day's runs                                                                                                                                          |
+| Mutation checks                                                              | 18 regressions tried (1 through the e2e test); 17 make a test fail, and the other (the company in the query, already enforced by row security) cannot be observed                                                                               |
+
+### Known gaps
+
+- Not built: notes across conversations, editing or deleting notes, member names and mentions,
+  notes in webhooks.
+
+## 2026-09-30 — Phase 5: a message feed across conversations through the public API (P5-08, ADR-088)
+
+Status: **Implemented and locally verified (no customer data).** Integrations that copy what
+customers write into a helpdesk, a CRM or a warehouse read messages one conversation at a time: to
+catch up after their receiver was down, or to fill a new install, they listed the conversations
+updated since their last pass and read each one's messages, one request per conversation.
+
+### Completed
+
+- **Design (ADR-088):** `GET /api/v1/messages` (`listMessages`) pages the messages of every
+  conversation of the company newest first on exact keyset cursors, with `direction`, `channelId`
+  and `since`, under `conversations.read` (no new scope: it reads what one conversation's messages
+  already give). Each message reads as a conversation's messages read it, with the conversation's
+  contact and the number it was received on or sent from; no media, no internal notes, no erased
+  contacts' conversations. Catching up: ask for `since` a little before the previous pass began and
+  deduplicate on the id; statuses are followed with the `message.status` webhook.
+- **A bounded read per page:** measured before building (400,000 synthetic messages of one company
+  in a rolled-back transaction on the local PostgreSQL 18): `messages_tenant_created_idx` (0008)
+  serves unfiltered pages in a few milliseconds, but a filter matching few messages read every
+  message the company has (774 ms for a number without messages, growing with the company up to the
+  15-second statement timeout). Rather than an index per filter on the busiest table, each page
+  reads at most 2,000 messages (`API_MESSAGE_FEED_WINDOW`): a first read finds the 2,000th message
+  from the cursor, the second reads the matches between them, both in one repeatable-read, read-only
+  transaction; a short page's cursor continues after the last message it read. Measured the same
+  way, each read took about 3 ms, for a number without messages and for a page 300,000 messages
+  back alike. No migration.
+- **Domain:** `apiListMessages` and `apiMessageFeedQuerySchema` in `api/conversations.ts`, with the
+  message columns and `toApiMessage` now shared with `apiListConversationMessages`; the OpenAPI
+  operation `listMessages` with its parameters and the `FeedMessage` schema; the
+  `conversations.read` description and the API description name the feed.
+- **Web:** `GET` on `/api/v1/messages` beside `POST`; Settings → API keys says keys read messages
+  of one conversation or all of them.
+- **Tests:** unit (the query: direction, number and time, unknown fields refused; the scope checked
+  before the query; the OpenAPI operation with exactly its parameters, the window in its description
+  and `FeedMessage` with the contact and number). Integration in `api.test.ts`: every
+  conversation's messages newest first on pages of 1, 2 and 3 that never skip or repeat, two of them
+  saved by one delivery with the same time to the microsecond; each message as the conversation's
+  messages read it, with the contact and number; a reply sent through the API named with its key;
+  notes and an erased contact's conversation left out; `direction`, `channelId` (a second number, an
+  unknown one) and `since` (a message's own time included, a later time empty until a new message);
+  another company's key reading only its own; 2,002 messages read 2,000 at a time: unfiltered pages
+  of 100 always full, answers placed at the window's last message and the one after it found on a
+  short page and the next, a number without messages giving two empty pages to the end; the scope
+  and bad queries (direction, number, time, limit, unknown field, cursor) refused. e2e `api.spec.ts`:
+  after reading the conversation page by page, the key reads the same two messages in the feed, one
+  page at a time, with the contact and number, and the inbound one alone by direction; the OpenAPI
+  document names `listMessages`.
+- **Docs:** ADR-088; ARCHITECTURE (public API); SECURITY (Phase 5 rules); THREAT-MODEL T106;
+  RUNBOOKS (the message feed); BACKLOG P5-08; FEATURE-MATRIX H-033 and W-134.
+- **Mutation checks:** 24 regressions tried one at a time; 23 make a test fail. 22 of 23 in the domain: the
+  scope not checked; erased contacts' conversations included; `direction`, `channelId` or `since`
+  ignored; `since` exclusive; the cursor's own message read again; messages sharing a time in the
+  other order; a window one message larger or smaller; no window; the window's last message left
+  out; a short page ending the feed; no further pages seen; the conversation given as the contact;
+  the number left out; any text taken as `since` or `channelId`; unknown query fields accepted; the
+  route, the window paragraph or the contact and number missing from the OpenAPI document. The
+  other, dropping the company condition from the query, cannot be observed: row security already
+  keeps other companies' messages out, which the test checks. 1 in the web layer through the e2e
+  test: the route answering POST only.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                     | Result                                                                                                                                                            |
+| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                    |
+| `pnpm test` (unit)                                                          | 403 passed, including 3 new in `api/api.test.ts`                                                                                                                  |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 545 passed, including 3 new in `api.test.ts`                                                                                                                      |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 545 passed                                                                                                                                                        |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / on `api.spec.ts`: 10 passed (2.2 min), on the local database created for the day's runs                                                            |
+| Query plans (EXPLAIN ANALYZE, 400,000 synthetic messages, rolled back)      | unbounded read: 774 ms for a number without messages; each windowed read: about 3 ms, for a number without messages and 300,000 messages back alike               |
+| Mutation checks                                                             | 24 regressions tried (1 through the e2e test); 23 make a test fail, and the other (the company in the query, already enforced by row security) cannot be observed |
+
+### Known gaps
+
+- Not built: statuses changed since a time, filters by contact or conversation, media, notes,
+  counts.
+
+## 2026-09-30 — Phase 5: webhook events for campaigns (P5-09, ADR-087)
+
+Status: **Implemented and locally verified with local test receivers (no customer data).** A CRM or
+marketing tool kept in step with HyFib heard of each campaign message through `message.status`, but
+not that a campaign was approved, started, paused (and why) or finished.
+
+### Completed
+
+- **Design (ADR-087):** `campaign.status_changed` whenever a campaign's status changes, whoever
+  changes it: a member submitting it for approval, withdrawing, rejecting, approving, pausing,
+  resuming or cancelling it, or the runner starting, pausing (with the reason: a cap, the template,
+  the number, the member whose authority it uses, a missing rate card) or completing it (every
+  recipient processed, or its time ran out). Draft edits, progress and test sends send nothing.
+  Payloads are built when delivered: the campaign's name, template, times and counters (audience,
+  queued, skipped) and its number, with the change and its reason as captured; never a recipient or
+  a member.
+- **Migrations 0065–0066:** the endpoint check takes all 14 types; the event type check is replaced
+  `NOT VALID` in 0065 and validated in 0066 without blocking writes; the capture function (not
+  executable by `PUBLIC`) and a trigger on `app.campaigns` after an update that changes `status`.
+  Events are stamped with `clock_timestamp()`, so a start and a pause the runner makes in one
+  transaction keep their order.
+- **Domain:** the type in `WEBHOOK_EVENT_TYPES`, `WEBHOOK_EVENT_KEYS` and `WEBHOOK_EVENT_INFO`;
+  `CAMPAIGN_COMPLETION_REASONS` exported from the schema; `campaignStatusChangedPayloadSchema` and
+  the campaign read (`campaignOf`) in `webhooks/payloads.ts`; the OpenAPI webhook
+  `campaign.status_changed` (`WebhookCampaignStatusChanged`).
+- **Web:** Settings → Webhooks offers "Campaign status" (from the shared list) and its introduction
+  names campaigns.
+- **Tests:** unit (the payload schema: every status from every other, every pause and completion
+  reason, a draft without a template or number, unknown statuses and reasons, fractional counts and
+  another type refused; the OpenAPI list and body schema). Integration in `webhook-events.test.ts`
+  (local receiver): a campaign submitted, rejected, submitted again, approved, started by the
+  runner, paused by a member, resumed by another and completed by the runner, each change captured
+  once with the status before it and its reason and delivered only to the endpoint that takes
+  campaign events, as the campaign is when delivered; draft edits capturing nothing; a start and a
+  pause by the runner in one transaction (the member lost the permission) captured in order with
+  distinct times; a cancellation before the start; nothing captured without an endpoint for
+  campaigns; a gone campaign failing as `event_gone` without an attempt; an endpoint taking all 14
+  types. e2e `webhook-events.spec.ts`: an endpoint chosen in settings receives signed changes as a
+  member starts a campaign and the runner starts and completes it (draft edits send nothing).
+- **Docs:** ADR-087; ARCHITECTURE (outgoing webhooks); SECURITY (controls, Phase 5 rules);
+  THREAT-MODEL T105; RUNBOOKS (campaign events, migrations 0065–0066); DATA-RETENTION (outgoing
+  webhooks); BACKLOG P5-09; FEATURE-MATRIX H-014 and W-138.
+- **Mutation checks:** 27 regressions tried one at a time; 26 make a test fail. 25 of 26 in the
+  database and domain: no trigger; every update of a campaign captured; the status before a change
+  not kept; the pause or completion reason not kept; the pause reason kept whatever the status
+  (missed at first: a resume clears the reason, so the test now also cancels a paused campaign);
+  events stamped with the transaction's time; no status in the event; endpoints refused the campaign
+  type or limited to 13 types; events refused the type; the status as the campaign is now; the
+  status before it, the reasons or the template's name not read; queued counted as skipped; no
+  number; a gone campaign not detected; the type not offered to endpoints; the webhook or its body
+  schema missing from the OpenAPI document; a pause reason missing from the schema; fractional
+  counts described; a draft without a number not described. The other, dropping the explicit `REVOKE
+… FROM PUBLIC`, cannot be observed: default privileges (migration 0002) already withhold EXECUTE
+  from PUBLIC, which the isolation suite checks. 1 in the web layer through the e2e test: the
+  endpoint form not offering the campaign event.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                     | Result                                                                                                                                                                                        |
+| --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                |
+| `pnpm test` (unit)                                                          | 400 passed, including 1 new in `webhooks/webhooks.test.ts`                                                                                                                                    |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 542 passed, including 2 new in `webhook-events.test.ts`                                                                                                                                       |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 542 passed                                                                                                                                                                                    |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / on `webhook-events.spec.ts`, `webhooks.spec.ts` and `campaigns.spec.ts`: 16 passed (3.9 min), on a local database created for the day's runs with migrations 0065–0066 applied |
+| Mutation checks                                                             | 27 regressions tried (1 through the e2e test); 26 make a test fail, and the other (a redundant REVOKE) cannot be observed                                                                     |
+
+### Known gaps
+
+- Not built: delivery and read counts in the payload, the campaign in `message.status`, events per
+  recipient, test sends and drafts, reading campaigns through the public API, filters by campaign.
+
+## 2026-09-30 — Phase 5: product messages through the public API (P5-08, ADR-086)
+
+Status: **Implemented and locally verified (no customer data).** Members send products from the
+company's WhatsApp catalogs in the inbox, but an integration answering a customer who asked about
+something to buy (a store, a chatbot, a recommendation system) could send only text, buttons, lists
+and reactions through the API, so it sent a link as text.
+
+### Completed
+
+- **Design (ADR-086):** three more reply types on `POST /api/v1/messages` under `messages.reply`
+  (now "Reply with text, buttons, lists, products and reactions"): `product` (one product, with an
+  optional body and footer), `product_list` (a header, a body, an optional footer and up to 10
+  sections of products, 30 in all, each once, titled when there are several) and `catalog` (the
+  catalog, opened from a product's picture). They follow every rule of replies (only to a number
+  that wrote in the last 24 hours, one answer otherwise, the automation ended, one message per
+  `Idempotency-Key`, `replyTo` quoting a message) and need Commerce in the plan (403 `not_in_plan`,
+  checked first). Products are named by content id (`retailerId`) and found only among the catalogs
+  HyFib read for the sending number's WhatsApp account, connected and not removed at Meta, all from
+  one catalog (`catalogId` names it when two hold the ids); unknown ids are refused by name (422 on
+  `products`). No migration.
+- **Domain:** `apiSendProductSchema`, `apiSendProductListSchema` and `apiSendCatalogSchema` with the
+  inbox's limits (`COMMERCE_LIMITS`); `apiSendProducts`, dispatched by `apiSendMessage`;
+  `catalogProducts` resolves the ids; `sendReply` gains a `precheck` run first and passes the
+  transaction and the number's WhatsApp account to `build`; `productInteractive` (shared with the
+  inbox's `buildProductMessageRequest`) builds the Graph object; the message stores
+  `content.products` as the inbox's product sends do, so the thread shows it named as the key's. The
+  OpenAPI document gains `SendProduct`, `SendProductList` and `SendCatalog`, the products paragraph
+  and the 403 reason; the scope's label and description name products.
+- **Web:** Settings → API keys' introduction names products; the inbox bubble already shows
+  `content.products` (its comment now says so).
+- **Tests:** unit (the three bodies with Meta's limits and every refusal: missing and long content
+  ids, catalog ids that are not digits, long body, footer, header and section titles, a header on
+  one product, untitled sections, more than 30 products or 10 sections, a product twice, a catalog
+  without a body or thumbnail; content ids kept exactly as given; the scope checked before anything
+  is read for each type; the OpenAPI bodies and description). Integration in `api.test.ts` (Graph
+  stand-in): a product, a product list and the catalog once per `Idempotency-Key` (a retry replayed)
+  through the send pipeline, with the Graph requests, the stored content and names, the key named in
+  the inbox, the preview and the status read back; refusals storing nothing: unknown ids, a product
+  removed at Meta, a disconnected catalog, another company's catalog and another WhatsApp account's
+  catalog (a second account of the company), a content id in two catalogs without `catalogId`, ids
+  split across catalogs, a `catalogId` without the id, then the named catalog's product and name
+  sent; a closed window; a plan without Commerce refused before the window, then sent once Commerce
+  is in the plan. e2e `commerce.spec.ts`: a key created in settings sends a product over HTTP, the
+  Graph stand-in receives it with the catalog found, and the chat shows it with the key's name;
+  `api.spec.ts` follows the scope's new label.
+- **Docs:** ADR-086; ARCHITECTURE (the public API); SECURITY (Phase 5 rules); THREAT-MODEL T104;
+  RUNBOOKS (products refused or failing); BACKLOG P5-08; FEATURE-MATRIX W-134 and H-033.
+- **Mutation checks:** 35 regressions tried one at a time; all make a test fail. 34 in the domain
+  and API: a plan without Commerce not refused, refused only after the number and its window,
+  checked for another module, or refused without its reason; products of the company's other
+  WhatsApp accounts, of disconnected catalogs or removed at Meta found; `catalogId` ignored; unknown
+  ids not named, or not refused as unknown; one of two catalogs picked silently; products of several
+  catalogs taken as one; names read from every catalog; content ids stored as the names; the list's
+  header not stored; the catalog's preview; the catalog found not sent; a product's body, the footer
+  or section titles dropped; product messages stored as text; catalog messages not routed; products
+  sent without the reply scope; more than 30 products in all; several sections without titles; a
+  product given twice; content ids trimmed; any catalog id; a longer body than Meta's; unknown
+  fields accepted; the catalog body or the products paragraph left out of the OpenAPI document; a
+  product message without its body or a catalog message without its thumbnail. One, names read from
+  every catalog, was missed at first: a catalog named with `catalogId` returns only its own rows, so
+  the test now also sends, without `catalogId`, ids that only one catalog holds in full. The account
+  filter is observable because the test gives the company a second WhatsApp account with a catalog
+  of its own. 1 in the web layer through the e2e test: Settings → API keys' introduction not naming
+  products.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                     | Result                                                                                                                      |
+| --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                              |
+| `pnpm test` (unit)                                                          | 399 passed, including 2 new in `api/api.test.ts`                                                                            |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 540 passed, including 2 new in `api.test.ts`                                                                                |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 540 passed                                                                                                                  |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / on `api.spec.ts` and `commerce.spec.ts`: 12 passed (2.4 min), on a local database created for the day's runs |
+| Mutation checks                                                             | 35 regressions tried (1 through the e2e test); all make a test fail                                                         |
+
+### Known gaps
+
+- Not built: Flows, call-to-action and order messages through the API, product names or prices in
+  the request, reading catalogs and products through the API, and products outside the customer
+  service window (templates with product buttons).
+
+## 2026-09-30 — Fix: the email outbox lease test in a busy test database
+
+Status: **Fixed and verified locally (PostgreSQL 18.6 and 17.11).** The integration test "a worker
+that died mid-delivery leaves a lease that the sweeper recovers after expiry" (`jobs.test.ts`)
+failed now and then with "expected [ Array(500) ] to deep equally contain { … }": once in a full
+PostgreSQL 18 run, then in the fifth of five back-to-back full runs made to catch it (the first four
+passed). Only the test changed: the sweeper and email delivery are unchanged.
+
+### Cause
+
+- The sweeper (`findStaleOutboxRows`, which the worker runs every minute) reads at most 500 stale
+  rows, in no order: pending rows due more than a minute ago, and rows whose delivery lease
+  expired. The integration test files share one database, and some leave pending notices behind
+  (nothing sends them there). When more than 500 were pending as this test ran, which depends on
+  the order the files ran in, the one batch the test read could leave out its row.
+- Reproduced every time by adding 600 pending notices at the start of the test: the same failure,
+  with exactly 500 rows returned.
+- The worker is not affected this way: every row a sweep signals again is then sent, rescheduled or
+  marked failed, so it leaves the stale rows and later sweeps read the rest.
+
+### Completed
+
+- **The test reads every stale row** (a limit of 100,000 instead of the sweeper's 500), with a
+  comment saying why: it checks that the expired lease makes the row stale, not which batch the row
+  lands in.
+- **Mutation checks:** both deliberate regressions in the sweeper's query (expired leases left out,
+  the lease compared the wrong way) still make the test fail.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                                         | Result                                                          |
+| ----------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| The test with 600 more pending notices added at its start, before and after the fix             | failed (500 rows returned, without the test's row), then passed |
+| `npx vitest run --project integration tests/integration/jobs.test.ts` (PostgreSQL 18.6 / 17.11) | 15 passed / 15 passed                                           |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                            | 0 problems / all files formatted / all workspace packages pass  |
+
+## 2026-09-30 — Phase 5: webhook events for WhatsApp orders (P5-09, ADR-085)
+
+Status: **Implemented and locally verified with local test receivers (no customer data).** An order
+or delivery system learned of a WhatsApp order only from `message.received` (type `order`), without
+its items or total, and heard nothing when the order was paid or changed status.
+
+### Completed
+
+- **Design (ADR-085):** `order.received` when HyFib records a cart a customer sent from the
+  company's WhatsApp catalog, and `order.status_changed` with the status before it whenever the
+  status changes, whoever changes it: a member confirming, fulfilling or cancelling the order or
+  asking for payment, or the worker applying what Razorpay reports for its Payment Link (paid, or
+  back to confirmed when the link ends unpaid). Payloads are built when delivered: the order with
+  its items in cart order, amounts as integers in minor units, the customer's note and the product
+  names HyFib knew, then the conversation, contact and number; an erased contact's order is sent
+  without number, name or note, and no Payment Link address or Razorpay payment id is ever sent.
+  Store orders (Shopify, WooCommerce) are not sent.
+- **Migrations 0063–0064:** the endpoint check takes all 13 types; the event type check is
+  replaced `NOT VALID` in 0063 and validated in 0064 without blocking writes; the capture function
+  (not executable by `PUBLIC`) and two triggers on `app.commerce_orders` (after an insert, and
+  after an update that changes `status`; erasure clearing the note sends nothing).
+- **Domain:** the two types in `WEBHOOK_EVENT_TYPES`, `WEBHOOK_EVENT_KEYS` and
+  `WEBHOOK_EVENT_INFO`; `orderReceivedPayloadSchema` and `orderStatusChangedPayloadSchema`, and the
+  order read (`orderOf`) in `webhooks/payloads.ts`; the OpenAPI webhooks `order.received` and
+  `order.status_changed` (`WebhookOrderReceived`, `WebhookOrderStatusChanged`).
+- **Web:** Settings → Webhooks offers "Order received" and "Order status" (from the shared list)
+  and its introduction names orders.
+- **Tests:** unit (both payload schemas: every order status, an order without a total or note,
+  fractional amounts and unknown statuses refused; the OpenAPI list and body schemas). Integration
+  in `webhook-events.test.ts` (Razorpay stand-in and local receiver): a cart from a catalog read
+  from Meta, then a member's confirmation, a payment request, Razorpay reporting the link paid
+  (through the worker) and the member's fulfilment, each captured once with the status before it
+  and delivered to the endpoints that take its type (an endpoint for messages hears only the order
+  message), items in cart order with the names HyFib knew, amounts in minor units, `paidAt` as
+  delivered; an erased contact's order and its change delivered without number, name or note,
+  erasure capturing nothing, nothing captured without an endpoint that takes order events, a gone
+  order failing as `event_gone` without an attempt, and an endpoint taking all 13 types. e2e
+  `webhook-events.spec.ts`: an endpoint chosen in settings receives a signed `order.received` for a
+  cart sent through the Meta webhook, then signed changes as a member confirms and fulfils the order
+  from the chat.
+- **Docs:** ADR-085; ARCHITECTURE (outgoing webhooks); SECURITY (controls, Phase 5 rules);
+  THREAT-MODEL T103; RUNBOOKS (order events, migrations 0063–0064); DATA-RETENTION (outgoing
+  webhooks, orders); BACKLOG P5-09; FEATURE-MATRIX H-014 and W-138 (which now names every kind of
+  event).
+- **Mutation checks:** 24 regressions tried one at a time; 23 make a test fail. 22 of 23 in the
+  database and domain: no event when an order is recorded, or when its status changes; any update of
+  an order captured (erasure clearing the note included); the status before a change not kept; a
+  change reporting the old status; changes captured as `order.received`; endpoints refused the
+  order types, or limited to 11 types; events refused the order types; the customer's note copied
+  into the event (and so sent after an erasure); items sorted by content id instead of cart order;
+  items of every order of the company; the status as the order is now instead of as captured; no
+  status before a change in the body; amounts in major units; a gone order not detected; the paid
+  time not read; fractional amounts described; the order events not offered to endpoints;
+  `order.received` or its body schema missing from the OpenAPI document; the database type list
+  without `order.status_changed` (caught by the type check). The other, dropping the explicit
+  `REVOKE … FROM PUBLIC`, cannot be observed: default privileges (migration 0002) already withhold
+  EXECUTE from PUBLIC, which the isolation suite checks. 1 in the web layer through the e2e test:
+  the endpoint form not offering the order events.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                     | Result                                                                                                                                                                   |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                           |
+| `pnpm test` (unit)                                                          | 397 passed, including 1 new in `webhooks/webhooks.test.ts`                                                                                                               |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 538 passed, including 2 new in `webhook-events.test.ts`                                                                                                                  |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 538 passed                                                                                                                                                               |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / on `webhook-events.spec.ts` and `webhooks.spec.ts`: 12 passed (2.4 min), on a local database created for the day's runs with migrations 0063–0064 applied |
+| Mutation checks                                                             | 24 regressions tried (1 through the e2e test); 23 make a test fail, and the other (a redundant REVOKE) cannot be observed                                                |
+
+### Known gaps
+
+- Not built: store order events, Payment Link events, reading or changing orders through the public
+  API, catalog and product events, filters by status.
+
+## 2026-09-29 — Phase 5: internal notes through the public API (P5-08, ADR-084)
+
+Status: **Implemented and locally verified (no customer data).** An integration that works beside
+the team (a helpdesk that opened a ticket, an order system that issued a refund) could resolve and
+reopen conversations but could not leave the team a note in one: notes needed a member.
+
+### Completed
+
+- **Design (ADR-084):** the `conversations.write` scope, now "Resolve, reopen and add notes to
+  conversations", adds internal notes with `POST /api/v1/conversations/{id}/notes` (1 to 4,000
+  characters, trimmed, as members' notes), once per `Idempotency-Key`. WhatsApp never receives a
+  note, nothing else about the conversation changes, the inbox names the key and hears of the note
+  live, and a key's note mentions no one. The conversation is locked before its contact is checked,
+  in erasure's order, so no note outlives an erasure.
+- **Migrations 0060–0062:** `author_membership_id` becomes optional and `author_api_key_id` (a
+  composite foreign key to the key) records a key, with a check that exactly one author is set; both
+  `NOT VALID` in 0060, the partial index on the key built concurrently in 0061, both validated in
+  0062 without blocking writes.
+- **Domain:** `apiAddConversationNote` and `apiAddNoteSchema` in `api/conversations.ts`;
+  `NOTE_MAX_LENGTH` in `messaging/notes.ts`, shared with members' notes; the inbox thread reads
+  notes with the member's or the key's name; the export lists the new column; the OpenAPI document
+  describes the operation (`AddConversationNote`, `ConversationNote`).
+- **Web:** the route; the Notes card names a key's note "API (name)"; Settings → API keys offers the
+  scope under its new label, and its introduction names notes and, left out by ADR-083, webhook
+  deliveries and replays.
+- **Tests:** unit (the text, the scope and company checked before anything is read, the OpenAPI
+  entries). Integration in `api.test.ts`: a note once per key (a retry answers the same and adds
+  nothing), stored with the key, shown in the inbox under the key's name beside a member's note,
+  heard live, changing nothing about the conversation and sending nothing; refusals storing nothing
+  (the reading scope, another company's key, an erased contact's conversation, bad ids and bodies,
+  suspended and restricted companies); an erasure held open while a note waits on the conversation's
+  lock, the note then refused and the earlier note deleted by the erasure; the author check, the key
+  belonging to the company and the runtime role unable to change the author. The ADR-075 test and
+  the e2e locator follow the scope's new label. e2e `api.spec.ts`: the key adds a note over HTTP
+  and the inbox shows it as "API (Helpdesk)"; the stand-in received no message for it.
+- **Docs:** ADR-084; ARCHITECTURE (the public API); SECURITY (Phase 5 rules); THREAT-MODEL T102;
+  RUNBOOKS (a troubleshooting entry, migrations 0060–0062, suspended companies, which also gains
+  resolving conversations); DATA-RETENTION (a row for conversation notes, which had none); BACKLOG
+  P5-08; FEATURE-MATRIX H-033 and W-134.
+- **Mutation checks:** 19 regressions tried one at a time; all make a test fail. 18 in the database and
+  domain: the conversation not locked before its contact is checked (caught by the erasure held
+  open); erased contacts' conversations taking notes; the note without its key; a note added again
+  on a retry; the inbox not told live; the scope not checked, or the reading scope enough; the text
+  not trimmed; no length limit; unknown fields accepted; the inbox hiding keys' notes or leaving out
+  the key's name; the scope's label not naming notes; the Idempotency-Key and the route missing
+  from the OpenAPI document; the author check and the foreign key to the key dropped from the
+  migrations; the new column not classified for the export. 1 in the web layer through the e2e
+  test: the Notes card showing only members' names.
+
+### Test commands and results (local, 2026-09-29)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                              |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                      |
+| `pnpm test` (unit)                                                          | 396 passed, including 3 new in `api/api.test.ts`                                                                                                                                                                                                                                                                                                                    |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 536 passed, including 4 new in `api.test.ts`                                                                                                                                                                                                                                                                                                                        |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 536 passed                                                                                                                                                                                                                                                                                                                                                          |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / on `api.spec.ts`, `api-keys.spec.ts`, `inbox.spec.ts`, `inbox-teams.spec.ts` and `webhooks.spec.ts`: 28 passed (4.2 min), on a local database created for the day's runs with migrations 0060–0062 applied. An earlier run of the first four, before the note's time was taken from the request's clock (a lint fix), passed too: 22 tests (2.9 min) |
+| Mutation checks                                                             | 19 regressions tried (1 through the e2e test); all make a test fail                                                                                                                                                                                                                                                                                                 |
+
+### Known gaps
+
+- Not built: reading notes through the API, editing or deleting notes, mentions from keys, notes on
+  contacts or deals, a webhook event for notes.
+
+## 2026-09-29 — Phase 5: webhook deliveries, test events and replays through the public API (P5-08, P5-09, ADR-083)
+
+Status: **Implemented and locally verified with local test receivers (no customer data).** An
+integration that manages its endpoints through the API (ADR-081) could not tell whether events
+reached its receiver, send a test event to check its setup, or have a failed delivery sent again
+once its receiver was fixed: only members could, in Settings → Webhooks.
+
+### Completed
+
+- **Design (ADR-083):** the same `webhooks.manage` scope pages an endpoint's deliveries (newest
+  first, exact keyset pages, optionally by status), reads one, sends a test event (`ping`) and
+  replays a finished delivery, for the endpoints keys added only. Test events and replays need an
+  `Idempotency-Key` and an endpoint that is on; a delivery still being attempted is refused. A
+  delivery says how sending went (status, attempts, next attempt, the last attempt's time, HTTP
+  status, error code and duration, when it was delivered, the delivery it replays), never a body.
+  No migration.
+- **Domain:** the settings service's test and replay steps shared as `queueWebhookTest` and
+  `replayWebhookDelivery` (with `keysOnly`), and its delivery columns and join as
+  `webhookDeliveryColumns` and `deliveryEventJoin`; `api/webhook-endpoints.ts` gains `deliveries`,
+  `getDelivery`, `sendTest` and `replay` (a replay audited as the key, with the host and both
+  deliveries); the OpenAPI document describes the four operations and the `WebhookDelivery`
+  schema; the scope's description names deliveries, test events and replays.
+- **Web:** the routes `GET /api/v1/webhook-endpoints/{id}/deliveries`,
+  `POST /api/v1/webhook-endpoints/{id}/test`, `GET /api/v1/webhook-deliveries/{id}` and
+  `POST /api/v1/webhook-deliveries/{id}/replay`.
+- **Tests:** unit (the scope checked before anything is read for all four operations, the list
+  query, the OpenAPI entries). Integration in `api-webhook-endpoints.test.ts` with a local
+  receiver: a test event once per key, answered with its pending delivery, delivered signed with
+  the endpoint's secret and read back as succeeded; a second test, the deliveries newest first, a
+  page at a time and by status; a replay of the first once per key, delivering the same event again
+  as a new delivery that names the one replayed, audited as the key; deliveries to members'
+  endpoints and other companies' not found for lists, reads, tests and replays, unknown and
+  malformed ids, a bad status, a delivery still being attempted, an endpoint that is off, a key
+  without the scope and a suspended company refused, with nothing stored by any refusal. e2e
+  `webhooks.spec.ts`: a key created in settings sends its endpoint a test event over HTTP, follows
+  the delivery until it succeeds, replays it and reads the history newest first, which Settings →
+  Webhooks shows with the replay marked.
+- **Docs:** ADR-083; ARCHITECTURE (the public API); SECURITY (Phase 5 rules, outgoing webhooks);
+  THREAT-MODEL T101; RUNBOOKS (a troubleshooting entry, turning an endpoint back on, suspended
+  companies); BACKLOG P5-08 and P5-09; FEATURE-MATRIX W-139, H-033 and H-014. DATA-RETENTION now
+  says keys also delete the endpoints keys added (ADR-081 left it saying only members did).
+- **Mutation checks:** 31 regressions tried one at a time; all make a test fail. 30 in the domain and
+  API: deliveries to members' endpoints reached by keys (the replay's lookup in the service and in
+  the API, the list, the read, a test event); a delivery still being attempted replayed; a test
+  event or a replay to an endpoint that is off; a replay not naming the delivery it replays;
+  settings replays limited to keys' endpoints; the scope left out of each of the four operations;
+  a replay not audited, or audited without the delivery replayed; a test event or a replay sent
+  again on a retry; the status filter, the order, the cursor and the next page; the next attempt
+  shown for a finished delivery; `replayOf` not returned; pages over 100 and unknown query fields;
+  the OpenAPI entries (the replay's Idempotency-Key, `ping`, the route list, the 409). 1 in the web
+  layer through the e2e test: the replay route calling the test operation. A first web attempt,
+  the delivery answered without its `data` envelope, does not build (TypeScript refuses it), so it
+  was replaced. Before the run, three not-found checks in the integration test were made to name
+  what was not found: without that, a test event let through to a member's endpoint was refused
+  only by the response's own read of the delivery, with the same code, and went unnoticed.
+
+### Test commands and results (local, 2026-09-29)
+
+| Command                                                                                                                                                           | Result                                                                                                                                        |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                              | 0 problems / all files formatted / all workspace packages pass                                                                                |
+| `pnpm test` (unit)                                                                                                                                                | 393 passed, including 3 new in `api/api.test.ts`                                                                                              |
+| `pnpm test:integration` (PostgreSQL 18.6)                                                                                                                         | 532 passed, including 2 new in `api-webhook-endpoints.test.ts`                                                                                |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                                                                                                         | 532 passed; `api-webhook-endpoints.test.ts` (7 tests) again on 18.6 and 17.11 after its not-found checks were made to name what was not found |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` on `webhooks.spec.ts`, `api-keys.spec.ts`, `api.spec.ts` and `webhook-events.spec.ts` | build passes / 26 passed: 13 tests on each project (4.5 min), on a local database created for the day's runs                                  |
+| Mutation checks                                                                                                                                                   | 31 regressions tried (1 through the e2e test); all make a test fail                                                                           |
+
+### Known gaps
+
+- Not built: bodies sent or received, replaying many deliveries in one call, filters beyond the
+  status (event type, dates), and deliveries to members' endpoints.
+
+## 2026-09-29 — Phase 5: replies that quote a message, and reactions, through the public API (P5-08, ADR-082)
+
+Status: **Implemented and locally verified against the Graph stand-in (no customer data).**
+Integrations could reply in the customer service window with text, buttons and lists, but could not
+show which of the customer's messages a reply answers or acknowledge one with an emoji, and neither
+the inbox nor the API said which message a customer's quote or reaction pointed at.
+
+### Completed
+
+- **Design (ADR-082):** `replyTo` on a text, buttons or a list quotes a message of the conversation
+  (the contact's, or the business's once WhatsApp accepted it and while it has not failed; not a
+  reaction or a notice), sent as `context.message_id` (research M-041, M-183). `type: "reaction"`
+  puts one RGI emoji on a message the contact sent in the last 30 days (the stricter reading of the
+  unconfirmed M-185) under the same `messages.reply` scope, inside the service window, without
+  ending an automation. The named message is found by its HyFib id in that conversation only. No
+  migration.
+- **Research:** M-182–M-186 from Meta's OpenAPI description (the same file as for ADR-080) and the
+  pywa library's source: the reaction and `context` shapes, the reaction webhook, the unconfirmed
+  reaction rules, and the `context` of a customer's quote, which the spec leaves undescribed.
+- **Domain:** `messaging/reply-context.ts` (the rules, `isSingleEmoji`, the join on the message a
+  message answers, `findAnsweredMessageId`), `messaging/message-text.ts` (`outboundText` moved,
+  `messageSnippet`); `sendReply` builds the message after finding the named one, keeps a quote's id
+  in `context_external_id` and a reaction's in its content; `apiSendReaction`; `replyTo` in the
+  API's conversation messages, `GET /messages/{id}` (which reports `reaction`) and the
+  `message.received` payload; the OpenAPI document (the `SendReaction` body, `replyTo`).
+- **Web:** the inbox shows a quote above a reply and names the message a reaction is for; the
+  scope reads "Reply with text, buttons, lists and reactions" and Settings → API keys' introduction
+  names reactions and quotes.
+- **Graph stand-in:** reactions (`message_id` and `emoji` only) and `context` checked.
+- **Tests:** unit (the emoji check, the reaction body and `replyTo` on each reply kind, what can be
+  quoted or reacted to, where the answered message's WhatsApp id is read, the inbox's one-line
+  quote, the scope checked first, the OpenAPI entries). Integration: `api.test.ts` (a quoted text
+  and buttons and a reaction through the send pipeline and the Graph stand-in, once per key, with
+  the stored rows and requests, the preview, `GET /messages/{id}`, the customer's own quote and
+  reaction of the reply read back through the API, a quote naming nothing when it points at
+  another conversation's message, and the inbox's quotes; every refusal with nothing stored:
+  unknown ids, another conversation's and another company's messages, a reaction, queued and failed
+  business messages, the business's own message, a message 31 days old, a reaction, bad emoji, and a
+  number that has not written), `automations.test.ts` (a reaction leaving the bot and its queued
+  question alone, a quoted reply taking over) and `webhook-events.test.ts` (`replyTo` in
+  `message.received` for a quote and a reaction, null for an unknown or another conversation's
+  message). The conversation read and text reply tests now expect `replyTo`. e2e `api.spec.ts`: a
+  key created in settings quotes a customer's message and reacts to it (a word refused as an emoji),
+  the two requests the Graph stand-in received, the quote and the reaction's message in the inbox,
+  and the customer's reaction to the reply read back through the API.
+- **Docs:** ADR-082; research M-182–M-186; ARCHITECTURE (the public API); SECURITY (Phase 5 rules);
+  THREAT-MODEL T100; RUNBOOKS (a troubleshooting entry); BACKLOG P5-08; FEATURE-MATRIX H-033 and
+  W-134.
+- **Mutation checks:** 28 regressions tried one at a time; all make a test fail. 27 in the domain and API: another conversation's message answered (in the send, the inbox and API join, and the webhook lookup); reactions on the business's own, old, reacted-to or notice messages; the age taken from when HyFib stored the message; 7 days instead of 30; quotes of failed messages; no `context`, or `context` on a reaction; the quoted id not kept, or a reaction kept as a quote; a reaction ending the automation, or a quoted reply not ending it; the reaction's message not stored; the preview without "Reacted"; the emoji not checked, or several emoji taken as one; a reaction's message read from its context; the join reading only the context; the webhook without `replyTo`; a reaction reported as a template; the OpenAPI body missing; the scope not checked; a sent reaction without its emoji as text; the snippet cut inside a character. 1 in the web layer through the e2e test: the inbox not showing the quote (a first attempt did not build, as the change broke type narrowing, and proved nothing).
+
+### Test commands and results (local, 2026-09-29)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                           |
+| `pnpm test` (unit)                                                          | 390 passed, including 7 new in `api/api.test.ts`                                                                                                                                                                                                                                                                                                                                                                         |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 530 passed, including 2 new in `api.test.ts`, 1 in `automations.test.ts` and 1 in `webhook-events.test.ts`                                                                                                                                                                                                                                                                                                               |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 530 passed                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / on `api.spec.ts`, `api-keys.spec.ts`, `inbox.spec.ts`, `inbox-teams.spec.ts`, `webhooks.spec.ts`, `webhook-events.spec.ts` and `automations.spec.ts`: 31 passed and 1 failed (6.4 min), the new test on chromium, whose reaction locator also matched the conversation list; with the locator scoped to the thread, `api.spec.ts` passed: 10 tests (1.8 min). A local database created for the day's runs |
+| Mutation checks                                                             | 28 regressions tried (1 through the e2e test); all make a test fail                                                                                                                                                                                                                                                                                                                                                      |
+
+### Known gaps
+
+- Not built: members quoting or reacting in the inbox, taking a reaction back, reacting to the
+  business's own messages, media, location and contact card replies through the API, editing or
+  deleting sent messages.
+- Unconfirmed (M-185, M-186): Meta's rules for reactions (the 30 days are the stricter reading of a
+  recalled rule) and the `context` of a customer's quoted reply, which the spec does not describe.
+  If Meta sends none, such replies simply show no quote and `replyTo` is null.
+
+## 2026-09-29 — Phase 5: managing webhook endpoints through the public API (P5-08, P5-09, ADR-081)
+
+Status: **Implemented and locally verified with local test receivers (no customer data).** Webhook
+endpoints were managed only in Settings → Webhooks, so an integration that installs itself into a
+company had to ask a member to paste its receiver's address and copy the secret back (W-139).
+
+### Completed
+
+- **Design (ADR-081):** a `webhooks.manage` scope, granted only by owners and administrators (who
+  hold `developer.manage` and read every conversation); keys see and manage only the endpoints keys
+  added, whichever key of the company added them; members' endpoints are not found. Secrets are
+  shown once: adding and rotating need an `Idempotency-Key`, and the response kept for a retry holds
+  `secret: null`. The address cannot change. Owners and administrators are emailed when a key adds
+  an endpoint.
+- **Migration 0059:** the scope check allows `webhooks.manage`; `created_by_user_id` becomes
+  optional and `created_by_api_key_id` (composite foreign key to the key) records a key, with a
+  check that exactly one creator is set.
+- **Domain:** `api/webhook-endpoints.ts` (list, read, add, change, delete, rotate); the settings
+  service's steps shared (`checkedWebhookUrl`, `insertWebhookEndpoint`, `lockWebhookEndpoint` with
+  `keysOnly`, `rotateWebhookEndpointSecret`, `setWebhookEndpointEnabled`); `idempotent` keeps a
+  redacted response when asked; the announcement's text (`endpointAnnouncement`); the export
+  classifies the new column.
+- **Web:** the routes under `/api/v1/webhook-endpoints`; Settings → Webhooks names the key that
+  added an endpoint; Settings → API keys offers the scope and its introduction names endpoints; the
+  Idempotency-Key refusal no longer speaks of sends only.
+- **Tests:** unit (the scope, who grants it, the bodies, the announcement's text, the scope checked
+  first for every operation, the OpenAPI entries). Integration in `api-webhook-endpoints.test.ts`
+  with a local receiver: an endpoint added once per key with the secret in the first answer only
+  and never kept for replays, the key recorded and audited, owners and administrators emailed (not
+  agents, and never the address's path), settings naming the key, a delivery signed with the given
+  secret; keys limited to what keys added (another key of the company manages it, members' and
+  other companies' endpoints are not found); changes, turning off (the waiting delivery fails) and
+  on, a rotation once per key with both secrets signing, deletion with its history, every step
+  audited as the key; refusals (the scope, bad bodies, the address rules, the address unchangeable,
+  the limit of 10 with members' endpoints, suspended and restricted companies); the creator check,
+  the key belonging to the company, and the runtime role unable to change the creator. e2e
+  `webhooks.spec.ts`: a key created in settings adds its endpoint over HTTP (a retry without the
+  secret), the owner's email, settings naming the key, a signed test event, the key turning it off
+  and deleting it.
+- **Docs:** ADR-081; ARCHITECTURE (the public API); SECURITY (Phase 5 rules); THREAT-MODEL T99;
+  RUNBOOKS (migration 0059, a troubleshooting entry, suspended companies); BACKLOG P5-08;
+  FEATURE-MATRIX W-139, H-033 and H-014.
+- **Mutation checks:** 24 regressions tried one at a time; all make a test fail. 23 in the database
+  and domain: members' endpoints found by keys (in the lock, in lists and reads); the secret kept
+  for replays of an addition or a rotation, or `idempotent` keeping the whole body; no announcement,
+  or one naming the full address or event keys; audited as the system or without its source; listing
+  without the scope; the scope not writing, or granted by another permission; the address
+  changeable; the state not changed; an empty description kept; no limit of endpoints; the address
+  not checked; no creator check; no foreign key to the key; the scope check not widened; settings
+  not naming the key; the secret not nullable in the OpenAPI document. 1 in the web layer through
+  the e2e test: Settings → Webhooks not naming the key.
+
+### Test commands and results (local, 2026-09-29)
+
+| Command                                                                                                                                                           | Result                                                                                                                                   |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                              | 0 problems / all files formatted / all workspace packages pass                                                                           |
+| `pnpm test` (unit)                                                                                                                                                | 383 passed, including 6 new in `api/api.test.ts`                                                                                         |
+| `pnpm test:integration` (PostgreSQL 18.6)                                                                                                                         | 526 passed, including 5 new in `api-webhook-endpoints.test.ts`                                                                           |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                                                                                                         | 526 passed                                                                                                                               |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` on `webhooks.spec.ts`, `api-keys.spec.ts`, `api.spec.ts` and `webhook-events.spec.ts` | build passes / 22 passed: 11 tests on each project (4.3 min), on a local database created for the day's runs with migration 0059 applied |
+| Mutation checks                                                                                                                                                   | 24 regressions tried; all make a test fail                                                                                               |
+
+### Known gaps
+
+- Not built: deliveries, replays and test events through the API, changing an address, managing
+  members' endpoints, filters beyond the event type, notices when a key changes or deletes an
+  endpoint (the audit log records them).
+
+## 2026-09-29 — Phase 5: reply buttons and list messages through the public API (P5-08, ADR-080)
+
+Status: **Implemented and locally verified against the Graph stand-in (no customer data).**
+Integrations replied inside the customer service window with text only (ADR-070); a booking system
+or helpdesk bot could not offer "Keep it / Move it" or a few times to pick from. HyFib's automations
+and surveys already sent reply buttons; nothing sent list messages.
+
+### Completed
+
+- **Research (M-179–M-181):** Meta's OpenAPI description, downloaded again from GitHub, gives the
+  list message's limits and the list reply's shape; whether a list may have 10 rows per section or
+  10 in all is unconfirmed, and HyFib enforces 10 in all.
+- **Design (ADR-080):** `POST /api/v1/messages` with `type` `buttons` (1 to 3) or `list` (up to 10
+  sections and 10 rows in all), under `messages.reply` and every rule of ADR-070 (the 24-hour
+  window with one answer, the automation ended, the conversation still waiting for a member, one
+  send per `Idempotency-Key`, the window checked again at send). Ids are the integration's own and
+  cannot start with `w360`: HyFib's automation and survey ids do, and a survey-like tap would
+  neither reopen the conversation nor open a reply turn.
+- **Domain:** `messaging/interactive.ts` (Meta's limits, the reserved prefix, the Graph
+  `interactive` objects and what the inbox stores); `apiSendButtonsSchema` and `apiSendListSchema`;
+  the text reply's path shared as `sendReply`; `GET /messages/{id}` reports `interactive`; taps in
+  webhooks and the API's messages carry `reply.type` and a row's `description`
+  (`tappedReplySchema`). No migration.
+- **Web:** the inbox shows a list's button and rows; the scope reads "Reply with text, buttons and
+  lists"; Settings → API keys' introduction names replies with buttons and lists and, overdue since
+  ADR-079, stopping runs.
+- **Graph stand-in:** list messages are accepted within the limits and refused beyond them.
+- **Tests:** unit (the limits pinned to Meta's numbers; both schemas and every refusal; the Graph
+  objects and stored content, ids kept out of it; the scope checked first; tap kinds and
+  descriptions; the OpenAPI operation). Integration in `api.test.ts`: buttons and a list sent once
+  per `Idempotency-Key` through the send pipeline and accepted by the stand-in, their stored content
+  and requests, the status reported `interactive`, a picked row read back through the API with its
+  kind and description; HyFib's ids (in any case) and 11 rows in all refused with nothing stored,
+  and a number that has not written answered `window_closed`; the conversation read test now expects
+  the reply's kind. e2e `api.spec.ts`: a key created in settings sends buttons and a list, a HyFib
+  id is refused, the inbox shows both, and the customer's pick comes back through the API.
+- **Docs:** ADR-080; research M-179–M-181; ARCHITECTURE (the public API); SECURITY (Phase 5
+  rules); THREAT-MODEL T98; RUNBOOKS (a troubleshooting entry); BACKLOG P5-08; FEATURE-MATRIX H-033
+  and W-134.
+- **e2e fix (aa4c902):** the Shopify store test was flaky on b453b6c's CI (Firefox, passed on
+  its retry): it timed out waiting for the main navigation's Commerce link right after removing the
+  store. The worker can finish the removal before the store's page is drawn again, and the step
+  before already accepted that case, but the page is then the plain not-found page, which has no
+  company navigation. The test now opens the store list by its address.
+- **Mutation checks:** 22 regressions tried one at a time; all make a test fail. 21 in the domain
+  and API: HyFib's ids accepted, or checked with their case; spaces around ids accepted; button
+  titles repeated, or compared with their case; button ids repeated; more than 10 rows in all;
+  several sections without titles; row ids repeated; a limit changed; section titles left out of the
+  request; ids stored for the inbox; the message stored as text; a list sent as buttons; buttons
+  without the scope; the status reported as a template; the kind of a tap lost; a description kept
+  for buttons; an empty description kept; a template's quick reply not called a button; list bodies
+  missing from the OpenAPI document. 1 in the web layer through the e2e test: the inbox no longer
+  showing a list.
+
+### Test commands and results (local, 2026-09-29)
+
+| Command                                                                                                                                                                                                                          | Result                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                                                                             | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                          |
+| `pnpm test` (unit)                                                                                                                                                                                                               | 377 passed, including 6 new in `api/api.test.ts` and `webhooks/webhooks.test.ts`                                                                                                                                                                                                                                                                                                                                        |
+| `pnpm test:integration` (PostgreSQL 18.6)                                                                                                                                                                                        | 521 passed, including 2 new in `api.test.ts`                                                                                                                                                                                                                                                                                                                                                                            |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                                                                                                                                                                        | 521 passed                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` on `api.spec.ts`, `api-keys.spec.ts`, `automations.spec.ts`, `inbox.spec.ts`, `inbox-teams.spec.ts`, `webhooks.spec.ts` and `webhook-events.spec.ts` | build passes / 28 passed: 14 tests on each project (5.8 min), on a local database created for the day's runs. The first run of `api.spec.ts` failed the new test on mobile-chromium: the list left before the buttons, which the test assumed could not happen; it now accepts either order (6 passed with the test repeated 3 times on each project), and the OpenAPI document says messages may leave in either order |
+| `pnpm test:e2e --project=chromium --project=mobile-chromium stores.spec.ts` (the e2e fix)                                                                                                                                        | Reproduced first: with the removal left to finish before the page was looked at, the old step failed on chromium as CI's did, waiting for the Commerce link on the not-found page (3.0 min). The same with the fix: 2 passed (26.9 s). The final code, the whole spec: 10 passed (3.9 min). Firefox, where CI saw the failure, is not installed here                                                                    |
+| Mutation checks                                                                                                                                                                                                                  | 22 regressions tried; all make a test fail                                                                                                                                                                                                                                                                                                                                                                              |
+
+### Known gaps
+
+- Not built: media headers, call-to-action URL buttons, product and catalog messages through the
+  API, location requests, replies quoting a message, editing or deleting sent messages.
+- The row limit follows the stricter reading (M-181) until Meta's documentation can be read.
+
+## 2026-09-29 — Phase 5: stopping automation runs through the public API (P5-08, ADR-079)
+
+Status: **Implemented and locally verified against the Graph stand-in (no customer data).** An
+integration that started an automation through the API (ADR-077) could not stop it when the flow
+was no longer needed (an appointment cancelled or confirmed elsewhere); only a member could, from
+the run page.
+
+### Completed
+
+- **Design (ADR-079):** `POST /api/v1/automation-runs/{id}/stop` with the `automations.start` scope,
+  for runs keys of the company started; other runs, other companies' runs and unknown ids answer 404. An active run ends as `stopped` with the new reason `stopped_by_api`: its queued messages and
+  web requests not yet made are cancelled, and the conversation is not handed to people (a customer
+  who wrote waits for a member, as after a reply through the API). A run that has ended is answered
+  as it is, so retries change nothing.
+- **Migrations:** 0057 replaces the run's end check, `NOT VALID`, to allow `stopped_by_api`; 0058
+  validates it without blocking writes.
+- **Domain:** `apiStopAutomationRun` in `api/automations.ts` locks the conversation and then the
+  active run, and ends it with `endRun`; the step log and the audit entry `automation.run_stopped`
+  (as the key, with `source: api` and the request id) follow in the same transaction. The OpenAPI
+  document describes the operation; the scope's description mentions stopping.
+- **Web:** the route; the run page says "Stopped through the API."
+- **Tests:** a unit check that every end reason, the new one included, is described by the
+  `automation.run_ended` webhook payload, and the OpenAPI route list. 1 integration test in
+  `api.test.ts`: a waiting run stopped once (row, step log, audit entry, the webhook event with the
+  reason), the conversation left resolved with nobody assigned and no one waiting; retries and
+  another key answering the run unchanged while a newer run works in the same conversation (which
+  is not stopped); a template cancelled before it left; a contact who wrote left waiting for a member
+  (a hand-off turn), unassigned; refusals for other companies' keys, keys without the scope,
+  suspended and restricted companies, unknown ids and a keyword run. e2e `api.spec.ts`: the booking
+  system's key stops a second run over HTTP while its template waits for an answer, a retry answers
+  the same, and the run page says how it ended.
+- **Docs:** ADR-079; ARCHITECTURE (the public API); SECURITY (Phase 5 rules); THREAT-MODEL T97;
+  RUNBOOKS (migrations 0057–0058, a troubleshooting entry, suspended companies); BACKLOG P5-08;
+  FEATURE-MATRIX H-033.
+- **e2e fix (4149efe):** the settlement reconciliation test was flaky on da91fc3's CI (mobile-chromium, passed on its retry): the day's page showed two resolved notes, chromium's and its own, and the check for the note matched both. Each browser project reconciles its own day, India's date plus an offset, and the offsets were one day apart; the run crossed India's midnight (18:30 UTC) between the chromium test and the mobile-chromium one, so both reconciled the same day. The offsets are now odd and two days apart (a retry moves 8 days), so a day picked before midnight never meets one picked after it, and the note is looked for in the resolved item's row.
+- **Mutation checks:** 13 regressions tried one at a time; all make a test fail. 12 in the database and domain: the company status check (suspended and restricted companies' keys stopping runs), the scope, runs of every kind stoppable, the conversation's active run stopped whichever run was named, the run stopped as a member stops it (which hands the conversation to people), taken over instead of stopped, no step recorded, no audit entry, audited as the system, the database refusing the reason, the reason missing from the model, and the route missing from the OpenAPI document. 1 in the web layer through the e2e test: the run page's text for the reason.
+
+### Test commands and results (local, 2026-09-29)
+
+| Command                                                                                                                                          | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                             | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                           |
+| `pnpm test` (unit)                                                                                                                               | 371 passed; the webhook payload test now covers every end reason and the OpenAPI test the new route                                                                                                                                                                                                                                                                                                                                                      |
+| `pnpm test:integration` (PostgreSQL 18.6)                                                                                                        | 519 passed, including 1 new in `api.test.ts`                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                                                                                        | 519 passed                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` on `api.spec.ts`, `automations.spec.ts` and `webhook-events.spec.ts` | build passes / 12 passed: 6 tests on each project (2.7 min), on a fresh local database. An earlier run on the long-lived local database failed 3 tests: 2 waited too long for a template's approval (the worker's template syncs there are slowed by earlier runs' companies) and 1 had a locator that matched the new label twice (fixed)                                                                                                               |
+| `pnpm test:e2e --project=chromium --project=mobile-chromium settlement-recon.spec.ts` (the e2e fix)                                              | Reproduced first: with both projects forced onto one day and the old check, chromium passed and mobile-chromium failed with CI's strict mode violation (two notes; 4.1 min). Forced onto one day with the note looked for in the item's row: 2 passed (4.0 min). The final code: 2 passed (4.1 min). A check of every point in a run where India's midnight can fall, retries included, finds 7 collisions for the old offsets and none for the new ones |
+| Mutation checks                                                                                                                                  | 13 regressions tried; all make a test fail                                                                                                                                                                                                                                                                                                                                                                                                               |
+
+### Known gaps
+
+- Not built: stopping runs keys did not start, stopping every run of an automation or a contact in
+  one call, pausing a run, and a reason given by the caller.
+
+## 2026-09-29 — Phase 5: webhook events for automation runs (P5-09, ADR-078)
+
+Status: **Implemented and locally verified with local test receivers (no customer endpoints).** An
+integration could learn how an automation run went only by polling a run it started through the API
+(ADR-077), and runs started otherwise could not be followed at all.
+
+### Completed
+
+- **Design (ADR-078):** `automation.run_started` when a live run starts, whatever started it, and
+  `automation.run_ended` when it ends (completed, handed off, taken over, stopped or failed) with its
+  reason; members' test runs and moves between running and waiting send nothing. Payloads are built
+  when delivered: the run (what started it, the API key for runs started through the API, the
+  automation's name, the status, reason and end time as captured, the start time), the conversation
+  id, the contact and the number; never the run's answers or inputs.
+- **Migrations:** 0055 widens the event type checks (the one on `app.webhook_events` `NOT VALID`)
+  and adds `app.webhook_capture_automation_run` with triggers after a live run is inserted and after
+  its status moves from running or waiting to an ended one; they call `app.capture_webhook_event` as
+  the role making the change (the runtime role, or `w360_definer` when erasure stops a run). 0056
+  validates the check without blocking writes.
+- **Domain:** `webhooks/payloads.ts` builds the two payloads (a run that no longer exists fails the
+  delivery as `event_gone`); `webhooks/model.ts` names and describes the events; the OpenAPI
+  document lists them, noting the API key and that deliveries are not ordered.
+- **Web:** Settings → Webhooks offers the events (from the model); its introduction, which still
+  listed only the first four kinds of event, now names every kind.
+- **Tests:** unit tests of the two payload schemas (a test run's trigger, an unknown reason and an
+  unknown status refused) and the OpenAPI entries. 5 integration tests in `webhook-events.test.ts`
+  with a local receiver: a keyword run's start and end reaching the endpoints that take each (none
+  to an endpoint that takes other events) with every payload field, and a member's test run in the
+  same conversation sending nothing; a run started through the API naming its key; a run failing
+  once the service window has closed; erasure stopping a waiting run inside its definer function,
+  both bodies delivered without the number or name; nothing captured for a company whose endpoints
+  take other events, and an event whose run is gone failing as `event_gone`. e2e
+  `webhook-events.spec.ts`: an endpoint added in settings for the two events receives a keyword
+  run's signed start and end, and a member's test run of the draft sends nothing (a second
+  customer's run then brings only its own two events).
+- **Docs:** ADR-078; ARCHITECTURE (outgoing webhooks); SECURITY (controls, Phase 5 rules);
+  THREAT-MODEL T96; RUNBOOKS (the events, migrations 0055–0056); DATA-RETENTION; BACKLOG P5-09;
+  FEATURE-MATRIX H-014.
+- **Mutation checks:** 22 regressions tried one at a time; 21 make a test fail: 10 in migration 0055 (test
+  runs captured at start or at end, no start or end trigger, moves to waiting sent as ends, the end
+  reason or end time not kept, no status, the two checks not widened), 9 in the payload builder (the
+  end reason, end time, status, key, trigger, automation name, number, contact and gone runs), the
+  event list and the OpenAPI entries. The other, removing the trigger function's explicit `REVOKE …
+FROM PUBLIC` in 0055, cannot be observed: migration 0002's default privileges already withhold
+  `EXECUTE` from `PUBLIC`.
+
+### Test commands and results (local, 2026-09-29)
+
+| Command                                                                                                                                               | Result                                                                                                                                                                                                                           |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                  | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                   |
+| `pnpm test` (unit)                                                                                                                                    | 371 passed, including 1 new in `webhooks/webhooks.test.ts`                                                                                                                                                                       |
+| `pnpm test:integration` (PostgreSQL 18.6)                                                                                                             | 518 passed, including 5 new in `webhook-events.test.ts`                                                                                                                                                                          |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                                                                                             | 518 passed                                                                                                                                                                                                                       |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` on `webhook-events.spec.ts`, `webhooks.spec.ts` and `automations.spec.ts` | build passes / 8 passed: 4 tests on each project (1.8 min). A first run failed every webhook test: after the container restarted, the test receiver's host no longer resolved to 127.0.0.1 (CI's workflow adds that hosts entry) |
+| Mutation checks                                                                                                                                       | 22 regressions tried; 21 make a test fail, and the other cannot be observed                                                                                                                                                      |
+
+### Known gaps
+
+- Not built: events per step or message of a run, test runs, answers or inputs in the payload,
+  filters by automation, and reading runs not started through the API with the API.
+- Delivered only to local test receivers; no customer endpoint has received these events.
+
+## 2026-09-29 — Phase 5: starting automations through the public API (P5-08, ADR-077)
+
+Status: **Implemented and locally verified against the Graph stand-in (no customer data).**
+Integrations (booking systems, CRMs, a company's own order system) could send one template through
+the API but not start a flow that continues on the contact's replies (W-086).
+
+### Completed
+
+- **Design (ADR-077):** a trigger, "Started through the API", that never matches a customer message
+  and declares up to 10 inputs by name; every start gives each a text of 1 to 1,000 characters, and
+  steps use them as `{{input.<name>}}`. Such an automation is limited to one WhatsApp number and,
+  as for order messages (ADR-050), sends only templates until the contact replies. A key with the
+  new `automations.start` scope (granted only by members holding `automations.publish`) lists these
+  automations, starts the published version for a contact once per `Idempotency-Key`, and reads the
+  runs keys started; a marketing template also needs `messages.send_marketing`.
+- **Migrations:** 0052 widens the scope check, adds `app.automation_runs.api_key_id` with the
+  trigger type check, a check tying the key to `api` runs and the foreign key, all `NOT VALID`, and
+  replaces the run guard so that the key stays fixed; 0053 builds the partial index on the key
+  concurrently; 0054 validates the three constraints without blocking writes.
+- **Domain:** the trigger, `apiInputValues`, `{{input.<name>}}` in texts, templates and web
+  requests, the checks that refuse undeclared inputs and inputs in other automations, the service
+  window rule and `triggerIssues` (one number). `api/automations.ts`: `apiListAutomations`,
+  `apiStartAutomationRun` and `apiGetAutomationRun`. A start runs in the idempotency key's
+  transaction with an order rule's checks (the automation, its number, suppression, erasure,
+  opt-out, an unassigned conversation with no active run, 10 runs per conversation per hour, the
+  plan's runs), each refusal with its reason; the run records its key and the inputs as
+  `input.<name>` answers, and the audit entry `automation.run_started` names the key without them.
+  **Fix found while testing:** the runner let only order message runs work in a conversation that is
+  still resolved, so a run started through the API would have stopped at its first step; API runs
+  now work the same way. Members' test runs of an `api` automation take the inputs; the run page
+  names the key (as the inbox does for API messages). The plan's usage emails and module notice now
+  mention starts through the API.
+- **Web:** `GET /api/v1/automations`, `POST /api/v1/automations/{id}/runs`, `GET
+/api/v1/automation-runs/{id}`; the builder's trigger with its inputs, sample inputs in the
+  simulator, inputs in the test form, a "Start through the API" card with the automation id and a
+  request example, the key on the run page; the OpenAPI document and Settings → API keys list the
+  scope and operations.
+- **Tests:** unit tests of the trigger (inputs, matching, description), the number requirement,
+  `{{input.<name>}}` (declared, undeclared, in other automations), the service window rule, the
+  template variables filled from inputs, the inputs a start gives, and the scope and who grants it.
+  5 integration tests in `api.test.ts`: a start once per key with its row, contact, conversation and
+  audit, concurrent starts for one number, the template and the tap through the Graph stand-in and
+  the run read through the API; every refusal (scope, ids, inputs, unpublished, archived, other
+  trigger, paused, marketing scope, suppression, opt-out, inactive number, assigned, busy, hourly
+  limit) changing nothing, and a marketing template refused at send without an opt-in; the plan's
+  runs and module; the run guard and the key check; erasure clearing the inputs; the number
+  requirement, undeclared inputs and test runs with inputs. e2e `api.spec.ts`: an automation built in
+  the builder with the API trigger is started by a key created in settings, sends its template to a
+  number that never wrote, continues on the tap, and its run page names the key.
+- **Docs:** ADR-077; ARCHITECTURE (automations, the public API); SECURITY (Phase 5 rules);
+  THREAT-MODEL T95; RUNBOOKS (migrations 0052–0054, a troubleshooting entry); DATA-RETENTION;
+  BACKLOG P5-08; FEATURE-MATRIX W-086, W-084, W-134 and H-033.
+- **Mutation checks:** 40 regressions tried one at a time; 39 make a test fail. 36 in the database
+  and domain: the trigger type, paused, archived and unpublished automations, the inputs (not
+  checked, unknown, too long, not stored, not filled in, undeclared in steps, allowed in other
+  automations), the marketing scope, the number's status, the start's consent check, assigned
+  conversations, active runs, the hourly limit, the plan's runs, a run without its key, the audit
+  entry (missing, as the system), runs of other kinds readable by keys, the list (other triggers,
+  archived automations), the idempotency key, the runner stopping API runs in a resolved
+  conversation, the number requirement, messages before a reply, the trigger matching messages,
+  the run guard, the key check, the scope in the database, test runs without inputs, the run
+  page's key, and the scope's permission, write flag and OpenAPI route. 3 in the web layer through
+  the e2e test: the run page not naming the key, the simulator without sample inputs, and the
+  builder not offering the trigger. The other, the dispatcher skipping API automations, cannot be
+  observed while their trigger never matches a message (that check's own regression is caught).
+
+### Test commands and results (local, 2026-09-29)
+
+| Command                                                                                                                                                            | Result                                                                                                       |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                               | 0 problems / all files formatted / all workspace packages pass                                               |
+| `pnpm test` (unit)                                                                                                                                                 | 370 passed, including 12 new: 11 in `automations/api-trigger.test.ts`, 1 in `api/api.test.ts`                |
+| `pnpm test:integration` (PostgreSQL 18.6)                                                                                                                          | 513 passed, including 5 new in `api.test.ts`                                                                 |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                                                                                                          | 513 passed                                                                                                   |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` on `api.spec.ts`, `api-keys.spec.ts`, `automations.spec.ts` and `company-data.spec.ts` | build passes / 18 passed: 9 tests on each project (6.2 min)                                                  |
+| Mutation checks                                                                                                                                                    | 40 regressions tried (3 of them through the e2e test); 39 make a test fail, and the other cannot be observed |
+
+### Known gaps
+
+- Not built: choosing a number per call, starting runs for many contacts in one call (or a
+  segment), stopping runs through the API, inputs other than text, webhook events for runs.
+- A start checks the contact's utility consent; a marketing template step checks the marketing
+  opt-in when it sends, so a run for a contact without one starts and then fails (`send_blocked`),
+  which the run's status shows.
+
+## 2026-09-29 — Phase 5: the addresses an API key accepts requests from (P5-08, ADR-076)
+
+Status: **Implemented and locally verified (no customer data).** A leaked API key worked from
+anywhere until someone revoked it; integrations usually call from a few fixed servers, and a key
+tied to their addresses is useless elsewhere.
+
+### Completed
+
+- **Design (ADR-076):** up to 20 IPv4 or IPv6 addresses or CIDR ranges per key; a key without
+  them accepts any address, as every key did before. Entries are typed one per line or separated by commas or
+  spaces, kept as PostgreSQL writes them (a single address gains /32 or /128) without repeats; an
+  address with bits after its prefix length (`203.0.113.7/24`) is refused with the network it
+  probably means, never widened or narrowed silently, and `/0`, IPv4-mapped IPv6 addresses and
+  prefixes longer than the address are refused. Members who manage keys set them when creating a
+  key or later for an active key, with a recent sign-in; a rotation copies them. A request from any
+  other address, or whose address could not be determined, is refused with 403 `ip_not_allowed`
+  before the key is marked used, and counts against the address's limit of failed authentication.
+- **Migration 0051:** `app.api_keys.allowed_networks cidr[]` (1 to 20 entries, no NULL entries)
+  with column grants to `w360_app`; `ops.api_key_authenticate(token_hash, client_ip)` (SECURITY
+  DEFINER, pinned `search_path`, runtime role only) finds the key as the one-argument function of
+  0024 did and says whether the address is inside one of its networks (`<<=`), marking the key used
+  only when it is. The one-argument function stays for web servers of the previous release during
+  a rolling deploy, rebuilt on the new one so that it refuses every key that lists networks.
+- **Domain:** `allowedNetworksSchema` and `networkEntryProblem` check each entry's shape;
+  `canonicalNetworks` has PostgreSQL write each network (`pg_input_is_valid`, `::cidr`) and explains
+  host bits with the masked network; creation stores the networks and audits them, rotation copies
+  them, and `setAllowedNetworks` changes an active key's networks under its row lock (a recent
+  sign-in, `developer.manage`, a no-op for the same list), audited as `api_key.networks_changed`
+  with the lists before and after. `authenticateApiRequest` passes the normalised client address
+  and returns either the key's context or a refusal naming the key and company. The company export
+  (ADR-055) includes each key's networks.
+- **Web:** the API wrapper answers a refusal with 403 `ip_not_allowed`, naming the address it saw,
+  after taking a token from the address's failed-authentication bucket, and logs it with the key and
+  company ids. Settings → API keys: an "Allowed addresses (optional)" field when creating a key, each
+  key's "Accepts requests from" line, and an Addresses dialog for active keys. The OpenAPI document
+  lists the new reason.
+- **Tests:** unit tests of the entries accepted and refused (IPv4 and IPv6, separators, repeats, the
+  limit of 20, bad shapes, long prefixes, `/0`, mapped IPv4), how a single address is shown and the
+  OpenAPI refusal. 3 integration tests in `api.test.ts`: addresses inside and outside the networks,
+  an unknown address and an IPv4-mapped one, the key's last use untouched by a refusal, the old
+  lookup refusing keys with networks; what PostgreSQL accepts as a network and the messages for
+  host bits and other text; changes for an active key after a recent sign-in with their audit, a
+  repeat changing nothing, an empty list accepting any address, refused for stale sessions, agents,
+  other companies, revoked keys and bad input, and copied by a rotation. The grant lists in
+  `api.test.ts` and `tenant-isolation.test.ts` include the new function. e2e `api-keys.spec.ts`: a
+  key created with one network refuses another address (403 naming it) and a request without the
+  header, accepts an address inside the network, answers a burst of refusals from one address with
+  429, and accepts the other address once the owner adds it in the Addresses dialog.
+- **Docs:** ADR-076; ARCHITECTURE (keys and requests); SECURITY (Phase 5 rules); DEPLOYMENT (the
+  address allowlists trust); THREAT-MODEL T94; RUNBOOKS (migration 0051, a troubleshooting entry);
+  BACKLOG P5-08; FEATURE-MATRIX H-033 and W-135, and W-136 and W-137 brought up to date with the
+  rate limit tests (ADR-068) and monthly API requests by plan (ADR-061), which they still listed as
+  untested and not built.
+- **Mutation checks:** 25 regressions tried one at a time, all make a test fail: the address
+  check (missing, an unknown address accepted), a refused key marked used, the old lookup accepting
+  keys with networks, the runtime role's column grant, the new function's grant, networks not
+  stored at creation or dropped by a rotation, entries kept as typed, host bits masked silently, the
+  recent sign-in, the active-key check, the change's audit (missing, repeated for the same list),
+  the creation audit without networks, the shape check, `/0`, the limit of 20, mapped IPv4, a
+  refusal read as acceptance, the address not normalised, single addresses shown with /32, and in
+  the web layer (through the e2e test) a refusal answered as an unknown key, refusals not counted
+  as failed authentication and edited addresses not saved.
+
+### Test commands and results (local, 2026-09-29)
+
+| Command                                                                                                                                                          | Result                                                                                                                                                      |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                             | 0 problems / all files formatted / all workspace packages pass                                                                                              |
+| `pnpm test` (unit)                                                                                                                                               | 358 passed, including 3 new in `api/api.test.ts` (and the OpenAPI document's new reason)                                                                    |
+| `pnpm test:integration` (PostgreSQL 18.6)                                                                                                                        | 508 passed, including 3 new in `api.test.ts`; the first run failed the export classification check (`allowed_networks` unclassified), fixed before this run |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                                                                                                        | 508 passed                                                                                                                                                  |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` on `api-keys.spec.ts`, `api.spec.ts`, `api-quota.spec.ts` and `company-data.spec.ts` | build passes / 16 passed: 8 tests on each project (5.1 min)                                                                                                 |
+| Mutation checks                                                                                                                                                  | 25 regressions tried (3 of them through the e2e test); all make a test fail                                                                                 |
+
+### Known gaps
+
+- Not built: networks for the whole company, per scope or per endpoint; hostnames; time windows;
+  alerts or a list of refused requests (the web log has each refusal with the key and company).
+- The check trusts the address the web server resolves: behind a load balancer every proxy hop must
+  be in `TRUSTED_PROXIES` and the edge must overwrite or append `X-Forwarded-For` (DEPLOYMENT.md).
+- The one-argument key lookup is kept for rolling deploys and must be dropped in a later release.
+- The full e2e suite was not run locally for this slice (only the specs above, on two projects); CI
+  runs every spec on Chromium, Firefox, WebKit and mobile.
+
+## 2026-09-29 — Phase 5: resolving and reopening conversations through the public API (P5-08, ADR-075)
+
+Status: **Implemented and locally verified (Graph stand-in; no customer data).** Integrations could
+read conversations (ADR-072) and reply inside the service window (ADR-070) but not close the loop: a
+helpdesk that closed a ticket left the WhatsApp conversation open until a member resolved it.
+
+### Completed
+
+- **Design (ADR-075):** a `conversations.write` scope ("Resolve and reopen conversations"), granted
+  only by members holding `inbox.supervise` (owners, administrators, supervisors: those who resolve
+  every conversation in the inbox); `PATCH /api/v1/conversations/{id}` with `{"status": "resolved"}`
+  or `{"status": "open"}`, answered with the conversation; the status it already has changes
+  nothing, so retries need no `Idempotency-Key`; `pending` and other fields are refused; no
+  satisfaction survey after an API resolve (surveys follow a member's resolve, ADR-032).
+- **Migration 0050:** widens `api_keys_scopes_check` to allow `conversations.write` (up to 8 scopes).
+  Nothing else changes in the database: the runtime role already writes a conversation's status in
+  the company's scope, and the triggers that follow (reply turns, cases, webhook events) already run.
+- **Domain:** `apiSetConversationStatus` (`api/conversations.ts`) locks the conversation `FOR UPDATE`
+  as the inbox's `setStatus` does, finds no erased contact's or other company's conversation, and on a
+  change stops an active automation (`conversation_resolved`, no member), sets or clears
+  `resolved_at`, clears the unread count on resolving, raises the version, emits the live
+  `conversation.status` event and audits `conversation.status_changed` as the key (`source: api`,
+  the request id). The scope's model entry and the OpenAPI operation (`setConversationStatus`, body
+  `ConversationStatus`) come from the same definitions; the `conversation.status_changed` webhook's
+  description now names API keys.
+- **Web:** the route's `PATCH` handler; Settings → API keys offers the scope to members who hold
+  `inbox.supervise` (the list comes from the model) and its introduction now lists everything the
+  API does.
+- **Tests:** unit tests of the write scopes, who can grant `conversations.write` (every role holding
+  `inbox.supervise` also reads and replies to every conversation), the body (only `open` or
+  `resolved`), refusals before any read (scope, company status, ids, bodies) and the OpenAPI
+  operation. 4 integration tests in `api.test.ts`: the scope and its grant; a resolve and reopen
+  with the reply turn and case closed without a member, the case keeping the assignee, no survey
+  although surveys are on, the live event, one webhook event per change, the audit entries, a
+  retried request changing nothing and the contact's next message reopening; two requests held
+  behind a row lock changing the status once; erased contacts, other companies, suspended and
+  restricted companies, bad ids and bodies. One in `automations.test.ts`: an API resolve stops the
+  bot, cancels its queued question and leaves no waiting turn. e2e `api.spec.ts`: the key (created
+  in settings with the new scope) resolves the conversation, a repeat answers the same, `pending` is
+  refused, the inbox offers Reopen, the key reopens it and the inbox offers Resolve.
+- **CI:** the e2e job gets 95 minutes and its test step 85 (were 80 and 70): its 200 tests took 64.3
+  minutes on 28a774c, close to the step's limit, and one retry of a long test must still fit.
+- **Docs:** ADR-075; ARCHITECTURE (the public API); SECURITY (Phase 5 rules); THREAT-MODEL T93;
+  RUNBOOKS (migration 0050, a troubleshooting entry); BACKLOG P5-08; FEATURE-MATRIX W-134 and H-033.
+- **Mutation checks:** 29 regressions tried one at a time, all make a test fail: the row lock, the
+  erased-contact check, the no-op for the same status, stopping the automation (reason and
+  condition), `resolved_at` on resolving and reopening, the unread count, the version, the live
+  event and its assignee, the audit entry (missing, as the system, without its source or request
+  id, the wrong status before), the scope check (missing, the read scope), the id check, `pending`
+  and unknown fields in the body, the scope marked as writing, the permission that grants it (read
+  all, reply), the database check (the scope, eight scopes), the `PATCH` handler, and the OpenAPI
+  schema and route list.
+
+### Test commands and results (local, 2026-09-29)
+
+| Command                                                                                                                                       | Result                                                                                                |
+| --------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                          | 0 problems / all files formatted / all workspace packages pass                                        |
+| `pnpm test` (unit)                                                                                                                            | 355 passed, including 4 new in `api/api.test.ts` (and the write scopes and permission checks widened) |
+| `pnpm test:integration` (PostgreSQL 18.6)                                                                                                     | 505 passed, including 4 new in `api.test.ts` and 1 in `automations.test.ts`                           |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                                                                                     | 505 passed                                                                                            |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` on `api.spec.ts`, `api-keys.spec.ts` and `webhook-events.spec.ts` | build passes / 10 passed on both projects (2.1 min)                                                   |
+| Mutation checks                                                                                                                               | 29 regressions tried; all make a test fail                                                            |
+
+### Known gaps
+
+- Not built: assigning or moving conversations, notes, setting `pending`, bulk changes, surveys after
+  API resolves, and a precondition on the conversation's state (the inbox checks the version the
+  member saw).
+- The full e2e suite was not run locally for this slice (only the specs above, on two projects); CI
+  runs every spec on Chromium, Firefox, WebKit and mobile.
+
+## 2026-09-29 — Phase 5: webhook events for conversations and contacts (P5-09, ADR-074)
+
+Status: **Implemented and locally verified with local test receivers only (no customer
+endpoints).** Webhooks told integrations about messages, consent and templates (ADR-053); a
+helpdesk or CRM kept in step with HyFib also needs to hear when a conversation is resolved,
+reopened or picked up by a person, and when a contact is added, changed or erased, which it could
+not hear at all before.
+
+### Completed
+
+- **Design (ADR-074):** five event types an endpoint can take (up to 9 per endpoint now):
+  `conversation.status_changed` (open, pending, resolved, with the status before, whoever changed
+  it), `conversation.assignment_changed` (a member assigned where none was, or none any more; moves
+  between members are not sent, as webhooks and the API name no members), `contact.created`,
+  `contact.updated` (name, number, email or tags; not custom fields, not consent) and
+  `contact.erased`. One contact event per contact and transaction; erasure sends only
+  `contact.erased`, with no personal data.
+- **Migrations 0047–0049:** 0047 widens the event type checks (the one on `app.webhook_events` `NOT
+VALID`, so the table is not scanned under the lock), adds `app.webhook_events.captured_xact`,
+  `app.capture_contact_webhook_event` and the triggers on `app.conversations`, `app.contacts` and
+  `app.contact_tags`; 0048 builds the partial index on the contact events concurrently; 0049
+  validates the check without blocking writes.
+- **Capture rules:** `contact.created` and `contact.updated` are captured when an active endpoint
+  takes either, once per contact and top-level transaction (savepoints included), and delivered to
+  the endpoints that take the event's own type: a contact added with its tags is sent as added only,
+  and an endpoint that takes only updates hears nothing of it. `contact.erased` first deletes the
+  created and updated events its own transaction captured, with their deliveries (erasure removes
+  the tags before it marks the contact).
+- **Domain:** `api/contact-view.ts` holds the API's contact (its schema, query and shape), now
+  shared by the API and the contact webhooks; `webhooks/payloads.ts` builds the five payloads when
+  delivered (conversation events as the message events are; contact events with the API's contact
+  and `erased`, an erased contact keeping its id, source and creation time only);
+  `webhooks/model.ts` names and describes the events for the settings page; the OpenAPI document's
+  `webhooks` section describes them.
+- **Web:** Settings → Webhooks offers the five events (the list comes from the model).
+- **Tests:** unit tests of the payload schemas (an erased contact included, the contact's fields
+  being the API's and `erased`) and of the OpenAPI entries. 10 integration tests in
+  `webhook-events.test.ts` with a local receiver: status changes from a member and from the contact
+  writing again, with the status before and the conversation as it is when delivered; assignment
+  sent when a member is assigned or unassigned, not for a move; one `contact.created` for a contact
+  added with tags, only to the endpoints that take it; one `contact.updated` for each save of the
+  name, the email, the number, all three, tags added and a tag removed, and nothing for a custom
+  field or an unchanged save; a customer's first message; an import (added and changed contacts);
+  erasure sending only `contact.erased` without personal data, events captured before it delivered
+  without personal data too; an endpoint taking only updates hearing nothing of an erasure; one
+  event per transaction across savepoints, a rolled-back savepoint leaving none; the capture
+  function refusing other types and refusing the company role a delete. The isolation suite checks
+  the new functions' grants. e2e `webhook-events.spec.ts`: a customer writes (`contact.created`), a
+  member resolves the conversation in the inbox (`conversation.status_changed`), tags the contact
+  (one `contact.updated`) and erases it (only `contact.erased`, without the name or number), each
+  request signed.
+- **Docs:** ADR-074; ARCHITECTURE (outgoing webhooks); SECURITY (controls, Phase 5 rules);
+  THREAT-MODEL T92; DATA-RETENTION; RUNBOOKS (the events, migrations 0047–0049); BACKLOG P5-09;
+  FEATURE-MATRIX H-014; the e2e job's comment in CI (200 tests; 196 took 58.4 minutes on
+  5232313).
+- **Mutation checks:** 27 regressions tried one at a time; 26 make a test fail. They cover each
+  trigger's condition and what it records, the one-event-per-transaction lookup and the transaction
+  id, erasure deleting its own events (also when no endpoint takes erasure), the subscription rules,
+  each contact field, custom fields, tag additions and removals, the grants to both roles, the
+  function refusing other types, and the payloads (the status and assignment as captured, the
+  erased contact, the full contact, the settings list). The other, removing the explicit `REVOKE ...
+FROM PUBLIC` of a trigger function, cannot be observed: migration 0002's default privileges
+  already withhold `EXECUTE` from `PUBLIC`, and the line stays as in every migration.
+
+### Test commands and results (local, 2026-09-29)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `pnpm test` (unit)                                                          | 351 passed, including 1 new in `webhooks/webhooks.test.ts` (and the OpenAPI list check widened)                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 500 passed, including 10 new in `webhook-events.test.ts`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 500 passed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / `webhook-events.spec.ts` and `webhooks.spec.ts` passed on both projects (4 tests, 48 s). A full run of both projects: 99 passed, 1 failed. The failure was the refund request test on mobile-chromium, which waits up to 120 s for its announcement email: the local e2e database had gathered 181 platform owners (test users) from earlier local runs, the announcement went to all of them, and this test's email arrived 87 s after the sweep, about 2 s after the wait ended (worker log and Mailpit times). CI starts from an empty database |
+| Mutation checks                                                             | 27 regressions tried; 26 make a test fail, the other cannot be observed (above)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+
+### Known gaps
+
+- Not built: custom field changes, member and team identities (and so moves between members or
+  teams), conversations started, notes, merges, events for campaigns, automations or orders, and
+  filters beyond the event type.
+- An import sends one `contact.created` or `contact.updated` per contact to each endpoint that takes
+  it; nothing batches them. Delivery was tested with local receivers only, and not under load.
+
+## 2026-09-29 — Phase 5: refund requests from companies and a platform-wide refunds list (P5-05, ADR-073)
+
+Status: **Implemented and locally verified against the Razorpay stand-in (email through the local
+outbox and Mailpit only).** Since ADR-058 a platform owner could refund unused service credit from a
+company's platform page, but a company could only ask by writing to support, and platform staff had
+no list of refunds across companies. Billing managers now ask from a payment's receipt, platform
+owners decide on `/platform/refunds`, and the same page lists every refund.
+
+### Completed
+
+- **Design (ADR-073):** members with `billing.manage` and a sign-in within 15 minutes ask for part
+  or all of a paid top-up's unused credit, with a reason; at most what is left of the payment and
+  the unused credit, one open request per top-up, 5 requests a day per company, none once the
+  company asked for its deletion; an open request can be withdrawn. A request moves no money and
+  holds no credit. Only a platform owner decides: approving starts the staff refund of ADR-058 for
+  the amount asked, in the same transaction, so every check runs again under its locks; declining
+  needs a note the company reads. Platform owners are emailed a count (no company, amount or
+  reason); billing managers are emailed a decline with its note; each once. Requests are exported
+  and deleted with the company; the refunds they led to stay as billing records.
+- **Migration 0046:** `app.credit_refund_requests` (row security; the company role reads everything
+  but who decided and the notice marks, inserts only an open request's columns and moves an open
+  request only to withdrawn, a restrictive policy; one open request per top-up, a partial unique
+  index; deletion step 76); `ops.platform_owner_recipients`,
+  `ops.credit_refund_requests_to_announce`, `ops.credit_refund_requests_mark_announced`,
+  `ops.credit_refund_request_declines_due` and `app.credit_refund_request_mark_decline_notified` for
+  the worker; `ops.platform_credit_refund_requests` and `ops.platform_credit_refunds` (newest first
+  on exact keyset pages) and `ops.platform_decide_credit_refund_request` (platform owners, audited)
+  for platform staff.
+- **Domain** (`billing/refund-requests.ts`): `createRefundRequestsService` (`ask`, which reads the
+  company's status under a share lock and counts the day's requests under a per-company advisory
+  lock; `withdraw`; `list`; `forTopup`, what the receipt offers and why not),
+  `announceRefundRequests` and `notifyRefundRequestDeclines` (the minute sweep's emails, marked in
+  the transaction that queues them; nothing is marked while there is no platform owner);
+  `platformBilling.refundRequests`, `creditRefunds` and `decideRefundRequest`. The insert names only
+  the columns the company role may insert: a query builder insert names every column, and PostgreSQL
+  checks the column grant even for `DEFAULT` (the first test run showed it).
+- **Worker:** the minute billing sweep announces new requests to platform owners and tells billing
+  managers of declines, logging what it sent, a missing platform owner and a company whose email
+  failed (retried the next minute).
+- **Web:** the receipt's "Refund of unused credit" section (the requests with their state, the
+  decision note and the refund's progress; the form for billing managers with a recent sign-in, or
+  why nothing can be asked for; withdrawing); the Billing page's Payments card points to the receipt
+  and shows a request waiting; `/platform/refunds` (requests waiting, decided or all, with the
+  company, the payment and its date, what is left of it, the unused credit now and a refund already
+  running; approve with a confirmation or decline with a note, for platform owners; every refund
+  across companies, each list with its own "Older" pages) and its link on the platform home.
+- **Tests:** 5 unit tests (the announcement's text, its rendering and the limits the database
+  checks; the decision refusing operators and notes of the wrong length before any query). 17
+  integration tests in `refund-requests.test.ts`: asking (nothing held, audit, the receipt's and
+  staff's views; agents, administrators and stale sessions refused; bad amounts and reasons, more
+  than is left or unused, a running refund, unpaid, unknown and other companies' payments; one open
+  request per payment with two sent at once; 5 a day with 7 sent at once, withdrawn requests
+  counted, a day-old one not; a company being deleted, also when the deletion is asked for while a
+  request is being made); withdrawing; deciding (approval starting and
+  linking the staff refund with its hold and both audit entries; approval refused when the credit
+  was spent since or a refund started meanwhile, the request staying open; declining with a note,
+  checked by the function too; operators, a claimed owner role and the company role refused); the
+  company role's column grants and restrictive policy; another company's scope; the emails (owners
+  once, a count only, a withdrawn request never, two sweeps at once, no platform owner; billing
+  managers once with the note and the receipt's link, two sweeps at once, the mark refused in
+  another company's scope); the lists paging on exact times and ids with 53 requests and 2 refunds
+  sharing a microsecond. The company export classification, the deletion test (a withdrawn and an
+  approved request deleted with the company, the refund kept) and the new functions' grants in the
+  isolation suite. e2e `refund-requests.spec.ts`: a company asks for ₹300 from the receipt (the
+  Billing page shows it waiting); the platform owner is emailed a count, declines with a note on
+  `/platform/refunds`; the company is emailed the note and asks for ₹200; the owner approves; the
+  worker sends the refund to Razorpay and the company is emailed and sees it on its way.
+- **e2e fix:** the Shopify store's removal step in `stores.spec.ts` failed once on PR #16's CI
+  (Chromium, passed on its retry): the worker can remove the store before the page is drawn again,
+  so the brief "Being removed" state never shows. The step now accepts either that state or the
+  store already gone ("Page not found"); the checks after it (no store connected, HyFib uninstalled
+  at the stand-in) are unchanged.
+- **Review fix (PR #17):** `ask` checked the company's status only in the context read before its
+  transaction, so an owner's deletion request committed in between let a request in for a company
+  being deleted. The status is now read in the transaction under a share lock:
+  `app.request_tenant_deletion` locks the row for update, so it waits for the request, or the
+  request sees the new status and is refused. A new integration test holds the deletion's
+  transaction open while a request waits on it; two new mutation checks (no lock, the context's
+  status) are caught by it.
+- **Docs:** ADR-073; ARCHITECTURE (billing section); SECURITY (controls, Phase 5 rules, platform
+  roles); THREAT-MODEL T91; RUNBOOKS (refund requests, migration 0046); DATA-RETENTION; BACKLOG
+  P5-05; FEATURE-MATRIX H-036 and H-043; RELEASE-CHECKLIST (refund requests in Razorpay test mode);
+  the e2e job's comment in CI (196 tests).
+- **Mutation checks:** 39 regressions tried one at a time; all make a test fail. They cover the
+  step-up, the permission, the deleting-company check (read under a lock, not from the context), the
+  advisory lock, the daily limit and what
+  it counts, each of the payment, amount, unused-credit and running-refund checks, the unique
+  index and its message, withdrawing, what the receipt offers, the announcement's no-owner rule and
+  its mark, the decline notice's mark and link, the decision's note, owner and open-request checks
+  in the service and in SQL, the company role's column grants and restrictive policy, the owner
+  recipients, both lists' exact keyset cursors, the functions' grants, the deletion step and the
+  export classification. Two were missed at first: the service's owner check (the database refuses
+  an operator with the same error) is caught since a unit test shows the service refuses before
+  any query. The SQL owner check is caught since the test also has an operator decline directly:
+  a direct approval was already refused, later, by the staff refund's own owner check.
+
+### Test commands and results (local, 2026-09-29)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                |
+| `pnpm test` (unit)                                                          | 350 passed, including 3 new in `billing/refund-requests.test.ts` and 2 in `platform/billing.test.ts`                                                                                                                                                                                                                                                                                                                                                          |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 489 passed before the review fix, including 16 new in `refund-requests.test.ts`; with it, that file (17 tests), `company-data.test.ts` and `tenant-isolation.test.ts` pass                                                                                                                                                                                                                                                                                    |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 489 passed (before the review fix)                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / `refund-requests.spec.ts`, `credit-refunds.spec.ts` and `billing-history.spec.ts` passed on both projects (6 tests, 8.4 min); after the refund test's waits were reordered, it and `stores.spec.ts` passed on chromium (6 tests, 4.2 min); both runs used the build from before the forms' unreachable success messages were removed. A full run of both projects on the build of the first push (before the review fix): 98 passed (33.2 min) |
+| Mutation checks                                                             | 39 regressions tried; all make a test fail (two after the tests were strengthened, above)                                                                                                                                                                                                                                                                                                                                                                     |
+
+### Known gaps
+
+- Not built: requests for spent credit or plan payments, approving a different amount (a platform
+  owner declines with a note and refunds from the company's page instead), several open requests
+  per top-up, reminders about requests waiting, and in-app notices.
+- Razorpay may fail a normal refund of a payment older than about 6 months (R-077); the page shows
+  each payment's date and warns, but HyFib does not refuse such a request by itself.
+- Verified against the Razorpay stand-in only; refunds in Razorpay test mode are still unrun
+  (RELEASE-CHECKLIST).
+
 ## 2026-09-29 — Phase 5: reading conversations and messages through the public API (P5-08, ADR-072)
 
 Status: **Implemented and locally verified against the Graph stand-in.** Integrations heard of new

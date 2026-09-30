@@ -9,6 +9,7 @@ import {
   inArray,
   isNull,
   memberAvailability,
+  memberships,
   sql,
   systemScope,
   teams,
@@ -42,6 +43,37 @@ export const INBOX_WORKER_ROLES: readonly TenantRole[] = (
 });
 
 export { matchesKeyword, normalizeRoutingText } from './keywords';
+
+/**
+ * Whether a member can be given conversations: active, with a role that reads and answers them (the
+ * members teams take). The row is locked for share until the caller commits, so a change to the
+ * member's status or roles made at the same time either waits and then releases what the caller
+ * assigned (releaseMemberConversations), or comes first and is seen here.
+ */
+export async function lockAssignableMember(
+  tx: Tx,
+  tenantId: string,
+  membershipId: string,
+): Promise<boolean> {
+  const [member] = await tx
+    .select({ status: memberships.status, roles: memberships.roles })
+    .from(memberships)
+    .where(and(eq(memberships.tenantId, tenantId), eq(memberships.id, membershipId)))
+    .for('share');
+  return (
+    member?.status === 'active' && member.roles.some((role) => INBOX_WORKER_ROLES.includes(role))
+  );
+}
+
+/** Whether the team is the company's; its row is kept from deletion until the caller commits. */
+export async function lockTeam(tx: Tx, tenantId: string, teamId: string): Promise<boolean> {
+  const [team] = await tx
+    .select({ id: teams.id })
+    .from(teams)
+    .where(and(eq(teams.tenantId, tenantId), eq(teams.id, teamId)))
+    .for('key share');
+  return team !== undefined;
+}
 
 /**
  * The next member in a team's rotation: the first eligible member after `last` in team order

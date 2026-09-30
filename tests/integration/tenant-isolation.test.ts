@@ -153,9 +153,11 @@ describe('database roles', () => {
     expect(await can('w360_platform', 'app.tenant_entitlements(uuid)')).toBe(true);
     expect(await can('w360_auth', 'app.tenant_entitlements(uuid)')).toBe(false);
     // Public API (0024): the key lookup and the idempotency sweep, for the runtime app role only,
-    // and the listing of keys due an expiry reminder (0040), for the worker.
+    // and the listing of keys due an expiry reminder (0040), for the worker. The lookup with the
+    // client's address (0051) replaced the one without, which stays for a rolling deploy.
     for (const fn of [
       'ops.api_key_authenticate(text)',
+      'ops.api_key_authenticate(text,inet)',
       'ops.purge_api_idempotency_keys(integer)',
       'ops.api_key_expiry_reminders_due(integer,integer)',
       // The purge of full rate limit buckets (0041), for the worker.
@@ -183,9 +185,76 @@ describe('database roles', () => {
     for (const role of ['w360_app', 'w360_auth', 'w360_platform']) {
       expect(await can(role, 'ops.settlement_unsettled_topups()'), role).toBe(false);
     }
-    // Outgoing webhooks (0025): the dispatch and retention sweeps for the worker; capture, which
-    // the triggers call as the role making the change (the runtime role, or a definer function);
-    // the trigger functions for nobody.
+    // Refund requests (0046): the notice sweeps and the platform owners' addresses for the worker,
+    // and the decline mark in the company's scope; the lists and the decision for platform staff.
+    for (const fn of [
+      'ops.platform_owner_recipients()',
+      'ops.credit_refund_requests_to_announce(integer)',
+      'ops.credit_refund_requests_mark_announced(uuid[])',
+      'ops.credit_refund_request_declines_due(integer)',
+      'app.credit_refund_request_mark_decline_notified(uuid)',
+    ]) {
+      expect(await can('w360_app', fn), fn).toBe(true);
+      expect(await can('w360_auth', fn), fn).toBe(false);
+      expect(await can('w360_platform', fn), fn).toBe(false);
+    }
+    for (const fn of [
+      'ops.platform_credit_refund_requests(text,timestamp with time zone,uuid,integer)',
+      'ops.platform_credit_refunds(timestamp with time zone,uuid,integer)',
+      'ops.platform_decide_credit_refund_request(uuid,boolean,text,text)',
+    ]) {
+      expect(await can('w360_platform', fn), fn).toBe(true);
+      expect(await can('w360_app', fn), fn).toBe(false);
+      expect(await can('w360_auth', fn), fn).toBe(false);
+    }
+    // Company deletion started by staff (0067): scheduling and cancelling for platform staff; the
+    // notice sweep, its mark and owners' cancelling for the runtime app role; the shared rule for the
+    // status a cancelled deletion restores only inside the definer functions.
+    for (const fn of [
+      'ops.platform_request_tenant_deletion(uuid,text,text,text)',
+      'ops.platform_cancel_tenant_deletion(uuid,text,text)',
+    ]) {
+      expect(await can('w360_platform', fn), fn).toBe(true);
+      expect(await can('w360_app', fn), fn).toBe(false);
+      expect(await can('w360_auth', fn), fn).toBe(false);
+    }
+    for (const fn of [
+      'ops.tenant_deletion_notices_due(integer)',
+      'app.tenant_deletion_mark_notified(uuid,text)',
+      'app.cancel_tenant_deletion()',
+    ]) {
+      expect(await can('w360_app', fn), fn).toBe(true);
+      expect(await can('w360_auth', fn), fn).toBe(false);
+      expect(await can('w360_platform', fn), fn).toBe(false);
+    }
+    for (const role of ['w360_app', 'w360_auth', 'w360_platform']) {
+      expect(await can(role, 'ops.tenant_status_after_deletion(uuid,text,text)'), role).toBe(false);
+    }
+    // Alerts for work that failed for good (0068): the count, the mark and the recipients for the
+    // runtime app role (the worker's sweep); the rule for a used-up receipt for the worker and the
+    // operations console; the receipt retry, replaced, still for platform staff only.
+    for (const fn of [
+      'ops.failure_alerts_due()',
+      'ops.mark_failure_alert()',
+      'ops.platform_failure_alert_recipients()',
+    ]) {
+      expect(await can('w360_app', fn), fn).toBe(true);
+      expect(await can('w360_auth', fn), fn).toBe(false);
+      expect(await can('w360_platform', fn), fn).toBe(false);
+    }
+    // Late queues (0072): the check's record and the alert's mark for the worker's sweep only.
+    for (const fn of ['ops.record_queue_waits(jsonb)', 'ops.mark_queue_alert()']) {
+      expect(await can('w360_app', fn), fn).toBe(true);
+      expect(await can('w360_auth', fn), fn).toBe(false);
+      expect(await can('w360_platform', fn), fn).toBe(false);
+    }
+    const rule = 'ops.webhook_receipt_exhausted(text,integer,timestamp with time zone)';
+    expect(await can('w360_app', rule)).toBe(true);
+    expect(await can('w360_platform', rule)).toBe(true);
+    expect(await can('w360_auth', rule)).toBe(false);
+    // Outgoing webhooks (0025, 0047): the dispatch and retention sweeps for the worker; capture,
+    // which the triggers call as the role making the change (the runtime role, or a definer
+    // function); the trigger functions for nobody.
     for (const fn of ['ops.webhook_dispatch_due(integer)', 'ops.purge_webhook_data(integer)']) {
       expect(await can('w360_app', fn), fn).toBe(true);
       expect(await can('w360_auth', fn), fn).toBe(false);
@@ -194,6 +263,7 @@ describe('database roles', () => {
     for (const fn of [
       'app.webhook_subscribed(uuid,text)',
       'app.capture_webhook_event(uuid,text,uuid,uuid,uuid,uuid,text,jsonb,timestamp with time zone)',
+      'app.capture_contact_webhook_event(uuid,uuid,text)',
     ]) {
       expect(await can('w360_app', fn), fn).toBe(true);
       expect(await can('w360_definer', fn), fn).toBe(true);
@@ -205,6 +275,9 @@ describe('database roles', () => {
       'app.webhook_capture_message()',
       'app.webhook_capture_consent()',
       'app.webhook_capture_template()',
+      'app.webhook_capture_conversation()',
+      'app.webhook_capture_contact()',
+      'app.webhook_capture_contact_tag()',
     ]) {
       for (const role of ['w360_app', 'w360_auth', 'w360_platform']) {
         expect(await can(role, fn), `${role} ${fn}`).toBe(false);

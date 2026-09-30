@@ -142,3 +142,62 @@ test('a burst beyond a key’s rate limit is refused with 429 and Retry-After, a
     })
     .toBe(200);
 });
+
+test('a key limited to listed addresses refuses requests from other addresses until its addresses are changed', async ({
+  page,
+  request,
+}) => {
+  const email = uniqueEmail('nets');
+  const suffix = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`;
+  const slug = `nets-${suffix}`;
+  const companyName = `Nets Co ${suffix}`;
+  await signUpAndVerify(page, { name: 'Neha Nets', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill(companyName);
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page.getByRole('heading', { name: companyName })).toBeVisible();
+
+  // A key that accepts requests from one network only (ADR-076).
+  await page.goto(`/c/${slug}/settings/api-keys`);
+  await page.getByLabel('Name', { exact: true }).fill('Office sync');
+  await page.getByRole('checkbox', { name: /Read contacts/ }).check();
+  await page.getByLabel('Allowed addresses (optional)').fill('198.51.100.0/24');
+  await page.getByRole('button', { name: 'Create API key' }).click();
+  const token = await page.getByLabel('API key', { exact: true }).inputValue();
+  await page.getByRole('button', { name: 'I have stored the key' }).click();
+  await expect(page.getByText('198.51.100.0/24', { exact: true })).toBeVisible();
+
+  // The client's address comes from X-Forwarded-For (no proxy is trusted in this setup).
+  const from = (address?: string) =>
+    request.get('/api/v1/contacts', {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        ...(address ? { 'X-Forwarded-For': address } : {}),
+      },
+    });
+  const outside = await from('203.0.113.5');
+  expect(outside.status()).toBe(403);
+  const refusal = (await outside.json()) as {
+    error: { code: string; reason: string; message: string };
+  };
+  expect(refusal.error).toMatchObject({ code: 'forbidden', reason: 'ip_not_allowed' });
+  expect(refusal.error.message).toContain('203.0.113.5');
+  expect((await from('198.51.100.20')).status()).toBe(200);
+  // Without the header, the address is the connection's, which is not listed either.
+  expect((await from()).status()).toBe(403);
+  // Refusals count as failed authentication for the address (bursts of 20): a client that keeps
+  // trying from elsewhere is slowed like one with a wrong key.
+  const burst = await Promise.all(Array.from({ length: 25 }, () => from('192.0.2.77')));
+  const statuses = burst.map((r) => r.status());
+  expect(statuses.filter((s) => s !== 403 && s !== 429)).toEqual([]);
+  expect(statuses.filter((s) => s === 429).length).toBeGreaterThanOrEqual(5);
+
+  // The owner adds the other office's addresses; the next request is accepted.
+  await page.getByRole('button', { name: 'Addresses for Office sync' }).click();
+  const dialog = page.getByRole('alertdialog');
+  await dialog.getByLabel('Allowed addresses (optional)').fill('198.51.100.0/24\n203.0.113.5');
+  await dialog.getByRole('button', { name: 'Save addresses' }).click();
+  await expect(page.getByText('198.51.100.0/24, 203.0.113.5', { exact: true })).toBeVisible();
+  expect((await from('203.0.113.5')).status()).toBe(200);
+  await expectNoHorizontalOverflow(page);
+});

@@ -1,11 +1,14 @@
 import type { Job } from 'pg-boss';
-import { QUEUES } from '@w360/contracts';
+import { ALL_QUEUES, QUEUES } from '@w360/contracts';
 import { toError } from '@w360/core';
 import { authorizedTenantScope } from '@w360/db';
 import {
+  alertFailures,
+  alertLateQueues,
   applyMessagingRetention,
   authorizeJob,
   cancelSendIntent,
+  checkQueueWaits,
   findStaleReceipts,
   findStaleSendIntents,
   processChannelOnboarding,
@@ -14,6 +17,7 @@ import {
   purgeApiIdempotencyKeys,
   purgeDeadLetters,
   purgeRateLimitBuckets,
+  queueWaitLimits,
   recoverExpiredSend,
   remindExpiringApiKeys,
   routeDueConversations,
@@ -148,7 +152,8 @@ export function channelOnboardHandler(rt: WorkerRuntime) {
  * intents whose worker died (before dispatch: re-queued; after dispatch: unknown outcome, never an
  * automatic resend), signal automation runs and task reminders that are due or lost their
  * signal, route waiting conversations of round-robin teams, remind companies of API keys that
- * expire soon, and delete rate limit buckets that are full again.
+ * expire soon, delete rate limit buckets that are full again, alert platform staff to work that
+ * failed for good, and check how long jobs wait in each queue.
  */
 export function messagingSweepHandler(rt: WorkerRuntime) {
   return async (): Promise<void> => {
@@ -233,6 +238,47 @@ export function messagingSweepHandler(rt: WorkerRuntime) {
       rt.logger.info(
         { receipts: receipts.length, intents: intents.length, unknownOutcomes: recovered },
         'messaging sweep',
+      );
+    }
+    // Dead letters, receipts that used all their attempts and unmatched provider events: platform
+    // staff hear of each once, at most every 15 minutes (ADR-091). Last, so that a failure here
+    // holds back none of the sweep's other work.
+    const failures = await alertFailures({
+      db: rt.db,
+      outbox: rt.notices.outbox,
+      appBaseUrl: rt.notices.appBaseUrl,
+    });
+    if (failures.alerted > 0) {
+      rt.logger.info(
+        { items: failures.alerted, recipients: failures.recipients },
+        'failure alert emailed to platform staff',
+      );
+    }
+    if (failures.unsent > 0) {
+      rt.logger.warn(
+        { items: failures.unsent },
+        'work failed for good but there is no platform administrator to email',
+      );
+    }
+    // How long jobs wait in each queue; platform staff hear of a queue that falls behind once, at
+    // most every 15 minutes, and again only after it caught up (ADR-096).
+    const waits = await checkQueueWaits(rt.db, queueWaitLimits(ALL_QUEUES));
+    if (waits.late > 0) rt.logger.warn({ lateQueues: waits.late }, 'job queues are late');
+    const lateQueues = await alertLateQueues({
+      db: rt.db,
+      outbox: rt.notices.outbox,
+      appBaseUrl: rt.notices.appBaseUrl,
+    });
+    if (lateQueues.alerted > 0) {
+      rt.logger.info(
+        { queues: lateQueues.alerted, recipients: lateQueues.recipients },
+        'late queue alert emailed to platform staff',
+      );
+    }
+    if (lateQueues.unsent > 0) {
+      rt.logger.warn(
+        { queues: lateQueues.unsent },
+        'job queues are late but there is no platform administrator to email',
       );
     }
   };

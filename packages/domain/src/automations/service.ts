@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { AppError, forbidden, notFound, uuidv7, type Clock } from '@w360/core';
 import {
   and,
+  apiKeys,
   asc,
   automationRunSteps,
   automationHttpCalls,
@@ -43,6 +44,7 @@ import { STORE_MESSAGE_EVENT_INFO } from '../stores/messages-model';
 import { renderPlaceholders, sendSpecFor } from '../templates/definition';
 import { parseInput } from '../validation';
 import {
+  apiInputValues,
   canonicalJson,
   checkGraph,
   describeTrigger,
@@ -50,6 +52,8 @@ import {
   parseTrigger,
   starterGraph,
   starterTrigger,
+  templatesOf,
+  triggerIssues,
   type AutomationGraph,
   type AutomationTrigger,
   type GraphIssue,
@@ -109,6 +113,8 @@ const testRunSchema = idSchema.extend({
   conversationId: z.uuid(),
   /** The order a test of an automation started by order messages reads (ADR-050). */
   storeOrderId: z.uuid().nullable().default(null),
+  /** The inputs a test of an automation started through the API gives (ADR-077). */
+  inputs: z.record(z.string(), z.unknown()).optional(),
 });
 const listRunsSchema = z.object({
   automationId: z.uuid().optional(),
@@ -207,6 +213,8 @@ export interface RunDetail extends RunSummary {
   startedByName: string | null;
   /** The order event that started the run (runs started by order messages). */
   storeEvent: string | null;
+  /** The name of the API key that started the run (runs started through the API). */
+  apiKeyName: string | null;
   /** The order the run reads (members with `commerce.read`; null when none or gone). */
   order: { id: string; name: string; storeName: string } | null;
   graph: AutomationGraph | null;
@@ -305,17 +313,6 @@ function templateOption(t: TemplateRow): AutomationTemplateOption {
       ? { header: preview.header, body: preview.body, footer: preview.footer }
       : null,
   };
-}
-
-/** Template ids a graph's template steps use. */
-function templatesOf(graph: AutomationGraph): string[] {
-  return [
-    ...new Set(
-      graph.nodes.flatMap((n) =>
-        n.type === 'send_template' || n.type === 'ask_template' ? [n.templateId] : [],
-      ),
-    ),
-  ];
 }
 
 /** The active run of a conversation, for the inbox. */
@@ -431,11 +428,12 @@ export function createAutomationService(deps: AutomationServiceDeps) {
   /**
    * What a graph may refer to in this company (teams, fields, HTTP domains and secrets, templates),
    * and what its automation allows: order fields and the reply rule when it starts from order
-   * messages, templates of its number's WhatsApp account when it is limited to one.
+   * messages, the trigger's inputs and the reply rule when it starts through the API, templates of
+   * its number's WhatsApp account when it is limited to one.
    */
   function graphRefs(
     refs: Awaited<ReturnType<typeof references>>,
-    context: { storeEvent: boolean; channelWhatsappAccountId: string | null },
+    context: { trigger: AutomationTrigger | null; channelWhatsappAccountId: string | null },
   ): GraphReferences {
     return {
       teamIds: new Set(refs.teamRows.map((t) => t.id)),
@@ -444,7 +442,8 @@ export function createAutomationService(deps: AutomationServiceDeps) {
       secrets: new Map(refs.secrets.map((r) => [r.name, r.domain])),
       allowInsecureHttp: deps.allowInsecureHttp ?? false,
       templates: new Map(refs.templates.map((t) => [t.id, t])),
-      storeEvent: context.storeEvent,
+      storeEvent: context.trigger?.type === 'store_event',
+      apiInputs: context.trigger?.type === 'api' ? new Set(context.trigger.inputs) : undefined,
       channelWhatsappAccountId: context.channelWhatsappAccountId,
     };
   }
@@ -504,13 +503,16 @@ export function createAutomationService(deps: AutomationServiceDeps) {
     if (row.draftChannelAccountId && !channel) {
       throw new AppError('precondition_failed', 'Choose a WhatsApp number again.');
     }
-    const errors = checkGraph(
-      graph.graph,
-      graphRefs(await references(tx, row.tenantId), {
-        storeEvent: trigger.trigger.type === 'store_event',
-        channelWhatsappAccountId: channel?.whatsappAccountId ?? null,
-      }),
-    ).filter((i) => i.level === 'error');
+    const errors = [
+      ...triggerIssues(trigger.trigger, row.draftChannelAccountId),
+      ...checkGraph(
+        graph.graph,
+        graphRefs(await references(tx, row.tenantId), {
+          trigger: trigger.trigger,
+          channelWhatsappAccountId: channel?.whatsappAccountId ?? null,
+        }),
+      ),
+    ].filter((i) => i.level === 'error');
     if (errors.length > 0) {
       throw new AppError(
         'precondition_failed',
@@ -716,12 +718,13 @@ export function createAutomationService(deps: AutomationServiceDeps) {
           const graph = parseGraph(a.draftGraph);
           const issues: GraphIssue[] = [];
           if (!trigger.ok) issues.push({ level: 'error', nodeId: null, message: trigger.message });
+          else issues.push(...triggerIssues(trigger.trigger, a.draftChannelAccountId));
           if (graph.ok) {
             issues.push(
               ...checkGraph(
                 graph.graph,
                 graphRefs(refs, {
-                  storeEvent: trigger.ok && trigger.trigger.type === 'store_event',
+                  trigger: trigger.ok ? trigger.trigger : null,
                   channelWhatsappAccountId:
                     channels.find((c) => c.id === a.draftChannelAccountId)?.whatsappAccountId ??
                     null,
@@ -955,13 +958,16 @@ export function createAutomationService(deps: AutomationServiceDeps) {
         const channel = await channelAccountOf(tx, ctx.tenant.id, data.channelAccountId);
         return {
           version: row.version + 1,
-          issues: checkGraph(
-            graph.graph,
-            graphRefs(await references(tx, ctx.tenant.id), {
-              storeEvent: trigger.trigger.type === 'store_event',
-              channelWhatsappAccountId: channel?.whatsappAccountId ?? null,
-            }),
-          ),
+          issues: [
+            ...triggerIssues(trigger.trigger, data.channelAccountId),
+            ...checkGraph(
+              graph.graph,
+              graphRefs(await references(tx, ctx.tenant.id), {
+                trigger: trigger.trigger,
+                channelWhatsappAccountId: channel?.whatsappAccountId ?? null,
+              }),
+            ),
+          ],
         };
       });
     },
@@ -1165,7 +1171,8 @@ export function createAutomationService(deps: AutomationServiceDeps) {
      * there). The conversation must be open, inside the 24-hour window, not assigned to someone
      * else, and not handled by another automation. An automation started by order messages is
      * tested with an order the member chooses (`commerce.read` and `contacts.read`, as store
-     * orders need), whose values its steps read.
+     * orders need), whose values its steps read; one started through the API with the inputs the
+     * member gives.
      */
     async startTestRun(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
       assertCan(ctx, 'automations.write');
@@ -1198,6 +1205,12 @@ export function createAutomationService(deps: AutomationServiceDeps) {
             );
           if (!order) throw notFound('Order');
           storeOrderId = order.id;
+        }
+        let variables: Record<string, string> = {};
+        if (trigger.type === 'api') {
+          const inputs = apiInputValues(trigger.inputs, data.inputs);
+          if (!inputs.ok) throw new AppError('validation_failed', inputs.message);
+          variables = inputs.variables;
         }
         const [conv] = await tx
           .select({
@@ -1277,6 +1290,7 @@ export function createAutomationService(deps: AutomationServiceDeps) {
           mode: 'test',
           triggerType: 'test',
           storeOrderId,
+          variables,
           startedByMembershipId: ctx.membership.id,
           startedByUserId: ctx.user.id,
           status: 'running',
@@ -1410,8 +1424,16 @@ export function createAutomationService(deps: AutomationServiceDeps) {
               versionNumber: automationVersions.number,
               graph: automationVersions.graph,
               assigned: conversations.assignedMembershipId,
+              apiKeyName: apiKeys.name,
             })
             .from(automationRuns)
+            .leftJoin(
+              apiKeys,
+              and(
+                eq(apiKeys.tenantId, automationRuns.tenantId),
+                eq(apiKeys.id, automationRuns.apiKeyId),
+              ),
+            )
             .innerJoin(
               automations,
               and(
@@ -1531,6 +1553,7 @@ export function createAutomationService(deps: AutomationServiceDeps) {
             endedByName: nameOf(r.run.endedByMembershipId),
             startedByName: nameOf(r.run.startedByMembershipId),
             storeEvent: r.run.storeEvent,
+            apiKeyName: r.apiKeyName,
             order: order ?? null,
             graph: graph.ok ? graph.graph : null,
             variables: visible ? r.run.variables : null,

@@ -128,24 +128,22 @@ export type ResolvedProductMessage =
     }
   | { kind: 'catalog'; thumbnailRetailerId: string; body: string; footer: string };
 
-/** The Graph request for a product, multi-product or catalog message (research M-169). */
-export function buildProductMessageRequest(
-  to: string,
-  message: ResolvedProductMessage,
-): Record<string, unknown> {
+/**
+ * The `interactive` object of a product, multi-product or catalog message (research M-169), shared
+ * by the inbox and the public API (ADR-086).
+ */
+export function productInteractive(message: ResolvedProductMessage): Record<string, unknown> {
   const footer = message.footer ? { footer: { text: message.footer } } : {};
-  let interactive: Record<string, unknown>;
   switch (message.kind) {
     case 'product':
-      interactive = {
+      return {
         type: 'product',
         ...(message.body ? { body: { text: message.body } } : {}),
         ...footer,
         action: { catalog_id: message.catalogId, product_retailer_id: message.retailerId },
       };
-      break;
     case 'product_list':
-      interactive = {
+      return {
         type: 'product_list',
         header: { type: 'text', text: message.header },
         body: { text: message.body },
@@ -158,9 +156,8 @@ export function buildProductMessageRequest(
           })),
         },
       };
-      break;
     case 'catalog':
-      interactive = {
+      return {
         type: 'catalog_message',
         body: { text: message.body },
         ...footer,
@@ -169,14 +166,20 @@ export function buildProductMessageRequest(
           parameters: { thumbnail_product_retailer_id: message.thumbnailRetailerId },
         },
       };
-      break;
   }
+}
+
+/** The Graph request for a product, multi-product or catalog message (research M-169). */
+export function buildProductMessageRequest(
+  to: string,
+  message: ResolvedProductMessage,
+): Record<string, unknown> {
   return {
     messaging_product: 'whatsapp',
     recipient_type: 'individual',
     to,
     type: 'interactive',
-    interactive,
+    interactive: productInteractive(message),
   };
 }
 

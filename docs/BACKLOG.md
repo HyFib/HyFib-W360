@@ -293,7 +293,10 @@ verification, app review, Embedded Signup configuration).
   403 without the API, one notice per period); **[a warning at 80% of the month's automation runs
   or API requests built, locally verified]** (ADR-062: one email per counter, marked on the plan
   card; the used-up notices now skip counters of an earlier period); **[paying for plans by
-  Razorpay subscription built, locally verified against the stand-in]** (ADR-063, see P5-07).
+  Razorpay subscription built, locally verified against the stand-in]** (ADR-063, see P5-07);
+  **[API scopes by plan built, locally verified]** (ADR-092, W-137: a version includes every API
+  scope or only those chosen; requests needing another are refused with 403 `not_in_plan` whatever
+  the key has, new keys cannot be given one, existing keys keep theirs and are marked).
   Remaining: billing that starts when a trial ends, self-serve plan changes and higher-plan trials,
   proration, plan invoices, thresholds chosen per company, in-app notices, plan-change emails to
   companies, packs of extra API requests and AI credits (Phase 6).
@@ -333,9 +336,14 @@ verification, app review, Embedded Signup configuration).
   finished attempt when a day waits for a person or fails, naming days and counts only);
   **[alerts for unsettled payments built, locally verified]** (ADR-071: platform owners emailed
   once about each paid top-up no settlement showed 7 days after payment, from the same definition
-  as the page's list, with counts and payment days only; the list says when). Remaining: refunds
-  asked for by companies, a platform-wide refunds list, bank statement (UTR) matching, fee and tax
-  accounting, and GST invoices (GST treatment needs tax review).
+  as the page's list, with counts and payment days only; the list says when). **[Refund requests
+  from companies and a platform-wide refunds list built; Razorpay traffic simulated by a test-only
+  stand-in]** (ADR-073): billing managers with a recent sign-in ask from a paid top-up's receipt for
+  a refund of unused credit, with a reason (5 a day, one open per top-up, withdrawable); platform
+  owners are emailed a count and decide on `/platform/refunds`, where approving starts the staff
+  refund with every check run again and declining needs a note the company is emailed; the page
+  also lists every refund across companies on exact keyset pages. Remaining: bank statement (UTR)
+  matching, fee and tax accounting, and GST invoices (GST treatment needs tax review).
 - **P5-06 Mandatory financial tests** **[29 integration tests + 2 e2e]**: concurrent spends on last
   funds; many low-balance triggers → one attempt; repeated and out-of-order events; timeout after
   capture (reconciliation); delayed success after UI timeout; decline; mandate revocation; cap
@@ -385,10 +393,58 @@ verification, app review, Embedded Signup configuration).
   company's conversations by status, contact, number and time of change, reads one, and pages its
   messages in the webhooks' words; erased contacts' conversations are hidden; keyset cursors now
   keep PostgreSQL's microseconds, which fixed rows skipped at page ends in the contacts list and
-  export, API contacts, the inbox thread and the audit log). Remaining: media, interactive and
-  reaction messages, replies to a given message, resolving or assigning conversations, member and
-  team names, media downloads, a message feed across conversations, starting automations (W-086),
-  bulk sends in one call, IP allowlists, per-key quotas, limits per endpoint.
+  export, API contacts, the inbox thread and the audit log); **[resolving and reopening
+  conversations built, locally verified]** (ADR-075: a `conversations.write` key, granted only by
+  owners, administrators and supervisors, resolves or reopens a conversation as the inbox does,
+  under its row lock: the automation stops, the reply turn and case close, the webhook fires; audited
+  as the key, no satisfaction survey, no member credited); **[networks per key built, locally
+  verified]** (ADR-076: up to 20 IPv4 or IPv6 networks a key accepts requests from, checked in the
+  lookup before the key is marked used, 403 `ip_not_allowed` counted as a failed authentication,
+  set at creation, copied on rotation, changed with a recent sign-in and audited); **[starting
+  automations built, locally verified against the Graph stand-in]** (ADR-077, W-086: an
+  `automations.start` key, granted only by owners and administrators, starts a published automation
+  whose trigger is "Started through the API" for one contact with the inputs it declares, once per
+  `Idempotency-Key`, with an order rule's checks and a reason for each refusal; templates until the
+  contact replies, from the automation's one number; the run records its key, its inputs are kept
+  and cleared with its answers, and keys read the runs they started); **[stopping runs built,
+  locally verified]** (ADR-079: the same scope stops a run keys started, as `stopped_by_api`,
+  cancelling what it queued without handing the conversation to people; an ended run is answered as
+  it is); **[buttons and lists built, locally verified against the Graph stand-in]** (ADR-080: a
+  `messages.reply` key also sends up to 3 reply buttons or a list of up to 10 rows to a contact who
+  wrote in the last 24 hours, within Meta's limits and with its own ids, never HyFib's `w360…`; taps
+  come back with `reply.type` and a row's description); **[webhook endpoints through the API
+  built, locally verified]** (ADR-081, W-139: a `webhooks.manage` key, granted only by owners and
+  administrators, adds, reads, changes, rotates the secret of and deletes the endpoints keys added,
+  never members' ones; secrets shown once and never kept for replays; owners and administrators
+  emailed about each endpoint a key adds); **[quotes and reactions built, locally verified against
+  the Graph stand-in]** (ADR-082: a text, buttons or a list may quote a message of the conversation
+  with `replyTo`, and a `messages.reply` key reacts with one emoji to a message the contact sent in
+  the last 30 days, without ending an automation; the API, the `message.received` webhook and the
+  inbox name the message a message quotes, reacts to or taps a button of); **[webhook deliveries
+  through the API built, locally verified; delivered to local test receivers only]** (ADR-083: the
+  same `webhooks.manage` key pages the deliveries of the endpoints keys added, reads one, sends a
+  test event and replays a finished delivery, once per `Idempotency-Key`; deliveries say how
+  sending went, never a body); **[notes built, locally verified]** (ADR-084: a
+  `conversations.write` key adds internal notes to a conversation, once per `Idempotency-Key`,
+  named as the key's in the inbox and never sent to WhatsApp; a note sent while the contact is being
+  erased waits for the erasure and is refused); **[product messages built, locally verified]**
+  (ADR-086: `product`, `product_list` and `catalog` replies under `messages.reply`, products named
+  by content id in the sending number's catalogs, Commerce in the plan); **[message feed built,
+  locally verified]** (ADR-088: `GET /messages` pages every conversation's messages newest first
+  under `conversations.read`, with the contact and number, filtered by direction, number and time;
+  each page reads at most 2,000 messages, so filters give short pages rather than slow ones);
+  **[reading notes built, locally verified]** (ADR-089: the same scope reads a conversation's
+  notes newest first, members' and keys' alike, never naming members or mentions); **[assigning
+  and moving conversations built, locally verified]** (ADR-093: `conversations.write` gives a
+  conversation to a member who can answer it, unassigns it or moves it to a team, routed as the
+  inbox routes it; `conversations.read` lists those members, by name, and the teams; conversations
+  name their member and team by id; the inbox now offers and accepts only such members too).
+  Remaining: media messages, call-to-action messages through the API, taking reactions back,
+  assigning many conversations at once, media downloads, statuses changed since a time, starting or
+  stopping runs for many contacts in one call, bulk sends in one call, networks for the whole
+  company, per-key quotas, limits per endpoint, availability per single endpoint (plans choose per
+  scope since ADR-092), and dropping the one-argument key lookup kept for rolling deploys (0051).
+  Replaying many deliveries in one call is built with P5-09 (ADR-095).
 - **P5-09 Outgoing webhooks** **[built, locally verified; delivered to local test receivers only]**
   (ADR-053): up to 10 endpoints per company (`developer.manage`) for `message.received`,
   `message.status`, `consent.changed` and `template.status_changed`, captured by database triggers
@@ -397,17 +453,51 @@ verification, app review, Embedded Signup configuration).
   delivery through the egress guard with leases, eight attempts over about 45 hours, interrupted
   attempts retried (at least once), automatic disabling after 72 hours of failures with an email,
   delivery history, replays, test events, 30-day retention, the OpenAPI `webhooks` section.
-  Remaining: filters beyond the event type, custom headers, mutual TLS, fixed egress addresses,
-  events for conversations, campaigns, automations, contact changes and orders, load tests.
+  **[Conversation and contact events built, locally verified]** (ADR-074:
+  `conversation.status_changed`, `conversation.assignment_changed` (whether a member is assigned,
+  never who), `contact.created`, `contact.updated` (name, number, email, tags) and `contact.erased`,
+  one contact event per contact and transaction, erasure sending only `contact.erased` with no
+  personal data). **[Automation run events built, locally verified]** (ADR-078:
+  `automation.run_started` and `automation.run_ended` for live runs, whatever started them, with
+  what started the run, the API key for runs started through the API, the status and end reason;
+  test runs send nothing; no answers or inputs). **[Endpoints, deliveries, test events and replays
+  through the API built, locally verified]** (ADR-081, ADR-083: for the endpoints API keys add; see
+  P5-08). **[WhatsApp order events built, locally verified]** (ADR-085: `order.received` with the
+  cart, amounts in minor units and the customer's note, and `order.status_changed` with the status
+  before it, whoever changes it, Razorpay's payment through the worker included; no Payment Link or
+  payment details). **[Campaign events built, locally verified]** (ADR-087:
+  `campaign.status_changed` for every status change, by members or the runner, with the status
+  before it and why it paused or completed; counts only, no recipients or members). **[Member and
+  team ids in conversation events built, locally verified]** (ADR-094: `conversation.assignment_changed`
+  for every change of the member with the member before and after, a new
+  `conversation.team_changed` for every change of the team, whoever makes it, a team's deletion
+  included; ids as `GET /members` and `GET /teams` list them, no names or emails; stamped with the
+  time each change is captured). **[Replaying an endpoint's failed deliveries in one call built,
+  locally verified]** (ADR-095: every event whose deliveries to an endpoint that is on all failed
+  since a chosen time, 500 at most per call, oldest first, each once, from Settings → Webhooks or
+  `POST /webhook-endpoints/{id}/replay-failed`; events delivered or waiting, gone events and test
+  events left out; audited once per call). Remaining: filters beyond the event type (such as by
+  automation or status), custom headers, mutual TLS, fixed egress addresses, custom field changes,
+  delivery counts in campaign events, events for store orders, Payment Links and each step of a
+  run, `createdAt` finer than the millisecond, replays across endpoints or by event type, load
+  tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,
   Meta and Razorpay receipts needing attention, quarantine, email delivery counts), Queues (pg-boss
   counts per queue with retry policy, dead letters recorded by the worker without error messages),
   Signals (7-day review flags and security event counts) and Usage (7, 30 or 90 days); a health
-  card on each company's platform page; audited receipt retry and quarantine resolution. Remaining:
-  alerts, trends, Meta's quality webhook, API request counts, exports, the oldest waiting job,
-  redrive from the console, acknowledging issues, paging and rollups for many companies.
+  card on each company's platform page; audited receipt retry and quarantine resolution.
+  **[Failure alerts built, locally verified]** (ADR-091: every platform administrator emailed once
+  about each dead letter, each receipt that used all its attempts and each unresolved quarantine
+  entry, at most every 15 minutes, counts only; a receipt whose worker stopped during its last
+  attempt is now listed and retryable). **[Queue waits and alerts for late queues built, locally
+  verified]** (ADR-096: the worker's minute sweep records each queue's ready jobs and the oldest
+  one's wait, shown on the Queues tab with the queue's limit; every platform administrator is
+  emailed once each time a queue's oldest job waits past its limit, at most every 15 minutes, and
+  the console says when the worker stopped checking). Remaining: other alerts (companies' failing
+  integrations) and channels, trends, Meta's quality webhook, API request counts, exports, redrive
+  from the console, acknowledging issues, paging and rollups for many companies.
 - **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**
   (ADR-055): Settings → Company data for owners. A streamed, gzip-compressed JSON Lines export of
   every company table from one read-only transaction (each table and column exported or excluded
@@ -418,9 +508,12 @@ verification, app review, Embedded Signup configuration).
   deleted at Razorpay), batched deletion in foreign-key order, a tombstone company row, billing
   records and plan history kept, final emails. Also fixed: erasure now redacts past send requests,
   public entry points serve companies pending deletion, and the ended-run guard freezes two columns
-  again (step-up re-authentication for both since ADR-056). Remaining: staff-started
-  deletion, stored exports, other formats, a deletion job run on staging, legal review of the kept
-  records.
+  again (step-up re-authentication for both since ADR-056). **[Staff-started deletion built,
+  locally verified]** (ADR-090: platform owners schedule a company's deletion on its platform page
+  with the address typed and a reason the owners and administrators are emailed and read in the
+  company; the same 14 days and job; whoever scheduled a deletion cancels it, so owners cannot
+  cancel HyFib's and staff cannot cancel an owner's). Remaining: stored exports, other formats, a
+  deletion job run on staging, legal review of the kept records.
 
 ## Phase 6 — AI, calling, channels, connectors, enterprise
 

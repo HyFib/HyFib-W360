@@ -3,7 +3,10 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { displayMoney } from '@w360/core';
 import {
+  API_SCOPE_INFO,
   dayOf,
+  DELETION_GRACE_DAYS,
+  STAFF_DELETION_REASON,
   PLAN_INTERVAL_LABELS,
   PLAN_MODULE_KEYS,
   PLAN_MODULE_LABELS,
@@ -35,6 +38,10 @@ import {
   SupportGrantForm,
   TenantStatusForm,
 } from '@/components/platform/platform-forms';
+import {
+  CancelStaffDeletionForm,
+  ScheduleDeletionForm,
+} from '@/components/platform/deletion-forms';
 import { IssueList, LevelBadge, Utc } from '@/components/platform/ops';
 import { ServiceCredit } from '@/components/platform/service-credit';
 import { formatDate, formatDateTime } from '@/lib/format';
@@ -66,6 +73,8 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
     deletion.dueAt.getTime() <= clock.now().getTime() &&
     credit.refunds.some((r) => r.status === 'requested' || r.status === 'submitted'),
   );
+  const openDeletion = Boolean(deletion && !deletion.cancelledAt && !deletion.completedAt);
+  const reasonLimits = { min: STAFF_DELETION_REASON.min, max: STAFF_DELETION_REASON.max };
   const tz = planView.timezone;
   const option = (p: (typeof published)[number] | NonNullable<typeof planView.plan>) => ({
     id: p.id,
@@ -123,8 +132,10 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
                 </Badge>
               </div>
               <CardDescription>
-                Asked for by an owner (ADR-055). Staff cannot start, speed up or cancel it; owners
-                can cancel until it starts.
+                {deletion.requestedBy === 'platform'
+                  ? 'Scheduled by HyFib staff (ADR-090): platform owners can cancel it until it starts; owners cannot.'
+                  : 'Asked for by an owner (ADR-055): owners can cancel it until it starts; staff cannot.'}{' '}
+                Nobody can speed it up.
                 {waitsForRefund
                   ? ' It is due and waits for the refund of service credit in progress (ADR-058).'
                   : ''}
@@ -201,6 +212,28 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
                 </ul>
               ) : deletion.providerCleanupAt ? (
                 <p className="text-muted-foreground">No provider connections to remove.</p>
+              ) : null}
+              {deletion.reason ? (
+                <p className="whitespace-pre-line break-words">
+                  <span className="font-medium">Reason the company was given:</span>{' '}
+                  {deletion.reason}
+                </p>
+              ) : null}
+              {deletion.cancelledAt ? (
+                <p className="whitespace-pre-line break-words">
+                  <span className="font-medium">
+                    Cancelled by {deletion.cancelledBy === 'platform' ? 'HyFib staff' : 'an owner'}
+                    {deletion.cancelReason ? ':' : '.'}
+                  </span>
+                  {deletion.cancelReason ? ` ${deletion.cancelReason}` : ''}
+                </p>
+              ) : null}
+              {deletion.requestedBy === 'platform' && openDeletion && !deletion.startedAt ? (
+                actor.role === 'platform_owner' ? (
+                  <CancelStaffDeletionForm tenantId={company.id} limits={reasonLimits} />
+                ) : (
+                  <p className="text-muted-foreground">Only platform owners can cancel it.</p>
+                )
               ) : null}
             </CardContent>
           </Card>
@@ -294,6 +327,12 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
                       : used(usage.apiRequests, limits.apiRequests)}
                   </dd>
                 </div>
+                {limits.apiRequests !== 0 && planView.apiScopes ? (
+                  <div className="sm:col-span-2">
+                    <dt className="text-muted-foreground">API scopes</dt>
+                    <dd>{planView.apiScopes.map((s) => API_SCOPE_INFO[s].label).join(', ')}</dd>
+                  </div>
+                ) : null}
                 <div className="sm:col-span-2">
                   <dt className="text-muted-foreground">Modules</dt>
                   <dd>
@@ -530,6 +569,33 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
                   </div>
                 </dl>
               ) : null}
+            </CardContent>
+          </Card>
+        ) : null}
+        {!openDeletion && ['active', 'suspended', 'restricted'].includes(company.status) ? (
+          <Card className="lg:col-span-2">
+            <CardHeader>
+              <CardTitle>Delete the company</CardTitle>
+              <CardDescription>
+                For a company that asked HyFib to delete it, or whose service HyFib ends (ADR-090).
+                It is deleted {DELETION_GRACE_DAYS} days later by the same job as an owner’s
+                request; until then it works as if suspended and its owners can export its data. The
+                owners and administrators are emailed the reason. Only platform owners can schedule
+                or cancel it; nobody can speed it up.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {actor.role === 'platform_owner' ? (
+                <ScheduleDeletionForm
+                  tenantId={company.id}
+                  slug={company.slug}
+                  limits={reasonLimits}
+                />
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  Only platform owners can schedule a deletion.
+                </p>
+              )}
             </CardContent>
           </Card>
         ) : null}

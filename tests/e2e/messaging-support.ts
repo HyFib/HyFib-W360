@@ -106,13 +106,14 @@ export function inboundMessage(
   waId: string,
   text: string,
   sentAt: Date = new Date(),
+  id = `wamid.e2e.${randomUUID()}`,
 ) {
   return envelope(wabaId, phoneNumberId, {
     contacts: [{ profile: { name: 'Priya Customer' }, wa_id: waId }],
     messages: [
       {
         from: waId,
-        id: `wamid.e2e.${randomUUID()}`,
+        id,
         timestamp: String(Math.floor(sentAt.getTime() / 1000)),
         type: 'text',
         text: { body: text },
@@ -162,6 +163,51 @@ export function buttonReply(
         type: 'interactive',
         interactive: { type: 'button_reply', button_reply: button },
         context: { from: '919000012345', id: contextId },
+      },
+    ],
+  });
+}
+
+/** A customer's pick of a row of the list message `contextId` (research M-158, M-180). */
+export function listReply(
+  wabaId: string,
+  phoneNumberId: string,
+  waId: string,
+  row: { id: string; title: string; description?: string },
+  contextId: string,
+) {
+  return envelope(wabaId, phoneNumberId, {
+    contacts: [{ profile: { name: 'Priya Customer' }, wa_id: waId }],
+    messages: [
+      {
+        from: waId,
+        id: `wamid.e2e.${randomUUID()}`,
+        timestamp: String(Math.floor(Date.now() / 1000)),
+        type: 'interactive',
+        interactive: { type: 'list_reply', list_reply: row },
+        context: { from: '919000012345', id: contextId },
+      },
+    ],
+  });
+}
+
+/** A customer's reaction to the message `messageId` (research M-184). */
+export function reactionMessage(
+  wabaId: string,
+  phoneNumberId: string,
+  waId: string,
+  emoji: string,
+  messageId: string,
+) {
+  return envelope(wabaId, phoneNumberId, {
+    contacts: [{ profile: { name: 'Priya Customer' }, wa_id: waId }],
+    messages: [
+      {
+        from: waId,
+        id: `wamid.e2e.${randomUUID()}`,
+        timestamp: String(Math.floor(Date.now() / 1000)),
+        type: 'reaction',
+        reaction: { message_id: messageId, emoji },
       },
     ],
   });

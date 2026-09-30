@@ -366,7 +366,10 @@ describe('email outbox delivery', () => {
       await processEmailOutbox({ db: dbs.app, keyring, sender, clock: new ManualClock(t0) }, id),
     ).toBe('not_claimable');
     const later = new ManualClock(new Date(t0.getTime() + 121_000));
-    expect(await findStaleOutboxRows({ db: dbs.app, clock: later })).toContainEqual({
+    // The sweeper reads 500 stale rows a minute, in no order. Other test files leave pending
+    // notices in this shared database, sometimes more than 500, so read every stale row: the
+    // test is whether the expired lease makes this row stale, not which batch it lands in.
+    expect(await findStaleOutboxRows({ db: dbs.app, clock: later }, 100_000)).toContainEqual({
       id,
       kind: 'auth.verify_email',
     });

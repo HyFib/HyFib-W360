@@ -18,7 +18,12 @@ export interface ThreadMessage {
   apiKeyName: string | null;
   createdAt: string;
   providerTimestamp: string | null;
+  /** The message this one quotes, reacts to or taps a button of, in one line (ADR-082). */
+  replyTo: { id: string; direction: 'inbound' | 'outbound'; text: string } | null;
 }
+
+/** Inbound messages that answer a message by their nature (taps, forms, carts): no quote shown. */
+const ANSWER_TYPES = new Set(['interactive', 'button', 'order']);
 
 /** An order message's label ("Order shipped · Tara Tea") from its content (order messages). */
 function storeMessageLabel(content: unknown): string | null {
@@ -47,7 +52,15 @@ function text(value: unknown): string | null {
 
 /** One answer of a completed form as text (lists joined, other values as JSON, bounded). */
 /** Renders message content as plain text only (never HTML), by type. */
-function Body({ type, content }: { type: string; content: unknown }) {
+function Body({
+  type,
+  content,
+  replyTo,
+}: {
+  type: string;
+  content: unknown;
+  replyTo: ThreadMessage['replyTo'];
+}) {
   const c = (typeof content === 'object' && content !== null ? content : {}) as Record<
     string,
     unknown
@@ -89,7 +102,12 @@ function Body({ type, content }: { type: string; content: unknown }) {
         </p>
       );
     case 'reaction':
-      return <p>{text(c.emoji) ? `Reacted ${text(c.emoji)}` : 'Removed a reaction'}</p>;
+      return (
+        <p className="break-words">
+          {text(c.emoji) ? `Reacted ${text(c.emoji)}` : 'Removed a reaction'}
+          {replyTo ? <span className="text-xs opacity-80"> to “{replyTo.text}”</span> : null}
+        </p>
+      );
     case 'interactive': {
       const flow = (typeof c.flow === 'object' && c.flow !== null ? c.flow : null) as Record<
         string,
@@ -144,7 +162,7 @@ function Body({ type, content }: { type: string; content: unknown }) {
         typeof c.products === 'object' && c.products !== null ? c.products : null
       ) as Record<string, unknown> | null;
       if (products) {
-        // Products sent from the inbox (a product, a product list or the catalog).
+        // Products sent from the inbox or the API (a product, a product list or the catalog).
         const names = Array.isArray(products.names)
           ? (products.names as unknown[]).map((n) => text(n) ?? 'Unnamed product')
           : [];
@@ -187,9 +205,16 @@ function Body({ type, content }: { type: string; content: unknown }) {
         );
       }
       if (text(c.body)) {
-        // A question with reply buttons sent by an automation.
+        // Reply buttons (an automation's question or the API's) or a list sent through the API.
         const buttons = Array.isArray(c.buttons)
           ? (c.buttons as unknown[]).map(text).filter(Boolean)
+          : [];
+        const list =
+          typeof c.list === 'object' && c.list !== null
+            ? (c.list as { button?: unknown; sections?: unknown })
+            : null;
+        const sections = Array.isArray(list?.sections)
+          ? (list.sections as { title?: unknown; rows?: unknown }[])
           : [];
         return (
           <div className="grid gap-1">
@@ -198,6 +223,29 @@ function Body({ type, content }: { type: string; content: unknown }) {
             {text(c.footer) ? <p className="text-xs opacity-80">{text(c.footer)}</p> : null}
             {buttons.length > 0 ? (
               <p className="text-xs opacity-80">Buttons: {buttons.join(' · ')}</p>
+            ) : null}
+            {list ? (
+              <div className="grid gap-1 text-xs opacity-80">
+                <p>List: {text(list.button) ?? ''}</p>
+                {sections.map((section, i) => (
+                  <div key={i}>
+                    {text(section.title) ? (
+                      <p className="font-medium">{text(section.title)}</p>
+                    ) : null}
+                    <ul className="list-disc pl-4">
+                      {(Array.isArray(section.rows)
+                        ? (section.rows as { title?: unknown; description?: unknown }[])
+                        : []
+                      ).map((row, j) => (
+                        <li key={j} className="break-words">
+                          {text(row.title) ?? ''}
+                          {text(row.description) ? ` · ${text(row.description)}` : ''}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ))}
+              </div>
             ) : null}
           </div>
         );
@@ -320,7 +368,18 @@ export function MessageBubble({
             : 'Customer wrote'}
           :{' '}
         </span>
-        <Body type={message.type} content={message.content} />
+        {message.replyTo &&
+        message.type !== 'reaction' &&
+        !(message.direction === 'inbound' && ANSWER_TYPES.has(message.type)) ? (
+          <blockquote className="mb-1 border-l-2 border-muted-foreground/40 pl-2 text-xs text-muted-foreground">
+            <span className="font-medium">
+              <span className="sr-only">Quoting </span>
+              {message.replyTo.direction === 'inbound' ? 'Customer' : 'Your team'}
+            </span>
+            <span className="block break-words">{message.replyTo.text}</span>
+          </blockquote>
+        ) : null}
+        <Body type={message.type} content={message.content} replyTo={message.replyTo} />
         <p className="mt-1 flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
           <time dateTime={message.providerTimestamp ?? message.createdAt}>{at}</time>
           {outbound && message.senderType === 'system' ? (

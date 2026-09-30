@@ -150,7 +150,9 @@ export const conversationNotes = appSchema.table('conversation_notes', {
   id: uuid('id').primaryKey(),
   tenantId: uuid('tenant_id').notNull(),
   conversationId: uuid('conversation_id').notNull(),
-  authorMembershipId: uuid('author_membership_id').notNull(),
+  /** The member who wrote the note, or the key that wrote it through the API (ADR-084). */
+  authorMembershipId: uuid('author_membership_id'),
+  authorApiKeyId: uuid('author_api_key_id'),
   body: text('body').notNull(),
   createdAt: tz('created_at').notNull().defaultNow(),
 });
@@ -324,6 +326,8 @@ export const webhookReceipts = opsSchema.table('webhook_receipts', {
     .default(sql`'{}'::jsonb`)
     .$type<Record<string, unknown>>(),
   processedAt: tz('processed_at'),
+  /** When platform staff were emailed that it used all its attempts (ADR-091); cleared on retry. */
+  exhaustedAlertedAt: tz('exhausted_alerted_at'),
 });
 
 export const webhookQuarantine = opsSchema.table('webhook_quarantine', {
@@ -340,6 +344,8 @@ export const webhookQuarantine = opsSchema.table('webhook_quarantine', {
   createdAt: tz('created_at').notNull().defaultNow(),
   resolvedAt: tz('resolved_at'),
   resolution: text('resolution'),
+  /** When platform staff were emailed about it (ADR-091). */
+  alertedAt: tz('alerted_at'),
 });
 
 export const rateLimitBuckets = opsSchema.table('rate_limit_buckets', {

@@ -5,6 +5,8 @@ import {
   and,
   asc,
   channelAccounts,
+  commerceCatalogs,
+  commerceProducts,
   contactIdentities,
   contactTags,
   contacts,
@@ -17,7 +19,6 @@ import {
   isNull,
   messageTemplates,
   messages,
-  outerColumn,
   sendIntents,
   sql,
   suppressions,
@@ -26,13 +27,34 @@ import {
 import { recordSystemAudit } from '../audit';
 import { endRunForHuman } from '../automations/runs';
 import { lockCampaignSends, marketingCapReached } from '../campaigns/frequency-cap';
+import {
+  COMMERCE_LIMITS,
+  productInteractive,
+  type ResolvedProductMessage,
+} from '../commerce/model';
 import { checkTemplateEligibility, recordConsentEvents } from '../consent/service';
 import { normalizeEmail, normalizeTag } from '../contacts/fields';
 import { normalizePhone, phoneFromWaId, waRecipientFromPhone } from '../contacts/phone';
 import { contactForPhone } from '../contacts/service';
 import { emitTenantEvent } from '../messaging/events';
+import {
+  INTERACTIVE_LIMITS,
+  RESERVED_REPLY_ID_PREFIX,
+  isReservedReplyId,
+  listContent,
+  listInteractive,
+  replyButtonsContent,
+  replyButtonsInteractive,
+} from '../messaging/interactive';
 import { SERVICE_WINDOW_MS, type OutboundDeps } from '../messaging/outbound';
+import {
+  answeredJoin,
+  answeredMessages,
+  answerProblem,
+  isSingleEmoji,
+} from '../messaging/reply-context';
 import { STATUS_RANK } from '../messaging/status';
+import { loadEntitlements } from '../plans/entitlements';
 import {
   buildTemplateSend,
   fromMetaComponents,
@@ -40,7 +62,8 @@ import {
   TEMPLATE_LIMITS,
 } from '../templates/definition';
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
-import { apiActor, assertScope, type ApiContext } from './context';
+import { apiContactById, apiContactColumns, toApiContact, type ApiContact } from './contact-view';
+import { apiActor, assertAnyScope, assertScope, type ApiContext } from './context';
 import {
   claimIdempotencyKey,
   storeIdempotentResponse,
@@ -54,7 +77,7 @@ import { API_LIMITS, API_SEND_SCOPES } from './model';
  * also the source of the OpenAPI document, so the two cannot drift apart.
  */
 
-const phoneField = z
+export const phoneField = z
   .string({ error: 'Give the phone number' })
   .max(40)
   .describe('The number with its country code, starting with + (for example +919876543210).');
@@ -119,17 +142,29 @@ export const apiSendMessageSchema = z
   })
   .strict();
 
+/** The number a reply is sent from (ADR-070). */
+const replyFromField = z
+  .uuid()
+  .optional()
+  .describe(
+    'The id of the WhatsApp number the contact wrote to; optional when the company has one active number.',
+  );
+
+/** The message a reply quotes (ADR-082), checked against the conversation when sending. */
+const quoteField = z
+  .uuid({ error: 'Give the id of a message in this conversation' })
+  .optional()
+  .describe(
+    'The id of a message in the conversation to quote, from GET /conversations/{id}/messages, the message.received webhook or a send’s response: WhatsApp shows it above the reply. A message the contact sent, or one the business sent that WhatsApp accepted and that did not fail; not a reaction or a WhatsApp notice.',
+  );
+
 /** A free-form text reply to a contact who wrote in the last 24 hours (ADR-070). */
 export const apiSendTextSchema = z
   .object({
     type: z.literal('text'),
     to: phoneField,
-    from: z
-      .uuid()
-      .optional()
-      .describe(
-        'The id of the WhatsApp number the contact wrote to; optional when the company has one active number.',
-      ),
+    from: replyFromField,
+    replyTo: quoteField,
     text: z
       .string({ error: 'Give the text' })
       .trim()
@@ -146,16 +181,297 @@ export const apiSendTextSchema = z
   })
   .strict();
 
-export interface ApiContact {
-  id: string;
-  name: string | null;
-  phone: string | null;
-  email: string | null;
-  tags: string[];
-  consent: { marketing: 'opted_in' | 'opted_out' | null; utility: 'opted_in' | 'opted_out' | null };
-  source: string;
-  createdAt: string;
+const LIMITS = INTERACTIVE_LIMITS;
+
+/** Text in a reply buttons or list message, trimmed, within Meta's limit (M-157, M-159, M-179). */
+const interactiveText = (label: string, max: number) =>
+  z
+    .string({ error: `Give the ${label}` })
+    .trim()
+    .min(1, `Give the ${label}`)
+    .max(max, `The ${label} is limited to ${max} characters`);
+
+/**
+ * A button's or row's id: the integration's own, returned when the customer taps it. Kept exactly
+ * as given (Meta refuses spaces around it), and never one of HyFib's own ids (ADR-080).
+ */
+const replyIdField = (max: number) =>
+  z
+    .string({ error: 'Give an id' })
+    .min(1, 'Give an id')
+    .max(max, `Ids are limited to ${max} characters`)
+    .refine((id) => id.trim() === id, 'Ids cannot start or end with a space')
+    .refine(
+      (id) => !isReservedReplyId(id),
+      `Ids cannot start with “${RESERVED_REPLY_ID_PREFIX}”: HyFib’s own buttons use it`,
+    );
+
+const interactiveFrame = {
+  to: phoneField,
+  from: replyFromField,
+  replyTo: quoteField,
+  header: interactiveText('header', LIMITS.headerLength)
+    .optional()
+    .describe('Text shown above the body.'),
+  body: interactiveText('body', LIMITS.bodyLength).describe('The message.'),
+  footer: interactiveText('footer', LIMITS.footerLength)
+    .optional()
+    .describe('Small text shown below the body.'),
+};
+
+/** Adds an issue at each value already seen before it (compared as `key` gives them). */
+function refineUnique(
+  ctx: z.RefinementCtx,
+  values: { path: (string | number)[]; key: string }[],
+  message: string,
+) {
+  const seen = new Set<string>();
+  for (const value of values) {
+    if (seen.has(value.key)) ctx.addIssue({ code: 'custom', path: value.path, message });
+    seen.add(value.key);
+  }
 }
+
+/** Reply buttons to a contact who wrote in the last 24 hours (ADR-080). */
+export const apiSendButtonsSchema = z
+  .object({
+    type: z.literal('buttons'),
+    ...interactiveFrame,
+    buttons: z
+      .array(
+        z
+          .object({
+            id: replyIdField(LIMITS.buttonIdLength).describe(
+              'Returned as `reply.id` in the `message.received` webhook when the customer taps it.',
+            ),
+            title: interactiveText('button title', LIMITS.buttonTitleLength).describe(
+              'The button’s label, different from the others.',
+            ),
+          })
+          .strict(),
+      )
+      .min(1, 'Give at least one button')
+      .max(LIMITS.buttons, `A message has at most ${LIMITS.buttons} buttons`)
+      .describe('The buttons, each with its own id and label.'),
+  })
+  .strict()
+  .superRefine((data, ctx) => {
+    refineUnique(
+      ctx,
+      data.buttons.map((b, i) => ({ path: ['buttons', i, 'title'], key: b.title.toLowerCase() })),
+      'Give each button a different title',
+    );
+    refineUnique(
+      ctx,
+      data.buttons.map((b, i) => ({ path: ['buttons', i, 'id'], key: b.id })),
+      'Give each button a different id',
+    );
+  });
+
+/** A list message to a contact who wrote in the last 24 hours (ADR-080). */
+export const apiSendListSchema = z
+  .object({
+    type: z.literal('list'),
+    ...interactiveFrame,
+    button: interactiveText('list button', LIMITS.listButtonLength).describe(
+      'The label of the button that opens the list.',
+    ),
+    sections: z
+      .array(
+        z
+          .object({
+            title: interactiveText('section title', LIMITS.sectionTitleLength)
+              .optional()
+              .describe('Required when there is more than one section.'),
+            rows: z
+              .array(
+                z
+                  .object({
+                    id: replyIdField(LIMITS.rowIdLength).describe(
+                      'Returned as `reply.id` in the `message.received` webhook when the customer picks the row.',
+                    ),
+                    title: interactiveText('row title', LIMITS.rowTitleLength),
+                    description: interactiveText('row description', LIMITS.rowDescriptionLength)
+                      .optional()
+                      .describe('Shown under the row’s title.'),
+                  })
+                  .strict(),
+              )
+              .min(1, 'Give each section at least one row')
+              .max(LIMITS.rows, `A list has at most ${LIMITS.rows} rows`),
+          })
+          .strict(),
+      )
+      .min(1, 'Give at least one section')
+      .max(LIMITS.sections, `A list has at most ${LIMITS.sections} sections`)
+      .describe(
+        `The rows the customer picks from, in sections: at most ${LIMITS.rows} rows in all, each with its own id.`,
+      ),
+  })
+  .strict()
+  .superRefine((data, ctx) => {
+    const rows = data.sections.flatMap((section, s) =>
+      section.rows.map((row, r) => ({ row, path: ['sections', s, 'rows', r] })),
+    );
+    if (rows.length > LIMITS.rows) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['sections'],
+        message: `A list has at most ${LIMITS.rows} rows in all`,
+      });
+    }
+    if (data.sections.length > 1) {
+      data.sections.forEach((section, s) => {
+        if (!section.title) {
+          ctx.addIssue({
+            code: 'custom',
+            path: ['sections', s, 'title'],
+            message: 'Give each section a title when there is more than one',
+          });
+        }
+      });
+    }
+    refineUnique(
+      ctx,
+      rows.map(({ row, path }) => ({ path: [...path, 'id'], key: row.id })),
+      'Give each row a different id',
+    );
+  });
+
+/** The longest emoji accepted, in UTF-16 code units. */
+const EMOJI_LENGTH = 32;
+
+/** A reaction to a message the contact sent in the last 30 days (ADR-082). */
+export const apiSendReactionSchema = z
+  .object({
+    type: z.literal('reaction'),
+    to: phoneField,
+    from: replyFromField,
+    replyTo: z
+      .uuid({ error: 'Give the id of the contact’s message to react to' })
+      .describe(
+        'The id of the message to react to: one the contact sent in the last 30 days, from GET /conversations/{id}/messages or the message.received webhook.',
+      ),
+    emoji: z
+      .string({ error: 'Give one emoji, such as 👍' })
+      .max(EMOJI_LENGTH, 'Give one emoji, such as 👍')
+      .refine(isSingleEmoji, 'Give one emoji, such as 👍')
+      .describe(
+        'One emoji, such as 👍, from Unicode’s recommended set: skin tones, flags and keycaps count as one.',
+      ),
+  })
+  .strict();
+
+/** A product's content id in a catalog (its retailer id), exactly as Meta keeps it (ADR-086). */
+const retailerIdField = z
+  .string({ error: 'Give the product’s content id' })
+  .min(1, 'Give the product’s content id')
+  .max(100, 'Content ids are limited to 100 characters')
+  .describe(
+    'The product’s content id (its SKU) in the catalog, exactly as Commerce Manager shows it.',
+  );
+
+const productFrame = {
+  to: phoneField,
+  from: replyFromField,
+  replyTo: quoteField,
+  catalogId: z
+    .string()
+    .regex(/^[0-9]{1,32}$/, 'Give the Meta catalog id (digits only)')
+    .optional()
+    .describe(
+      'The Meta catalog the products are in; needed only when more than one catalog connected to the WhatsApp number has all the content ids.',
+    ),
+  footer: interactiveText('footer', COMMERCE_LIMITS.footerLength)
+    .optional()
+    .describe('Small text shown below the body.'),
+};
+
+/** One product from a catalog of the number, to a contact who wrote in the last 24 hours (ADR-086). */
+export const apiSendProductSchema = z
+  .object({
+    type: z.literal('product'),
+    ...productFrame,
+    retailerId: retailerIdField,
+    body: interactiveText('body', COMMERCE_LIMITS.bodyLength)
+      .optional()
+      .describe('Text shown with the product.'),
+  })
+  .strict();
+
+/** Up to 30 products in sections, to a contact who wrote in the last 24 hours (ADR-086). */
+export const apiSendProductListSchema = z
+  .object({
+    type: z.literal('product_list'),
+    ...productFrame,
+    header: interactiveText('header', COMMERCE_LIMITS.headerLength).describe(
+      'The heading shown above the products.',
+    ),
+    body: interactiveText('body', COMMERCE_LIMITS.bodyLength).describe('The message.'),
+    sections: z
+      .array(
+        z
+          .object({
+            title: interactiveText('section title', COMMERCE_LIMITS.sectionTitleLength)
+              .optional()
+              .describe('Required when there is more than one section.'),
+            retailerIds: z
+              .array(retailerIdField)
+              .min(1, 'Give each section at least one product')
+              .max(
+                COMMERCE_LIMITS.productsPerMessage,
+                `A message has at most ${COMMERCE_LIMITS.productsPerMessage} products`,
+              ),
+          })
+          .strict(),
+      )
+      .min(1, 'Give at least one section')
+      .max(COMMERCE_LIMITS.sections, `A message has at most ${COMMERCE_LIMITS.sections} sections`)
+      .describe(
+        `The products, in sections: at most ${COMMERCE_LIMITS.productsPerMessage} in all, each once, all from one catalog.`,
+      ),
+  })
+  .strict()
+  .superRefine((data, ctx) => {
+    const products = data.sections.flatMap((section, s) =>
+      section.retailerIds.map((id, i) => ({ id, path: ['sections', s, 'retailerIds', i] })),
+    );
+    if (products.length > COMMERCE_LIMITS.productsPerMessage) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['sections'],
+        message: `A message has at most ${COMMERCE_LIMITS.productsPerMessage} products in all`,
+      });
+    }
+    if (data.sections.length > 1) {
+      data.sections.forEach((section, s) => {
+        if (!section.title) {
+          ctx.addIssue({
+            code: 'custom',
+            path: ['sections', s, 'title'],
+            message: 'Give each section a title when there is more than one',
+          });
+        }
+      });
+    }
+    refineUnique(
+      ctx,
+      products.map(({ id, path }) => ({ path, key: id })),
+      'Give each product once',
+    );
+  });
+
+/** The number's catalog, opened from a product's picture (ADR-086). */
+export const apiSendCatalogSchema = z
+  .object({
+    type: z.literal('catalog'),
+    ...productFrame,
+    thumbnailRetailerId: retailerIdField.describe(
+      'The content id of the product whose picture the message shows.',
+    ),
+    body: interactiveText('body', COMMERCE_LIMITS.bodyLength).describe('The message.'),
+  })
+  .strict();
 
 export interface ApiTemplate {
   id: string;
@@ -169,7 +485,7 @@ export interface ApiTemplate {
 
 export interface ApiMessage {
   id: string;
-  type: 'template' | 'text';
+  type: 'template' | 'text' | 'interactive' | 'reaction';
   status: string;
   statusAt: string;
   to: string | null;
@@ -177,63 +493,13 @@ export interface ApiMessage {
   templateName: string | null;
   channelId: string;
   contactId: string;
+  /** The message it quotes or reacts to, when it is in the conversation (ADR-082). */
+  replyTo: string | null;
   error: { code: string | null; title: string | null } | null;
   createdAt: string;
 }
 
-// Outer columns named in full: these selects have no joins, so drizzle would leave the table out
-// and `id` would bind to the subquery's own table.
-const consentState = (purpose: 'marketing' | 'utility') =>
-  sql<'opted_in' | 'opted_out' | null>`(select cc.status from app.contact_consents cc
-    where cc.tenant_id = ${outerColumn(contacts.tenantId)} and cc.contact_id = ${outerColumn(contacts.id)}
-      and cc.purpose = ${purpose})`;
-
-const contactColumns = {
-  id: contacts.id,
-  name: contacts.displayName,
-  phone: contacts.phoneE164,
-  email: contacts.email,
-  source: contacts.source,
-  createdAt: contacts.createdAt,
-  erasedAt: contacts.erasedAt,
-  tags: sql<string[]>`coalesce((select array_agg(t.tag order by t.tag) from app.contact_tags t
-    where t.tenant_id = ${outerColumn(contacts.tenantId)} and t.contact_id = ${outerColumn(contacts.id)}), '{}')`,
-  marketing: consentState('marketing'),
-  utility: consentState('utility'),
-};
-
-type ContactRow = {
-  id: string;
-  name: string | null;
-  phone: string | null;
-  email: string | null;
-  source: string;
-  createdAt: Date;
-  tags: string[];
-  marketing: 'opted_in' | 'opted_out' | null;
-  utility: 'opted_in' | 'opted_out' | null;
-};
-
-const toApiContact = (r: ContactRow): ApiContact => ({
-  id: r.id,
-  name: r.name,
-  phone: r.phone,
-  email: r.email,
-  tags: r.tags,
-  consent: { marketing: r.marketing, utility: r.utility },
-  source: r.source,
-  createdAt: r.createdAt.toISOString(),
-});
-
-async function contactById(tx: Tx, tenantId: string, id: string): Promise<ContactRow | null> {
-  const [row] = await tx
-    .select(contactColumns)
-    .from(contacts)
-    .where(and(eq(contacts.tenantId, tenantId), eq(contacts.id, id), isNull(contacts.erasedAt)));
-  return row ?? null;
-}
-
-const explicitPhone = (raw: string) => {
+export const explicitPhone = (raw: string) => {
   const phone = normalizePhone(raw, { kind: 'explicit' });
   if (!phone.ok)
     throw new AppError('validation_failed', phone.message, {
@@ -243,12 +509,14 @@ const explicitPhone = (raw: string) => {
 };
 
 /** Runs work once per idempotency key (when given) in one transaction with it. */
-async function idempotent(
+export async function idempotent(
   tx: Tx,
   ctx: ApiContext,
   idempotency: IdempotencyInput | null,
   now: Date,
   work: () => Promise<{ status: number; body: Record<string, unknown> }>,
+  /** What is kept for a replay, when not the whole body (a secret is shown once, ADR-081). */
+  kept: (body: Record<string, unknown>) => Record<string, unknown> = (body) => body,
 ): Promise<ApiResponse> {
   let claimed: string | null = null;
   if (idempotency) {
@@ -257,7 +525,12 @@ async function idempotent(
     claimed = claim.claimed;
   }
   const result = await work();
-  if (claimed) await storeIdempotentResponse(tx, ctx, claimed, result);
+  if (claimed) {
+    await storeIdempotentResponse(tx, ctx, claimed, {
+      status: result.status,
+      body: kept(result.body),
+    });
+  }
   return { ...result, replayed: false };
 }
 
@@ -337,7 +610,7 @@ export async function apiListContacts(
     ctx.scope,
     async (tx) => {
       const rows = await tx
-        .select({ ...contactColumns, cursorAt: exactTimestamp(contacts.createdAt) })
+        .select({ ...apiContactColumns, cursorAt: exactTimestamp(contacts.createdAt) })
         .from(contacts)
         .where(
           and(
@@ -370,7 +643,7 @@ export async function apiGetContact(
 ): Promise<ApiContact> {
   assertScope(ctx, 'contacts.read');
   if (!z.uuid().safeParse(contactId).success) throw notFound('Contact');
-  const row = await deps.db.run(ctx.scope, (tx) => contactById(tx, ctx.tenant.id, contactId), {
+  const row = await deps.db.run(ctx.scope, (tx) => apiContactById(tx, ctx.tenant.id, contactId), {
     accessMode: 'read only',
   });
   if (!row) throw notFound('Contact');
@@ -467,7 +740,7 @@ export async function apiCreateContact(
           apiActor(ctx),
         );
       }
-      const row = await contactById(tx, ctx.tenant.id, id);
+      const row = await apiContactById(tx, ctx.tenant.id, id);
       if (!row) throw new AppError('conflict', 'This contact was erased.');
       return {
         status: inserted ? 201 : 200,
@@ -520,7 +793,7 @@ export async function apiRecordConsent(
       },
       apiActor(ctx),
     );
-    const row = await contactById(tx, ctx.tenant.id, contactId);
+    const row = await apiContactById(tx, ctx.tenant.id, contactId);
     if (!row) throw notFound('Contact');
     return toApiContact(row);
   });
@@ -569,9 +842,9 @@ export async function apiSendTemplate(
   input: unknown,
   idempotency: IdempotencyInput,
 ): Promise<ApiResponse> {
-  // The template decides which of the two scopes is needed; a key with neither is refused first.
-  if (!ctx.key.scopes.has('messages.send') && !ctx.key.scopes.has('messages.send_marketing'))
-    assertScope(ctx, 'messages.send');
+  // The template decides which of the two scopes is needed; a request that may use neither is
+  // refused first.
+  assertAnyScope(ctx, ['messages.send', 'messages.send_marketing']);
   const data = parseInput(apiSendMessageSchema, input);
   const phone = explicitPhone(data.to);
   const now = deps.clock.now();
@@ -769,27 +1042,98 @@ const windowClosed = () =>
   );
 
 /**
- * Sends a free-form text message to a contact who wrote to the number in the last 24 hours, as the
- * inbox's reply does (ADR-070). The contact is never created: a number that is not a contact, has
- * no conversation on the number, was erased, or last wrote more than 24 hours ago gets one answer,
- * so the refusal tells a key without `contacts.read` nothing more than a sent reply would. The
- * reply takes the conversation over from an automation handling it (its queued messages are
- * cancelled), but it is not a member's reply: the conversation keeps waiting for a member. Exactly
- * one send per idempotency key; the window is checked again when the worker sends.
+ * The WhatsApp id of the message `messageId` of the conversation, which a reply quotes or a
+ * reaction goes on (ADR-082). A message of another conversation is refused as unknown, like one
+ * that does not exist.
  */
-export async function apiSendText(
+async function answeredMessage(
+  tx: Tx,
+  tenantId: string,
+  conversationId: string,
+  messageId: string,
+  options: { kind: 'quote' | 'reaction'; now: Date },
+): Promise<string> {
+  const [target] = await tx
+    .select({
+      direction: messages.direction,
+      type: messages.type,
+      status: messages.status,
+      externalMessageId: messages.externalMessageId,
+      providerTimestamp: messages.providerTimestamp,
+      createdAt: messages.createdAt,
+    })
+    .from(messages)
+    .where(
+      and(
+        eq(messages.tenantId, tenantId),
+        eq(messages.conversationId, conversationId),
+        eq(messages.id, messageId),
+      ),
+    );
+  const problem = target
+    ? answerProblem(
+        options.kind,
+        { ...target, at: target.providerTimestamp ?? target.createdAt },
+        options.now,
+      )
+    : 'Give the id of a message in this conversation.';
+  if (problem) {
+    throw new AppError('validation_failed', problem, {
+      issues: [{ path: 'replyTo', message: problem }],
+    });
+  }
+  if (!target?.externalMessageId) throw new Error('Only messages with a WhatsApp id are answered');
+  return target.externalMessageId;
+}
+
+/** What a reply stores and sends (ADR-070, ADR-080, ADR-082). */
+interface BuiltReply {
+  content: Record<string, unknown>;
+  preview: string;
+  request: Record<string, unknown>;
+}
+
+interface ApiReply {
+  type: 'text' | 'interactive' | 'reaction';
+  /** The message the reply quotes, or the reaction is for, as the request names it. */
+  replyTo: string | undefined;
+  /** Checks that do not depend on the number, made first (the plan's modules). */
+  precheck?: (tx: Tx) => Promise<void>;
+  /**
+   * The message's stored content (as the inbox shows it), the conversation's preview, and the
+   * Graph request's `type` and its object, given the WhatsApp id of the message named by `replyTo`
+   * and the WhatsApp account of the number it is sent from.
+   */
+  build(
+    answered: string | null,
+    sending: { tx: Tx; whatsappAccountId: string },
+  ): BuiltReply | Promise<BuiltReply>;
+}
+
+/**
+ * Sends a free-form message to a contact who wrote to the number in the last 24 hours, as the
+ * inbox's reply does (ADR-070): text, reply buttons or a list (ADR-080), which may quote a message
+ * of the conversation, or a reaction to a message the contact sent (ADR-082). The contact is never
+ * created: a number that is not a contact, has no conversation on the number, was erased, or last
+ * wrote more than 24 hours ago gets one answer, so the refusal tells a key without `contacts.read`
+ * nothing more than a sent reply would. A reply takes the conversation over from an automation
+ * handling it (its queued messages are cancelled), but it is not a member's reply: the
+ * conversation keeps waiting for a member. A reaction is not an answer: it leaves an automation
+ * running. Exactly one send per idempotency key; the window is checked again when the worker sends.
+ */
+async function sendReply(
   deps: OutboundDeps,
   ctx: ApiContext,
-  input: unknown,
+  target: { to: string; from?: string | undefined },
   idempotency: IdempotencyInput,
+  reply: ApiReply,
 ): Promise<ApiResponse> {
-  assertScope(ctx, 'messages.reply');
-  const data = parseInput(apiSendTextSchema, input);
-  const phone = explicitPhone(data.to);
+  const phone = explicitPhone(target.to);
   const now = deps.clock.now();
   return deps.db.run(ctx.scope, (tx) =>
     idempotent(tx, ctx, idempotency, now, async () => {
-      const channel = await sendingNumber(tx, ctx, data.from);
+      if (reply.precheck) await reply.precheck(tx);
+      const channel = await sendingNumber(tx, ctx, target.from);
       if (channel.status !== 'active') {
         throw new AppError('precondition_failed', 'This WhatsApp number is not active.');
       }
@@ -841,13 +1185,26 @@ export async function apiSendText(
           'This contact wrote from a WhatsApp user id without a phone number. Sending to user ids is not enabled until Meta’s request format is verified.',
         );
       }
+      const reaction = reply.type === 'reaction';
+      const answered = reply.replyTo
+        ? await answeredMessage(tx, ctx.tenant.id, conversation.id, reply.replyTo, {
+            kind: reaction ? 'reaction' : 'quote',
+            now,
+          })
+        : null;
 
-      await endRunForHuman(tx, {
-        tenantId: ctx.tenant.id,
-        conversationId: conversation.id,
-        reason: 'api_replied',
-        actorMembershipId: null,
-        now,
+      if (!reaction) {
+        await endRunForHuman(tx, {
+          tenantId: ctx.tenant.id,
+          conversationId: conversation.id,
+          reason: 'api_replied',
+          actorMembershipId: null,
+          now,
+        });
+      }
+      const built = await reply.build(answered, {
+        tx,
+        whatsappAccountId: channel.whatsappAccountId,
       });
       const messageId = uuidv7();
       const intentId = uuidv7();
@@ -857,12 +1214,15 @@ export async function apiSendText(
         conversationId: conversation.id,
         channelAccountId: channel.id,
         direction: 'outbound',
-        type: 'text',
-        content: { text: data.text },
+        type: reply.type,
+        content: built.content,
         status: 'queued',
         statusRank: STATUS_RANK.queued,
         senderType: 'api',
         apiKeyId: ctx.key.id,
+        // A quoted reply keeps the quoted message's WhatsApp id as inbound replies do; a
+        // reaction keeps it in its content, as inbound reactions do.
+        contextExternalId: reaction ? null : answered,
       });
       await tx.insert(sendIntents).values({
         id: intentId,
@@ -873,8 +1233,8 @@ export async function apiSendText(
           messaging_product: 'whatsapp',
           recipient_type: 'individual',
           to: identity.waId,
-          type: 'text',
-          text: { body: data.text, preview_url: data.previewUrl },
+          ...(answered && !reaction ? { context: { message_id: answered } } : {}),
+          ...built.request,
         },
         actorUserId: null,
       });
@@ -882,7 +1242,7 @@ export async function apiSendText(
         .update(conversations)
         .set({
           lastMessageAt: now,
-          lastMessagePreview: data.text.slice(0, 200),
+          lastMessagePreview: built.preview.slice(0, 200),
           version: sql`${conversations.version} + 1`,
         })
         .where(
@@ -909,7 +1269,7 @@ export async function apiSendText(
         body: {
           data: {
             id: messageId,
-            type: 'text',
+            type: reply.type,
             status: 'queued',
             contactId: contact.id,
             channelId: channel.id,
@@ -920,7 +1280,262 @@ export async function apiSendText(
   );
 }
 
-/** POST /api/v1/messages: a template (the default) or a text reply, by the body's `type`. */
+/** A free-form text reply (ADR-070); see `sendReply`. */
+export async function apiSendText(
+  deps: OutboundDeps,
+  ctx: ApiContext,
+  input: unknown,
+  idempotency: IdempotencyInput,
+): Promise<ApiResponse> {
+  assertScope(ctx, 'messages.reply');
+  const data = parseInput(apiSendTextSchema, input);
+  return sendReply(deps, ctx, data, idempotency, {
+    type: 'text',
+    replyTo: data.replyTo,
+    build: () => ({
+      content: { text: data.text },
+      preview: data.text,
+      request: { type: 'text', text: { body: data.text, preview_url: data.previewUrl } },
+    }),
+  });
+}
+
+/** Reply buttons (ADR-080); see `sendReply`. */
+export async function apiSendButtons(
+  deps: OutboundDeps,
+  ctx: ApiContext,
+  input: unknown,
+  idempotency: IdempotencyInput,
+): Promise<ApiResponse> {
+  assertScope(ctx, 'messages.reply');
+  const data = parseInput(apiSendButtonsSchema, input);
+  return sendReply(deps, ctx, data, idempotency, {
+    type: 'interactive',
+    replyTo: data.replyTo,
+    build: () => ({
+      content: replyButtonsContent(data),
+      preview: data.body,
+      request: { type: 'interactive', interactive: replyButtonsInteractive(data) },
+    }),
+  });
+}
+
+/** A list message (ADR-080); see `sendReply`. */
+export async function apiSendList(
+  deps: OutboundDeps,
+  ctx: ApiContext,
+  input: unknown,
+  idempotency: IdempotencyInput,
+): Promise<ApiResponse> {
+  assertScope(ctx, 'messages.reply');
+  const data = parseInput(apiSendListSchema, input);
+  return sendReply(deps, ctx, data, idempotency, {
+    type: 'interactive',
+    replyTo: data.replyTo,
+    build: () => ({
+      content: listContent(data),
+      preview: data.body,
+      request: { type: 'interactive', interactive: listInteractive(data) },
+    }),
+  });
+}
+
+/**
+ * A reaction to a message the contact sent in the last 30 days (ADR-082); see `sendReply`. Stored
+ * as inbound reactions are, with the WhatsApp id of the message in its content.
+ */
+export async function apiSendReaction(
+  deps: OutboundDeps,
+  ctx: ApiContext,
+  input: unknown,
+  idempotency: IdempotencyInput,
+): Promise<ApiResponse> {
+  assertScope(ctx, 'messages.reply');
+  const data = parseInput(apiSendReactionSchema, input);
+  return sendReply(deps, ctx, data, idempotency, {
+    type: 'reaction',
+    replyTo: data.replyTo,
+    build: (answered) => {
+      if (!answered) throw new Error('A reaction is sent only for a message it names');
+      return {
+        content: { emoji: data.emoji, message_id: answered },
+        preview: `Reacted ${data.emoji}`,
+        request: { type: 'reaction', reaction: { message_id: answered, emoji: data.emoji } },
+      };
+    },
+  });
+}
+
+/**
+ * The products a message names by content id, in one catalog connected to the sending number's
+ * WhatsApp account, neither disconnected nor removed at Meta (ADR-086). `catalogId` picks the
+ * catalog when two of them hold the ids. Unknown ids are refused by name.
+ */
+async function catalogProducts(
+  tx: Tx,
+  tenantId: string,
+  whatsappAccountId: string,
+  retailerIds: string[],
+  catalogId: string | undefined,
+): Promise<{ catalogId: string; names: Map<string, string> }> {
+  const rows = await tx
+    .select({
+      retailerId: commerceProducts.retailerId,
+      name: commerceProducts.name,
+      catalogId: commerceCatalogs.metaCatalogId,
+    })
+    .from(commerceProducts)
+    .innerJoin(
+      commerceCatalogs,
+      and(
+        eq(commerceCatalogs.tenantId, commerceProducts.tenantId),
+        eq(commerceCatalogs.id, commerceProducts.catalogId),
+      ),
+    )
+    .where(
+      and(
+        eq(commerceProducts.tenantId, tenantId),
+        inArray(commerceProducts.retailerId, retailerIds),
+        eq(commerceCatalogs.whatsappAccountId, whatsappAccountId),
+        isNull(commerceCatalogs.disconnectedAt),
+        isNull(commerceProducts.removedAt),
+        catalogId ? eq(commerceCatalogs.metaCatalogId, catalogId) : undefined,
+      ),
+    );
+  const refuse = (path: string, message: string) =>
+    new AppError('validation_failed', message, { issues: [{ path, message }] });
+  const known = new Set(rows.map((r) => r.retailerId));
+  const missing = retailerIds.filter((id) => !known.has(id));
+  if (missing.length > 0) {
+    throw refuse(
+      'products',
+      `Not in a catalog of this WhatsApp number${catalogId ? ' with that id' : ''}: ${missing.slice(0, 5).join(', ')}${missing.length > 5 ? ', …' : ''}`,
+    );
+  }
+  const complete = [...new Set(rows.map((r) => r.catalogId))].filter((c) =>
+    retailerIds.every((id) => rows.some((r) => r.catalogId === c && r.retailerId === id)),
+  );
+  const [chosen, other] = complete;
+  if (!chosen) throw refuse('products', 'Give products from one catalog.');
+  if (other) {
+    throw refuse(
+      'catalogId',
+      'More than one catalog of this WhatsApp number has these products: name one with catalogId.',
+    );
+  }
+  return {
+    catalogId: chosen,
+    names: new Map(rows.filter((r) => r.catalogId === chosen).map((r) => [r.retailerId, r.name])),
+  };
+}
+
+type ApiProductInput =
+  | z.infer<typeof apiSendProductSchema>
+  | z.infer<typeof apiSendProductListSchema>
+  | z.infer<typeof apiSendCatalogSchema>;
+
+/**
+ * A product, several products or the catalog (ADR-086), as the inbox sends them (P4-06); see
+ * `sendReply`. The company's plan must include Commerce.
+ */
+export async function apiSendProducts(
+  deps: OutboundDeps,
+  ctx: ApiContext,
+  input: unknown,
+  idempotency: IdempotencyInput,
+): Promise<ApiResponse> {
+  assertScope(ctx, 'messages.reply');
+  const type =
+    input !== null && typeof input === 'object' && !Array.isArray(input)
+      ? (input as { type?: unknown }).type
+      : undefined;
+  const data: ApiProductInput =
+    type === 'product'
+      ? parseInput(apiSendProductSchema, input)
+      : type === 'product_list'
+        ? parseInput(apiSendProductListSchema, input)
+        : parseInput(apiSendCatalogSchema, input);
+  const retailerIds =
+    data.type === 'product'
+      ? [data.retailerId]
+      : data.type === 'catalog'
+        ? [data.thumbnailRetailerId]
+        : data.sections.flatMap((s) => s.retailerIds);
+  return sendReply(deps, ctx, data, idempotency, {
+    type: 'interactive',
+    replyTo: data.replyTo,
+    precheck: async (tx) => {
+      const entitlements = await loadEntitlements(tx, ctx.tenant.id);
+      if (!entitlements.modules.has('commerce')) {
+        throw new AppError('forbidden', "Your company's plan does not include Commerce.", {
+          details: { apiReason: 'not_in_plan' },
+        });
+      }
+    },
+    build: async (_answered, sending) => {
+      const found = await catalogProducts(
+        sending.tx,
+        ctx.tenant.id,
+        sending.whatsappAccountId,
+        retailerIds,
+        data.catalogId,
+      );
+      const footer = data.footer ?? '';
+      const resolved: ResolvedProductMessage =
+        data.type === 'product'
+          ? {
+              kind: 'product',
+              catalogId: found.catalogId,
+              retailerId: data.retailerId,
+              body: data.body ?? '',
+              footer,
+            }
+          : data.type === 'catalog'
+            ? {
+                kind: 'catalog',
+                thumbnailRetailerId: data.thumbnailRetailerId,
+                body: data.body,
+                footer,
+              }
+            : {
+                kind: 'product_list',
+                catalogId: found.catalogId,
+                header: data.header,
+                body: data.body,
+                footer,
+                sections: data.sections.map((s) => ({
+                  title: s.title ?? '',
+                  retailerIds: s.retailerIds,
+                })),
+              };
+      const names = retailerIds.map((id) => found.names.get(id) ?? id);
+      return {
+        // Stored as the inbox stores the products it sends, so the thread shows them alike.
+        content: {
+          products: {
+            kind: resolved.kind,
+            names,
+            ...(resolved.kind === 'product_list' ? { header: resolved.header } : {}),
+            body: resolved.body,
+            footer,
+          },
+        },
+        preview:
+          resolved.kind === 'catalog'
+            ? '[Catalog]'
+            : resolved.kind === 'product'
+              ? `[Product] ${names[0] ?? ''}`
+              : `[Products] ${names.length}`,
+        request: { type: 'interactive', interactive: productInteractive(resolved) },
+      };
+    },
+  });
+}
+
+/**
+ * POST /api/v1/messages: a template (the default), or a reply inside the service window as text,
+ * reply buttons, a list, products (ADR-086) or a reaction, by the body's `type`.
+ */
 export async function apiSendMessage(
   deps: OutboundDeps,
   ctx: ApiContext,
@@ -932,12 +1547,27 @@ export async function apiSendMessage(
       ? (input as { type?: unknown }).type
       : undefined;
   if (type === 'text') return apiSendText(deps, ctx, input, idempotency);
+  if (type === 'buttons') return apiSendButtons(deps, ctx, input, idempotency);
+  if (type === 'list') return apiSendList(deps, ctx, input, idempotency);
+  if (type === 'reaction') return apiSendReaction(deps, ctx, input, idempotency);
+  if (type === 'product' || type === 'product_list' || type === 'catalog') {
+    return apiSendProducts(deps, ctx, input, idempotency);
+  }
   if (type === undefined || type === 'template') {
     return apiSendTemplate(deps, ctx, input, idempotency);
   }
-  throw new AppError('validation_failed', 'Send a template or a text message.', {
-    issues: [{ path: 'type', message: 'Use template or text.' }],
-  });
+  throw new AppError(
+    'validation_failed',
+    'Send a template, a text, buttons, a list, products or a reaction.',
+    {
+      issues: [
+        {
+          path: 'type',
+          message: 'Use template, text, buttons, list, product, product_list, catalog or reaction.',
+        },
+      ],
+    },
+  );
 }
 
 /** The status of a message the API sent (any key of the company). */
@@ -946,8 +1576,7 @@ export async function apiGetMessage(
   ctx: ApiContext,
   messageId: string,
 ): Promise<ApiMessage> {
-  if (!API_SEND_SCOPES.some((scope) => ctx.key.scopes.has(scope)))
-    assertScope(ctx, 'messages.send');
+  assertAnyScope(ctx, API_SEND_SCOPES);
   if (!z.uuid().safeParse(messageId).success) throw notFound('Message');
   const row = await deps.db.run(
     ctx.scope,
@@ -966,6 +1595,7 @@ export async function apiGetMessage(
           createdAt: messages.createdAt,
           contactId: conversations.contactId,
           phone: contacts.phoneE164,
+          replyTo: answeredMessages.id,
         })
         .from(messages)
         .innerJoin(
@@ -982,6 +1612,7 @@ export async function apiGetMessage(
             eq(contacts.id, conversations.contactId),
           ),
         )
+        .leftJoin(answeredMessages, answeredJoin())
         .where(
           and(
             eq(messages.tenantId, ctx.tenant.id),
@@ -998,7 +1629,10 @@ export async function apiGetMessage(
   const template = (row.content as { template?: { name?: string } }).template;
   return {
     id: row.id,
-    type: row.type === 'text' ? 'text' : 'template',
+    type:
+      row.type === 'text' || row.type === 'interactive' || row.type === 'reaction'
+        ? row.type
+        : 'template',
     status: row.status,
     statusAt: row.statusAt.toISOString(),
     to: row.phone,
@@ -1006,6 +1640,7 @@ export async function apiGetMessage(
     templateName: template?.name ?? null,
     channelId: row.channelId,
     contactId: row.contactId,
+    replyTo: row.replyTo,
     error: row.errorCode || row.errorTitle ? { code: row.errorCode, title: row.errorTitle } : null,
     createdAt: row.createdAt.toISOString(),
   };

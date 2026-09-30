@@ -40,6 +40,9 @@ export const AUTOMATION_LIMITS = {
   httpHeaderValueLength: 1000,
   httpBodyLength: 8000,
   httpSaves: 10,
+  /** Inputs an automation started through the API declares, and the characters of each value. */
+  apiInputs: 10,
+  apiInputLength: 1000,
 } as const;
 
 /**
@@ -487,6 +490,7 @@ export const TRIGGER_TYPES = [
   'conversation_started',
   'any_message',
   'store_event',
+  'api',
 ] as const;
 export type TriggerType = (typeof TRIGGER_TYPES)[number];
 export const TRIGGER_HOURS = ['any', 'open', 'closed'] as const;
@@ -536,16 +540,35 @@ export const triggerSchema = z.discriminatedUnion('type', [
    * when, with its delay and sending hours.
    */
   z.object({ type: z.literal('store_event') }),
+  /**
+   * Started through the public API by a key (ADR-077), never by a customer message. Every call gives
+   * the inputs named here, which the steps use as {{input.<name>}}.
+   */
+  z.object({
+    type: z.literal('api'),
+    inputs: z
+      .array(
+        z
+          .string()
+          .regex(
+            VARIABLE_RE,
+            'Input names start with a letter and use a-z, 0-9 and _ (at most 32).',
+          ),
+      )
+      .max(AUTOMATION_LIMITS.apiInputs, `At most ${AUTOMATION_LIMITS.apiInputs} inputs.`)
+      .transform((list) => [...new Set(list)]),
+  }),
 ]);
 export type AutomationTrigger = z.infer<typeof triggerSchema>;
 /** Triggers that start from customer messages (with business hours and cooldowns). */
-export type MessageTrigger = Exclude<AutomationTrigger, { type: 'store_event' }>;
+export type MessageTrigger = Exclude<AutomationTrigger, { type: 'store_event' | 'api' }>;
 
 export const TRIGGER_LABELS: Record<TriggerType, string> = {
   keyword: 'A message contains a keyword',
   conversation_started: 'A customer starts a conversation',
   any_message: 'Any customer message',
   store_event: 'An order event in a store (chosen in the store’s Order messages)',
+  api: 'A call from your systems through the HyFib W360 API',
 };
 
 /** How strongly a trigger matched; lower wins (exact keyword, keyword, new conversation, any). */
@@ -574,12 +597,18 @@ export function matchTrigger(
     case 'any_message':
       return 3;
     case 'store_event':
+    case 'api':
       return null;
   }
 }
 
 export function describeTrigger(trigger: AutomationTrigger): string {
   if (trigger.type === 'store_event') return 'Started by a store’s order messages';
+  if (trigger.type === 'api') {
+    return trigger.inputs.length > 0
+      ? `Started through the API with ${trigger.inputs.map((i) => `“${i}”`).join(', ')}`
+      : 'Started through the API';
+  }
   const hours =
     trigger.hours === 'open'
       ? ' while the business is open'
@@ -601,8 +630,9 @@ export function describeTrigger(trigger: AutomationTrigger): string {
 // Text placeholders -------------------------------------------------------------------------------
 
 /**
- * {{name}} (the contact's name), {{company}}, {{answer.<name>}} (a captured answer) and, in
- * automations started by order messages, {{order.<field>}} (the order the run is about).
+ * {{name}} (the contact's name), {{company}}, {{answer.<name>}} (a captured answer), in automations
+ * started by order messages {{order.<field>}} (the order the run is about), and in automations
+ * started through the API {{input.<name>}} (a value the call gave, ADR-077).
  */
 export const PLACEHOLDER_RE = /\{\{\s*([a-zA-Z][a-zA-Z0-9_.]*)\s*\}\}/g;
 
@@ -667,9 +697,15 @@ export function renderHttpText(
 function placeholderValue(name: string, values: TextValues): string | null {
   if (name === 'name') return values.contactName ?? '';
   if (name === 'company') return values.companyName;
-  if (name.startsWith('answer.')) return values.variables[name.slice(7)] ?? '';
+  // Only answer names (no dot), so {{answer.…}} never reads an API input (ADR-077).
+  if (name.startsWith('answer.'))
+    return VARIABLE_RE.test(name.slice(7)) ? (values.variables[name.slice(7)] ?? '') : null;
   if (name.startsWith('order.') && isOrderPlaceholder(name.slice(6)))
     return values.order?.[name.slice(6) as OrderPlaceholder] ?? '';
+  // A run started through the API keeps the call's inputs with its answers (ADR-077); answer names
+  // have no dot, so a step never overwrites them.
+  if (name.startsWith('input.') && VARIABLE_RE.test(name.slice(6)))
+    return values.variables[name] ?? '';
   return null;
 }
 
@@ -751,22 +787,27 @@ export function httpPathTemplate(url: string): string {
 
 /**
  * Placeholders used by a text: unknown ones, captured answers, (when allowed) secrets and order
- * fields, and order fields used where they are not available.
+ * fields, order fields used where they are not available, and API inputs used where they are not
+ * available or not declared (`inputs` are the trigger's, in automations started through the API).
  */
 function placeholdersIn(
   text: string,
-  allow: { secrets?: boolean; order?: boolean } = {},
+  allow: { secrets?: boolean; order?: boolean; inputs?: ReadonlySet<string> } = {},
 ): {
   unknown: string[];
   answers: string[];
   secrets: string[];
   misplacedOrder: string[];
+  misplacedInputs: string[];
+  undeclaredInputs: string[];
   literal: boolean;
 } {
   const unknown: string[] = [];
   const answers: string[] = [];
   const secrets: string[] = [];
   const misplacedOrder: string[] = [];
+  const misplacedInputs: string[] = [];
+  const undeclaredInputs: string[] = [];
   for (const match of text.matchAll(PLACEHOLDER_RE)) {
     const name = (match[1] ?? '').toLowerCase();
     if (name === 'name' || name === 'company') continue;
@@ -775,10 +816,13 @@ function placeholdersIn(
       secrets.push(name.slice(7));
     else if (name.startsWith('order.') && isOrderPlaceholder(name.slice(6))) {
       if (!allow.order) misplacedOrder.push(match[0]);
+    } else if (name.startsWith('input.') && VARIABLE_RE.test(name.slice(6))) {
+      if (!allow.inputs) misplacedInputs.push(match[0]);
+      else if (!allow.inputs.has(name.slice(6))) undeclaredInputs.push(match[0]);
     } else unknown.push(match[0]);
   }
   const literal = text.replace(PLACEHOLDER_RE, '').trim().length > 0;
-  return { unknown, answers, secrets, misplacedOrder, literal };
+  return { unknown, answers, secrets, misplacedOrder, misplacedInputs, undeclaredInputs, literal };
 }
 
 /** Problems with an HTTP step's address and body (placeholders are checked separately). */
@@ -829,6 +873,73 @@ export interface GraphIssue {
   /** The step the issue belongs to (null: the automation as a whole). */
   nodeId: string | null;
   message: string;
+}
+
+/** Template ids a graph's template steps use. */
+export function templatesOf(graph: AutomationGraph): string[] {
+  return [
+    ...new Set(
+      graph.nodes.flatMap((n) =>
+        n.type === 'send_template' || n.type === 'ask_template' ? [n.templateId] : [],
+      ),
+    ),
+  ];
+}
+
+/**
+ * The values a call (or a member's test run) gives an automation started through the API, checked
+ * against the inputs its trigger declares (ADR-077): each declared input once, not blank, at most
+ * `apiInputLength` characters, and no other names. Kept with the run's answers as
+ * `input.<name>`, where {{input.<name>}} reads them.
+ */
+export function apiInputValues(
+  declared: readonly string[],
+  given: unknown,
+): { ok: true; variables: Record<string, string> } | { ok: false; message: string } {
+  const values = given ?? {};
+  if (typeof values !== 'object' || Array.isArray(values)) {
+    return { ok: false, message: 'Give the inputs as an object of names and texts.' };
+  }
+  const entries = Object.entries(values as Record<string, unknown>);
+  const unknown = entries.map(([name]) => name).filter((name) => !declared.includes(name));
+  if (unknown.length > 0) {
+    return { ok: false, message: `The automation has no input named “${unknown[0]}”.` };
+  }
+  const variables: Record<string, string> = {};
+  for (const name of declared) {
+    const value = (values as Record<string, unknown>)[name];
+    if (typeof value !== 'string' || value.trim() === '') {
+      return { ok: false, message: `Give the input “${name}” a value.` };
+    }
+    if (value.length > AUTOMATION_LIMITS.apiInputLength) {
+      return {
+        ok: false,
+        message: `The input “${name}” is limited to ${AUTOMATION_LIMITS.apiInputLength} characters.`,
+      };
+    }
+    variables[`input.${name}`] = value;
+  }
+  return { ok: true, variables };
+}
+
+/**
+ * Problems with the trigger together with the automation's number: one started through the API
+ * sends from the one number it is limited to, as calls do not choose a number (ADR-077).
+ */
+export function triggerIssues(
+  trigger: AutomationTrigger,
+  channelAccountId: string | null,
+): GraphIssue[] {
+  if (trigger.type === 'api' && !channelAccountId) {
+    return [
+      {
+        level: 'error',
+        nodeId: null,
+        message: 'An automation started through the API sends from one WhatsApp number: choose it.',
+      },
+    ];
+  }
+  return [];
 }
 
 /** Outgoing edges of a node with a label for each. */
@@ -927,6 +1038,12 @@ export interface GraphReferences {
    * messages that need the service window must follow a customer reply (ADR-050).
    */
   storeEvent?: boolean;
+  /**
+   * The automation starts through the API (ADR-077): the inputs its trigger declares are available
+   * as {{input.<name>}}, and, as for order messages, messages that need the service window must
+   * follow a customer reply.
+   */
+  apiInputs?: ReadonlySet<string>;
   /** The company's templates by id; when given, template steps must use one HyFib can send. */
   templates?: ReadonlyMap<string, TemplateReference>;
   /** The WhatsApp account of the automation's number, when it is limited to one. */
@@ -986,17 +1103,30 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
     });
   }
 
-  const known = refs.storeEvent
-    ? '{{name}}, {{company}}, {{answer.<name>}} or {{order.<field>}}'
+  const extra = refs.storeEvent ? '{{order.<field>}}' : refs.apiInputs ? '{{input.<name>}}' : null;
+  const known = extra
+    ? `{{name}}, {{company}}, {{answer.<name>}} or ${extra}`
     : '{{name}}, {{company}} or {{answer.<name>}}';
-  const knownInHeaders = refs.storeEvent
-    ? '{{name}}, {{company}}, {{answer.<name>}}, {{order.<field>}} or {{secret.<name>}}'
+  const knownInHeaders = extra
+    ? `{{name}}, {{company}}, {{answer.<name>}}, ${extra} or {{secret.<name>}}`
     : '{{name}}, {{company}}, {{answer.<name>}} or {{secret.<name>}}';
   const misplacedOrder = (nodeId: string, placeholder: string) =>
     issues.push({
       level: 'error',
       nodeId,
       message: `${placeholder} is an order field: order fields work only in automations started by a store’s order messages.`,
+    });
+  const misplacedInput = (nodeId: string, placeholder: string) =>
+    issues.push({
+      level: 'error',
+      nodeId,
+      message: `${placeholder} is an API input: inputs work only in automations started through the API.`,
+    });
+  const undeclaredInput = (nodeId: string, placeholder: string) =>
+    issues.push({
+      level: 'error',
+      nodeId,
+      message: `${placeholder} is not one of the trigger’s inputs. Add it to the trigger’s inputs first.`,
     });
 
   /** Errors or a warning when a step uses an answer that is not saved (on every path) before it. */
@@ -1034,7 +1164,7 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
       }
     }
     for (const text of textsOf(node)) {
-      const found = placeholdersIn(text, { order: refs.storeEvent });
+      const found = placeholdersIn(text, { order: refs.storeEvent, inputs: refs.apiInputs });
       for (const u of found.unknown) {
         issues.push({
           level: 'error',
@@ -1043,6 +1173,8 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
         });
       }
       for (const u of found.misplacedOrder) misplacedOrder(node.id, u);
+      for (const u of found.misplacedInputs) misplacedInput(node.id, u);
+      for (const u of found.undeclaredInputs) undeclaredInput(node.id, u);
       for (const a of found.answers) checkAnswerUse(node.id, a);
       // A template variable that is only a placeholder is usual ({{1}} = {{name}}); left empty, the
       // step fails without sending instead.
@@ -1070,7 +1202,11 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
         ...(node.body ? [{ text: node.body, headers: false }] : []),
       ];
       for (const { text, headers } of texts) {
-        const found = placeholdersIn(text, { secrets: headers, order: refs.storeEvent });
+        const found = placeholdersIn(text, {
+          secrets: headers,
+          order: refs.storeEvent,
+          inputs: refs.apiInputs,
+        });
         for (const u of found.unknown) {
           issues.push({
             level: 'error',
@@ -1083,6 +1219,8 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
           });
         }
         for (const u of found.misplacedOrder) misplacedOrder(node.id, u);
+        for (const u of found.misplacedInputs) misplacedInput(node.id, u);
+        for (const u of found.undeclaredInputs) undeclaredInput(node.id, u);
         for (const a of found.answers) checkAnswerUse(node.id, a);
         for (const secret of found.secrets) {
           const domain = refs.secrets?.get(secret);
@@ -1205,8 +1343,9 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
     }
   }
 
-  // Started by order messages: until the customer replies only templates reach them (ADR-050).
-  if (refs.storeEvent) {
+  // Started by order messages or through the API: until the customer replies only templates reach
+  // them (ADR-050, ADR-077).
+  if (refs.storeEvent || refs.apiInputs) {
     const replied = repliedOnEveryPath(graph.start, byId, reachable);
     for (const node of graph.nodes) {
       if (!reachable.has(node.id) || replied.get(node.id)) continue;

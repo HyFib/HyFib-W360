@@ -34,7 +34,8 @@ import { consumeAutomationRun } from '../plans/entitlements';
  *   starts: an exact keyword first, then a keyword in the message, then "conversation started",
  *   then "any message"; ties go to the automation whose name sorts first. Business-hours filters,
  *   per-automation cooldowns and a per-conversation hourly cap (bot-to-bot loops) apply.
- *   Automations started by a store's order messages are never candidates (ADR-050).
+ *   Automations started by a store's order messages (ADR-050) or through the API (ADR-077) are
+ *   never candidates.
  * Routing waits while a run is active (see routeConversation).
  */
 export interface DispatchDeps extends RunSignalDeps {
@@ -145,8 +146,14 @@ export async function dispatchInboundToAutomation(
   for (const candidate of candidates) {
     const trigger = triggerSchema.safeParse(candidate.trigger);
     const graph = graphSchema.safeParse(candidate.graph);
-    // Automations started by order messages never start from a customer message.
-    if (!trigger.success || !graph.success || trigger.data.type === 'store_event') continue;
+    // Automations started by order messages or through the API never start from a customer message.
+    if (
+      !trigger.success ||
+      !graph.success ||
+      trigger.data.type === 'store_event' ||
+      trigger.data.type === 'api'
+    )
+      continue;
     const rank = matchTrigger(trigger.data, { text: input.text, newCase: input.newCase });
     if (rank === null || (best && best.rank <= rank)) continue;
     if (trigger.data.hours !== 'any') {

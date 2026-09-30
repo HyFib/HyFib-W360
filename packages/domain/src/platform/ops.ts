@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { notFound, uuidv7, type Clock } from '@w360/core';
-import { ALL_QUEUES } from '@w360/contracts';
+import { ALL_QUEUES, queueMaxWaitMinutes } from '@w360/contracts';
 import {
   and,
   channelAccounts,
@@ -13,7 +13,9 @@ import {
   isNull,
   lt,
   or,
+  platformAlerts,
   platformAuditEvents,
+  queueWaits,
   securityEvents,
   sql,
   tenants,
@@ -24,6 +26,7 @@ import {
 import type { PlatformDatabase } from '@w360/db/platform';
 import { MAX_RECEIPT_ATTEMPTS } from '../messaging/receipts';
 import type { QueueInspector, QueueSnapshot } from '../jobs/queue';
+import { QUEUE_CHECK_FRESH_MINUTES } from './queue-waits';
 import { parseInput } from '../validation';
 import {
   OPS_SIGNAL_RULES,
@@ -169,12 +172,32 @@ export interface IntegrationFailure {
 
 export type ReceiptProblem = 'exhausted' | 'waiting';
 
-/** One queue: its declared retry policy (null when this release does not declare it) and counts. */
+/**
+ * How long a queue's jobs waited when the worker last checked (ADR-096): jobs pg-boss would hand to
+ * a worker, the oldest one's wait then, the queue's limit, and whether it is late.
+ */
+export interface QueueWait {
+  waiting: number;
+  oldestWaitingSince: Date | null;
+  /** The oldest job's wait when the worker checked, in milliseconds (null when none waited). */
+  oldestWaitMs: number | null;
+  limitMinutes: number;
+  lateSince: Date | null;
+  /** When platform staff were emailed that it was late (ADR-096). */
+  alertedAt: Date | null;
+  checkedAt: Date;
+}
+
+/**
+ * One queue: its declared retry policy and wait limit (null when this release does not declare it),
+ * counts, and how long its jobs waited at the last check.
+ */
 export interface QueueRow {
   name: string;
-  policy: { retryLimit: number; hasDeadLetter: boolean } | null;
+  policy: { retryLimit: number; hasDeadLetter: boolean; maxWaitMinutes: number } | null;
   counts: QueueSnapshot | null;
   deadLetters: { last24h: number; last7d: number };
+  wait: QueueWait | null;
 }
 
 export interface ReceiptNeedingAttention {
@@ -187,6 +210,8 @@ export interface ReceiptNeedingAttention {
   problem: ReceiptProblem;
   /** Whether the body is still kept, so a retry can process it (checked again when retrying). */
   retryable: boolean;
+  /** When platform staff were emailed that it used all its attempts (ADR-091). */
+  alertedAt: Date | null;
 }
 
 export interface EventCount {
@@ -239,6 +264,9 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
 
   async function receiptsNeedingAttention(tx: Tx, now: Date): Promise<ReceiptNeedingAttention[]> {
     const waitingBefore = new Date(now.getTime() - OPS_WINDOWS.stuckReceiptMinutes * MINUTE_MS);
+    // One rule for a receipt that used all its attempts, shared with the alerts and the retry
+    // (migration 0068): failed its last attempt, or its worker stopped during it.
+    const exhausted = sql<boolean>`ops.webhook_receipt_exhausted(${webhookReceipts.status}, ${webhookReceipts.attempts}, ${webhookReceipts.leaseUntil})`;
     const rows = await tx
       .select({
         id: webhookReceipts.id,
@@ -247,13 +275,16 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
         status: webhookReceipts.status,
         attempts: webhookReceipts.attempts,
         lastError: webhookReceipts.lastError,
+        exhausted,
+        alertedAt: webhookReceipts.exhaustedAlertedAt,
       })
       .from(webhookReceipts)
       .where(
         or(
           and(
-            eq(webhookReceipts.status, 'failed'),
+            inArray(webhookReceipts.status, ['failed', 'processing']),
             gte(webhookReceipts.attempts, MAX_RECEIPT_ATTEMPTS),
+            exhausted,
           ),
           and(
             inArray(webhookReceipts.status, ['pending', 'processing', 'failed']),
@@ -265,9 +296,8 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
       .orderBy(desc(webhookReceipts.receivedAt))
       .limit(100);
     const bodyKeptAfter = now.getTime() - RECEIPT_BODY_DAYS * DAY_MS;
-    return rows.map((r) => {
-      const problem: ReceiptProblem =
-        r.status === 'failed' && r.attempts >= MAX_RECEIPT_ATTEMPTS ? 'exhausted' : 'waiting';
+    return rows.map(({ exhausted: usedUp, ...r }) => {
+      const problem: ReceiptProblem = usedUp ? 'exhausted' : 'waiting';
       return {
         ...r,
         problem,
@@ -291,6 +321,40 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
       error: text(r.error),
       since: date(r.since),
     }));
+  }
+
+  /** The last check of each queue's waits, by queue (ADR-096). */
+  async function queueWaitsByName(tx: Tx): Promise<Map<string, QueueWait>> {
+    const rows = await tx.select().from(queueWaits);
+    return new Map(
+      rows.map((r) => [
+        r.queue,
+        {
+          waiting: r.waiting,
+          oldestWaitingSince: r.oldestWaitingSince,
+          oldestWaitMs: r.oldestWaitingSince
+            ? r.checkedAt.getTime() - r.oldestWaitingSince.getTime()
+            : null,
+          limitMinutes: r.limitMinutes,
+          lateSince: r.lateSince,
+          alertedAt: r.alertedAt,
+          checkedAt: r.checkedAt,
+        },
+      ]),
+    );
+  }
+
+  /** When the worker last checked the declared queues, and whether that check is still fresh. */
+  function queueCheck(waits: Map<string, QueueWait>, now: Date) {
+    const times = ALL_QUEUES.map((q) => waits.get(q.name)?.checkedAt.getTime()).filter(
+      (t): t is number => t !== undefined,
+    );
+    const checkedAt = times.length > 0 ? new Date(Math.max(...times)) : null;
+    const fresh =
+      checkedAt !== null &&
+      now.getTime() - checkedAt.getTime() <= QUEUE_CHECK_FRESH_MINUTES * MINUTE_MS;
+    const late = ALL_QUEUES.filter((q) => waits.get(q.name)?.lateSince).length;
+    return { checkedAt, fresh, late };
   }
 
   async function deadLetterCountsByQueue(tx: Tx, now: Date) {
@@ -322,6 +386,7 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
           .from(webhookQuarantine)
           .where(isNull(webhookQuarantine.resolvedAt));
         const deadLetterCounts = await deadLetterCountsByQueue(tx, now);
+        const queueWaitCheck = queueCheck(await queueWaitsByName(tx), now);
         const signups = await tx.execute<{ n: number }>(
           sql`select count(*)::int as n from ops.platform_ops_signup_sessions(${new Date(
             now.getTime() - 7 * DAY_MS,
@@ -335,6 +400,7 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
           deadLetters24h: [...deadLetterCounts.values()].reduce((s, c) => s + c.last24h, 0),
           deadLetters7d: [...deadLetterCounts.values()].reduce((s, c) => s + c.last7d, 0),
           failedSignups7d: num(signups.rows[0]?.n),
+          queueWaitCheck,
         };
       });
       const attention = data.companies
@@ -359,6 +425,10 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
         failedSignups7d: data.failedSignups7d,
         readyJobs: snapshot.reduce((s, q) => s + q.ready, 0),
         failedJobs: snapshot.reduce((s, q) => s + q.failed, 0),
+        /** Queues late at the worker's last check, and when that was (ADR-096). */
+        lateQueues: data.queueWaitCheck.late,
+        queuesCheckedAt: data.queueWaitCheck.checkedAt,
+        queueCheckFresh: data.queueWaitCheck.fresh,
       };
     },
 
@@ -468,6 +538,7 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
             reason: webhookQuarantine.reason,
             externalIds: webhookQuarantine.externalIds,
             createdAt: webhookQuarantine.createdAt,
+            alertedAt: webhookQuarantine.alertedAt,
             receiptStatus: webhookReceipts.status,
             receivedAt: webhookReceipts.receivedAt,
           })
@@ -489,9 +560,15 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
           .where(gte(emailOutbox.createdAt, since7d))
           .groupBy(emailOutbox.kind)
           .orderBy(emailOutbox.kind);
+        // When platform staff were last emailed about work that failed for good (ADR-091).
+        const [alerts] = await tx
+          .select({ lastSentAt: platformAlerts.lastSentAt })
+          .from(platformAlerts)
+          .where(eq(platformAlerts.kind, 'failures'));
         return {
           failures,
           receipts,
+          lastFailureAlertAt: alerts?.lastSentAt ?? null,
           quarantine: quarantine.map((q) => ({
             ...q,
             externalIds: quarantineExternalIds(q.externalIds),
@@ -504,13 +581,21 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
       });
     },
 
-    /** Queue counts from pg-boss and dead letters recorded by the worker. */
+    /**
+     * Queue counts from pg-boss, how long jobs waited at the worker's last check (ADR-096) and dead
+     * letters recorded by the worker.
+     */
     async queues(actor: PlatformActor) {
       const now = clock.now();
       const snapshot = await inspector.snapshot();
       const byName = new Map<string, QueueSnapshot>(snapshot.map((q) => [q.name, q]));
       return platformDb.run(actor.userId, async (tx) => {
         const counts = await deadLetterCountsByQueue(tx, now);
+        const waits = await queueWaitsByName(tx);
+        const [alerts] = await tx
+          .select({ lastSentAt: platformAlerts.lastSentAt })
+          .from(platformAlerts)
+          .where(eq(platformAlerts.kind, 'queues'));
         const recent = await tx
           .select({
             id: deadLetters.id,
@@ -527,6 +612,7 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
             errorCode: deadLetters.errorCode,
             firstQueuedAt: deadLetters.firstQueuedAt,
             failedAt: deadLetters.failedAt,
+            alertedAt: deadLetters.alertedAt,
           })
           .from(deadLetters)
           .leftJoin(tenants, eq(tenants.id, deadLetters.tenantId))
@@ -538,17 +624,32 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
           policy: {
             retryLimit: definition.retryLimit,
             hasDeadLetter: Boolean(definition.deadLetter),
+            maxWaitMinutes: queueMaxWaitMinutes(definition),
           },
           counts: byName.get(definition.name) ?? null,
           deadLetters: counts.get(definition.name) ?? { last24h: 0, last7d: 0 },
+          wait: waits.get(definition.name) ?? null,
         }));
         // Dead letters from a queue this release does not declare still show, with no policy.
         for (const [name, c] of counts) {
           if (!known.has(name)) {
-            rows.push({ name, policy: null, counts: byName.get(name) ?? null, deadLetters: c });
+            rows.push({
+              name,
+              policy: null,
+              counts: byName.get(name) ?? null,
+              deadLetters: c,
+              wait: null,
+            });
           }
         }
-        return { queues: rows, deadLetters: recent };
+        const check = queueCheck(waits, now);
+        return {
+          queues: rows,
+          deadLetters: recent,
+          waitsCheckedAt: check.checkedAt,
+          waitsFresh: check.fresh,
+          lastQueueAlertAt: alerts?.lastSentAt ?? null,
+        };
       });
     },
 

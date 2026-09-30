@@ -167,15 +167,20 @@ function graphError(
 }
 
 /**
- * Checks an interactive reply-button message against the limits in Meta's OpenAPI spec (research
- * M-157): 1 to 3 buttons of type "reply", unique non-empty titles of at most 20 characters, ids of
- * at most 256 characters without surrounding spaces, and a body of at most 1024 characters.
+ * Checks an interactive reply-button or list message against the limits in Meta's OpenAPI spec.
+ * Both: a body of at most 1024 characters, an optional text header and footer of at most 60
+ * (research M-159). Reply buttons (M-157): 1 to 3 buttons of type "reply", unique non-empty titles
+ * of at most 20 characters, ids of at most 256 characters without surrounding spaces. Lists (M-179):
+ * a button label of at most 20 characters, 1 to 10 sections, a title of at most 24 on each when
+ * there are several, rows with unique ids of at most 200 characters, titles of at most 24 and
+ * descriptions of at most 72; at most 10 rows in all, the stricter reading of the spec (M-181).
  */
 function interactiveProblem(body: unknown): string | null {
   const b = body as { type?: unknown; interactive?: Record<string, unknown> } | undefined;
   if (b?.type !== 'interactive') return null;
   const interactive = b.interactive;
-  if (!interactive || interactive.type !== 'button') return 'interactive.type';
+  if (!interactive || (interactive.type !== 'button' && interactive.type !== 'list'))
+    return 'interactive.type';
   const text = (interactive.body as { text?: unknown } | undefined)?.text;
   if (typeof text !== 'string' || text.length === 0 || text.length > 1024) return 'body.text';
   // Optional text header and footer (HeaderObject / FooterObject: at most 60 characters).
@@ -194,7 +199,13 @@ function interactiveProblem(body: unknown): string | null {
     (typeof footer.text !== 'string' || !footer.text || footer.text.length > 60)
   )
     return 'footer.text';
-  const buttons = (interactive.action as { buttons?: unknown } | undefined)?.buttons;
+  return interactive.type === 'list'
+    ? listProblem(interactive.action)
+    : buttonsProblem(interactive.action);
+}
+
+function buttonsProblem(action: unknown): string | null {
+  const buttons = (action as { buttons?: unknown } | undefined)?.buttons;
   if (!Array.isArray(buttons) || buttons.length < 1 || buttons.length > 3) return 'action.buttons';
   const titles = new Set<string>();
   for (const button of buttons as { type?: unknown; reply?: { id?: unknown; title?: unknown } }[]) {
@@ -207,6 +218,30 @@ function interactiveProblem(body: unknown): string | null {
     titles.add(title);
   }
   return null;
+}
+
+const text = (value: unknown, max: number): value is string =>
+  typeof value === 'string' && value.length > 0 && value.length <= max;
+
+function listProblem(action: unknown): string | null {
+  const a = action as { button?: unknown; sections?: unknown } | undefined;
+  if (!text(a?.button, 20)) return 'action.button';
+  const sections = a?.sections;
+  if (!Array.isArray(sections) || sections.length < 1 || sections.length > 10)
+    return 'action.sections';
+  const ids = new Set<string>();
+  for (const section of sections as { title?: unknown; rows?: unknown }[]) {
+    if (section.title !== undefined ? !text(section.title, 24) : sections.length > 1)
+      return 'sections.title';
+    if (!Array.isArray(section.rows) || section.rows.length < 1) return 'sections.rows';
+    for (const row of section.rows as { id?: unknown; title?: unknown; description?: unknown }[]) {
+      if (!text(row.id, 200) || ids.has(row.id)) return 'rows.id';
+      if (!text(row.title, 24)) return 'rows.title';
+      if (row.description !== undefined && !text(row.description, 72)) return 'rows.description';
+      ids.add(row.id);
+    }
+  }
+  return ids.size > 10 ? 'sections.rows' : null;
 }
 
 const PRODUCT_TYPES = new Set(['product', 'product_list', 'catalog_message']);
@@ -260,6 +295,33 @@ function productMessageProblem(
     total += items.length;
   }
   return total > 30 ? 'product_items' : null;
+}
+
+/**
+ * Checks a reaction message (research M-182): `reaction` holds only `message_id` and `emoji`, both
+ * given. Taking a reaction back (recalled as an empty emoji, M-185) is not in the spec: refused.
+ */
+function reactionProblem(body: unknown): string | null {
+  const b = body as { type?: unknown; reaction?: unknown } | undefined;
+  if (b?.type !== 'reaction') return b?.reaction === undefined ? null : 'reaction';
+  const reaction = b.reaction as Record<string, unknown> | undefined;
+  if (typeof reaction !== 'object' || reaction === null) return 'reaction';
+  if (Object.keys(reaction).some((key) => key !== 'message_id' && key !== 'emoji')) {
+    return 'reaction';
+  }
+  if (typeof reaction.message_id !== 'string' || !reaction.message_id) {
+    return 'reaction.message_id';
+  }
+  if (typeof reaction.emoji !== 'string' || !reaction.emoji) return 'reaction.emoji';
+  return null;
+}
+
+/** Checks the `context` of a reply that quotes a message (research M-041, M-183). */
+function contextProblem(body: unknown): string | null {
+  const context = (body as { context?: unknown } | undefined)?.context;
+  if (context === undefined) return null;
+  const messageId = (context as { message_id?: unknown } | null)?.message_id;
+  return typeof messageId === 'string' && messageId ? null : 'context.message_id';
 }
 
 /** Checks an interactive flow message (research M-165) against the flows the stand-in has. */
@@ -442,6 +504,10 @@ export async function startGraphStandIn(options: {
             ? null
             : interactiveProblem(body);
         if (invalid) return graphError(res, 400, 100, `(#100) Invalid parameter: ${invalid}`);
+        const shapeInvalid = contextProblem(body) ?? reactionProblem(body);
+        if (shapeInvalid) {
+          return graphError(res, 400, 100, `(#100) Invalid parameter: ${shapeInvalid}`);
+        }
         const behaviour = state.sendQueue.shift() ?? { kind: 'accept' };
         if (behaviour.kind === 'drop_connection') {
           req.socket.destroy();

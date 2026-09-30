@@ -1,10 +1,13 @@
 import type { Database } from '@w360/db';
 import { API_NOT_IN_PLAN, consumeApiRequest } from '../plans/entitlements';
-import type { ApiContext } from './context';
+import type { ApiContext, ApiKeyContext } from './context';
 
-/** Whether a request may go on, and the refusal the API sends when not (ADR-061). */
+/**
+ * Whether a request may go on, with its context under the plan (ADR-092), and the refusal the API
+ * sends when not (ADR-061).
+ */
 export type ApiAdmission =
-  | { ok: true }
+  | { ok: true; ctx: ApiContext }
   | {
       ok: false;
       status: 403 | 429;
@@ -22,15 +25,16 @@ export const secondsUntil = (end: Date, now: Date): number =>
 /**
  * Counts the request against the company's monthly API requests (ADR-061), after authentication and
  * the rate limits and before the request is read: refused when the plan leaves the API out or the
- * month's requests are used up.
+ * month's requests are used up. An admitted request may use only the scopes the plan includes
+ * (ADR-092), which its context carries.
  */
 export async function admitApiRequest(
   db: Database,
-  ctx: ApiContext,
+  key: ApiKeyContext,
   now: Date,
 ): Promise<ApiAdmission> {
-  const counted = await db.run(ctx.scope, (tx) => consumeApiRequest(tx, ctx.tenant.id, now));
-  if (counted.ok) return { ok: true };
+  const counted = await db.run(key.scope, (tx) => consumeApiRequest(tx, key.tenant.id, now));
+  if (counted.ok) return { ok: true, ctx: { ...key, planScopes: counted.apiScopes } };
   if (counted.reason === 'not_in_plan') {
     return {
       ok: false,

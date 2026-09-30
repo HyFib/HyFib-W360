@@ -89,7 +89,9 @@ export default async function TenantLayout({
             >
               {deletion?.started
                 ? 'The deletion has started and can no longer be cancelled.'
-                : `It will be deleted on ${deletion ? formatDateTime(deletion.dueAt, ctx.tenant.timezone) : 'the date its owners were emailed'}. Until then nothing is sent; members can still review its data, and an owner can export it or cancel the deletion.`}
+                : deletion?.requestedBy === 'platform'
+                  ? `It will be deleted on ${formatDateTime(deletion.dueAt, ctx.tenant.timezone)}: HyFib scheduled the deletion. Until then nothing is sent; members can still review its data, and an owner can export it. Only HyFib can cancel the deletion. HyFib’s reason: ${deletion.reason ?? ''}`
+                  : `It will be deleted on ${deletion ? formatDateTime(deletion.dueAt, ctx.tenant.timezone) : 'the date its owners were emailed'}. Until then nothing is sent; members can still review its data, and an owner can export it or cancel the deletion.`}
             </Alert>
           ) : ctx.tenant.status === 'restricted' ? (
             <Alert

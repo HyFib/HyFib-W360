@@ -1,5 +1,6 @@
 import { displayMoney } from '@w360/core';
 import {
+  API_SCOPE_INFO,
   PLAN_INTERVAL_LABELS,
   PLAN_MODULE_KEYS,
   PLAN_MODULE_LABELS,
@@ -256,6 +257,12 @@ export function PlanCard({
                 detail={`${day(usage.apiRequests.periodStart)} to ${day(usage.apiRequests.periodEnd)}; requests with the company's API keys`}
               />
             )}
+            {usage.limits.apiRequests !== 0 && usage.apiScopes ? (
+              <TR>
+                <TD className="font-medium">API scopes</TD>
+                <TD>{usage.apiScopes.map((s) => API_SCOPE_INFO[s].label).join(', ')}</TD>
+              </TR>
+            ) : null}
           </TBody>
         </Table>
       </CardContent>

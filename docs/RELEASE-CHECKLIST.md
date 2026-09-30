@@ -154,6 +154,11 @@ made. This checklist records the evidence required per gate; unchecked items blo
       `refund.processed` arrives (and by the worker's check with the webhook disabled); a refusal
       (refunds not enabled or no balance) gives the credit back; confirm with Razorpay how long a
       normal refund takes and that its fee is not returned (R-077, R-079)
+- [ ] Refund requests (ADR-073) on the same staging deployment: a billing manager asks from a test
+      payment's receipt; platform owners receive the count email; a decline with a note reaches the
+      billing managers; an approval starts the staff refund above, which appears in the Razorpay
+      Dashboard once; a request asked for before the credit was spent is refused on approval and
+      stays open; agree who watches `/platform/refunds` and how quickly requests are decided
 - [ ] Settlement reconciliation against Razorpay test mode or the live account: confirm with Razorpay
       which time zone the report's `day` uses and whether `skip` pages are stable (R-110); run a day
       with a settled test payment, a refund and a Dashboard refund and check each item's outcome;

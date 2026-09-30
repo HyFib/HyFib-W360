@@ -37,13 +37,21 @@ import { endRunForHuman } from '../automations/runs';
 import { automationStateForConversation } from '../automations/service';
 import { latestConversationSource } from '../growth/sources';
 import { latestCsatSurvey, queueCsatSurvey } from '../inbox/csat';
-import { routeConversation } from '../inbox/routing';
+import {
+  INBOX_WORKER_ROLES,
+  lockAssignableMember,
+  lockTeam,
+  routeConversation,
+} from '../inbox/routing';
 import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
 import { loadReplyTarget, replyTimer, type ReplyTarget } from '../inbox/sla';
 import { decodeKeysetCursor, encodeKeysetCursor, likePattern } from '../validation';
 import { emitTenantEvent } from './events';
+import { messageSnippet } from './message-text';
+import { NOTE_MAX_LENGTH } from './notes';
 import { SERVICE_WINDOW_MS, canSeeConversation } from './outbound';
+import { answeredJoin, answeredMessages } from './reply-context';
 
 /**
  * Shared inbox queries and commands. Visibility: `inbox.read_all` sees every conversation;
@@ -97,7 +105,7 @@ export const responseTargetSchema = z.object({
 
 export const noteSchema = z.object({
   conversationId: z.uuid(),
-  body: z.string().trim().min(1, 'Write a note').max(4000),
+  body: z.string().trim().min(1, 'Write a note').max(NOTE_MAX_LENGTH),
   /** Members to notify; each must be able to see the conversation. */
   mentionIds: z.array(z.uuid()).max(20).default([]),
 });
@@ -487,8 +495,13 @@ export function createInboxService(deps: InboxDeps) {
               createdAt: messages.createdAt,
               providerTimestamp: messages.providerTimestamp,
               cursorAt: exactTimestamp(messages.createdAt),
+              answeredId: answeredMessages.id,
+              answeredDirection: answeredMessages.direction,
+              answeredType: answeredMessages.type,
+              answeredContent: answeredMessages.content,
             })
             .from(messages)
+            .leftJoin(answeredMessages, answeredJoin())
             .leftJoin(
               memberships,
               and(
@@ -512,22 +525,31 @@ export function createInboxService(deps: InboxDeps) {
             )
             .orderBy(desc(messages.createdAt), desc(messages.id))
             .limit(pageSize + 1);
+          // A note's author is a member, or an API key for notes added through the API (ADR-084).
           const notes = await tx
             .select({
               id: conversationNotes.id,
               body: conversationNotes.body,
               createdAt: conversationNotes.createdAt,
               authorName: users.name,
+              apiKeyName: apiKeys.name,
             })
             .from(conversationNotes)
-            .innerJoin(
+            .leftJoin(
               memberships,
               and(
                 eq(memberships.tenantId, conversationNotes.tenantId),
                 eq(memberships.id, conversationNotes.authorMembershipId),
               ),
             )
-            .innerJoin(users, eq(users.id, memberships.userId))
+            .leftJoin(users, eq(users.id, memberships.userId))
+            .leftJoin(
+              apiKeys,
+              and(
+                eq(apiKeys.tenantId, conversationNotes.tenantId),
+                eq(apiKeys.id, conversationNotes.authorApiKeyId),
+              ),
+            )
             .where(
               and(
                 eq(conversationNotes.tenantId, ctx.tenant.id),
@@ -608,11 +630,31 @@ export function createInboxService(deps: InboxDeps) {
               ),
               ...timerFields(target, turn?.startedAt ?? null, now),
             },
-            messages: page.reverse().map(({ cursorAt: _cursorAt, ...m }) => ({
-              ...m,
-              createdAt: m.createdAt.toISOString(),
-              providerTimestamp: m.providerTimestamp?.toISOString() ?? null,
-            })),
+            messages: page
+              .reverse()
+              .map(
+                ({
+                  cursorAt: _cursorAt,
+                  answeredId,
+                  answeredDirection,
+                  answeredType,
+                  answeredContent,
+                  ...m
+                }) => ({
+                  ...m,
+                  createdAt: m.createdAt.toISOString(),
+                  providerTimestamp: m.providerTimestamp?.toISOString() ?? null,
+                  // The message this one quotes, reacts to or taps a button of (ADR-082).
+                  replyTo:
+                    answeredId && answeredDirection && answeredType && answeredContent
+                      ? {
+                          id: answeredId,
+                          direction: answeredDirection,
+                          text: messageSnippet(answeredDirection, answeredType, answeredContent),
+                        }
+                      : null,
+                }),
+              ),
             olderCursor:
               rows.length > pageSize && oldest
                 ? encodeKeysetCursor(oldest.cursorAt, oldest.id)
@@ -653,16 +695,15 @@ export function createInboxService(deps: InboxDeps) {
         if (!managing && !claimingSelf && !releasingSelf) {
           throw forbidden('You can only claim unassigned conversations or release your own.');
         }
-        if (data.membershipId) {
-          const [target] = await tx
-            .select({ id: memberships.id, status: memberships.status })
-            .from(memberships)
-            .where(
-              and(eq(memberships.tenantId, ctx.tenant.id), eq(memberships.id, data.membershipId)),
-            );
-          if (!target || target.status !== 'active') {
-            throw new AppError('validation_failed', 'Choose an active member.');
-          }
+        // Only members who can answer conversations hold them, as in teams and routing.
+        if (
+          data.membershipId &&
+          !(await lockAssignableMember(tx, ctx.tenant.id, data.membershipId))
+        ) {
+          throw new AppError(
+            'validation_failed',
+            'Choose an active member whose role can reply in the inbox.',
+          );
         }
         // Assigning a person ends an automation handling the conversation (hand-off lock).
         if (data.membershipId) {
@@ -706,12 +747,8 @@ export function createInboxService(deps: InboxDeps) {
       const data = parse(conversationTeamSchema, input);
       return withConversation(ctx, data.conversationId, async (tx, current) => {
         if (current.version !== data.expectedVersion) throw staleVersion();
-        if (data.teamId) {
-          const [team] = await tx
-            .select({ id: teams.id })
-            .from(teams)
-            .where(and(eq(teams.tenantId, ctx.tenant.id), eq(teams.id, data.teamId)));
-          if (!team) throw new AppError('validation_failed', 'Choose a team of this company.');
+        if (data.teamId && !(await lockTeam(tx, ctx.tenant.id, data.teamId))) {
+          throw new AppError('validation_failed', 'Choose a team of this company.');
         }
         if (current.teamId === data.teamId) return { assignedMembershipId: null };
         await tx
@@ -1071,7 +1108,7 @@ export function createInboxService(deps: InboxDeps) {
       });
     },
 
-    /** Active members for the assignment picker. */
+    /** Members the assignment picker offers: active, with a role that answers conversations. */
     async assignableMembers(ctx: TenantContext) {
       assertCan(ctx, 'members.read');
       return db.run(
@@ -1081,7 +1118,13 @@ export function createInboxService(deps: InboxDeps) {
             .select({ membershipId: memberships.id, name: users.name, roles: memberships.roles })
             .from(memberships)
             .innerJoin(users, eq(users.id, memberships.userId))
-            .where(and(eq(memberships.tenantId, ctx.tenant.id), eq(memberships.status, 'active')))
+            .where(
+              and(
+                eq(memberships.tenantId, ctx.tenant.id),
+                eq(memberships.status, 'active'),
+                sql`${memberships.roles} && ${sql.param([...INBOX_WORKER_ROLES])}::text[]`,
+              ),
+            )
             .orderBy(users.name),
         { accessMode: 'read only' },
       );

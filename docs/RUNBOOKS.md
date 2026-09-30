@@ -32,8 +32,23 @@ audited. Never paste tokens, message content or card data into tickets or chat.
 
 ## 3. Backlog growth / queue lag
 
-1. Identify the queue (`pgboss.job` counts by `name` and `state='created'`).
-2. Check worker health and logs; scale worker replicas horizontally (safe).
+Platform administrators are emailed "Queue … is falling behind" (or "N queues are falling behind")
+when a queue's oldest ready job has waited longer than the queue's limit (ADR-096: 15 minutes, 60
+for template, catalog and store syncs, the settlement reconciliation and company deletion). The
+email names each queue with its waiting jobs and oldest wait; Operations → Queues shows the same
+for every queue at the worker's last check, which it makes every minute. A queue stays late until
+its oldest job has waited under half its limit, and is emailed about again only after that, at most
+every 15 minutes. If the Queues tab says **the worker is not checking the queues**, the minute
+sweep is not running: nobody is emailed about late queues until it does, so start with the worker
+(`:9464/ready`, its logs, whether its pod or container runs).
+
+1. Identify the queue (Operations → Queues, or `pgboss.job` counts by `name` and
+   `state='created'`; the oldest wait is
+   `SELECT min(start_after) FROM pgboss.job WHERE name = … AND state < 'active' AND start_after <= now()`).
+2. Check worker health and logs; scale worker replicas horizontally (safe). A queue whose handler
+   takes one or two jobs at a time (see `apps/worker/src/main.ts`) drains slowly after a burst: that
+   is why its limit is longer. A limit is changed in the queue catalog
+   (`packages/contracts/src/jobs.ts`, `maxWaitMinutes`) and applies with the next release.
 3. If a poison job fails repeatedly, it moves to `dead-letter` after its retry limit, and the
    worker records it in `ops.dead_letters` (Operations → Queues: queue, kind, company when its
    signature verified, retries, error name and code, never the message). The worker log's
@@ -192,6 +207,30 @@ WHERE tenant_id = … ORDER BY requested_at DESC`:
       deletion card on the platform page says so).
     - A refund still open after 90 days loses its hold to the expired-holds sweep; if Razorpay
       processes it later, it is recorded as a plain refund.
+    - **Refund requests from companies** (`/platform/refunds`, ADR-073). Billing managers ask from a
+      payment's receipt; platform owners are emailed a count ("A refund request is waiting for a
+      decision") within a minute, and decide on the page (operators only read). Approving starts
+      the refund above for the amount asked, with the same checks; declining needs a note, which
+      the company's billing managers are emailed within a minute. Before approving, check the
+      reason and the payment date: Razorpay may fail a normal refund of a payment older than about
+      6 months (R-077), so decline such a request with a note and settle it another way.
+      `SELECT status, requested_at, announced_at, decided_at, decline_notified_at, credit_refund_id
+FROM app.credit_refund_requests WHERE tenant_id = … ORDER BY requested_at DESC`:
+      - **"Approving was refused":** the request no longer fits (the unused credit was spent since,
+        a refund of the payment started meanwhile, or the company asked for deletion); the page
+        shows the reason and the request stays open. Decline it with a note, or refund a smaller
+        amount from the company's platform page and decline the request saying so.
+      - **No email about a request:** only platform owners are emailed, once per request, and only
+        while it is open (a request withdrawn or decided within the minute is not announced). The
+        worker logs `refund requests announced to platform owners`, or `companies asked for refunds
+but there is no platform owner to email` (make someone a platform owner; the requests are
+        then announced). Emails go through the outbox (section 3).
+      - **The company did not hear of a decline:** the worker logs `refund request declines
+emailed`, or `refund request decline notice failed for a company; will retry` with the
+        company; `decline_notified_at` is set when the email was queued. An approval sends no email
+        of its own: the refund's emails follow.
+      - **"We asked too often":** a company can ask 5 times in 24 hours (withdrawn requests count);
+        the next request is accepted once the oldest of those is a day old.
 11. **Settlement reconciliation** (`/platform/reconciliation`, ADR-059). Each day from 06:00 India
     time the worker reads Razorpay's settlement report for the previous day and matches every
     transaction. Look at the list once a day; "Need a person" counts what is still open. Platform
@@ -976,6 +1015,65 @@ retried the next minute). A company being deleted is skipped. Check `app.tenant_
 company (`status`, `trial_ends_at`, `period_end`, `grace_ends_at`): the database's clock decides
 what is due.
 
+**Migration 0060, 0061 or 0062 failed.** 0060 runs in one transaction, so a failure applies
+nothing: it makes `app.conversation_notes.author_membership_id` optional and adds
+`author_api_key_id` with the check `conversation_notes_author` (exactly one author) and a composite
+foreign key to `app.api_keys`, both `NOT VALID`. A failure usually means a lock wait on
+`app.conversation_notes` or `app.api_keys` timed out: run the migrations again when writes are
+quieter. 0061 runs outside a transaction (one `CREATE INDEX CONCURRENTLY`): a failure can leave an
+INVALID index; run `DROP INDEX CONCURRENTLY IF EXISTS app.conversation_notes_api_key_idx;` and run
+the migrations again. 0062 validates both constraints without blocking writes; it fails only if a
+stored note has no author or two, which no code writes: find it with `SELECT id FROM
+app.conversation_notes WHERE (author_membership_id IS NULL) = (author_api_key_id IS NULL)` before
+running it again.
+
+**Migration 0059 failed.** It runs in one transaction, so a failure applies nothing: it widens
+the check on `app.api_keys.scopes` to allow `webhooks.manage` (up to ten scopes), makes
+`app.webhook_endpoints.created_by_user_id` optional, and adds `created_by_api_key_id` with the check
+`webhook_endpoints_creator` (exactly one creator) and a composite foreign key to `app.api_keys`,
+both validated at once (a company has at most 10 endpoints). A failure usually means the scope
+check was renamed or changed by hand; no stored endpoint can break the new check, since each has a
+member as its creator.
+
+**Migration 0057 or 0058 failed.** 0057 runs in one transaction, so a failure applies nothing: it
+replaces `automation_runs_end` on `app.automation_runs`, `NOT VALID`, with a check that also allows
+the reason `stopped_by_api`. A failure usually means the check was renamed or changed by hand.
+0058 validates it without blocking writes; it fails only if a stored run's status and end reason do
+not match, which no code writes: find it with `SELECT id, status, end_reason FROM
+app.automation_runs WHERE status NOT IN ('running', 'waiting') AND end_reason IS NULL` (and compare
+the pairs listed in 0057) before running it again.
+
+**Migration 0052, 0053 or 0054 failed.** 0052 runs in one transaction, so a failure applies
+nothing: it widens the check on `app.api_keys.scopes` to allow `automations.start` (up to nine
+scopes), adds `app.automation_runs.api_key_id` with the trigger type check, the key check and the
+foreign key `NOT VALID`, and replaces `app.guard_automation_run` so that the key stays fixed. A
+failure usually means a constraint was renamed or changed by hand (`api_keys_scopes_check`,
+`automation_runs_trigger_type_check`). 0053 runs outside a transaction (one `CREATE INDEX
+CONCURRENTLY`): a failure can leave an INVALID index; run `DROP INDEX CONCURRENTLY IF EXISTS
+app.automation_runs_api_key_idx;` and run the migrations again. 0054 validates the three
+constraints without blocking writes; it fails only if a stored run breaks one, which no code writes:
+find it with `SELECT id, trigger_type, api_key_id FROM app.automation_runs WHERE (trigger_type =
+'api') <> (api_key_id IS NOT NULL)` before running it again.
+
+**Migration 0051 failed.** It runs in one transaction, so a failure applies nothing. It adds
+`app.api_keys.allowed_networks` with its check and grants, creates
+`ops.api_key_authenticate(text, inet)` and rebuilds the one-argument lookup on it (dropped and
+created again, granted to `w360_app`, then handed to `w360_definer`). A failure usually means the
+bootstrap roles are missing or the lookup was changed by hand. The one-argument lookup is kept only
+for web servers of the previous release during a rolling deploy and refuses keys that list networks;
+drop it in a later release once no older web server runs.
+
+**Migration 0050 failed.** It runs in one transaction, so a failure applies nothing. It replaces
+the check on `app.api_keys.scopes` with one that also allows `conversations.write` (up to eight
+scopes). The check is wider than before, so existing keys pass; a failure usually means the
+constraint was renamed or changed by hand.
+
+**Migration 0046 failed.** It runs in one transaction, so a failure applies nothing. It adds
+`app.credit_refund_requests` (row security, column grants, a restrictive policy for the company
+role, deletion step 76), the notice functions for the worker, the platform lists and
+`ops.platform_decide_credit_refund_request`. A failure usually means a deletion step numbered 76
+already exists, or a function of the same name was created by hand.
+
 **Migration 0045 failed or left an INVALID index.** It runs outside a transaction
 (`-- migrate:no-transaction`, one `CREATE INDEX CONCURRENTLY` of `app.conversations_created_idx`),
 so a failure can leave an INVALID index: run
@@ -1065,6 +1163,24 @@ and 30 a second; wait for `Retry-After` and retry with the same `Idempotency-Key
 reason `quota_exceeded` means the plan's API requests for the month are used up (ADR-061): the
 requests work again when the next usage period starts, or with a larger plan.
 
+**403 `not_in_plan` naming a scope.** The company's plan leaves that scope out (ADR-092). The key
+keeps the scope: requests that need it work again, with no change to the key, once the company is
+on a plan version that includes it (a published version's scopes never change, so this is a new
+version or another plan). Settings → API keys lists the plan's scopes and marks each key's scope it
+leaves out; platform staff see the scopes on the plan page and the company's platform page. A 403
+`not_in_plan` that names no scope means the plan leaves the whole API out (ADR-061).
+
+**An API request to assign or move a conversation is refused with 422 naming `assigneeId` or
+`teamId`.** The member cannot be given conversations or the team is not the company's (ADR-093):
+`GET /members` lists the members who can (active, with a role that answers conversations; a
+marketer, analyst or billing manager cannot, nor a suspended member), and `GET /teams` the teams.
+Nothing in the refused request was kept, including a status or team named with it. A conversation
+moved to a round-robin team goes to the team's next available member at once when it is open and
+has no member after the request; an unassigned conversation in such a team is otherwise given out
+by the minute sweep. The audit log shows the key's changes
+(`conversation.assigned`, `conversation.team_changed`, source `api`) and routing's
+(`conversation.routed`).
+
 **An API key expired without a reminder, or the reminder came twice.** Owners and administrators
 are emailed once, 7 days before a key expires (ADR-067): `app.api_keys.expiry_reminded_at` says when
 the reminder was queued, and Settings → API keys shows it. Keys that never expire, rotated keys (the
@@ -1113,8 +1229,144 @@ be older than the pass. Before ADR-072, pages of contacts (the list, the export 
 inbox thread's older messages and the audit log could skip rows written in the same transaction as
 a page's last row; cursors issued before still work.
 
+**An API request is refused with `ip_not_allowed` (403).** The key lists the networks it accepts
+(Settings → API keys, "Accepts requests from"; ADR-076) and the request came from another address;
+the error message names the address the API saw. If that address is a load balancer's or proxy's
+rather than the integration's, `TRUSTED_PROXIES` is missing a hop (DEPLOYMENT.md): fix the
+configuration, do not add the proxy's address to the key. If the integration moved, a member who
+manages keys changes the key's addresses (a recent sign-in is needed); the change applies to the
+next request and is in the audit log (`api_key.networks_changed`). Refused requests count against
+the address's failed-authentication limit, so a client that keeps trying is answered 429 for a
+while. The web log has `api request refused: the key does not accept the address` with the key and
+company ids.
+
+**An integration cannot resolve or reopen a conversation, or a resolve did something unexpected.**
+`PATCH /api/v1/conversations/{id}` (ADR-075) needs the `conversations.write` scope (403 without it),
+which only owners, administrators and supervisors can grant; keys keep their scopes, so an older
+key is replaced by a new one with the scope. It answers 404 for an erased contact's conversation or
+another company's, 422 for any body but `{"status": "resolved"}` or `{"status": "open"}`, and 423
+while the company is suspended or its plan has ended. Asking for the status the conversation
+already has changes nothing. A resolve stops an automation answering the conversation ("The
+conversation was resolved.") and sends no satisfaction survey: surveys follow a member's resolve.
+The audit log shows the change with the actor `api_key`, and per-member report counts leave it out.
+The contact's next message reopens the conversation as usual.
+
+**An integration cannot start an automation, or its run ended early.** `POST
+/api/v1/automations/{id}/runs` (ADR-077) needs the `automations.start` scope, which only owners and
+administrators can grant (keys keep their scopes: replace an older key), and an `Idempotency-Key`.
+The reason says what is missing: `automation_unavailable` (not published, archived, or the published
+version is not "Started through the API": publish the draft with that trigger), `automation_paused`
+(resume it), `channel_unavailable` (the automation's number is not active), `automation_busy` (a run
+is already handling the contact's conversation: wait for it, or stop it on its run page),
+`conversation_assigned` (a member has the conversation), `automation_limit` (10 runs in that
+conversation in the last hour), `automation_quota` or `not_in_plan` (the plan). A 412 without a
+reason is the contact's consent: on the suppression list, erased, or opted out of utility messages.
+A 422 names the input that is missing, unknown or longer than 1,000 characters (`GET
+/api/v1/automations` lists the inputs); a marketing template needs the key's
+`messages.send_marketing` scope (403). A run that starts and then fails with `send_blocked` had a
+template step refused when it sent (for a marketing template, no opt-in or the frequency cap); the
+run page shows the step and the reason, with the key that started it and the inputs. A retry with
+the same `Idempotency-Key` answers as the first request did; `GET /api/v1/automation-runs/{id}`
+shows the run as it is now.
+
+**A run was stopped through the API, or a stop changed nothing.** `POST
+/api/v1/automation-runs/{id}/stop` (ADR-079) stops only runs keys of the company started; any other
+run answers 404. A run that had already ended is answered as it is: its `endReason` says how it
+ended (`stopped_by_api` for an earlier stop). A stopped run's page says "Stopped through the API.",
+and the audit log shows `automation.run_stopped` with the actor `api_key`. Messages the run had
+queued but not handed to the sender are cancelled ("Not sent: the automation stopped before this
+message left."). The conversation is not handed to people: if the customer wrote, it waits,
+unassigned, for a member in the inbox; assign it or let routing pick it up when the customer writes
+again.
+
+**A reply with buttons or a list is refused or fails.** A 422 names the field: at most 3 buttons
+with different titles (up to 20 characters) and ids (up to 256); a list button label up to 20
+characters, up to 10 sections with a title on each when there are several (up to 24 characters),
+at most 10 rows in all with different ids (up to 200 characters), titles up to 24 and descriptions
+up to 72; ids cannot start or end with a space, or start with `w360` (HyFib's own buttons use it).
+A 412 `window_closed` means the number has not written in the last 24 hours, as for text. A
+message that fails after it was queued shows WhatsApp's error on `GET /api/v1/messages/{id}` and in
+the inbox; limits Meta applies beyond its published description would show there first.
+
+**A quote or a reaction sent through the API is refused, or shows no quote.** `replyTo` takes a
+HyFib message id (from `GET /api/v1/conversations/{id}/messages`, the `message.received` webhook or
+a send's response), never a WhatsApp id. A 422 on `replyTo` says why: "Give the id of a message in
+this conversation" when the id is unknown or belongs to another conversation (another number, or
+another contact, of the company or not); reactions and WhatsApp notices cannot be quoted; a
+business message can be quoted once WhatsApp accepted it and while it has not failed; reactions go
+only on messages the contact sent in the last 30 days; the emoji must be exactly one emoji (skin
+tones and flags count as one). A 412 `window_closed` means the number has not written in the last
+24 hours, as for any reply. A reaction does not end a running automation. Reactions cannot be taken
+back through the API. The inbox shows a quote above a reply and names the message a reaction is
+for; it shows no quote when the quoted message is not in the conversation (sent before HyFib had
+the number, or deleted by retention), and the API then gives `replyTo: null`.
+
+**Products sent through the API are refused or fail.** A 403 with reason `not_in_plan` means the
+company's plan does not include Commerce. A 422 on `products` names the content ids HyFib cannot
+send: ids are matched exactly (case and spaces included) against the catalogs HyFib read for the
+WhatsApp number in Commerce → Catalogs; a product added at Meta since the last read appears after
+"Read from Meta", and products Meta no longer lists or catalogs disconnected from the number are
+not sent. A 422 on `catalogId` means more than one catalog of the number holds all the ids: name
+the one to use with its Meta id. "Give products from one catalog" means no catalog holds them all.
+Other 422s name Meta's limits (header up to 60 characters, body up to 1,024, footer up to 60,
+section titles up to 24 and required with more than one section, 10 sections, 30 products, each
+once). A 412 `window_closed` means the number has not written in the last 24 hours, as for any
+reply. A message that fails after it was queued shows WhatsApp's error on
+`GET /api/v1/messages/{id}` and in the inbox.
+
+**The message feed (`GET /api/v1/messages`) looks short, empty or repeated.** A page reads at most
+2,000 of the company's messages, newest first, and shows those that pass `direction` and
+`channelId`: when the filters leave out most of them the page holds fewer messages than `limit`,
+or none, and still gives a `nextCursor`. That is not the end: follow `nextCursor` until it is
+`null`. Messages seen again after asking for `since` a little before the previous pass are
+expected (a message carries the time its saving began); deduplicate on the message id. Missing
+messages: the feed leaves out erased contacts' conversations and internal notes, never attaches
+media, and a 403 means the key lacks `conversations.read`. A 422 names the query field (`direction`
+is `inbound` or `outbound`, `channelId` a number's id, `since` a date-time with its offset, `limit`
+up to 100, a cursor from a previous page); a `channelId` that is not one of the company's numbers
+gives empty pages. Statuses in the feed are as they were when read; follow them with the
+`message.status` webhook.
+
+**Notes read through the API (`GET /api/v1/conversations/{id}/notes`) are missing or unnamed.** A
+404 means the conversation is another company's, its contact was erased (erasure deletes the
+conversation's notes too) or the id is wrong; a 403 means the key lacks `conversations.read`.
+Members' notes say `writtenBy: agent` and never which member: that is deliberate, as nowhere in
+the API names members. A key's note names the key in `apiKeyId`, and the inbox shows the note with
+the key's name. Pages are newest first; follow `nextCursor` until it is `null`.
+
+**An endpoint added through the API is refused, missing or unexpected.** A 422 names the field:
+an https address (no credentials, port 443 or from 1024; `http://` and loopback only where local
+and test configuration allow them), at least one event from the list, a description up to 200
+characters; the address cannot change (add a new endpoint and delete the old one). A 412 means the
+company has 10 endpoints, members' included. A key that cannot find an endpoint (404) is looking
+at one a member added in settings: keys see only what keys added. A retry with the same
+`Idempotency-Key` answers `secret: null` by design: rotate the secret to get a new one. Owners and
+administrators are emailed whenever a key adds an endpoint; if nobody expected it, delete it in
+Settings → Webhooks (which names the key) and revoke the key, then check the audit log for what
+else the key did (`actor_type = 'api_key'`).
+
+**A note added through the API is refused or does not show.** `POST /conversations/{id}/notes`
+needs `conversations.write` (403 otherwise) and an `Idempotency-Key`; a retry with the same key
+answers as the first request did and adds nothing. A 404 means the conversation is another
+company's or its contact was erased (erasure deletes the conversation's notes, and a note sent while
+an erasure runs waits for it and is then refused). A 422 names the text: 1 to 4,000 characters.
+The note shows in the conversation's Notes card as "API (key name)"; it never reaches the customer
+and notifies no member.
+
+**A test event or a replay through the API is refused, or a delivery cannot be found.**
+`POST /webhook-endpoints/{id}/test` and `POST /webhook-deliveries/{id}/replay` need an
+`Idempotency-Key`; a retry with the same key answers as the first request did and queues nothing
+more. A 412 ("Turn the endpoint on") means the endpoint is off: the key turns it on with
+`PATCH /webhook-endpoints/{id}` and `{"enabled": true}`. A 409 ("still being attempted") means the
+delivery has not succeeded or failed yet: follow it with `GET /webhook-deliveries/{id}`. A 404
+means the delivery or endpoint was added by a member (keys see only what keys added), belongs to
+another company, or was deleted after 30 days. A delivery shows no body (payloads are built when
+delivered and never stored): match it to the receiver's log by `eventId`.
+
 **The company is suspended or its plan ended.** Keys keep reading; creating contacts, recording
-consent and sending answer 423 until the company is active again.
+consent, sending, resolving conversations and adding notes to them, starting and stopping
+automations, and managing webhook endpoints (reading them and their deliveries included) answer 423
+until the company is active again.
 
 **Migration 0024 failed.** It runs in one transaction. It creates the two tables, the guard trigger,
 the two SECURITY DEFINER functions (granted to `w360_app` before their ownership moves to
@@ -1144,8 +1396,21 @@ it twice and deduplicates on the event id).
 deliveries were marked failed (`endpoint_disabled`), owners and administrators got the
 "Webhook endpoint turned off" email, and the audit log has `webhook.endpoint_auto_disabled`. Fix the
 receiver, turn the endpoint on (its health starts afresh), send a test event, then replay the
-failed deliveries that are still needed (within 30 days) from its deliveries page, filtered to
-failed ones.
+failed deliveries still needed (within 30 days): on its deliveries page, "Replay failed
+deliveries" from the last hour, day, week or 30 days sends every event whose deliveries all failed
+again, 500 at a time (ADR-095; press again while it says more remain), and single deliveries can
+be replayed from the same page. For an endpoint a key added, the integration can do the same
+through the API: `POST /webhook-endpoints/{id}/replay-failed` with `since` (repeat while `more` is
+true), or `POST /webhook-deliveries/{id}/replay` for one (ADR-083).
+
+**A replay of failed deliveries queued fewer events than expected (ADR-095).** It leaves out
+events already delivered or waiting to be (a replay queued earlier included), deliveries that
+failed with `event_gone` (the message, contact, run, order or campaign no longer exists, so a
+replay would fail again at once), test events, and deliveries queued before the period chosen or
+deleted after 30 days. A 412 means the endpoint is off. Each call is audited as
+`webhook.deliveries_replayed` with the host, the time from, the count and whether more remained.
+The replays go out ten at a time with the company's other deliveries, so a large one delays new
+events by a few minutes at most.
 
 **The receiver rejects signatures.** It must compute HMAC-SHA256 over the exact raw body bytes
 prefixed with the `t` value and a dot, compare in constant time against any `v1` value, and allow a
@@ -1163,6 +1428,100 @@ row-level security and grants, the capture triggers on `app.messages`, `app.cons
 `app.template_status_events`, the notification trigger and the two SECURITY DEFINER sweep functions
 (granted to `w360_app` before their ownership moves to `w360_definer`). A failure usually means the
 bootstrap roles are missing (`infra/db/bootstrap-roles.sql`).
+
+**Conversation and contact events (ADR-074).** An endpoint that takes `contact.created` and
+`contact.updated` receives one event per contact for each change saved: an import sends one per
+contact it adds or changes, delivered like any other event. A receiver that asks why an erased
+contact's `contact.created` arrived with no name or number: payloads are built when delivered, and
+the contact was erased in between; `contact.erased` follows if the endpoint takes it. Since
+ADR-094 every change of a conversation's member sends `conversation.assignment_changed`, moves
+between members included (see the entry on member and team events below). To see what a
+transaction captured, `app.webhook_events.captured_xact` holds its id for contact events.
+
+**Migration 0047, 0048 or 0049 failed.** 0047 runs in one transaction, so a failure applies
+nothing: it widens the event type checks (the one on `app.webhook_events` `NOT VALID`), adds
+`captured_xact`, the capture functions and the triggers on `app.conversations`, `app.contacts` and
+`app.contact_tags`. A failure usually means a check was renamed by hand
+(`webhook_endpoints_event_types_check`, `webhook_events_type_check`). 0048 runs outside a
+transaction (one `CREATE INDEX CONCURRENTLY`): a failure can leave an INVALID index; run
+`DROP INDEX CONCURRENTLY IF EXISTS app.webhook_events_contact_xact_idx;` and run the migrations
+again. 0049 validates the type check without blocking writes; it fails only if a stored event has a
+type outside the list, which no code writes: look for the row by `type` before running it again.
+
+**Automation run events (ADR-078).** An endpoint that takes `automation.run_started` or
+`automation.run_ended` hears of live runs only: a member's test run sends nothing, so a receiver
+that sees no event for a test is working as designed. The end of a short run can arrive before its
+start (deliveries are not ordered); receivers compare `run.startedAt` and `run.endedAt`. A receiver
+that asks for a run's answers or API inputs: payloads never carry them; the run page shows answers
+to members who can see the conversation. The event keeps the run and automation ids and the end
+reason in `app.webhook_events.detail`.
+
+**Migration 0055 or 0056 failed.** 0055 runs in one transaction, so a failure applies nothing: it
+widens the event type checks (the one on `app.webhook_events` `NOT VALID`) and adds the capture
+function and the two triggers on `app.automation_runs`. A failure usually means a check was renamed
+by hand (`webhook_endpoints_event_types_check`, `webhook_events_type_check`) or a trigger of the
+same name exists. 0056 validates the type check without blocking writes; it fails only if a stored
+event has a type outside the list, which no code writes: look for the row by `type` before running
+it again.
+
+**Order events (ADR-085).** An endpoint that takes `order.received` or `order.status_changed` hears
+of WhatsApp orders only: store orders (Shopify, WooCommerce) send nothing, since the store reports
+them itself. Every status change is sent whoever makes it: a member (confirm, fulfil, cancel, ask
+for payment) or the worker applying a Payment Link's outcome (paid, or back to confirmed when the
+link ends unpaid). A receiver that sees `paidAt` on an early event is reading the order as it was
+when that event was delivered; `order.status` and `order.previousStatus` are the change itself, and
+the latest change has the latest `createdAt`. A receiver that asks for the Payment Link address or
+Razorpay's payment id: payloads never carry them; the order page shows the link. A missing note on
+an order whose contact was erased is expected: erasure clears it (and sends no order event). The
+event keeps the order id and the status before a change in `app.webhook_events.detail`.
+
+**Migration 0063 or 0064 failed.** 0063 runs in one transaction, so a failure applies nothing: it
+widens the event type checks (the one on `app.webhook_events` `NOT VALID`) and adds the capture
+function and the two triggers on `app.commerce_orders`. A failure usually means a check was renamed
+by hand (`webhook_endpoints_event_types_check`, `webhook_events_type_check`) or a trigger of the
+same name exists. 0064 validates the type check without blocking writes; it fails only if a stored
+event has a type outside the list, which no code writes: look for the row by `type` before running
+it again.
+
+**Campaign events (ADR-087).** An endpoint that takes `campaign.status_changed` hears of every
+status change a campaign makes, whoever makes it: a member (submit, withdraw, reject, approve,
+pause, resume, cancel) or the runner (start, pause with its reason, complete). A campaign the runner
+starts and pauses in one tick (its member lost the permission, the template or number stopped
+working) sends both changes, `running` then `paused`, in capture order. Editing a draft and sending
+tests send nothing. `campaign.status` and `campaign.previousStatus` are the change itself, with
+`pauseReason` or `completionReason`; the name, times and counters are as they are when the event
+is delivered, so a late delivery can show counts from after the change. Delivery and read numbers
+are not in the payload: they come with `message.status` for each message or from the campaign's
+report. The event keeps the campaign id, the status before it and the reason in
+`app.webhook_events.detail`.
+
+**Migration 0065 or 0066 failed.** 0065 runs in one transaction, so a failure applies nothing: it
+widens the event type checks (the one on `app.webhook_events` `NOT VALID`) and adds the capture
+function and the trigger on `app.campaigns`. A failure usually means a check was renamed by hand
+(`webhook_endpoints_event_types_check`, `webhook_events_type_check`) or a trigger of the same name
+exists. 0066 validates the type check without blocking writes; it fails only if a stored event has
+a type outside the list, which no code writes: look for the row by `type` before running it again.
+
+**Member and team events (ADR-094).** `conversation.assignment_changed` is sent for every change of
+a conversation's member (one assigned, a move to another, none any more) with `assigneeId` and
+`previousAssigneeId`, and `conversation.team_changed` for every change of its team with `teamId` and
+`previousTeamId`, whoever makes it: routing, a member, an automation's hand-off, an API key.
+Deleting a team sends one `conversation.team_changed` for each conversation it had, delivered like
+any other event: expect a burst after a busy team is deleted. Ids are memberships and teams as
+`GET /members` and `GET /teams` list them; a member removed since is not listed there any more.
+An assignment event with both member ids null was captured before migration 0070; one without the
+fields at all was delivered by a worker of the previous release while the release rolled out. Two
+changes made by one request (a member taken off, then routing giving the conversation out) can
+share a `createdAt` to the millisecond: the receiver reads the conversation for where it stands.
+The events keep the ids before and after in `app.webhook_events.detail`, stamped with the time each
+change was captured (`occurred_at`).
+
+**Migration 0070 or 0071 failed.** 0070 runs in one transaction, so a failure applies nothing: it
+widens the event type checks (the one on `app.webhook_events` `NOT VALID`) and replaces the
+conversation capture function and its trigger (`conversations_webhook`). A failure usually means a
+check was renamed by hand (`webhook_endpoints_event_types_check`, `webhook_events_type_check`).
+0071 validates the type check without blocking writes; it fails only if a stored event has a type
+outside the list, which no code writes: look for the row by `type` before running it again.
 
 ## 10P. Platform operations console
 
@@ -1191,7 +1550,21 @@ help with Embedded Signup.
 jobs retained after their last attempt. `billing.auto-recharge` has no retries on purpose
 (section 9). A row "Not declared by this release" is a queue named by a dead letter that this
 release does not declare (an older or newer deploy); "No such queue in the database" means pg-boss
-has no queue by that name (for a declared queue: the migrations have not run).
+has no queue by that name (for a declared queue: the migrations have not run). The oldest wait
+(ADR-096) is the longest a ready job had waited when the worker's minute sweep last checked, with
+the queue's limit under its name; "Not checked" means the sweep has not checked that queue yet (a
+queue new in this release, until the next minute).
+
+**Late queues (ADR-096).** Every platform administrator is emailed "Queue … is falling behind" (or
+"N queues are falling behind") once each time a queue's oldest ready job has waited its limit, at
+most every 15 minutes, with each queue's waiting jobs, oldest wait and limit; the Queues tab marks
+the queue late and says when staff were emailed. It stays late until its oldest job has waited under
+half its limit, then its alert is re-armed. The worker logs `job queues are late` at each check
+while any is, and `late queue alert emailed to platform staff`; `job queues are late but there is
+no platform administrator to email` means nothing is marked until there is one. Section 3 says what
+to do. "The worker is not checking the queues" on the tab (or a dash on the overview's Late queues)
+means no check for 5 minutes: the minute messaging sweep is not running or fails before the check
+(look for failures of `ops.messaging-sweep` in the worker's logs), so late queues are not emailed.
 
 **Dead letters.** Recorded by the worker within seconds of the move; if the list stays empty while
 `SELECT count(*) FROM pgboss.job WHERE name = 'dead-letter' AND state = 'created'` grows, the worker
@@ -1201,7 +1574,37 @@ days after the job failed.
 **Repairs.** Retry and Resolve (section 4) both need a reason of at least 10 characters and appear
 in the platform audit log as `platform.webhook_receipt_retried` and
 `platform.webhook_quarantine_resolved`. A receipt whose body was erased (after 7 days) cannot be
-retried.
+retried. A receipt listed as "Failed all attempts" with "Its worker stopped during the last
+attempt" was being processed when its worker stopped (a deploy or a crash) on its 12th attempt: the
+sweeper no longer signals it, so retry it once the worker runs (since migration 0068; before, it was
+listed nowhere and needed SQL).
+
+**Failure alerts (ADR-091).** Every platform administrator is emailed "N failures need a look" when
+a job is dead-lettered, a receipt uses all its attempts or an event is quarantined: counts by queue,
+provider and reason, never a company or an error. One email covers everything new since the last
+one, at most every 15 minutes; the Integrations page says when the last one went out, and each
+receipt, quarantine entry and dead letter shows when staff were emailed about it. A retried receipt
+that fails all its attempts again is emailed again. The worker logs `failure alert emailed to
+platform staff`; `work failed for good but there is no platform administrator to email` means nothing
+is marked until there is one. An item listed without "Staff emailed" for more than 15 minutes means
+the alert did not run: it runs last in the minute messaging sweep, so look in the worker's logs for
+failures of `ops.messaging-sweep`. On the email: open the tab it links, find the cause (the worker's
+logs, the provider's status page), fix it, then retry receipts within 7 days of receipt and resolve
+quarantine entries (section 4). Dead letters need no action once the cause is fixed: the minute
+sweeps signal their work again.
+
+**Migration 0068 failed.** It adds nullable columns and partial indexes to `ops.dead_letters`,
+`ops.webhook_receipts` and `ops.webhook_quarantine`, marks existing dead letters and erased receipts
+as told, and replaces `ops.platform_retry_webhook_receipt` (dropped as `w360_definer` and recreated,
+as in 0011), in one transaction. A failure rolls it all back: fix the cause (usually the bootstrap
+roles) and run the migrations again. Workers of the previous release keep working; web servers of
+the previous release show receipts as before.
+
+**Migration 0072 failed.** It creates `ops.queue_waits`, adds `queues` to the kinds of
+`ops.platform_alerts` (replacing its check `platform_alerts_kind_check`) and creates
+`ops.record_queue_waits` and `ops.mark_queue_alert`, in one transaction. A failure rolls it all
+back: usually the bootstrap roles, or the check renamed by hand. Workers of the previous release do
+not check queues; web servers of the previous release show the Queues tab without waits.
 
 **Migrations 0026 and 0027 failed.** 0026 runs in one transaction: it needs the bootstrap roles
 (`w360_definer`, `w360_platform`, `w360_app`). 0027 builds an index concurrently outside a
@@ -1211,8 +1614,9 @@ migrations again.
 
 ## 10Q. Company export and deletion
 
-Owners use Settings → Company data (ADR-055). Nothing here is done by staff: staff cannot start,
-speed up or cancel a deletion, and the export is only for the company's owners.
+Owners use Settings → Company data (ADR-055). Platform owners can also schedule a company's
+deletion and cancel the ones staff scheduled (ADR-090, below); nobody can speed a deletion up, and
+the export is only for the company's owners.
 
 **An export fails or is cut short.** The file is complete only if its last line is
 `{"end":true,...}`. A second export while one runs answers 409; each start is audited
@@ -1224,8 +1628,26 @@ ends an export whose reader stops reading for a minute.
 **A deletion is scheduled.** The company is `pending_deletion` until `due_at` (14 days) and works as
 suspended. Any owner cancels in Settings → Company data until the run starts; after that the page
 says it can no longer be cancelled. The register is `ops.tenant_deletions` (the company's platform
-page shows it). A company that asks HyFib to stop a deletion before it starts: an owner cancels; if
-no owner can, suspend handling of the request and escalate (there is no staff cancellation).
+page shows it). A company that asks HyFib to stop an owner's deletion before it starts: an owner
+cancels; staff cannot cancel an owner's deletion, so if no owner can, escalate before it is due.
+
+**Deleting a company for HyFib (ADR-090).** For a company whose owners asked support to delete it
+and cannot do it themselves, or whose service HyFib ends. Confirm the request or the decision
+outside the product first (who asked, through which channel, the ticket), as for an MFA reset. A
+platform owner opens the company's platform page, "Delete the company", writes the reason (10 to
+1,000 characters: the owners and administrators read it, in their email and on every page of the
+company, so no internal notes) and types the company address. The company is `pending_deletion` at
+once and deleted 14 days later by the same job; its owners can still export meanwhile. Operators
+see the card but cannot schedule. The owners and administrators are emailed by the worker's minute
+sweep (`staff deletion notices emailed` in the worker log; a failure logs `staff deletion notice
+failed for a company; will retry` and is tried again the next minute). Both audit logs record it
+(`platform.tenant_deletion_scheduled`, with the reason).
+
+**Cancelling a deletion HyFib scheduled.** Only a platform owner, only before the run starts, from
+the Deletion card on the company's platform page, with a reason the company reads (emailed the same
+way). The company returns to the status it had (a suspension stays, a lapsed plan restricts). Owners
+cannot cancel it: their page tells them to contact HyFib support. Staff cannot cancel a deletion an
+owner asked for.
 
 **A deletion is running or stuck.** The minute billing sweep queues a `tenant.delete` job for every
 due or unfinished deletion (`company deletions due` in the worker log); each run deletes for up to
@@ -1245,6 +1667,13 @@ grants and security events stay. Meta events for its numbers are quarantined as 
 
 **Migration 0028 failed.** It runs in one transaction and needs the bootstrap roles; fix the cause
 and run the migrations again.
+
+**Migration 0067 failed.** It adds columns to `ops.tenant_deletions` (existing rows become owners'
+deletions; nothing is rewritten), replaces `app.cancel_tenant_deletion` (dropped as `w360_definer`
+and recreated, as in 0011) and adds the staff and notice functions, in one transaction. A failure
+rolls it all back: fix the cause (usually the bootstrap roles) and run the migrations again. Web
+servers of the previous release keep working: they read none of the new columns and call the owners'
+cancel with the same signature.
 
 ## 11. Compromised company (tenant) or account
 

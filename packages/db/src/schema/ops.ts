@@ -112,6 +112,33 @@ export const deadLetters = opsSchema.table('dead_letters', {
   firstQueuedAt: tz('first_queued_at'),
   failedAt: tz('failed_at').notNull(),
   recordedAt: tz('recorded_at').notNull().defaultNow(),
+  /** When platform staff were emailed about it (ADR-091). */
+  alertedAt: tz('alerted_at'),
+});
+
+/**
+ * When each platform alert last went out: failures (ADR-091) and late queues (ADR-096), each at most
+ * every 15 minutes.
+ */
+export const platformAlerts = opsSchema.table('platform_alerts', {
+  kind: text('kind', { enum: ['failures', 'queues'] }).primaryKey(),
+  lastSentAt: tz('last_sent_at'),
+});
+
+/**
+ * How long jobs wait in each queue, as the worker's minute sweep last read them from pg-boss
+ * (ADR-096): jobs pg-boss would hand to a worker now and when the oldest became due. Late past the
+ * queue's limit until the wait is back under half of it. Written only through
+ * `ops.record_queue_waits` and `ops.mark_queue_alert`; the worker and platform staff read.
+ */
+export const queueWaits = opsSchema.table('queue_waits', {
+  queue: text('queue').primaryKey(),
+  waiting: integer('waiting').notNull(),
+  oldestWaitingSince: tz('oldest_waiting_since'),
+  limitMinutes: integer('limit_minutes').notNull(),
+  checkedAt: tz('checked_at').notNull(),
+  lateSince: tz('late_since'),
+  alertedAt: tz('alerted_at'),
 });
 
 /** What happened at one provider while a company was deleted (ADR-055). */
@@ -154,4 +181,14 @@ export const tenantDeletions = opsSchema.table('tenant_deletions', {
   providerCleanupAt: tz('provider_cleanup_at'),
   rowsDeleted: bigint('rows_deleted', { mode: 'number' }).notNull().default(0),
   completedAt: tz('completed_at'),
+  /** Who scheduled the deletion (ADR-090): an owner, or HyFib staff with `reason`. */
+  requestedBy: text('requested_by', { enum: ['owner', 'platform'] })
+    .notNull()
+    .default('owner'),
+  reason: text('reason'),
+  /** Who cancelled it; empty on deletions cancelled before ADR-090 (owners only then). */
+  cancelledBy: text('cancelled_by', { enum: ['owner', 'platform'] }),
+  cancelReason: text('cancel_reason'),
+  scheduledNotifiedAt: tz('scheduled_notified_at'),
+  cancelledNotifiedAt: tz('cancelled_notified_at'),
 });

@@ -1,5 +1,6 @@
 'use server';
 import { refresh } from 'next/cache';
+import type { WebhookReplayPeriod } from '@w360/domain/webhook-model';
 import { getRuntime } from '@/server/runtime';
 import { runAction, type ActionResult } from '@/server/action';
 import { requestMeta } from '@/server/session';
@@ -84,6 +85,20 @@ export async function sendWebhookTestAction(
     const sent = await webhooks.sendTest(ctx, { endpointId });
     refresh();
     return sent;
+  });
+}
+
+export async function replayFailedWebhookDeliveriesAction(
+  slug: string,
+  endpointId: string,
+  period: WebhookReplayPeriod,
+): Promise<ActionResult<{ queued: number; more: boolean }>> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { webhooks } = await getRuntime();
+    const replayed = await webhooks.replayFailed(ctx, { endpointId, period }, await requestMeta());
+    refresh();
+    return replayed;
   });
 }
 

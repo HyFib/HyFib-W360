@@ -71,6 +71,8 @@ export const AUTOMATION_END_REASONS = {
     'opted_out',
     'contact_erased',
     'automation_archived',
+    /** Stopped through the public API (migration 0057, ADR-079). */
+    'stopped_by_api',
   ],
   failed: [
     'budget_steps',
@@ -93,6 +95,8 @@ export const AUTOMATION_TRIGGER_TYPES = [
   'test',
   /** Started by a store's order message rule (migration 0022). */
   'store_event',
+  /** Started through the public API by a key (migration 0052). */
+  'api',
 ] as const;
 export type AutomationRunTrigger = (typeof AUTOMATION_TRIGGER_TYPES)[number];
 
@@ -117,6 +121,8 @@ export const automationRuns = appSchema.table('automation_runs', {
   storeEvent: text('store_event', {
     enum: ['order_placed', 'order_shipped', 'order_delivered', 'order_cancelled'],
   }),
+  /** The API key a run started through the API came from (migration 0052, ADR-077). */
+  apiKeyId: uuid('api_key_id'),
   startedByMembershipId: uuid('started_by_membership_id'),
   startedByUserId: text('started_by_user_id'),
   status: text('status', { enum: AUTOMATION_RUN_STATUSES }).notNull().default('running'),

@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button, Checkbox, Field, Input, Label, Select, Textarea } from '@w360/ui';
 import { ConfirmDialog } from '@w360/ui/client';
+import { API_SCOPE_INFO, API_SCOPE_KEYS } from '@w360/domain/api-model';
 import { PLAN_MODULE_KEYS, PLAN_MODULE_LABELS, addOnsForPlan } from '@w360/domain/plan-model';
 import {
   cancelTenantSubscriptionAction,
@@ -39,6 +40,9 @@ export interface PlanFormValues {
   runPackSize: string;
   runPackPrice: string;
   apiRequestsMonthly: string;
+  /** Every API scope, including later ones, or only `apiScopes` (ADR-092). */
+  apiScopeChoice: 'all' | 'chosen';
+  apiScopes: string[];
   modules: string[];
 }
 
@@ -62,6 +66,8 @@ export const EMPTY_PLAN_FORM: PlanFormValues = {
   runPackSize: '',
   runPackPrice: '',
   apiRequestsMonthly: '',
+  apiScopeChoice: 'all',
+  apiScopes: [],
   modules: [],
 };
 
@@ -90,7 +96,7 @@ export function PlanForm({
   const set = (patch: Partial<PlanFormValues>) => setValues((v) => ({ ...v, ...patch }));
 
   const text = (
-    key: Exclude<keyof PlanFormValues, 'modules'>,
+    key: Exclude<keyof PlanFormValues, 'modules' | 'apiScopeChoice' | 'apiScopes'>,
     label: string,
     options: { description?: string; inputMode?: 'numeric' | 'decimal'; placeholder?: string } = {},
   ) => (
@@ -241,6 +247,50 @@ export function PlanForm({
             description: '0 leaves the public API out of the plan.',
           })}
         </div>
+      </fieldset>
+      <fieldset className="grid gap-2">
+        <legend className="mb-2 text-sm font-semibold">API scopes</legend>
+        <p className="text-xs text-muted-foreground">
+          What keys of companies on the plan can do through the public API. Requests that need a
+          scope the plan leaves out are refused. Not used when the plan leaves the API out (0
+          requests).
+        </p>
+        <Field id="plan-apiScopeChoice" label="The plan includes" error={issues.apiScopeChoice}>
+          {(aria) => (
+            <Select
+              {...aria}
+              value={values.apiScopeChoice}
+              onChange={(e) => set({ apiScopeChoice: e.target.value as 'all' | 'chosen' })}
+            >
+              <option value="all">Every scope, including scopes HyFib adds later</option>
+              <option value="chosen">Only the scopes chosen below</option>
+            </Select>
+          )}
+        </Field>
+        {API_SCOPE_KEYS.map((s) => (
+          <div key={s} className="flex items-center gap-2">
+            <Checkbox
+              id={`plan-api-scope-${s}`}
+              checked={values.apiScopeChoice === 'all' || values.apiScopes.includes(s)}
+              disabled={values.apiScopeChoice === 'all'}
+              onChange={(e) =>
+                set({
+                  apiScopes: e.target.checked
+                    ? [...values.apiScopes, s]
+                    : values.apiScopes.filter((x) => x !== s),
+                })
+              }
+            />
+            <Label htmlFor={`plan-api-scope-${s}`} className="font-normal">
+              {API_SCOPE_INFO[s].label} <span className="font-mono text-xs">({s})</span>
+            </Label>
+          </div>
+        ))}
+        {issues.apiScopes ? (
+          <p role="alert" className="text-xs font-medium text-destructive">
+            {issues.apiScopes}
+          </p>
+        ) : null}
       </fieldset>
       <fieldset className="grid gap-2">
         <legend className="mb-2 text-sm font-semibold">Modules</legend>

@@ -97,11 +97,12 @@ export default async function BillingPage({ params }: { params: Promise<{ slug: 
   const { slug } = await params;
   const ctx = await requireTenant(slug);
   assertCan(ctx, 'billing.read');
-  const { billing, plans, planPayments, clock } = await getRuntime();
-  const [overview, plan, planPayment] = await Promise.all([
+  const { billing, plans, planPayments, refundRequests, clock } = await getRuntime();
+  const [overview, plan, planPayment, asked] = await Promise.all([
     billing.overview(ctx),
     plans.overview(ctx),
     planPayments.overview(ctx),
+    refundRequests.list(ctx),
   ]);
   const canManage = can(ctx, 'billing.manage');
   // Adding a card and turning automatic top-ups on need a recent sign-in (ADR-056).
@@ -112,6 +113,10 @@ export default async function BillingPage({ params }: { params: Promise<{ slug: 
   // Refunds HyFib started that Razorpay has not completed (ADR-058), by the payment they refund.
   const refundsByTopup = new Map(overview.refunds.map((r) => [r.topupId, r]));
   const refundingMinor = overview.refunds.reduce((sum, r) => sum + r.amountMinor, 0);
+  // Refunds the company asked for that HyFib has not decided (ADR-073), by payment.
+  const askedByTopup = new Map(
+    asked.filter((r) => r.status === 'open').map((r) => [r.topupId, r.amountMinor]),
+  );
 
   return (
     <>
@@ -314,6 +319,9 @@ export default async function BillingPage({ params }: { params: Promise<{ slug: 
         <Card>
           <CardHeader>
             <CardTitle>Payments</CardTitle>
+            <CardDescription>
+              To ask HyFib for a refund of credit you have not spent, open the payment’s receipt.
+            </CardDescription>
           </CardHeader>
           <CardContent>
             {overview.topups.length === 0 ? (
@@ -358,6 +366,12 @@ export default async function BillingPage({ params }: { params: Promise<{ slug: 
                         {refundsByTopup.has(t.id) ? (
                           <span className="block text-xs text-muted-foreground">
                             Refund of {inr(refundsByTopup.get(t.id)?.amountMinor ?? 0)} in progress
+                          </span>
+                        ) : null}
+                        {askedByTopup.has(t.id) ? (
+                          <span className="block text-xs text-muted-foreground">
+                            Refund of {inr(askedByTopup.get(t.id) ?? 0)} asked for; waiting for
+                            HyFib
                           </span>
                         ) : null}
                       </TD>

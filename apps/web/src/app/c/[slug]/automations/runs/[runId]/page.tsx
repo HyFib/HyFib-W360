@@ -74,7 +74,11 @@ export default async function AutomationRunPage({
         description={`${run.mode === 'test' ? 'Test of the draft' : `Version ${run.versionNumber ?? '—'}`}, started ${formatDateTime(run.startedAt, tz)} by ${
           run.mode === 'test'
             ? (run.startedByName ?? 'a member')
-            : (TRIGGER_TYPE_LABELS[run.triggerType] ?? run.triggerType).toLowerCase()
+            : run.triggerType === 'api'
+              ? run.apiKeyName
+                ? `the API key “${run.apiKeyName}”`
+                : 'an API key'
+              : (TRIGGER_TYPE_LABELS[run.triggerType] ?? run.triggerType).toLowerCase()
         }.`}
         actions={
           <Link
@@ -257,7 +261,8 @@ export default async function AutomationRunPage({
               <CardHeader>
                 <CardTitle>Saved answers</CardTitle>
                 <CardDescription>
-                  Cleared 30 days after the run ends, or when the contact is erased.
+                  Cleared 30 days after the run ends, or when the contact is erased. Inputs a call
+                  or a test gave are listed as input.&lt;name&gt;.
                 </CardDescription>
               </CardHeader>
               <CardContent>

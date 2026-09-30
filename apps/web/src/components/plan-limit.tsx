@@ -53,7 +53,7 @@ export function PlanLimitHint({
 
 const MODULE_EFFECTS: Record<PlanModule, string> = {
   automations:
-    'You can still see your automations and their runs, but not change or publish them, and they no longer start from customer messages or store events.',
+    'You can still see your automations and their runs, but not change or publish them, and they no longer start from customer messages, store events or the API.',
   flows: 'You can still see your flows and their answers, but not change, publish or send them.',
   crm: 'You can still see your deals and tasks, but not change them.',
   commerce:

@@ -52,6 +52,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'revoked_by_user_id',
       'replaced_by_key_id',
       'expiry_reminded_at',
+      'allowed_networks',
     ],
     omitted: { token_hash: "Only a hash of the key's token." },
   },
@@ -178,6 +179,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'http_call_count',
       'store_order_id',
       'store_event',
+      'api_key_id',
     ],
   },
   {
@@ -791,7 +793,14 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
   },
   {
     table: 'app.conversation_notes',
-    columns: ['id', 'conversation_id', 'author_membership_id', 'body', 'created_at'],
+    columns: [
+      'id',
+      'conversation_id',
+      'author_membership_id',
+      'author_api_key_id',
+      'body',
+      'created_at',
+    ],
   },
   {
     table: 'app.conversation_sources',
@@ -843,6 +852,28 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'updated_at',
       'team_id',
     ],
+  },
+  {
+    table: 'app.credit_refund_requests',
+    columns: [
+      'id',
+      'topup_id',
+      'amount_minor',
+      'reason',
+      'status',
+      'requested_by_user_id',
+      'requested_at',
+      'withdrawn_at',
+      'decided_at',
+      'decision_note',
+      'credit_refund_id',
+      'updated_at',
+    ],
+    omitted: {
+      decided_by_user_id: 'The HyFib platform owner who decided; platform-only.',
+      announced_at: 'When HyFib staff were emailed about the request; internal bookkeeping.',
+      decline_notified_at: 'When the decline email was queued; internal bookkeeping.',
+    },
   },
   {
     table: 'app.credit_refunds',
@@ -1435,6 +1466,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'last_success_at',
       'last_failure_at',
       'created_by_user_id',
+      'created_by_api_key_id',
       'created_at',
       'updated_at',
     ],

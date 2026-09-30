@@ -3,8 +3,9 @@ import type { WebhookEventType } from '@w360/db';
 export type { WebhookEventType } from '@w360/db';
 
 /**
- * Outgoing webhooks (P5-09, ADR-053): the parts the settings page and the services share. Pure
- * definitions without server dependencies, so pages can use them in the browser.
+ * Outgoing webhooks (P5-09, ADR-053, ADR-074, ADR-078, ADR-085, ADR-087, ADR-094): the parts the
+ * settings page and the services share. Pure definitions without server dependencies, so pages can
+ * use them in the browser.
  */
 
 export const WEBHOOK_EVENT_KEYS = [
@@ -12,6 +13,17 @@ export const WEBHOOK_EVENT_KEYS = [
   'message.status',
   'consent.changed',
   'template.status_changed',
+  'conversation.status_changed',
+  'conversation.assignment_changed',
+  'conversation.team_changed',
+  'contact.created',
+  'contact.updated',
+  'contact.erased',
+  'automation.run_started',
+  'automation.run_ended',
+  'order.received',
+  'order.status_changed',
+  'campaign.status_changed',
 ] as const satisfies readonly WebhookEventType[];
 
 export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; description: string }> =
@@ -33,6 +45,60 @@ export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; descr
       label: 'Template status',
       description: 'Meta approved, rejected, paused or disabled a template, or it was deleted.',
     },
+    'conversation.status_changed': {
+      label: 'Conversation status',
+      description:
+        'A conversation was resolved, reopened or set to pending, by a member, an automation, an API key or the contact writing again.',
+    },
+    'conversation.assignment_changed': {
+      label: 'Conversation assignment',
+      description:
+        'A member was assigned to a conversation, it moved to another member, or it went back to nobody.',
+    },
+    'conversation.team_changed': {
+      label: 'Conversation team',
+      description:
+        'A conversation was placed in a team, moved to another or taken out of one: by routing, a member, an automation, an API key or the team being deleted.',
+    },
+    'contact.created': {
+      label: 'Contact added',
+      description:
+        'A contact was added: by a first message, a member, an import, the API or a store.',
+    },
+    'contact.updated': {
+      label: 'Contact changed',
+      description: 'A contact’s name, number, email or tags changed.',
+    },
+    'contact.erased': {
+      label: 'Contact erased',
+      description:
+        'A contact was erased. Take it to delete your copy: the event carries no personal data.',
+    },
+    'automation.run_started': {
+      label: 'Automation started',
+      description:
+        'An automation started in a conversation: from a customer message, a store’s order event or a call through the API. Members’ test runs are not sent.',
+    },
+    'automation.run_ended': {
+      label: 'Automation ended',
+      description:
+        'An automation run ended: completed, handed to people, taken over, stopped or failed, with the reason.',
+    },
+    'order.received': {
+      label: 'Order received',
+      description:
+        'A customer sent a cart from your WhatsApp catalog: the order with its items, total and note.',
+    },
+    'order.status_changed': {
+      label: 'Order status',
+      description:
+        'A WhatsApp order was confirmed, fulfilled or cancelled, is waiting for payment, was paid through its Payment Link, or went back to confirmed when the link ended unpaid.',
+    },
+    'campaign.status_changed': {
+      label: 'Campaign status',
+      description:
+        'A campaign was submitted for approval, sent back to draft, scheduled, started, paused, resumed, completed or cancelled, by a member or as it ran.',
+    },
   };
 
 export const WEBHOOK_LIMITS = {
@@ -46,7 +112,32 @@ export const WEBHOOK_LIMITS = {
   /** An endpoint failing without a success for this long is disabled at its next failure. */
   disableAfterHours: 72,
   retentionDays: 30,
+  /** Failed deliveries replayed in one call at most (ADR-095); another call queues the next ones. */
+  replayBatch: 500,
 } as const;
+
+/**
+ * The periods Settings → Webhooks replays failed deliveries from (ADR-095), up to the deliveries
+ * HyFib keeps. The API takes any time instead.
+ */
+export const WEBHOOK_REPLAY_PERIODS = [
+  { key: '1h', label: 'the last hour', hours: 1 },
+  { key: '24h', label: 'the last 24 hours', hours: 24 },
+  { key: '7d', label: 'the last 7 days', hours: 7 * 24 },
+  { key: '30d', label: 'the last 30 days', hours: WEBHOOK_LIMITS.retentionDays * 24 },
+] as const;
+
+export type WebhookReplayPeriod = (typeof WEBHOOK_REPLAY_PERIODS)[number]['key'];
+
+/** What a replay of failed deliveries did, in the words Settings → Webhooks shows it. */
+export function webhookReplaySummary(result: { queued: number; more: boolean }): string {
+  if (result.queued === 0) return 'No failed deliveries to replay from that period.';
+  const queued =
+    result.queued === 1 ? 'Replaying 1 delivery.' : `Replaying ${result.queued} deliveries.`;
+  return result.more
+    ? `${queued} More failed deliveries remain: replay again to queue the next ones.`
+    : queued;
+}
 
 /** The wait after each failed attempt: after the first, 1 minute; after the seventh, 24 hours. */
 export const WEBHOOK_RETRY_SECONDS = [60, 300, 1_800, 7_200, 21_600, 43_200, 86_400] as const;
@@ -87,7 +178,7 @@ export function webhookErrorLabel(code: string | null, status: number | null): s
     case 'endpoint_disabled':
       return 'The endpoint was turned off';
     case 'event_gone':
-      return 'The message no longer exists';
+      return 'What the event is about no longer exists';
     default:
       return code;
   }

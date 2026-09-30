@@ -1,15 +1,21 @@
 'use client';
 import { useId, useState } from 'react';
-import { Alert, Button, Checkbox, Field, Input, Label, Select } from '@w360/ui';
+import { Alert, Button, Checkbox, Field, Input, Label, Select, Textarea } from '@w360/ui';
 import { ConfirmDialog } from '@w360/ui/client';
 import {
   API_KEY_EXPIRY_DAYS,
   API_KEY_LIMITS,
   API_SCOPE_INFO,
   API_SCOPE_KEYS,
+  formatAllowedNetwork,
   type ApiScope,
 } from '@w360/domain/api-model';
-import { createApiKeyAction, revokeApiKeyAction, rotateApiKeyAction } from '@/app/actions/api-keys';
+import {
+  createApiKeyAction,
+  revokeApiKeyAction,
+  rotateApiKeyAction,
+  setApiKeyNetworksAction,
+} from '@/app/actions/api-keys';
 import { ActionFailure, type ActionFailureState } from '@/components/action-failure';
 import { ClientButton, ClientForm } from '@/components/client-form';
 import { CopyField } from '@/components/growth/copy-field';
@@ -28,6 +34,37 @@ const OVERLAP_OPTIONS = [
   { hours: 24, label: '24 hours' },
   { hours: API_KEY_LIMITS.rotationOverlapHours, label: '72 hours' },
 ] as const;
+
+const NETWORKS_HELP =
+  'One IPv4 or IPv6 address or network per line, such as 203.0.113.7 or 203.0.113.0/24. Requests from any other address are refused. Leave it empty to accept any address.';
+
+/** The addresses field of the create form and the edit dialog. */
+function NetworksField({
+  id,
+  value,
+  onChange,
+}: {
+  id: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <Field id={id} label="Allowed addresses (optional)" description={NETWORKS_HELP}>
+      {(aria) => (
+        <Textarea
+          {...aria}
+          rows={3}
+          maxLength={API_KEY_LIMITS.allowedNetworksText}
+          spellCheck={false}
+          autoComplete="off"
+          className="font-mono text-xs"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+        />
+      )}
+    </Field>
+  );
+}
 
 /**
  * A key's token, right after it was created. It lives only in this component's memory: it is not
@@ -58,20 +95,26 @@ function NewToken({
   );
 }
 
-/** Creates a key with a name, scopes and an expiry. Scopes the member cannot grant are disabled. */
+/**
+ * Creates a key with a name, scopes and an expiry. Scopes the member cannot grant, and scopes the
+ * company's plan leaves out (ADR-092), are disabled.
+ */
 export function CreateApiKeyForm({
   slug,
   grantable,
+  notInPlan,
   atLimit,
 }: {
   slug: string;
   grantable: ApiScope[];
+  notInPlan: ApiScope[];
   atLimit: boolean;
 }) {
   const prefix = useId();
   const [name, setName] = useState('');
   const [scopes, setScopes] = useState<ApiScope[]>([]);
   const [expiresInDays, setExpiresInDays] = useState<number>(90);
+  const [networks, setNetworks] = useState('');
   const [error, setError] = useState<ActionFailureState | null>(null);
   const [busy, setBusy] = useState(false);
   const [created, setCreated] = useState<{ token: string; name: string } | null>(null);
@@ -101,13 +144,19 @@ export function CreateApiKeyForm({
         event.preventDefault();
         setBusy(true);
         setError(null);
-        void createApiKeyAction(slug, { name, scopes, expiresInDays }).then((r) => {
+        void createApiKeyAction(slug, {
+          name,
+          scopes,
+          expiresInDays,
+          allowedNetworks: networks,
+        }).then((r) => {
           setBusy(false);
           if (!r.ok) setError(r);
           else {
             setCreated({ token: r.data.token, name: name.trim() });
             setName('');
             setScopes([]);
+            setNetworks('');
           }
         });
       }}
@@ -176,13 +225,16 @@ export function CreateApiKeyForm({
                 <span className="text-xs text-muted-foreground">
                   {allowed
                     ? info.description
-                    : `${info.description} You cannot grant it: it needs a permission you do not have.`}
+                    : notInPlan.includes(scope)
+                      ? `${info.description} Your company’s plan does not include it.`
+                      : `${info.description} You cannot grant it: it needs a permission you do not have.`}
                 </span>
               </Label>
             </div>
           );
         })}
       </fieldset>
+      <NetworksField id={`${prefix}-networks`} value={networks} onChange={setNetworks} />
       <div>
         <Button type="submit" disabled={busy || !name.trim() || scopes.length === 0}>
           {busy ? 'Creating…' : 'Create API key'}
@@ -193,8 +245,8 @@ export function CreateApiKeyForm({
 }
 
 /**
- * Rotation and revocation of one key. A rotation shows the new key here, and it stays on screen
- * after the list updates (the old key may then be revoked or rotated).
+ * Rotation, revocation and the allowed addresses of one key. A rotation shows the new key here,
+ * and it stays on screen after the list updates (the old key may then be revoked or rotated).
  */
 export function ApiKeyActions({
   slug,
@@ -202,14 +254,19 @@ export function ApiKeyActions({
   name,
   rotatable,
   revocable,
+  allowedNetworks,
 }: {
   slug: string;
   keyId: string;
   name: string;
   rotatable: boolean;
   revocable: boolean;
+  /** The key's networks when they can be changed (an active key), else undefined. */
+  allowedNetworks?: string[] | null;
 }) {
   const prefix = useId();
+  const current = (allowedNetworks ?? []).map(formatAllowedNetwork).join('\n');
+  const [networks, setNetworks] = useState(current);
   const [overlapHours, setOverlapHours] = useState<number>(24);
   const [error, setError] = useState<ActionFailureState | null>(null);
   const [busy, setBusy] = useState(false);
@@ -220,8 +277,37 @@ export function ApiKeyActions({
       {token ? (
         <NewToken token={token} heading={`New key for “${name}”`} onDone={() => setToken(null)} />
       ) : null}
-      {rotatable || revocable ? (
+      {rotatable || revocable || allowedNetworks !== undefined ? (
         <div className="flex flex-wrap gap-2">
+          {allowedNetworks !== undefined ? (
+            <ConfirmDialog
+              trigger={
+                <ClientButton
+                  size="sm"
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() => setNetworks(current)}
+                >
+                  Addresses<span className="sr-only"> for {name}</span>
+                </ClientButton>
+              }
+              title={`Addresses for “${name}”`}
+              description="The key accepts requests only from these addresses. Changes apply to the next request."
+              confirmLabel="Save addresses"
+              onConfirm={() => {
+                setBusy(true);
+                setError(null);
+                void setApiKeyNetworksAction(slug, { keyId, allowedNetworks: networks }).then(
+                  (r) => {
+                    setBusy(false);
+                    if (!r.ok) setError(r);
+                  },
+                );
+              }}
+            >
+              <NetworksField id={`${prefix}-networks`} value={networks} onChange={setNetworks} />
+            </ConfirmDialog>
+          ) : null}
           {rotatable ? (
             <ConfirmDialog
               trigger={

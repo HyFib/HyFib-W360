@@ -23,6 +23,7 @@ import {
 } from '@w360/db';
 import type { PlatformDatabase } from '@w360/db/platform';
 import { planGivesAccess } from '../plans/model';
+import { STAFF_DELETION_REASON } from '../tenancy/deletion';
 
 /**
  * Platform administration (HyFib staff). Separately authorised from tenant roles: the actor must be
@@ -54,6 +55,21 @@ const supportGrantSchema = z.object({
   scopes: z.array(z.enum(SUPPORT_SCOPES)).min(1).max(SUPPORT_SCOPES.length),
   durationMinutes: z.number().int().min(15).max(480),
 });
+
+const staffDeletionReason = z
+  .string()
+  .trim()
+  .min(STAFF_DELETION_REASON.min, 'Give a reason of at least 10 characters; the company reads it.')
+  .max(STAFF_DELETION_REASON.max, 'Keep the reason under 1,000 characters.');
+
+/** A platform owner schedules a company's deletion (ADR-090): the address typed, and a reason. */
+const scheduleDeletionSchema = z.object({
+  tenantId: z.uuid(),
+  confirm: z.string().trim().min(1, 'Type the company address.').max(64),
+  reason: staffDeletionReason,
+});
+
+const cancelDeletionSchema = z.object({ tenantId: z.uuid(), reason: staffDeletionReason });
 
 const mfaResetSchema = z.object({
   userId: z.string().min(1).max(200),
@@ -365,7 +381,54 @@ export function createPlatformService(deps: PlatformDeps) {
       });
     },
 
-    /** The company's latest deletion request, if any (ADR-055): dates, state and provider cleanup. */
+    /**
+     * Schedules the company's deletion for HyFib (platform owners, ADR-090): due in 14 days, the
+     * company working as if suspended until then, its owners and administrators emailed by the
+     * worker. Refused while the company is already being deleted.
+     */
+    async scheduleTenantDeletion(
+      actor: PlatformActor,
+      input: unknown,
+    ): Promise<{ deletionId: string; dueAt: Date }> {
+      const data = parse(scheduleDeletionSchema, input);
+      if (actor.role !== 'platform_owner') {
+        throw forbidden('Only a platform owner can schedule a company’s deletion.');
+      }
+      return platformDb.run(actor.userId, async (tx) => {
+        const result = await tx.execute<{ deletion_id: string; due_at: string | Date }>(
+          sql`select deletion_id, due_at from ops.platform_request_tenant_deletion(
+                ${data.tenantId}::uuid, ${data.confirm}, ${data.reason}, ${actor.correlationId})`,
+        );
+        const row = result.rows[0];
+        if (!row) throw new Error('ops.platform_request_tenant_deletion returned no row');
+        return { deletionId: row.deletion_id, dueAt: new Date(row.due_at) };
+      });
+    },
+
+    /**
+     * Cancels a deletion HyFib scheduled, before it starts (platform owners, ADR-090); the company
+     * returns to the status it had. A deletion an owner asked for is refused: only owners cancel it.
+     */
+    async cancelTenantDeletion(actor: PlatformActor, input: unknown): Promise<{ status: string }> {
+      const data = parse(cancelDeletionSchema, input);
+      if (actor.role !== 'platform_owner') {
+        throw forbidden('Only a platform owner can cancel a company’s deletion.');
+      }
+      return platformDb.run(actor.userId, async (tx) => {
+        const result = await tx.execute<{ status: string }>(
+          sql`select ops.platform_cancel_tenant_deletion(${data.tenantId}::uuid, ${data.reason},
+                ${actor.correlationId}) as status`,
+        );
+        const status = result.rows[0]?.status;
+        if (!status) throw new Error('ops.platform_cancel_tenant_deletion returned no status');
+        return { status };
+      });
+    },
+
+    /**
+     * The company's latest deletion request, if any (ADR-055): dates, state, provider cleanup, and
+     * who scheduled or cancelled it and why (ADR-090).
+     */
     async tenantDeletion(actor: PlatformActor, tenantId: string) {
       if (!z.uuid().safeParse(tenantId).success) throw notFound('Company');
       return platformDb.run(actor.userId, async (tx) => {
@@ -382,6 +445,10 @@ export function createPlatformService(deps: PlatformDeps) {
             providerCleanupAt: tenantDeletions.providerCleanupAt,
             rowsDeleted: tenantDeletions.rowsDeleted,
             completedAt: tenantDeletions.completedAt,
+            requestedBy: tenantDeletions.requestedBy,
+            reason: tenantDeletions.reason,
+            cancelledBy: tenantDeletions.cancelledBy,
+            cancelReason: tenantDeletions.cancelReason,
           })
           .from(tenantDeletions)
           .where(eq(tenantDeletions.tenantId, tenantId))

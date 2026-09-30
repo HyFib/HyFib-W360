@@ -65,7 +65,8 @@ export default async function CompanyDataPage({ params }: { params: Promise<{ sl
             <CardTitle>Delete the company</CardTitle>
             <CardDescription>
               The company is deleted {DELETION_GRACE_DAYS} days after an owner asks; until then it
-              works as if suspended and any owner can cancel.
+              works as if suspended and any owner can cancel. HyFib can also schedule a deletion,
+              which only HyFib can cancel.
             </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-4 text-sm">
@@ -75,6 +76,20 @@ export default async function CompanyDataPage({ params }: { params: Promise<{ sl
                   The deletion started and can no longer be cancelled. The owners and administrators
                   are emailed when it is finished.
                 </Alert>
+              ) : deletion.requestedBy === 'platform' ? (
+                <>
+                  <Alert tone="warning">
+                    This company will be deleted on {formatDateTime(deletion.dueAt, tz)}, as HyFib
+                    scheduled on {formatDateTime(deletion.requestedAt, tz)}. Export its data before
+                    then if you need a copy.
+                  </Alert>
+                  <p className="whitespace-pre-line break-words">
+                    <span className="font-medium">HyFib’s reason:</span> {deletion.reason}
+                  </p>
+                  <p className="text-muted-foreground">
+                    Only HyFib can cancel this deletion. Contact HyFib support to discuss it.
+                  </p>
+                </>
               ) : (
                 <>
                   <Alert tone="warning">

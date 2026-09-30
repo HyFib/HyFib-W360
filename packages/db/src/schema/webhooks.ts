@@ -3,12 +3,26 @@ import { appSchema } from './tenancy';
 
 const tz = (name: string) => timestamp(name, { withTimezone: true, mode: 'date' });
 
-/** Event types an endpoint can receive (ADR-053); `ping` is only sent as a test. */
+/**
+ * Event types an endpoint can receive (ADR-053, ADR-074, ADR-078, ADR-085); `ping` is only sent as
+ * a test.
+ */
 export const WEBHOOK_EVENT_TYPES = [
   'message.received',
   'message.status',
   'consent.changed',
   'template.status_changed',
+  'conversation.status_changed',
+  'conversation.assignment_changed',
+  'conversation.team_changed',
+  'contact.created',
+  'contact.updated',
+  'contact.erased',
+  'automation.run_started',
+  'automation.run_ended',
+  'order.received',
+  'order.status_changed',
+  'campaign.status_changed',
 ] as const;
 export type WebhookEventType = (typeof WEBHOOK_EVENT_TYPES)[number];
 
@@ -34,12 +48,17 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
   failingSince: tz('failing_since'),
   lastSuccessAt: tz('last_success_at'),
   lastFailureAt: tz('last_failure_at'),
-  createdByUserId: text('created_by_user_id').notNull(),
+  /** The member who created the endpoint in settings, or the key that created it (ADR-081). */
+  createdByUserId: text('created_by_user_id'),
+  createdByApiKeyId: uuid('created_by_api_key_id'),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });
 
-/** What happened, without personal data; written by the capture triggers (and test sends). */
+/**
+ * What happened, without personal data; written by the capture triggers (and test sends). The
+ * contact events' `captured_xact` (migration 0047) is used only by the capture functions in SQL.
+ */
 export const webhookEvents = appSchema.table('webhook_events', {
   id: uuid('id').primaryKey(),
   tenantId: uuid('tenant_id').notNull(),

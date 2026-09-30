@@ -8,6 +8,7 @@ import {
   API_SCOPE_KEYS,
   apiKeyExpiresSoon,
   can,
+  formatAllowedNetwork,
   hasRecentSignIn,
   RECENT_SIGN_IN_MINUTES,
   type ApiKeyView,
@@ -40,7 +41,13 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
   const inPlan = apiLimit !== 0;
   const tz = ctx.tenant.timezone;
   const apiBase = new URL('/api/v1', config.APP_BASE_URL).toString();
-  const grantable = API_SCOPE_KEYS.filter((s) => can(ctx, API_SCOPE_INFO[s].permission));
+  // Scopes the plan leaves out (ADR-092): refused to requests, and not offered for new keys.
+  const planScopes = usage.apiScopes;
+  const notInPlan =
+    planScopes === null ? [] : API_SCOPE_KEYS.filter((s) => !planScopes.includes(s));
+  const grantable = API_SCOPE_KEYS.filter(
+    (s) => can(ctx, API_SCOPE_INFO[s].permission) && !notInPlan.includes(s),
+  );
   const activeCount = keys.filter((k) => k.state === 'active').length;
   const prefixes = new Map(keys.map((k) => [k.id, k.keyPrefix]));
   const now = clock.now();
@@ -50,10 +57,15 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
         <CardHeader>
           <CardTitle>Using the API</CardTitle>
           <CardDescription>
-            Your systems can send approved templates, create contacts, record consent and read
-            message status through the HyFib W360 API. Each key belongs to the company and has only
-            the scopes chosen for it. The audit log records changes to keys, and the contacts and
-            consent a key records.
+            Your systems can send approved templates and replies (text, buttons, lists, products and
+            reactions, quoting a message if they like), create contacts, record consent, read
+            conversations, their messages (one conversation or all of them) and their notes, resolve
+            and reopen conversations and add notes to them, start and stop automations, add webhook
+            endpoints and follow their deliveries, and read message status through the HyFib W360
+            API. Each key belongs to the company and has only the scopes chosen for it. The audit
+            log records changes to keys, the contacts and consent a key records, the conversations
+            it resolves or reopens, the automation runs it starts and stops, the webhook endpoints
+            it adds and changes, and the deliveries it replays.
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4">
@@ -76,13 +88,21 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
               refused and new keys cannot be created. Ask HyFib to change the plan.
             </Alert>
           )}
+          {inPlan && planScopes !== null ? (
+            <p className="text-sm">
+              Your plan includes these scopes:{' '}
+              {planScopes.map((s) => API_SCOPE_INFO[s].label).join(', ')}. Requests that need
+              another scope are refused, whatever scopes their key has.
+            </p>
+          ) : null}
           <CopyField label="Base URL" value={apiBase} />
           <p className="text-sm">
             Send the key as{' '}
             <code className="font-mono text-xs">Authorization: Bearer &lt;key&gt;</code>. Sending a
             message needs an <code className="font-mono text-xs">Idempotency-Key</code> header, so a
             retry never sends twice. Each key can make {API_LIMITS.keyRate.refillPerSecond} requests
-            a second. The full reference is the{' '}
+            a second, and can be limited to the addresses your systems call from. The full reference
+            is the{' '}
             <a
               className="font-medium underline underline-offset-4"
               href="/api/v1/openapi.json"
@@ -139,11 +159,27 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
                     </div>
                     <p className="font-mono text-xs">{k.keyPrefix}_…</p>
                     <p className="flex flex-wrap gap-1">
-                      {k.scopes.map((s) => (
-                        <Badge key={s} tone="neutral">
-                          {API_SCOPE_INFO[s].label}
-                        </Badge>
-                      ))}
+                      {k.scopes.map((s) =>
+                        notInPlan.includes(s) ? (
+                          <Badge key={s} tone="warning">
+                            {API_SCOPE_INFO[s].label}: not in your plan
+                          </Badge>
+                        ) : (
+                          <Badge key={s} tone="neutral">
+                            {API_SCOPE_INFO[s].label}
+                          </Badge>
+                        ),
+                      )}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      Accepts requests from{' '}
+                      {k.allowedNetworks ? (
+                        <span className="font-mono text-foreground">
+                          {k.allowedNetworks.map(formatAllowedNetwork).join(', ')}
+                        </span>
+                      ) : (
+                        'any address'
+                      )}
                     </p>
                     <dl className="grid gap-x-4 gap-y-1 text-xs text-muted-foreground sm:grid-cols-2">
                       <div>
@@ -188,6 +224,7 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
                       name={k.name}
                       rotatable={inPlan && k.state === 'active' && !k.replacedByKeyId}
                       revocable={k.state === 'active'}
+                      allowedNetworks={k.state === 'active' ? k.allowedNetworks : undefined}
                     />
                   </li>
                 );
@@ -214,6 +251,7 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
             <CreateApiKeyForm
               slug={ctx.tenant.slug}
               grantable={grantable}
+              notInPlan={notInPlan}
               atLimit={activeCount >= API_KEY_LIMITS.activeKeys}
             />
           ) : (

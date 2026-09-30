@@ -40,9 +40,11 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
         <CardHeader>
           <CardTitle>Webhooks</CardTitle>
           <CardDescription>
-            Your systems can receive what happens in HyFib W360 as it happens: messages received,
-            message status, consent changes and template status. Each event is a signed JSON POST to
-            your endpoint.
+            Your systems can receive what happens in HyFib W360 as it happens: messages and their
+            status, consent changes, template status, conversations resolved, reopened or assigned,
+            contacts added, changed or erased, automations starting and ending, orders customers
+            send from your WhatsApp catalog and their status, and campaigns changing status. Each
+            event is a signed JSON POST to your endpoint.
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-2 text-sm">
@@ -140,7 +142,11 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                         <dt className="inline">Added </dt>
                         <dd className="inline">
                           {formatDateTime(e.createdAt, tz)}
-                          {e.createdBy ? ` by ${e.createdBy}` : ''}
+                          {e.createdByKey
+                            ? ` by the API key “${e.createdByKey.name}” (${e.createdByKey.keyPrefix}_…)`
+                            : e.createdBy
+                              ? ` by ${e.createdBy}`
+                              : ''}
                         </dd>
                       </div>
                     </dl>

@@ -3,12 +3,14 @@ import {
   eq,
   plans,
   tenantPlans,
+  type ApiScope,
   type Database,
   type PlanModule,
   type PlanStatus,
   type TenantPlanStatus,
   type Tx,
 } from '@w360/db';
+import { API_SCOPE_KEYS } from '../api/model';
 import { assertCan, type TenantContext } from '../authz/context';
 import {
   activeMemberCount,
@@ -33,6 +35,8 @@ export interface PlanUsage {
   automationRuns: { used: number; periodStart: Date; periodEnd: Date };
   /** Public API requests counted this period (ADR-061), with or without a limit. */
   apiRequests: { used: number; periodStart: Date; periodEnd: Date };
+  /** The public API scopes the plan includes, in the list's order; null: every scope (ADR-092). */
+  apiScopes: ApiScope[] | null;
 }
 
 /** The company's own view of its plan (ADR-051), shown on the Billing page. */
@@ -71,6 +75,7 @@ export function createPlansService(deps: PlansServiceDeps) {
     const now = clock.now();
     const entitlements = await loadEntitlements(tx, tenantId);
     const period = usagePeriod(entitlements.usageAnchor, now);
+    const included = entitlements.apiScopes;
     return {
       limits: entitlements.limits,
       seats: {
@@ -90,6 +95,7 @@ export function createPlansService(deps: PlansServiceDeps) {
         periodStart: period.start,
         periodEnd: period.end,
       },
+      apiScopes: included === null ? null : API_SCOPE_KEYS.filter((s) => included.has(s)),
     };
   }
 

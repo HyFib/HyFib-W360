@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, randomInt } from 'node:crypto';
+import { createHmac, randomBytes, randomInt, randomUUID } from 'node:crypto';
 import type { APIRequestContext, Page } from '@playwright/test';
 import { expect, test } from './fixtures';
 import {
@@ -99,7 +99,7 @@ test('a catalog is read from Meta, products are sent in a chat and an order is p
   request,
 }) => {
   test.setTimeout(240_000);
-  const { wabaId, phoneNumberId } = await newCompany(page, 'shop', 'Sana Shop');
+  const { slug, wabaId, phoneNumberId } = await newCompany(page, 'shop', 'Sana Shop');
   const catalogId = String(randomInt(100_000_000, 999_999_999));
   const keyId = `rzp_test_${randomBytes(8).toString('hex')}`;
   const keySecret = randomBytes(18).toString('hex');
@@ -154,6 +154,7 @@ test('a catalog is read from Meta, products are sent in a chat and an order is p
   await openFromNav(page, 'Inbox');
   await page.getByRole('link', { name: /Priya Customer/ }).click({ timeout: 20_000 });
   await expect(page.getByRole('heading', { name: 'Send products' })).toBeVisible();
+  const conversationUrl = page.url();
   await page
     .getByLabel('Product', { exact: true })
     .selectOption({ label: 'Masala chai · ₹120.00' });
@@ -192,6 +193,42 @@ test('a catalog is read from Meta, products are sent in a chat and an order is p
     ],
   });
   await expectNoHorizontalOverflow(page);
+
+  // An integration sends a product through the API with a key created in settings (ADR-086).
+  // The live inbox is left through the navigation, not a page load (see openFromNav).
+  await openFromNav(page, 'Settings');
+  await page
+    .getByRole('navigation', { name: 'Settings sections' })
+    .getByRole('link', { name: 'API keys' })
+    .click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}/settings/api-keys$`));
+  await page.getByLabel('Name', { exact: true }).fill('Shop');
+  await page
+    .getByRole('checkbox', { name: /Reply with text, buttons, lists, products and reactions/ })
+    .check();
+  await page.getByRole('button', { name: 'Create API key' }).click();
+  const token = await page.getByLabel('API key', { exact: true }).inputValue();
+  await page.getByRole('button', { name: 'I have stored the key' }).click();
+  const viaApi = await request.post('/api/v1/messages', {
+    headers: { Authorization: `Bearer ${token}`, 'Idempotency-Key': randomUUID() },
+    data: { type: 'product', to: `+${customer}`, retailerId: 'chai-2', body: 'Fresh today' },
+  });
+  expect(viaApi.status()).toBe(201);
+  const apiProduct = await sentTo(
+    request,
+    customer,
+    (b) =>
+      (b.interactive as { action?: { product_retailer_id?: unknown } } | undefined)?.action
+        ?.product_retailer_id === 'chai-2',
+  );
+  expect((apiProduct.interactive as { action: unknown }).action).toEqual({
+    catalog_id: catalogId,
+    product_retailer_id: 'chai-2',
+  });
+  // The chat shows it with the key's name, as it shows the products members send.
+  await page.goto(conversationUrl);
+  await expect(thread.getByText('Fresh today')).toBeVisible();
+  await expect(thread.getByText('· API (Shop)')).toBeVisible();
 
   // The customer sends a cart: the order appears in the chat with an exact total.
   await sendSignedWebhook(

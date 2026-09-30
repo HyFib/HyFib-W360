@@ -76,7 +76,7 @@ test('a Shopify store is approved in Shopify, its orders are read and shown next
   request,
 }) => {
   test.setTimeout(180_000);
-  const { wabaId, phoneNumberId } = await newCompany(page, 'shopify', 'Tara Tea');
+  const { slug, wabaId, phoneNumberId } = await newCompany(page, 'shopify', 'Tara Tea');
   const shopName = `tara-${Date.now().toString(36)}`;
   const shop = `${shopName}.myshopify.com`;
   const customer = randomWaId();
@@ -152,8 +152,15 @@ test('a Shopify store is approved in Shopify, its orders are read and shown next
   await page.getByRole('link', { name: shopName, exact: true }).click();
   await page.getByRole('button', { name: 'Remove store' }).click();
   await page.getByRole('button', { name: 'Yes, remove the store' }).click();
-  await expect(page.getByText('Being removed', { exact: true })).toBeVisible();
-  await openStores(page);
+  // The worker can finish the removal before the page is drawn again: then the store is gone, and
+  // the page is the plain not-found page, without the company's navigation (once on Firefox in CI),
+  // so the list is opened by its address.
+  await expect(
+    page
+      .getByText('Being removed', { exact: true })
+      .or(page.getByRole('heading', { name: 'Page not found' })),
+  ).toBeVisible();
+  await page.goto(`/c/${slug}/commerce/stores`);
   await reloadUntil(page, () => page.getByText('No store connected yet.'));
   const state = (await control(request, `${SHOPIFY}/__stand-in/shop`, { shop })) as {
     installed: boolean;

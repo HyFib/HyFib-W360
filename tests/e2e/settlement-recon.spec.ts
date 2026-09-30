@@ -81,13 +81,16 @@ async function payLongAgo(paymentId: string): Promise<string> {
 
 /**
  * Each browser project reconciles its own day, and a retry another one: they share one database and
- * one stand-in, which keeps what an earlier attempt settled.
+ * one stand-in, which keeps what an earlier attempt settled. The offsets are odd and two apart, so
+ * the days stay apart when a run crosses India's midnight (18:30 UTC) between two projects: days
+ * picked before it lie an odd number of days before the day the run started, days picked after it
+ * an even number. (With offsets one apart, a CI run once gave chromium and mobile-chromium one day.)
  */
 const DAY_OFFSETS: Record<string, number> = {
   chromium: -5,
-  'mobile-chromium': -6,
-  firefox: -7,
-  webkit: -8,
+  'mobile-chromium': -7,
+  firefox: -9,
+  webkit: -11,
 };
 const PROJECTS = Object.keys(DAY_OFFSETS).length;
 
@@ -98,7 +101,7 @@ test('a platform owner reconciles a settled day: a payment HyFib missed is credi
   const { project, retry } = test.info();
   const offset = DAY_OFFSETS[project.name];
   if (offset === undefined) throw new Error(`No settlement day for the ${project.name} project`);
-  const day = indiaDay(offset - PROJECTS * retry);
+  const day = indiaDay(offset - 2 * PROJECTS * retry);
   let paymentId = '';
   // The customer pays and closes Checkout at once: HyFib never hears of the payment.
   await routeFakeCheckout(page, {
@@ -244,8 +247,9 @@ test('a platform owner reconciles a settled day: a payment HyFib missed is credi
     .fill('Payment for the old website, checked with finance');
   await resolve.getByRole('button', { name: 'Mark resolved' }).click();
   await expect(page.getByRole('heading', { name: 'Needs a person (0)' })).toBeVisible();
+  // Every project's platform owner is called Ravi Recon: the note is looked for in this item's row.
   await expect(
-    page.getByText(/Resolved by Ravi Recon on .*: Payment for the old website/),
+    other.getByText(/Resolved by Ravi Recon on .*: Payment for the old website/),
   ).toBeVisible();
   await expectNoHorizontalOverflow(page);
 

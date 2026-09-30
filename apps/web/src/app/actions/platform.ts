@@ -43,6 +43,30 @@ export async function revokeSupportAccessAction(grantId: string): Promise<Action
   });
 }
 
+/** Schedules a company's deletion for HyFib (platform owners, ADR-090). */
+export async function scheduleTenantDeletionAction(
+  input: unknown,
+): Promise<ActionResult<{ dueAt: string }>> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    const { dueAt } = await runtime.platform.scheduleTenantDeletion(actor, input);
+    refresh();
+    return { dueAt: dueAt.toISOString() };
+  });
+}
+
+/** Cancels a deletion HyFib scheduled, before it starts (platform owners, ADR-090). */
+export async function cancelTenantDeletionAction(
+  input: unknown,
+): Promise<ActionResult<{ status: string }>> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    const result = await runtime.platform.cancelTenantDeletion(actor, input);
+    refresh();
+    return result;
+  });
+}
+
 export async function resetUserMfaAction(input: unknown): Promise<ActionResult> {
   return runAction(async () => {
     const { actor, runtime } = await actorForAction();
@@ -59,6 +83,18 @@ export async function requestCreditRefundAction(
   return runAction(async () => {
     const { actor, runtime } = await actorForAction();
     const result = await runtime.platformBilling.requestRefund(actor, input);
+    refresh();
+    return result;
+  });
+}
+
+/** Approves or declines a company's refund request (platform owners, ADR-073). */
+export async function decideRefundRequestAction(
+  input: unknown,
+): Promise<ActionResult<{ refundId: string | null }>> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    const result = await runtime.platformBilling.decideRefundRequest(actor, input);
     refresh();
     return result;
   });

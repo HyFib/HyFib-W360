@@ -16,6 +16,9 @@ export const API_SCOPE_KEYS = [
   'messages.send_marketing',
   'messages.reply',
   'conversations.read',
+  'conversations.write',
+  'automations.start',
+  'webhooks.manage',
 ] as const satisfies readonly ApiScope[];
 
 /**
@@ -58,18 +61,39 @@ export const API_SCOPE_INFO: Record<
     writes: true,
   },
   'messages.reply': {
-    label: 'Reply with text',
+    label: 'Reply with text, buttons, lists, products and reactions',
     description:
-      'Send text messages to contacts who wrote to the number in the last 24 hours, and read the status of messages the API sent.',
+      'Send text, reply buttons, list messages, products from the company’s WhatsApp catalogs and reactions to contacts who wrote to the number in the last 24 hours, quoting their messages if wanted, and read the status of messages the API sent.',
     permission: 'inbox.reply',
     writes: true,
   },
   'conversations.read': {
     label: 'Read conversations',
     description:
-      "List the company's conversations and read their messages, including what contacts wrote.",
+      "List the company's conversations and read their messages, one conversation or all of them, including what contacts wrote, and their internal notes, with the teams and the members conversations can be assigned to (names only).",
     permission: 'inbox.read_all',
     writes: false,
+  },
+  'conversations.write': {
+    label: 'Resolve, reopen, assign and add notes to conversations',
+    description:
+      'Mark conversations resolved, or open again, assign them to members or move them between teams, as members do in the inbox, and add internal notes the team reads there (WhatsApp never receives them). Resolving a conversation or assigning it to a member stops an automation answering it.',
+    permission: 'inbox.supervise',
+    writes: true,
+  },
+  'automations.start': {
+    label: 'Start automations',
+    description:
+      'Start published automations made to start through the API, for one contact at a time with the inputs they need, and read and stop the runs keys started. They message contacts who have not written first, with templates.',
+    permission: 'automations.publish',
+    writes: true,
+  },
+  'webhooks.manage': {
+    label: 'Manage webhook endpoints',
+    description:
+      "Add webhook endpoints that receive the company's events, including what contacts write, and read, change, rotate the secret of and delete the endpoints keys added, with their deliveries, test events and replays. Owners and administrators are emailed when a key adds one.",
+    permission: 'developer.manage',
+    writes: true,
   },
 };
 
@@ -90,6 +114,9 @@ export const API_KEY_LIMITS = {
   activeKeys: 20,
   nameLength: 80,
   rotationOverlapHours: 72,
+  /** Networks a key may list (ADR-076), and the characters of the settings field that lists them. */
+  allowedNetworks: 20,
+  allowedNetworksText: 2000,
 } as const;
 
 export const API_LIMITS = {
@@ -118,6 +145,12 @@ export function apiKeyState(
   if (key.revokedAt) return 'revoked';
   if (key.expiresAt && key.expiresAt <= now) return 'expired';
   return 'active';
+}
+
+/** A network a key accepts (ADR-076) as settings show it: a single address without /32 or /128. */
+export function formatAllowedNetwork(network: string): string {
+  const single = network.includes(':') ? '/128' : '/32';
+  return network.endsWith(single) ? network.slice(0, -single.length) : network;
 }
 
 /**
