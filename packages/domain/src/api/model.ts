@@ -70,7 +70,7 @@ export const API_SCOPE_INFO: Record<
   'conversations.read': {
     label: 'Read conversations',
     description:
-      "List the company's conversations and read their messages, including what contacts wrote.",
+      "List the company's conversations and read their messages, one conversation or all of them, including what contacts wrote.",
     permission: 'inbox.read_all',
     writes: false,
   },

@@ -251,7 +251,7 @@ test('a key answers a customer who wrote, reads the conversation and resolves it
   const listed = await request.get('/api/v1/conversations?status=open', { headers: auth });
   expect(listed.status()).toBe(200);
   const conversations = (await listed.json()) as {
-    data: { id: string; status: string; serviceWindowEndsAt: string | null }[];
+    data: { id: string; status: string; channelId: string; serviceWindowEndsAt: string | null }[];
     nextCursor: string | null;
   };
   expect(conversations.data).toHaveLength(1);
@@ -282,7 +282,8 @@ test('a key answers a customer who wrote, reads the conversation and resolves it
     `/api/v1/conversations/${open!.id}/messages?limit=1&cursor=${firstPage.nextCursor}`,
     { headers: auth },
   );
-  expect((await older.json()).data).toEqual([
+  const olderPage = (await older.json()) as { data: Record<string, unknown>[] };
+  expect(olderPage.data).toEqual([
     expect.objectContaining({
       direction: 'inbound',
       type: 'text',
@@ -293,6 +294,32 @@ test('a key answers a customer who wrote, reads the conversation and resolves it
   ]);
   const resolved = await request.get('/api/v1/conversations?status=resolved', { headers: auth });
   expect((await resolved.json()).data).toEqual([]);
+
+  // The feed across every conversation (ADR-088) holds the same messages, newest first, each with
+  // the contact and the number.
+  const withThread = (m: Record<string, unknown> | undefined) => ({
+    ...m,
+    contactId: queued.contactId,
+    channelId: open!.channelId,
+  });
+  const feed = await request.get('/api/v1/messages?limit=1', { headers: auth });
+  expect(feed.status()).toBe(200);
+  const feedPage = (await feed.json()) as {
+    data: Record<string, unknown>[];
+    nextCursor: string | null;
+  };
+  expect(feedPage.data).toEqual([withThread(firstPage.data[0])]);
+  const feedOlder = await request.get(`/api/v1/messages?limit=1&cursor=${feedPage.nextCursor}`, {
+    headers: auth,
+  });
+  const feedOlderPage = (await feedOlder.json()) as {
+    data: Record<string, unknown>[];
+    nextCursor: string | null;
+  };
+  expect(feedOlderPage.data).toEqual([withThread(olderPage.data[0])]);
+  expect(feedOlderPage.nextCursor).toBeNull();
+  const inboundOnly = await request.get('/api/v1/messages?direction=inbound', { headers: auth });
+  expect((await inboundOnly.json()).data).toEqual([withThread(olderPage.data[0])]);
 
   // Members see the reply in the conversation, marked with the key that sent it.
   await conversation.click();
@@ -306,6 +333,7 @@ test('a key answers a customer who wrote, reads the conversation and resolves it
     request.patch(`/api/v1/conversations/${open!.id}`, { headers: auth, data: { status } });
   const doc = await (await request.get('/api/v1/openapi.json')).json();
   expect(doc.paths['/conversations/{id}'].patch.operationId).toBe('setConversationStatus');
+  expect(doc.paths['/messages'].get.operationId).toBe('listMessages');
   const resolvedNow = await setStatus('resolved');
   expect(resolvedNow.status()).toBe(200);
   const resolvedBody = (await resolvedNow.json()).data as Record<string, unknown>;

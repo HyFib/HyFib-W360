@@ -1,5 +1,82 @@
 # Progress
 
+## 2026-09-30 — Phase 5: a message feed across conversations through the public API (P5-08, ADR-088)
+
+Status: **Implemented and locally verified (no customer data).** Integrations that copy what
+customers write into a helpdesk, a CRM or a warehouse read messages one conversation at a time: to
+catch up after their receiver was down, or to fill a new install, they listed the conversations
+updated since their last pass and read each one's messages, one request per conversation.
+
+### Completed
+
+- **Design (ADR-088):** `GET /api/v1/messages` (`listMessages`) pages the messages of every
+  conversation of the company newest first on exact keyset cursors, with `direction`, `channelId`
+  and `since`, under `conversations.read` (no new scope: it reads what one conversation's messages
+  already give). Each message reads as a conversation's messages read it, with the conversation's
+  contact and the number it was received on or sent from; no media, no internal notes, no erased
+  contacts' conversations. Catching up: ask for `since` a little before the previous pass began and
+  deduplicate on the id; statuses are followed with the `message.status` webhook.
+- **A bounded read per page:** measured before building (400,000 synthetic messages of one company
+  in a rolled-back transaction on the local PostgreSQL 18): `messages_tenant_created_idx` (0008)
+  serves unfiltered pages in a few milliseconds, but a filter matching few messages read every
+  message the company has (774 ms for a number without messages, growing with the company up to the
+  15-second statement timeout). Rather than an index per filter on the busiest table, each page
+  reads at most 2,000 messages (`API_MESSAGE_FEED_WINDOW`): a first read finds the 2,000th message
+  from the cursor, the second reads the matches between them, both in one repeatable-read, read-only
+  transaction; a short page's cursor continues after the last message it read. Measured the same
+  way, each read took about 3 ms, for a number without messages and for a page 300,000 messages
+  back alike. No migration.
+- **Domain:** `apiListMessages` and `apiMessageFeedQuerySchema` in `api/conversations.ts`, with the
+  message columns and `toApiMessage` now shared with `apiListConversationMessages`; the OpenAPI
+  operation `listMessages` with its parameters and the `FeedMessage` schema; the
+  `conversations.read` description and the API description name the feed.
+- **Web:** `GET` on `/api/v1/messages` beside `POST`; Settings → API keys says keys read messages
+  of one conversation or all of them.
+- **Tests:** unit (the query: direction, number and time, unknown fields refused; the scope checked
+  before the query; the OpenAPI operation with exactly its parameters, the window in its description
+  and `FeedMessage` with the contact and number). Integration in `api.test.ts`: every
+  conversation's messages newest first on pages of 1, 2 and 3 that never skip or repeat, two of them
+  saved by one delivery with the same time to the microsecond; each message as the conversation's
+  messages read it, with the contact and number; a reply sent through the API named with its key;
+  notes and an erased contact's conversation left out; `direction`, `channelId` (a second number, an
+  unknown one) and `since` (a message's own time included, a later time empty until a new message);
+  another company's key reading only its own; 2,002 messages read 2,000 at a time: unfiltered pages
+  of 100 always full, answers placed at the window's last message and the one after it found on a
+  short page and the next, a number without messages giving two empty pages to the end; the scope
+  and bad queries (direction, number, time, limit, unknown field, cursor) refused. e2e `api.spec.ts`:
+  after reading the conversation page by page, the key reads the same two messages in the feed, one
+  page at a time, with the contact and number, and the inbound one alone by direction; the OpenAPI
+  document names `listMessages`.
+- **Docs:** ADR-088; ARCHITECTURE (public API); SECURITY (Phase 5 rules); THREAT-MODEL T106;
+  RUNBOOKS (the message feed); BACKLOG P5-08; FEATURE-MATRIX H-033 and W-134.
+- **Mutation checks:** 24 regressions tried one at a time; 23 make a test fail. 22 of 23 in the domain: the
+  scope not checked; erased contacts' conversations included; `direction`, `channelId` or `since`
+  ignored; `since` exclusive; the cursor's own message read again; messages sharing a time in the
+  other order; a window one message larger or smaller; no window; the window's last message left
+  out; a short page ending the feed; no further pages seen; the conversation given as the contact;
+  the number left out; any text taken as `since` or `channelId`; unknown query fields accepted; the
+  route, the window paragraph or the contact and number missing from the OpenAPI document. The
+  other, dropping the company condition from the query, cannot be observed: row security already
+  keeps other companies' messages out, which the test checks. 1 in the web layer through the e2e
+  test: the route answering POST only.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                     | Result                                                                                                                                                            |
+| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                    |
+| `pnpm test` (unit)                                                          | 403 passed, including 3 new in `api/api.test.ts`                                                                                                                  |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 545 passed, including 3 new in `api.test.ts`                                                                                                                      |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 545 passed                                                                                                                                                        |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / on `api.spec.ts`: 10 passed (2.2 min), on the local database created for the day's runs                                                            |
+| Query plans (EXPLAIN ANALYZE, 400,000 synthetic messages, rolled back)      | unbounded read: 774 ms for a number without messages; each windowed read: about 3 ms, for a number without messages and 300,000 messages back alike               |
+| Mutation checks                                                             | 24 regressions tried (1 through the e2e test); 23 make a test fail, and the other (the company in the query, already enforced by row security) cannot be observed |
+
+### Known gaps
+
+- Not built: statuses changed since a time, filters by contact or conversation, media, notes,
+  counts.
+
 ## 2026-09-30 — Phase 5: webhook events for campaigns (P5-09, ADR-087)
 
 Status: **Implemented and locally verified with local test receivers (no customer data).** A CRM or

@@ -5,6 +5,7 @@ import { authorizedTenantScope, channelAccounts, sql, whatsappAccounts } from '@
 import {
   API_KEY_LIMITS,
   API_KEY_REMINDER_DAYS,
+  API_MESSAGE_FEED_WINDOW,
   API_SCOPE_KEYS,
   API_TOKEN_RE,
   RUN_BUDGETS,
@@ -21,6 +22,7 @@ import {
   apiListContacts,
   apiListConversationMessages,
   apiListConversations,
+  apiListMessages,
   apiListTemplates,
   apiRecordConsent,
   apiSendMessage,
@@ -5069,5 +5071,233 @@ describe('reminders before keys expire (ADR-067)', () => {
     // Other changes to the key still work: revoking it, for example.
     await keys.revoke(await fx.ctx(c, c.owner), { keyId: key.id });
     expect((await keyRow(key.id)).expiry_reminded_at).not.toBeNull();
+  });
+});
+
+describe('the message feed (ADR-088)', () => {
+  /** Every page of the feed, following `nextCursor`. */
+  async function everyPage(ctx: ApiContext, query: Record<string, string>) {
+    const pages: Awaited<ReturnType<typeof apiListMessages>>['data'][] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await apiListMessages(deps(), ctx, { ...query, ...(cursor ? { cursor } : {}) });
+      pages.push(page.data);
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor && pages.length < 50);
+    return pages;
+  }
+
+  /** PostgreSQL's time, to the microsecond. */
+  async function databaseNow() {
+    const [row] = await fx.query<{ now: string }>(
+      `SELECT to_char(now() at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS now`,
+    );
+    return row!.now;
+  }
+
+  it('lists the messages of every conversation newest first, with their contact and number, on pages that never skip or repeat', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const reader = await apiKey(c, ['conversations.read']);
+    const replier = await apiKey(c, ['messages.reply'], 'Helpdesk');
+    const owner = await fx.ctx(c, c.owner);
+    const second = await addNumber(c, 'active');
+    const [secondNumber] = await fx.query<{ phone_number_id: string }>(
+      'SELECT phone_number_id FROM app.channel_accounts WHERE id = $1',
+      [second],
+    );
+    // Two messages in one delivery share their creation time to the microsecond.
+    await fx.deliver(
+      fx.messagesBody(c, {
+        messages: [
+          { waId: '919811100081', text: 'Is it in stock?' },
+          { waId: '919811100081', text: 'In blue?' },
+        ],
+      }),
+    );
+    await inbound(c, '919811100082', [{ text: 'Hello' }], secondNumber!.phone_number_id);
+    await inbound(c, '919811100083', [{ text: 'Please forget me' }]);
+    await inbound(other, '919811100084', [{ text: 'Another company' }]);
+    const reply = await apiSendMessage(
+      deps(),
+      replier.ctx,
+      { type: 'text', to: '+919811100081', from: c.channelAccountId, text: 'Yes, in blue too.' },
+      idem('feed-1', 'feed-1'),
+    );
+    const [asking, onSecond, erasedConv] = await Promise.all(
+      ['919811100081', '919811100082', '919811100083'].map((w) => conversationOf(c, w)),
+    );
+    const [asked] = await fx.query<{ times: number }>(
+      `SELECT count(DISTINCT created_at)::int AS times FROM app.messages
+        WHERE conversation_id = $1 AND direction = 'inbound'`,
+      [asking!.id],
+    );
+    expect(asked!.times).toBe(1);
+    // Internal notes are not messages, and an erased contact's conversation is left out.
+    await inbox().addNote(owner, { conversationId: asking!.id, body: 'Check the warehouse.' });
+    await createContactsService({ db: fx.dbs.app, clock: systemClock }).eraseContact(owner, {
+      contactId: erasedConv!.contact_id,
+      suppress: false,
+    });
+    const newestFirst = (
+      await fx.query<{ id: string }>(
+        `SELECT m.id FROM app.messages m
+           JOIN app.conversations cv ON cv.tenant_id = m.tenant_id AND cv.id = m.conversation_id
+          WHERE m.tenant_id = $1 AND cv.contact_id <> $2
+          ORDER BY m.created_at DESC, m.id DESC`,
+        [c.tenant.id, erasedConv!.contact_id],
+      )
+    ).map((r) => r.id);
+    expect(newestFirst).toHaveLength(4);
+    for (const limit of ['1', '2', '3']) {
+      const pages = await everyPage(reader.ctx, { limit });
+      expect(
+        pages.flat().map((m) => m.id),
+        `limit ${limit}`,
+      ).toEqual(newestFirst);
+    }
+
+    // Each message reads as the conversation's messages read it, with the contact and number.
+    const feed = (await apiListMessages(deps(), reader.ctx, {})).data;
+    const inConversation = (await apiListConversationMessages(deps(), reader.ctx, asking!.id, {}))
+      .data;
+    expect(feed.filter((m) => m.conversationId === asking!.id)).toEqual(
+      inConversation.map((m) => ({
+        ...m,
+        contactId: asking!.contact_id,
+        channelId: c.channelAccountId,
+      })),
+    );
+    expect(feed.find((m) => m.conversationId === onSecond!.id)).toMatchObject({
+      contactId: onSecond!.contact_id,
+      channelId: second,
+      direction: 'inbound',
+      text: 'Hello',
+    });
+    expect(feed.find((m) => m.id === (reply.body.data as { id: string }).id)).toMatchObject({
+      direction: 'outbound',
+      sentBy: 'api',
+      apiKeyId: replier.id,
+      text: 'Yes, in blue too.',
+    });
+
+    // Filters: direction, number and a time; each keeps the order.
+    const ids = async (query: Record<string, string>) =>
+      (await apiListMessages(deps(), reader.ctx, query)).data.map((m) => m.id);
+    const outboundIds = feed.filter((m) => m.direction === 'outbound').map((m) => m.id);
+    expect(outboundIds).toHaveLength(1);
+    expect(await ids({ direction: 'outbound' })).toEqual(outboundIds);
+    expect(await ids({ direction: 'inbound' })).toEqual(
+      newestFirst.filter((id) => !outboundIds.includes(id)),
+    );
+    expect(await ids({ channelId: second })).toEqual(
+      feed.filter((m) => m.channelId === second).map((m) => m.id),
+    );
+    expect(await ids({ channelId: uuidv7() })).toEqual([]);
+    // `since` a message's own time includes it.
+    const [replyTime] = await fx.query<{ at: string }>(
+      `SELECT to_char(created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at
+         FROM app.messages WHERE id = $1`,
+      [(reply.body.data as { id: string }).id],
+    );
+    expect((await ids({ since: replyTime!.at })).at(-1)).toBe(
+      (reply.body.data as { id: string }).id,
+    );
+    const since = await databaseNow();
+    expect(await ids({ since })).toEqual([]);
+    await inbound(c, '919811100082', [{ text: 'Any update?' }], secondNumber!.phone_number_id);
+    const [latest] = await ids({ since });
+    expect(await ids({ since })).toEqual([latest]);
+    expect(await ids({ since, direction: 'outbound' })).toEqual([]);
+
+    // Another company's key reads only its own company's messages.
+    const theirs = await apiKey(other, ['conversations.read']);
+    const theirFeed = (await apiListMessages(deps(), theirs.ctx, {})).data;
+    expect(theirFeed.map((m) => m.text)).toEqual(['Another company']);
+  });
+
+  it(`reads at most ${API_MESSAGE_FEED_WINDOW} messages a page: filters that leave out most of them give short pages that go on to the end`, async () => {
+    const c = await fx.company();
+    const reader = await apiKey(c, ['conversations.read']);
+    const second = await addNumber(c, 'active');
+    await inbound(c, '919811100085', [{ text: 'The first' }]);
+    const conv = await conversationOf(c, '919811100085');
+    // Each statement adds messages after every message before, a microsecond apart.
+    const add = (direction: string, count: number) =>
+      fx.query(
+        `INSERT INTO app.messages (id, tenant_id, conversation_id, channel_account_id, direction,
+                                   type, content, status, sender_type, created_at)
+         SELECT gen_random_uuid(), cv.tenant_id, cv.id, cv.channel_account_id, $2, 'text',
+                jsonb_build_object('text', 'Message ' || g),
+                CASE WHEN $2 = 'inbound' THEN 'received' ELSE 'sent' END,
+                CASE WHEN $2 = 'inbound' THEN 'contact' ELSE 'agent' END,
+                (SELECT max(created_at) FROM app.messages WHERE conversation_id = cv.id)
+                  + g * interval '1 microsecond'
+           FROM app.conversations cv, generate_series(1, $3::int) g
+          WHERE cv.id = $1`,
+        [conv.id, direction, count],
+      );
+    // Newest first: an answer, the contact's messages, then two answers, the newer of them the last
+    // message the first page reads, then the first message.
+    await add('outbound', 2);
+    await add('inbound', API_MESSAGE_FEED_WINDOW - 2);
+    await add('outbound', 1);
+    const newestFirst = await fx.query<{ id: string; direction: string }>(
+      `SELECT id, direction FROM app.messages WHERE conversation_id = $1
+        ORDER BY created_at DESC, id DESC`,
+      [conv.id],
+    );
+    expect(newestFirst).toHaveLength(API_MESSAGE_FEED_WINDOW + 2);
+    const answers = newestFirst.filter((m) => m.direction === 'outbound').map((m) => m.id);
+    expect(newestFirst.map((m) => m.id).indexOf(answers[1]!)).toBe(API_MESSAGE_FEED_WINDOW - 1);
+
+    // Without filters every page is full, and the pages hold every message once.
+    const all = await everyPage(reader.ctx, { limit: '100' });
+    expect(all.slice(0, -1).every((p) => p.length === 100)).toBe(true);
+    expect(all.flat().map((m) => m.id)).toEqual(newestFirst.map((m) => m.id));
+
+    // The answers: the first page reads the newest messages up to its window, the last of them
+    // included; its cursor goes on after that one, and the next page finds the last answer.
+    const first = await apiListMessages(deps(), reader.ctx, { direction: 'outbound' });
+    expect(first.data.map((m) => m.id)).toEqual(answers.slice(0, 2));
+    expect(first.nextCursor).not.toBeNull();
+    const rest = await apiListMessages(deps(), reader.ctx, {
+      direction: 'outbound',
+      cursor: first.nextCursor!,
+    });
+    expect(rest.data.map((m) => m.id)).toEqual([answers[2]]);
+    expect(rest.nextCursor).toBeNull();
+
+    // A number without messages: empty pages that still reach the end.
+    const none = await everyPage(reader.ctx, { channelId: second });
+    expect(none).toEqual([[], []]);
+
+    // The cursor of a short page reads on exactly: the contact's messages page by page are every
+    // inbound message once.
+    const inboundPages = await everyPage(reader.ctx, { direction: 'inbound', limit: '100' });
+    expect(inboundPages.flat().map((m) => m.id)).toEqual(
+      newestFirst.filter((m) => m.direction === 'inbound').map((m) => m.id),
+    );
+  });
+
+  it('needs the conversations.read scope and refuses queries it does not know', async () => {
+    const c = await fx.company();
+    const without = await apiKey(c, ['messages.reply', 'conversations.write']);
+    await expectAppError(
+      apiListMessages(deps(), without.ctx, {}),
+      'forbidden',
+      /conversations\.read scope/,
+    );
+    const reader = await apiKey(c, ['conversations.read']);
+    for (const query of [
+      { direction: 'both' },
+      { channelId: 'main' },
+      { since: 'yesterday' },
+      { limit: '101' },
+      { status: 'read' },
+      { cursor: 'not-a-cursor' },
+    ]) {
+      await expectAppError(apiListMessages(deps(), reader.ctx, query), 'validation_failed');
+    }
   });
 });

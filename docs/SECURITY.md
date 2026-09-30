@@ -532,6 +532,12 @@ Phase 5 rules (Public API, P5-08):
   another WhatsApp account's, another company's or a disconnected catalog are refused like unknown
   ids, and the catalog sent to Meta is always the one found, never taken from the request
   unchecked.
+- The message feed (ADR-088) needs `conversations.read`, checked before its query is read, and
+  reads only in the key's company scope: other companies' messages are never in it, erased
+  contacts' conversations are left out, internal notes are not messages and media is never
+  attached. It reads what one conversation's messages already give the same key. Each page reads at
+  most 2,000 of the company's messages whatever its filters, so no request can make the database
+  read every message a company has.
 - Only the token's SHA-256 is stored; the runtime role cannot read it. The token is shown once in
   the browser and kept only in the page's memory; it is never logged, and audit entries carry the
   public prefix only.

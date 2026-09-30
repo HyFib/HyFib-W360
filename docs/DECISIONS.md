@@ -2854,3 +2854,54 @@ Decision:
 Not built: delivery and read counts in the payload (they change with every message status; the
 reports have them), the campaign in `message.status`, events for each recipient, test sends and
 drafts, reading campaigns through the public API, and filters by campaign.
+
+## ADR-088 A message feed across conversations through the public API (2026-09-30)
+
+Context: integrations that copy what customers write into a helpdesk, a CRM or a warehouse hear of
+each message through the `message.received` webhook (ADR-053), but read messages only one
+conversation at a time (ADR-072). To catch up after their receiver was down, or to fill a new
+install, they listed the conversations updated since their last pass and read each one's messages:
+one request per conversation, and a conversation's `updated_at` does not move for every message.
+
+Decision:
+
+- **Endpoint:** `GET /api/v1/messages` (`listMessages`, beside `POST /messages` and
+  `GET /messages/{id}`): the messages of every conversation of the company, newest first, on the
+  exact keyset pages of ADR-072 (creation time to the microsecond, then id; neither changes), so
+  paging never skips or repeats a message. Filters: `direction` (`inbound`, what contacts wrote;
+  `outbound`, what the company sent), `channelId` (the number a message was received on or sent
+  from) and `since` (created at or after a time).
+- **No new scope:** `conversations.read` already reads every message of every conversation, one
+  conversation at a time; the feed reads the same messages in fewer requests. A key without it is
+  refused (403) before its query is read. It does not write, so suspended and restricted companies
+  can still read.
+- **What a message says:** exactly what a conversation's messages say (one function builds both),
+  with its conversation's contact (`contactId`) and the number it was received on or sent from
+  (`channelId`, the message's own number), so an integration can file it without reading the
+  conversation. No media, no internal notes; erased contacts' conversations are left out, as in
+  every read.
+- **A bounded read per page:** `messages_tenant_created_idx` (0008) serves the pages: PostgreSQL
+  reads it backwards and sorts by id only the messages that share a time. Filters are not in that
+  index, so a filter that matches few messages would read every message the company has to fill a
+  page (measured locally on 400,000 synthetic messages in a rolled-back transaction: a number
+  without messages took 774 ms, and the time grows with the company's messages up to the 15-second
+  statement timeout), and indexes for each filter, and for both together, would cost every message
+  written. Instead each page reads at most 2,000 of the company's messages (from `since` and the
+  cursor, newest first) and shows those that pass the filters: when the filters leave out most of
+  them it shows fewer than `limit`, or none, and its cursor continues after the last message it
+  read, as filtered DynamoDB queries do. The page first finds the 2,000th message (if there is
+  one), then reads the matches from there to the cursor; both reads see one snapshot (repeatable
+  read, read only), so no message saved between them moves the page's end. Unfiltered pages are
+  always full. Measured the same way, each of the two reads took about 3 ms, for a number without
+  messages as for outbound messages, and for a page 300,000 messages back as for the first.
+- **Catching up:** a message carries the time its transaction began, so one still being saved
+  while a pass reads can carry an earlier time than messages the pass saw. As for `updatedSince`
+  (ADR-072), the documentation tells integrations to ask for `since` a little before their previous
+  pass began (a minute) and to expect some messages again (deduplicating on the id), rather than
+  promising an exact feed. Statuses change after a message is created, and the feed does not follow
+  them: the `message.status` webhook does (and `GET /messages/{id}` for messages sent through the
+  API).
+- **No migration.**
+
+Not built: statuses changed since a time, filters by contact or conversation (a conversation's
+messages endpoint reads one), media, notes, counts, and a push feed (the webhooks are that).

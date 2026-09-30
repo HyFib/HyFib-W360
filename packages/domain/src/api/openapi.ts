@@ -34,7 +34,11 @@ import {
 } from '../webhooks/payloads';
 import { apiStartAutomationSchema } from './automations';
 import { apiContactSchema } from './contact-view';
-import { apiAddNoteSchema, apiConversationStatusSchema } from './conversations';
+import {
+  API_MESSAGE_FEED_WINDOW,
+  apiAddNoteSchema,
+  apiConversationStatusSchema,
+} from './conversations';
 import { API_LIMITS, API_SCOPE_INFO, API_SCOPE_KEYS } from './model';
 import {
   apiConsentSchema,
@@ -190,6 +194,12 @@ export const apiConversationMessageSchema = z.object({
   statusAt: z.iso.datetime(),
   error: z.object({ code: z.string().nullable(), title: z.string().nullable() }).nullable(),
   createdAt: z.iso.datetime(),
+});
+
+/** A message of the feed across conversations (ADR-088). */
+export const apiFeedMessageSchema = apiConversationMessageSchema.extend({
+  contactId: z.uuid().describe('The contact of the message’s conversation.'),
+  channelId: z.uuid().describe('The WhatsApp number the message was received on or sent from.'),
 });
 
 export const apiAutomationSchema = z.object({
@@ -411,7 +421,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       title: 'HyFib W360 API',
       version: '1.0.0',
       description: [
-        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations and their messages, resolve and reopen conversations, manage contacts and consent, and read message status for your company.',
+        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations and their messages (one conversation or all of them), resolve and reopen conversations, manage contacts and consent, and read message status for your company.',
         '',
         'Authenticate with `Authorization: Bearer <API key>`; keys are created in Settings → API keys and belong to the company. A key can be limited to the addresses its systems call from: a request from any other address is refused with 403 (reason `ip_not_allowed`).',
         `Scopes: ${API_SCOPE_KEYS.map((s) => `\`${s}\` (${API_SCOPE_INFO[s].label.toLowerCase()})`).join(', ')}.`,
@@ -570,6 +580,41 @@ export function buildOpenApiDocument(serverUrl: string) {
               content: json(dataOf(ref('QueuedMessage'))),
             },
             ...errors(400, 401, 403, 404, 412, 415, 422, 423, 429, 500),
+          },
+        },
+        get: {
+          operationId: 'listMessages',
+          summary: 'Messages across every conversation, newest first',
+          description: [
+            `${scopeNote('conversations.read')} Every message the company's conversations hold, read as \`GET /conversations/{id}/messages\` reads them, with the conversation's contact (\`contactId\`) and the number the message was received on or sent from (\`channelId\`); media is not attached and internal notes are not messages. Messages of erased contacts' conversations are left out.`,
+            `Pages never skip or repeat a message. Each page reads at most ${API_MESSAGE_FEED_WINDOW.toLocaleString('en-US')} of the company's messages, newest first: when \`direction\` or \`channelId\` leave out most of them, a page can hold fewer messages than \`limit\`, or none, and still give a \`nextCursor\`; follow it until it is \`null\`.`,
+            'To catch up on what you missed (after your receiver was down, say), ask for `since` a little before your previous pass began (a minute) and expect to see some messages again: a message carries the time it began to be saved, so one still being saved while you read can carry an earlier time. Statuses change after a message is created; follow them with the `message.status` webhook.',
+          ].join('\n\n'),
+          parameters: [
+            ...pageParams,
+            {
+              name: 'direction',
+              in: 'query',
+              schema: { type: 'string', enum: ['inbound', 'outbound'] },
+              description:
+                'Only messages the contacts wrote (inbound) or the company sent (outbound).',
+            },
+            {
+              name: 'channelId',
+              in: 'query',
+              schema: { type: 'string', format: 'uuid' },
+              description: 'Only messages received on or sent from this WhatsApp number.',
+            },
+            {
+              name: 'since',
+              in: 'query',
+              schema: { type: 'string', format: 'date-time' },
+              description: 'Only messages created at or after this time.',
+            },
+          ],
+          responses: {
+            '200': { description: 'A page of messages.', content: pageOf('FeedMessage') },
+            ...errors(401, 403, 422, 429, 500),
           },
         },
       },
@@ -1082,6 +1127,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         Message: jsonSchema(apiMessageSchema),
         Conversation: jsonSchema(apiConversationSchema),
         ConversationMessage: jsonSchema(apiConversationMessageSchema),
+        FeedMessage: jsonSchema(apiFeedMessageSchema),
         ConversationStatus: jsonSchema(apiConversationStatusSchema, 'input'),
         AddConversationNote: jsonSchema(apiAddNoteSchema, 'input'),
         ConversationNote: jsonSchema(apiConversationNoteSchema),
@@ -1122,6 +1168,7 @@ export const API_ROUTES = [
   ['get', '/contacts/{id}'],
   ['post', '/contacts/{id}/consent'],
   ['post', '/messages'],
+  ['get', '/messages'],
   ['get', '/messages/{id}'],
   ['get', '/conversations'],
   ['get', '/conversations/{id}'],

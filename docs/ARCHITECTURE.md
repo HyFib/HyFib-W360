@@ -969,6 +969,15 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   share an id). `productInteractive` (`commerce/model.ts`) builds the Graph `interactive` object for
   the inbox and the API alike, and the message stores `content.products` as the inbox's product
   sends do.
+- **Message feed (ADR-088):** `GET /messages` (`apiListMessages`, `conversations.read`) pages the
+  company's messages across conversations newest first on exact keyset cursors, joined to their
+  conversation and contact (erased contacts' conversations left out), with `direction`,
+  `channelId` (the message's own `channel_account_id`) and `since`. Each message is built by
+  `toApiMessage`, shared with a conversation's messages. `messages_tenant_created_idx` (0008) serves
+  the order; since the filters are not in it, a page reads at most `API_MESSAGE_FEED_WINDOW` (2,000)
+  messages: a first read finds the window's last message (`OFFSET 1999`), the second reads the
+  matches between it and the cursor, and both run in one repeatable-read, read-only transaction. A
+  short page's cursor is the window's last message.
 - **Keyset cursors** (`encodeKeysetCursor`, `exactTimestamp`): a cursor carries the last row's
   timestamp as PostgreSQL keeps it, to the microsecond, and its id, and pages compare
   `(time, id) < (cursor time, cursor id)`; cursors made with milliseconds still read. Cursors built

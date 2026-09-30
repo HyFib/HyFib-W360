@@ -1281,6 +1281,19 @@ once). A 412 `window_closed` means the number has not written in the last 24 hou
 reply. A message that fails after it was queued shows WhatsApp's error on
 `GET /api/v1/messages/{id}` and in the inbox.
 
+**The message feed (`GET /api/v1/messages`) looks short, empty or repeated.** A page reads at most
+2,000 of the company's messages, newest first, and shows those that pass `direction` and
+`channelId`: when the filters leave out most of them the page holds fewer messages than `limit`,
+or none, and still gives a `nextCursor`. That is not the end: follow `nextCursor` until it is
+`null`. Messages seen again after asking for `since` a little before the previous pass are
+expected (a message carries the time its saving began); deduplicate on the message id. Missing
+messages: the feed leaves out erased contacts' conversations and internal notes, never attaches
+media, and a 403 means the key lacks `conversations.read`. A 422 names the query field (`direction`
+is `inbound` or `outbound`, `channelId` a number's id, `since` a date-time with its offset, `limit`
+up to 100, a cursor from a previous page); a `channelId` that is not one of the company's numbers
+gives empty pages. Statuses in the feed are as they were when read; follow them with the
+`message.status` webhook.
+
 **An endpoint added through the API is refused, missing or unexpected.** A 422 names the field:
 an https address (no credentials, port 443 or from 1024; `http://` and loopback only where local
 and test configuration allow them), at least one event from the list, a description up to 200

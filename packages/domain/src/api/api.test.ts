@@ -12,6 +12,8 @@ import {
   apiAddConversationNote,
   apiAddNoteSchema,
   apiConversationStatusSchema,
+  apiListMessages,
+  apiMessageFeedQuerySchema,
   apiSetConversationStatus,
 } from './conversations';
 import {
@@ -293,6 +295,49 @@ describe('internal notes (ADR-084)', () => {
       'id',
       'text',
     ]);
+  });
+});
+
+describe('the message feed (ADR-088)', () => {
+  it('takes a page, a direction, a number and a time, and nothing else', () => {
+    const channelId = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f01';
+    expect(
+      apiMessageFeedQuerySchema.parse({
+        limit: '20',
+        direction: 'inbound',
+        channelId,
+        since: '2026-09-30T10:00:00+05:30',
+      }),
+    ).toEqual({ limit: 20, direction: 'inbound', channelId, since: '2026-09-30T10:00:00+05:30' });
+    expect(apiMessageFeedQuerySchema.parse({})).toEqual({ limit: 50 });
+    for (const bad of [
+      { limit: '0' },
+      { limit: '101' },
+      { direction: 'both' },
+      { channelId: 'main' },
+      { since: 'yesterday' },
+      { status: 'read' },
+    ]) {
+      expect(apiMessageFeedQuerySchema.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  it('needs the scope that reads conversations, checked before anything is read', async () => {
+    const ctx = (scopes: string[]) =>
+      ({
+        tenant: { id: 't', status: 'active' },
+        key: { id: 'k', scopes: new Set(scopes) },
+      }) as unknown as ApiContext;
+    for (const scopes of [['messages.send', 'messages.reply'], ['conversations.write']]) {
+      const error: unknown = await apiListMessages({} as never, ctx(scopes), {}).catch(
+        (caught: unknown) => caught,
+      );
+      expect(isAppError(error) && error.code, scopes.join()).toBe('forbidden');
+    }
+    const refused: unknown = await apiListMessages({} as never, ctx(['conversations.read']), {
+      direction: 'sideways',
+    }).catch((caught: unknown) => caught);
+    expect(isAppError(refused) && refused.code).toBe('validation_failed');
   });
 });
 
@@ -1162,6 +1207,30 @@ describe('OpenAPI document', () => {
       expect(responses).toEqual(expect.arrayContaining(['401', '403', '429', '500']));
       expect(responses.some((s) => s.startsWith('2'))).toBe(true);
     }
+  });
+
+  it('lists the messages of every conversation with their contact and number (ADR-088)', () => {
+    const feed = paths['/messages']?.get as unknown as {
+      operationId: string;
+      description: string;
+      parameters: { name?: string }[];
+    };
+    expect(feed.operationId).toBe('listMessages');
+    expect(feed.description).toContain('`conversations.read`');
+    expect(feed.description).toContain('`since` a little before your previous pass began');
+    expect(feed.description).toContain('Each page reads at most 2,000 of the company');
+    expect(feed.description).toContain('follow it until it is `null`');
+    expect(feed.parameters.map((p) => p.name).filter(Boolean)).toEqual([
+      'limit',
+      'cursor',
+      'direction',
+      'channelId',
+      'since',
+    ]);
+    const schemas = doc.components.schemas as Record<string, { required?: string[] }>;
+    expect(schemas.FeedMessage?.required).toEqual(
+      expect.arrayContaining(['id', 'conversationId', 'contactId', 'channelId', 'createdAt']),
+    );
   });
 
   it('names the plan refusals in the 403 and 429 responses and the error reason', () => {
