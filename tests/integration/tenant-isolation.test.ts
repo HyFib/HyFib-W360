@@ -154,9 +154,8 @@ describe('database roles', () => {
     expect(await can('w360_auth', 'app.tenant_entitlements(uuid)')).toBe(false);
     // Public API (0024): the key lookup and the idempotency sweep, for the runtime app role only,
     // and the listing of keys due an expiry reminder (0040), for the worker. The lookup with the
-    // client's address (0051) replaced the one without, which stays for a rolling deploy.
+    // client's address (0051) replaced the one without, which 0074 drops.
     for (const fn of [
-      'ops.api_key_authenticate(text)',
       'ops.api_key_authenticate(text,inet)',
       'ops.purge_api_idempotency_keys(integer)',
       'ops.api_key_expiry_reminders_due(integer,integer)',

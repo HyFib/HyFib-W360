@@ -1,5 +1,29 @@
 # Progress
 
+## 2026-09-30 — Phase 5: the one-argument API key lookup dropped (P5-08, migration 0074)
+
+Status: **Implemented and locally verified.** Migration 0051 (ADR-076) kept
+`ops.api_key_authenticate(text)`, rebuilt so that it refuses every key that lists networks, only for
+web servers of the previous release during a rolling deploy. Every release since calls the lookup
+with the client's address, so nothing calls it any more.
+
+### Completed
+
+- **Migration 0074:** drops `ops.api_key_authenticate(text)`: one definer function fewer that reads
+  the keys.
+- **Tests:** the ADR-076 test that the old lookup refused keys with networks now checks that it is
+  gone; the grant lists in `api.test.ts` and the isolation suite drop it.
+- **Docs:** ADR-076's rollout note; RUNBOOKS (migrations 0074 and, missing from ADR-097, 0073);
+  THREAT-MODEL T94; BACKLOG P5-08.
+- **Mutation check:** a migration that keeps the function makes the ADR-076 test fail.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                                                    | Result                                                                                        |
+| ---------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `pnpm vitest run --project integration` for `api.test.ts` and `tenant-isolation.test.ts` (PostgreSQL 18.6) | 111 passed; the local databases were started again first, after the cloud container restarted |
+| Mutation check                                                                                             | the migration keeping the function: the ADR-076 test fails                                    |
+
 ## 2026-09-30 — Phase 5: monthly request limits per API key (P5-08, ADR-097)
 
 Status: **Implemented and locally verified (test data only).** A company's plan limits the API

@@ -1059,9 +1059,9 @@ find it with `SELECT id, trigger_type, api_key_id FROM app.automation_runs WHERE
 `app.api_keys.allowed_networks` with its check and grants, creates
 `ops.api_key_authenticate(text, inet)` and rebuilds the one-argument lookup on it (dropped and
 created again, granted to `w360_app`, then handed to `w360_definer`). A failure usually means the
-bootstrap roles are missing or the lookup was changed by hand. The one-argument lookup is kept only
-for web servers of the previous release during a rolling deploy and refuses keys that list networks;
-drop it in a later release once no older web server runs.
+bootstrap roles are missing or the lookup was changed by hand. The one-argument lookup was kept only
+for web servers of the previous release during a rolling deploy and refused keys that list networks;
+0074 drops it.
 
 **Migration 0050 failed.** It runs in one transaction, so a failure applies nothing. It replaces
 the check on `app.api_keys.scopes` with one that also allows `conversations.write` (up to eight
@@ -1380,6 +1380,20 @@ until the company is active again.
 the two SECURITY DEFINER functions (granted to `w360_app` before their ownership moves to
 `w360_definer`), adds `messages.api_key_id` and widens the consent actor check. A failure usually
 means the bootstrap roles are missing (`infra/db/bootstrap-roles.sql`).
+
+**Migration 0073 failed.** It runs in one transaction, so a failure applies nothing. It adds
+`app.api_keys.monthly_request_limit` (a nullable column with a check, validated against the keys
+already stored: a short `ACCESS EXCLUSIVE` lock on the keys table), creates `app.api_key_usage` with
+row security and its grants, and registers deletion step 855 with the definer's grants and
+policies. A failure usually means a lock wait on `app.api_keys` timed out (run the migrations again
+when requests are quieter) or the bootstrap roles are missing.
+
+**Migration 0074 failed.** It runs in one transaction and only drops
+`ops.api_key_authenticate(text)`, the lookup without the client's address that 0051 kept for web
+servers of the previous release. A failure usually means something created since depends on it
+(nothing in the application does): find it with `SELECT * FROM pg_depend WHERE refobjid =
+'ops.api_key_authenticate(text)'::regprocedure` before running it again. Web servers of a release
+before 0051 can no longer authenticate keys once it has run.
 
 ## 10O. Outgoing webhooks
 

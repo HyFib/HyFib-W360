@@ -448,8 +448,9 @@ verification, app review, Embedded Signup configuration).
   assigning many conversations at once, media downloads, statuses changed since a time, starting or
   stopping runs for many contacts in one call, bulk sends in one call, networks for the whole
   company, limits per endpoint, availability per single endpoint (plans choose per scope since
-  ADR-092), warnings before a key's own limit, and dropping the one-argument key lookup kept for
-  rolling deploys (0051). Replaying many deliveries in one call is built with P5-09 (ADR-095).
+  ADR-092) and warnings before a key's own limit. The one-argument key lookup kept for rolling
+  deploys (0051) is dropped (0074). Replaying many deliveries in one call is built with P5-09
+  (ADR-095).
 - **P5-09 Outgoing webhooks** **[built, locally verified; delivered to local test receivers only]**
   (ADR-053): up to 10 endpoints per company (`developer.manage`) for `message.received`,
   `message.status`, `consent.changed` and `template.status_changed`, captured by database triggers

@@ -4029,17 +4029,11 @@ describe('allowed networks (ADR-076)', () => {
     // An unknown token is unknown from any address.
     expect(await from(generateApiToken().token, '203.0.113.1')).toBe('unknown');
 
-    // The previous release's lookup, kept for a rolling deploy, refuses keys that list networks.
-    const oldLookup = (token: string) =>
-      fx.dbs.app.run(authorizedTenantScope(c.tenant.id, null), async (tx) =>
-        (
-          await tx.execute<{ key_id: string }>(
-            sql`select key_id from ops.api_key_authenticate(${sha256Hex(token)})`,
-          )
-        ).rows.map((r) => r.key_id),
-      );
-    expect(await oldLookup(key.token)).toEqual([]);
-    expect(await oldLookup(open.token)).toEqual([open.id]);
+    // The lookup without an address, kept for a rolling deploy by 0051, is gone (0074).
+    const [old] = await fx.query<{ fn: string | null }>(
+      `SELECT to_regprocedure('ops.api_key_authenticate(text)')::text AS fn`,
+    );
+    expect(old?.fn).toBeNull();
   });
 
   it('check what they are given as networks', async () => {
@@ -5241,7 +5235,6 @@ describe('isolation and retention', () => {
         ])
       )[0]!.ok;
     for (const fn of [
-      'ops.api_key_authenticate(text)',
       'ops.api_key_authenticate(text,inet)',
       'ops.purge_api_idempotency_keys(integer)',
     ]) {

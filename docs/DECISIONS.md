@@ -2338,6 +2338,7 @@ Decision:
 - **Rollout:** the one-argument lookup of 0024 stays for web servers of the previous release during
   a rolling deploy, rebuilt on the new one so that it refuses every key that lists networks (it
   cannot check an address); a later release drops it.
+  (Migration 0074, 2026-09-30, drops it: every release since calls the lookup with the address.)
 
 Not built: networks for the whole company, per scope or per endpoint; hostnames; time windows; and
 alerts or a list of refused requests (the web server logs each refusal with the key and company).
