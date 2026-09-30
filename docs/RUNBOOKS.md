@@ -1294,6 +1294,13 @@ up to 100, a cursor from a previous page); a `channelId` that is not one of the 
 gives empty pages. Statuses in the feed are as they were when read; follow them with the
 `message.status` webhook.
 
+**Notes read through the API (`GET /api/v1/conversations/{id}/notes`) are missing or unnamed.** A
+404 means the conversation is another company's, its contact was erased (erasure deletes the
+conversation's notes too) or the id is wrong; a 403 means the key lacks `conversations.read`.
+Members' notes say `writtenBy: agent` and never which member: that is deliberate, as nowhere in
+the API names members. A key's note names the key in `apiKeyId`, and the inbox shows the note with
+the key's name. Pages are newest first; follow `nextCursor` until it is `null`.
+
 **An endpoint added through the API is refused, missing or unexpected.** A 422 names the field:
 an https address (no credentials, port 443 or from 1024; `http://` and loopback only where local
 and test configuration allow them), at least one event from the list, a description up to 200

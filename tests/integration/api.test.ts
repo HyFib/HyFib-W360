@@ -21,6 +21,7 @@ import {
   apiListAutomations,
   apiListContacts,
   apiListConversationMessages,
+  apiListConversationNotes,
   apiListConversations,
   apiListMessages,
   apiListTemplates,
@@ -3300,6 +3301,7 @@ describe('internal notes (ADR-084)', () => {
           id: expect.any(String),
           conversationId: conv.id,
           text,
+          writtenBy: 'api',
           apiKeyId: keyId,
           createdAt: expect.any(String),
         },
@@ -5298,6 +5300,130 @@ describe('the message feed (ADR-088)', () => {
       { cursor: 'not-a-cursor' },
     ]) {
       await expectAppError(apiListMessages(deps(), reader.ctx, query), 'validation_failed');
+    }
+  });
+});
+
+describe('reading notes (ADR-089)', () => {
+  it('reads a conversation’s notes newest first, members’ and keys’ alike, without naming members or mentions', async () => {
+    const c = await fx.company();
+    const reader = await apiKey(c, ['conversations.read']);
+    const writer = await apiKey(c, ['conversations.write'], 'Helpdesk');
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    await inbound(c, '919811100086', [{ text: 'Where is my order?' }]);
+    const conv = await conversationOf(c, '919811100086');
+    await inbox().addNote(agent, {
+      conversationId: conv.id,
+      body: 'Asked the warehouse, @Owner please check.',
+      mentionIds: [owner.membership.id],
+    });
+    const added = await apiAddConversationNote(
+      deps(),
+      writer.ctx,
+      conv.id,
+      { text: 'Ticket #4522 opened in the helpdesk.' },
+      idem('read-note-1', 'a'),
+    );
+    // Two notes saved by one statement share their time to the microsecond.
+    await fx.query(
+      `INSERT INTO app.conversation_notes (id, tenant_id, conversation_id, author_membership_id, body)
+       SELECT gen_random_uuid(), cv.tenant_id, cv.id, $2, 'Same time ' || g
+         FROM app.conversations cv, generate_series(1, 2) g
+        WHERE cv.id = $1`,
+      [conv.id, owner.membership.id],
+    );
+    const newestFirst = await fx.query<{
+      id: string;
+      body: string;
+      author_api_key_id: string | null;
+    }>(
+      `SELECT id, body, author_api_key_id FROM app.conversation_notes
+        WHERE conversation_id = $1 ORDER BY created_at DESC, id DESC`,
+      [conv.id],
+    );
+    expect(newestFirst).toHaveLength(4);
+
+    // Every note once, newest first, whatever the page size.
+    for (const limit of ['1', '2', '3']) {
+      const ids: string[] = [];
+      let cursor: string | undefined;
+      do {
+        const page = await apiListConversationNotes(deps(), reader.ctx, conv.id, {
+          limit,
+          ...(cursor ? { cursor } : {}),
+        });
+        ids.push(...page.data.map((n) => n.id));
+        cursor = page.nextCursor ?? undefined;
+      } while (cursor && ids.length < 20);
+      expect(ids, `limit ${limit}`).toEqual(newestFirst.map((n) => n.id));
+    }
+
+    // Members' notes say a member wrote them, never which one or whom they mention; a key's note
+    // names its key, and reads as the note the key added.
+    const { data, nextCursor } = await apiListConversationNotes(deps(), reader.ctx, conv.id, {});
+    expect(nextCursor).toBeNull();
+    expect(data.map((n) => [n.text, n.writtenBy, n.apiKeyId])).toEqual(
+      newestFirst.map((n) => [
+        n.body,
+        n.author_api_key_id ? 'api' : 'agent',
+        n.author_api_key_id ?? null,
+      ]),
+    );
+    const byKey = data.find((n) => n.writtenBy === 'api');
+    expect(byKey).toEqual((added.body as { data: unknown }).data);
+    expect(byKey!.apiKeyId).toBe(writer.id);
+    const byMember = data.find((n) => n.text.startsWith('Asked the warehouse'));
+    expect(byMember).toEqual({
+      id: expect.any(String),
+      conversationId: conv.id,
+      text: 'Asked the warehouse, @Owner please check.',
+      writtenBy: 'agent',
+      apiKeyId: null,
+      createdAt: expect.any(String),
+    });
+
+    // A conversation without notes reads as an empty page.
+    await inbound(c, '919811100087', [{ text: 'Hi' }]);
+    const quiet = await conversationOf(c, '919811100087');
+    expect(await apiListConversationNotes(deps(), reader.ctx, quiet.id, {})).toEqual({
+      data: [],
+      nextCursor: null,
+    });
+  });
+
+  it('finds no conversation of another company or an erased contact, and needs conversations.read', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const theirOwner = await fx.ctx(other, other.owner);
+    const reader = await apiKey(c, ['conversations.read']);
+    await inbound(c, '919811100088', [{ text: 'Please forget me' }]);
+    await inbound(other, '919811100089', [{ text: 'Hello' }]);
+    const erasedConv = await conversationOf(c, '919811100088');
+    const theirs = await conversationOf(other, '919811100089');
+    await inbox().addNote(theirOwner, { conversationId: theirs.id, body: 'Their note.' });
+    await inbox().addNote(owner, { conversationId: erasedConv.id, body: 'Before the erasure.' });
+    await createContactsService({ db: fx.dbs.app, clock: systemClock }).eraseContact(owner, {
+      contactId: erasedConv.contact_id,
+      suppress: false,
+    });
+    for (const id of [theirs.id, erasedConv.id, uuidv7(), 'not-a-uuid']) {
+      await expectAppError(apiListConversationNotes(deps(), reader.ctx, id, {}), 'not_found');
+    }
+    const without = await apiKey(c, ['conversations.write', 'messages.reply']);
+    await expectAppError(
+      apiListConversationNotes(deps(), without.ctx, theirs.id, {}),
+      'forbidden',
+      /conversations\.read scope/,
+    );
+    await inbound(c, '919811100090', [{ text: 'Still here' }]);
+    const live = await conversationOf(c, '919811100090');
+    for (const query of [{ limit: '0' }, { limit: '101' }, { cursor: 'nope' }, { since: 'now' }]) {
+      await expectAppError(
+        apiListConversationNotes(deps(), reader.ctx, live.id, query),
+        'validation_failed',
+      );
     }
   });
 });

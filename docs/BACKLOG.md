@@ -429,12 +429,14 @@ verification, app review, Embedded Signup configuration).
   by content id in the sending number's catalogs, Commerce in the plan); **[message feed built,
   locally verified]** (ADR-088: `GET /messages` pages every conversation's messages newest first
   under `conversations.read`, with the contact and number, filtered by direction, number and time;
-  each page reads at most 2,000 messages, so filters give short pages rather than slow ones).
-  Remaining: media messages, call-to-action messages through the API, taking reactions back,
-  assigning conversations, reading notes, member and team names, media downloads, statuses changed
-  since a time, starting or stopping runs for many contacts in one call, bulk sends in one call,
-  replaying many deliveries in one call, networks for the whole company, per-key quotas, limits per
-  endpoint, and dropping the one-argument key lookup kept for rolling deploys (0051).
+  each page reads at most 2,000 messages, so filters give short pages rather than slow ones);
+  **[reading notes built, locally verified]** (ADR-089: the same scope reads a conversation's
+  notes newest first, members' and keys' alike, never naming members or mentions). Remaining: media
+  messages, call-to-action messages through the API, taking reactions back, assigning
+  conversations, member and team names, media downloads, statuses changed since a time, starting or
+  stopping runs for many contacts in one call, bulk sends in one call, replaying many deliveries in
+  one call, networks for the whole company, per-key quotas, limits per endpoint, and dropping the
+  one-argument key lookup kept for rolling deploys (0051).
 - **P5-09 Outgoing webhooks** **[built, locally verified; delivered to local test receivers only]**
   (ADR-053): up to 10 endpoints per company (`developer.manage`) for `message.received`,
   `message.status`, `consent.changed` and `template.status_changed`, captured by database triggers

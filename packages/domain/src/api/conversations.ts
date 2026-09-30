@@ -33,10 +33,10 @@ import { idempotent } from './resources';
 
 /**
  * Conversations through the public API. A key with `conversations.read` lists the company's
- * conversations and reads their messages (ADR-072), or every message across them (ADR-088); one with
- * `conversations.write` resolves and reopens them (ADR-075) and adds internal notes (ADR-084). The
- * conversations of erased contacts are left out, as their contacts are. Messages read as the
- * webhooks describe them (ADR-053).
+ * conversations and reads their messages (ADR-072), or every message across them (ADR-088), and their
+ * internal notes (ADR-089); one with `conversations.write` resolves and reopens them (ADR-075) and
+ * adds internal notes (ADR-084). The conversations of erased contacts are left out, as their
+ * contacts are. Messages read as the webhooks describe them (ADR-053).
  */
 
 const page = {
@@ -60,6 +60,9 @@ export const apiConversationListQuerySchema = z
   .strict();
 
 export const apiMessageListQuerySchema = z.object(page).strict();
+
+/** A conversation's internal notes (ADR-089). */
+export const apiNoteListQuerySchema = z.object(page).strict();
 
 /** The messages of every conversation (ADR-088). */
 export const apiMessageFeedQuerySchema = z
@@ -123,8 +126,10 @@ export interface ApiConversationNote {
   id: string;
   conversationId: string;
   text: string;
-  /** The key that wrote the note, named in the inbox. */
-  apiKeyId: string;
+  /** Written by a member in the inbox (agent, as messages say), or added through the API (ADR-089). */
+  writtenBy: 'agent' | 'api';
+  /** The key that added the note through the API, named in the inbox; null for members' notes. */
+  apiKeyId: string | null;
   createdAt: string;
 }
 
@@ -403,6 +408,67 @@ export async function apiListConversationMessages(
 }
 
 /**
+ * A conversation's internal notes, newest first on exact keyset pages (ADR-089): what members wrote
+ * in the inbox and what keys added through the API (ADR-084), each saying which, and for a key's
+ * note which key; never which member wrote a note or whom it mentions. Erased contacts'
+ * conversations are not found, as in every read (their notes went with the erasure).
+ */
+export async function apiListConversationNotes(
+  deps: Pick<OutboundDeps, 'db'>,
+  ctx: ApiContext,
+  conversationId: string,
+  query: unknown,
+): Promise<{ data: ApiConversationNote[]; nextCursor: string | null }> {
+  assertScope(ctx, 'conversations.read');
+  if (!z.uuid().safeParse(conversationId).success) throw notFound('Conversation');
+  const q = parseInput(apiNoteListQuerySchema, query);
+  const cursor = decodeKeysetCursor(q.cursor);
+  const result = await deps.db.run(
+    ctx.scope,
+    async (tx) => {
+      if (!(await visibleConversation(tx, ctx.tenant.id, conversationId))) return null;
+      const rows = await tx
+        .select({
+          id: conversationNotes.id,
+          body: conversationNotes.body,
+          apiKeyId: conversationNotes.authorApiKeyId,
+          createdAt: conversationNotes.createdAt,
+          cursorAt: exactTimestamp(conversationNotes.createdAt),
+        })
+        .from(conversationNotes)
+        .where(
+          and(
+            eq(conversationNotes.tenantId, ctx.tenant.id),
+            eq(conversationNotes.conversationId, conversationId),
+            cursor
+              ? sql`(${conversationNotes.createdAt}, ${conversationNotes.id}) < (${cursor.at}::timestamptz, ${cursor.id}::uuid)`
+              : undefined,
+          ),
+        )
+        .orderBy(desc(conversationNotes.createdAt), desc(conversationNotes.id))
+        .limit(q.limit + 1);
+      const shown = rows.slice(0, q.limit);
+      const last = shown.at(-1);
+      return {
+        data: shown.map((n): ApiConversationNote => ({
+          id: n.id,
+          conversationId,
+          text: n.body,
+          writtenBy: n.apiKeyId ? 'api' : 'agent',
+          apiKeyId: n.apiKeyId,
+          createdAt: n.createdAt.toISOString(),
+        })),
+        nextCursor:
+          rows.length > q.limit && last ? encodeKeysetCursor(last.cursorAt, last.id) : null,
+      };
+    },
+    { accessMode: 'read only' },
+  );
+  if (!result) throw notFound('Conversation');
+  return result;
+}
+
+/**
  * The most messages one page of the feed reads (ADR-088), whatever it shows: filters that leave out
  * most of a company's messages give short pages, never a scan of every message it has.
  */
@@ -607,6 +673,7 @@ export async function apiAddConversationNote(
         id,
         conversationId,
         text: data.text,
+        writtenBy: 'api',
         apiKeyId: ctx.key.id,
         createdAt: now.toISOString(),
       };

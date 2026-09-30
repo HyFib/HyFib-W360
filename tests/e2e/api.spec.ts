@@ -362,6 +362,29 @@ test('a key answers a customer who wrote, reads the conversation and resolves it
   await page.reload();
   const note = page.getByRole('listitem').filter({ hasText: noteText });
   await expect(note.getByText(/^API \(Helpdesk\) ·/)).toBeVisible();
+
+  // A member adds a note in the inbox, and the key reads both, newest first (ADR-089): the
+  // member's without saying which member, its own with its key.
+  const noteForm = page.locator('form').filter({ has: page.getByLabel('Internal note') });
+  await noteForm.getByLabel('Internal note').fill('Called the courier.');
+  await noteForm.getByRole('button', { name: 'Add note' }).click();
+  await expect(page.getByText('Called the courier.', { exact: true })).toBeVisible();
+  const notes = await request.get(`/api/v1/conversations/${open!.id}/notes`, { headers: auth });
+  expect(notes.status()).toBe(200);
+  expect(await notes.json()).toEqual({
+    data: [
+      {
+        id: expect.any(String),
+        conversationId: open!.id,
+        text: 'Called the courier.',
+        writtenBy: 'agent',
+        apiKeyId: null,
+        createdAt: expect.any(String),
+      },
+      (await noted.json()).data,
+    ],
+    nextCursor: null,
+  });
   const sentToCustomer = (await standInRequests(request)).filter(
     (r) =>
       r.path === `/v26.0/${phoneNumberId}/messages` &&

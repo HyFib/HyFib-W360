@@ -2905,3 +2905,34 @@ Decision:
 
 Not built: statuses changed since a time, filters by contact or conversation (a conversation's
 messages endpoint reads one), media, notes, counts, and a push feed (the webhooks are that).
+
+## ADR-089 Reading internal notes through the public API (2026-09-30)
+
+Context: keys add internal notes to conversations (ADR-084), and members write them in the inbox,
+but no key could read them: a helpdesk kept in step with HyFib pushed its notes in and could not
+bring the team's back, so the two sides of a conversation's internal history drifted apart.
+
+Decision:
+
+- **Endpoint:** `GET /api/v1/conversations/{id}/notes` (`listConversationNotes`): the
+  conversation's notes, newest first, on the exact keyset pages of ADR-072 (creation time to the
+  microsecond, then id), so paging never skips or repeats a note.
+- **Scope:** `conversations.read`, which already reads everything customers wrote in every
+  conversation and is granted only by members who read every conversation's notes in the inbox
+  (`inbox.read_all`, ADR-072). Notes are the team's own words, no more sensitive than what the scope
+  gives; a separate scope would make every integration that reads conversations ask twice. Keys
+  that already hold the scope can read notes from this release, which its label now says.
+- **What a note says:** its text, when it was written, and who wrote it at the level the API names
+  anyone: `writtenBy` is `agent` (a member in the inbox, the word messages' `sentBy` uses for
+  members) or `api` (added through the API), with the key (`apiKeyId`) for a key's note. Never which member, as nowhere else in the API (assignment
+  says whether a member is assigned, not who, ADR-074), and never whom a note mentions (mentions are
+  member ids and notifications; the text keeps whatever the member typed). The note a key adds
+  (ADR-084) answers in the same shape, now with `writtenBy: api`; ADR-084 is not yet released, so
+  its response gains the field and `apiKeyId` becomes nullable without breaking anyone.
+- **Erased contacts:** their conversations are not found, as in every read; erasure deletes their
+  notes (ADR-084).
+- **No migration:** `conversation_notes_thread_idx` (0003) serves the pages; a conversation holds
+  few notes.
+
+Not built: notes across conversations (the message feed of ADR-088 is for messages), editing or
+deleting notes, member names and mentions, and notes in webhooks.

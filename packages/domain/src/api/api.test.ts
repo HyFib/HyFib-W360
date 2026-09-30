@@ -12,8 +12,10 @@ import {
   apiAddConversationNote,
   apiAddNoteSchema,
   apiConversationStatusSchema,
+  apiListConversationNotes,
   apiListMessages,
   apiMessageFeedQuerySchema,
+  apiNoteListQuerySchema,
   apiSetConversationStatus,
 } from './conversations';
 import {
@@ -294,7 +296,83 @@ describe('internal notes (ADR-084)', () => {
       'createdAt',
       'id',
       'text',
+      'writtenBy',
     ]);
+  });
+});
+
+describe('reading notes (ADR-089)', () => {
+  it('takes a page and nothing else', () => {
+    expect(apiNoteListQuerySchema.parse({ limit: '5', cursor: 'abc' })).toEqual({
+      limit: 5,
+      cursor: 'abc',
+    });
+    expect(apiNoteListQuerySchema.parse({})).toEqual({ limit: 50 });
+    for (const bad of [{ limit: '0' }, { limit: '101' }, { since: 'now' }, { writtenBy: 'api' }]) {
+      expect(apiNoteListQuerySchema.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  it('need the scope that reads conversations, checked before anything is read', async () => {
+    const ctx = (scopes: string[]) =>
+      ({
+        tenant: { id: 't', status: 'active' },
+        key: { id: 'k', scopes: new Set(scopes) },
+      }) as unknown as ApiContext;
+    const id = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f01';
+    const codeOf = (promise: Promise<unknown>) =>
+      promise.then(
+        () => 'resolved',
+        (caught: unknown) => (isAppError(caught) ? caught.code : 'other'),
+      );
+    expect(
+      await codeOf(apiListConversationNotes({} as never, ctx(['conversations.write']), id, {})),
+    ).toBe('forbidden');
+    const reader = ctx(['conversations.read']);
+    expect(await codeOf(apiListConversationNotes({} as never, reader, 'nope', {}))).toBe(
+      'not_found',
+    );
+    expect(await codeOf(apiListConversationNotes({} as never, reader, id, { limit: 'many' }))).toBe(
+      'validation_failed',
+    );
+  });
+
+  it('are described: newest first, who wrote each without naming members', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const get = (
+      doc.paths as unknown as Record<
+        string,
+        Record<
+          string,
+          {
+            operationId: string;
+            description: string;
+            parameters: { name?: string; $ref?: string }[];
+            responses: Record<string, unknown>;
+          }
+        >
+      >
+    )['/conversations/{id}/notes']?.get;
+    expect(get?.operationId).toBe('listConversationNotes');
+    expect(get?.description).toContain('`conversations.read`');
+    expect(get?.description).toContain('Never which member wrote a note or whom it mentions');
+    expect(get?.parameters.map((p) => p.name ?? p.$ref)).toEqual([
+      '#/components/parameters/Id',
+      'limit',
+      'cursor',
+    ]);
+    expect(JSON.stringify(get?.responses['200'])).toContain(
+      '#/components/schemas/ConversationNote',
+    );
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const note = schemas.ConversationNote as {
+      required: string[];
+      properties: Record<string, Record<string, unknown>>;
+    };
+    expect(note.required).toEqual(expect.arrayContaining(['writtenBy', 'apiKeyId']));
+    expect(note.properties.writtenBy).toMatchObject({ enum: ['agent', 'api'] });
+    expect(JSON.stringify(note.properties.apiKeyId)).toContain('null');
   });
 });
 

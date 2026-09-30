@@ -978,6 +978,11 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   messages: a first read finds the window's last message (`OFFSET 1999`), the second reads the
   matches between it and the cursor, and both run in one repeatable-read, read-only transaction. A
   short page's cursor is the window's last message.
+- **Reading notes (ADR-089):** `GET /conversations/{id}/notes` (`apiListConversationNotes`,
+  `conversations.read`) checks the conversation is visible (the contact not erased), then pages
+  `conversation_notes` newest first on exact keyset cursors. `writtenBy` comes from which author
+  column is set (`author_api_key_id` for a key, `author_membership_id` for a member; the database
+  keeps exactly one); member ids and `note_mentions` are never read.
 - **Keyset cursors** (`encodeKeysetCursor`, `exactTimestamp`): a cursor carries the last row's
   timestamp as PostgreSQL keeps it, to the microsecond, and its id, and pages compare
   `(time, id) < (cursor time, cursor id)`; cursors made with milliseconds still read. Cursors built

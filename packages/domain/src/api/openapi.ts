@@ -155,7 +155,15 @@ export const apiConversationNoteSchema = z.object({
   id: z.uuid(),
   conversationId: z.uuid(),
   text: z.string(),
-  apiKeyId: z.uuid().describe('The key that wrote the note, which the inbox names.'),
+  writtenBy: z
+    .enum(['agent', 'api'])
+    .describe('Who wrote the note: a member in the inbox (agent, never which member) or the API.'),
+  apiKeyId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'The key that added the note through the API, which the inbox names; null for members.',
+    ),
   createdAt: z.iso.datetime(),
 });
 
@@ -421,7 +429,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       title: 'HyFib W360 API',
       version: '1.0.0',
       description: [
-        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations and their messages (one conversation or all of them), resolve and reopen conversations, manage contacts and consent, and read message status for your company.',
+        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations, their messages (one conversation or all of them) and their notes, resolve and reopen conversations, manage contacts and consent, and read message status for your company.',
         '',
         'Authenticate with `Authorization: Bearer <API key>`; keys are created in Settings → API keys and belong to the company. A key can be limited to the addresses its systems call from: a request from any other address is refused with 403 (reason `ip_not_allowed`).',
         `Scopes: ${API_SCOPE_KEYS.map((s) => `\`${s}\` (${API_SCOPE_INFO[s].label.toLowerCase()})`).join(', ')}.`,
@@ -704,6 +712,16 @@ export function buildOpenApiDocument(serverUrl: string) {
           responses: {
             '201': { description: 'The note.', content: json(dataOf(ref('ConversationNote'))) },
             ...errors(400, 401, 403, 404, 415, 422, 423, 429, 500),
+          },
+        },
+        get: {
+          operationId: 'listConversationNotes',
+          summary: 'The internal notes of a conversation, newest first',
+          description: `${scopeNote('conversations.read')} What members wrote in the inbox and what keys added through the API, each saying which (\`writtenBy\`) and, for a key's note, which key. Never which member wrote a note or whom it mentions. Conversations of erased contacts are not found.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }, ...pageParams],
+          responses: {
+            '200': { description: 'A page of notes.', content: pageOf('ConversationNote') },
+            ...errors(401, 403, 404, 422, 429, 500),
           },
         },
       },
@@ -1174,6 +1192,7 @@ export const API_ROUTES = [
   ['get', '/conversations/{id}'],
   ['patch', '/conversations/{id}'],
   ['post', '/conversations/{id}/notes'],
+  ['get', '/conversations/{id}/notes'],
   ['get', '/conversations/{id}/messages'],
   ['get', '/automations'],
   ['post', '/automations/{id}/runs'],

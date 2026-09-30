@@ -1,5 +1,65 @@
 # Progress
 
+## 2026-09-30 — Phase 5: reading internal notes through the public API (P5-08, ADR-089)
+
+Status: **Implemented and locally verified (no customer data).** Keys added notes to conversations
+(ADR-084) and members wrote them in the inbox, but no key could read them: a helpdesk kept in step
+with HyFib pushed its notes in and could not bring the team's back.
+
+### Completed
+
+- **Design (ADR-089):** `GET /api/v1/conversations/{id}/notes` (`listConversationNotes`) pages a
+  conversation's notes newest first on exact keyset cursors under `conversations.read`, which is
+  granted only by members who read every conversation's notes in the inbox. Each note says who
+  wrote it at the level the API names anyone: `writtenBy` `agent` (a member, as messages' `sentBy` says) or `api`, with the key for a
+  key's note; never which member, never whom it mentions. The note a key adds answers in the same
+  shape, now with `writtenBy: api` (ADR-084 is unreleased, so its `apiKeyId` becomes nullable
+  without breaking anyone). No migration.
+- **Domain:** `apiListConversationNotes` and `apiNoteListQuerySchema` in `api/conversations.ts`;
+  `ApiConversationNote` gains `writtenBy`; the OpenAPI operation `listConversationNotes` and the
+  `ConversationNote` schema with `writtenBy` and a nullable `apiKeyId`; the scope's description and
+  the API description name notes.
+- **Web:** `GET` on `/api/v1/conversations/{id}/notes` beside `POST`; Settings → API keys says keys
+  read conversations' notes.
+- **Tests:** unit (the query: a page and nothing else; the scope checked before anything is read, a
+  malformed id not looked up; the OpenAPI operation with its parameters and the note's shape, with
+  `writtenBy` and a nullable `apiKeyId`). Integration in `api.test.ts`: a member's note that
+  mentions another member, a key's note and two notes saved by one statement with the same time,
+  read newest first on pages of 1, 2 and 3 that never skip or repeat; the member's note without
+  the member or the mention, the key's as the key added it; an empty conversation; another
+  company's conversation, an erased contact's, an unknown id and a malformed one not found; the
+  scope and bad queries refused; the note a key adds now answering with `writtenBy: api`. e2e
+  `api.spec.ts`: after the key adds its note, a member adds one in the inbox and the key reads both,
+  newest first.
+- **Docs:** ADR-089; ARCHITECTURE (public API); SECURITY (Phase 5 rules); THREAT-MODEL T107;
+  RUNBOOKS (notes read through the API); BACKLOG P5-08; FEATURE-MATRIX H-033 and W-134.
+- **Mutation checks:** 18 regressions tried one at a time; 17 make a test fail. 16 of 17 in the domain: the
+  scope not checked; erased contacts' or other companies' conversations not refused; notes of every
+  conversation read; the cursor's own note again; oldest first; notes sharing a time in the other
+  order; no further pages seen; every note said to be an agent's; the key left out; the member named
+  on a member's note; the added note without `writtenBy`; unknown query fields; malformed ids looked
+  up; the operation, `writtenBy` or the sentence about members missing from the OpenAPI document.
+  The other, dropping the company from the query, cannot be observed: row security already keeps
+  other companies' notes out, which the test checks. 1 in the web layer through the e2e test: the
+  route answering POST only.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                      | Result                                                                                                                                                                                                                                          |
+| ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                         | 0 problems / all files formatted / all workspace packages pass                                                                                                                                                                                  |
+| `pnpm test` (unit)                                                           | 406 passed, including 3 new in `api/api.test.ts`                                                                                                                                                                                                |
+| `pnpm test:integration` (PostgreSQL 18.6)                                    | first run: 546 passed and 1 failed (the email outbox lease test in `jobs.test.ts`, which this slice does not touch: the test's own fault, fixed below in "Fix: the email outbox lease test in a busy test database"); two more runs: 547 passed |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                    | 547 passed                                                                                                                                                                                                                                      |
+| `pnpm test:integration` once placed after that fix (PostgreSQL 18.6 / 17.11) | 547 passed / 547 passed                                                                                                                                                                                                                         |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium`  | build passes / on `api.spec.ts`: 10 passed (1.8 min), on the local database created for the day's runs                                                                                                                                          |
+| Mutation checks                                                              | 18 regressions tried (1 through the e2e test); 17 make a test fail, and the other (the company in the query, already enforced by row security) cannot be observed                                                                               |
+
+### Known gaps
+
+- Not built: notes across conversations, editing or deleting notes, member names and mentions,
+  notes in webhooks.
+
 ## 2026-09-30 — Phase 5: a message feed across conversations through the public API (P5-08, ADR-088)
 
 Status: **Implemented and locally verified (no customer data).** Integrations that copy what

@@ -538,6 +538,10 @@ Phase 5 rules (Public API, P5-08):
   attached. It reads what one conversation's messages already give the same key. Each page reads at
   most 2,000 of the company's messages whatever its filters, so no request can make the database
   read every message a company has.
+- Reading notes (ADR-089) needs `conversations.read`, checked before anything is read, and finds
+  only the key's company's conversations whose contacts are not erased (others answer 404). A note
+  says whether a member or a key wrote it and, for a key's note, which key; never which member, and
+  mentions are never read.
 - Only the token's SHA-256 is stored; the runtime role cannot read it. The token is shown once in
   the browser and kept only in the page's memory; it is never logged, and audit entries carry the
   public prefix only.
