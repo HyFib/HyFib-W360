@@ -3298,10 +3298,13 @@ Decision:
   is taken first, below its limit (one upsert, atomic whatever runs in parallel), then the
   company's; a request its key refuses takes nothing from the company, as with the rate limits,
   and a request the company refuses is taken back from its key (a savepoint), so a refused request
-  counts for neither. Every request locks its key's row before its company's, so requests cannot
-  deadlock. A key that used up its month gets 429 `rate_limited` with reason `key_quota_exceeded`,
-  the limit and when requests are accepted again in the message, and Retry-After until the next
-  period; with both used up, the key's refusal is the one given.
+  counts for neither. The key's limit is read under a key share lock, which waits for a change of
+  the limit in progress (the change holds the key's row FOR UPDATE), so a request is never counted
+  under a limit just replaced; the last-used update (at most once a minute) already skips a locked
+  key and is made by a later request. Every request locks its key, then the key's count, then the
+  company's, so requests cannot deadlock. A key that used up its month gets 429 `rate_limited` with reason
+  `key_quota_exceeded`, the limit and when requests are accepted again in the message, and
+  Retry-After until the next period; with both used up, the key's refusal is the one given.
 - **Access and data:** the runtime role reads the counts, adds to them and cannot move them to
   another key or period or delete them (column grants); a count belongs to a key of the same
   company (a composite foreign key). The counts are in the company export and are deleted with the

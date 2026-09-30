@@ -571,7 +571,9 @@ Phase 5 rules (Public API, P5-08):
 - Each counted request is also counted for its key (ADR-097), in the same transaction and before
   the company's count, below the key's own monthly limit when it has one: a request its key refuses
   (429, `key_quota_exceeded`) takes nothing from the company, and one the company refuses is taken
-  back from the key, so a refused request counts for neither. The limit is set and changed only by
+  back from the key, so a refused request counts for neither. A request reads the key's limit under
+  a lock that a change of the limit holds until it commits, so it is never counted under a limit a
+  committed change replaced. The limit is set and changed only by
   members with `developer.manage` after a recent sign-in, audited; the runtime role adds to a
   key's count but cannot move it to another key or period or delete it, and a count belongs to a
   key of the same company.

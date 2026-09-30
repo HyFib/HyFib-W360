@@ -1035,7 +1035,9 @@ true`); the same key with another request (method, path and body hashed) answers
   period), before the company's count and in the same transaction: one upsert below the key's
   `monthly_request_limit` when it has one (429 `rate_limited`, reason `key_quota_exceeded`, nothing
   counted for the company), then the company's; a company refusal rolls back to a savepoint taken
-  before the key's count. Keys lock before companies, for every request. The keys service sets the
+  before the key's count. The key's limit is read `FOR KEY SHARE`, so a request waits for a change
+  of the limit in progress, which holds the key `FOR UPDATE`. Keys lock before companies, for
+  every request. The keys service sets the
   limit at creation, changes it for an active key after a recent sign-in (`setMonthlyLimit`,
   audited `api_key.limit_changed`), copies it on rotation, and lists each key's count this period.
 - **OpenAPI** (`api/openapi.ts`): `GET /api/v1/openapi.json` (no key; cacheable 5 minutes) is built

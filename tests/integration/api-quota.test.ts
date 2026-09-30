@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { isAppError, systemClock, uuidv7, type Clock } from '@w360/core';
 import { authorizedTenantScope, sql } from '@w360/db';
 import {
@@ -724,6 +724,63 @@ describe('monthly request limits per key (ADR-097)', () => {
       'conflict',
       'Only the limit of an active key can be changed.',
     );
+  });
+
+  it("makes a request wait for a change of its key's limit, and counts it under the new limit", async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const key = await limitedKey(c, '5');
+    expect(await admit(key.ctx)).toMatchObject({ ok: true });
+    expect(await admit(key.ctx)).toMatchObject({ ok: true });
+    /** How many backends wait, directly or behind another, for a lock that `pid` holds. */
+    const waitingBehind = async (pid: number) => {
+      const [waiting] = await fx.query<{ n: number }>(
+        `WITH RECURSIVE blocked (pid) AS (
+           SELECT a.pid FROM pg_stat_activity a WHERE $1 = ANY (pg_blocking_pids(a.pid))
+           UNION
+           SELECT a.pid FROM pg_stat_activity a
+             JOIN blocked b ON b.pid = ANY (pg_blocking_pids(a.pid)))
+         SELECT count(*)::int AS n FROM blocked`,
+        [pid],
+      );
+      return waiting!.n;
+    };
+    // The owner lowers the limit to the two requests counted. The change holds the key's row while
+    // its audit entry waits behind a table lock, and a request comes meanwhile.
+    const holder = await fx.dbs.adminPool.connect();
+    let change: Promise<unknown> | undefined;
+    let request: Promise<unknown> | undefined;
+    try {
+      await holder.query('BEGIN');
+      await holder.query('LOCK TABLE app.audit_events IN SHARE MODE');
+      const [lock] = (await holder.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows;
+      change = keys().setMonthlyLimit(owner, { keyId: key.id, monthlyRequestLimit: '2' });
+      await vi.waitFor(
+        async () => {
+          if ((await waitingBehind(lock!.pid)) < 1) throw new Error('the change is not held yet');
+        },
+        { timeout: 4_000, interval: 20 },
+      );
+      request = admit(key.ctx);
+      // The request waits for the change, which waits for the table lock.
+      await vi.waitFor(
+        async () => {
+          if ((await waitingBehind(lock!.pid)) < 2) throw new Error('the request is not waiting');
+        },
+        { timeout: 4_000, interval: 20 },
+      );
+    } finally {
+      await holder.query('COMMIT');
+      holder.release();
+    }
+    expect(await change).toEqual({ monthlyRequestLimit: 2 });
+    // Under the limit it replaced (five), the request would have been admitted as a third.
+    expect(await request).toMatchObject({
+      ok: false,
+      reason: 'key_quota_exceeded',
+      message: expect.stringContaining('This API key allows 2 requests a month'),
+    });
+    expect((await keyCounts(c))[key.id]).toEqual([2, 2]);
   });
 
   it("keeps each key's counts to its company, and to what the runtime role may do", async () => {

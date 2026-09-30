@@ -359,10 +359,13 @@ export async function consumeApiRequest(
   const limit = entitlements.limits.apiRequests;
   const { start, end } = usagePeriod(entitlements.usageAnchor, now);
   if (limit === 0) return { ok: false, reason: 'not_in_plan', limit, periodEnd: end };
+  // A change of the key's limit holds its row FOR UPDATE until it commits: the request waits for
+  // it and counts under the new limit, never under the one it replaced.
   const [key] = await tx
     .select({ limit: apiKeys.monthlyRequestLimit })
     .from(apiKeys)
-    .where(and(eq(apiKeys.tenantId, tenantId), eq(apiKeys.id, keyId)));
+    .where(and(eq(apiKeys.tenantId, tenantId), eq(apiKeys.id, keyId)))
+    .for('key share');
   if (!key) throw new Error('The API key of an authenticated request was not found.');
   const keyLimit = key.limit;
   // The key first, as the rate limits (ADR-068): a request its key refuses takes nothing from the

@@ -505,7 +505,8 @@ export function createApiKeysService(deps: { db: Database; clock: Clock }) {
     /**
      * Changes an active key's own monthly request limit (ADR-097); empty removes it, leaving only
      * the plan's. It applies from the key's next request, to the requests already counted this
-     * period. The change is audited with the limits before and after.
+     * period: a request reads the limit under a key share lock, which waits for this change. The
+     * change is audited with the limits before and after.
      */
     async setMonthlyLimit(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
       assertCan(ctx, 'developer.manage');
@@ -522,6 +523,7 @@ export function createApiKeysService(deps: { db: Database; clock: Clock }) {
           })
           .from(apiKeys)
           .where(and(eq(apiKeys.tenantId, ctx.tenant.id), eq(apiKeys.id, data.keyId)))
+          // FOR UPDATE, which a request's key share lock waits for (NO KEY UPDATE it would not).
           .for('update');
         if (!key) throw notFound('API key');
         if (apiKeyState(key, now) !== 'active') {

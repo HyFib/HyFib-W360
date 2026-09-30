@@ -1,5 +1,38 @@
 # Progress
 
+## 2026-09-30 — Phase 5: a key's limit read under a lock (P5-08, ADR-097 review finding)
+
+Status: **Implemented and locally verified.** The Codex review of PR #18 found that a request could
+read its key's limit just before an owner lowered it, and still be counted under the old limit after
+the change committed: the read took no lock, so it did not wait for the change.
+
+### Completed
+
+- **Domain:** `consumeApiRequest` reads the key's limit `FOR KEY SHARE`. A change of the limit
+  (`setMonthlyLimit`) holds the key's row `FOR UPDATE` until it commits, so a request arriving
+  meanwhile waits for it and is counted under the new limit, and a change arriving while a request
+  counts waits for that request. The last-used update of authentication already skips a locked key
+  (`SKIP LOCKED`, at most once a minute), and every request still locks its key, then the key's
+  count, then the company's.
+- **Test:** in `api-quota.test.ts`, the owner lowers a key's limit from five to the two requests
+  counted while its audit entry waits behind a table lock, so the change holds the key's row; a
+  request sent meanwhile waits for the change and is refused (`key_quota_exceeded`, limit 2), and
+  the key's count stays at two.
+- **Docs:** ADR-097 (admission); SECURITY (Phase 5 rules); ARCHITECTURE (monthly requests per
+  key); THREAT-MODEL T115.
+- **Mutation checks:** the limit read without a lock, and the change locking `FOR NO KEY UPDATE`
+  (which a key share lock does not wait for): the new test fails on each.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                              | Result                                     |
+| ---------------------------------------------------- | ------------------------------------------ |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck` | clean                                      |
+| `pnpm test`                                          | 434 passed                                 |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)  | 584 passed on each (the new test included) |
+| Mutation checks                                      | 2 regressions, both caught by the new test |
+| gitleaks 8.30.1 on the fix and migration 0074        | no leaks                                   |
+
 ## 2026-09-30 — Phase 5: the one-argument API key lookup dropped (P5-08, migration 0074)
 
 Status: **Implemented and locally verified.** Migration 0051 (ADR-076) kept
