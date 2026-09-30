@@ -95,10 +95,19 @@ export default async function OpsIntegrationsPage() {
         <CardHeader>
           <CardTitle>Meta and Razorpay webhook receipts</CardTitle>
           <CardDescription>
-            Receipts that failed all 12 attempts or have waited over 10 minutes (quarantined ones
-            are listed below). Retry one after fixing the cause: it goes back to processing, which
-            is idempotent. A receipt&apos;s body is erased after 7 days, and then it cannot be
-            processed again.
+            Receipts that failed all 12 attempts, or whose worker stopped during the last one, or
+            that have waited over 10 minutes (quarantined ones are listed below). Retry one after
+            fixing the cause: it goes back to processing, which is idempotent. A receipt&apos;s body
+            is erased after 7 days, and then it cannot be processed again. Platform administrators
+            are emailed about each receipt that failed all its attempts, each quarantined event and
+            each dead letter, at most every 15 minutes (ADR-091);{' '}
+            {o.lastFailureAlertAt ? (
+              <>
+                the last email went out <Utc at={o.lastFailureAlertAt} />.
+              </>
+            ) : (
+              'none has gone out yet.'
+            )}
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -128,6 +137,16 @@ export default async function OpsIntegrationsPage() {
                       <Badge tone={r.problem === 'waiting' ? 'warning' : 'danger'}>
                         {PROBLEM_LABELS[r.problem]}
                       </Badge>
+                      {r.problem === 'exhausted' && r.status === 'processing' ? (
+                        <div className="text-xs text-muted-foreground">
+                          Its worker stopped during the last attempt.
+                        </div>
+                      ) : null}
+                      {r.alertedAt ? (
+                        <div className="text-xs text-muted-foreground">
+                          Staff emailed <Utc at={r.alertedAt} />
+                        </div>
+                      ) : null}
                     </TD>
                     <TD className="tabular-nums">{r.attempts}</TD>
                     <TD className="max-w-xs text-sm">{r.lastError ?? '—'}</TD>
@@ -176,6 +195,11 @@ export default async function OpsIntegrationsPage() {
                   <TR key={q.id}>
                     <TD>
                       <Utc at={q.createdAt} />
+                      {q.alertedAt ? (
+                        <div className="text-xs text-muted-foreground">
+                          Staff emailed <Utc at={q.alertedAt} />
+                        </div>
+                      ) : null}
                     </TD>
                     <TD>{WEBHOOK_PROVIDER_LABELS[q.provider] ?? q.provider}</TD>
                     <TD>{QUARANTINE_REASON_LABELS[q.reason] ?? q.reason}</TD>

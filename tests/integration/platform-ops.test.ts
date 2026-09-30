@@ -5,8 +5,10 @@ import { PgBoss } from 'pg-boss';
 import { isAppError, uuidv7 } from '@w360/core';
 import { sql } from '@w360/db';
 import {
+  alertFailures,
   createPlatformOpsService,
   deadLetterJob,
+  outboxAad,
   pgBossQueueInspector,
   purgeDeadLetters,
   recordDeadLetters,
@@ -489,5 +491,309 @@ describe('dead letters and queues', () => {
       `SELECT id FROM ops.dead_letters WHERE source_queue = 'it.purge'`,
     );
     expect(left.map((r) => r.id)).toEqual([recent]);
+  });
+});
+
+describe('alerts for work that failed for good (ADR-091)', () => {
+  const alert = () =>
+    alertFailures({
+      db: fx.dbs.app,
+      outbox: { keyring: fx.keyring, jobs: fx.jobs(), signer: fx.signer },
+      appBaseUrl: 'https://app.w360.test',
+    });
+  /** The next alert is allowed now, as if the last one went out over 15 minutes ago. */
+  const allowNextAlert = () =>
+    fx.query(`UPDATE ops.platform_alerts SET last_sent_at = now() - interval '16 minutes'`);
+  async function staffOf(role: 'platform_owner' | 'platform_operator') {
+    const user = await createUser(fx.dbs, { twoFactor: true });
+    await fx.dbs.ownerPool.query(
+      `INSERT INTO ops.platform_admins (user_id, role) VALUES ($1, $2)`,
+      [user.id, role],
+    );
+    return user;
+  }
+  async function alertsTo(email: string) {
+    const rows = await fx.query<{
+      id: string;
+      tenant_id: string | null;
+      payload_ciphertext: string;
+    }>(
+      `SELECT id, tenant_id, payload_ciphertext FROM ops.email_outbox
+        WHERE to_address = $1 AND kind = 'platform.notice' ORDER BY created_at, id`,
+      [email],
+    );
+    return rows.map((r) => ({
+      tenantId: r.tenant_id,
+      payload: JSON.parse(fx.keyring.decryptString(r.payload_ciphertext, outboxAad(r.id))) as {
+        subject: string;
+        lines: string[];
+        url: string;
+      },
+    }));
+  }
+  async function deadLetter(queue: string, extra: { tenantId?: string; ref?: string } = {}) {
+    const id = uuidv7();
+    await fx.query(
+      `INSERT INTO ops.dead_letters (id, source_queue, kind, tenant_id, ref, verified, error_code,
+         failed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, 'provider_rejected', now())`,
+      [
+        id,
+        queue,
+        extra.tenantId ? 'commerce.store' : null,
+        extra.tenantId ?? null,
+        extra.ref ?? null,
+        Boolean(extra.tenantId),
+      ],
+    );
+    return id;
+  }
+  async function receipt(status: string, attempts: number, lease: string | null) {
+    const id = uuidv7();
+    await fx.query(
+      `INSERT INTO ops.webhook_receipts (id, provider, body_sha256, body_ciphertext, body_size,
+         status, attempts, lease_until, last_error)
+       VALUES ($1, 'meta_whatsapp', $2, 'sealed-body', 10, $3, $4, now() + $5::interval, $6)`,
+      [id, randomBytes(32).toString('hex'), status, attempts, lease, `boom ${SECRET_TOKEN}`],
+    );
+    return id;
+  }
+  const marks = async (table: string, column: string, ids: string[]) =>
+    (
+      await fx.query<{ id: string; at: Date | null }>(
+        `SELECT id, ${column} AS at FROM ${table} WHERE id = ANY($1::uuid[])`,
+        [ids],
+      )
+    ).reduce<Record<string, boolean>>((all, r) => ({ ...all, [r.id]: r.at !== null }), {});
+
+  it('emails every platform administrator once about each item, with counts only', async () => {
+    const owner = await staffOf('platform_owner');
+    const operator = await staffOf('platform_operator');
+    const queueA = `it.alert-a-${randomBytes(3).toString('hex')}`;
+    const queueB = `it.alert-b-${randomBytes(3).toString('hex')}`;
+    const letters = [
+      await deadLetter(queueA, { tenantId: company.tenant.id, ref: 'store-ref-secret' }),
+      await deadLetter(queueA),
+      await deadLetter(queueB),
+    ];
+    // Used up: failed its 12th attempt; its worker stopped during the 12th and the lease ran out.
+    const failed = await receipt('failed', 12, null);
+    const stuck = await receipt('processing', 12, '-5 minutes');
+    // Not used up: still processing its 12th attempt; failed an earlier one, to be retried.
+    const working = await receipt('processing', 12, '5 minutes');
+    const retrying = await receipt('failed', 5, null);
+    const quarantineId = uuidv7();
+    await fx.query(
+      `INSERT INTO ops.webhook_quarantine (id, receipt_id, provider, reason, external_ids)
+       VALUES ($1, $2, 'meta_whatsapp', 'asset_mismatch', '{"waba": "1234"}'::jsonb)`,
+      [quarantineId, failed],
+    );
+    // Resolved before any alert: nothing to act on, so nobody is told.
+    const resolvedId = uuidv7();
+    await fx.query(
+      `INSERT INTO ops.webhook_quarantine (id, receipt_id, provider, reason, external_ids, resolved_at,
+         resolution)
+       VALUES ($1, $2, 'meta_whatsapp', 'malformed', '{"waba": "5678"}'::jsonb, now(),
+         'A Meta test event, nothing to do.')`,
+      [resolvedId, retrying],
+    );
+    await allowNextAlert();
+    const sent = await alert();
+    // Items other test files left count too: at least these six.
+    expect(sent.alerted).toBeGreaterThanOrEqual(6);
+    expect(sent.recipients).toBeGreaterThanOrEqual(2);
+    expect(await marks('ops.dead_letters', 'alerted_at', letters)).toEqual(
+      Object.fromEntries(letters.map((id) => [id, true])),
+    );
+    expect(
+      await marks('ops.webhook_receipts', 'exhausted_alerted_at', [
+        failed,
+        stuck,
+        working,
+        retrying,
+      ]),
+    ).toEqual({ [failed]: true, [stuck]: true, [working]: false, [retrying]: false });
+    expect(await marks('ops.webhook_quarantine', 'alerted_at', [quarantineId, resolvedId])).toEqual(
+      { [quarantineId]: true, [resolvedId]: false },
+    );
+    // The console shows when staff were emailed: the last alert, and each item it told.
+    const [sentAt] = await fx.query<{ at: Date }>(
+      `SELECT last_sent_at AS at FROM ops.platform_alerts WHERE kind = 'failures'`,
+    );
+    const listing = await ops().integrations(staff);
+    expect(listing.lastFailureAlertAt).toEqual(sentAt!.at);
+    expect(listing.quarantine.find((q) => q.id === quarantineId)?.alertedAt).toBeInstanceOf(Date);
+    const { deadLetters: listedLetters } = await ops().queues(staff);
+    expect(
+      listedLetters.filter((d) => letters.includes(d.id)).map((d) => d.alertedAt instanceof Date),
+    ).toEqual([true, true, true]);
+    // One email to each administrator, both roles, about no company.
+    for (const person of [owner, operator]) {
+      const told = await alertsTo(person.email);
+      expect(told).toHaveLength(1);
+      expect(told[0]!.tenantId).toBeNull();
+      const { subject, lines, url } = told[0]!.payload;
+      expect(subject).toMatch(/^\d+ failures need a look$/);
+      expect(url).toBe('https://app.w360.test/platform/ops');
+      expect(lines.find((l) => l.includes('dead-letter queue'))).toMatch(
+        new RegExp(`${queueA} 2.*${queueB} 1|${queueB} 1.*${queueA} 2`),
+      );
+      expect(lines.find((l) => l.includes('used all 12 processing attempts'))).toMatch(
+        /Meta \(WhatsApp\) \d+/,
+      );
+      expect(lines.find((l) => l.includes('could not be matched'))).toContain(
+        'Meta (WhatsApp), number not in the account it came with',
+      );
+      const text = JSON.stringify(told[0]!.payload);
+      for (const secret of [
+        company.tenant.id,
+        company.tenant.slug,
+        'store-ref-secret',
+        SECRET_TOKEN,
+        failed,
+        '1234',
+      ]) {
+        expect(text).not.toContain(secret);
+      }
+    }
+    // Told once: the next alert tells what is new since, and marks nothing it already told.
+    const markTimes = async () =>
+      fx.query<{ id: string; at: Date }>(
+        `SELECT id, alerted_at AS at FROM ops.dead_letters WHERE id = ANY($1::uuid[])
+         UNION ALL
+         SELECT id, exhausted_alerted_at FROM ops.webhook_receipts WHERE id = ANY($2::uuid[])
+         UNION ALL
+         SELECT id, alerted_at FROM ops.webhook_quarantine WHERE id = $3
+         ORDER BY id`,
+        [letters, [failed, stuck], quarantineId],
+      );
+    const firstMarks = await markTimes();
+    const queueC = `it.alert-new-${randomBytes(3).toString('hex')}`;
+    await deadLetter(queueC);
+    await allowNextAlert();
+    await alert();
+    expect(await markTimes()).toEqual(firstMarks);
+    for (const person of [owner, operator]) {
+      const told = await alertsTo(person.email);
+      expect(told).toHaveLength(2);
+      const second = JSON.stringify(told[1]!.payload);
+      expect(second).toContain(`${queueC} 1`);
+      expect(second).not.toContain(queueA);
+      expect(second).not.toContain(queueB);
+    }
+  });
+
+  it('sends at most one alert every 15 minutes, and two sweeps at once send one', async () => {
+    const owner = await staffOf('platform_owner');
+    await allowNextAlert();
+    const first = await deadLetter(`it.alert-c-${randomBytes(3).toString('hex')}`);
+    await Promise.all([alert(), alert()]);
+    expect(await alertsTo(owner.email)).toHaveLength(1);
+    expect(await marks('ops.dead_letters', 'alerted_at', [first])).toEqual({ [first]: true });
+    // Too soon after that alert: a new dead letter waits, unmarked.
+    const second = await deadLetter(`it.alert-d-${randomBytes(3).toString('hex')}`);
+    expect((await alert()).alerted).toBe(0);
+    expect(await marks('ops.dead_letters', 'alerted_at', [second])).toEqual({ [second]: false });
+    expect(await alertsTo(owner.email)).toHaveLength(1);
+    // Once 15 minutes have passed, it goes out in the next alert.
+    await allowNextAlert();
+    expect((await alert()).alerted).toBeGreaterThanOrEqual(1);
+    expect(await marks('ops.dead_letters', 'alerted_at', [second])).toEqual({ [second]: true });
+    const told = await alertsTo(owner.email);
+    expect(told).toHaveLength(2);
+    expect(told[1]!.payload.url).toBe('https://app.w360.test/platform/ops/queues');
+  });
+
+  it('tells each kind of failure even when it is the only one waiting', async () => {
+    await allowNextAlert();
+    await alert();
+    const letter = await deadLetter(`it.alert-e-${randomBytes(3).toString('hex')}`);
+    await allowNextAlert();
+    await alert();
+    expect(await marks('ops.dead_letters', 'alerted_at', [letter])).toEqual({ [letter]: true });
+    const used = await receipt('failed', 12, null);
+    await allowNextAlert();
+    await alert();
+    expect(await marks('ops.webhook_receipts', 'exhausted_alerted_at', [used])).toEqual({
+      [used]: true,
+    });
+    const entry = uuidv7();
+    await fx.query(
+      `INSERT INTO ops.webhook_quarantine (id, receipt_id, provider, reason)
+       VALUES ($1, $2, 'razorpay', 'unknown_asset')`,
+      [entry, used],
+    );
+    await allowNextAlert();
+    await alert();
+    expect(await marks('ops.webhook_quarantine', 'alerted_at', [entry])).toEqual({ [entry]: true });
+  });
+
+  it('retries a stuck receipt, and re-arms the alert of a retried one', async () => {
+    const stuck = await receipt('processing', 12, '-5 minutes');
+    const listed = (await ops().integrations(staff)).receipts.find((r) => r.id === stuck);
+    expect(listed).toMatchObject({ problem: 'exhausted', retryable: true, alertedAt: null });
+    // Still processing its last attempt: neither listed as used up nor retryable.
+    const working = await receipt('processing', 12, '5 minutes');
+    expect(
+      (await ops().integrations(staff)).receipts.find((r) => r.id === working),
+    ).toBeUndefined();
+    await expectCode(
+      ops().retryReceipt(staff, { receiptId: working, reason: 'Retrying after the outage' }),
+      'precondition_failed',
+    );
+    await allowNextAlert();
+    await alert();
+    expect(
+      (await ops().integrations(staff)).receipts.find((r) => r.id === stuck)?.alertedAt,
+    ).toBeInstanceOf(Date);
+    const result = await ops().retryReceipt(staff, {
+      receiptId: stuck,
+      reason: 'The worker restarted mid-deploy',
+    });
+    expect(result.previousStatus).toBe('processing');
+    const [row] = await fx.query<{
+      status: string;
+      attempts: number;
+      exhausted_alerted_at: Date | null;
+    }>(`SELECT status, attempts, exhausted_alerted_at FROM ops.webhook_receipts WHERE id = $1`, [
+      stuck,
+    ]);
+    expect(row).toEqual({ status: 'pending', attempts: 0, exhausted_alerted_at: null });
+    // It fails all its attempts again: staff hear of it again.
+    await fx.query(
+      `UPDATE ops.webhook_receipts SET status = 'failed', attempts = 12 WHERE id = $1`,
+      [stuck],
+    );
+    await allowNextAlert();
+    expect((await alert()).alerted).toBeGreaterThanOrEqual(1);
+    expect(await marks('ops.webhook_receipts', 'exhausted_alerted_at', [stuck])).toEqual({
+      [stuck]: true,
+    });
+  });
+
+  it('keeps the alert functions to the worker and the rule to the worker and platform staff', async () => {
+    for (const fn of [
+      'ops.failure_alerts_due()',
+      'ops.mark_failure_alert()',
+      'ops.platform_failure_alert_recipients()',
+    ]) {
+      await expect(fx.dbs.platformPool.query(`SELECT * FROM ${fn}`)).rejects.toThrow(
+        /permission denied for function/,
+      );
+    }
+    // The rule matches the sweeper's limit (MAX_RECEIPT_ATTEMPTS).
+    const rule = async (status: string, attempts: number, lease: string | null) =>
+      (
+        await fx.dbs.appPool.query<{ used: boolean }>(
+          `SELECT ops.webhook_receipt_exhausted($1, $2, now() + $3::interval) AS used`,
+          [status, attempts, lease],
+        )
+      ).rows[0]!.used;
+    expect(await rule('failed', 12, null)).toBe(true);
+    expect(await rule('failed', 11, null)).toBe(false);
+    expect(await rule('processing', 12, '-1 minute')).toBe(true);
+    expect(await rule('processing', 12, '1 minute')).toBe(false);
+    expect(await rule('processing', 12, null)).toBe(false);
+    expect(await rule('pending', 12, null)).toBe(false);
   });
 });

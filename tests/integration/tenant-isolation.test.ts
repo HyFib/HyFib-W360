@@ -230,6 +230,22 @@ describe('database roles', () => {
     for (const role of ['w360_app', 'w360_auth', 'w360_platform']) {
       expect(await can(role, 'ops.tenant_status_after_deletion(uuid,text,text)'), role).toBe(false);
     }
+    // Alerts for work that failed for good (0068): the count, the mark and the recipients for the
+    // runtime app role (the worker's sweep); the rule for a used-up receipt for the worker and the
+    // operations console; the receipt retry, replaced, still for platform staff only.
+    for (const fn of [
+      'ops.failure_alerts_due()',
+      'ops.mark_failure_alert()',
+      'ops.platform_failure_alert_recipients()',
+    ]) {
+      expect(await can('w360_app', fn), fn).toBe(true);
+      expect(await can('w360_auth', fn), fn).toBe(false);
+      expect(await can('w360_platform', fn), fn).toBe(false);
+    }
+    const rule = 'ops.webhook_receipt_exhausted(text,integer,timestamp with time zone)';
+    expect(await can('w360_app', rule)).toBe(true);
+    expect(await can('w360_platform', rule)).toBe(true);
+    expect(await can('w360_auth', rule)).toBe(false);
     // Outgoing webhooks (0025, 0047): the dispatch and retention sweeps for the worker; capture,
     // which the triggers call as the role making the change (the runtime role, or a definer
     // function); the trigger functions for nobody.

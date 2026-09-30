@@ -1495,7 +1495,31 @@ days after the job failed.
 **Repairs.** Retry and Resolve (section 4) both need a reason of at least 10 characters and appear
 in the platform audit log as `platform.webhook_receipt_retried` and
 `platform.webhook_quarantine_resolved`. A receipt whose body was erased (after 7 days) cannot be
-retried.
+retried. A receipt listed as "Failed all attempts" with "Its worker stopped during the last
+attempt" was being processed when its worker stopped (a deploy or a crash) on its 12th attempt: the
+sweeper no longer signals it, so retry it once the worker runs (since migration 0068; before, it was
+listed nowhere and needed SQL).
+
+**Failure alerts (ADR-091).** Every platform administrator is emailed "N failures need a look" when
+a job is dead-lettered, a receipt uses all its attempts or an event is quarantined: counts by queue,
+provider and reason, never a company or an error. One email covers everything new since the last
+one, at most every 15 minutes; the Integrations page says when the last one went out, and each
+receipt, quarantine entry and dead letter shows when staff were emailed about it. A retried receipt
+that fails all its attempts again is emailed again. The worker logs `failure alert emailed to
+platform staff`; `work failed for good but there is no platform administrator to email` means nothing
+is marked until there is one. An item listed without "Staff emailed" for more than 15 minutes means
+the alert did not run: it runs last in the minute messaging sweep, so look in the worker's logs for
+failures of `ops.messaging-sweep`. On the email: open the tab it links, find the cause (the worker's
+logs, the provider's status page), fix it, then retry receipts within 7 days of receipt and resolve
+quarantine entries (section 4). Dead letters need no action once the cause is fixed: the minute
+sweeps signal their work again.
+
+**Migration 0068 failed.** It adds nullable columns and partial indexes to `ops.dead_letters`,
+`ops.webhook_receipts` and `ops.webhook_quarantine`, marks existing dead letters and erased receipts
+as told, and replaces `ops.platform_retry_webhook_receipt` (dropped as `w360_definer` and recreated,
+as in 0011), in one transaction. A failure rolls it all back: fix the cause (usually the bootstrap
+roles) and run the migrations again. Workers of the previous release keep working; web servers of
+the previous release show receipts as before.
 
 **Migrations 0026 and 0027 failed.** 0026 runs in one transaction: it needs the bootstrap roles
 (`w360_definer`, `w360_platform`, `w360_app`). 0027 builds an index concurrently outside a

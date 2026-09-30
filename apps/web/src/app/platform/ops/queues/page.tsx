@@ -95,7 +95,8 @@ export default async function OpsQueuesPage() {
           <CardDescription>
             Jobs that failed all their retries. The company and reference show only when the
             job&apos;s signature verified; errors show only their name and code. The full job stays
-            in pg-boss for 30 days (RUNBOOKS §3).
+            in pg-boss for 30 days (RUNBOOKS §3). Platform administrators are emailed about each,
+            with counts by queue, at most every 15 minutes (ADR-091).
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -119,6 +120,11 @@ export default async function OpsQueuesPage() {
                     <TD>
                       <Utc at={d.failedAt} />
                       <div className="text-xs text-muted-foreground">{d.id}</div>
+                      {d.alertedAt ? (
+                        <div className="text-xs text-muted-foreground">
+                          Staff emailed <Utc at={d.alertedAt} />
+                        </div>
+                      ) : null}
                     </TD>
                     <TD>
                       <code className="text-xs">{d.sourceQueue}</code>

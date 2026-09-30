@@ -469,9 +469,14 @@ verification, app review, Embedded Signup configuration).
   Meta and Razorpay receipts needing attention, quarantine, email delivery counts), Queues (pg-boss
   counts per queue with retry policy, dead letters recorded by the worker without error messages),
   Signals (7-day review flags and security event counts) and Usage (7, 30 or 90 days); a health
-  card on each company's platform page; audited receipt retry and quarantine resolution. Remaining:
-  alerts, trends, Meta's quality webhook, API request counts, exports, the oldest waiting job,
-  redrive from the console, acknowledging issues, paging and rollups for many companies.
+  card on each company's platform page; audited receipt retry and quarantine resolution.
+  **[Failure alerts built, locally verified]** (ADR-091: every platform administrator emailed once
+  about each dead letter, each receipt that used all its attempts and each unresolved quarantine
+  entry, at most every 15 minutes, counts only; a receipt whose worker stopped during its last
+  attempt is now listed and retryable). Remaining: other alerts (queue age, companies' failing
+  integrations) and channels, trends, Meta's quality webhook, API request counts, exports, the
+  oldest waiting job, redrive from the console, acknowledging issues, paging and rollups for many
+  companies.
 - **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**
   (ADR-055): Settings → Company data for owners. A streamed, gzip-compressed JSON Lines export of
   every company table from one read-only transaction (each table and column exported or excluded

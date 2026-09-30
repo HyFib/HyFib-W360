@@ -103,5 +103,6 @@ export * from './stores';
 export * from './jobs/dead-letters';
 export * from './platform/ops-model';
 export * from './platform/ops';
+export * from './platform/failure-alerts';
 export * from './platform/billing';
 export * from './platform/reconciliation';

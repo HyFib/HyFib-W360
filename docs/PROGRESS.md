@@ -1,5 +1,98 @@
 # Progress
 
+## 2026-09-30 — Phase 5: alerts for work that failed for good (P5-10, ADR-091)
+
+Status: **Implemented and locally verified (no customer data).** The operations console listed dead
+letters, Meta and Razorpay webhook receipts that used all their attempts, and quarantined provider
+events (ADR-054), but nobody heard of them unless they looked. A receipt can be retried only while
+its body is kept (7 days), so a payment or a customer's message could be lost while the console
+waited.
+
+### Completed
+
+- **Design (ADR-091):** every platform administrator is emailed about each dead letter, each receipt
+  that used all its attempts and each unresolved quarantine entry, once, at most every 15 minutes,
+  with counts by queue, provider and reason only. A retried receipt that fails all its attempts
+  again is emailed again.
+- **A receipt nobody could see, fixed:** a receipt whose worker stopped during its 12th attempt
+  stayed `processing` after its lease ran out. The sweeper no longer signalled it, the console did
+  not list it and the retry refused it. One rule (`ops.webhook_receipt_exhausted`) now decides that
+  a receipt used its attempts, for the alert, the console and the retry: the console lists such a
+  receipt as "Failed all attempts" with the reason, and staff can retry it.
+- **Migration 0068:**
+  - an alert mark on dead letters, receipts and quarantine entries;
+  - `ops.platform_alerts` holding when the last alert went out;
+  - `ops.failure_alerts_due`, `ops.platform_failure_alert_recipients` and `ops.mark_failure_alert`
+    (SECURITY DEFINER, the worker's role only; the mark is row-locked, re-checks each item's mark,
+    and marks at most 1,000 items of each kind);
+  - `ops.platform_retry_webhook_receipt` replaced to take the stuck receipt and clear the mark.
+
+  Existing dead letters and erased receipts are marked as told. Receipts that can still be retried
+  and unresolved quarantine entries are emailed by the first sweep.
+
+- **Domain and worker:** `alertFailures` and the email (`platform/failure-alerts.ts`), run last in
+  the minute messaging sweep, so that a failure there holds back none of its other work. A queue's
+  name is cut at 40 characters in the email: the table allows 100, and a line longer than a
+  notice's 600 would fail the email, and so the alert, at every sweep. The console's receipt
+  listing uses the shared rule.
+- **Web:** Operations → Integrations says when the last alert went out, and shows when staff were
+  emailed about each receipt and quarantine entry. Operations → Queues shows the same for each dead
+  letter.
+- **Tests:**
+  - Unit: the email's wording, links and entry limit; the longest queue names, every provider and
+    every reason fitting a notice; nothing marked with nobody to tell.
+  - Integration in `platform-ops.test.ts` (5 new tests):
+    - each item told once to every administrator, both roles, with counts only; a resolved entry
+      not told; receipts still being processed or retried not told; the console showing when the
+      last alert went out and when staff were emailed about each item;
+    - the 15-minute gap, and two sweeps at once sending one alert;
+    - each kind told when it is the only one waiting;
+    - the stuck receipt listed, retried, and its alert re-armed; a receipt still processing its last
+      attempt neither listed nor retryable;
+    - the rule against the sweeper's limit, and the alert functions refused to platform staff.
+  - The isolation suite checks the new functions' grants.
+  - e2e `platform-ops.spec.ts` checks the Integrations page's alert line.
+- **Docs:** ADR-091; SECURITY (operations console); THREAT-MODEL T109; RUNBOOKS (failure alerts,
+  the stuck receipt, migration 0068); ARCHITECTURE 6P; BACKLOG P5-10; FEATURE-MATRIX H-034.
+- **Mutation checks:** 30 regressions tried one at a time; all make a test fail.
+  - 17 in SQL:
+    - the rule ignoring a stuck receipt, taking one still processing, or counting 11 attempts;
+    - no 15-minute gap, or the last alert's time not kept;
+    - dead letters or receipts told again; resolved quarantine entries told, or quarantine never
+      told; the due count leaving out each kind;
+    - platform owners only; platform staff running the mark;
+    - the retry not re-arming the alert, refusing a stuck receipt or taking one still processing.
+  - 7 in the domain: the sweep never alerting; marking with nobody to tell; no email queued; the
+    receipts line without the 7 days; every entry named on a line; long queue names kept whole; the
+    queues tab linked for receipts.
+  - 5 in the console's service: the listing ignoring the rule; hiding when the last alert went out,
+    or when staff were emailed about a receipt, a quarantine entry or a dead letter.
+  - 1 in the web page, through the e2e test: Integrations leaving out when the last alert went out.
+  - One, dead letters told again, first made no test fail. The next alert runs only when something
+    new waits, and in the test nothing did. The test now adds a new item and checks that nothing
+    already told is marked again.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                     | Result                                                                                                                                                                 |
+| --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                         |
+| `pnpm test` (unit)                                                          | 419 passed, including 5 new in `platform/failure-alerts.test.ts`                                                                                                       |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 556 passed, including 5 new in `platform-ops.test.ts`                                                                                                                  |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 556 passed                                                                                                                                                             |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / on `platform-ops.spec.ts` and `company-data.spec.ts`: 8 passed (5.8 min), on the local database created for the day's runs, with migration 0068 applied |
+| Mutation checks                                                             | 30 regressions tried (1 through the e2e test); all make a test fail, one only once the test added a new item                                                           |
+
+### Known gaps
+
+- Not built: alerts for a queue's oldest waiting job (pg-boss's counts carry no age), for a
+  company's failing integrations, other channels (chat, pager), and intervals chosen per alert.
+- The worker calling the alert is not observed by a test: the integration tests call the alert
+  directly, and an e2e check would wait on the global 15-minute gap.
+- The alert runs last in the minute messaging sweep: while an earlier step of that sweep fails, no
+  alert goes out either. The sweeps have no dead-letter queue (they run again each minute), so
+  their own failures are in the worker's logs only.
+
 ## 2026-09-30 — Phase 5: company deletion started by HyFib staff (P5-11, ADR-090)
 
 Status: **Implemented and locally verified (no customer data).** Only a company's owners could

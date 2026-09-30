@@ -2987,3 +2987,55 @@ Decision:
 Not built: a shorter grace for staff, starting the job early, deleting a company without its
 owners being told, staff cancelling an owner's deletion, reasons kept only for staff, and
 selecting companies to delete in bulk (for example inactive trials).
+
+## ADR-091 Alerts for work that failed for good (2026-09-30)
+
+Context: the operations console (ADR-054) lists jobs the dead-letter queue received, Meta and
+Razorpay webhook receipts that used all their processing attempts, and provider events that could
+not be matched to a company (quarantine), but nobody heard of them unless they looked. A receipt
+can be retried only while its body is kept (7 days): a Razorpay payment or a customer's message
+could be lost for good while the console waited to be opened. Designing the alert also showed a
+receipt nobody could see: one whose worker stopped during its 12th attempt stayed `processing`
+after its lease ran out. The sweeper stops signalling a receipt after 12 attempts, and the console
+listed only `failed` receipts as used up (and only those under 12 attempts as waiting), so it was
+neither listed, retried nor retryable (the retry took `failed` or `quarantined` receipts only).
+
+Decision:
+
+- **What is told:** each dead letter; each receipt that used all its attempts, meaning it failed
+  its 12th attempt or its worker stopped during it (`ops.webhook_receipt_exhausted`, the one rule
+  for the alert, the console and the retry, tested against `MAX_RECEIPT_ATTEMPTS`); and each
+  quarantine entry not resolved.
+- **Who:** every platform administrator, both roles: both retry receipts and resolve quarantine
+  entries (ADR-054), and dead letters need someone to look for the cause. While there is none,
+  nothing is marked and the worker warns; the alert goes out once there is one.
+- **Once, and not too often:** each item carries when staff were emailed about it
+  (`ops.dead_letters.alerted_at`, `ops.webhook_receipts.exhausted_alerted_at`,
+  `ops.webhook_quarantine.alerted_at`). The minute messaging sweep, last of its work so that a
+  failure here holds nothing else back, counts what waits (`ops.failure_alerts_due`), reads the
+  recipients (`ops.platform_failure_alert_recipients`) and marks it all through
+  `ops.mark_failure_alert` in the transaction that queues the emails. The mark
+  does nothing while the last alert went out less than 15 minutes ago (`ops.platform_alerts`, row
+  locked, so two sweeps at once send one alert), and marks at most 1,000 items of each kind per
+  alert. A burst of failures makes one email, not one a minute; what arrives in between waits for
+  the next. Retrying a receipt clears its mark, so if it fails all its attempts again, staff hear of
+  it again. All three functions are SECURITY DEFINER and executable by the worker's role only.
+- **What:** one `platform.notice` email: how many jobs were dead-lettered by queue, how many
+  receipts used their attempts by provider (with the 7 days to retry them), and how many events
+  could not be matched by provider and reason, naming six entries a line at most, with a link to
+  the tab that lists them. A queue's name is cut at 40 characters: the table allows 100, and a line
+  longer than a notice's 600 would fail the email, and so the alert, at every sweep. No company, receipt, reference or error: those stay on the console,
+  behind platform sign-in and two-factor authentication.
+- **The stuck receipt:** the console lists a receipt whose worker stopped during its last attempt
+  as "Failed all attempts", with that explanation, and the retry takes it (migration 0068 replaces
+  `ops.platform_retry_webhook_receipt`). The console also shows when staff were emailed about each
+  receipt, quarantine entry and dead letter, and when the last alert went out.
+- **Already listed before this release:** dead letters, and receipts whose body was already erased,
+  are marked as told by the migration (they are history, and nothing can be done for such a
+  receipt). Receipts that can still be retried and unresolved quarantine entries are emailed by the
+  first sweep, since staff must act on them and nobody was told.
+
+Not built: alerts for queues whose oldest waiting job is too old (pg-boss's counts carry no age),
+alerts to other channels (chat, pager), a digest schedule or intervals chosen per alert, and alerts
+for failing integrations of one company (the console's Current failures; companies hear of their
+own through their pages and emails).

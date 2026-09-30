@@ -13,6 +13,7 @@ import {
   isNull,
   lt,
   or,
+  platformAlerts,
   platformAuditEvents,
   securityEvents,
   sql,
@@ -187,6 +188,8 @@ export interface ReceiptNeedingAttention {
   problem: ReceiptProblem;
   /** Whether the body is still kept, so a retry can process it (checked again when retrying). */
   retryable: boolean;
+  /** When platform staff were emailed that it used all its attempts (ADR-091). */
+  alertedAt: Date | null;
 }
 
 export interface EventCount {
@@ -239,6 +242,9 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
 
   async function receiptsNeedingAttention(tx: Tx, now: Date): Promise<ReceiptNeedingAttention[]> {
     const waitingBefore = new Date(now.getTime() - OPS_WINDOWS.stuckReceiptMinutes * MINUTE_MS);
+    // One rule for a receipt that used all its attempts, shared with the alerts and the retry
+    // (migration 0068): failed its last attempt, or its worker stopped during it.
+    const exhausted = sql<boolean>`ops.webhook_receipt_exhausted(${webhookReceipts.status}, ${webhookReceipts.attempts}, ${webhookReceipts.leaseUntil})`;
     const rows = await tx
       .select({
         id: webhookReceipts.id,
@@ -247,13 +253,16 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
         status: webhookReceipts.status,
         attempts: webhookReceipts.attempts,
         lastError: webhookReceipts.lastError,
+        exhausted,
+        alertedAt: webhookReceipts.exhaustedAlertedAt,
       })
       .from(webhookReceipts)
       .where(
         or(
           and(
-            eq(webhookReceipts.status, 'failed'),
+            inArray(webhookReceipts.status, ['failed', 'processing']),
             gte(webhookReceipts.attempts, MAX_RECEIPT_ATTEMPTS),
+            exhausted,
           ),
           and(
             inArray(webhookReceipts.status, ['pending', 'processing', 'failed']),
@@ -265,9 +274,8 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
       .orderBy(desc(webhookReceipts.receivedAt))
       .limit(100);
     const bodyKeptAfter = now.getTime() - RECEIPT_BODY_DAYS * DAY_MS;
-    return rows.map((r) => {
-      const problem: ReceiptProblem =
-        r.status === 'failed' && r.attempts >= MAX_RECEIPT_ATTEMPTS ? 'exhausted' : 'waiting';
+    return rows.map(({ exhausted: usedUp, ...r }) => {
+      const problem: ReceiptProblem = usedUp ? 'exhausted' : 'waiting';
       return {
         ...r,
         problem,
@@ -468,6 +476,7 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
             reason: webhookQuarantine.reason,
             externalIds: webhookQuarantine.externalIds,
             createdAt: webhookQuarantine.createdAt,
+            alertedAt: webhookQuarantine.alertedAt,
             receiptStatus: webhookReceipts.status,
             receivedAt: webhookReceipts.receivedAt,
           })
@@ -489,9 +498,15 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
           .where(gte(emailOutbox.createdAt, since7d))
           .groupBy(emailOutbox.kind)
           .orderBy(emailOutbox.kind);
+        // When platform staff were last emailed about work that failed for good (ADR-091).
+        const [alerts] = await tx
+          .select({ lastSentAt: platformAlerts.lastSentAt })
+          .from(platformAlerts)
+          .where(eq(platformAlerts.kind, 'failures'));
         return {
           failures,
           receipts,
+          lastFailureAlertAt: alerts?.lastSentAt ?? null,
           quarantine: quarantine.map((q) => ({
             ...q,
             externalIds: quarantineExternalIds(q.externalIds),
@@ -527,6 +542,7 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
             errorCode: deadLetters.errorCode,
             firstQueuedAt: deadLetters.firstQueuedAt,
             failedAt: deadLetters.failedAt,
+            alertedAt: deadLetters.alertedAt,
           })
           .from(deadLetters)
           .leftJoin(tenants, eq(tenants.id, deadLetters.tenantId))

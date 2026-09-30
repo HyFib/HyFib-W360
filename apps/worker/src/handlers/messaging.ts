@@ -3,6 +3,7 @@ import { QUEUES } from '@w360/contracts';
 import { toError } from '@w360/core';
 import { authorizedTenantScope } from '@w360/db';
 import {
+  alertFailures,
   applyMessagingRetention,
   authorizeJob,
   cancelSendIntent,
@@ -233,6 +234,26 @@ export function messagingSweepHandler(rt: WorkerRuntime) {
       rt.logger.info(
         { receipts: receipts.length, intents: intents.length, unknownOutcomes: recovered },
         'messaging sweep',
+      );
+    }
+    // Dead letters, receipts that used all their attempts and unmatched provider events: platform
+    // staff hear of each once, at most every 15 minutes (ADR-091). Last, so that a failure here
+    // holds back none of the sweep's other work.
+    const failures = await alertFailures({
+      db: rt.db,
+      outbox: rt.notices.outbox,
+      appBaseUrl: rt.notices.appBaseUrl,
+    });
+    if (failures.alerted > 0) {
+      rt.logger.info(
+        { items: failures.alerted, recipients: failures.recipients },
+        'failure alert emailed to platform staff',
+      );
+    }
+    if (failures.unsent > 0) {
+      rt.logger.warn(
+        { items: failures.unsent },
+        'work failed for good but there is no platform administrator to email',
       );
     }
   };

@@ -112,6 +112,14 @@ export const deadLetters = opsSchema.table('dead_letters', {
   firstQueuedAt: tz('first_queued_at'),
   failedAt: tz('failed_at').notNull(),
   recordedAt: tz('recorded_at').notNull().defaultNow(),
+  /** When platform staff were emailed about it (ADR-091). */
+  alertedAt: tz('alerted_at'),
+});
+
+/** When each platform alert last went out (ADR-091: failures at most every 15 minutes). */
+export const platformAlerts = opsSchema.table('platform_alerts', {
+  kind: text('kind', { enum: ['failures'] }).primaryKey(),
+  lastSentAt: tz('last_sent_at'),
 });
 
 /** What happened at one provider while a company was deleted (ADR-055). */

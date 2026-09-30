@@ -767,9 +767,15 @@ message text, contact details, payloads, email addresses, secrets or full URLs:
   definer purges after 30 days. A job's company, kind and reference are recorded only when its
   envelope signature verifies, so a forged job cannot attribute a failure to a company.
 - Repairs: retrying a Meta or Razorpay receipt (`ops.platform_retry_webhook_receipt`, only from
-  `failed` or `quarantined`, only while its body is kept) and resolving a quarantine entry each
-  need a written reason and write `ops.platform_audit_events` in the same transaction. Neither
-  reads or changes company data.
+  `failed`, `quarantined` or processing with its last attempt's lease run out (since 0068), only
+  while its body is kept) and resolving a quarantine entry each need a written reason and write
+  `ops.platform_audit_events` in the same transaction. Neither reads or changes company data.
+- Failure alerts (ADR-091): the worker emails every platform administrator counts of dead letters by
+  queue, used-up receipts by provider and quarantine entries by provider and reason, never a
+  company, receipt, reference or error. `ops.failure_alerts_due`, `ops.mark_failure_alert` and
+  `ops.platform_failure_alert_recipients` are SECURITY DEFINER, executable only by the worker's
+  role; the definer role may update only the three alert marks and the last alert's time. Each item
+  is emailed once, at most one alert every 15 minutes.
 
 Company export and deletion (Settings → Company data, ADR-055):
 

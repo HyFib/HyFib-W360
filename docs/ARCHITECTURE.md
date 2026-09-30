@@ -1151,17 +1151,27 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
 - **Health and signals** (`platform/ops-model.ts`) are pure functions over those facts with HyFib's
   own thresholds (ADR-054): a company is `critical`, `warning` or `ok`, and a signal asks for a
   review; nothing is suspended automatically.
-- **Repairs:** retrying a Meta or Razorpay receipt that failed all attempts or was quarantined, while
-  its body is still kept (`ops.platform_retry_webhook_receipt`: back to pending with no attempts;
-  the minute sweep processes it again, idempotently), and resolving a quarantine entry with a
-  written resolution. Both need a reason and write `ops.platform_audit_events` in the same
-  transaction.
+- **Repairs:** retrying a Meta or Razorpay receipt that used all its attempts (it failed the 12th, or
+  its worker stopped during it: `ops.webhook_receipt_exhausted`, migration 0068) or was
+  quarantined, while its body is still kept (`ops.platform_retry_webhook_receipt`: back to pending
+  with no attempts; the minute sweep processes it again, idempotently), and resolving a quarantine
+  entry with a written resolution. Both need a reason and write `ops.platform_audit_events` in the
+  same transaction.
+- **Failure alerts** (ADR-091, migration 0068, `platform/failure-alerts.ts`): the minute messaging
+  sweep emails every platform administrator about each dead letter, each receipt that used all its
+  attempts and each unresolved quarantine entry, once (`alerted_at` marks set by
+  `ops.mark_failure_alert` in the transaction that queues the emails) and at most every 15 minutes
+  (`ops.platform_alerts`), with counts by queue, provider and reason only. A retry clears the
+  receipt's mark. The console shows when staff were emailed about each item and when the last alert
+  went out.
 - **Web:** `/platform/ops` (Overview, Onboarding, Integrations, Queues, Signals, Usage over 7, 30 or
   90 days) and a health card on each company's platform page. Every page re-checks the platform
   actor. The functions read every company on each view, which suits the test envelope; paging and
   precomputed rollups come with growth.
-- **Not built yet:** alerts, trends, quality updates from Meta's quality webhook, API request counts,
-  exports, the age of the oldest waiting job, redrive from the console, and acknowledging issues.
+- **Not built yet:** alerts other than failures (a queue's oldest waiting job, a company's failing
+  integrations) and other channels, trends, quality updates from Meta's quality webhook, API
+  request counts, exports, the age of the oldest waiting job, redrive from the console, and
+  acknowledging issues.
 
 ## 6Q. Company export and deletion **[built — providers verified against the local Graph, Shopify and Razorpay stand-ins only]**
 

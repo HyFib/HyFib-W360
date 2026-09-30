@@ -59,6 +59,10 @@ test('staff read the operations console and repair a quarantined webhook event',
   // Integrations: the quarantined event names the unknown account; staff retry it, then resolve it.
   await sections.getByRole('link', { name: 'Integrations' }).click();
   await expect(page.getByRole('heading', { name: 'Current failures' })).toBeVisible();
+  // Staff are emailed about what failed for good (ADR-091); the page says when the last alert went.
+  await expect(
+    page.getByText(/Platform administrators are emailed about each receipt that failed all/),
+  ).toContainText(/the last email went out|none has gone out yet/);
   const quarantine = page.getByRole('table', { name: 'Quarantined webhook events' });
   const row = quarantine.getByRole('row').filter({ hasText: wabaId });
   // The worker quarantines the receipt after the webhook is answered; the page shows what was
