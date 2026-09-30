@@ -129,9 +129,10 @@ describe('database roles', () => {
       expect(await can('w360_platform', fn), fn).toBe(false);
     }
     // Plans (0023): the sweep functions for the worker (with the API request notice of 0035, the
-    // warnings of 0036, the subscription functions of 0037, the rate change notices of 0038 and the
-    // notices of staff changes and cancellations of 0077 and 0078), the usage counts for platform
-    // staff, the entitlements for both, and the plan-state triggers for nobody.
+    // warnings of 0036, the subscription functions of 0037, the rate change notices of 0038, the
+    // notices of staff changes and cancellations of 0077 and 0078, and the refunds of plan payments
+    // of 0080), the usage counts for platform staff, the entitlements for both, and the plan-state
+    // triggers for nobody.
     for (const fn of [
       'ops.plan_transitions_due(integer)',
       'ops.usage_limits_reached(integer)',
@@ -146,11 +147,18 @@ describe('database roles', () => {
       'app.take_plan_change_notice()',
       'ops.plan_subscription_cancel_notices_due(integer)',
       'app.take_plan_subscription_cancel_notice(uuid)',
+      'ops.plan_payment_refunds_due(integer)',
+      'app.record_plan_payment_refund(text,text,bigint,uuid)',
     ]) {
       expect(await can('w360_app', fn), fn).toBe(true);
       expect(await can('w360_auth', fn), fn).toBe(false);
       expect(await can('w360_platform', fn), fn).toBe(false);
     }
+    // Refunds of plan payments (0080) are asked for by platform owners only.
+    const planRefund = 'ops.platform_request_plan_payment_refund(uuid,uuid,bigint,text,text)';
+    expect(await can('w360_platform', planRefund)).toBe(true);
+    expect(await can('w360_app', planRefund)).toBe(false);
+    expect(await can('w360_auth', planRefund)).toBe(false);
     expect(await can('w360_platform', 'ops.platform_tenant_usage(uuid)')).toBe(true);
     expect(await can('w360_app', 'ops.platform_tenant_usage(uuid)')).toBe(false);
     expect(await can('w360_app', 'app.tenant_entitlements(uuid)')).toBe(true);

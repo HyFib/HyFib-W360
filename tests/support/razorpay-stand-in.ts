@@ -77,6 +77,8 @@ export interface StandInRefund {
   amount: number;
   status: 'pending' | 'processed' | 'failed';
   idempotencyKey: string | null;
+  /** The notes given when the refund was created, returned with it (R-120). */
+  notes?: Record<string, string>;
 }
 
 export interface StandInDispute {
@@ -423,6 +425,8 @@ function refundJson(r: StandInRefund) {
     payment_id: r.paymentId,
     amount: r.amount,
     status: r.status,
+    // As for payments, notes are sent as [] when there are none.
+    notes: r.notes && Object.keys(r.notes).length > 0 ? r.notes : [],
   };
 }
 
@@ -1281,12 +1285,19 @@ export async function startRazorpayStandIn(options: {
               },
             };
           }
+          const notes: Record<string, string> = {};
+          if (body?.notes && typeof body.notes === 'object' && !Array.isArray(body.notes)) {
+            for (const [k, v] of Object.entries(body.notes as Record<string, unknown>)) {
+              if (typeof v === 'string') notes[k] = v;
+            }
+          }
           const refund: StandInRefund = {
             id: id('rfnd'),
             paymentId: payment.id,
             amount,
             status: state.refundStatusOnCreate,
             idempotencyKey: key,
+            notes,
           };
           state.refunds.set(refund.id, refund);
           payment.amountRefunded += amount;

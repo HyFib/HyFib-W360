@@ -8,6 +8,7 @@ import {
   gt,
   inArray,
   or,
+  planPaymentRefunds,
   planPayments,
   planSettings,
   planSubscriptions,
@@ -19,6 +20,8 @@ import {
   tenants,
   LIVE_PLAN_SUBSCRIPTION_STATUSES,
   type Database,
+  type PlanPaymentRefundOrigin,
+  type PlanPaymentRefundStatus,
   type PlanSubscriptionStatus,
   type TenantScope,
   type Tx,
@@ -110,6 +113,21 @@ export interface PlanPaymentRecord {
   periodEnd: Date;
   paidAt: Date;
   method: string | null;
+  /** Refunds Razorpay processed (ADR-103). */
+  refundedMinor: number;
+  /** A refund HyFib asked for that Razorpay has not finished. */
+  openRefundMinor: number | null;
+}
+
+/** A refund of a plan payment as the company sees it (ADR-103): no staff reason or name. */
+export interface PlanPaymentReceiptRefund {
+  id: string;
+  amountMinor: number;
+  status: PlanPaymentRefundStatus;
+  /** Asked for by HyFib, or made at Razorpay (for example in its Dashboard). */
+  origin: PlanPaymentRefundOrigin;
+  requestedAt: Date;
+  processedAt: Date | null;
 }
 
 export type PlanPaymentOffer =
@@ -152,6 +170,10 @@ export interface PlanPaymentReceipt {
   companyName: string;
   billingEmail: string | null;
   timezone: string;
+  /** The payment's refunds, oldest first, except those that failed (ADR-103). */
+  refunds: PlanPaymentReceiptRefund[];
+  /** What Razorpay refunded of it. */
+  refundedMinor: number;
 }
 
 export interface PlanPaymentOverview {
@@ -641,25 +663,62 @@ export async function resolvePlanSubscription(
   );
 }
 
-/** The plan payment HyFib recorded for a Razorpay payment id, if any (the settlement check). */
+/** The refunds of some of the company's plan payments, oldest first (ADR-103). */
+async function refundsOf(tx: Tx, tenantId: string, planPaymentIds: string[]) {
+  if (planPaymentIds.length === 0) return [];
+  return tx
+    .select({
+      id: planPaymentRefunds.id,
+      planPaymentId: planPaymentRefunds.planPaymentId,
+      amountMinor: planPaymentRefunds.amountMinor,
+      status: planPaymentRefunds.status,
+      origin: planPaymentRefunds.origin,
+      requestedAt: planPaymentRefunds.requestedAt,
+      processedAt: planPaymentRefunds.processedAt,
+    })
+    .from(planPaymentRefunds)
+    .where(
+      and(
+        eq(planPaymentRefunds.tenantId, tenantId),
+        inArray(planPaymentRefunds.planPaymentId, planPaymentIds),
+      ),
+    )
+    .orderBy(planPaymentRefunds.requestedAt, planPaymentRefunds.id);
+}
+
+const refundedOf = (refunds: readonly { status: string; amountMinor: number }[]) =>
+  refunds.filter((r) => r.status === 'processed').reduce((sum, r) => sum + r.amountMinor, 0);
+
+/**
+ * The plan payment HyFib recorded for a Razorpay payment id, if any (the settlement check, and
+ * refunds of plan payments, ADR-103).
+ */
 export async function findPlanPayment(
   db: Database,
   providerPaymentId: string,
-): Promise<{ tenantId: string; subscriptionId: string; amountMinor: number } | null> {
+): Promise<{
+  tenantId: string;
+  planPaymentId: string;
+  subscriptionId: string;
+  amountMinor: number;
+} | null> {
   return db.run(
     systemScope,
     async (tx) => {
       const res = await tx.execute<{
         tenant_id: string;
+        plan_payment_id: string;
         subscription_id: string;
         amount_minor: string | number;
       }>(
-        sql`select tenant_id, subscription_id, amount_minor from ops.billing_resolve_plan_payment(${providerPaymentId})`,
+        sql`select tenant_id, plan_payment_id, subscription_id, amount_minor
+              from ops.billing_resolve_plan_payment(${providerPaymentId})`,
       );
       const row = res.rows[0];
       return row
         ? {
             tenantId: row.tenant_id,
+            planPaymentId: row.plan_payment_id,
             subscriptionId: row.subscription_id,
             amountMinor: Number(row.amount_minor),
           }
@@ -875,7 +934,7 @@ export function createPlanSubscriptionService(deps: PlanSubscriptionServiceDeps)
                 )
                 .orderBy(desc(planSubscriptions.createdAt))
                 .limit(1);
-          const payments = await tx
+          const paid = await tx
             .select({
               id: planPayments.id,
               amountMinor: planPayments.amountMinor,
@@ -888,6 +947,20 @@ export function createPlanSubscriptionService(deps: PlanSubscriptionServiceDeps)
             .where(eq(planPayments.tenantId, ctx.tenant.id))
             .orderBy(desc(planPayments.paidAt))
             .limit(24);
+          const refunds = await refundsOf(
+            tx,
+            ctx.tenant.id,
+            paid.map((p) => p.id),
+          );
+          const payments: PlanPaymentRecord[] = paid.map((p) => {
+            const own = refunds.filter((r) => r.planPaymentId === p.id);
+            const open = own.find((r) => r.status === 'requested' || r.status === 'submitted');
+            return {
+              ...p,
+              refundedMinor: refundedOf(own),
+              openRefundMinor: open ? open.amountMinor : null,
+            };
+          });
           return { offer, subscription: shown ? summary(shown, now) : null, payments };
         },
         { accessMode: 'read only' },
@@ -943,6 +1016,9 @@ export function createPlanSubscriptionService(deps: PlanSubscriptionServiceDeps)
             .select({ email: billingCustomers.email })
             .from(billingCustomers)
             .where(eq(billingCustomers.tenantId, ctx.tenant.id));
+          const refunds = (await refundsOf(tx, ctx.tenant.id, [found.id])).filter(
+            (r) => r.status !== 'failed',
+          );
           return {
             id: found.id,
             receiptNumber: found.providerInvoiceId,
@@ -974,6 +1050,8 @@ export function createPlanSubscriptionService(deps: PlanSubscriptionServiceDeps)
             companyName: ctx.tenant.name,
             billingEmail: customer?.email ?? null,
             timezone: ctx.tenant.timezone,
+            refunds: refunds.map(({ planPaymentId: _payment, ...refund }) => refund),
+            refundedMinor: refundedOf(refunds),
           };
         },
         { accessMode: 'read only' },

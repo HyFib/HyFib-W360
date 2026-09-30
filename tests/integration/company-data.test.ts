@@ -16,6 +16,7 @@ import {
   createCompanyDeletionService,
   createContactsService,
   createGrowthService,
+  createPlanAdminService,
   createPlatformBillingService,
   createPlatformService,
   createRefundRequestsService,
@@ -24,6 +25,7 @@ import {
   notifyStaffDeletions,
   outboxAad,
   processCreditRefund,
+  processPlanPaymentRefund,
   processStoreJob,
   queueTextMessage,
   runTenantDeletion,
@@ -60,6 +62,7 @@ const KEPT = [
   'app.ledger_entries',
   'app.ledger_transactions',
   'app.payment_mandates',
+  'app.plan_payment_refunds',
   'app.plan_payments',
   'app.plan_subscriptions',
   'app.tenant_plans',
@@ -1297,6 +1300,76 @@ describe('running a deletion', () => {
       'precondition_failed',
       /being deleted/,
     );
+  });
+
+  it('waits for a refund of a plan payment in progress, and keeps it (ADR-103)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const providerSubscriptionId = await addPlanSubscription(c);
+    // A cycle Razorpay charged, as HyFib records it (fixture row: recording is covered by
+    // plan-subscriptions.test.ts).
+    const { payment, invoice } = rzp.chargeSubscription(providerSubscriptionId);
+    const planPaymentId = uuidv7();
+    await fx.query(
+      `INSERT INTO app.plan_payments (id, tenant_id, subscription_id, provider_payment_id,
+         provider_invoice_id, amount_minor, currency, period_start, period_end, paid_at)
+       SELECT $1, $2, s.id, $3, $4, 118000, 'INR', now(), now() + interval '30 days', now()
+         FROM app.plan_subscriptions s WHERE s.provider_subscription_id = $5`,
+      [planPaymentId, c.tenant.id, payment.id, invoice.id, providerSubscriptionId],
+    );
+    const actor = await platformOwner();
+    const plans = createPlanAdminService({
+      platformDb: fx.dbs.platform,
+      clock: systemClock,
+      razorpay,
+    });
+    const ask = {
+      tenantId: c.tenant.id,
+      planPaymentId,
+      amount: '100',
+      reason: 'Charged twice by mistake, ticket 5150',
+    };
+    const { refundId } = await plans.requestPlanPaymentRefund(actor, ask);
+    const scope = authorizedTenantScope(c.tenant.id, null);
+    const refundDeps = {
+      db: fx.dbs.app,
+      razorpay,
+      clock: systemClock,
+      notices: { outbox: outbox(), appBaseUrl: APP_BASE },
+    };
+    rzp.state.refundStatusOnCreate = 'pending';
+    try {
+      expect(await processPlanPaymentRefund(refundDeps, scope, refundId)).toBe('submitted');
+    } finally {
+      rzp.state.refundStatusOnCreate = 'processed';
+    }
+
+    await deletions().request(owner, { confirm: c.tenant.slug });
+    await makeDue(c.tenant.id);
+    await expectAppError(
+      plans.requestPlanPaymentRefund(actor, { ...ask, amount: '50' }),
+      'precondition_failed',
+      /being deleted/,
+    );
+    expect(await runTenantDeletion(runDeps(), c.tenant.id)).toEqual({
+      outcome: 'waiting_for_refund',
+    });
+    expect(await deletionRow(c.tenant.id)).toMatchObject({ started_at: null, attempts: 0 });
+
+    // Razorpay completes the refund; the deletion then runs and keeps the refund with the payment.
+    const refund = [...rzp.state.refunds.values()].find(
+      (r) => r.idempotencyKey === `ppr_${refundId}`,
+    );
+    rzp.setRefundStatus(refund!.id, 'processed');
+    expect(await processPlanPaymentRefund(refundDeps, scope, refundId)).toBe('processed');
+    expect((await runTenantDeletion(runDeps(), c.tenant.id)).outcome).toBe('finished');
+    expect(
+      await fx.query<{ status: string; amount_minor: number }>(
+        'SELECT status, amount_minor::int AS amount_minor FROM app.plan_payment_refunds WHERE id = $1',
+        [refundId],
+      ),
+    ).toEqual([{ status: 'processed', amount_minor: 10_000 }]);
+    expect(await tenantRow(c.tenant.id)).toMatchObject({ status: 'deleted' });
   });
 
   it('removes HyFib from the providers, deletes every company row, keeps the records and leaves a tombstone', async () => {

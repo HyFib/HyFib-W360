@@ -1,5 +1,133 @@
 # Progress
 
+## 2026-09-30 — Phase 5: refunds of plan payments (P5-07, ADR-103)
+
+Status: **Implemented and locally verified against the Razorpay stand-in (test data only).** HyFib
+could not refund a plan payment (ADR-063), and a refund made in Razorpay's Dashboard was not
+recorded: `refund.processed` set it aside as an unknown refund, the receipt did not show it and the
+daily reconciliation left it to a person.
+
+### Completed
+
+- **Research (R-120, R-121, read 2026-09-30 from Razorpay's documentation repository):** a refund
+  carries the notes it was created with, and fetching it returns them; subscription charges are
+  auto-captured payments, and a captured payment can be refunded in full or in part. No page says
+  whether a refund of a subscription's payment changes the subscription or its invoice (unconfirmed
+  point 29, in the release checklist's test-mode check).
+- **Design (ADR-103):** platform owners refund part or all of a recorded plan payment from the
+  company's platform page, with a reason (10 to 2,000 characters, platform audit log): at least
+  ₹0.01, at most what Razorpay has not refunded of it, one open refund per payment, none for a
+  company being deleted. Operators see refunds only. A refund never changes the plan or the
+  subscription (to end the plan, staff cancel the subscription and change the plan, as the form
+  says). The flow follows staff credit refunds (ADR-058) without a hold: the worker asks Razorpay
+  with `X-Refund-Idempotency: ppr_<request id>` and the note `hyfib_plan_refund: <request id>`, and
+  only a refund fetched from Razorpay is recorded.
+- **Migration 0080:** `app.plan_payment_refunds` (origin `staff` with the reason and who asked, which
+  the company role cannot read, or `razorpay` for refunds made there; one open refund per payment;
+  refund ids unique; append-only); `ops.platform_request_plan_payment_refund` (platform owners only,
+  checked in SQL, with the platform audit entry); `ops.plan_payment_refunds_due` for the minute
+  billing sweep; `app.record_plan_payment_refund`, which marks HyFib's refund processed by its
+  refund id, or by the request its notes name after a lost response (same amount, no refund id
+  yet), records any other processed refund as made at Razorpay, and never lets processed refunds
+  exceed the payment; requests and recordings of a payment's refunds take one advisory lock. The
+  runtime role may only move a request to submitted or failed (column grants and a restrictive
+  policy). The reconciliation's facts include recorded plan refunds.
+- **Domain:** `plan-payment-refunds.ts` (the due list, the job's step: the attempt written down first,
+  the call with the same key and body every time, a refusal failing the request, anything uncertain
+  tried again after 1, 5, 15 and 60 minutes, then hourly, and the refund checked until Razorpay
+  processes or fails it; the billing managers' emails when Razorpay accepts or fails it);
+  `refund.processed` and `refund.failed` for plan payments (a payment without a HyFib order is
+  looked up among recorded plan payments); the reconciliation matches a plan refund by id and
+  records one HyFib missed, instead of leaving it to a person; the company deletion waits for an open
+  refund; the export omits the reason and who asked; the Razorpay client reads a refund's notes
+  (string values only).
+- **Worker:** the `billing.plan-payment-refund` job, signed and run in the company's scope, queued by
+  the minute billing sweep.
+- **Web:** the platform page lists a company's plan refunds with the reason and who asked, and a form
+  for platform owners (the payments that can be refunded, with what is left of each, the amount, the
+  reason and a confirmation); the receipt lists the payment's refunds (in progress, refunded on a
+  day, started by HyFib or made at Razorpay) and the amount paid after refunds; Billing's payments
+  table marks refunded amounts and a refund in progress.
+- **Stand-in (tests only):** refunds keep and return their notes.
+- **Tests:**
+  - Unit (3 new): a refund's notes sent and read back, string values only; the payments offered for a
+    refund (what is left, none with a refund in progress); operators and bad amounts refused before
+    the database; the reconciliation's matching of plan refunds by id and amount.
+  - Integration (`plan-payment-refunds.test.ts`, 7 new):
+    - the request's key and notes sent once, the company's audit entry and email (without the
+      reason), the plan and the subscription unchanged, the refund checked until processed;
+    - operators, short reasons, bad amounts, another company's payment and a company being deleted
+      refused;
+    - Dashboard refunds recorded once from their webhook (the refund fetched from Razorpay, not the
+      event's forged amount and notes); a failed staff refund failing its request with one email,
+      and a failed Dashboard refund changing nothing;
+    - a refund whose response was lost recognised by its notes, with the webhook first and with the
+      next try (the same key returning the same refund), a 409 waiting, and notes naming the request
+      with another amount recorded as made at Razorpay;
+    - never more than the payment, whoever reports the refund; a refusal failing the request with
+      the email; another company's scope unable to record a refund of the payment;
+    - the company role reading refunds without the reason or who asked, never marking one processed,
+      inserting or deleting one, failing only an open request, and another company seeing nothing;
+    - each origin's fields and a processed refund's id and time.
+  - Integration elsewhere: the reconciliation records a missed plan refund (`settlement-recon`); the
+    deletion waits for an open plan refund, then runs and keeps it (`company-data`); the export
+    classification; the new functions' grants (`tenant-isolation`).
+  - e2e (`plan-subscription.spec.ts`): a platform owner refunds ₹100 of the company's plan payment
+    with a reason, the worker asks Razorpay, the billing manager's email arrives without the reason,
+    the platform page shows the refund and the payment's refunded amount, Billing shows the refunded
+    amount with the plan still active, and the receipt shows the refund and ₹1,314.82 after it.
+- **Docs:** ADR-103 (and notes in ADR-063 and ADR-064); research R-120, R-121 and unconfirmed point
+  29; RELEASE-CHECKLIST (test-mode check); SECURITY; THREAT-MODEL T116; RUNBOOKS (refunding a plan
+  payment, migration 0080); ARCHITECTURE; DATA-RETENTION; BACKLOG P5-07; FEATURE-MATRIX H-041, H-044.
+- **Found while finishing:**
+  - The refund form's reason field made the e2e test's existing locator for the staff cancellation's
+    reason match two fields on the platform page; the test now matches labels exactly.
+  - Removing the job's own "open requests only" filter from failing a request changed nothing: the
+    runtime role's update policy already refuses a settled request. A 41st mutation removed that
+    policy's condition instead, and a test catches it.
+- **Mutation checks:** 41 regressions tried one at a time, 40 caught (4 through the e2e test).
+  - 19 in the migration: operators allowed to ask; more than what is left, a second open refund, a
+    company being deleted or a short reason accepted; the request missing from the platform audit
+    log; processed refunds exceeding the payment; a processed refund recorded again; a refund whose
+    response was lost not recognised by its notes, or notes naming a request for another amount
+    taken as it; the reconciliation not knowing recorded plan refunds; the company role reading the
+    reason, marking a refund processed or changing a settled one; a refund deletable; a refund made
+    at Razorpay stored before it is processed; the recording function granted to platform staff
+    instead of the runtime role; the runtime role able to ask for refunds; a request listed before
+    it is due.
+  - 7 in the job: the idempotency key per payment instead of per request; the request not named in
+    the notes; a 409 or an unknown outcome failing the request; the billing managers not told when
+    Razorpay accepts; the notes ignored when recording; and the job's own filter for open requests
+    removed when failing one, the one not caught: the runtime role's update policy repeats it, and
+    removing the policy's condition is caught (the 41st, above).
+  - 11 elsewhere in the domain: plan refund webhooks not recorded; a failed Dashboard refund failing
+    a staff request; the reconciliation leaving plan refunds to a person again, or matching them
+    whatever their amount; the deletion not waiting; the export including the reason; Billing, or
+    staff, counting a refund in progress as refunded; the receipt listing failed refunds; a payment
+    with a refund in progress offered again; refund notes not read from Razorpay.
+  - 4 through the e2e test: the sweep not queueing refunds; the receipt, the platform page or
+    Billing not showing them.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                                                                                                                                  | Result                                                                            |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                                     | clean                                                                             |
+| `pnpm test`                                                                                                                                                                              | 454 passed                                                                        |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                                                                      | 620 passed on each                                                                |
+| `pnpm build` and `pnpm test:e2e` for `plan-subscription.spec.ts` and `plans.spec.ts` on chromium and mobile-chromium, on the local database created for the day's runs, migrated to 0080 | 4 passed (8.0 min), the plan subscription test refunding ₹100 of the plan payment |
+| Mutation checks                                                                                                                                                                          | 41 regressions, 40 caught (listed above)                                          |
+| gitleaks 8.30.1 on the commit                                                                                                                                                            | no leaks                                                                          |
+
+### Known gaps
+
+- Companies cannot ask for a refund of a plan payment (ADR-073's requests are for top-ups), a refund
+  never ends the plan, and plan refunds are not in the platform-wide refunds list.
+- A staff refund that Razorpay reports processed before HyFib stored its id (recognised by its notes
+  after a lost response) is recorded without the "HyFib is refunding" email; the receipt shows it.
+- Razorpay test mode has not been run, including whether a refund of a subscription's payment
+  changes the subscription (RELEASE-CHECKLIST, unconfirmed point 29).
+
 ## 2026-09-30 — Phase 5: paying for a plan from the end of the trial (P5-01/P5-07, ADR-102)
 
 Status: **Implemented and locally verified against the Razorpay stand-in (test data only).** A

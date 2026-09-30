@@ -1,5 +1,13 @@
 import { z } from 'zod';
-import { AppError, conflict, forbidden, notFound, uuidv7, type Clock } from '@w360/core';
+import {
+  AppError,
+  conflict,
+  forbidden,
+  notFound,
+  parseMajorUnits,
+  uuidv7,
+  type Clock,
+} from '@w360/core';
 import {
   and,
   asc,
@@ -8,6 +16,7 @@ import {
   eq,
   inArray,
   outerColumn,
+  planPaymentRefunds,
   planPayments,
   planSettings,
   planSubscriptions,
@@ -17,10 +26,13 @@ import {
   tenantPlans,
   tenants,
   usageCounters,
+  users,
   gt,
   or,
   LIVE_PLAN_SUBSCRIPTION_STATUSES,
   PLAN_MODULES,
+  type PlanPaymentRefundOrigin,
+  type PlanPaymentRefundStatus,
   type TenantPlanStatus,
 } from '@w360/db';
 import type { PlatformDatabase } from '@w360/db/platform';
@@ -257,6 +269,17 @@ const planTaxSchema = z.object({ tax: taxPercent }).and(reasonSchema);
 
 const cancelSubscriptionSchema = z.object({ tenantId: z.uuid() }).and(reasonSchema);
 
+const planPaymentRefundSchema = z.object({
+  tenantId: z.uuid(),
+  planPaymentId: z.uuid(),
+  amount: z.string().trim().min(1, 'Enter the amount to refund.').max(20),
+  reason: z
+    .string()
+    .trim()
+    .min(10, 'Give a reason of at least 10 characters.')
+    .max(2000, 'Keep the reason under 2,000 characters.'),
+});
+
 const day = z.preprocess(
   (v) => (blank(v) ? null : v),
   z
@@ -314,6 +337,48 @@ function assertOwner(actor: PlatformActor): void {
 const idOrNotFound = (id: string, what: string) => {
   if (!z.uuid().safeParse(id).success) throw notFound(what);
 };
+
+/** A plan payment on a company's platform page, with what was refunded of it (ADR-103). */
+export interface PlatformPlanPayment {
+  id: string;
+  providerPaymentId: string;
+  /** Razorpay's invoice id: the receipt number the company sees. */
+  providerInvoiceId: string;
+  amountMinor: number;
+  periodStart: Date;
+  periodEnd: Date;
+  paidAt: Date;
+  /** Refunds Razorpay processed. */
+  refundedMinor: number;
+  /** A refund asked for in HyFib that Razorpay has not finished. */
+  openRefundMinor: number | null;
+}
+
+/** A refund of a plan payment, for platform staff (with the reason and who asked). */
+export interface PlatformPlanPaymentRefund {
+  id: string;
+  planPaymentId: string;
+  origin: PlanPaymentRefundOrigin;
+  amountMinor: number;
+  status: PlanPaymentRefundStatus;
+  providerRefundId: string | null;
+  lastError: string | null;
+  reason: string | null;
+  requestedByName: string | null;
+  requestedAt: Date;
+  processedAt: Date | null;
+  failedAt: Date | null;
+}
+
+/**
+ * The plan payments a platform owner can refund now and up to how much: what Razorpay has not
+ * refunded yet, with no refund of the payment in progress (ADR-103). The request checks it again.
+ */
+export function refundablePlanPayments(payments: readonly PlatformPlanPayment[]) {
+  return payments
+    .filter((p) => p.openRefundMinor === null && p.amountMinor > p.refundedMinor)
+    .map((p) => ({ ...p, maxMinor: p.amountMinor - p.refundedMinor }));
+}
 
 export function createPlanAdminService(deps: {
   platformDb: PlatformDatabase;
@@ -405,6 +470,44 @@ export function createPlanAdminService(deps: {
               reason,
             ),
           );
+      });
+    },
+
+    /**
+     * Refunds part or all of a plan payment (platform owners, ADR-103). It is recorded as asked for,
+     * with the reason in the platform audit log, and the worker asks Razorpay. The plan and the
+     * subscription do not change.
+     */
+    async requestPlanPaymentRefund(
+      actor: PlatformActor,
+      input: unknown,
+    ): Promise<{ refundId: string }> {
+      if (actor.role !== 'platform_owner') {
+        throw forbidden('Only a platform owner can refund a plan payment.');
+      }
+      const data = parseInput(planPaymentRefundSchema, input);
+      let amountMinor: number;
+      try {
+        amountMinor = Number(parseMajorUnits(data.amount, 'INR'));
+      } catch {
+        throw new AppError('validation_failed', 'Enter the amount in rupees, like 250 or 250.50.', {
+          issues: [{ path: 'amount', message: 'Enter the amount in rupees' }],
+        });
+      }
+      if (!Number.isSafeInteger(amountMinor) || amountMinor < 1) {
+        throw new AppError('validation_failed', 'Enter an amount above ₹0.', {
+          issues: [{ path: 'amount', message: 'Enter an amount above ₹0' }],
+        });
+      }
+      return platformDb.run(actor.userId, async (tx) => {
+        const result = await tx.execute<{ id: string }>(
+          sql`select ops.platform_request_plan_payment_refund(${data.tenantId}::uuid,
+                ${data.planPaymentId}::uuid, ${amountMinor}::bigint, ${data.reason},
+                ${actor.correlationId}) as id`,
+        );
+        const refundId = result.rows[0]?.id;
+        if (!refundId) throw new Error('refund request returned no id');
+        return { refundId };
       });
     },
 
@@ -833,10 +936,11 @@ export function createPlanAdminService(deps: {
           )
           .orderBy(desc(planSubscriptions.createdAt))
           .limit(1);
-        const payments = await tx
+        const paid = await tx
           .select({
             id: planPayments.id,
             providerPaymentId: planPayments.providerPaymentId,
+            providerInvoiceId: planPayments.providerInvoiceId,
             amountMinor: planPayments.amountMinor,
             periodStart: planPayments.periodStart,
             periodEnd: planPayments.periodEnd,
@@ -846,6 +950,58 @@ export function createPlanAdminService(deps: {
           .where(eq(planPayments.tenantId, tenantId))
           .orderBy(desc(planPayments.paidAt))
           .limit(12);
+        // What was refunded of each payment shown, and a refund in progress (ADR-103).
+        const totals =
+          paid.length === 0
+            ? []
+            : await tx
+                .select({
+                  planPaymentId: planPaymentRefunds.planPaymentId,
+                  status: planPaymentRefunds.status,
+                  amountMinor: planPaymentRefunds.amountMinor,
+                })
+                .from(planPaymentRefunds)
+                .where(
+                  and(
+                    eq(planPaymentRefunds.tenantId, tenantId),
+                    inArray(
+                      planPaymentRefunds.planPaymentId,
+                      paid.map((p) => p.id),
+                    ),
+                    inArray(planPaymentRefunds.status, ['requested', 'submitted', 'processed']),
+                  ),
+                );
+        const payments: PlatformPlanPayment[] = paid.map((p) => {
+          const own = totals.filter((t) => t.planPaymentId === p.id);
+          const open = own.find((t) => t.status !== 'processed');
+          return {
+            ...p,
+            refundedMinor: own
+              .filter((t) => t.status === 'processed')
+              .reduce((sum, t) => sum + t.amountMinor, 0),
+            openRefundMinor: open ? open.amountMinor : null,
+          };
+        });
+        const refunds: PlatformPlanPaymentRefund[] = await tx
+          .select({
+            id: planPaymentRefunds.id,
+            planPaymentId: planPaymentRefunds.planPaymentId,
+            origin: planPaymentRefunds.origin,
+            amountMinor: planPaymentRefunds.amountMinor,
+            status: planPaymentRefunds.status,
+            providerRefundId: planPaymentRefunds.providerRefundId,
+            lastError: planPaymentRefunds.lastError,
+            reason: planPaymentRefunds.reason,
+            requestedByName: users.name,
+            requestedAt: planPaymentRefunds.requestedAt,
+            processedAt: planPaymentRefunds.processedAt,
+            failedAt: planPaymentRefunds.failedAt,
+          })
+          .from(planPaymentRefunds)
+          .leftJoin(users, eq(users.id, planPaymentRefunds.requestedByUserId))
+          .where(eq(planPaymentRefunds.tenantId, tenantId))
+          .orderBy(desc(planPaymentRefunds.requestedAt), desc(planPaymentRefunds.id))
+          .limit(50);
         return {
           timezone: company.timezone,
           state,
@@ -858,6 +1014,7 @@ export function createPlanAdminService(deps: {
               }
             : null,
           payments,
+          refunds,
           plan: plan ?? null,
           limits: entitlements.limits,
           modules: PLAN_MODULE_KEYS.filter((m) => entitlements.modules.has(m)),

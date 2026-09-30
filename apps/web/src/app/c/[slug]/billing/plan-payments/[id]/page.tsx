@@ -80,7 +80,13 @@ export default async function PlanPaymentReceiptPage({
             <CardTitle>
               {inr(receipt.amountMinor)} for the {receipt.planName} plan
             </CardTitle>
-            <Badge tone="success">Paid</Badge>
+            {receipt.refundedMinor >= receipt.amountMinor ? (
+              <Badge tone="neutral">Refunded</Badge>
+            ) : receipt.refundedMinor > 0 ? (
+              <Badge tone="warning">Partly refunded</Badge>
+            ) : (
+              <Badge tone="success">Paid</Badge>
+            )}
           </div>
           <CardDescription>
             This receipt confirms a payment for your HyFib W360 plan through a Razorpay
@@ -117,6 +123,29 @@ export default async function PlanPaymentReceiptPage({
               </>
             ) : null}
             <Row label="Amount paid">{inr(receipt.amountMinor)} (INR)</Row>
+            {receipt.refunds.map((r) => (
+              <Row
+                key={r.id}
+                label={
+                  r.status === 'processed' && r.processedAt
+                    ? `Refunded on ${formatDate(r.processedAt, tz)}`
+                    : 'Refund in progress'
+                }
+              >
+                {inr(r.amountMinor)}
+                <span className="block text-muted-foreground">
+                  {r.origin === 'staff' ? 'Started by HyFib' : 'Made at Razorpay'}
+                  {r.status === 'processed'
+                    ? ', back to the card, UPI or bank account the payment came from'
+                    : '; Razorpay usually completes a refund in 5–7 working days'}
+                </span>
+              </Row>
+            ))}
+            {receipt.refundedMinor > 0 ? (
+              <Row label="Paid after refunds">
+                {inr(receipt.amountMinor - receipt.refundedMinor)} (INR)
+              </Row>
+            ) : null}
             <Row label="Paid with">
               {receipt.methodLabel ? `${receipt.methodLabel}, through Razorpay` : 'Razorpay'}
             </Row>
@@ -135,7 +164,8 @@ export default async function PlanPaymentReceiptPage({
           </dl>
           <p className="text-xs text-muted-foreground">
             Times are in {tz}. Card numbers are never stored by HyFib. Tax invoices are not issued
-            yet, and refunds made outside HyFib are not shown here.
+            yet. A refund shows here once HyFib asks Razorpay for it, or once Razorpay reports one
+            made there.
           </p>
         </CardContent>
       </Card>

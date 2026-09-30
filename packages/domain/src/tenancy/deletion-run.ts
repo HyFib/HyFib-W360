@@ -10,6 +10,7 @@ import {
   eq,
   inArray,
   paymentMandates,
+  planPaymentRefunds,
   sql,
   systemScope,
   tenantDeletions,
@@ -331,15 +332,16 @@ async function notifyDeleted(
 }
 
 /**
- * Whether a refund of service credit started by platform staff is still open (ADR-058). The
- * deletion waits for it: nothing runs for a deleted company, and no new refund can be asked for
- * once the company is pending deletion, so none is left open after the deletion starts.
+ * Whether a refund started by platform staff is still open: of service credit (ADR-058) or of a
+ * plan payment (ADR-103). The deletion waits for it: nothing runs for a deleted company, and no new
+ * refund can be asked for once the company is pending deletion, so none is left open after the
+ * deletion starts.
  */
-async function hasOpenCreditRefund(db: Database, tenantId: string): Promise<boolean> {
-  const rows = await db.run(
+async function hasOpenRefund(db: Database, tenantId: string): Promise<boolean> {
+  return db.run(
     authorizedTenantScope(tenantId, null),
-    (tx) =>
-      tx
+    async (tx) => {
+      const credit = await tx
         .select({ id: creditRefunds.id })
         .from(creditRefunds)
         .where(
@@ -348,10 +350,22 @@ async function hasOpenCreditRefund(db: Database, tenantId: string): Promise<bool
             inArray(creditRefunds.status, ['requested', 'submitted']),
           ),
         )
-        .limit(1),
+        .limit(1);
+      if (credit.length > 0) return true;
+      const plan = await tx
+        .select({ id: planPaymentRefunds.id })
+        .from(planPaymentRefunds)
+        .where(
+          and(
+            eq(planPaymentRefunds.tenantId, tenantId),
+            inArray(planPaymentRefunds.status, ['requested', 'submitted']),
+          ),
+        )
+        .limit(1);
+      return plan.length > 0;
+    },
     { accessMode: 'read only' },
   );
-  return rows.length > 0;
 }
 
 /** One run of a company's deletion; see `DeletionRunResult`. */
@@ -362,7 +376,7 @@ export async function runTenantDeletion(
 ): Promise<DeletionRunResult> {
   const budgetMs = options.budgetMs ?? 5 * 60_000;
   const batchSize = options.batchSize ?? 2_000;
-  if (await hasOpenCreditRefund(deps.db, tenantId)) return { outcome: 'waiting_for_refund' };
+  if (await hasOpenRefund(deps.db, tenantId)) return { outcome: 'waiting_for_refund' };
   const started = await startDeletion(deps.db, tenantId);
   if (!started) return { outcome: 'not_due' };
   const scope = authorizedTenantScope(tenantId, null);

@@ -976,6 +976,23 @@ company that cancelled just as the first charge was made may show "a payment of 
 subscription that syncing the subscription did not record" in the daily reconciliation: the charge
 is on a cancelled subscription and HyFib gave no period for it, so refund it in the Dashboard.
 
+**Refunding a plan payment (ADR-103).** Platform owners refund part or all of a plan payment on the
+company's platform page → Plan subscription → Refund a plan payment, with a reason (kept in the
+platform audit log, never shown to the company). The plan and the subscription do not change: to end
+the plan as well, cancel the subscription and then change the plan. The worker asks Razorpay within a
+minute or two with `X-Refund-Idempotency: ppr_<request id>` and the note `hyfib_plan_refund`, and the
+company's billing managers are emailed when Razorpay accepts it. A request that does not move: check
+`SELECT status, attempts, provider_refund_id, last_error, next_attempt_at FROM
+app.plan_payment_refunds WHERE id = …`. `requested` with attempts rising: Razorpay is unreachable or
+answering unclearly; the same call (same key, so never a second refund) is repeated after 1, 5, 15
+and 60 minutes, then hourly. `submitted` for days is normal up to about 7 working days; if the
+Dashboard shows it processed, redeliver `refund.processed` or wait for the job's check. `failed`:
+`last_error` is Razorpay's code and description (for example a payment already refunded in the
+Dashboard, or older than Razorpay refunds); the company was emailed, and another refund can be asked
+for. A refund made in the Dashboard is recorded from `refund.processed` or the daily reconciliation,
+as made at Razorpay, and shows on the company's receipt. For a company being deleted, refund in the
+Dashboard; a due deletion waits for a refund in progress.
+
 **Cancelling a company's subscription.** Owners and billing managers cancel in Billing (an active
 one at the end of the paid period, otherwise at once). Platform owners cancel at once on the
 company's platform page with a reason (needed before changing the company's plan, which staff
@@ -1440,6 +1457,16 @@ already stored: a short `ACCESS EXCLUSIVE` lock on the keys table), creates `app
 row security and its grants, and registers deletion step 855 with the definer's grants and
 policies. A failure usually means a lock wait on `app.api_keys` timed out (run the migrations again
 when requests are quieter) or the bootstrap roles are missing.
+
+**Migration 0080 failed.** It runs in one transaction, so a failure applies nothing. It creates
+`app.plan_payment_refunds` (empty, with row security, a rule that nobody deletes a row and the
+roles' grants), `ops.platform_request_plan_payment_refund` (platform role), and
+`ops.plan_payment_refunds_due` and `app.record_plan_payment_refund` (runtime role), each handed to
+`w360_definer`, and rebuilds `ops.settlement_recon_facts`: `w360_definer` drops it, and the migration
+role recreates it, grants it to `w360_app` and hands it back. A failure usually means the bootstrap
+roles are missing: run the migrations again. Web and worker images from before it do not know
+refunds of plan payments and leave refunds made in the Dashboard unrecorded, as before; the new
+images need it (migrate first).
 
 **Migration 0079 failed.** It runs in one transaction, so a failure applies nothing. It adds
 `starts_at` to `app.plan_subscriptions` (nullable, with a check validated against the rows stored: a

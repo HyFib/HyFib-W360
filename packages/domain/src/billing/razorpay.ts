@@ -64,6 +64,8 @@ export interface RazorpayRefund {
   paymentId: string;
   amount: number;
   status: 'pending' | 'processed' | 'failed' | string;
+  /** The notes given when the refund was created, which Razorpay returns with it (R-120). */
+  notes: Record<string, string>;
 }
 
 export interface RazorpayDispute {
@@ -202,6 +204,30 @@ function causeCode(error: unknown): string | undefined {
 
 const str = (v: unknown): string | null => (typeof v === 'string' && v.length > 0 ? v : null);
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+
+/** String notes only; Razorpay sends notes as [] when there are none. */
+function stringNotes(v: unknown): Record<string, string> {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return {};
+  const notes: Record<string, string> = {};
+  for (const [key, value] of Object.entries(v as Record<string, unknown>)) {
+    if (typeof value === 'string') notes[key] = value;
+  }
+  return notes;
+}
+
+function parseRefund(json: Record<string, unknown>, paymentId: string): RazorpayRefund | null {
+  const id = str(json.id);
+  const amount = num(json.amount);
+  return id && amount !== null
+    ? {
+        id,
+        paymentId: str(json.payment_id) ?? paymentId,
+        amount,
+        status: str(json.status) ?? 'unknown',
+        notes: stringNotes(json.notes),
+      }
+    : null;
+}
 
 function mapPayment(json: Record<string, unknown>): RazorpayPayment | null {
   const id = str(json.id);
@@ -783,18 +809,7 @@ export class RazorpayClient {
         },
         headers: { 'x-refund-idempotency': input.idempotencyKey },
       },
-      (json): RazorpayRefund | null => {
-        const id = str(json.id);
-        const amount = num(json.amount);
-        return id && amount !== null
-          ? {
-              id,
-              paymentId: str(json.payment_id) ?? paymentId,
-              amount,
-              status: str(json.status) ?? 'unknown',
-            }
-          : null;
-      },
+      (json) => parseRefund(json, paymentId),
     );
   }
 
@@ -803,18 +818,7 @@ export class RazorpayClient {
       'GET',
       `/v1/payments/${encodeURIComponent(paymentId)}/refunds/${encodeURIComponent(refundId)}`,
       {},
-      (json): RazorpayRefund | null => {
-        const id = str(json.id);
-        const amount = num(json.amount);
-        return id && amount !== null
-          ? {
-              id,
-              paymentId: str(json.payment_id) ?? paymentId,
-              amount,
-              status: str(json.status) ?? 'unknown',
-            }
-          : null;
-      },
+      (json) => parseRefund(json, paymentId),
     );
   }
 

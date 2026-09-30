@@ -14,6 +14,7 @@ import {
   findAutoRechargeCandidates,
   findBillingReconciliationDue,
   findDueCreditRefunds,
+  findDuePlanPaymentRefunds,
   findDueSettlementRecons,
   findStaleReceipts,
   notifyRefundRequestDeclines,
@@ -21,6 +22,7 @@ import {
   notifyStaffPlanChanges,
   notifyStaffSubscriptionCancellations,
   processCreditRefund,
+  processPlanPaymentRefund,
   processRazorpayReceipt,
   reconcileTopup,
   releaseExpiredHolds,
@@ -147,6 +149,33 @@ export function creditRefundHandler(rt: WorkerRuntime) {
     rt.logger.info(
       { jobId: job.id, tenantId: auth.scope.tenantId, refundId: auth.envelope.ref, outcome },
       'credit refund step',
+    );
+  };
+}
+
+/**
+ * `billing.plan-payment-refund`: one step of a refund of a plan payment a platform owner asked for
+ * (ADR-103): ask Razorpay for it, or check a refund Razorpay is processing. Provider failures leave
+ * the request due again for the minute sweep; only unexpected errors fail the job (and are retried).
+ */
+export function planPaymentRefundHandler(rt: WorkerRuntime) {
+  return async ([job]: Job<unknown>[]): Promise<void> => {
+    if (!job) return;
+    const auth = await authorizeJob(rt, job.data, {
+      expectedKind: 'billing.plan-payment-refund',
+      requireActiveTenant: false,
+      requireActiveActor: false,
+    });
+    if (auth.outcome !== 'authorized' || !auth.scope || !UUID_RE.test(auth.envelope.ref)) {
+      rt.logger.warn({ jobId: job.id, outcome: auth.outcome }, 'plan payment refund job dropped');
+      return;
+    }
+    const deps = providerDeps(rt);
+    if (!deps) throw new RetryableJobError('Razorpay is not configured');
+    const outcome = await processPlanPaymentRefund(deps, auth.scope, auth.envelope.ref);
+    rt.logger.info(
+      { jobId: job.id, tenantId: auth.scope.tenantId, refundId: auth.envelope.ref, outcome },
+      'plan payment refund step',
     );
   };
 }
@@ -439,6 +468,21 @@ export function billingSweepHandler(rt: WorkerRuntime) {
         QUEUES.billingCreditRefund.name,
         rt.signer.sign({
           kind: 'billing.credit-refund',
+          tenantId: item.tenantId,
+          actorUserId: null,
+          ref: item.refundId,
+        }),
+        { singletonKey: item.refundId },
+      );
+    }
+    // Staff refunds of plan payments (ADR-103): one job per request that is due.
+    const planRefunds = await findDuePlanPaymentRefunds(rt.db);
+    for (const item of planRefunds) {
+      await rt.jobs.enqueue(
+        null,
+        QUEUES.billingPlanPaymentRefund.name,
+        rt.signer.sign({
+          kind: 'billing.plan-payment-refund',
           tenantId: item.tenantId,
           actorUserId: null,
           ref: item.refundId,

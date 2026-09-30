@@ -32,7 +32,7 @@ test('a company pays for its plan by subscription, a renewal counts from Razorpa
   page,
   request,
 }) => {
-  test.setTimeout(300_000);
+  test.setTimeout(420_000);
   const email = uniqueEmail('plansub');
   const suffix = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`;
   const slug = `plansub-${suffix}`;
@@ -119,6 +119,41 @@ test('a company pays for its plan by subscription, a renewal counts from Razorpa
     expect(subscriptionId).toMatch(/^sub_/);
     await expectNoHorizontalOverflow(page);
 
+    // A platform owner refunds part of the payment (ADR-103): the worker asks Razorpay, the company
+    // is emailed, and its receipt shows the refund. The plan does not change.
+    const refundForm = panel.getByRole('form', { name: 'Refund a plan payment' });
+    await refundForm.getByLabel('Amount in rupees').fill('100');
+    await refundForm.getByLabel(/^Reason/).fill('Goodwill for an outage, ticket 5151');
+    await refundForm.getByRole('checkbox').check();
+    await refundForm.getByRole('button', { name: 'Refund payment' }).click();
+    // The refresh that follows may leave nothing to refund, so the confirmation can stand without
+    // the form around it.
+    await expect(panel.getByText(/^Refund requested\./)).toBeVisible();
+    const refunding = await waitForEmailContaining(
+      email,
+      'HyFib is refunding a plan payment',
+      'Your plan and its paid period do not change.',
+      90_000,
+    );
+    expect(refunding).toMatch(/₹100\.00 of your plan payment inv_/);
+    expect(refunding).not.toContain('ticket 5151');
+    await page.reload();
+    await expect(panel.getByRole('row', { name: /Goodwill for an outage/ })).toContainText(
+      'Refunded',
+    );
+    // The payment's row (the refund form's choice names the amount refunded too).
+    await expect(panel.getByText('₹100.00 refunded', { exact: true })).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+    await page.goto(`/c/${slug}/billing`);
+    await expect(paying.getByText('₹100.00 refunded', { exact: true })).toBeVisible();
+    await expect(paying.getByText('Active', { exact: true })).toBeVisible();
+    await paying.getByRole('link', { name: /^Receipt/ }).click();
+    await expect(page.getByText('Partly refunded', { exact: true })).toBeVisible();
+    await expect(page.getByText(/^Refunded on /)).toBeVisible();
+    await expect(page.getByText('Started by HyFib', { exact: false })).toBeVisible();
+    await expect(page.getByText('₹1,314.82 (INR)', { exact: true })).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+
     // Razorpay charges the next month; its event carries only ids, and HyFib fetches the rest.
     const charged = await fetch(`${standInUrl}/__stand-in/charge-subscription`, {
       method: 'POST',
@@ -173,7 +208,7 @@ test('a company pays for its plan by subscription, a renewal counts from Razorpa
     await page.getByRole('link', { name: companyName }).click();
     await page
       .getByRole('region', { name: 'Plan subscription' })
-      .getByLabel('Reason')
+      .getByLabel('Reason', { exact: true })
       .fill('Customer asked by phone to stop now, ticket 9002');
     await page.getByRole('button', { name: 'Cancel subscription now' }).click();
     await page

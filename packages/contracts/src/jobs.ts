@@ -141,6 +141,22 @@ export const QUEUES = {
     deleteAfterHours: 168,
   },
   /**
+   * Asks Razorpay for a refund of a plan payment a platform owner requested (ADR-103), or checks one
+   * Razorpay is processing. As for refunds of service credit, provider failures leave the request
+   * due again for the minute sweep; the job itself retries only unexpected errors.
+   */
+  billingPlanPaymentRefund: {
+    name: 'billing.plan-payment-refund',
+    policy: 'exclusive',
+    retryLimit: 5,
+    retryDelaySeconds: 60,
+    retryBackoff: true,
+    retryDelayMaxSeconds: 1800,
+    expireInSeconds: 300,
+    deadLetter: 'dead-letter',
+    deleteAfterHours: 168,
+  },
+  /**
    * One attempt at a day's settlement reconciliation (ADR-059). The run row is the source of truth:
    * Razorpay failures leave it due again for the minute sweep, and a job that dies leaves its lease
    * to expire, so the job itself retries only once.

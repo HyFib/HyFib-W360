@@ -134,6 +134,50 @@ describe('RazorpayClient result classification', () => {
     const { client } = clientReturning(async () => json(200, {}));
     expect(() => client.createRefund('pay_1', { amount: 100, idempotencyKey: 'short' })).toThrow();
   });
+
+  it('sends a refund’s notes and reads them back, string values only (R-120)', async () => {
+    const refund = (notes: unknown) => ({
+      id: 'rfnd_1',
+      payment_id: 'pay_1',
+      amount: 100,
+      status: 'pending',
+      notes,
+    });
+    const sent: { body: unknown; headers: Headers }[] = [];
+    const client = new RazorpayClient({
+      baseUrl: 'https://api.razorpay.test',
+      keyId: 'rzp_test_unit',
+      keySecret: 'unit-secret',
+      fetchImpl: async (_input, init) => {
+        sent.push({ body: JSON.parse(String(init?.body)), headers: new Headers(init?.headers) });
+        return json(200, refund({ hyfib_plan_refund: 'r-1' }));
+      },
+    });
+    const result = await client.createRefund('pay_1', {
+      amount: 100,
+      idempotencyKey: 'ppr_request-1',
+      notes: { hyfib_plan_refund: 'r-1' },
+    });
+    expect(sent[0]!.body).toEqual({
+      amount: 100,
+      speed: 'normal',
+      notes: { hyfib_plan_refund: 'r-1' },
+    });
+    expect(sent[0]!.headers.get('x-refund-idempotency')).toBe('ppr_request-1');
+    expect(result).toMatchObject({ ok: true, data: { notes: { hyfib_plan_refund: 'r-1' } } });
+    // Razorpay sends [] when there are none; other values are not taken as notes.
+    for (const [notes, expected] of [
+      [[], {}],
+      [null, {}],
+      [{ a: 'b', n: 1, o: { x: 'y' } }, { a: 'b' }],
+    ] as const) {
+      const fetched = clientReturning(async () => json(200, refund(notes)));
+      expect(await fetched.client.fetchRefund('pay_1', 'rfnd_1')).toMatchObject({
+        ok: true,
+        data: { id: 'rfnd_1', paymentId: 'pay_1', amount: 100, notes: expected },
+      });
+    }
+  });
 });
 
 describe('RazorpayClient Payment Links', () => {

@@ -213,6 +213,18 @@ export async function setPlanTaxAction(input: unknown): Promise<ActionResult> {
   });
 }
 
+/** Refunds part or all of a plan payment (platform owners, ADR-103). */
+export async function requestPlanPaymentRefundAction(
+  input: unknown,
+): Promise<ActionResult<{ refundId: string }>> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    const result = await runtime.planAdmin.requestPlanPaymentRefund(actor, input);
+    refresh();
+    return result;
+  });
+}
+
 /** Cancels a company's plan subscription at Razorpay at once (ADR-063; owners only, audited). */
 export async function cancelTenantSubscriptionAction(input: unknown): Promise<ActionResult> {
   return runAction(async () => {

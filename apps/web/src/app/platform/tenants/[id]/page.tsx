@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
-import { displayMoney } from '@w360/core';
+import { displayMoney, formatMinorUnits } from '@w360/core';
 import {
   API_SCOPE_INFO,
   dayOf,
@@ -10,7 +10,9 @@ import {
   PLAN_INTERVAL_LABELS,
   PLAN_MODULE_KEYS,
   PLAN_MODULE_LABELS,
+  PLAN_PAYMENT_REFUND_STATUS_LABELS,
   PLAN_SUBSCRIPTION_STATUS_LABELS,
+  refundablePlanPayments,
   TENANT_PLAN_STATUS_LABELS,
 } from '@w360/domain';
 import {
@@ -43,6 +45,10 @@ import {
   ScheduleDeletionForm,
 } from '@/components/platform/deletion-forms';
 import { IssueList, LevelBadge, Utc } from '@/components/platform/ops';
+import {
+  PlanPaymentRefundForm,
+  type RefundablePlanPayment,
+} from '@/components/platform/plan-payment-refund-form';
 import { ServiceCredit } from '@/components/platform/service-credit';
 import { formatDate, formatDateTime } from '@/lib/format';
 import { getRuntime } from '@/server/runtime';
@@ -50,6 +56,13 @@ import { requirePlatformActor } from '@/server/session';
 
 export const metadata: Metadata = { title: 'Company · Platform' };
 export const dynamic = 'force-dynamic';
+
+const REFUND_TONE = {
+  requested: 'info',
+  submitted: 'info',
+  processed: 'success',
+  failed: 'danger',
+} as const;
 
 export default async function PlatformTenantPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -66,6 +79,19 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
     platformBilling.companyBilling(actor, id),
   ]);
   const { state, usage, limits } = planView;
+  // Refunds of plan payments (ADR-103): the form's choices come from the domain's rule.
+  const receipts = new Map(planView.payments.map((p) => [p.id, p.providerInvoiceId]));
+  const refundChoices: RefundablePlanPayment[] = refundablePlanPayments(planView.payments).map(
+    (p) => ({
+      id: p.id,
+      label: `${p.providerInvoiceId} · ${displayMoney(BigInt(p.amountMinor), 'INR')}${
+        p.refundedMinor > 0 ? ` (${displayMoney(BigInt(p.refundedMinor), 'INR')} refunded)` : ''
+      } · ${formatDate(p.paidAt, planView.timezone)}`,
+      maxMinor: p.maxMinor,
+      maxAmount: formatMinorUnits(BigInt(p.maxMinor), 'INR'),
+      maxLabel: displayMoney(BigInt(p.maxMinor), 'INR'),
+    }),
+  );
   const waitsForRefund = Boolean(
     deletion &&
     !deletion.startedAt &&
@@ -463,12 +489,101 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
                         </TD>
                         <TD className="text-right tabular-nums">
                           {displayMoney(BigInt(p.amountMinor), 'INR')}
+                          {p.refundedMinor > 0 ? (
+                            <span className="block text-xs text-muted-foreground">
+                              {displayMoney(BigInt(p.refundedMinor), 'INR')} refunded
+                            </span>
+                          ) : null}
+                          {p.openRefundMinor !== null ? (
+                            <span className="block text-xs text-muted-foreground">
+                              Refund of {displayMoney(BigInt(p.openRefundMinor), 'INR')} in progress
+                            </span>
+                          ) : null}
                         </TD>
-                        <TD className="font-mono text-xs">{p.providerPaymentId}</TD>
+                        <TD className="font-mono text-xs">
+                          {p.providerInvoiceId}
+                          <span className="block text-muted-foreground">{p.providerPaymentId}</span>
+                        </TD>
                       </TR>
                     ))}
                   </TBody>
                 </Table>
+              ) : null}
+              {planView.refunds.length > 0 ? (
+                <div className="grid gap-2">
+                  <h3 className="font-medium">Refunds of plan payments (latest 50)</h3>
+                  <Table>
+                    <THead>
+                      <TR>
+                        <TH>Requested</TH>
+                        <TH>Receipt</TH>
+                        <TH className="text-right">Amount</TH>
+                        <TH>Status</TH>
+                        <TH>Reason</TH>
+                      </TR>
+                    </THead>
+                    <TBody>
+                      {planView.refunds.map((r) => (
+                        <TR key={r.id}>
+                          <TD>
+                            {formatDateTime(r.requestedAt, tz)}
+                            {r.requestedByName ? (
+                              <span className="block text-xs text-muted-foreground">
+                                by {r.requestedByName}
+                              </span>
+                            ) : null}
+                          </TD>
+                          <TD className="font-mono text-xs">
+                            {receipts.get(r.planPaymentId) ?? '—'}
+                          </TD>
+                          <TD className="text-right tabular-nums">
+                            {displayMoney(BigInt(r.amountMinor), 'INR')}
+                          </TD>
+                          <TD>
+                            <Badge tone={REFUND_TONE[r.status]}>
+                              {PLAN_PAYMENT_REFUND_STATUS_LABELS[r.status]}
+                            </Badge>
+                            {r.providerRefundId ? (
+                              <code className="block text-xs text-muted-foreground">
+                                {r.providerRefundId}
+                              </code>
+                            ) : null}
+                            {r.lastError ? (
+                              <span className="block text-xs text-muted-foreground">
+                                {r.lastError}
+                              </span>
+                            ) : null}
+                          </TD>
+                          <TD className="min-w-48 break-words">
+                            {r.origin === 'razorpay'
+                              ? 'Made at Razorpay (for example in its Dashboard)'
+                              : r.reason}
+                          </TD>
+                        </TR>
+                      ))}
+                    </TBody>
+                  </Table>
+                </div>
+              ) : null}
+              {planView.payments.length > 0 ? (
+                actor.role !== 'platform_owner' ? (
+                  <p className="text-muted-foreground">
+                    Only platform owners can refund plan payments.
+                  </p>
+                ) : company.status === 'pending_deletion' || company.status === 'deleted' ? (
+                  <p className="text-muted-foreground">
+                    The company is being deleted, so refunds are not started here. Refund the
+                    payment in the Razorpay Dashboard; HyFib records it from Razorpay’s refund
+                    event.
+                  </p>
+                ) : (
+                  // Rendered even when nothing is refundable, so a refund's confirmation survives
+                  // the refresh that removes the payment from the choices.
+                  <div className="grid gap-2">
+                    <h3 className="font-medium">Refund a plan payment</h3>
+                    <PlanPaymentRefundForm tenantId={company.id} payments={refundChoices} />
+                  </div>
+                )
               ) : null}
               {planView.subscription?.live ? (
                 actor.role === 'platform_owner' ? (

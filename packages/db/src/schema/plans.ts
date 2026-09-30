@@ -180,6 +180,41 @@ export const planPayments = appSchema.table('plan_payments', {
   createdAt: tz('created_at').notNull().defaultNow(),
 });
 
+export const PLAN_PAYMENT_REFUND_STATUSES = [
+  'requested',
+  'submitted',
+  'processed',
+  'failed',
+] as const;
+export type PlanPaymentRefundStatus = (typeof PLAN_PAYMENT_REFUND_STATUSES)[number];
+export const PLAN_PAYMENT_REFUND_ORIGINS = ['staff', 'razorpay'] as const;
+export type PlanPaymentRefundOrigin = (typeof PLAN_PAYMENT_REFUND_ORIGINS)[number];
+
+/**
+ * Refunds of plan payments (0080, ADR-103): asked for by a platform owner, or made at Razorpay and
+ * recorded from what it reports. The company role reads every column except the staff reason and
+ * who asked (column grants).
+ */
+export const planPaymentRefunds = appSchema.table('plan_payment_refunds', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  planPaymentId: uuid('plan_payment_id').notNull(),
+  origin: text('origin', { enum: PLAN_PAYMENT_REFUND_ORIGINS }).notNull(),
+  amountMinor: bigint('amount_minor', { mode: 'number' }).notNull(),
+  status: text('status', { enum: PLAN_PAYMENT_REFUND_STATUSES }).notNull().default('requested'),
+  reason: text('reason'),
+  requestedByUserId: text('requested_by_user_id'),
+  providerRefundId: text('provider_refund_id'),
+  attempts: integer('attempts').notNull().default(0),
+  nextAttemptAt: tz('next_attempt_at').notNull().defaultNow(),
+  lastError: text('last_error'),
+  requestedAt: tz('requested_at').notNull().defaultNow(),
+  submittedAt: tz('submitted_at'),
+  processedAt: tz('processed_at'),
+  failedAt: tz('failed_at'),
+  updatedAt: tz('updated_at').notNull().defaultNow(),
+});
+
 export const USAGE_METRICS = ['automation_runs', 'api_requests'] as const;
 export type UsageMetric = (typeof USAGE_METRICS)[number];
 

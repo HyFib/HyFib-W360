@@ -1373,6 +1373,20 @@ WHERE used < limit`), per monthly period from `usage_anchor`; the sweep announce
   `ops.plan_subscriptions_due` re-reads a due first charge hourly until a paid cycle is recorded.
   The company's cancel before the start is at once; after it, the subscription is synced first, so
   a charge already made is kept and cancelled at the end of its cycle.
+- **Refunds of plan payments (0080, ADR-103) [built]:** `app.plan_payment_refunds` holds each refund
+  of a plan payment: asked for by a platform owner (`origin = 'staff'`, with the reason and who
+  asked, which the company role cannot read) or made at Razorpay (`origin = 'razorpay'`, recorded
+  as processed). `ops.platform_request_plan_payment_refund` (platform role) checks the owner, the
+  reason, the company's status and the amount; `ops.plan_payment_refunds_due` feeds the minute
+  billing sweep, which queues one signed `billing.plan-payment-refund` job per request;
+  `processPlanPaymentRefund` asks Razorpay with `ppr_<id>` as the idempotency key and the request's
+  id in the notes, and checks the refund until it is processed or failed. Only
+  `app.record_plan_payment_refund` (company scope, a refund fetched from Razorpay: from the job,
+  `refund.processed` or the daily reconciliation) marks a refund processed, recognising HyFib's own
+  by refund id or by its note, and it and the request take one advisory lock per payment so
+  processed refunds never exceed the payment. The runtime role may only move a request to submitted
+  or failed. A refund never changes the plan state or the subscription. The receipt and Billing's
+  payments table show refunds; the platform page lists them and has the form.
 - **Ledger (0004_billing):** one INR wallet per company with five accounts (`wallet_available`,
   `wallet_held`, `payment_clearing`, `service_revenue`, `dispute_losses`). `ledger_transactions` and
   `ledger_entries` are append-only (trigger), balances are maintained by trigger from the entries,

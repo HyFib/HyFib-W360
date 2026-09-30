@@ -80,10 +80,11 @@ export interface ReconFact {
     | 'mandate_order'
     | 'mandate_refund'
     | 'refund'
-    | 'plan_payment';
+    | 'plan_payment'
+    | 'plan_refund';
   providerId: string;
   tenantId: string;
-  /** The top-up, card mandate or plan subscription. */
+  /** The top-up, card mandate or plan subscription, or the plan payment a refund is of. */
   subjectId: string;
   amountMinor: number | null;
   currency: string | null;
@@ -99,6 +100,8 @@ export interface ReconFacts {
   mandateByRefund: Map<string, ReconFact>;
   refundById: Map<string, ReconFact>;
   planByPayment: Map<string, ReconFact>;
+  /** Processed refunds of plan payments HyFib recorded, by refund id (ADR-103). */
+  planRefundById: Map<string, ReconFact>;
 }
 
 export function indexReconFacts(facts: readonly ReconFact[]): ReconFacts {
@@ -110,6 +113,7 @@ export function indexReconFacts(facts: readonly ReconFact[]): ReconFacts {
     mandateByRefund: new Map(),
     refundById: new Map(),
     planByPayment: new Map(),
+    planRefundById: new Map(),
   };
   const maps: Record<ReconFact['kind'], Map<string, ReconFact>> = {
     topup_payment: index.topupByPayment,
@@ -119,6 +123,7 @@ export function indexReconFacts(facts: readonly ReconFact[]): ReconFacts {
     mandate_refund: index.mandateByRefund,
     refund: index.refundById,
     plan_payment: index.planByPayment,
+    plan_refund: index.planRefundById,
   };
   for (const fact of facts) maps[fact.kind].set(fact.providerId, fact);
   return index;
@@ -214,6 +219,17 @@ function matchReconItem(item: RazorpayReconItem, facts: ReconFacts): ReconClassi
           ? { ...match, status: 'matched', reason: null }
           : { ...match, status: 'mismatch', reason: 'amount_differs' };
       }
+      const planRefund = facts.planRefundById.get(item.entityId);
+      if (planRefund) {
+        const match = {
+          ...NO_MATCH,
+          tenantId: planRefund.tenantId,
+          hyfibAmountMinor: planRefund.amountMinor,
+        };
+        return planRefund.amountMinor === item.amount
+          ? { ...match, status: 'matched', reason: null }
+          : { ...match, status: 'mismatch', reason: 'amount_differs' };
+      }
       const authorization =
         facts.mandateByRefund.get(item.entityId) ??
         (item.paymentId ? facts.mandateByPayment.get(item.paymentId) : undefined);
@@ -250,11 +266,13 @@ function matchReconItem(item: RazorpayReconItem, facts: ReconFacts): ReconClassi
       }
       const planPayment = item.paymentId ? facts.planByPayment.get(item.paymentId) : undefined;
       if (planPayment) {
+        // A refund of a plan payment, not recorded: applied as refund.processed (ADR-103).
         return {
           ...NO_MATCH,
           tenantId: planPayment.tenantId,
-          status: 'review',
-          reason: 'plan_payment_refund',
+          status: 'mismatch',
+          reason: 'refund_unavailable',
+          apply: 'refund',
         };
       }
       return { ...NO_MATCH, status: 'not_hyfib', reason: 'unknown_refund' };

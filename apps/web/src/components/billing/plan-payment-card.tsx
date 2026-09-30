@@ -319,7 +319,19 @@ export function PlanPaymentCard({
                   <TD>
                     {day(p.periodStart)} to {day(p.periodEnd)}
                   </TD>
-                  <TD className="text-right tabular-nums">{inr(p.amountMinor)}</TD>
+                  <TD className="text-right tabular-nums">
+                    {inr(p.amountMinor)}
+                    {p.refundedMinor > 0 ? (
+                      <span className="block text-xs text-muted-foreground">
+                        {inr(p.refundedMinor)} refunded
+                      </span>
+                    ) : null}
+                    {p.openRefundMinor !== null ? (
+                      <span className="block text-xs text-muted-foreground">
+                        Refund of {inr(p.openRefundMinor)} in progress
+                      </span>
+                    ) : null}
+                  </TD>
                   <TD>{p.method ?? '—'}</TD>
                   <TD className="whitespace-nowrap">
                     <Link

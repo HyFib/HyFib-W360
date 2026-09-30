@@ -1830,7 +1830,7 @@ Decision:
   of being quarantined as an unknown order; an event for a subscription HyFib does not know is
   quarantined. The daily settlement reconciliation (ADR-059) matches recorded plan payments by
   payment id, looks up unknown payments the same way (recording a missed one), and leaves refunds of
-  plan payments to a person, since HyFib does not refund them.
+  plan payments to a person, since HyFib does not refund them (since ADR-103 it records them).
 - **Flag:** `RAZORPAY_SUBSCRIPTIONS_ENABLED`, off by default: Razorpay Subscriptions (and Flash
   Checkout, which Razorpay requires for them) must be activated on the account, and the tax
   treatment of plan prices needs review (ADR-012). Events for existing subscriptions are processed
@@ -1845,8 +1845,8 @@ Razorpay registers "as presented" for frequencies other than weekly, monthly and
 release checklist has the test-mode checks.
 
 Not built: billing that starts at the end of a trial (since ADR-102), self-serve plan and add-on changes with
-proration, pausing, offers, plan payment receipts (since ADR-064) and GST invoices, refunds of plan payments, and
-emails about a subscription beyond charges, failures and endings.
+proration, pausing, offers, plan payment receipts (since ADR-064) and GST invoices, refunds of plan payments (since
+ADR-103), and emails about a subscription beyond charges, failures and endings.
 
 ## ADR-064 Receipts for plan payments (2026-09-29)
 
@@ -1868,7 +1868,8 @@ read with `billing.read` in the company's scope like top-up receipts. It shows:
 Like top-up receipts, it says it is a payment confirmation and **not a tax invoice**; the operator's
 legal name, address and GSTIN are not configured, and tax invoices wait for tax review. HyFib does
 not refund plan payments, so a refund made in Razorpay's Dashboard is not shown (the daily
-reconciliation leaves it to a person). Nothing is stored: the page is computed from the plan payment
+reconciliation leaves it to a person). Since ADR-103 the receipt lists every refund of the payment,
+HyFib's own and those made at Razorpay. Nothing is stored: the page is computed from the plan payment
 and its subscription. The payments table in Billing links each payment to its receipt, and the
 payment-received email links to the receipt of the payment that paid the new period.
 
@@ -3510,3 +3511,68 @@ release checklist has the test-mode check (R-119).
 
 Not built: moving the start when staff extend a trial (they cancel the subscription first, as for
 other plan changes), and payments starting on a day other than the trial's end.
+
+## ADR-103 Refunds of plan payments (2026-09-30)
+
+Context: companies pay for plans by Razorpay subscription (ADR-063), and HyFib could not refund a
+plan payment. A refund made in Razorpay's Dashboard was not recorded either: `refund.processed`
+found no top-up for the payment and was set aside as an unknown refund, the receipt (ADR-064) did
+not show it, and the daily reconciliation (ADR-059) left it to a person. Staff need to refund a plan
+payment, for example a charge made after the company asked to cancel, or a goodwill refund.
+
+Decision:
+
+- **Who:** platform owners, from the company's platform page, with a written reason (10 to 2,000
+  characters, kept in the platform audit log). Operators see refunds but cannot start them. Part or
+  all of a recorded plan payment can be refunded: at least ₹0.01 and at most what Razorpay has not
+  refunded of it, one refund of a payment at a time. Not for a company being deleted (refund in the
+  Razorpay Dashboard; the webhook now records it), and a deletion that is due waits until no refund
+  of a plan payment is open, as for refunds of service credit (ADR-058).
+- **The plan does not change:** a refund never changes the plan state or the subscription. Reasons
+  vary (a goodwill refund, part of a price, a charge after a late cancel), and ending a plan on a
+  partial refund would be wrong. To end the plan, staff cancel the subscription (ADR-063) and then
+  change the plan (ADR-051); the form says so. Plan payments never touch the wallet, so nothing is
+  held.
+- **Flow, as ADR-058:**
+  1. `ops.platform_request_plan_payment_refund` (SECURITY DEFINER, platform role only) checks the
+     role, the reason, the company's status, the payment and the amount, and records the request
+     with the platform audit entry. Requests and recordings of one payment's refunds take the same
+     transaction lock, so what is refunded never exceeds what was paid.
+  2. The minute billing sweep lists due requests (`ops.plan_payment_refunds_due`) and queues one
+     signed `billing.plan-payment-refund` job each, run in the company's scope. The attempt is written
+     down first; then `POST /v1/payments/:id/refund` with the amount, speed `normal`,
+     `X-Refund-Idempotency: ppr_<request id>` (R-086) and the note `hyfib_plan_refund: <request id>`.
+     A plan payment is refunded like any captured payment (R-121; whether Razorpay changes the
+     subscription or its invoice is unconfirmed point 29, checked in test mode before release).
+     A refund returned makes the request `submitted` (company audit log, billing managers emailed),
+     and one already processed is recorded at once; a refusal (a 4xx other than 401 and 409) fails
+     the request and emails the billing managers; anything else is tried again with the same key
+     after 1, 5, 15 and 60 minutes, then hourly.
+  3. `refund.processed`, the job's own check (every 15 minutes, backing off to 6 hours) and the daily
+     reconciliation fetch the refund and its payment from Razorpay and call
+     `app.record_plan_payment_refund` in the company's scope. The refund with this id completes its
+     request. A refund whose id HyFib never stored (the creation's response was lost) completes the
+     request its notes name, when the amount is the same: Razorpay returns a refund's notes (R-120),
+     so it is never recorded as a second refund. Any other processed refund of the payment was made
+     at Razorpay and is recorded as such. Processed refunds of a payment never exceed it (W3412).
+  4. `refund.failed`, or a fetched refund that failed, fails the staff request it belongs to and
+     emails the billing managers; a failed refund nobody asked for through HyFib changes nothing.
+     Failing moves no money, so the runtime role may fail an open request; only the definer function
+     marks a refund processed or records one made at Razorpay.
+- **What people see:** the plan payment's receipt lists its refunds (in progress, or refunded on a
+  day, started by HyFib or made at Razorpay) and the amount paid after refunds; Billing's payments
+  table marks refunded amounts and a refund in progress; the platform page lists the refunds with the
+  reason and who asked, and the form. The company never reads the reason or who asked (column
+  grants), and its emails give neither.
+- **Reconciliation:** a refund of a plan payment in the settlement report is matched against the
+  recorded refund by id (amounts compared); one HyFib has not recorded is fetched and recorded
+  through the same path, as its webhook would have been, instead of waiting for a person.
+- **Records:** refunds of plan payments are billing records, kept after the company's deletion with
+  the payments they refund (no role may delete them), and exported without the reason and who asked.
+
+Not built: refunds asked for by companies, ending the plan with a refund, instant refunds
+(`optimum`), several open refunds of one payment, credit notes and tax invoices, disputes of plan
+payments, plan payment refunds in the platform-wide refunds list (ADR-073), emails about refunds
+made in the Dashboard, and the "HyFib is refunding" email for a staff refund that Razorpay reports
+processed before HyFib stored its id (recognised by its notes after a lost response; the receipt
+shows it).

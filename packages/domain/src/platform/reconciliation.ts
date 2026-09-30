@@ -54,7 +54,7 @@ export const SETTLEMENT_RECON_REASON_TEXT: Record<SettlementReconReason, string>
     'A payment on a card mandate’s authorisation order that HyFib has not recorded. Check the mandate.',
   refund_not_processed: 'Razorpay settled this refund but reports it as not processed.',
   refund_exceeds_payment:
-    'Recording this refund would refund more than the payment. Check the top-up’s refunds.',
+    'Recording this refund would refund more than the payment. Check the refunds of the top-up or plan payment.',
   payment_unavailable: 'Razorpay did not return this payment, so HyFib could not record it.',
   refund_unavailable: 'Razorpay did not return this refund, so HyFib could not record it.',
   plan_payment_unrecorded:
@@ -66,7 +66,7 @@ export const SETTLEMENT_RECON_REASON_TEXT: Record<SettlementReconReason, string>
   currency: 'Not in rupees.',
   unreadable: 'Razorpay returned a transaction HyFib could not read.',
   plan_payment_refund:
-    'A refund of a plan subscription payment. HyFib does not refund plan payments, and the paid period is unchanged: check it in the Razorpay Dashboard.',
+    'A refund of a plan subscription payment, found before HyFib recorded refunds of plan payments (ADR-103). The paid period is unchanged: check it in the Razorpay Dashboard.',
   unknown_payment:
     'A payment that is not HyFib’s (another integration or a payment made in the Dashboard).',
   unknown_refund: 'A refund of a payment that is not HyFib’s.',

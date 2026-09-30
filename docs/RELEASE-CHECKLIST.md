@@ -182,6 +182,13 @@ made. This checklist records the evidence required per gate; unchecked items blo
       `authenticated` with no invoice paid; the first charge at the start activates the plan from
       the trial's end, and a failed one leaves the trial waiting for the plan's grace days;
       cancelling before the start charges nothing and the trial goes on
+- [ ] Refunds of plan payments (ADR-103) in Razorpay test mode on the same staging deployment: a
+      platform owner refunds part of a test-mode plan payment; the refund appears in the Razorpay
+      Dashboard once, with the note `hyfib_plan_refund` and the request's `X-Refund-Idempotency`
+      key; `refund.processed` records it (and the worker's check with the webhook switched off), the
+      receipt shows it, and the subscription and its next charge do not change (R-121, unconfirmed
+      point 29); a refund made in the Dashboard is recorded once from its webhook, and a fetched
+      refund returns its notes (R-120)
 - [ ] Tenant-isolation and security gates passing in CI on the release commit
 - [ ] Measured load behaviour against the test envelope (k6 results)
 - [ ] Backup restoration drill performed and timings recorded (RPO/RTO)
