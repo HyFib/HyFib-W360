@@ -195,7 +195,13 @@ test('a catalog is read from Meta, products are sent in a chat and an order is p
   await expectNoHorizontalOverflow(page);
 
   // An integration sends a product through the API with a key created in settings (ADR-086).
-  await page.goto(`/c/${slug}/settings/api-keys`);
+  // The live inbox is left through the navigation, not a page load (see openFromNav).
+  await openFromNav(page, 'Settings');
+  await page
+    .getByRole('navigation', { name: 'Settings sections' })
+    .getByRole('link', { name: 'API keys' })
+    .click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}/settings/api-keys$`));
   await page.getByLabel('Name', { exact: true }).fill('Shop');
   await page
     .getByRole('checkbox', { name: /Reply with text, buttons, lists, products and reactions/ })
