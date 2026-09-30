@@ -1,4 +1,5 @@
 import { bigint, boolean, integer, smallint, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import type { ApiScope } from './api';
 import { opsSchema } from './ops';
 import { appSchema } from './tenancy';
 
@@ -39,6 +40,8 @@ export const plans = opsSchema.table('plans', {
   modules: text('modules').array().notNull().$type<PlanModule[]>(),
   /** Requests to the public API per monthly usage period; null: no limit; 0: no API (ADR-061). */
   apiRequestsMonthly: integer('api_requests_monthly'),
+  /** The public API scopes the plan includes; null: every scope, including later ones (ADR-092). */
+  apiScopes: text('api_scopes').array().$type<ApiScope[]>(),
   status: text('status', { enum: PLAN_STATUSES }).notNull().default('draft'),
   createdByUserId: text('created_by_user_id').notNull(),
   createdAt: tz('created_at').notNull().defaultNow(),

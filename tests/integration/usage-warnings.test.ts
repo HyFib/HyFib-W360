@@ -124,7 +124,7 @@ async function apiKey(c: Company): Promise<ApiContext> {
 
 async function requests(ctx: ApiContext, n: number) {
   for (let i = 0; i < n; i += 1)
-    expect(await admitApiRequest(fx.dbs.app, ctx, new Date())).toEqual({ ok: true });
+    expect(await admitApiRequest(fx.dbs.app, ctx, new Date())).toMatchObject({ ok: true });
 }
 
 /** How many of the company's counters `ops.usage_warnings_due` lists for a warning. */

@@ -1,5 +1,92 @@
 # Progress
 
+## 2026-09-30 — Phase 5: API scopes by plan (P5-01, P5-08, ADR-092)
+
+Status: **Implemented and locally verified (no customer data).** A plan version could leave the
+whole public API out (0 monthly requests, ADR-061) but not part of it. The benchmark documents which
+endpoints each plan can call (W-137); HyFib's endpoints are grouped by the scope they need, so a
+plan now chooses its scopes.
+
+### Completed
+
+- **Design (ADR-092):** a plan version includes every API scope, including scopes HyFib adds
+  later, or only the scopes platform owners choose. A request may use a scope only when its key has
+  it and the plan includes it; one the plan leaves out answers 403 `not_in_plan`, naming the scope.
+  New keys cannot be given such a scope; existing keys keep theirs, marked on Settings → API keys.
+- **Migration 0069:** `ops.plans.api_scopes` (NULL for every scope, so versions published before
+  keep what they gave), checked by the table (known scopes, not empty, none on a plan without the
+  API) and kept by the guard once published; `app.tenant_entitlements` returns it.
+- **Domain:**
+  - The admission that counts each request now returns the request's context with the plan's
+    scopes, and handlers run only with that admitted context.
+  - `hasScope`, `assertScope` and `assertAnyScope` check the key's scopes, then the plan's (before
+    the company's status). The places that read the key's scopes directly use them: the send
+    request's first check, a message's status, reading automation runs, and an automation that
+    sends marketing templates.
+  - Key creation checks the scopes against the plan; rotation keeps them.
+  - The platform plan service takes "every scope" or the chosen scopes, keeps them in the list's
+    order and copies them into a new version. The company's usage and the platform's view of a
+    company give the plan's scopes.
+- **Web:**
+  - The platform plan form ("The plan includes": every scope, or only those chosen), the plan
+    page and the company's platform page.
+  - Settings → API keys: the plan's scopes, keys' scopes marked "not in your plan", and scopes the
+    plan leaves out disabled in the form.
+  - The Billing plan card.
+  - The OpenAPI document describes the refusal.
+- **Tests:**
+  - Unit: the scope checks under a plan (the key first, then the plan, then the status; reads any
+    of several scopes allow) and the refusal's wording.
+  - Integration in `api-quota.test.ts` (3 new tests):
+    - requests held to the plan's scopes whatever the key has, for reads any sending scope allows
+      too, and plan changes both ways with the same key;
+    - new keys refused a scope outside the plan, existing keys kept and rotated with theirs, and
+      the company's and the platform's views of the plan's scopes;
+    - the form's choice kept in order, none on a plan without the API, the table's checks, the
+      guard of a published version, a new version starting from its scopes, and the table's list
+      of scopes equal to the API's.
+  - Integration in `api.test.ts`: starting an automation that sends marketing templates is refused
+    when the plan leaves out the marketing scope, whatever the key has.
+  - e2e `api-quota.spec.ts`: staff publish a plan without webhook management; the key still reads
+    contacts, its endpoint request is refused with `not_in_plan`, and the pages show the plan's
+    scopes and mark the key's.
+- **Docs:** ADR-092; SECURITY (public API); THREAT-MODEL T110; RUNBOOKS (a 403 naming a scope);
+  ARCHITECTURE; BACKLOG P5-01 and P5-08; FEATURE-MATRIX W-137 and H-039.
+- **Mutation checks:** 27 regressions tried one at a time; all make a test fail.
+  - 6 in SQL: the entitlements without the plan's scopes; the guard letting a published version's
+    scopes change; the table taking unknown scopes, an empty list, or scopes on a plan without the
+    API; platform staff unable to set a draft's scopes.
+  - 11 in the request's scope checks: the plan ignored by `hasScope`, `assertScope` or
+    `assertAnyScope`; the status checked before the plan; the refusal naming the first scope
+    rather than the one the key has; the admission, the counted request, the tests' contexts or
+    the entitlements dropping the plan's scopes; the scopes left out computed backwards; one scope
+    named as several.
+  - 9 in keys, automations and plans: a new key given scopes outside the plan; an automation with
+    marketing templates starting without the plan's marketing scope, or refused without saying
+    the plan leaves it out; the form's choice not kept, kept on a plan without the API, or no scope
+    accepted; a new version starting with every scope; the company's and the platform's views
+    without the plan's scopes.
+  - 1 in the web page, through the e2e test: Settings → API keys offering scopes the plan leaves
+    out.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                     | Result                                                                                                                                                                                           |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                   |
+| `pnpm test` (unit)                                                          | 422 passed, including 3 new in `api/api.test.ts`                                                                                                                                                 |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 559 passed, including 3 new in `api-quota.test.ts` and a new case in `api.test.ts`                                                                                                               |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 559 passed                                                                                                                                                                                       |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / on `api-quota.spec.ts`, `api-keys.spec.ts`, `plans.spec.ts` and `api.spec.ts`: 22 passed (4.6 min), on the local database created for the day's runs, with migration 0069 applied |
+| Mutation checks                                                             | 27 regressions tried (1 through the e2e test); all make a test fail                                                                                                                              |
+
+### Known gaps
+
+- Not built: availability per single endpoint rather than per scope, quotas per scope, telling
+  companies which scopes a plan change removes, and packs of scopes sold as add-ons.
+- Endpoints a key added keep receiving events, and runs a key started go on, after the plan drops
+  the scope: by design, since deliveries and runs are not API requests.
+
 ## 2026-09-30 — Phase 5: alerts for work that failed for good (P5-10, ADR-091)
 
 Status: **Implemented and locally verified (no customer data).** The operations console listed dead

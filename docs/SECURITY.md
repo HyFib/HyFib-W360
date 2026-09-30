@@ -550,6 +550,12 @@ Phase 5 rules (Public API, P5-08):
   A plan without the API refuses every request (403, `not_in_plan`) and creating or rotating keys;
   a month used up is refused with 429 (`quota_exceeded`) until the next period. The limit belongs to
   the plan version and changes only with a new version or another plan, set by platform staff.
+- The scopes a plan includes (ADR-092) bound every key's: the admission that counts a request gives
+  it the plan's scopes, and a request may use a scope only when its key has it and the plan
+  includes it. One the plan leaves out answers 403 (`not_in_plan`), checked before the company's
+  status. New keys cannot be given such a scope; existing keys keep theirs and are refused them while
+  the plan leaves them out. The list belongs to the plan version (checked by the table, unchangeable
+  once published) and is set by platform owners.
 
 Phase 5 rules (outgoing webhooks, P5-09):
 

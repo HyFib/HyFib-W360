@@ -1148,6 +1148,13 @@ and 30 a second; wait for `Retry-After` and retry with the same `Idempotency-Key
 reason `quota_exceeded` means the plan's API requests for the month are used up (ADR-061): the
 requests work again when the next usage period starts, or with a larger plan.
 
+**403 `not_in_plan` naming a scope.** The company's plan leaves that scope out (ADR-092). The key
+keeps the scope: requests that need it work again, with no change to the key, once the company is
+on a plan version that includes it (a published version's scopes never change, so this is a new
+version or another plan). Settings → API keys lists the plan's scopes and marks each key's scope it
+leaves out; platform staff see the scopes on the plan page and the company's platform page. A 403
+`not_in_plan` that names no scope means the plan leaves the whole API out (ADR-061).
+
 **An API key expired without a reminder, or the reminder came twice.** Owners and administrators
 are emailed once, 7 days before a key expires (ADR-067): `app.api_keys.expiry_reminded_at` says when
 the reminder was queued, and Settings → API keys shows it. Keys that never expire, rotated keys (the

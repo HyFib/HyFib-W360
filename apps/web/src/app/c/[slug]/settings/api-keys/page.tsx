@@ -41,7 +41,13 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
   const inPlan = apiLimit !== 0;
   const tz = ctx.tenant.timezone;
   const apiBase = new URL('/api/v1', config.APP_BASE_URL).toString();
-  const grantable = API_SCOPE_KEYS.filter((s) => can(ctx, API_SCOPE_INFO[s].permission));
+  // Scopes the plan leaves out (ADR-092): refused to requests, and not offered for new keys.
+  const planScopes = usage.apiScopes;
+  const notInPlan =
+    planScopes === null ? [] : API_SCOPE_KEYS.filter((s) => !planScopes.includes(s));
+  const grantable = API_SCOPE_KEYS.filter(
+    (s) => can(ctx, API_SCOPE_INFO[s].permission) && !notInPlan.includes(s),
+  );
   const activeCount = keys.filter((k) => k.state === 'active').length;
   const prefixes = new Map(keys.map((k) => [k.id, k.keyPrefix]));
   const now = clock.now();
@@ -82,6 +88,13 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
               refused and new keys cannot be created. Ask HyFib to change the plan.
             </Alert>
           )}
+          {inPlan && planScopes !== null ? (
+            <p className="text-sm">
+              Your plan includes these scopes:{' '}
+              {planScopes.map((s) => API_SCOPE_INFO[s].label).join(', ')}. Requests that need
+              another scope are refused, whatever scopes their key has.
+            </p>
+          ) : null}
           <CopyField label="Base URL" value={apiBase} />
           <p className="text-sm">
             Send the key as{' '}
@@ -146,11 +159,17 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
                     </div>
                     <p className="font-mono text-xs">{k.keyPrefix}_…</p>
                     <p className="flex flex-wrap gap-1">
-                      {k.scopes.map((s) => (
-                        <Badge key={s} tone="neutral">
-                          {API_SCOPE_INFO[s].label}
-                        </Badge>
-                      ))}
+                      {k.scopes.map((s) =>
+                        notInPlan.includes(s) ? (
+                          <Badge key={s} tone="warning">
+                            {API_SCOPE_INFO[s].label}: not in your plan
+                          </Badge>
+                        ) : (
+                          <Badge key={s} tone="neutral">
+                            {API_SCOPE_INFO[s].label}
+                          </Badge>
+                        ),
+                      )}
                     </p>
                     <p className="text-xs text-muted-foreground">
                       Accepts requests from{' '}
@@ -232,6 +251,7 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
             <CreateApiKeyForm
               slug={ctx.tenant.slug}
               grantable={grantable}
+              notInPlan={notInPlan}
               atLimit={activeCount >= API_KEY_LIMITS.activeKeys}
             />
           ) : (

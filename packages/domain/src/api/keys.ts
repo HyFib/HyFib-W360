@@ -20,7 +20,7 @@ import { recordAudit, type RequestMeta } from '../audit';
 import { assertCan, type TenantContext } from '../authz/context';
 import { assertRecentSignIn } from '../authz/step-up';
 import { TOKEN_ALPHABET, randomToken } from '../growth/model';
-import { assertApiInPlan, loadEntitlements } from '../plans/entitlements';
+import { assertApiInPlan, assertScopesInPlan, loadEntitlements } from '../plans/entitlements';
 import { parseInput } from '../validation';
 import {
   API_KEY_EXPIRY_DAYS,
@@ -279,7 +279,10 @@ export function createApiKeysService(deps: { db: Database; clock: Clock }) {
       );
     },
 
-    /** A new key, unless the plan leaves the API out. The token is returned once, never stored. */
+    /**
+     * A new key, unless the plan leaves the API out or any of its scopes (ADR-092). The token is
+     * returned once, never stored.
+     */
     async create(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
       assertCan(ctx, 'developer.manage');
       const now = clock.now();
@@ -290,7 +293,9 @@ export function createApiKeysService(deps: { db: Database; clock: Clock }) {
         data.expiresInDays === 0 ? null : new Date(now.getTime() + data.expiresInDays * DAY_MS);
       return db.run(ctx.scope, async (tx) => {
         await lockKeys(tx, ctx.tenant.id);
-        assertApiInPlan(await loadEntitlements(tx, ctx.tenant.id));
+        const entitlements = await loadEntitlements(tx, ctx.tenant.id);
+        assertApiInPlan(entitlements);
+        assertScopesInPlan(entitlements, data.scopes);
         if ((await activeKeyCount(tx, ctx.tenant.id, now)) >= API_KEY_LIMITS.activeKeys) {
           throw new AppError(
             'precondition_failed',
@@ -327,7 +332,8 @@ export function createApiKeysService(deps: { db: Database; clock: Clock }) {
 
     /**
      * A new key with the same name, scopes and expiry period; the old key stays valid for the
-     * overlap (0 to 72 hours) so integrations can switch, then stops working.
+     * overlap (0 to 72 hours) so integrations can switch, then stops working. Scopes the plan
+     * leaves out are kept: requests are refused them while it does (ADR-092).
      */
     async rotate(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
       assertCan(ctx, 'developer.manage');

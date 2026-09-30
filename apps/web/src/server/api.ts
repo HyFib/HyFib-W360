@@ -110,15 +110,16 @@ export async function handleApiRequest(
       );
       return respond(e.status, e.body, requestId, { 'WWW-Authenticate': 'Bearer' });
     }
-    const { ctx } = auth;
+    const key = auth.authenticated;
 
-    if (!(await admitApiRate(runtime.db, { keyId: ctx.key.id, tenantId: ctx.tenant.id }))) {
+    if (!(await admitApiRate(runtime.db, { keyId: key.key.id, tenantId: key.tenant.id }))) {
       const e = apiRequestError(429, 'rate_limited', 'Too many requests. Slow down.', requestId);
       return respond(e.status, e.body, requestId, { 'Retry-After': '1' });
     }
 
-    // The plan's monthly API requests (ADR-061): counted here, before the request is read.
-    const admission = await admitApiRequest(runtime.db, ctx, systemClock.now());
+    // The plan's monthly API requests (ADR-061): counted here, before the request is read. The
+    // handler gets the admitted context, which holds the request to the plan's scopes (ADR-092).
+    const admission = await admitApiRequest(runtime.db, key, systemClock.now());
     if (!admission.ok) {
       const e = apiRequestError(
         admission.status,
@@ -136,6 +137,7 @@ export async function handleApiRequest(
           : { 'Retry-After': String(admission.retryAfterSeconds) },
       );
     }
+    const { ctx } = admission;
 
     let body: unknown = undefined;
     let raw = '';

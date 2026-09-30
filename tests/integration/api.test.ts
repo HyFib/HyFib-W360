@@ -3506,7 +3506,7 @@ describe('allowed networks (ADR-076)', () => {
   const from = async (token: string, ip: string | null) => {
     const auth = await authenticateApiRequest(fx.dbs.app, token, uuidv7(), ip);
     if (!auth) return 'unknown';
-    return 'ctx' in auth ? 'accepted' : 'refused';
+    return 'authenticated' in auth ? 'accepted' : 'refused';
   };
 
   it('accept requests only from the networks listed, and a refused request does not use the key', async () => {
@@ -4284,6 +4284,22 @@ describe('automations started through the API (ADR-077)', () => {
 
     // With the marketing scope the run starts; without the contact's opt-in its template is not sent.
     const marketer = await apiKey(c, ['automations.start', 'messages.send_marketing']);
+    // The key's marketing scope counts only while the company's plan includes it (ADR-092).
+    const refusedByPlan = await expectAppError(
+      apiStartAutomationRun(
+        deps(),
+        { ...marketer.ctx, planScopes: new Set<ApiScope>(['automations.start']) },
+        promoFlow.id,
+        { to: '+919811100071', inputs: { first_name: 'Asha' } },
+        idem('p-plan', 'p-plan'),
+      ),
+      'forbidden',
+      /^Your company's plan does not include the messages\.send_marketing scope\./,
+    );
+    expect(isAppError(refusedByPlan) && refusedByPlan.details).toEqual({
+      apiReason: 'not_in_plan',
+    });
+    expect(await runs()).toBe(0);
     const promoRun = await apiStartAutomationRun(
       deps(),
       marketer.ctx,

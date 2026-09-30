@@ -293,7 +293,10 @@ verification, app review, Embedded Signup configuration).
   403 without the API, one notice per period); **[a warning at 80% of the month's automation runs
   or API requests built, locally verified]** (ADR-062: one email per counter, marked on the plan
   card; the used-up notices now skip counters of an earlier period); **[paying for plans by
-  Razorpay subscription built, locally verified against the stand-in]** (ADR-063, see P5-07).
+  Razorpay subscription built, locally verified against the stand-in]** (ADR-063, see P5-07);
+  **[API scopes by plan built, locally verified]** (ADR-092, W-137: a version includes every API
+  scope or only those chosen; requests needing another are refused with 403 `not_in_plan` whatever
+  the key has, new keys cannot be given one, existing keys keep theirs and are marked).
   Remaining: billing that starts when a trial ends, self-serve plan changes and higher-plan trials,
   proration, plan invoices, thresholds chosen per company, in-app notices, plan-change emails to
   companies, packs of extra API requests and AI credits (Phase 6).
@@ -435,8 +438,9 @@ verification, app review, Embedded Signup configuration).
   messages, call-to-action messages through the API, taking reactions back, assigning
   conversations, member and team names, media downloads, statuses changed since a time, starting or
   stopping runs for many contacts in one call, bulk sends in one call, replaying many deliveries in
-  one call, networks for the whole company, per-key quotas, limits per endpoint, and dropping the
-  one-argument key lookup kept for rolling deploys (0051).
+  one call, networks for the whole company, per-key quotas, limits per endpoint, availability per
+  single endpoint (plans choose per scope since ADR-092), and dropping the one-argument key lookup
+  kept for rolling deploys (0051).
 - **P5-09 Outgoing webhooks** **[built, locally verified; delivered to local test receivers only]**
   (ADR-053): up to 10 endpoints per company (`developer.manage`) for `message.received`,
   `message.status`, `consent.changed` and `template.status_changed`, captured by database triggers

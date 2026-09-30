@@ -11,6 +11,7 @@ import {
   ne,
   sql,
   teams,
+  type ApiScope,
   type PlanModule,
   type TenantPlanStatus,
   type Tx,
@@ -28,6 +29,8 @@ export interface Entitlements {
   limits: PlanLimits;
   modules: ReadonlySet<PlanModule>;
   usageAnchor: Date;
+  /** The public API scopes the plan includes; null: every scope (ADR-092). */
+  apiScopes: ReadonlySet<ApiScope> | null;
 }
 
 interface EntitlementRow extends Record<string, unknown> {
@@ -41,6 +44,7 @@ interface EntitlementRow extends Record<string, unknown> {
   modules: PlanModule[];
   usage_anchor: Date | string;
   api_requests: number | null;
+  api_scopes: ApiScope[] | null;
 }
 
 /** The company's entitlements; `tx` must be in the company's scope. */
@@ -63,6 +67,7 @@ export async function loadEntitlements(tx: Tx, tenantId: string): Promise<Entitl
     },
     modules: new Set(row.modules),
     usageAnchor: new Date(row.usage_anchor),
+    apiScopes: row.api_scopes === null ? null : new Set(row.api_scopes),
   };
 }
 
@@ -288,14 +293,44 @@ export function assertApiInPlan(entitlements: { limits: { apiRequests: number | 
   }
 }
 
+/** The scopes of `scopes` the plan leaves out (ADR-092); none when it includes every scope. */
+export function scopesNotInPlan(
+  entitlements: { apiScopes: ReadonlySet<ApiScope> | null },
+  scopes: readonly ApiScope[],
+): ApiScope[] {
+  const included = entitlements.apiScopes;
+  return included === null ? [] : scopes.filter((scope) => !included.has(scope));
+}
+
+/** The refusal of scopes the plan leaves out, for the API and for key creation alike. */
+export function apiScopesNotInPlan(scopes: readonly ApiScope[]): AppError {
+  const names =
+    scopes.length === 1 ? scopes[0] : `${scopes.slice(0, -1).join(', ')} and ${scopes.at(-1)}`;
+  return new AppError(
+    'forbidden',
+    `Your company's plan does not include the ${names} ${scopes.length === 1 ? 'scope' : 'scopes'}. Ask HyFib to change the plan.`,
+    { details: { apiReason: 'not_in_plan' } },
+  );
+}
+
+/** Refuses scopes the plan leaves out, when a key is given them (ADR-092). */
+export function assertScopesInPlan(
+  entitlements: { apiScopes: ReadonlySet<ApiScope> | null },
+  scopes: readonly ApiScope[],
+): void {
+  const missing = scopesNotInPlan(entitlements, scopes);
+  if (missing.length > 0) throw apiScopesNotInPlan(missing);
+}
+
 export type ApiRequestCount =
-  | { ok: true; used: number; limit: number | null }
+  | { ok: true; used: number; limit: number | null; apiScopes: ReadonlySet<ApiScope> | null }
   | { ok: false; reason: 'not_in_plan' | 'quota_exceeded'; limit: number; periodEnd: Date };
 
 /**
  * Counts one public API request in the month's usage period (ADR-061), atomically and never beyond
  * the limit, whatever runs in parallel; counted without a limit too, so the month's use is known.
- * Refuses when the plan leaves the API out (limit 0) or the month's requests are used up.
+ * Refuses when the plan leaves the API out (limit 0) or the month's requests are used up; otherwise
+ * gives the scopes the plan includes (ADR-092), which the request is then held to.
  */
 export async function consumeApiRequest(
   tx: Tx,
@@ -317,6 +352,6 @@ export async function consumeApiRequest(
   );
   const row = res.rows[0];
   return row
-    ? { ok: true, used: row.used, limit }
+    ? { ok: true, used: row.used, limit, apiScopes: entitlements.apiScopes }
     : { ok: false, reason: 'quota_exceeded', limit: limit ?? 0, periodEnd: end };
 }

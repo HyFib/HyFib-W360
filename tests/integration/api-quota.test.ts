@@ -2,14 +2,21 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { isAppError, systemClock, uuidv7, type Clock } from '@w360/core';
 import {
   API_NOT_IN_PLAN,
+  API_SCOPE_KEYS,
   admitApiRequest,
+  apiGetMessage,
+  apiListContacts,
+  apiListTemplates,
+  authenticateApiRequest,
   authenticateApiToken,
   createApiKeysService,
+  createApiWebhookEndpoints,
   createPlanAdminService,
   createPlansService,
   dayOf,
   sweepPlanStates,
   type ApiContext,
+  type ApiScope,
   type BillingNoticeDeps,
   type PlatformActor,
 } from '@w360/domain';
@@ -22,7 +29,7 @@ import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './what
  * once, refused once the month's are used (with Retry-After until the next period), counted again
  * from the next period, a plan change taking effect at once, a plan without the API refusing every
  * request and new or rotated keys, one notice per period, published versions unchangeable, and
- * companies counted apart.
+ * companies counted apart. Also the API scopes a plan includes (ADR-092).
  */
 let fx: WhatsAppFixture;
 beforeAll(async () => {
@@ -131,7 +138,7 @@ describe('monthly API requests by plan', () => {
     const free = await fx.company();
     const { ctx: freeKey } = await apiKey(free);
     expect((await usage(free)).limits.apiRequests).toBeNull();
-    for (let i = 0; i < 3; i += 1) expect(await admit(freeKey)).toEqual({ ok: true });
+    for (let i = 0; i < 3; i += 1) expect(await admit(freeKey)).toMatchObject({ ok: true });
     expect((await usage(free)).apiRequests.used).toBe(3);
 
     const limited = await fx.company();
@@ -159,7 +166,7 @@ describe('monthly API requests by plan', () => {
 
     // The next period counts from zero again.
     const next = at(periodEnd);
-    expect(await admit(ctx, periodEnd)).toEqual({ ok: true });
+    expect(await admit(ctx, periodEnd)).toMatchObject({ ok: true });
     expect((await usage(limited, next)).apiRequests).toMatchObject({
       used: 1,
       periodStart: periodEnd,
@@ -172,8 +179,8 @@ describe('monthly API requests by plan', () => {
     const c = await fx.company();
     const { ctx } = await apiKey(c);
     await activePlan(owner, c, await publishedPlan(owner, '2'));
-    expect(await admit(ctx)).toEqual({ ok: true });
-    expect(await admit(ctx)).toEqual({ ok: true });
+    expect(await admit(ctx)).toMatchObject({ ok: true });
+    expect(await admit(ctx)).toMatchObject({ ok: true });
     expect(await admit(ctx)).toMatchObject({ ok: false, reason: 'quota_exceeded' });
 
     // The limit is reached: one notice, however often the sweep runs.
@@ -191,13 +198,13 @@ describe('monthly API requests by plan', () => {
 
     // A larger plan in the same period: the month's count carries on under the new limit.
     await activePlan(owner, c, await publishedPlan(owner, '4'));
-    expect(await admit(ctx)).toEqual({ ok: true });
-    expect(await admit(ctx)).toEqual({ ok: true });
+    expect(await admit(ctx)).toMatchObject({ ok: true });
+    expect(await admit(ctx)).toMatchObject({ ok: true });
     expect(await admit(ctx)).toMatchObject({ ok: false, reason: 'quota_exceeded' });
     expect((await usage(c)).apiRequests.used).toBe(4);
     // A plan without a monthly limit lets every request through, still counted.
     await activePlan(owner, c, await publishedPlan(owner, ''));
-    expect(await admit(ctx)).toEqual({ ok: true });
+    expect(await admit(ctx)).toMatchObject({ ok: true });
     expect((await usage(c)).apiRequests.used).toBe(5);
   });
 
@@ -241,7 +248,7 @@ describe('monthly API requests by plan', () => {
     // Back on a plan with the API, new keys work again.
     await activePlan(owner, c, await publishedPlan(owner, '10'));
     const { ctx: again } = await apiKey(c);
-    expect(await admit(again)).toEqual({ ok: true });
+    expect(await admit(again)).toMatchObject({ ok: true });
   });
 
   it('keeps the monthly API requests of a published version, and carries them into its next version', async () => {
@@ -289,5 +296,236 @@ describe('monthly API requests by plan', () => {
       }),
       'validation_failed',
     );
+  });
+});
+
+describe('API scopes by plan (ADR-092)', () => {
+  const webhookApi = () =>
+    createApiWebhookEndpoints({
+      db: fx.dbs.app,
+      clock: systemClock,
+      keyring: fx.keyring,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+      egressPolicy: { allowLoopbackForTests: true },
+      appBaseUrl: 'http://localhost:3000',
+    });
+  const notInPlan = (what: string) =>
+    `Your company's plan does not include the ${what}. Ask HyFib to change the plan.`;
+
+  /** A published version with every scope (null) or the scopes given. */
+  async function scopedPlan(
+    owner: PlatformActor,
+    apiScopes: ApiScope[] | null,
+    apiRequestsMonthly = '',
+  ) {
+    codes += 1;
+    const { id } = await admin().createPlan(owner, {
+      code: `scopes-${Date.now().toString(36)}-${codes}`,
+      name: 'Scoped plan',
+      price: '999',
+      intervalMonths: '1',
+      trialDays: '0',
+      graceDays: '7',
+      seatsIncluded: '10',
+      numbersIncluded: '5',
+      apiRequestsMonthly,
+      apiScopeChoice: apiScopes === null ? 'all' : 'chosen',
+      apiScopes: apiScopes ?? [],
+      modules: [],
+    });
+    await admin().publishPlan(owner, id);
+    return id;
+  }
+
+  async function keyWith(c: Company, scopes: ApiScope[]) {
+    const owner = await fx.ctx(c, c.owner);
+    return keys().create(owner, { name: 'Scoped key', scopes, expiresInDays: 0 });
+  }
+
+  /** A request with the token, admitted as the web app admits it: counted, under the plan. */
+  async function admitted(token: string): Promise<ApiContext> {
+    const auth = await authenticateApiRequest(fx.dbs.app, token, uuidv7(), null);
+    if (!auth || !('authenticated' in auth)) throw new Error('the key does not authenticate');
+    const admission = await admitApiRequest(fx.dbs.app, auth.authenticated, new Date());
+    if (!admission.ok) throw new Error(admission.message);
+    return admission.ctx;
+  }
+
+  it('holds each request to the scopes the plan includes, whatever its key has', async () => {
+    const owner = await platformOwner();
+    const c = await fx.company();
+    const key = await keyWith(c, ['contacts.read', 'messages.send', 'webhooks.manage']);
+    await activePlan(owner, c, await scopedPlan(owner, ['messages.send', 'contacts.read']));
+
+    const ctx = await admitted(key.token);
+    expect(ctx.planScopes && [...ctx.planScopes]).toEqual(['contacts.read', 'messages.send']);
+    await expect(apiListContacts({ db: fx.dbs.app }, ctx, {})).resolves.toMatchObject({
+      data: expect.any(Array),
+    });
+    const refused = await expectAppError(
+      webhookApi().list(ctx),
+      'forbidden',
+      notInPlan('webhooks.manage scope'),
+    );
+    expect(refused.details).toEqual({ apiReason: 'not_in_plan' });
+    // A scope the key does not have is refused as before, whatever the plan.
+    await expectAppError(
+      apiListTemplates({ db: fx.dbs.app }, ctx),
+      'forbidden',
+      'This API key does not have the templates.read scope.',
+    );
+    // A message's status needs any sending scope: messages.send is in the plan, so the lookup runs.
+    await expectAppError(apiGetMessage({ db: fx.dbs.app }, ctx, uuidv7()), 'not_found');
+
+    // A plan with no sending scope refuses the status too, naming the scope the key has.
+    await activePlan(owner, c, await scopedPlan(owner, ['contacts.read']));
+    const narrower = await admitted(key.token);
+    const status = await expectAppError(
+      apiGetMessage({ db: fx.dbs.app }, narrower, uuidv7()),
+      'forbidden',
+      notInPlan('messages.send scope'),
+    );
+    expect(status.details).toEqual({ apiReason: 'not_in_plan' });
+    // The tests' contexts carry the plan too.
+    const tested = await authenticateApiToken(fx.dbs.app, key.token, uuidv7());
+    expect(tested?.planScopes && [...tested.planScopes]).toEqual(['contacts.read']);
+
+    // Every scope again: the same key works, unchanged.
+    await activePlan(owner, c, await scopedPlan(owner, null));
+    const all = await admitted(key.token);
+    expect(all.planScopes).toBeNull();
+    await expect(webhookApi().list(all)).resolves.toEqual({ data: [] });
+    await expectAppError(apiGetMessage({ db: fx.dbs.app }, all, uuidv7()), 'not_found');
+  });
+
+  it('refuses new keys a scope the plan leaves out, and keeps and rotates keys that have one', async () => {
+    const owner = await platformOwner();
+    const c = await fx.company();
+    const old = await keyWith(c, ['contacts.read', 'webhooks.manage']);
+    await activePlan(owner, c, await scopedPlan(owner, ['contacts.read', 'templates.read']));
+    expect((await usage(c)).apiScopes).toEqual(['templates.read', 'contacts.read']);
+
+    const companyOwner = await fx.ctx(c, c.owner);
+    const refused = await expectAppError(
+      keys().create(companyOwner, {
+        name: 'Everything',
+        scopes: ['webhooks.manage', 'contacts.read', 'messages.send'],
+        expiresInDays: 0,
+      }),
+      'forbidden',
+      notInPlan('messages.send and webhooks.manage scopes'),
+    );
+    expect(refused.details).toEqual({ apiReason: 'not_in_plan' });
+    const reader = await keys().create(companyOwner, {
+      name: 'Reader',
+      scopes: ['templates.read', 'contacts.read'],
+      expiresInDays: 0,
+    });
+    await expect(
+      apiListTemplates({ db: fx.dbs.app }, await admitted(reader.token)),
+    ).resolves.toMatchObject({ data: expect.any(Array) });
+
+    // The key made before keeps its scopes, and rotating it keeps them: requests are refused the
+    // one the plan leaves out.
+    const rotated = await keys().rotate(companyOwner, { keyId: old.id, overlapHours: 0 });
+    const listed = (await keys().list(companyOwner)).find((k) => k.id === rotated.id);
+    expect(listed?.scopes).toEqual(['contacts.read', 'webhooks.manage']);
+    const ctx = await admitted(rotated.token);
+    await expectAppError(webhookApi().list(ctx), 'forbidden', notInPlan('webhooks.manage scope'));
+    await expect(apiListContacts({ db: fx.dbs.app }, ctx, {})).resolves.toMatchObject({
+      data: expect.any(Array),
+    });
+    // The platform's view of the company shows the plan's scopes.
+    expect((await admin().tenantPlan(owner, c.tenant.id)).apiScopes).toEqual([
+      'templates.read',
+      'contacts.read',
+    ]);
+  });
+
+  it("keeps a version's scopes coherent, unchangeable once published, and in its next version", async () => {
+    const owner = await platformOwner();
+    const fields = {
+      name: 'Scoped plan',
+      price: '999',
+      intervalMonths: '1',
+      trialDays: '0',
+      graceDays: '7',
+      seatsIncluded: '10',
+      numbersIncluded: '5',
+      apiRequestsMonthly: '',
+      modules: [],
+    };
+    const none = await expectAppError(
+      admin().createPlan(owner, {
+        ...fields,
+        code: `scopes-none-${Date.now().toString(36)}`,
+        apiScopeChoice: 'chosen',
+        apiScopes: [],
+      }),
+      'validation_failed',
+    );
+    expect(none.issues).toEqual([
+      { path: 'apiScopes', message: 'Choose at least one API scope, or include every scope' },
+    ]);
+    // Kept in the list's order; a plan without the API keeps none.
+    const id = await scopedPlan(owner, ['webhooks.manage', 'contacts.read']);
+    expect((await admin().getPlan(owner, id)).plan.apiScopes).toEqual([
+      'contacts.read',
+      'webhooks.manage',
+    ]);
+    const noApi = await scopedPlan(owner, ['contacts.read'], '0');
+    expect((await admin().getPlan(owner, noApi)).plan.apiScopes).toBeNull();
+    // Versions made before choosing scopes existed include every scope.
+    expect(
+      (await admin().getPlan(owner, await publishedPlan(owner, ''))).plan.apiScopes,
+    ).toBeNull();
+
+    // Published: the scopes cannot change, not even while retiring.
+    await expect(
+      fx.dbs.adminPool.query(`UPDATE ops.plans SET api_scopes = NULL WHERE id = $1`, [id]),
+    ).rejects.toThrow(/A published plan version cannot change/);
+    await expect(
+      fx.dbs.adminPool.query(
+        `UPDATE ops.plans SET status = 'retired', retired_at = now(), retired_by_user_id = $2,
+                api_scopes = ARRAY['contacts.read']
+          WHERE id = $1`,
+        [id, owner.userId],
+      ),
+    ).rejects.toThrow(/A published plan version cannot change/);
+
+    // The next version starts from them, and platform staff may change them there.
+    const { id: draft } = await admin().createVersion(owner, id);
+    expect((await admin().getPlan(owner, draft)).plan.apiScopes).toEqual([
+      'contacts.read',
+      'webhooks.manage',
+    ]);
+    await admin().updateDraft(owner, draft, {
+      ...fields,
+      apiScopeChoice: 'chosen',
+      apiScopes: ['templates.read'],
+    });
+    expect((await admin().getPlan(owner, draft)).plan.apiScopes).toEqual(['templates.read']);
+    // The table refuses unknown scopes, an empty list and scopes without the API.
+    for (const [scopes, monthly] of [
+      [['contacts.delete'], null],
+      [[], null],
+      [['contacts.read'], 0],
+    ] as const) {
+      await expect(
+        fx.dbs.adminPool.query(
+          `UPDATE ops.plans SET api_scopes = $2::text[], api_requests_monthly = $3 WHERE id = $1`,
+          [draft, scopes, monthly],
+        ),
+      ).rejects.toThrow(/plans_api_scopes/);
+    }
+    // The table's list of scopes is the API's.
+    const { rows } = await fx.dbs.adminPool.query<{ def: string }>(
+      `SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint
+        WHERE conname = 'plans_api_scopes_check'`,
+    );
+    expect([...rows[0]!.def.matchAll(/'([a-z_.]+)'::text/g)].map((m) => m[1])).toEqual([
+      ...API_SCOPE_KEYS,
+    ]);
   });
 });

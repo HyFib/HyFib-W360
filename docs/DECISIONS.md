@@ -3039,3 +3039,40 @@ Not built: alerts for queues whose oldest waiting job is too old (pg-boss's coun
 alerts to other channels (chat, pager), a digest schedule or intervals chosen per alert, and alerts
 for failing integrations of one company (the console's Current failures; companies hear of their
 own through their pages and emails).
+
+## ADR-092 API scopes by plan (2026-09-30)
+
+Context: a plan version can leave the whole public API out (0 monthly requests, ADR-061) but not
+part of it. HyFib may want a plan that lets integrations read contacts and send templates without
+managing webhook endpoints or starting automations, the "endpoint availability by plan" that the
+benchmark documents (W-137). HyFib's endpoints are grouped by the scope they need, so a plan's
+choice is made per scope.
+
+Decision:
+
+- **Plan versions choose API scopes:** `ops.plans.api_scopes` (migration 0069) is empty (NULL) for
+  every scope, including scopes HyFib adds later, or the scopes the version includes (1 to 10 of the
+  known ones, kept in the list's order; the table checks them). Versions published before keep NULL,
+  which is what they gave. A version without the API (0 monthly requests) has none (a check), and
+  published versions stay unchangeable (the guard compares the new column). The platform plan form
+  offers "Every scope, including scopes HyFib adds later" or "Only the scopes chosen below".
+  Complimentary access includes every scope.
+- **Every request is held to the plan:** the admission that counts a request (ADR-061) already
+  reads the company's entitlements; it now also gives the request's context the scopes the plan
+  includes, and handlers run only with an admitted context. A request may use a scope when its key
+  has it and the plan includes it (`hasScope`). A scope the key has but the plan leaves out answers
+  403 `forbidden` with reason `not_in_plan`, naming the scope (`assertScope`); a scope the key does
+  not have is refused as before, checked first. Reads that any of several scopes allow (a message's
+  status, automation runs) need one the plan includes (`assertAnyScope`). The plan is checked before
+  the company's status. A refused request was counted, as every admitted request is.
+- **Keys:** creating a key with a scope the plan leaves out is refused, naming the scopes. Existing
+  keys keep their scopes: rotating copies them, Settings → API keys marks the ones the plan leaves
+  out, and requests are refused them while it does. When the company's plan includes them again
+  they work again, with no change to the key. What keys already did stays: endpoints a key added
+  keep receiving events (deliveries are not API requests) and runs a key started go on.
+- **Where it shows:** Settings → API keys (the scopes the plan includes, scopes it leaves out
+  disabled in the form and marked on keys), the Billing plan card, the platform plan form and page,
+  and the platform company page. The OpenAPI document describes the refusal.
+
+Not built: availability per endpoint rather than per scope, quotas per scope, telling companies
+which scopes a plan change removes, and packs of scopes sold as add-ons.

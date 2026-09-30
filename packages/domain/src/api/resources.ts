@@ -63,7 +63,7 @@ import {
 } from '../templates/definition';
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
 import { apiContactById, apiContactColumns, toApiContact, type ApiContact } from './contact-view';
-import { apiActor, assertScope, type ApiContext } from './context';
+import { apiActor, assertAnyScope, assertScope, type ApiContext } from './context';
 import {
   claimIdempotencyKey,
   storeIdempotentResponse,
@@ -842,9 +842,9 @@ export async function apiSendTemplate(
   input: unknown,
   idempotency: IdempotencyInput,
 ): Promise<ApiResponse> {
-  // The template decides which of the two scopes is needed; a key with neither is refused first.
-  if (!ctx.key.scopes.has('messages.send') && !ctx.key.scopes.has('messages.send_marketing'))
-    assertScope(ctx, 'messages.send');
+  // The template decides which of the two scopes is needed; a request that may use neither is
+  // refused first.
+  assertAnyScope(ctx, ['messages.send', 'messages.send_marketing']);
   const data = parseInput(apiSendMessageSchema, input);
   const phone = explicitPhone(data.to);
   const now = deps.clock.now();
@@ -1576,8 +1576,7 @@ export async function apiGetMessage(
   ctx: ApiContext,
   messageId: string,
 ): Promise<ApiMessage> {
-  if (!API_SEND_SCOPES.some((scope) => ctx.key.scopes.has(scope)))
-    assertScope(ctx, 'messages.send');
+  assertAnyScope(ctx, API_SEND_SCOPES);
   if (!z.uuid().safeParse(messageId).success) throw notFound('Message');
   const row = await deps.db.run(
     ctx.scope,

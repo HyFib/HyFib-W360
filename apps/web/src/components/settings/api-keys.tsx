@@ -95,14 +95,19 @@ function NewToken({
   );
 }
 
-/** Creates a key with a name, scopes and an expiry. Scopes the member cannot grant are disabled. */
+/**
+ * Creates a key with a name, scopes and an expiry. Scopes the member cannot grant, and scopes the
+ * company's plan leaves out (ADR-092), are disabled.
+ */
 export function CreateApiKeyForm({
   slug,
   grantable,
+  notInPlan,
   atLimit,
 }: {
   slug: string;
   grantable: ApiScope[];
+  notInPlan: ApiScope[];
   atLimit: boolean;
 }) {
   const prefix = useId();
@@ -220,7 +225,9 @@ export function CreateApiKeyForm({
                 <span className="text-xs text-muted-foreground">
                   {allowed
                     ? info.description
-                    : `${info.description} You cannot grant it: it needs a permission you do not have.`}
+                    : notInPlan.includes(scope)
+                      ? `${info.description} Your company’s plan does not include it.`
+                      : `${info.description} You cannot grant it: it needs a permission you do not have.`}
                 </span>
               </Label>
             </div>

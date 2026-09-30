@@ -1004,6 +1004,14 @@ true`); the same key with another request (method, path and body hashed) answers
   up answers 429 `rate_limited` with reason `quota_exceeded` and `Retry-After` until the next
   period. The minute plan sweep emails the billing managers once per period
   (`ops.api_quota_reached`), and once before, at 80% of the limit (ADR-062).
+- **API scopes by plan (0069, ADR-092):** `ops.plans.api_scopes` is empty for every scope or the
+  scopes the version includes; `app.tenant_entitlements` returns them. `admitApiRequest` takes the
+  authenticated key (`ApiKeyContext`) and returns the request's `ApiContext` with `planScopes`, so
+  a handler only runs with a context admitted under the plan. `hasScope`, `assertScope` and
+  `assertAnyScope` (`api/context.ts`) check the key's scopes, then the plan's (403 `not_in_plan`),
+  then the company's status for writing scopes. Creating a key checks its scopes against the plan
+  (`assertScopesInPlan`); rotating keeps them. `authenticateApiToken`, used by the tests, loads the
+  plan's scopes without counting a request.
 - **OpenAPI** (`api/openapi.ts`): `GET /api/v1/openapi.json` (no key; cacheable 5 minutes) is built
   from the zod schemas that validate requests; a unit test checks it against the route handlers.
 - **Expiry reminders (0040, ADR-067):** the minute messaging sweep (`api/expiry-reminders.ts`) lists,

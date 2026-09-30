@@ -2,7 +2,12 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { displayMoney, isAppError } from '@w360/core';
-import { PLAN_INTERVAL_LABELS, PLAN_MODULE_KEYS, PLAN_MODULE_LABELS } from '@w360/domain';
+import {
+  API_SCOPE_INFO,
+  PLAN_INTERVAL_LABELS,
+  PLAN_MODULE_KEYS,
+  PLAN_MODULE_LABELS,
+} from '@w360/domain';
 import { minorToInput } from '@w360/domain/crm-money';
 import { Badge, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
 import {
@@ -57,6 +62,8 @@ export default async function PlanPage({ params }: { params: Promise<{ id: strin
     runPackSize: count(plan.runPackSize),
     runPackPrice: rupees(plan.runPackPriceMinor),
     apiRequestsMonthly: count(plan.apiRequestsMonthly),
+    apiScopeChoice: plan.apiScopes === null ? 'all' : 'chosen',
+    apiScopes: plan.apiScopes ?? [],
     modules: plan.modules,
   };
   const terms: [string, string][] = [
@@ -89,6 +96,14 @@ export default async function PlanPage({ params }: { params: Promise<{ id: strin
     [
       'API requests a month',
       plan.apiRequestsMonthly === 0 ? 'Not included' : limit(plan.apiRequestsMonthly),
+    ],
+    [
+      'API scopes',
+      plan.apiRequestsMonthly === 0
+        ? 'The API is not included'
+        : plan.apiScopes === null
+          ? 'Every scope, including scopes HyFib adds later'
+          : plan.apiScopes.map((s) => API_SCOPE_INFO[s].label).join(', '),
     ],
     [
       'Modules',

@@ -7,7 +7,8 @@ import { API_SCOPES } from '@w360/db';
 import { PERMISSIONS, ROLE_PERMISSIONS } from '../authz/permissions';
 import { apiErrorResponse, apiRequestError } from './errors';
 import { allowedNetworksSchema, bearerToken, generateApiToken, networkEntryProblem } from './keys';
-import type { ApiContext } from './context';
+import { assertAnyScope, assertScope, hasScope, type ApiContext } from './context';
+import { apiScopesNotInPlan, scopesNotInPlan } from '../plans/entitlements';
 import {
   apiAddConversationNote,
   apiAddNoteSchema,
@@ -167,11 +168,93 @@ describe('API scopes', () => {
   });
 });
 
+describe('scopes by plan (ADR-092)', () => {
+  const ctx = (scopes: string[], planScopes: string[] | null, status = 'active') =>
+    ({
+      tenant: { id: 't', status },
+      key: { id: 'k', scopes: new Set(scopes) },
+      planScopes: planScopes === null ? null : new Set(planScopes),
+    }) as unknown as ApiContext;
+  const refusal = (run: () => void) => {
+    try {
+      run();
+    } catch (error) {
+      return isAppError(error)
+        ? { code: error.code, message: error.publicMessage, details: error.details }
+        : error;
+    }
+    return 'allowed';
+  };
+
+  it('let a request use a scope only when its key has it and the plan includes it', () => {
+    const c = ctx(['contacts.read', 'webhooks.manage'], ['contacts.read', 'templates.read']);
+    expect(hasScope(c, 'contacts.read')).toBe(true);
+    expect(hasScope(c, 'webhooks.manage')).toBe(false);
+    expect(hasScope(c, 'templates.read')).toBe(false);
+    expect(hasScope(ctx(['webhooks.manage'], null), 'webhooks.manage')).toBe(true);
+    expect(refusal(() => assertScope(c, 'contacts.read'))).toBe('allowed');
+    expect(refusal(() => assertScope(c, 'webhooks.manage'))).toEqual({
+      code: 'forbidden',
+      message:
+        "Your company's plan does not include the webhooks.manage scope. Ask HyFib to change the plan.",
+      details: { apiReason: 'not_in_plan' },
+    });
+    // The key's own scopes are checked first, with the message they always had.
+    expect(refusal(() => assertScope(c, 'templates.read'))).toMatchObject({
+      message: 'This API key does not have the templates.read scope.',
+      details: undefined,
+    });
+    // Plan before the company's status: a suspended company hears the plan leaves the scope out.
+    expect(
+      refusal(() =>
+        assertScope(ctx(['contacts.write'], ['contacts.read'], 'suspended'), 'contacts.write'),
+      ),
+    ).toMatchObject({ details: { apiReason: 'not_in_plan' } });
+  });
+
+  it('refuse a read any of several scopes allows only when the plan leaves out all the key has', () => {
+    const sending = ['messages.send', 'messages.send_marketing', 'messages.reply'] as const;
+    expect(
+      refusal(() =>
+        assertAnyScope(ctx(['messages.send', 'messages.reply'], ['messages.reply']), sending),
+      ),
+    ).toBe('allowed');
+    // Reads stay allowed while the company is suspended.
+    expect(refusal(() => assertAnyScope(ctx(['messages.reply'], null, 'suspended'), sending))).toBe(
+      'allowed',
+    );
+    expect(
+      refusal(() => assertAnyScope(ctx(['messages.reply'], ['contacts.read']), sending)),
+    ).toMatchObject({
+      message:
+        "Your company's plan does not include the messages.reply scope. Ask HyFib to change the plan.",
+    });
+    expect(refusal(() => assertAnyScope(ctx(['contacts.read'], null), sending))).toMatchObject({
+      message: 'This API key does not have the messages.send scope.',
+    });
+  });
+
+  it('name the scopes the plan leaves out', () => {
+    const plan = { apiScopes: new Set(['contacts.read'] as const) };
+    expect(scopesNotInPlan(plan, ['contacts.read', 'messages.send', 'webhooks.manage'])).toEqual([
+      'messages.send',
+      'webhooks.manage',
+    ]);
+    expect(scopesNotInPlan({ apiScopes: null }, ['webhooks.manage'])).toEqual([]);
+    expect(
+      apiScopesNotInPlan(['messages.send', 'conversations.read', 'webhooks.manage']).publicMessage,
+    ).toBe(
+      "Your company's plan does not include the messages.send, conversations.read and webhooks.manage scopes. Ask HyFib to change the plan.",
+    );
+  });
+});
+
 describe('conversation status (ADR-075)', () => {
   const ctx = (scopes: string[], status = 'active') =>
     ({
       tenant: { id: 't', status },
       key: { id: 'k', scopes: new Set(scopes) },
+      planScopes: null,
     }) as unknown as ApiContext;
   const id = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f01';
 
@@ -219,6 +302,7 @@ describe('internal notes (ADR-084)', () => {
     ({
       tenant: { id: 't', status },
       key: { id: 'k', scopes: new Set(scopes) },
+      planScopes: null,
     }) as unknown as ApiContext;
   const id = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f01';
 
@@ -318,6 +402,7 @@ describe('reading notes (ADR-089)', () => {
       ({
         tenant: { id: 't', status: 'active' },
         key: { id: 'k', scopes: new Set(scopes) },
+        planScopes: null,
       }) as unknown as ApiContext;
     const id = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f01';
     const codeOf = (promise: Promise<unknown>) =>
@@ -405,6 +490,7 @@ describe('the message feed (ADR-088)', () => {
       ({
         tenant: { id: 't', status: 'active' },
         key: { id: 'k', scopes: new Set(scopes) },
+        planScopes: null,
       }) as unknown as ApiContext;
     for (const scopes of [['messages.send', 'messages.reply'], ['conversations.write']]) {
       const error: unknown = await apiListMessages({} as never, ctx(scopes), {}).catch(
@@ -449,6 +535,7 @@ describe('text replies (ADR-070)', () => {
     const ctx = {
       tenant: { id: 't', status: 'active' },
       key: { id: 'k', scopes: new Set() },
+      planScopes: null,
     } as unknown as ApiContext;
     const idem = { key: 'k-1', requestHash: 'h' };
     for (const body of [{ type: 'image' }, { type: 'TEXT' }, { type: null }]) {
@@ -696,6 +783,7 @@ describe('reply buttons and lists (ADR-080)', () => {
     const ctx = {
       tenant: { id: 't', status: 'active' },
       key: { id: 'k', scopes: new Set(['messages.send']) },
+      planScopes: null,
     } as unknown as ApiContext;
     for (const body of [buttons, list]) {
       const error: unknown = await apiSendMessage({} as never, ctx, body, {
@@ -797,6 +885,7 @@ describe('product messages (ADR-086)', () => {
     const ctx = {
       tenant: { id: 't', status: 'active' },
       key: { id: 'k', scopes: new Set(['messages.send']) },
+      planScopes: null,
     } as unknown as ApiContext;
     for (const body of [product, productList, catalog]) {
       const error: unknown = await apiSendMessage({} as never, ctx, body, {
@@ -965,6 +1054,7 @@ describe('quotes and reactions (ADR-082)', () => {
     const ctx = {
       tenant: { id: 't', status: 'active' },
       key: { id: 'k', scopes: new Set(['messages.send', 'conversations.read']) },
+      planScopes: null,
     } as unknown as ApiContext;
     const error: unknown = await apiSendMessage({} as never, ctx, reaction, {
       key: 'k-1',
@@ -1041,6 +1131,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     const ctx = {
       tenant: { id: 't', status: 'active' },
       key: { id: 'k', scopes: new Set(['contacts.read']) },
+      planScopes: null,
     } as unknown as ApiContext;
     const idempotency = { key: 'k-1', requestHash: 'h' };
     for (const call of [
@@ -1086,6 +1177,7 @@ describe('webhook deliveries through the API (ADR-083)', () => {
     const ctx = {
       tenant: { id: 't', status: 'active' },
       key: { id: 'k', scopes: new Set(['contacts.read', 'messages.reply']) },
+      planScopes: null,
     } as unknown as ApiContext;
     const idempotency = { key: 'k-1', requestHash: 'h' };
     for (const call of [

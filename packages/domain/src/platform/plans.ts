@@ -24,6 +24,7 @@ import {
   type TenantPlanStatus,
 } from '@w360/db';
 import type { PlatformDatabase } from '@w360/db/platform';
+import { API_SCOPE_KEYS } from '../api/model';
 import type { RazorpayClient } from '../billing/razorpay';
 import { parseLocalDateTime, resolveLocalTime } from '../campaigns/schedule';
 import { parseAmountToMinor } from '../crm/money';
@@ -170,6 +171,16 @@ const planFieldsSchema = z
       PLAN_BOUNDS.apiRequests,
       'API requests are a whole number up to 1,000,000,000',
     ),
+    // Every API scope, including scopes added later, or the scopes chosen (ADR-092).
+    apiScopeChoice: z
+      .enum(['all', 'chosen'], { error: 'Choose which API scopes the plan includes' })
+      .default('all'),
+    apiScopes: z
+      .preprocess(
+        (v) => (v === undefined || v === null ? [] : typeof v === 'string' ? [v] : v),
+        z.array(z.enum(API_SCOPE_KEYS, { error: 'Choose API scopes from the list' })),
+      )
+      .transform((chosen) => API_SCOPE_KEYS.filter((s) => chosen.includes(s))),
     modules: z
       .preprocess(
         (v) => (v === undefined || v === null ? [] : typeof v === 'string' ? [v] : v),
@@ -192,6 +203,8 @@ const planFieldsSchema = z
       issue('runPackSize', 'Give both the size and the price of a run pack, or neither');
     if (d.runPackSize !== null && d.automationRunsMonthly === null)
       issue('runPackSize', 'Run packs need a monthly automation run limit');
+    if (d.apiScopeChoice === 'chosen' && d.apiRequestsMonthly !== 0 && d.apiScopes.length === 0)
+      issue('apiScopes', 'Choose at least one API scope, or include every scope');
   });
 
 type PlanFields = z.infer<typeof planFieldsSchema>;
@@ -287,6 +300,8 @@ function planValues(d: PlanFields) {
     runPackSize: d.runPackSize,
     runPackPriceMinor: d.runPackPrice,
     apiRequestsMonthly: d.apiRequestsMonthly,
+    // A plan without the API has no scopes to choose.
+    apiScopes: d.apiRequestsMonthly === 0 || d.apiScopeChoice === 'all' ? null : d.apiScopes,
     modules: d.modules,
   };
 }
@@ -594,6 +609,7 @@ export function createPlanAdminService(deps: {
           runPackSize: source.runPackSize,
           runPackPriceMinor: source.runPackPriceMinor,
           apiRequestsMonthly: source.apiRequestsMonthly,
+          apiScopes: source.apiScopes,
           modules: source.modules,
           createdByUserId: actor.userId,
         });
@@ -840,6 +856,10 @@ export function createPlanAdminService(deps: {
           plan: plan ?? null,
           limits: entitlements.limits,
           modules: PLAN_MODULE_KEYS.filter((m) => entitlements.modules.has(m)),
+          apiScopes:
+            entitlements.apiScopes === null
+              ? null
+              : API_SCOPE_KEYS.filter((s) => entitlements.apiScopes?.has(s)),
           usage: {
             members: Number(usage?.active_members ?? 0),
             invitations: Number(usage?.pending_invitations ?? 0),

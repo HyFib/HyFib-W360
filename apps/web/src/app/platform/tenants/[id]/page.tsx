@@ -3,6 +3,7 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { displayMoney } from '@w360/core';
 import {
+  API_SCOPE_INFO,
   dayOf,
   DELETION_GRACE_DAYS,
   STAFF_DELETION_REASON,
@@ -326,6 +327,12 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
                       : used(usage.apiRequests, limits.apiRequests)}
                   </dd>
                 </div>
+                {limits.apiRequests !== 0 && planView.apiScopes ? (
+                  <div className="sm:col-span-2">
+                    <dt className="text-muted-foreground">API scopes</dt>
+                    <dd>{planView.apiScopes.map((s) => API_SCOPE_INFO[s].label).join(', ')}</dd>
+                  </div>
+                ) : null}
                 <div className="sm:col-span-2">
                   <dt className="text-muted-foreground">Modules</dt>
                   <dd>

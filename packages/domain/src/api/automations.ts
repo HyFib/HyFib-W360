@@ -34,7 +34,7 @@ import { emitTenantEvent } from '../messaging/events';
 import type { OutboundDeps } from '../messaging/outbound';
 import { consumeAutomationRun } from '../plans/entitlements';
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
-import { apiActor, assertScope, type ApiContext } from './context';
+import { apiActor, assertAnyScope, assertScope, hasScope, type ApiContext } from './context';
 import type { ApiResponse, IdempotencyInput } from './idempotency';
 import { API_LIMITS } from './model';
 import { explicitPhone, idempotent, phoneField } from './resources';
@@ -90,7 +90,7 @@ export interface ApiAutomationRun {
 
 /** Reading needs the scope only; starting and stopping (writes) also need an active company. */
 function assertStartScopeHeld(ctx: ApiContext) {
-  if (!ctx.key.scopes.has('automations.start')) assertScope(ctx, 'automations.start');
+  assertAnyScope(ctx, ['automations.start']);
 }
 
 const runColumns = {
@@ -296,9 +296,10 @@ async function startRun(
       issues: [{ path: 'inputs', message: inputs.message }],
     });
   }
-  // Marketing templates need the key's marketing scope, as publishing them needs campaigns.send.
+  // Marketing templates need the key's marketing scope, as publishing them needs campaigns.send,
+  // and the plan must include it (ADR-092).
   const templateIds = templatesOf(graph.data);
-  if (templateIds.length > 0 && !ctx.key.scopes.has('messages.send_marketing')) {
+  if (templateIds.length > 0 && !hasScope(ctx, 'messages.send_marketing')) {
     const [marketing] = await tx
       .select({ id: messageTemplates.id })
       .from(messageTemplates)
@@ -311,6 +312,8 @@ async function startRun(
       )
       .limit(1);
     if (marketing) {
+      if (ctx.key.scopes.has('messages.send_marketing'))
+        assertScope(ctx, 'messages.send_marketing');
       throw new AppError(
         'forbidden',
         'This automation sends marketing templates, which needs the messages.send_marketing scope.',
