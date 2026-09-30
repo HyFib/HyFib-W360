@@ -104,5 +104,6 @@ export * from './jobs/dead-letters';
 export * from './platform/ops-model';
 export * from './platform/ops';
 export * from './platform/failure-alerts';
+export * from './platform/queue-waits';
 export * from './platform/billing';
 export * from './platform/reconciliation';

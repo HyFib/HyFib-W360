@@ -3224,3 +3224,50 @@ Decision:
 
 Not built: replays across endpoints, choosing event types or single deliveries to replay in
 bulk, replaying succeeded deliveries in bulk, and scheduled replays.
+
+## ADR-096 How long jobs wait, and alerts for queues that fall behind (2026-09-30)
+
+Context: the operations console (ADR-054) shows pg-boss's counts for each queue, which carry no
+age: a queue whose workers had stopped taking work looked like one with a few jobs in it. Nobody
+was told (ADR-091 left it out), and the counts come from pg-boss's own cache, refreshed by the
+worker. A job whose handler never runs is not dead-lettered either: it waits, while customers'
+messages, webhook deliveries or payments wait with it.
+
+Decision:
+
+- **What is measured:** for each queue this release declares, the jobs pg-boss would hand to a
+  worker now and since when the oldest of them has waited: jobs created or retried whose start time
+  has come (pg-boss's own "ready", as its queue stats count it), left out when held by a job they
+  depend on (they wait for that job, not for a worker). A retried or delayed job waits from when it
+  became due. Read from `pgboss.job` by the worker's role, which pg-boss already needs, through the
+  partial index pg-boss claims jobs with (checked with `EXPLAIN`: an index-only scan, so finished
+  jobs are never read).
+- **Limits per queue:** `maxWaitMinutes` in the queue catalog, 15 minutes unless given (a job
+  normally starts within seconds); 60 minutes for queues of long jobs run one or two at a time,
+  where a burst of work waits by design (template sync, catalog sync, store sync, the settlement
+  reconciliation and company deletion).
+- **Recorded every minute:** the minute messaging sweep reads them after the failure alert and
+  records them in `ops.queue_waits` through `ops.record_queue_waits`, one row per queue with the
+  count, the oldest job's due time, the limit and the time of the check. A queue is late once its
+  oldest job has waited its limit, and stays late until nothing has waited half of it, so a queue
+  hovering around its limit is not reported again and again. Rows no check touched for 7 days
+  (queues a release no longer declares) are deleted.
+- **Alert:** every platform administrator is emailed once each time a queue becomes late, through
+  `ops.mark_queue_alert` in the transaction that queues the emails: at most every 15 minutes
+  (`ops.platform_alerts` gains a `queues` row, so failure alerts and queue alerts do not hold each
+  other back), only for checks from the last 5 minutes (a row a stopped check left behind is not
+  news), and two sweeps at once send one alert. The email names each late queue with its waiting
+  jobs, its oldest wait and its limit, the longest wait first, eight queues at most (seven and a
+  count beyond), and what to look at. Queue names, counts and times only: no job's payload leaves
+  pg-boss. While there is no platform administrator, nothing is marked and the worker warns.
+- **Console:** the Queues tab shows each queue's oldest wait at the last check, its limit, whether
+  and since when it is late and when staff were emailed, and when the worker last checked; when
+  that was more than 5 minutes ago it says the worker is not checking, since then nobody is told.
+  The overview counts late queues.
+- **Access:** the table is written only by the two functions (SECURITY DEFINER, executable by the
+  worker's role only); the worker and platform staff read it.
+
+Not built: an email when the worker itself stops (an alert the worker sends cannot report that:
+its liveness and readiness probes are for it, see DEPLOYMENT, and the console says when the last
+check was), a reminder while a queue stays late, an email when it has caught up, limits changed
+without a release, and trends of waits over time.

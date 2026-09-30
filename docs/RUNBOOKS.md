@@ -32,8 +32,23 @@ audited. Never paste tokens, message content or card data into tickets or chat.
 
 ## 3. Backlog growth / queue lag
 
-1. Identify the queue (`pgboss.job` counts by `name` and `state='created'`).
-2. Check worker health and logs; scale worker replicas horizontally (safe).
+Platform administrators are emailed "Queue … is falling behind" (or "N queues are falling behind")
+when a queue's oldest ready job has waited longer than the queue's limit (ADR-096: 15 minutes, 60
+for template, catalog and store syncs, the settlement reconciliation and company deletion). The
+email names each queue with its waiting jobs and oldest wait; Operations → Queues shows the same
+for every queue at the worker's last check, which it makes every minute. A queue stays late until
+its oldest job has waited under half its limit, and is emailed about again only after that, at most
+every 15 minutes. If the Queues tab says **the worker is not checking the queues**, the minute
+sweep is not running: nobody is emailed about late queues until it does, so start with the worker
+(`:9464/ready`, its logs, whether its pod or container runs).
+
+1. Identify the queue (Operations → Queues, or `pgboss.job` counts by `name` and
+   `state='created'`; the oldest wait is
+   `SELECT min(start_after) FROM pgboss.job WHERE name = … AND state < 'active' AND start_after <= now()`).
+2. Check worker health and logs; scale worker replicas horizontally (safe). A queue whose handler
+   takes one or two jobs at a time (see `apps/worker/src/main.ts`) drains slowly after a burst: that
+   is why its limit is longer. A limit is changed in the queue catalog
+   (`packages/contracts/src/jobs.ts`, `maxWaitMinutes`) and applies with the next release.
 3. If a poison job fails repeatedly, it moves to `dead-letter` after its retry limit, and the
    worker records it in `ops.dead_letters` (Operations → Queues: queue, kind, company when its
    signature verified, retries, error name and code, never the message). The worker log's
@@ -1535,7 +1550,21 @@ help with Embedded Signup.
 jobs retained after their last attempt. `billing.auto-recharge` has no retries on purpose
 (section 9). A row "Not declared by this release" is a queue named by a dead letter that this
 release does not declare (an older or newer deploy); "No such queue in the database" means pg-boss
-has no queue by that name (for a declared queue: the migrations have not run).
+has no queue by that name (for a declared queue: the migrations have not run). The oldest wait
+(ADR-096) is the longest a ready job had waited when the worker's minute sweep last checked, with
+the queue's limit under its name; "Not checked" means the sweep has not checked that queue yet (a
+queue new in this release, until the next minute).
+
+**Late queues (ADR-096).** Every platform administrator is emailed "Queue … is falling behind" (or
+"N queues are falling behind") once each time a queue's oldest ready job has waited its limit, at
+most every 15 minutes, with each queue's waiting jobs, oldest wait and limit; the Queues tab marks
+the queue late and says when staff were emailed. It stays late until its oldest job has waited under
+half its limit, then its alert is re-armed. The worker logs `job queues are late` at each check
+while any is, and `late queue alert emailed to platform staff`; `job queues are late but there is
+no platform administrator to email` means nothing is marked until there is one. Section 3 says what
+to do. "The worker is not checking the queues" on the tab (or a dash on the overview's Late queues)
+means no check for 5 minutes: the minute messaging sweep is not running or fails before the check
+(look for failures of `ops.messaging-sweep` in the worker's logs), so late queues are not emailed.
 
 **Dead letters.** Recorded by the worker within seconds of the move; if the list stays empty while
 `SELECT count(*) FROM pgboss.job WHERE name = 'dead-letter' AND state = 'created'` grows, the worker
@@ -1570,6 +1599,12 @@ as told, and replaces `ops.platform_retry_webhook_receipt` (dropped as `w360_def
 as in 0011), in one transaction. A failure rolls it all back: fix the cause (usually the bootstrap
 roles) and run the migrations again. Workers of the previous release keep working; web servers of
 the previous release show receipts as before.
+
+**Migration 0072 failed.** It creates `ops.queue_waits`, adds `queues` to the kinds of
+`ops.platform_alerts` (replacing its check `platform_alerts_kind_check`) and creates
+`ops.record_queue_waits` and `ops.mark_queue_alert`, in one transaction. A failure rolls it all
+back: usually the bootstrap roles, or the check renamed by hand. Workers of the previous release do
+not check queues; web servers of the previous release show the Queues tab without waits.
 
 **Migrations 0026 and 0027 failed.** 0026 runs in one transaction: it needs the bootstrap roles
 (`w360_definer`, `w360_platform`, `w360_app`). 0027 builds an index concurrently outside a

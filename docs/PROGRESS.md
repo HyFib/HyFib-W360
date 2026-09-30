@@ -1,5 +1,98 @@
 # Progress
 
+## 2026-09-30 — Phase 5: queue waits and alerts for late queues (P5-10, ADR-096)
+
+Status: **Implemented and locally verified (test data only; alerts go to the local test mailbox).**
+The operations console showed pg-boss's counts, which carry no age: a queue whose workers had
+stopped taking work looked like one with a few jobs in it, and nobody was told (ADR-091 left this
+out).
+
+### Completed
+
+- **Design (ADR-096):** for each declared queue, the jobs pg-boss would hand to a worker now and
+  since when the oldest has waited (pg-boss's own "ready"; jobs held by a dependency left out); a
+  limit per queue (15 minutes, 60 for template, catalog and store syncs, the settlement
+  reconciliation and company deletion); late at the limit until the wait is under half of it; every
+  platform administrator emailed once each time a queue becomes late, at most every 15 minutes, for
+  fresh checks only.
+- **Migration 0072:** `ops.queue_waits` (one row per queue, with checks on counts, limits and marks;
+  read by the worker and platform roles); `queues` added to `ops.platform_alerts`;
+  `ops.record_queue_waits` (lateness with the half-limit margin, re-arming, rows no check touched
+  for 7 days deleted) and `ops.mark_queue_alert` (the 15-minute gap under the row lock, fresh checks
+  only), SECURITY DEFINER and executable by the worker's role only.
+- **Contracts:** `maxWaitMinutes` in the queue catalog, `DEFAULT_MAX_WAIT_MINUTES`,
+  `queueMaxWaitMinutes`.
+- **Domain:** `checkQueueWaits` (reads `pgboss.job` through pg-boss's partial claim index, an
+  index-only scan checked with `EXPLAIN`), `alertLateQueues` and `lateQueueAlert`
+  (`platform/queue-waits.ts`); the console's queues and overview read the waits, limits, lateness
+  and whether the check is fresh.
+- **Worker:** the minute messaging sweep checks the queues and alerts after the failure alert,
+  logging late queues.
+- **Web:** Operations → Queues gains an "Oldest wait" column with a late badge and when staff were
+  emailed, each queue's limit, when the worker last checked, and a warning when it has stopped; the
+  overview gains a "Late queues" tile.
+- **Tests:**
+  - Unit (`queue-waits.test.ts`, 5): limits per queue, wait labels, the email's wording and order,
+    eight queues at most within a notice's limits, nobody to tell.
+  - Integration in `platform-ops.test.ts` (6 new, 1 updated):
+    - what waits: created, retried and due jobs, but not active, completed, deferred or held ones; a
+      queue within its limit on time; the oldest job's due time;
+    - one alert per late spell: not told again while late, the half-limit margin, re-armed under
+      half, the 15-minute gap, over once the job is taken;
+    - fresh checks only; one alert when two sweeps race; a queue falling behind right after an alert
+      waits; a sweep waits for another that holds the alert's row;
+    - the console's waits and limits for every declared queue, a late queue and the overview's
+      count, a stopped check;
+    - rows no check touched for 7 days forgotten;
+    - grants: the table read-only for both roles, the functions refused to platform staff, invalid
+      checks refused;
+    - the ADR-054 dead-letter test now expects the queue's wait limit in its policy.
+  - Isolation suite: both functions for the worker's role only.
+  - e2e `platform-ops.spec.ts`: the overview's Late queues tile; on the Queues tab, a check the worker
+    made since the test started, the oldest-wait column and the limits, with no warning.
+- **Docs:** ADR-096; SECURITY; THREAT-MODEL T114; RUNBOOKS §3 (queue lag and the late-queue email)
+  and §10P (late queues, migration 0072); ARCHITECTURE; DATA-RETENTION; BACKLOG P5-10;
+  FEATURE-MATRIX H-034.
+- **Mutation checks:** 28 regressions tried one at a time (1 through the e2e test); 27 make a test
+  fail, and the other (the record function's explicit REVOKE from PUBLIC) cannot be observed:
+  migration 0002's default privileges already keep every new function from PUBLIC.
+  - 12 in the migration: a queue within its limit counted late; no margin (on time again as soon as
+    under the limit); the alert not re-armed once on time; rows never forgotten; the late count
+    taking queues not checked; told again within 15 minutes of the last alert; the last alert's time
+    not kept; stale checks told; the alert's row not locked; on-time queues told; platform staff
+    unable to read the waits; and the redundant REVOKE.
+  - 6 in reading pg-boss: jobs taken by a worker, held by a dependency or not yet due counted as
+    waiting; the oldest job taken by its creation time; queues with nothing waiting not recorded;
+    every queue given the default limit.
+  - 4 in the email: marked with nobody to tell; the shortest wait first; eight queues named beside a
+    count; waits rounded up.
+  - 3 in the console: a stopped check shown as fresh; the console without waits; the overview
+    counting no late queue.
+  - 2 in the limits: company deletion given the default limit; the default limit an hour.
+  - 1 through the e2e test: the minute sweep checking no queue. Its first run was not caught: the
+    local database kept rows the unmutated worker had written minutes before, fresh enough for the
+    page. The test now waits for a check made since it started (the page's time, to the second),
+    and the mutation is caught.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                               |
+| --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | the first run flagged one non-null assertion in `platform/queue-waits.ts` (the single late queue's name in the subject), replaced by a checked destructuring; then 0 problems / all files formatted / all workspace packages pass                                    |
+| `pnpm test` (unit)                                                          | 434 passed, including 5 new in `queue-waits.test.ts`                                                                                                                                                                                                                 |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 578 passed, including 6 new in `platform-ops.test.ts`                                                                                                                                                                                                                |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 578 passed                                                                                                                                                                                                                                                           |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / `platform-ops.spec.ts`: 2 passed (29 s); the e2e mutation then showed it accepted a check an earlier run had made, so it now waits for one made since it started: 2 passed (40 s); on the local database created for the day's runs, migrated to 0072 |
+| Mutation checks                                                             | 28 regressions tried (1 through the e2e test); 27 make a test fail (the e2e one after the test change above), and the other (a redundant REVOKE) cannot be observed                                                                                                  |
+
+### Known gaps
+
+- Not built: an email when the worker itself stops (its liveness and readiness probes cover that,
+  and the console says when the last check was), a reminder while a queue stays late, an email when
+  it has caught up, limits changed without a release, and trends of waits over time.
+- The minute sweep checks the queues, so a queue is reported late up to a minute after it reaches
+  its limit.
+
 ## 2026-09-30 — Phase 5: replaying an endpoint's failed deliveries in one call (P5-09, ADR-095)
 
 Status: **Implemented and locally verified (no customer data; webhooks delivered to local test

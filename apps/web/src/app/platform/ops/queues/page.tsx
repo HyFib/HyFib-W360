@@ -1,5 +1,7 @@
 import type { Metadata } from 'next';
+import { waitLabel, type QueueWait } from '@w360/domain';
 import {
+  Alert,
   Badge,
   Card,
   CardContent,
@@ -21,6 +23,29 @@ import { requirePlatformActor } from '@/server/session';
 export const metadata: Metadata = { title: 'Queues · Operations' };
 export const dynamic = 'force-dynamic';
 
+/** The oldest ready job's wait at the worker's last check, and whether the queue is late. */
+function QueueWaitCell({ wait }: { wait: QueueWait | null }) {
+  if (wait === null) return <span className="text-sm text-muted-foreground">Not checked</span>;
+  if (wait.oldestWaitMs === null) return <span className="text-muted-foreground">—</span>;
+  return (
+    <div className="grid gap-1">
+      <span className="whitespace-nowrap tabular-nums">{waitLabel(wait.oldestWaitMs)}</span>
+      {wait.lateSince ? (
+        <span className="grid gap-0.5 text-xs text-muted-foreground">
+          <span>
+            <Badge tone="danger">Late</Badge> since <Utc at={wait.lateSince} />
+          </span>
+          {wait.alertedAt ? (
+            <span>
+              Staff emailed <Utc at={wait.alertedAt} />
+            </span>
+          ) : null}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
 export default async function OpsQueuesPage() {
   const actor = await requirePlatformActor();
   const { platformOps } = await getRuntime();
@@ -33,15 +58,34 @@ export default async function OpsQueuesPage() {
           <CardDescription>
             pg-boss&apos;s counts, which the worker refreshes about once a minute. Failed counts
             only the failed jobs pg-boss still keeps. Each queue&apos;s work is a row that the
-            minute sweeps signal again, so there is no redrive here (ADR-054).
+            minute sweeps signal again, so there is no redrive here (ADR-054). The oldest wait is
+            the longest a ready job had waited for a worker when the worker&apos;s minute sweep last
+            checked ({o.waitsCheckedAt ? <Utc at={o.waitsCheckedAt} /> : 'not yet'}). A queue is
+            late once it reaches its limit, until the wait is back under half of it; platform
+            administrators are emailed once each time, at most every 15 minutes (ADR-096; last email{' '}
+            {o.lastQueueAlertAt ? <Utc at={o.lastQueueAlertAt} /> : 'never'}).
           </CardDescription>
         </CardHeader>
-        <CardContent>
+        <CardContent className="grid gap-4">
+          {o.waitsFresh ? null : (
+            <Alert tone="danger" title="The worker is not checking the queues">
+              {o.waitsCheckedAt ? (
+                <>
+                  Its last check was at <Utc at={o.waitsCheckedAt} />.
+                </>
+              ) : (
+                'It has not checked them yet.'
+              )}{' '}
+              The waits below may be out of date, and nobody is emailed about a late queue until the
+              worker&apos;s minute sweep runs again: look at the worker&apos;s health and logs.
+            </Alert>
+          )}
           <Table aria-label="Job queues">
             <THead>
               <TR>
                 <TH>Queue</TH>
                 <TH>Ready</TH>
+                <TH>Oldest wait</TH>
                 <TH>Deferred</TH>
                 <TH>Active</TH>
                 <TH>Failed</TH>
@@ -60,18 +104,21 @@ export default async function OpsQueuesPage() {
                             q.policy.retryLimit === 0
                               ? 'no retries'
                               : `${q.policy.retryLimit} ${q.policy.retryLimit === 1 ? 'retry' : 'retries'}`
-                          }${q.policy.hasDeadLetter ? ', then dead-lettered' : ''}`}
+                          }${q.policy.hasDeadLetter ? ', then dead-lettered' : ''}; waits ${q.policy.maxWaitMinutes} min at most`}
                     </div>
                   </TD>
                   {q.counts ? (
                     <>
                       <TD className="tabular-nums">{q.counts.ready}</TD>
+                      <TD>
+                        <QueueWaitCell wait={q.wait} />
+                      </TD>
                       <TD className="tabular-nums">{q.counts.deferred}</TD>
                       <TD className="tabular-nums">{q.counts.active}</TD>
                       <TD className="tabular-nums">{q.counts.failed}</TD>
                     </>
                   ) : (
-                    <TD colSpan={4} className="text-sm text-muted-foreground">
+                    <TD colSpan={5} className="text-sm text-muted-foreground">
                       No such queue in the database
                     </TD>
                   )}

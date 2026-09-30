@@ -25,7 +25,8 @@ test('staff read the operations console and repair a quarantined webhook event',
 }) => {
   test.skip(!platformConfigured, 'needs DATABASE_URL_MIGRATE and E2E_DATABASE_URL_AUTH');
   test.skip(!messagingConfigured, 'Meta test configuration (stand-in, app secret) not provided');
-  test.setTimeout(120_000);
+  test.setTimeout(210_000);
+  const started = Date.now();
   const email = uniqueEmail('ops');
   const suffix = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`;
   const companyName = `Ops Co ${suffix}`;
@@ -47,6 +48,7 @@ test('staff read the operations console and repair a quarantined webhook event',
   const totals = page.getByRole('region', { name: 'Totals' });
   await expect(totals.getByText('Companies needing attention')).toBeVisible();
   await expect(totals.getByText('Webhook receipts needing attention')).toBeVisible();
+  await expect(totals.getByText('Late queues')).toBeVisible();
   await expectNoHorizontalOverflow(page);
 
   // Onboarding: the new company has no WhatsApp number yet.
@@ -90,6 +92,23 @@ test('staff read the operations console and repair a quarantined webhook event',
     queues.getByRole('row').filter({ has: page.getByText(name, { exact: true }) });
   await expect(queue('commerce.store')).toContainText('5 retries, then dead-lettered');
   await expect(queue('billing.auto-recharge')).toContainText('no retries');
+  // The worker's minute sweep checks how long jobs wait (ADR-096): wait for a check made since this
+  // test started (the description's time carries it to the second), so an earlier run's rows cannot
+  // pass for it. Each queue then shows its oldest wait and its limit, and nothing warns that the
+  // check has stopped.
+  const lastCheck = page
+    .getByText(/last checked \(/)
+    .locator('time')
+    .first();
+  await expect(async () => {
+    await page.reload();
+    const at = await lastCheck.getAttribute('datetime', { timeout: 1_000 });
+    expect(Date.parse(at ?? '')).toBeGreaterThan(started);
+  }).toPass({ timeout: 90_000 });
+  await expect(page.getByText('The worker is not checking the queues')).toHaveCount(0);
+  await expect(queues.getByRole('columnheader', { name: 'Oldest wait' })).toBeVisible();
+  await expect(queue('commerce.store')).toContainText('waits 60 min at most');
+  await expect(queue('message.send')).toContainText('waits 15 min at most');
   await expectNoHorizontalOverflow(page);
   await sections.getByRole('link', { name: 'Signals' }).click();
   await expect(page.getByText('Sending signals (7 days)')).toBeVisible();

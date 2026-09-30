@@ -8,7 +8,7 @@ import {
   CardTitle,
   EmptyState,
 } from '@w360/ui';
-import { CompanyLink, IssueList, LevelBadge, StatTile } from '@/components/platform/ops';
+import { CompanyLink, IssueList, LevelBadge, StatTile, Utc } from '@/components/platform/ops';
 import { getRuntime } from '@/server/runtime';
 import { requirePlatformActor } from '@/server/session';
 
@@ -54,6 +54,25 @@ export default async function OpsOverviewPage() {
           value={o.readyJobs}
           detail={`${o.failedJobs} failed jobs retained by pg-boss`}
           href="/platform/ops/queues"
+        />
+        <StatTile
+          label="Late queues"
+          value={o.queueCheckFresh ? o.lateQueues : '—'}
+          detail={
+            o.queuesCheckedAt === null ? (
+              'The worker has not checked the queues yet'
+            ) : o.queueCheckFresh ? (
+              <>
+                Checked <Utc at={o.queuesCheckedAt} />
+              </>
+            ) : (
+              <>
+                The worker last checked <Utc at={o.queuesCheckedAt} />
+              </>
+            )
+          }
+          href="/platform/ops/queues"
+          tone={!o.queueCheckFresh || o.lateQueues > 0 ? 'danger' : undefined}
         />
         <StatTile
           label="Failed or abandoned signups (7 days)"

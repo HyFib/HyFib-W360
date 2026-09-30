@@ -1191,14 +1191,22 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   (`ops.platform_alerts`), with counts by queue, provider and reason only. A retry clears the
   receipt's mark. The console shows when staff were emailed about each item and when the last alert
   went out.
+- **Queue waits** (ADR-096, migration 0072, `platform/queue-waits.ts`): after the failure alert, the
+  minute messaging sweep reads, for each queue the catalog declares, the jobs pg-boss would hand to a
+  worker (`state < 'active'`, due, not held by a dependency: pg-boss's partial claim index serves it)
+  and the oldest one's due time, and records them with the queue's `maxWaitMinutes` through
+  `ops.record_queue_waits` into `ops.queue_waits` (late at the limit, until under half of it).
+  `alertLateQueues` then marks late queues not yet told through `ops.mark_queue_alert` (at most every
+  15 minutes, `ops.platform_alerts` kind `queues`; fresh checks only) in the transaction that queues
+  one `platform.notice` email to every platform administrator. The Queues tab and the overview read
+  `ops.queue_waits` as the platform role.
 - **Web:** `/platform/ops` (Overview, Onboarding, Integrations, Queues, Signals, Usage over 7, 30 or
   90 days) and a health card on each company's platform page. Every page re-checks the platform
   actor. The functions read every company on each view, which suits the test envelope; paging and
   precomputed rollups come with growth.
-- **Not built yet:** alerts other than failures (a queue's oldest waiting job, a company's failing
-  integrations) and other channels, trends, quality updates from Meta's quality webhook, API
-  request counts, exports, the age of the oldest waiting job, redrive from the console, and
-  acknowledging issues.
+- **Not built yet:** other alerts (a company's failing integrations) and other channels, trends,
+  quality updates from Meta's quality webhook, API request counts, exports, redrive from the
+  console, and acknowledging issues.
 
 ## 6Q. Company export and deletion **[built — providers verified against the local Graph, Shopify and Razorpay stand-ins only]**
 

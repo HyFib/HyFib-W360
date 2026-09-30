@@ -1,16 +1,20 @@
 import { randomBytes } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { inject } from 'vitest';
 import { PgBoss } from 'pg-boss';
+import { ALL_QUEUES, queueMaxWaitMinutes } from '@w360/contracts';
 import { isAppError, uuidv7 } from '@w360/core';
-import { sql } from '@w360/db';
+import { sql, systemScope } from '@w360/db';
 import {
   alertFailures,
+  alertLateQueues,
+  checkQueueWaits,
   createPlatformOpsService,
   deadLetterJob,
   outboxAad,
   pgBossQueueInspector,
   purgeDeadLetters,
+  queueWaitLimits,
   recordDeadLetters,
   type PlatformActor,
 } from '@w360/domain';
@@ -467,7 +471,7 @@ describe('dead letters and queues', () => {
       deadLetters: { last24h: 1, last7d: 1 },
     });
     const store = queues.find((q) => q.name === 'commerce.store');
-    expect(store?.policy).toEqual({ retryLimit: 5, hasDeadLetter: true });
+    expect(store?.policy).toEqual({ retryLimit: 5, hasDeadLetter: true, maxWaitMinutes: 60 });
     expect(typeof store?.counts?.ready).toBe('number');
     const health = await ops().companyHealth(staff, company.tenant.id);
     expect(health?.health.facts.deadLetters7d).toBe(1);
@@ -795,5 +799,376 @@ describe('alerts for work that failed for good (ADR-091)', () => {
     expect(await rule('processing', 12, '1 minute')).toBe(false);
     expect(await rule('processing', 12, null)).toBe(false);
     expect(await rule('pending', 12, null)).toBe(false);
+  });
+});
+
+describe('queue waits and late queues (ADR-096)', () => {
+  const alert = () =>
+    alertLateQueues({
+      db: fx.dbs.app,
+      outbox: { keyring: fx.keyring, jobs: fx.jobs(), signer: fx.signer },
+      appBaseUrl: 'https://app.w360.test',
+    });
+  /** The next queue alert is allowed now, as if the last one went out over 15 minutes ago. */
+  const allowNextAlert = () =>
+    fx.query(
+      `UPDATE ops.platform_alerts SET last_sent_at = now() - interval '16 minutes'
+        WHERE kind = 'queues'`,
+    );
+  /** A queue of this test's own, which no worker takes jobs from, retried once a minute. */
+  async function ownQueue() {
+    const name = `it.wait-${randomBytes(4).toString('hex')}`;
+    await fx.boss.createQueue(name, { retryLimit: 3, retryDelay: 60 });
+    return name;
+  }
+  /** A job that became due `minutes` minutes ago and still waits. */
+  async function dueJob(queue: string, minutes: number) {
+    const id = await fx.boss.send(queue, { token: SECRET_TOKEN });
+    await dueAgo(id!, minutes);
+    return id!;
+  }
+  const dueAgo = (id: string, minutes: number) =>
+    fx.query(
+      `UPDATE pgboss.job SET start_after = now() - make_interval(mins => $2) WHERE id = $1`,
+      [id, minutes],
+    );
+  const check = (...queues: string[]) =>
+    checkQueueWaits(
+      fx.dbs.app,
+      queues.map((name) => ({ name, limitMinutes: 10 })),
+    );
+  async function waitsOf(queue: string) {
+    const [row] = await fx.query<{
+      waiting: number;
+      oldest_waiting_since: Date | null;
+      limit_minutes: number;
+      checked_at: Date;
+      late_since: Date | null;
+      alerted_at: Date | null;
+    }>(
+      `SELECT waiting, oldest_waiting_since, limit_minutes, checked_at, late_since, alerted_at
+         FROM ops.queue_waits WHERE queue = $1`,
+      [queue],
+    );
+    return row;
+  }
+  async function administrator() {
+    const user = await createUser(fx.dbs, { twoFactor: true });
+    await fx.dbs.ownerPool.query(
+      `INSERT INTO ops.platform_admins (user_id, role) VALUES ($1, 'platform_owner')`,
+      [user.id],
+    );
+    return user;
+  }
+  async function noticesTo(email: string) {
+    const rows = await fx.query<{
+      id: string;
+      tenant_id: string | null;
+      payload_ciphertext: string;
+    }>(
+      `SELECT id, tenant_id, payload_ciphertext FROM ops.email_outbox
+        WHERE to_address = $1 AND kind = 'platform.notice' ORDER BY created_at, id`,
+      [email],
+    );
+    return rows.map((r) => ({
+      tenantId: r.tenant_id,
+      payload: JSON.parse(fx.keyring.decryptString(r.payload_ciphertext, outboxAad(r.id))) as {
+        subject: string;
+        lines: string[];
+        url: string;
+      },
+    }));
+  }
+
+  it('records the jobs each queue would hand to a worker and since when the oldest waited, as pg-boss counts them ready', async () => {
+    const queue = await ownQueue();
+    const idle = await ownQueue();
+    const recent = await ownQueue();
+    // Waiting 3 minutes, within its limit of 10: on time.
+    await dueJob(recent, 3);
+    // Taken by a worker: active, not waiting.
+    await fx.boss.send(queue, { n: 'active' });
+    expect(await fx.boss.fetch(queue)).toHaveLength(1);
+    // Done: not waiting.
+    const done = await fx.boss.send(queue, { n: 'done' });
+    expect((await fx.boss.fetch(queue))?.[0]?.id).toBe(done);
+    await fx.boss.complete(queue, done!);
+    // Failed once and due again: waiting, since its retry became due.
+    const retried = await fx.boss.send(queue, { n: 'retried' });
+    expect((await fx.boss.fetch(queue))?.[0]?.id).toBe(retried);
+    await fx.boss.fail(queue, retried!);
+    await dueAgo(retried!, 2);
+    // Not due for another 10 minutes: deferred, not waiting.
+    await fx.boss.send(queue, { n: 'later' }, { startAfter: 600 });
+    // Due 12 and 3 minutes ago: waiting.
+    const oldest = await dueJob(queue, 12);
+    await dueJob(queue, 3);
+    // Held by a job it depends on: it waits for that job, not for a worker.
+    const held = await dueJob(queue, 30);
+    await fx.query(`UPDATE pgboss.job SET blocked = true WHERE id = $1`, [held]);
+    const states = await fx.query<{ state: string }>(
+      `SELECT state FROM pgboss.job WHERE name = $1 ORDER BY state`,
+      [queue],
+    );
+    expect(states.map((s) => s.state).sort()).toEqual(
+      ['active', 'completed', 'created', 'created', 'created', 'created', 'retry'].sort(),
+    );
+
+    expect(await check(queue, idle, recent)).toEqual({ checked: 3, late: 1 });
+    const [due] = await fx.query<{ start_after: Date }>(
+      `SELECT start_after FROM pgboss.job WHERE id = $1`,
+      [oldest],
+    );
+    const waits = await waitsOf(queue);
+    expect(waits).toMatchObject({
+      waiting: 3,
+      oldest_waiting_since: due!.start_after,
+      limit_minutes: 10,
+      alerted_at: null,
+    });
+    // Late since this check: its oldest job has waited 12 minutes, over its limit of 10.
+    expect(waits!.late_since).toEqual(waits!.checked_at);
+    expect(Math.abs(waits!.checked_at.getTime() - Date.now())).toBeLessThan(60_000);
+    expect(await waitsOf(idle)).toMatchObject({
+      waiting: 0,
+      oldest_waiting_since: null,
+      late_since: null,
+    });
+    expect(await waitsOf(recent)).toMatchObject({ waiting: 1, late_since: null });
+    // The job's payload never leaves pg-boss.
+    expect(JSON.stringify(await waitsOf(queue))).not.toContain(SECRET_TOKEN);
+  });
+
+  it('emails every platform administrator once when a queue falls behind, and again only after it caught up and fell behind again', async () => {
+    const admin = await administrator();
+    const queue = await ownQueue();
+    const job = await dueJob(queue, 11);
+    await check(queue);
+    await allowNextAlert();
+    const sent = await alert();
+    expect(sent.alerted).toBeGreaterThanOrEqual(1);
+    expect(sent.recipients).toBeGreaterThanOrEqual(1);
+    const [first, ...others] = await noticesTo(admin.email);
+    expect(others).toEqual([]);
+    expect(first!.tenantId).toBeNull();
+    expect(first!.payload.url).toBe('https://app.w360.test/platform/ops/queues');
+    expect(first!.payload.lines).toContain(
+      `${queue}: 1 job waiting, the oldest for 11 minutes (its limit is 10 minutes).`,
+    );
+    expect(JSON.stringify(first)).not.toContain(SECRET_TOKEN);
+    const told = await waitsOf(queue);
+    expect(told!.alerted_at).toBeInstanceOf(Date);
+
+    // Still late at the next checks: not told again.
+    await check(queue);
+    await allowNextAlert();
+    await alert();
+    expect(await waitsOf(queue)).toMatchObject({
+      late_since: told!.late_since,
+      alerted_at: told!.alerted_at,
+    });
+    // Catching up, but still over half its limit: still late, not told again.
+    await dueAgo(job, 7);
+    await check(queue);
+    expect(await waitsOf(queue)).toMatchObject({
+      late_since: told!.late_since,
+      alerted_at: told!.alerted_at,
+    });
+    // Under half its limit: on time again, and its alert re-armed.
+    await dueAgo(job, 4);
+    expect(await check(queue)).toEqual({ checked: 1, late: 0 });
+    expect(await waitsOf(queue)).toMatchObject({ late_since: null, alerted_at: null });
+    // Falls behind again while the last alert went out less than 15 minutes ago: it waits.
+    await fx.query(
+      `UPDATE ops.platform_alerts SET last_sent_at = now() - interval '5 minutes'
+        WHERE kind = 'queues'`,
+    );
+    await dueAgo(job, 12);
+    await check(queue);
+    expect(await alert()).toMatchObject({ alerted: 0 });
+    expect((await waitsOf(queue))!.alerted_at).toBeNull();
+    await allowNextAlert();
+    expect((await alert()).alerted).toBeGreaterThanOrEqual(1);
+    const notices = await noticesTo(admin.email);
+    expect(notices).toHaveLength(2);
+    expect(notices[1]!.payload.lines).toContain(
+      `${queue}: 1 job waiting, the oldest for 12 minutes (its limit is 10 minutes).`,
+    );
+    // Taken by a worker: nothing waits, on time.
+    expect((await fx.boss.fetch(queue))?.[0]?.id).toBe(job);
+    expect(await check(queue)).toEqual({ checked: 1, late: 0 });
+    expect(await waitsOf(queue)).toMatchObject({
+      waiting: 0,
+      oldest_waiting_since: null,
+      late_since: null,
+      alerted_at: null,
+    });
+  });
+
+  it('tells only fresh checks, sends one alert when two sweeps race, and waits for a sweep already sending one', async () => {
+    const admin = await administrator();
+    const [a, b, stale] = [await ownQueue(), await ownQueue(), await ownQueue()];
+    await dueJob(a, 20);
+    await dueJob(b, 25);
+    await dueJob(b, 15);
+    await dueJob(stale, 30);
+    await check(a, b, stale);
+    // The worker stopped checking this one 6 minutes ago: not news to tell.
+    await fx.query(
+      `UPDATE ops.queue_waits SET checked_at = now() - interval '6 minutes' WHERE queue = $1`,
+      [stale],
+    );
+    await allowNextAlert();
+    const results = await Promise.all([alert(), alert()]);
+    expect(results.filter((r) => r.alerted > 0)).toHaveLength(1);
+    expect((await waitsOf(a))!.alerted_at).toBeInstanceOf(Date);
+    expect((await waitsOf(b))!.alerted_at).toBeInstanceOf(Date);
+    expect((await waitsOf(stale))!.alerted_at).toBeNull();
+    const notices = await noticesTo(admin.email);
+    expect(notices).toHaveLength(1);
+    const { subject, lines } = notices[0]!.payload;
+    expect(subject).toMatch(/^\d+ queues are falling behind$/);
+    // The longest wait first.
+    const named = lines.filter((l) => l.startsWith('it.wait-'));
+    expect(
+      named.indexOf(`${b}: 2 jobs waiting, the oldest for 25 minutes (its limit is 10 minutes).`),
+    ).toBeLessThan(
+      named.indexOf(`${a}: 1 job waiting, the oldest for 20 minutes (its limit is 10 minutes).`),
+    );
+    expect(named.some((l) => l.startsWith(stale))).toBe(false);
+    // Right after that alert, a queue falling behind waits for the next one.
+    const soon = await ownQueue();
+    await dueJob(soon, 30);
+    await check(soon);
+    expect(await alert()).toMatchObject({ alerted: 0 });
+    expect((await waitsOf(soon))!.alerted_at).toBeNull();
+
+    // Another sweep holds the alert's row while it sends one: this sweep waits for it, then finds
+    // that alert just gone and tells nothing until 15 minutes have passed.
+    const next = await ownQueue();
+    await dueJob(next, 40);
+    await check(next);
+    await allowNextAlert();
+    const holder = await fx.dbs.adminPool.connect();
+    let held: Promise<unknown> | undefined;
+    try {
+      await holder.query('BEGIN');
+      await holder.query(`SELECT 1 FROM ops.platform_alerts WHERE kind = 'queues' FOR UPDATE`);
+      await holder.query(
+        `UPDATE ops.platform_alerts SET last_sent_at = now() WHERE kind = 'queues'`,
+      );
+      const [lock] = (await holder.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows;
+      held = alert();
+      await vi.waitFor(
+        async () => {
+          const [waiting] = await fx.query<{ n: number }>(
+            `SELECT count(*)::int AS n FROM pg_stat_activity
+              WHERE datname = current_database() AND $1 = ANY (pg_blocking_pids(pid))`,
+            [lock!.pid],
+          );
+          if (waiting!.n < 1) throw new Error('the alert is not waiting yet');
+        },
+        { timeout: 4_000, interval: 20 },
+      );
+    } finally {
+      await holder.query('COMMIT');
+      holder.release();
+    }
+    expect(await held).toMatchObject({ alerted: 0 });
+    expect((await waitsOf(next))!.alerted_at).toBeNull();
+    expect(await noticesTo(admin.email)).toHaveLength(1);
+  });
+
+  it('forgets queues no check has touched for 7 days', async () => {
+    const [gone, kept] = [await ownQueue(), await ownQueue()];
+    await check(gone, kept);
+    await fx.query(
+      `UPDATE ops.queue_waits SET checked_at = now() - interval '8 days' WHERE queue = $1`,
+      [gone],
+    );
+    await fx.query(
+      `UPDATE ops.queue_waits SET checked_at = now() - interval '6 days' WHERE queue = $1`,
+      [kept],
+    );
+    await check(await ownQueue());
+    expect(await waitsOf(gone)).toBeUndefined();
+    expect(await waitsOf(kept)).toMatchObject({ waiting: 0 });
+  });
+
+  it('shows each declared queue’s wait, limit and lateness on the console, and says when the worker stopped checking', async () => {
+    const limits = queueWaitLimits(ALL_QUEUES);
+    expect(limits.find((l) => l.name === 'tenant.delete')?.limitMinutes).toBe(60);
+    expect(limits.find((l) => l.name === 'message.send')?.limitMinutes).toBe(15);
+    await checkQueueWaits(fx.dbs.app, limits);
+    const fresh = await ops().queues(staff);
+    expect(fresh.waitsFresh).toBe(true);
+    expect(Math.abs(fresh.waitsCheckedAt!.getTime() - Date.now())).toBeLessThan(60_000);
+    for (const definition of ALL_QUEUES) {
+      const row = fresh.queues.find((q) => q.name === definition.name);
+      expect(row?.policy?.maxWaitMinutes, definition.name).toBe(queueMaxWaitMinutes(definition));
+      expect(row?.wait?.limitMinutes, definition.name).toBe(queueMaxWaitMinutes(definition));
+    }
+    // A declared queue whose oldest job had waited 30 minutes when the worker checked.
+    await fx.dbs.app.run(systemScope, (tx) =>
+      tx.execute(
+        sql`select ops.record_queue_waits(${JSON.stringify([
+          {
+            queue: 'flow.keys',
+            waiting: 4,
+            oldest_waiting_since: new Date(Date.now() - 30 * 60_000).toISOString(),
+            limit_minutes: 15,
+          },
+        ])}::jsonb)`,
+      ),
+    );
+    const late = (await ops().queues(staff)).queues.find((q) => q.name === 'flow.keys')!.wait!;
+    expect(late).toMatchObject({ waiting: 4, limitMinutes: 15, alertedAt: null });
+    expect(late.lateSince).toBeInstanceOf(Date);
+    expect(Math.round(late.oldestWaitMs! / 60_000)).toBe(30);
+    const overview = await ops().overview(staff);
+    expect(overview.lateQueues).toBeGreaterThanOrEqual(1);
+    expect(overview.queueCheckFresh).toBe(true);
+    // The worker has not checked for 10 minutes: the console says so.
+    await fx.query(`UPDATE ops.queue_waits SET checked_at = checked_at - interval '10 minutes'`);
+    expect((await ops().queues(staff)).waitsFresh).toBe(false);
+    expect((await ops().overview(staff)).queueCheckFresh).toBe(false);
+    // Back to what pg-boss holds.
+    await checkQueueWaits(fx.dbs.app, limits);
+    expect((await ops().queues(staff)).waitsFresh).toBe(true);
+  });
+
+  it('keeps the table to its two functions, the functions to the worker, and refuses what is not a check', async () => {
+    const privilege = async (role: string, action: string) =>
+      (
+        await fx.query<{ ok: boolean }>(
+          `SELECT has_table_privilege($1, 'ops.queue_waits', $2) AS ok`,
+          [role, action],
+        )
+      )[0]!.ok;
+    for (const role of ['w360_app', 'w360_platform']) {
+      expect(await privilege(role, 'SELECT'), role).toBe(true);
+      for (const action of ['INSERT', 'UPDATE', 'DELETE']) {
+        expect(await privilege(role, action), `${role} ${action}`).toBe(false);
+      }
+    }
+    expect(await privilege('w360_auth', 'SELECT')).toBe(false);
+    for (const fn of ["ops.record_queue_waits('[]'::jsonb)", 'ops.mark_queue_alert()']) {
+      await expect(fx.dbs.platformPool.query(`SELECT * FROM ${fn}`)).rejects.toThrow(
+        /permission denied for function/,
+      );
+    }
+    await expect(
+      fx.dbs.appPool.query(`SELECT ops.record_queue_waits('{"queue": "a"}'::jsonb)`),
+    ).rejects.toThrow(/must be an array/);
+    for (const bad of [
+      { queue: 'Not A Queue!', waiting: 0, oldest_waiting_since: null, limit_minutes: 10 },
+      { queue: 'it.bad', waiting: 1, oldest_waiting_since: null, limit_minutes: 10 },
+      { queue: 'it.bad', waiting: 0, oldest_waiting_since: null, limit_minutes: 0 },
+    ]) {
+      await expect(
+        fx.dbs.appPool.query(`SELECT ops.record_queue_waits($1::jsonb)`, [JSON.stringify([bad])]),
+        JSON.stringify(bad),
+      ).rejects.toThrow(/violates check constraint/);
+    }
   });
 });

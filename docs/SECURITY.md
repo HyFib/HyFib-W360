@@ -797,6 +797,13 @@ message text, contact details, payloads, email addresses, secrets or full URLs:
   `ops.platform_failure_alert_recipients` are SECURITY DEFINER, executable only by the worker's
   role; the definer role may update only the three alert marks and the last alert's time. Each item
   is emailed once, at most one alert every 15 minutes.
+- Queue waits and late-queue alerts (ADR-096): the worker's role reads `pgboss.job` (which pg-boss
+  already needs) for each declared queue's count of ready jobs and the oldest one's due time, never
+  a job's data, and records them through `ops.record_queue_waits`; `ops.mark_queue_alert` marks late
+  queues in the transaction that queues the email. Both are SECURITY DEFINER and executable only by
+  the worker's role; only the definer role writes `ops.queue_waits`, which the worker and platform
+  roles read (queue names, counts and times). The email to every platform administrator names
+  queues, counts, waits and limits only, at most every 15 minutes.
 
 Company export and deletion (Settings → Company data, ADR-055):
 

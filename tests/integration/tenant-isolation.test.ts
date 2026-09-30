@@ -242,6 +242,12 @@ describe('database roles', () => {
       expect(await can('w360_auth', fn), fn).toBe(false);
       expect(await can('w360_platform', fn), fn).toBe(false);
     }
+    // Late queues (0072): the check's record and the alert's mark for the worker's sweep only.
+    for (const fn of ['ops.record_queue_waits(jsonb)', 'ops.mark_queue_alert()']) {
+      expect(await can('w360_app', fn), fn).toBe(true);
+      expect(await can('w360_auth', fn), fn).toBe(false);
+      expect(await can('w360_platform', fn), fn).toBe(false);
+    }
     const rule = 'ops.webhook_receipt_exhausted(text,integer,timestamp with time zone)';
     expect(await can('w360_app', rule)).toBe(true);
     expect(await can('w360_platform', rule)).toBe(true);

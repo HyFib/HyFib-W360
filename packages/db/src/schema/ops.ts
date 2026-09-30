@@ -116,10 +116,29 @@ export const deadLetters = opsSchema.table('dead_letters', {
   alertedAt: tz('alerted_at'),
 });
 
-/** When each platform alert last went out (ADR-091: failures at most every 15 minutes). */
+/**
+ * When each platform alert last went out: failures (ADR-091) and late queues (ADR-096), each at most
+ * every 15 minutes.
+ */
 export const platformAlerts = opsSchema.table('platform_alerts', {
-  kind: text('kind', { enum: ['failures'] }).primaryKey(),
+  kind: text('kind', { enum: ['failures', 'queues'] }).primaryKey(),
   lastSentAt: tz('last_sent_at'),
+});
+
+/**
+ * How long jobs wait in each queue, as the worker's minute sweep last read them from pg-boss
+ * (ADR-096): jobs pg-boss would hand to a worker now and when the oldest became due. Late past the
+ * queue's limit until the wait is back under half of it. Written only through
+ * `ops.record_queue_waits` and `ops.mark_queue_alert`; the worker and platform staff read.
+ */
+export const queueWaits = opsSchema.table('queue_waits', {
+  queue: text('queue').primaryKey(),
+  waiting: integer('waiting').notNull(),
+  oldestWaitingSince: tz('oldest_waiting_since'),
+  limitMinutes: integer('limit_minutes').notNull(),
+  checkedAt: tz('checked_at').notNull(),
+  lateSince: tz('late_since'),
+  alertedAt: tz('alerted_at'),
 });
 
 /** What happened at one provider while a company was deleted (ADR-055). */
