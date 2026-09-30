@@ -3076,3 +3076,63 @@ Decision:
 
 Not built: availability per endpoint rather than per scope, quotas per scope, telling companies
 which scopes a plan change removes, and packs of scopes sold as add-ons.
+
+## ADR-093 Assigning conversations and moving them between teams through the public API (2026-09-30)
+
+Context: an integration can read conversations, answer them, resolve and reopen them and add notes
+(ADR-070, ADR-072, ADR-075, ADR-084), but deciding who answers stayed in the inbox: a helpdesk or
+CRM that routes customers to its own owners could not give a conversation to a member or a team,
+and the API named no members or teams (ADR-072, ADR-074). The benchmark's API row lists assigning
+conversations (W-134).
+
+Decision:
+
+- **Scopes:** `conversations.write`, now "Resolve, reopen, assign and add notes to conversations",
+  also assigns conversations and moves them between teams. It is granted only by members holding
+  `inbox.supervise` (owners, administrators and supervisors), and a unit test keeps every role
+  holding it also holding `inbox.assign`. `conversations.read` also reads the teams and the members
+  conversations can be given to; it is granted only by members holding `inbox.read_all`, all of whom
+  hold `members.read` (a unit test). Existing keys gain both, as keys gained notes (ADR-084): within
+  what their granter could do in the app.
+- **Members and teams:** `GET /members` pages the active members whose role reads and answers
+  conversations (the members teams and routing take): the id `assigneeId` names, the name, the
+  teams they belong to, and whether they take new conversations now. Emails, roles and anything else
+  about them are not given. `GET /teams` pages the company's teams: id, name and how the team gives
+  out conversations (`manual` or `round_robin`); keywords, limits and numbers are settings, not
+  given. Both are paged oldest first.
+- **Conversations name their member and team:** `assigneeId` and `teamId` (null for none) join
+  `assigned`, and the list filters by `assigneeId` and `teamId`, each an id or `none`.
+- **One operation:** `PATCH /conversations/{id}` takes any of `status`, `assigneeId` (a member, or
+  null to unassign) and `teamId` (a team, or null for none), at least one, applied in one
+  transaction with the conversation row locked, as the inbox's controls are: the team, then the
+  member, then the status. The operation is renamed `updateConversation` and its body
+  `UpdateConversation`, since it no longer sets only the status.
+  - Assigning a member ends an automation answering the conversation (the hand-off, reason
+    `assigned`), as a member's assignment does. Unassigning leaves the conversation to routing:
+    in a round-robin team the minute sweep gives it out again.
+  - Moving a conversation to a team then routes it at once when it has no member and is not
+    resolved, as the inbox's team control does (a member the request names keeps it); routing
+    leaves a conversation an automation answers to the automation.
+  - A member who cannot answer conversations (another role, suspended or removed, another
+    company's) or a team of another company is refused with 422, naming the field, and nothing in
+    the request is kept. The member's row is locked for share and the team's row against deletion
+    while the change is written: a member being suspended at the same time is refused once the
+    suspension commits, or has the conversation released by it (as a suspension releases every
+    conversation), and a team being deleted is refused rather than failing on its foreign key.
+  - What the conversation already has changes nothing, so a retried request needs no
+    `Idempotency-Key`.
+- **Attributed to the key:** the audit entries (`conversation.assigned`,
+  `conversation.team_changed`, with `source: api` and the request id) name the key; routing that
+  follows is the system's, as always. The inbox hears of each change live, and the
+  `conversation.assignment_changed` webhook fires when a member comes or goes, captured by its
+  trigger as for any change.
+- **Also fixed in the inbox:** the assignment picker offered, and assigning accepted, any active
+  member, including marketers, analysts and billing managers, who cannot open the inbox, leaving
+  the conversation with someone who could not see it. The inbox now offers and accepts only members
+  who can answer conversations, as teams and routing do, with the same locks on the member and the
+  team as the API.
+
+Not built: webhooks naming the member and team (and so moves between members or teams), assigning
+many conversations in one call, members' emails, team settings through the API, and a precondition
+on the conversation's state (the inbox checks the version a member saw; the API has no
+counterpart).

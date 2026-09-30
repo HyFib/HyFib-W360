@@ -192,7 +192,7 @@ test('a key answers a customer who wrote, reads the conversation and resolves it
   await page.getByLabel('Name', { exact: true }).fill('Helpdesk');
   await page.getByRole('checkbox', { name: /Reply with text/ }).check();
   await page.getByRole('checkbox', { name: /Read conversations/ }).check();
-  await page.getByRole('checkbox', { name: /Resolve, reopen and add notes/ }).check();
+  await page.getByRole('checkbox', { name: /Resolve, reopen, assign and add notes/ }).check();
   await page.getByRole('button', { name: 'Create API key' }).click();
   const token = await page.getByLabel('API key', { exact: true }).inputValue();
   await page.getByRole('button', { name: 'I have stored the key' }).click();
@@ -332,7 +332,7 @@ test('a key answers a customer who wrote, reads the conversation and resolves it
   const setStatus = (status: string) =>
     request.patch(`/api/v1/conversations/${open!.id}`, { headers: auth, data: { status } });
   const doc = await (await request.get('/api/v1/openapi.json')).json();
-  expect(doc.paths['/conversations/{id}'].patch.operationId).toBe('setConversationStatus');
+  expect(doc.paths['/conversations/{id}'].patch.operationId).toBe('updateConversation');
   expect(doc.paths['/messages'].get.operationId).toBe('listMessages');
   const resolvedNow = await setStatus('resolved');
   expect(resolvedNow.status()).toBe(200);
@@ -391,6 +391,116 @@ test('a key answers a customer who wrote, reads the conversation and resolves it
       (r.body as { to?: string } | null)?.to === waId,
   );
   expect(sentToCustomer).toHaveLength(1);
+});
+
+test('a key assigns a conversation to a member and moves it to a team, and the inbox shows both', async ({
+  page,
+  request,
+}) => {
+  const email = uniqueEmail('apiassign');
+  const slug = `apiassign-${Date.now().toString(36)}`;
+  await signUpAndVerify(page, { name: 'Asha Assign', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('Assign Traders');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+  const { wabaId, phoneNumberId } = await connectTestChannel({ ownerEmail: email, slug });
+
+  // Settings → Teams: a team that assigns by hand, with the owner.
+  await page.goto(`/c/${slug}/settings/teams`);
+  const form = page.locator('form', { has: page.getByRole('button', { name: 'Create team' }) });
+  await form.getByLabel('Team name').fill('Returns');
+  await form.getByLabel('Asha Assign').check();
+  await form.getByRole('button', { name: 'Create team' }).click();
+  await expect(page.getByText('Team created.')).toBeVisible();
+
+  await page.goto(`/c/${slug}/settings/api-keys`);
+  await page.getByLabel('Name', { exact: true }).fill('Router');
+  await page.getByRole('checkbox', { name: /Read conversations/ }).check();
+  await page.getByRole('checkbox', { name: /Resolve, reopen, assign and add notes/ }).check();
+  await page.getByRole('button', { name: 'Create API key' }).click();
+  const token = await page.getByLabel('API key', { exact: true }).inputValue();
+  await page.getByRole('button', { name: 'I have stored the key' }).click();
+  const auth = { Authorization: `Bearer ${token}` };
+
+  const waId = randomWaId();
+  await sendSignedWebhook(
+    request,
+    inboundMessage(wabaId, phoneNumberId, waId, 'I want to return my order.'),
+  );
+  await page.goto(`/c/${slug}/inbox`);
+  const item = page.getByRole('link', { name: /Priya Customer/ });
+  await expect(item).toContainText('Unassigned', { timeout: 20_000 });
+
+  // The key reads the members and teams, and finds the conversation nobody has.
+  const members = await (await request.get('/api/v1/members', { headers: auth })).json();
+  expect(members).toEqual({
+    data: [
+      {
+        id: expect.any(String),
+        name: 'Asha Assign',
+        available: false,
+        teamIds: [expect.any(String)],
+      },
+    ],
+    nextCursor: null,
+  });
+  const teams = await (await request.get('/api/v1/teams', { headers: auth })).json();
+  expect(teams).toEqual({
+    data: [{ id: members.data[0].teamIds[0], name: 'Returns', assignment: 'manual' }],
+    nextCursor: null,
+  });
+  const waiting = await (
+    await request.get('/api/v1/conversations?assigneeId=none&status=open', { headers: auth })
+  ).json();
+  expect(waiting.data).toHaveLength(1);
+  const [open] = waiting.data as { id: string }[];
+  const memberId = members.data[0].id as string;
+  const teamId = teams.data[0].id as string;
+
+  // The key gives the conversation to the owner in the team; the inbox shows both.
+  const change = (data: Record<string, unknown>) =>
+    request.patch(`/api/v1/conversations/${open!.id}`, { headers: auth, data });
+  const assigned = await change({ teamId, assigneeId: memberId });
+  expect(assigned.status()).toBe(200);
+  expect((await assigned.json()).data).toMatchObject({
+    id: open!.id,
+    assigned: true,
+    assigneeId: memberId,
+    teamId,
+  });
+  await page.reload();
+  await expect(item).toContainText('Assigned to Asha Assign');
+  await expect(item).toContainText('Returns');
+  await item.click();
+  // The conversation's controls, not the CRM task form or the list's filter beside them.
+  const assigneeControl = page
+    .getByLabel('Assigned to', { exact: true })
+    .filter({ has: page.getByRole('option', { name: 'Unassigned', exact: true }) });
+  await expect(assigneeControl).toHaveValue(memberId);
+  const teamControl = page
+    .getByLabel('Team', { exact: true })
+    .and(page.locator('select:not([name="team"])'));
+  await expect(teamControl).toHaveValue(teamId);
+  await expectNoHorizontalOverflow(page);
+
+  // Someone who cannot be given conversations is refused, naming the field; unassigning shows.
+  const refused = await change({ assigneeId: randomUUID() });
+  expect(refused.status()).toBe(422);
+  expect((await refused.json()).error.issues).toEqual([
+    { path: 'assigneeId', message: expect.any(String) },
+  ]);
+  const unassigned = await change({ assigneeId: null });
+  expect((await unassigned.json()).data).toMatchObject({
+    assigned: false,
+    assigneeId: null,
+    teamId,
+  });
+  await page.reload();
+  await expect(assigneeControl).toHaveValue('');
+  const doc = await (await request.get('/api/v1/openapi.json')).json();
+  expect(doc.paths['/members'].get.operationId).toBe('listMembers');
+  expect(doc.paths['/teams'].get.operationId).toBe('listTeams');
 });
 
 test('a key sends reply buttons and a list to a customer who wrote: the inbox shows them, and a picked row comes back through the API', async ({

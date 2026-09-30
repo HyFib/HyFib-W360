@@ -434,9 +434,13 @@ verification, app review, Embedded Signup configuration).
   under `conversations.read`, with the contact and number, filtered by direction, number and time;
   each page reads at most 2,000 messages, so filters give short pages rather than slow ones);
   **[reading notes built, locally verified]** (ADR-089: the same scope reads a conversation's
-  notes newest first, members' and keys' alike, never naming members or mentions). Remaining: media
-  messages, call-to-action messages through the API, taking reactions back, assigning
-  conversations, member and team names, media downloads, statuses changed since a time, starting or
+  notes newest first, members' and keys' alike, never naming members or mentions); **[assigning
+  and moving conversations built, locally verified]** (ADR-093: `conversations.write` gives a
+  conversation to a member who can answer it, unassigns it or moves it to a team, routed as the
+  inbox routes it; `conversations.read` lists those members, by name, and the teams; conversations
+  name their member and team by id; the inbox now offers and accepts only such members too).
+  Remaining: media messages, call-to-action messages through the API, taking reactions back,
+  assigning many conversations at once, media downloads, statuses changed since a time, starting or
   stopping runs for many contacts in one call, bulk sends in one call, replaying many deliveries in
   one call, networks for the whole company, per-key quotas, limits per endpoint, availability per
   single endpoint (plans choose per scope since ADR-092), and dropping the one-argument key lookup

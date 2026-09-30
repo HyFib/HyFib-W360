@@ -37,7 +37,12 @@ import { endRunForHuman } from '../automations/runs';
 import { automationStateForConversation } from '../automations/service';
 import { latestConversationSource } from '../growth/sources';
 import { latestCsatSurvey, queueCsatSurvey } from '../inbox/csat';
-import { routeConversation } from '../inbox/routing';
+import {
+  INBOX_WORKER_ROLES,
+  lockAssignableMember,
+  lockTeam,
+  routeConversation,
+} from '../inbox/routing';
 import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
 import { loadReplyTarget, replyTimer, type ReplyTarget } from '../inbox/sla';
@@ -690,16 +695,15 @@ export function createInboxService(deps: InboxDeps) {
         if (!managing && !claimingSelf && !releasingSelf) {
           throw forbidden('You can only claim unassigned conversations or release your own.');
         }
-        if (data.membershipId) {
-          const [target] = await tx
-            .select({ id: memberships.id, status: memberships.status })
-            .from(memberships)
-            .where(
-              and(eq(memberships.tenantId, ctx.tenant.id), eq(memberships.id, data.membershipId)),
-            );
-          if (!target || target.status !== 'active') {
-            throw new AppError('validation_failed', 'Choose an active member.');
-          }
+        // Only members who can answer conversations hold them, as in teams and routing.
+        if (
+          data.membershipId &&
+          !(await lockAssignableMember(tx, ctx.tenant.id, data.membershipId))
+        ) {
+          throw new AppError(
+            'validation_failed',
+            'Choose an active member whose role can reply in the inbox.',
+          );
         }
         // Assigning a person ends an automation handling the conversation (hand-off lock).
         if (data.membershipId) {
@@ -743,12 +747,8 @@ export function createInboxService(deps: InboxDeps) {
       const data = parse(conversationTeamSchema, input);
       return withConversation(ctx, data.conversationId, async (tx, current) => {
         if (current.version !== data.expectedVersion) throw staleVersion();
-        if (data.teamId) {
-          const [team] = await tx
-            .select({ id: teams.id })
-            .from(teams)
-            .where(and(eq(teams.tenantId, ctx.tenant.id), eq(teams.id, data.teamId)));
-          if (!team) throw new AppError('validation_failed', 'Choose a team of this company.');
+        if (data.teamId && !(await lockTeam(tx, ctx.tenant.id, data.teamId))) {
+          throw new AppError('validation_failed', 'Choose a team of this company.');
         }
         if (current.teamId === data.teamId) return { assignedMembershipId: null };
         await tx
@@ -1108,7 +1108,7 @@ export function createInboxService(deps: InboxDeps) {
       });
     },
 
-    /** Active members for the assignment picker. */
+    /** Members the assignment picker offers: active, with a role that answers conversations. */
     async assignableMembers(ctx: TenantContext) {
       assertCan(ctx, 'members.read');
       return db.run(
@@ -1118,7 +1118,13 @@ export function createInboxService(deps: InboxDeps) {
             .select({ membershipId: memberships.id, name: users.name, roles: memberships.roles })
             .from(memberships)
             .innerJoin(users, eq(users.id, memberships.userId))
-            .where(and(eq(memberships.tenantId, ctx.tenant.id), eq(memberships.status, 'active')))
+            .where(
+              and(
+                eq(memberships.tenantId, ctx.tenant.id),
+                eq(memberships.status, 'active'),
+                sql`${memberships.roles} && ${sql.param([...INBOX_WORKER_ROLES])}::text[]`,
+              ),
+            )
             .orderBy(users.name),
         { accessMode: 'read only' },
       );

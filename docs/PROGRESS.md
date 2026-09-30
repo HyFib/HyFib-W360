@@ -1,5 +1,98 @@
 # Progress
 
+## 2026-09-30 — Phase 5: assigning conversations through the API (P5-08, ADR-093)
+
+Status: **Implemented and locally verified (no customer data).** An integration could read,
+answer, resolve and annotate conversations through the API, but not decide who answers them: the
+API named no members or teams, and the benchmark's API row listed assigning conversations as not
+built (W-134).
+
+### Completed
+
+- **Design (ADR-093):** `conversations.write` also gives a conversation to a member, unassigns it
+  or moves it to a team; `conversations.read` also lists the members conversations can be given to
+  and the teams. Conversations name their member and team by id. Every role that grants the first
+  holds `inbox.assign`, and every role that grants the second holds `members.read` (unit tests).
+- **Domain:**
+  - `apiUpdateConversation` (renamed from `apiSetConversationStatus`) takes `status`,
+    `assigneeId` and `teamId` and applies the team, then the member, then the status in one
+    transaction under the conversation's row lock, each as the inbox does: events, the audit as the
+    key, the automation taken over when a member is assigned, routing after a team move.
+  - `lockAssignableMember` and `lockTeam` (`inbox/routing.ts`) check the member (active, with a role
+    that answers conversations) and the team, locking their rows while the change is written; the
+    inbox's `assign` and `setTeam` use them too.
+  - `apiListMembers` and `apiListTeams` (`api/members.ts`) page the members routing would take (name,
+    teams, availability) and the teams (name, how they assign), oldest first.
+  - The conversation list filters by member and team, or those without one.
+  - **Fixed:** the inbox's assignment picker offered, and assigning accepted, members whose role
+    cannot open the inbox (marketers, analysts, billing managers).
+- **Web:** `GET /api/v1/members` and `GET /api/v1/teams`; the PATCH route calls the new service; the
+  scope labels on Settings → API keys; the OpenAPI document (`updateConversation` with
+  `UpdateConversation`, `listMembers`, `listTeams`, the conversation's new fields and filters).
+- **Tests:**
+  - Unit: who can grant both scopes; the body (a status the inbox sets, a member, a team or null, at
+    least one) and the list filters; refusals before any read; the OpenAPI entries.
+  - Integration in `api.test.ts` (5 new tests):
+    - members and teams paged, with names, teams and availability only, other roles, suspended
+      members and other companies left out, reads going on while the company is suspended;
+    - assigning, reassigning, unassigning and moving, audited as the key, heard live (with the
+      status event naming the new member), the assignment webhook for a member coming and going,
+      retries changing nothing, and the list filters;
+    - a team move routing an open conversation without a member, and leaving a named member, a
+      resolved conversation and an assigned one alone; the minute sweep giving an unassigned one
+      out again;
+    - every refusal (other roles, a suspended member, another company's member or team, unknown
+      ids) naming its field, with nothing in the request kept; other companies, suspended
+      companies and erased contacts;
+    - a member being suspended and a team being deleted in another transaction waited for and then
+      refused.
+  - Integration in `automations.test.ts`: a team move leaves the bot answering; an assignment takes
+    the conversation over, cancelling the bot's queued message.
+  - Integration in `inbox-advanced.test.ts`: the picker and assignment refuse members who cannot
+    answer conversations.
+  - e2e `api.spec.ts`: a key reads the members and the team, gives the conversation to the owner in
+    the team, and the inbox shows both; an unknown member is refused naming the field; unassigning
+    shows too.
+- **Docs:** ADR-093; SECURITY (public API; webhooks now say the API names members); THREAT-MODEL
+  T111; RUNBOOKS (a 422 naming `assigneeId` or `teamId`); ARCHITECTURE; BACKLOG P5-08;
+  FEATURE-MATRIX W-134 and H-033.
+- **Mutation checks:** 37 regressions tried one at a time; all make a test fail.
+  - 4 in the checks the API and the inbox share: any role, or a suspended member, given
+    conversations; the member or the team not locked while the change is written.
+  - 3 in the inbox: assigning without checking the member, the picker offering every member,
+    moving to a team without checking it.
+  - 16 in the update: the team or the member not checked; the automation left answering; no
+    routing after a team move, or routing before the request's status; the status event naming the
+    member the conversation had; the audit without its source, or naming the system; no live event
+    for an assignment or a team move, or one forgetting the member before; the member or team the
+    conversation already has set again; the conversation row not locked; `conversations.read`
+    enough to change it; an empty body taken.
+  - 4 in the conversation and the list: the conversation without its team or member; the member or
+    team filter ignored.
+  - 8 in the member and team lists: suspended members or every role listed; nobody available; no
+    teams; either list's cursor ignored; the member list without a scope; the team list needing
+    `conversations.write`.
+  - 1 in who grants the scopes: supervisors granting `conversations.write` without `inbox.assign`.
+  - 1 in the web, through the e2e test: `GET /members` answering with the teams.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                     | Result                                                                                                                                                                               |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                       |
+| `pnpm test` (unit)                                                          | 425 passed, including 3 new in `api/api.test.ts`                                                                                                                                     |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 566 passed, including 5 new in `api.test.ts`, 1 in `automations.test.ts` and 1 in `inbox-advanced.test.ts`                                                                           |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 566 passed                                                                                                                                                                           |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / on `api.spec.ts`, `api-keys.spec.ts`, `inbox.spec.ts`, `inbox-teams.spec.ts` and `crm.spec.ts`: 28 passed (5.9 min), on the local database created for the day's runs |
+| Mutation checks                                                             | 37 regressions tried (1 through the e2e test); all make a test fail                                                                                                                  |
+
+### Known gaps
+
+- Not built: webhooks naming the member and team (and so moves between members or teams),
+  assigning many conversations in one call, members' emails, team settings through the API, and a
+  precondition on the conversation's state.
+- The member list is paged by when members joined; there is no search by name.
+
 ## 2026-09-30 — Phase 5: API scopes by plan (P5-01, P5-08, ADR-092)
 
 Status: **Implemented and locally verified (no customer data).** A plan version could leave the

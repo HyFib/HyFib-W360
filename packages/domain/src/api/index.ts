@@ -10,5 +10,6 @@ export * from './quota';
 export * from './expiry-reminders';
 export * from './rate-limits';
 export * from './conversations';
+export * from './members';
 export * from './automations';
 export * from './webhook-endpoints';

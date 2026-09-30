@@ -12,13 +12,15 @@ import { apiScopesNotInPlan, scopesNotInPlan } from '../plans/entitlements';
 import {
   apiAddConversationNote,
   apiAddNoteSchema,
-  apiConversationStatusSchema,
+  apiConversationListQuerySchema,
   apiListConversationNotes,
   apiListMessages,
   apiMessageFeedQuerySchema,
   apiNoteListQuerySchema,
-  apiSetConversationStatus,
+  apiUpdateConversation,
+  apiUpdateConversationSchema,
 } from './conversations';
+import { apiListMembers, apiListTeams, apiMemberListQuerySchema } from './members';
 import {
   API_LIMITS,
   API_SCOPE_INFO,
@@ -156,7 +158,7 @@ describe('API scopes', () => {
     expect(granting.map(([role]) => role).sort()).toEqual(['admin', 'owner']);
   });
 
-  it('let only members who resolve every conversation in the inbox grant conversations.write', () => {
+  it('let only members who resolve and assign every conversation in the inbox grant conversations.write', () => {
     const granting = Object.entries(ROLE_PERMISSIONS).filter(([, permissions]) =>
       permissions.has('inbox.supervise'),
     );
@@ -164,7 +166,17 @@ describe('API scopes', () => {
     for (const [, permissions] of granting) {
       expect(permissions.has('inbox.read_all')).toBe(true);
       expect(permissions.has('inbox.reply')).toBe(true);
+      // Assigning conversations and moving them between teams (ADR-093).
+      expect(permissions.has('inbox.assign')).toBe(true);
     }
+  });
+
+  it('let only members who see the team grant conversations.read, which names members (ADR-093)', () => {
+    const granting = Object.entries(ROLE_PERMISSIONS).filter(([, permissions]) =>
+      permissions.has('inbox.read_all'),
+    );
+    expect(granting.map(([role]) => role).sort()).toEqual(['admin', 'owner', 'supervisor']);
+    for (const [, permissions] of granting) expect(permissions.has('members.read')).toBe(true);
   });
 });
 
@@ -249,7 +261,7 @@ describe('scopes by plan (ADR-092)', () => {
   });
 });
 
-describe('conversation status (ADR-075)', () => {
+describe('conversation changes (ADR-075, ADR-093)', () => {
   const ctx = (scopes: string[], status = 'active') =>
     ({
       tenant: { id: 't', status },
@@ -257,12 +269,26 @@ describe('conversation status (ADR-075)', () => {
       planScopes: null,
     }) as unknown as ApiContext;
   const id = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f01';
+  const other = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f02';
+  const code = (promise: Promise<unknown>) =>
+    promise.then(
+      () => 'resolved',
+      (error: unknown) => (isAppError(error) ? error.code : String(error)),
+    );
 
-  it('is open or resolved, and nothing else', () => {
-    expect(apiConversationStatusSchema.parse({ status: 'resolved' })).toEqual({
-      status: 'resolved',
-    });
-    expect(apiConversationStatusSchema.parse({ status: 'open' })).toEqual({ status: 'open' });
+  it('take a status the inbox sets, a member, a team or null for none, at least one of them', () => {
+    for (const body of [
+      { status: 'resolved' },
+      { status: 'open' },
+      { assigneeId: id },
+      { assigneeId: null },
+      { teamId: id },
+      { teamId: null },
+      { assigneeId: null, teamId: null },
+      { status: 'resolved', assigneeId: id, teamId: other },
+    ]) {
+      expect(apiUpdateConversationSchema.parse(body)).toEqual(body);
+    }
     for (const bad of [
       {},
       { status: 'pending' },
@@ -270,30 +296,63 @@ describe('conversation status (ADR-075)', () => {
       { status: 'RESOLVED' },
       { status: null },
       { status: 'resolved', assigned: false },
+      { assigneeId: 'none' },
+      { assigneeId: 'agent@example.com' },
+      { teamId: 'none' },
+      { teamId: 5 },
+      { assignee: id },
       'resolved',
       null,
     ]) {
-      expect(apiConversationStatusSchema.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
+      expect(apiUpdateConversationSchema.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
     }
   });
 
-  it('is refused before anything is read: without the scope, while the company is not active, for ids that are not ids, and for other bodies', async () => {
-    const code = (promise: Promise<unknown>) =>
-      promise.then(
-        () => 'resolved',
-        (error: unknown) => (isAppError(error) ? error.code : String(error)),
-      );
-    const set = (c: ApiContext, conversationId: string, body: unknown) =>
-      code(apiSetConversationStatus({} as never, c, conversationId, body));
-    const body = { status: 'resolved' };
-    expect(await set(ctx(['conversations.read']), id, body)).toBe('forbidden');
-    for (const status of ['suspended', 'restricted']) {
-      expect(await set(ctx(['conversations.write'], status), id, body)).toBe('tenant_suspended');
+  it('list by member or team, or those without one', () => {
+    for (const query of [
+      { assigneeId: id },
+      { assigneeId: 'none' },
+      { teamId: id },
+      { teamId: 'none' },
+      { assigneeId: 'none', teamId: other, status: 'open' },
+    ]) {
+      expect(apiConversationListQuerySchema.parse(query)).toMatchObject(query);
     }
-    expect(await set(ctx(['conversations.write']), 'not-a-uuid', body)).toBe('not_found');
-    expect(await set(ctx(['conversations.write']), id, { status: 'pending' })).toBe(
-      'validation_failed',
-    );
+    for (const bad of [{ assigneeId: 'nobody' }, { teamId: 'None' }, { assignee: id }]) {
+      expect(apiConversationListQuerySchema.safeParse(bad).success, JSON.stringify(bad)).toBe(
+        false,
+      );
+    }
+  });
+
+  it('are refused before anything is read: without the scope, while the company is not active, for ids that are not ids, and for other bodies', async () => {
+    const set = (c: ApiContext, conversationId: string, body: unknown) =>
+      code(apiUpdateConversation({} as never, c, conversationId, body));
+    for (const body of [{ status: 'resolved' }, { assigneeId: id }, { teamId: null }]) {
+      expect(await set(ctx(['conversations.read']), id, body)).toBe('forbidden');
+      for (const status of ['suspended', 'restricted']) {
+        expect(await set(ctx(['conversations.write'], status), id, body)).toBe('tenant_suspended');
+      }
+      expect(await set(ctx(['conversations.write']), 'not-a-uuid', body)).toBe('not_found');
+    }
+    for (const body of [{ status: 'pending' }, {}, { assigneeId: 'none' }]) {
+      expect(await set(ctx(['conversations.write']), id, body)).toBe('validation_failed');
+    }
+  });
+
+  it('read members and teams with conversations.read only, checking the page asked for first', async () => {
+    for (const list of [apiListMembers, apiListTeams]) {
+      expect(await code(list({} as never, ctx(['conversations.write']), {}))).toBe('forbidden');
+      for (const query of [{ limit: 0 }, { limit: API_LIMITS.pageSize + 1 }, { team: id }]) {
+        expect(await code(list({} as never, ctx(['conversations.read']), query))).toBe(
+          'validation_failed',
+        );
+      }
+      expect(await code(list({} as never, ctx(['conversations.read']), { cursor: 'x' }))).toBe(
+        'validation_failed',
+      );
+    }
+    expect(apiMemberListQuerySchema.parse({})).toEqual({ limit: 50 });
   });
 });
 
@@ -1487,17 +1546,17 @@ describe('OpenAPI document', () => {
     for (const scope of API_SEND_SCOPES) expect(read.description).toContain(`\`${scope}\``);
   });
 
-  it('resolves or reopens a conversation with the status alone', () => {
+  it('resolves, reopens, assigns or moves a conversation with any of the three fields (ADR-093)', () => {
     const patch = paths['/conversations/{id}']?.patch as unknown as {
       operationId: string;
       description: string;
       requestBody: { content: { 'application/json': { schema: unknown } } };
       responses: Record<string, unknown>;
     };
-    expect(patch.operationId).toBe('setConversationStatus');
+    expect(patch.operationId).toBe('updateConversation');
     expect(patch.description).toContain('`conversations.write`');
     expect(patch.requestBody.content['application/json'].schema).toEqual({
-      $ref: '#/components/schemas/ConversationStatus',
+      $ref: '#/components/schemas/UpdateConversation',
     });
     expect(Object.keys(patch.responses)).toEqual(
       expect.arrayContaining(['200', '404', '422', '423']),
@@ -1507,12 +1566,45 @@ describe('OpenAPI document', () => {
       {
         required?: string[];
         additionalProperties?: unknown;
-        properties?: Record<string, { enum?: string[] }>;
+        properties?: Record<string, { enum?: string[]; anyOf?: unknown[] }>;
       }
     >;
-    expect(schemas.ConversationStatus?.required).toEqual(['status']);
-    expect(schemas.ConversationStatus?.additionalProperties).toBe(false);
-    expect(schemas.ConversationStatus?.properties?.status?.enum).toEqual(['open', 'resolved']);
+    expect(schemas.UpdateConversation?.required ?? []).toEqual([]);
+    expect(schemas.UpdateConversation?.additionalProperties).toBe(false);
+    expect(Object.keys(schemas.UpdateConversation?.properties ?? {})).toEqual([
+      'status',
+      'assigneeId',
+      'teamId',
+    ]);
+    expect(schemas.UpdateConversation?.properties?.status?.enum).toEqual(['open', 'resolved']);
+    for (const field of ['assigneeId', 'teamId']) {
+      expect(schemas.UpdateConversation?.properties?.[field]?.anyOf).toEqual([
+        { type: 'string', format: 'uuid', pattern: expect.any(String) },
+        { type: 'null' },
+      ]);
+    }
+    // The conversation names its member and team, and the lists filter by them.
+    expect(Object.keys(schemas.Conversation?.properties ?? {})).toEqual(
+      expect.arrayContaining(['assigned', 'assigneeId', 'teamId']),
+    );
+    const list = paths['/conversations']?.get as unknown as { parameters: { name?: string }[] };
+    expect(list.parameters.map((p) => p.name)).toEqual(
+      expect.arrayContaining(['assigneeId', 'teamId']),
+    );
+    for (const [path, schema] of [
+      ['/members', 'Member'],
+      ['/teams', 'Team'],
+    ] as const) {
+      const get = paths[path]?.get as unknown as { description: string };
+      expect(get.description).toContain('`conversations.read`');
+      expect(schemas[schema]?.required).toEqual(expect.arrayContaining(['id', 'name']));
+    }
+    expect(Object.keys(schemas.Member?.properties ?? {}).sort()).toEqual([
+      'available',
+      'id',
+      'name',
+      'teamIds',
+    ]);
   });
 
   it('resolves every reference to a component', () => {

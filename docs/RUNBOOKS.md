@@ -1155,6 +1155,17 @@ version or another plan). Settings → API keys lists the plan's scopes and mark
 leaves out; platform staff see the scopes on the plan page and the company's platform page. A 403
 `not_in_plan` that names no scope means the plan leaves the whole API out (ADR-061).
 
+**An API request to assign or move a conversation is refused with 422 naming `assigneeId` or
+`teamId`.** The member cannot be given conversations or the team is not the company's (ADR-093):
+`GET /members` lists the members who can (active, with a role that answers conversations; a
+marketer, analyst or billing manager cannot, nor a suspended member), and `GET /teams` the teams.
+Nothing in the refused request was kept, including a status or team named with it. A conversation
+moved to a round-robin team goes to the team's next available member at once when it is open and
+has no member after the request; an unassigned conversation in such a team is otherwise given out
+by the minute sweep. The audit log shows the key's changes
+(`conversation.assigned`, `conversation.team_changed`, source `api`) and routing's
+(`conversation.routed`).
+
 **An API key expired without a reminder, or the reminder came twice.** Owners and administrators
 are emailed once, 7 days before a key expires (ADR-067): `app.api_keys.expiry_reminded_at` says when
 the reminder was queued, and Settings → API keys shows it. Keys that never expire, rotated keys (the

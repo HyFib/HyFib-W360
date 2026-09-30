@@ -8,7 +8,7 @@ import {
   advanceAutomationRun,
   apiSendReaction,
   apiSendText,
-  apiSetConversationStatus,
+  apiUpdateConversation,
   applyAutomationRetention,
   authenticateApiToken,
   authorizeJob,
@@ -875,7 +875,7 @@ describe('automation runs', () => {
     const run = await onlyRun(conv);
     await advance(c, run.id);
     expect((await botMessages(conv)).map((m) => m.status)).toEqual(['queued']);
-    const resolved = await apiSetConversationStatus(runnerDeps(), key, conv, {
+    const resolved = await apiUpdateConversation(runnerDeps(), key, conv, {
       status: 'resolved',
     });
     expect(resolved.status).toBe('resolved');
@@ -896,6 +896,63 @@ describe('automation runs', () => {
       ['canceled', 'bot_stopped'],
     ]);
     expect((await turns(conv)).filter((t) => t.end_reason === null)).toEqual([]);
+    expect(await sendQueued(c, conv)).toEqual([]);
+    expect((await advance(c, run.id)).outcome).toBe('idle');
+  });
+
+  it('hands the conversation to a member the public API assigns, and a team move leaves the bot answering (ADR-093)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    await publish(owner, 'Menu', keyword('menu'), menuGraph());
+    const teams = createTeamsService({ db: fx.dbs.app, clock: systemClock });
+    const { teamId } = await teams.createTeam(owner, {
+      name: 'Support',
+      assignment: 'round_robin',
+      memberIds: [agent.membership.id],
+    });
+    await teams.setAvailability(agent, { available: true });
+    const created = await createApiKeysService({ db: fx.dbs.app, clock: systemClock }).create(
+      owner,
+      { name: 'Router', scopes: ['conversations.write'], expiresInDays: 0 },
+    );
+    const key = await authenticateApiToken(fx.dbs.app, created.token, uuidv7());
+    if (!key) throw new Error('a new key does not authenticate');
+
+    const ivy = waId();
+    const conv = await inbound(c, ivy, 'menu');
+    const run = await onlyRun(conv);
+    await advance(c, run.id);
+    expect((await botMessages(conv)).map((m) => m.status)).toEqual(['queued']);
+    const answering = await onlyRun(conv);
+
+    // Moved to a round-robin team while the bot answers: routing leaves the conversation to it.
+    expect(await apiUpdateConversation(runnerDeps(), key, conv, { teamId })).toMatchObject({
+      teamId,
+      assigned: false,
+    });
+    expect(await onlyRun(conv)).toMatchObject({
+      status: answering.status,
+      end_reason: null,
+    });
+
+    // Assigned to a member: the run is taken over and its queued message cancelled.
+    expect(
+      await apiUpdateConversation(runnerDeps(), key, conv, { assigneeId: agent.membership.id }),
+    ).toMatchObject({ assigneeId: agent.membership.id, status: 'open' });
+    expect(await onlyRun(conv)).toMatchObject({ status: 'taken_over', end_reason: 'assigned' });
+    const [ended] = await fx.query<{ ended_by_membership_id: string | null }>(
+      'SELECT ended_by_membership_id FROM app.automation_runs WHERE id = $1',
+      [run.id],
+    );
+    expect(ended?.ended_by_membership_id).toBeNull();
+    expect((await stepLog(run.id)).at(-1)).toMatchObject({
+      outcome: 'taken_over',
+      detail: 'assigned',
+    });
+    expect((await botMessages(conv)).map((m) => [m.status, m.error_code])).toEqual([
+      ['canceled', 'bot_stopped'],
+    ]);
     expect(await sendQueued(c, conv)).toEqual([]);
     expect((await advance(c, run.id)).outcome).toBe('idle');
   });

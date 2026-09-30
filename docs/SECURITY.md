@@ -466,14 +466,23 @@ Phase 5 rules (Public API, P5-08):
 - Conversation reads (ADR-072) are the most sensitive reads the API offers: a key with
   `conversations.read` reads every conversation of the company and what contacts wrote, so only a
   member who reads every conversation (`inbox.read_all`) can grant it. The conversations of erased
-  contacts are neither listed nor read. A conversation shows whether someone is assigned, not who;
-  messages carry their text and the media type, never the media, internal notes or member names.
+  contacts are neither listed nor read. A conversation names its member and team by id only
+  (ADR-093); messages carry their text and the media type, never the media, internal notes or
+  member names.
   Keyset cursors carry a timestamp and an id that are checked before they reach a query.
 - Resolving and reopening conversations through the API (ADR-075) needs `conversations.write`,
   which only members who resolve every conversation in the inbox (`inbox.supervise`: owners,
   administrators, supervisors) can grant; an agent cannot. The change runs under the conversation's
   row lock like a member's, finds no erased contact's or other company's conversation, is audited
   as the key, sends no satisfaction survey and credits no member in reports.
+- Assigning conversations and moving them between teams (ADR-093) also needs `conversations.write`;
+  every role that can grant it also holds `inbox.assign` (tested). Only active members whose role
+  answers conversations can be given one (the rule teams and routing use, which the inbox now keeps
+  too), and only the company's teams; the member's and the team's rows are locked while the change
+  is written, so a member suspended at the same time is refused or has the conversation released by
+  the suspension. `conversations.read` lists those members with their names, teams and whether they
+  take conversations, never emails or roles; the members who can grant it see the team in the app
+  already. Every change is audited as the key; routing that follows is the system's.
 - Starting automations through the API (ADR-077) needs `automations.start`, which only members who
   publish automations (`automations.publish`: owners and administrators) can grant, as a started run
   messages contacts as a published version does; an automation whose version sends a marketing
@@ -579,7 +588,8 @@ Phase 5 rules (outgoing webhooks, P5-09):
 - Secrets (`whsec_` + 32 random bytes) are shown once, kept only in the page's memory, and stored
   encrypted with the AAD `webhook-secret:<company>:<endpoint>:<version>`.
 - Conversation and contact events (ADR-074) follow the same rules. Conversation events say whether
-  a member is assigned, never who (as the API, ADR-072). Contact events carry the contact in the
+  a member is assigned, never who (the API names the member by id to `conversations.read` keys since
+  ADR-093; webhooks do not). Contact events carry the contact in the
   API's words; an erased contact, whichever event is delivered, has only its id, source and creation
   time. `contact.erased` deletes the created and updated events its own transaction captured, with
   their deliveries: `app.capture_contact_webhook_event` can delete only as the definer role that

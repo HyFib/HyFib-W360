@@ -70,14 +70,14 @@ export const API_SCOPE_INFO: Record<
   'conversations.read': {
     label: 'Read conversations',
     description:
-      "List the company's conversations and read their messages, one conversation or all of them, including what contacts wrote, and their internal notes.",
+      "List the company's conversations and read their messages, one conversation or all of them, including what contacts wrote, and their internal notes, with the teams and the members conversations can be assigned to (names only).",
     permission: 'inbox.read_all',
     writes: false,
   },
   'conversations.write': {
-    label: 'Resolve, reopen and add notes to conversations',
+    label: 'Resolve, reopen, assign and add notes to conversations',
     description:
-      'Mark conversations resolved, or open again, as members do in the inbox, and add internal notes the team reads there (WhatsApp never receives them). Resolving stops an automation answering the conversation.',
+      'Mark conversations resolved, or open again, assign them to members or move them between teams, as members do in the inbox, and add internal notes the team reads there (WhatsApp never receives them). Resolving a conversation or assigning it to a member stops an automation answering it.',
     permission: 'inbox.supervise',
     writes: true,
   },

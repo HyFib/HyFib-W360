@@ -877,7 +877,8 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   told to overlap their passes. `conversations_created_idx` (0045, built concurrently) serves the
   pages.
 - **Resolving and reopening (0050, ADR-075):** `PATCH /conversations/{id}` with the `status`
-  `resolved` or `open` needs `conversations.write` (`apiSetConversationStatus`). It locks the
+  `resolved` or `open` needs `conversations.write` (`apiUpdateConversation`, which also assigns and
+  moves conversations since ADR-093). It locks the
   conversation row `FOR UPDATE`, as the inbox's `setStatus` does, checks the contact is not erased
   (404 otherwise), and answers the conversation unchanged when it already has the status. Otherwise
   resolving ends an active automation run (`conversation_resolved`, no member) and sets `resolved_at`
@@ -983,6 +984,14 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `conversation_notes` newest first on exact keyset cursors. `writtenBy` comes from which author
   column is set (`author_api_key_id` for a key, `author_membership_id` for a member; the database
   keeps exactly one); member ids and `note_mentions` are never read.
+- **Assigning and moving conversations (ADR-093):** `PATCH /conversations/{id}`
+  (`apiUpdateConversation`, `conversations.write`) takes `status`, `assigneeId` and `teamId` and,
+  with the conversation row locked, changes the team, then the member, then the status, each as the
+  inbox does (events, audit as the key, `endRunForHuman` for an assignment). A member is checked and
+  locked for share by `lockAssignableMember` and a team by `lockTeam` (`inbox/routing.ts`), which the
+  inbox's `assign` and `setTeam` use too; a team move without a member ends with `routeConversation`.
+  `GET /members` and `GET /teams` (`api/members.ts`, `conversations.read`) page the members routing
+  would take (active, `INBOX_WORKER_ROLES`) and the teams, oldest first on exact keyset cursors.
 - **Keyset cursors** (`encodeKeysetCursor`, `exactTimestamp`): a cursor carries the last row's
   timestamp as PostgreSQL keeps it, to the microsecond, and its id, and pages compare
   `(time, id) < (cursor time, cursor id)`; cursors made with milliseconds still read. Cursors built

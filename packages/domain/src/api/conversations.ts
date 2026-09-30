@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { notFound, uuidv7 } from '@w360/core';
+import { AppError, notFound, uuidv7 } from '@w360/core';
 import {
   and,
   contacts,
@@ -19,6 +19,7 @@ import {
 } from '@w360/db';
 import { recordSystemAudit } from '../audit';
 import { endRunForHuman } from '../automations/runs';
+import { lockAssignableMember, lockTeam, routeConversation } from '../inbox/routing';
 import { emitTenantEvent } from '../messaging/events';
 import { outboundText } from '../messaging/message-text';
 import { NOTE_MAX_LENGTH } from '../messaging/notes';
@@ -34,9 +35,10 @@ import { idempotent } from './resources';
 /**
  * Conversations through the public API. A key with `conversations.read` lists the company's
  * conversations and reads their messages (ADR-072), or every message across them (ADR-088), and their
- * internal notes (ADR-089); one with `conversations.write` resolves and reopens them (ADR-075) and
- * adds internal notes (ADR-084). The conversations of erased contacts are left out, as their
- * contacts are. Messages read as the webhooks describe them (ADR-053).
+ * internal notes (ADR-089); one with `conversations.write` resolves and reopens them (ADR-075), adds
+ * internal notes (ADR-084), and assigns them or moves them between teams (ADR-093). The
+ * conversations of erased contacts are left out, as their contacts are. Messages read as the
+ * webhooks describe them (ADR-053).
  */
 
 const page = {
@@ -50,6 +52,14 @@ export const apiConversationListQuerySchema = z
     status: z.enum(CONVERSATION_STATUSES).optional().describe('Only conversations in this status.'),
     contactId: z.uuid().optional().describe('Only the conversations of this contact.'),
     channelId: z.uuid().optional().describe('Only the conversations on this WhatsApp number.'),
+    assigneeId: z
+      .union([z.uuid(), z.literal('none')])
+      .optional()
+      .describe('Only the conversations assigned to this member, or `none` for those without one.'),
+    teamId: z
+      .union([z.uuid(), z.literal('none')])
+      .optional()
+      .describe('Only the conversations of this team, or `none` for those without one.'),
     updatedSince: z.iso
       .datetime({ offset: true })
       .optional()
@@ -95,14 +105,34 @@ export const apiAddNoteSchema = z
   })
   .strict();
 
-/** The statuses the inbox sets: `pending` is not one of them. */
-export const apiConversationStatusSchema = z
+/**
+ * What a key changes in a conversation (ADR-075, ADR-093): its status (those the inbox sets, so not
+ * `pending`), its assignee or its team, at least one of them.
+ */
+export const apiUpdateConversationSchema = z
   .object({
     status: z
       .enum(['open', 'resolved'])
+      .optional()
       .describe('`resolved` to resolve the conversation, `open` to reopen it.'),
+    assigneeId: z
+      .uuid()
+      .nullable()
+      .optional()
+      .describe(
+        'A member from GET /members to assign the conversation to, or null to unassign it.',
+      ),
+    teamId: z
+      .uuid()
+      .nullable()
+      .optional()
+      .describe('A team from GET /teams to move the conversation to, or null for no team.'),
   })
-  .strict();
+  .strict()
+  .refine(
+    (v) => v.status !== undefined || v.assigneeId !== undefined || v.teamId !== undefined,
+    'Give status, assigneeId or teamId.',
+  );
 
 export interface ApiConversation {
   id: string;
@@ -110,6 +140,9 @@ export interface ApiConversation {
   channelId: string;
   status: ConversationStatus;
   assigned: boolean;
+  /** The member assigned (an id from GET /members; ADR-093). */
+  assigneeId: string | null;
+  teamId: string | null;
   unreadCount: number;
   lastMessageAt: string | null;
   lastInboundAt: string | null;
@@ -182,6 +215,7 @@ const conversationColumns = {
   channelId: conversations.channelAccountId,
   status: conversations.status,
   assignedMembershipId: conversations.assignedMembershipId,
+  teamId: conversations.teamId,
   unreadCount: conversations.unreadCount,
   lastMessageAt: conversations.lastMessageAt,
   lastInboundAt: conversations.lastInboundAt,
@@ -197,6 +231,7 @@ type ConversationRow = {
   channelId: string;
   status: ConversationStatus;
   assignedMembershipId: string | null;
+  teamId: string | null;
   unreadCount: number;
   lastMessageAt: Date | null;
   lastInboundAt: Date | null;
@@ -211,6 +246,8 @@ const toApiConversation = (r: ConversationRow): ApiConversation => ({
   channelId: r.channelId,
   status: r.status,
   assigned: r.assignedMembershipId !== null,
+  assigneeId: r.assignedMembershipId,
+  teamId: r.teamId,
   unreadCount: r.unreadCount,
   lastMessageAt: r.lastMessageAt?.toISOString() ?? null,
   lastInboundAt: r.lastInboundAt?.toISOString() ?? null,
@@ -263,6 +300,16 @@ export async function apiListConversations(
             q.status ? eq(conversations.status, q.status) : undefined,
             q.contactId ? eq(conversations.contactId, q.contactId) : undefined,
             q.channelId ? eq(conversations.channelAccountId, q.channelId) : undefined,
+            q.assigneeId === 'none'
+              ? isNull(conversations.assignedMembershipId)
+              : q.assigneeId
+                ? eq(conversations.assignedMembershipId, q.assigneeId)
+                : undefined,
+            q.teamId === 'none'
+              ? isNull(conversations.teamId)
+              : q.teamId
+                ? eq(conversations.teamId, q.teamId)
+                : undefined,
             q.updatedSince
               ? sql`${conversations.updatedAt} >= ${q.updatedSince}::timestamptz`
               : undefined,
@@ -556,15 +603,26 @@ export async function apiListMessages(
   );
 }
 
+/** A refused assignee or team, named by the field that gave it. */
+const invalidField = (path: 'assigneeId' | 'teamId', message: string) =>
+  new AppError('validation_failed', message, { issues: [{ path, message }] });
+
 /**
- * Resolves or reopens a conversation as the inbox's Resolve and Reopen do (ADR-075), with the
- * conversation row locked like a member's change. Resolving stops an automation answering the
- * conversation; the triggers close the waiting reply turn and the case, open a new case on reopening
- * and capture the webhook event. The key is the audit actor, so per-member report counts leave the
- * change out, and no satisfaction survey is sent (surveys follow a member's resolve, ADR-032). The
- * status the conversation already has changes nothing, so a retried request does no harm.
+ * Changes a conversation as the inbox's controls do, in one transaction with the conversation row
+ * locked like a member's change: its team, then its assignee (ADR-093), then its status (ADR-075).
+ * - A team must be the company's, and an assignee a member who can answer conversations (the members
+ *   GET /members lists); both rows are locked while the change is written, so a member suspended or a
+ *   team deleted at the same time is refused, or releases the conversation once this commits.
+ * - Assigning a member ends an automation answering the conversation, as a member's assignment does.
+ *   Moving it to a team then routes it when it has no member and is not resolved, as the inbox's
+ *   team control does. Unassigning alone leaves it to routing's minute sweep, as in the inbox.
+ * - Resolving stops an automation answering the conversation; the triggers close the waiting reply
+ *   turn and the case, open a new case on reopening and capture the webhook events.
+ * The key is the audit actor, so per-member report counts leave the change out, and no satisfaction
+ * survey is sent (surveys follow a member's resolve, ADR-032). What the conversation already has
+ * changes nothing, so a retried request does no harm.
  */
-export async function apiSetConversationStatus(
+export async function apiUpdateConversation(
   deps: Pick<OutboundDeps, 'db' | 'clock'>,
   ctx: ApiContext,
   conversationId: string,
@@ -572,56 +630,122 @@ export async function apiSetConversationStatus(
 ): Promise<ApiConversation> {
   assertScope(ctx, 'conversations.write');
   if (!z.uuid().safeParse(conversationId).success) throw notFound('Conversation');
-  const data = parseInput(apiConversationStatusSchema, input);
+  const data = parseInput(apiUpdateConversationSchema, input);
   const row = await deps.db.run(ctx.scope, async (tx) => {
     const [current] = await tx
       .select({
         status: conversations.status,
         assignedMembershipId: conversations.assignedMembershipId,
+        teamId: conversations.teamId,
       })
       .from(conversations)
       .where(and(eq(conversations.tenantId, ctx.tenant.id), eq(conversations.id, conversationId)))
       .for('update');
     if (!current || !(await visibleConversation(tx, ctx.tenant.id, conversationId))) return null;
-    if (current.status === data.status)
-      return visibleConversation(tx, ctx.tenant.id, conversationId);
     const now = deps.clock.now();
-    if (data.status === 'resolved') {
-      await endRunForHuman(tx, {
-        tenantId: ctx.tenant.id,
-        conversationId,
-        reason: 'conversation_resolved',
-        actorMembershipId: null,
-        now,
-      });
-    }
-    await tx
-      .update(conversations)
-      .set({
-        status: data.status,
-        resolvedAt: data.status === 'resolved' ? now : null,
-        ...(data.status === 'resolved' ? { unreadCount: 0 } : {}),
-        version: sql`${conversations.version} + 1`,
-      })
-      .where(and(eq(conversations.tenantId, ctx.tenant.id), eq(conversations.id, conversationId)));
-    await emitTenantEvent(tx, ctx.tenant.id, {
-      type: 'conversation.status',
-      conversationId,
-      assignedMembershipId: current.assignedMembershipId,
-      payload: { status: data.status },
-    });
-    await recordSystemAudit(
-      tx,
-      ctx.tenant.id,
-      {
-        action: 'conversation.status_changed',
-        subjectType: 'conversation',
-        subjectId: conversationId,
-        correlationId: ctx.requestId,
-        metadata: { from: current.status, to: data.status, source: 'api' },
-      },
-      apiActor(ctx),
+    const thisConversation = and(
+      eq(conversations.tenantId, ctx.tenant.id),
+      eq(conversations.id, conversationId),
     );
+    const audit = (action: string, metadata: Record<string, unknown>) =>
+      recordSystemAudit(
+        tx,
+        ctx.tenant.id,
+        {
+          action,
+          subjectType: 'conversation',
+          subjectId: conversationId,
+          correlationId: ctx.requestId,
+          metadata: { ...metadata, source: 'api' },
+        },
+        apiActor(ctx),
+      );
+
+    const moved = data.teamId !== undefined && data.teamId !== current.teamId;
+    if (moved) {
+      if (data.teamId && !(await lockTeam(tx, ctx.tenant.id, data.teamId))) {
+        throw invalidField('teamId', 'Give the id of one of the company’s teams (GET /teams).');
+      }
+      await tx
+        .update(conversations)
+        .set({ teamId: data.teamId, version: sql`${conversations.version} + 1` })
+        .where(thisConversation);
+      await emitTenantEvent(tx, ctx.tenant.id, {
+        type: 'conversation.team',
+        conversationId,
+        assignedMembershipId: current.assignedMembershipId,
+        payload: { teamId: data.teamId },
+      });
+      await audit('conversation.team_changed', { from: current.teamId, to: data.teamId });
+    }
+
+    let assignee = current.assignedMembershipId;
+    if (data.assigneeId !== undefined && data.assigneeId !== current.assignedMembershipId) {
+      if (data.assigneeId) {
+        if (!(await lockAssignableMember(tx, ctx.tenant.id, data.assigneeId))) {
+          throw invalidField(
+            'assigneeId',
+            'Give the id of a member who can answer conversations (GET /members).',
+          );
+        }
+        await endRunForHuman(tx, {
+          tenantId: ctx.tenant.id,
+          conversationId,
+          reason: 'assigned',
+          actorMembershipId: null,
+          assigneeMembershipId: data.assigneeId,
+          now,
+        });
+      }
+      await tx
+        .update(conversations)
+        .set({ assignedMembershipId: data.assigneeId, version: sql`${conversations.version} + 1` })
+        .where(thisConversation);
+      await emitTenantEvent(tx, ctx.tenant.id, {
+        type: 'conversation.assigned',
+        conversationId,
+        assignedMembershipId: data.assigneeId,
+        payload: { previous: current.assignedMembershipId },
+      });
+      await audit('conversation.assigned', {
+        from: current.assignedMembershipId,
+        to: data.assigneeId,
+      });
+      assignee = data.assigneeId;
+    }
+
+    if (data.status !== undefined && data.status !== current.status) {
+      if (data.status === 'resolved') {
+        await endRunForHuman(tx, {
+          tenantId: ctx.tenant.id,
+          conversationId,
+          reason: 'conversation_resolved',
+          actorMembershipId: null,
+          now,
+        });
+      }
+      await tx
+        .update(conversations)
+        .set({
+          status: data.status,
+          resolvedAt: data.status === 'resolved' ? now : null,
+          ...(data.status === 'resolved' ? { unreadCount: 0 } : {}),
+          version: sql`${conversations.version} + 1`,
+        })
+        .where(thisConversation);
+      await emitTenantEvent(tx, ctx.tenant.id, {
+        type: 'conversation.status',
+        conversationId,
+        assignedMembershipId: assignee,
+        payload: { status: data.status },
+      });
+      await audit('conversation.status_changed', { from: current.status, to: data.status });
+    }
+
+    // Routing leaves a resolved or assigned conversation, and one an automation answers, as it is.
+    if (moved && data.teamId) {
+      await routeConversation(tx, ctx.tenant.id, conversationId, { newCase: false, text: null });
+    }
     return visibleConversation(tx, ctx.tenant.id, conversationId);
   });
   if (!row) throw notFound('Conversation');

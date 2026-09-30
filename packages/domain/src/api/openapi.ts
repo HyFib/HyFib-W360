@@ -4,6 +4,7 @@ import {
   AUTOMATION_RUN_STATUSES,
   CONVERSATION_STATUSES,
   MESSAGE_STATUSES,
+  TEAM_ASSIGNMENT_MODES,
   MESSAGE_TYPES,
   WEBHOOK_DELIVERY_STATES,
   type MessageStatus,
@@ -37,7 +38,7 @@ import { apiContactSchema } from './contact-view';
 import {
   API_MESSAGE_FEED_WINDOW,
   apiAddNoteSchema,
-  apiConversationStatusSchema,
+  apiUpdateConversationSchema,
 } from './conversations';
 import { API_LIMITS, API_SCOPE_INFO, API_SCOPE_KEYS } from './model';
 import {
@@ -136,6 +137,11 @@ export const apiConversationSchema = z.object({
   channelId: z.uuid().describe('The WhatsApp number the conversation is on.'),
   status: z.enum(CONVERSATION_STATUSES),
   assigned: z.boolean().describe('Whether a member of the team is assigned.'),
+  assigneeId: z.uuid().nullable().describe('The member assigned, as GET /members lists them.'),
+  teamId: z
+    .uuid()
+    .nullable()
+    .describe('The team the conversation is in, as GET /teams lists them.'),
   unreadCount: z.number().int(),
   lastMessageAt: z.iso.datetime().nullable(),
   lastInboundAt: z.iso.datetime().nullable().describe('When the contact last wrote.'),
@@ -148,6 +154,27 @@ export const apiConversationSchema = z.object({
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime().describe('When anything about the conversation last changed.'),
   resolvedAt: z.iso.datetime().nullable(),
+});
+
+/** A member conversations can be assigned to (ADR-093). */
+export const apiMemberSchema = z.object({
+  id: z.uuid().describe('The member, as `assigneeId` names them.'),
+  name: z.string(),
+  available: z
+    .boolean()
+    .describe('Whether the member takes new conversations now (round-robin teams give them some).'),
+  teamIds: z.array(z.uuid()).describe('The teams the member belongs to.'),
+});
+
+/** A team conversations can be moved to (ADR-093). */
+export const apiTeamSchema = z.object({
+  id: z.uuid(),
+  name: z.string(),
+  assignment: z
+    .enum(TEAM_ASSIGNMENT_MODES)
+    .describe(
+      '`round_robin`: conversations moved to the team without a member go to its available members in turn; `manual`: they wait for someone to take them.',
+    ),
 });
 
 /** A note a key added to a conversation (ADR-084). */
@@ -429,7 +456,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       title: 'HyFib W360 API',
       version: '1.0.0',
       description: [
-        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations, their messages (one conversation or all of them) and their notes, resolve and reopen conversations, manage contacts and consent, and read message status for your company.',
+        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations, their messages (one conversation or all of them) and their notes, resolve, reopen and assign conversations or move them between teams, manage contacts and consent, and read message status for your company.',
         '',
         'Authenticate with `Authorization: Bearer <API key>`; keys are created in Settings → API keys and belong to the company. A key can be limited to the addresses its systems call from: a request from any other address is refused with 403 (reason `ip_not_allowed`).',
         `Scopes: ${API_SCOPE_KEYS.map((s) => `\`${s}\` (${API_SCOPE_INFO[s].label.toLowerCase()})`).join(', ')}. A company's plan may include only some of them: a request that needs a scope the plan leaves out is refused with 403 (reason \`not_in_plan\`), whatever scopes its key has.`,
@@ -651,6 +678,19 @@ export function buildOpenApiDocument(serverUrl: string) {
               description: 'Only the conversations on this WhatsApp number.',
             },
             {
+              name: 'assigneeId',
+              in: 'query',
+              schema: { anyOf: [{ type: 'string', format: 'uuid' }, { const: 'none' }] },
+              description:
+                'Only the conversations assigned to this member, or `none` for those without one.',
+            },
+            {
+              name: 'teamId',
+              in: 'query',
+              schema: { anyOf: [{ type: 'string', format: 'uuid' }, { const: 'none' }] },
+              description: 'Only the conversations of this team, or `none` for those without one.',
+            },
+            {
               name: 'updatedSince',
               in: 'query',
               schema: { type: 'string', format: 'date-time' },
@@ -679,14 +719,16 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
         },
         patch: {
-          operationId: 'setConversationStatus',
-          summary: 'Resolve or reopen a conversation',
+          operationId: 'updateConversation',
+          summary: 'Resolve, reopen, assign or move a conversation',
           description: [
-            `${scopeNote('conversations.write')} As a member does in the inbox. Resolving stops an automation answering the conversation and ends the wait for a reply; the contact's next message opens the conversation again. No satisfaction survey is sent: surveys follow a member's resolve.`,
-            'Asking for the status the conversation already has changes nothing, so a retry is safe without an `Idempotency-Key`. Conversations of erased contacts are not found.',
+            `${scopeNote('conversations.write')} As members do in the inbox, with any of \`status\`, \`assigneeId\` and \`teamId\`, applied together: the team, then the member, then the status.`,
+            "Resolving stops an automation answering the conversation and ends the wait for a reply; the contact's next message opens the conversation again. No satisfaction survey is sent: surveys follow a member's resolve.",
+            'Assigning a member (one from GET /members) stops an automation answering the conversation; `null` unassigns it, and a round-robin team gives it out again within a minute. Moving it to a team (one from GET /teams) gives it to the team’s next available member when the team assigns in turn and the conversation is open with no member. A member who cannot answer conversations, or a team of another company, is refused (422, naming the field).',
+            'What the conversation already has changes nothing, so a retry is safe without an `Idempotency-Key`. Conversations of erased contacts are not found.',
           ].join('\n\n'),
           parameters: [{ $ref: '#/components/parameters/Id' }],
-          requestBody: { required: true, content: json(ref('ConversationStatus')) },
+          requestBody: { required: true, content: json(ref('UpdateConversation')) },
           responses: {
             '200': {
               description: 'The conversation, as it now is.',
@@ -734,6 +776,30 @@ export function buildOpenApiDocument(serverUrl: string) {
           responses: {
             '200': { description: 'A page of messages.', content: pageOf('ConversationMessage') },
             ...errors(401, 403, 404, 422, 429, 500),
+          },
+        },
+      },
+      '/members': {
+        get: {
+          operationId: 'listMembers',
+          summary: 'Members conversations can be assigned to, oldest first',
+          description: `${scopeNote('conversations.read')} The active members whose role reads and answers conversations, with their teams and whether they take new conversations now. Names only: no email or role.`,
+          parameters: pageParams,
+          responses: {
+            '200': { description: 'A page of members.', content: pageOf('Member') },
+            ...errors(401, 403, 422, 429, 500),
+          },
+        },
+      },
+      '/teams': {
+        get: {
+          operationId: 'listTeams',
+          summary: 'Teams, oldest first',
+          description: `${scopeNote('conversations.read')} The company's teams and how each gives out conversations.`,
+          parameters: pageParams,
+          responses: {
+            '200': { description: 'A page of teams.', content: pageOf('Team') },
+            ...errors(401, 403, 422, 429, 500),
           },
         },
       },
@@ -1146,7 +1212,9 @@ export function buildOpenApiDocument(serverUrl: string) {
         Conversation: jsonSchema(apiConversationSchema),
         ConversationMessage: jsonSchema(apiConversationMessageSchema),
         FeedMessage: jsonSchema(apiFeedMessageSchema),
-        ConversationStatus: jsonSchema(apiConversationStatusSchema, 'input'),
+        UpdateConversation: jsonSchema(apiUpdateConversationSchema, 'input'),
+        Member: jsonSchema(apiMemberSchema),
+        Team: jsonSchema(apiTeamSchema),
         AddConversationNote: jsonSchema(apiAddNoteSchema, 'input'),
         ConversationNote: jsonSchema(apiConversationNoteSchema),
         Automation: jsonSchema(apiAutomationSchema),
@@ -1194,6 +1262,8 @@ export const API_ROUTES = [
   ['post', '/conversations/{id}/notes'],
   ['get', '/conversations/{id}/notes'],
   ['get', '/conversations/{id}/messages'],
+  ['get', '/members'],
+  ['get', '/teams'],
   ['get', '/automations'],
   ['post', '/automations/{id}/runs'],
   ['get', '/automation-runs/{id}'],

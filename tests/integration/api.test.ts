@@ -23,12 +23,14 @@ import {
   apiListConversationMessages,
   apiListConversationNotes,
   apiListConversations,
+  apiListMembers,
   apiListMessages,
+  apiListTeams,
   apiListTemplates,
   apiRecordConsent,
   apiSendMessage,
   apiSendTemplate,
-  apiSetConversationStatus,
+  apiUpdateConversation,
   apiStartAutomationRun,
   apiStopAutomationRun,
   authenticateApiRequest,
@@ -43,7 +45,9 @@ import {
   createCsatService,
   createInboxService,
   createPlanAdminService,
+  createTeamsService,
   createTemplatesService,
+  createTenancyService,
   createWebhooksService,
   credentialAad,
   dayOf,
@@ -57,6 +61,7 @@ import {
   queueTextMessage,
   remindApiKeyExpiry,
   remindExpiringApiKeys,
+  routeDueConversations,
   syncTemplates,
   type ApiAutomationRun,
   type ApiContext,
@@ -85,9 +90,9 @@ import {
  * reused for another request, concurrent retries, failures, expiry), contacts and consent, template
  * sends with the members' checks and the send pipeline, text replies within the 24-hour window
  * (ADR-070), message status, reading conversations and their messages (ADR-072), resolving and
- * reopening conversations (ADR-075), the networks a key accepts requests from (ADR-076), starting
- * automations (ADR-077), the idempotency sweep, isolation between companies, and reminders before
- * keys expire (ADR-067).
+ * reopening conversations (ADR-075), assigning them and moving them between teams (ADR-093), the
+ * networks a key accepts requests from (ADR-076), starting automations (ADR-077), the idempotency
+ * sweep, isolation between companies, and reminders before keys expire (ADR-067).
  */
 let fx: WhatsAppFixture;
 let keys: ApiKeysService;
@@ -2674,6 +2679,8 @@ describe('conversation reads (ADR-072)', () => {
       channelId: c.channelAccountId,
       status: 'open',
       assigned: true,
+      assigneeId: agent.membership.id,
+      teamId: null,
       unreadCount: 1,
       lastMessageAt: row!.last_message_at.toISOString(),
       lastInboundAt: row!.last_inbound_at.toISOString(),
@@ -2686,6 +2693,7 @@ describe('conversation reads (ADR-072)', () => {
     expect(listed.find((x) => x.id === resolved.id)).toMatchObject({
       status: 'resolved',
       assigned: false,
+      assigneeId: null,
       unreadCount: 0,
       resolvedAt: expect.any(String),
     });
@@ -2993,7 +3001,7 @@ describe('conversation status (ADR-075)', () => {
     const c = await fx.company();
     const reader = await apiKey(c, ['conversations.read', 'messages.reply']);
     await expectAppError(
-      apiSetConversationStatus(deps(), reader.ctx, uuidv7(), resolve),
+      apiUpdateConversation(deps(), reader.ctx, uuidv7(), resolve),
       'forbidden',
       /conversations\.write scope/,
     );
@@ -3006,7 +3014,7 @@ describe('conversation status (ADR-075)', () => {
     await expectAppError(
       keys.create(narrower, { name: 'Closer', scopes: ['conversations.write'], expiresInDays: 30 }),
       'forbidden',
-      /Resolve, reopen and add notes to conversations/,
+      /Resolve, reopen, assign and add notes to conversations/,
     );
     const granted = await keys.create(owner, {
       name: 'Closer',
@@ -3050,7 +3058,7 @@ describe('conversation status (ADR-075)', () => {
     const before = await conversationRow(conv.id);
     expect(before).toMatchObject({ status: 'open', resolved_at: null, unread_count: 2 });
 
-    const resolved = await apiSetConversationStatus(deps(), ctx, conv.id, resolve);
+    const resolved = await apiUpdateConversation(deps(), ctx, conv.id, resolve);
     const after = await conversationRow(conv.id);
     expect(after).toMatchObject({
       status: 'resolved',
@@ -3116,13 +3124,13 @@ describe('conversation status (ADR-075)', () => {
     expect(await events()).toEqual([{ status: 'resolved', detail: { previousStatus: 'open' } }]);
 
     // The status it already has changes nothing, so a retry does no harm.
-    expect(await apiSetConversationStatus(deps(), ctx, conv.id, resolve)).toEqual(resolved);
+    expect(await apiUpdateConversation(deps(), ctx, conv.id, resolve)).toEqual(resolved);
     expect(await conversationRow(conv.id)).toEqual(after);
     expect(await statusAudit(c, conv.id)).toHaveLength(1);
     expect(await events()).toHaveLength(1);
 
     // Reopened: a new case opens and the conversation keeps its assignee.
-    const reopened = await apiSetConversationStatus(deps(), ctx, conv.id, { status: 'open' });
+    const reopened = await apiUpdateConversation(deps(), ctx, conv.id, { status: 'open' });
     expect(reopened).toMatchObject({
       status: 'open',
       assigned: true,
@@ -3139,12 +3147,10 @@ describe('conversation status (ADR-075)', () => {
       { resolved: false, resolved_by: null, assigned: null },
     ]);
     expect((await events()).map((e) => e.status)).toEqual(['resolved', 'open']);
-    expect(await apiSetConversationStatus(deps(), ctx, conv.id, { status: 'open' })).toEqual(
-      reopened,
-    );
+    expect(await apiUpdateConversation(deps(), ctx, conv.id, { status: 'open' })).toEqual(reopened);
 
     // Resolved again, the contact's next message opens it as after a member's resolve.
-    await apiSetConversationStatus(deps(), ctx, conv.id, resolve);
+    await apiUpdateConversation(deps(), ctx, conv.id, resolve);
     await inbound(c, waId, [{ text: 'One more thing' }]);
     expect(await conversationRow(conv.id)).toMatchObject({
       status: 'open',
@@ -3164,7 +3170,7 @@ describe('conversation status (ADR-075)', () => {
       await holder.query('BEGIN');
       await holder.query('SELECT id FROM app.conversations WHERE id = $1 FOR UPDATE', [conv.id]);
       const [lock] = (await holder.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows;
-      requests = [1, 2].map(() => apiSetConversationStatus(deps(), ctx, conv.id, resolve));
+      requests = [1, 2].map(() => apiUpdateConversation(deps(), ctx, conv.id, resolve));
       // Both wait behind the row lock (the second behind the first), then run one after the other.
       await vi.waitFor(
         async () => {
@@ -3208,25 +3214,19 @@ describe('conversation status (ADR-075)', () => {
     const erasedBefore = await conversationRow(erased.id);
     const keptBefore = await conversationRow(kept.id);
 
-    await expectAppError(
-      apiSetConversationStatus(deps(), mine.ctx, erased.id, resolve),
-      'not_found',
-    );
-    await expectAppError(
-      apiSetConversationStatus(deps(), theirs.ctx, kept.id, resolve),
-      'not_found',
-    );
+    await expectAppError(apiUpdateConversation(deps(), mine.ctx, erased.id, resolve), 'not_found');
+    await expectAppError(apiUpdateConversation(deps(), theirs.ctx, kept.id, resolve), 'not_found');
     // Nothing changes while the company is suspended or its plan has ended.
     for (const status of ['suspended', 'restricted'] as const) {
       const ctx = { ...mine.ctx, tenant: { ...mine.ctx.tenant, status } };
       await expectAppError(
-        apiSetConversationStatus(deps(), ctx, kept.id, resolve),
+        apiUpdateConversation(deps(), ctx, kept.id, resolve),
         'tenant_suspended',
       );
     }
     // Ids and bodies are checked.
     for (const id of ['not-a-uuid', uuidv7()]) {
-      await expectAppError(apiSetConversationStatus(deps(), mine.ctx, id, resolve), 'not_found');
+      await expectAppError(apiUpdateConversation(deps(), mine.ctx, id, resolve), 'not_found');
     }
     for (const body of [
       {},
@@ -3237,7 +3237,7 @@ describe('conversation status (ADR-075)', () => {
       'resolved',
     ]) {
       await expectAppError(
-        apiSetConversationStatus(deps(), mine.ctx, kept.id, body),
+        apiUpdateConversation(deps(), mine.ctx, kept.id, body),
         'validation_failed',
       );
     }
@@ -3245,6 +3245,472 @@ describe('conversation status (ADR-075)', () => {
     expect(await conversationRow(kept.id)).toEqual(keptBefore);
     expect(await statusAudit(c, erased.id)).toEqual([]);
     expect(await statusAudit(c, kept.id)).toEqual([]);
+  });
+});
+
+describe('assigning conversations (ADR-093)', () => {
+  const teams = () => createTeamsService({ db: fx.dbs.app, clock: systemClock });
+  const tenancy = () =>
+    createTenancyService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      keyring: fx.keyring,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+      appBaseUrl: 'http://localhost:3000',
+      invitationTtlHours: 72,
+    });
+
+  /** A member with one role, joined through an invitation. */
+  async function joined(c: Company, role: string, name: string) {
+    const user = await createUser(fx.dbs, { name });
+    const { token } = await invite(fx.dbs, c.tenant, c.owner, user.email, [role]);
+    await acceptInvitation(fx.dbs, user, token);
+    return fx.ctx(c, user);
+  }
+
+  async function conversationRow(id: string) {
+    const [row] = await fx.query<{
+      assigned: string | null;
+      team_id: string | null;
+      status: string;
+      version: number;
+    }>(
+      `SELECT assigned_membership_id AS assigned, team_id, status, version
+         FROM app.conversations WHERE id = $1`,
+      [id],
+    );
+    if (!row) throw new Error('no conversation');
+    return row;
+  }
+
+  /** The audit entries of a conversation's assignee, team, status and routing, oldest first. */
+  const changes = (c: Company, id: string) =>
+    fx.query<{
+      action: string;
+      actor_type: string;
+      actor_id: string | null;
+      correlation_id: string | null;
+      metadata: Record<string, unknown>;
+    }>(
+      `SELECT action, actor_type, actor_id, correlation_id, metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2
+          AND action IN ('conversation.assigned', 'conversation.team_changed',
+                         'conversation.status_changed', 'conversation.routed')
+        ORDER BY occurred_at, id`,
+      [c.tenant.id, id],
+    );
+
+  /** The conversation of a customer who wrote once. */
+  async function conversationWith(c: Company, waId: string) {
+    await inbound(c, waId, [{ text: 'Hello' }]);
+    return conversationOf(c, waId);
+  }
+
+  it('read the members conversations can be assigned to and the teams, a page at a time', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const supervisor = await joined(c, 'supervisor', 'Sam Supervisor');
+    await joined(c, 'analyst', 'Ana Analyst');
+    const leaving = await joined(c, 'agent', 'Lee Leaving');
+    await tenancy().setMemberStatus(owner, {
+      membershipId: leaving.membership.id,
+      status: 'suspended',
+    });
+    const { teamId: support } = await teams().createTeam(owner, {
+      name: 'Support',
+      assignment: 'round_robin',
+      memberIds: [agent.membership.id, supervisor.membership.id],
+    });
+    const { teamId: sales } = await teams().createTeam(owner, {
+      name: 'Sales',
+      memberIds: [agent.membership.id],
+    });
+    await teams().setAvailability(agent, { available: true });
+    const reader = await apiKey(c, ['conversations.read']);
+
+    // Active members whose role answers conversations: not the marketer, the analyst or the
+    // suspended agent. Names, teams and availability only.
+    const members = await apiListMembers(deps(), reader.ctx, {});
+    expect(members).toEqual({
+      data: [
+        { id: owner.membership.id, name: 'Owner', available: false, teamIds: [] },
+        { id: agent.membership.id, name: 'Agent', available: true, teamIds: [support, sales] },
+        {
+          id: supervisor.membership.id,
+          name: 'Sam Supervisor',
+          available: false,
+          teamIds: [support],
+        },
+      ],
+      nextCursor: null,
+    });
+    const first = await apiListMembers(deps(), reader.ctx, { limit: 2 });
+    expect(first.data).toEqual(members.data.slice(0, 2));
+    expect(first.nextCursor).not.toBeNull();
+    expect(
+      await apiListMembers(deps(), reader.ctx, { limit: 2, cursor: first.nextCursor ?? '' }),
+    ).toEqual({ data: members.data.slice(2), nextCursor: null });
+
+    const listed = await apiListTeams(deps(), reader.ctx, {});
+    expect(listed).toEqual({
+      data: [
+        { id: support, name: 'Support', assignment: 'round_robin' },
+        { id: sales, name: 'Sales', assignment: 'manual' },
+      ],
+      nextCursor: null,
+    });
+    const onePage = await apiListTeams(deps(), reader.ctx, { limit: 1 });
+    expect(onePage.data).toEqual(listed.data.slice(0, 1));
+    expect(
+      await apiListTeams(deps(), reader.ctx, { limit: 1, cursor: onePage.nextCursor ?? '' }),
+    ).toEqual({ data: listed.data.slice(1), nextCursor: null });
+
+    // Reads need conversations.read, go on while the company is suspended, and stay in the company.
+    const writer = await apiKey(c, ['conversations.write']);
+    for (const list of [apiListMembers, apiListTeams]) {
+      await expectAppError(list(deps(), writer.ctx, {}), 'forbidden', /conversations\.read scope/);
+    }
+    const suspended = {
+      ...reader.ctx,
+      tenant: { ...reader.ctx.tenant, status: 'suspended' as const },
+    };
+    expect(await apiListMembers(deps(), suspended, {})).toEqual(members);
+    const other = await fx.company();
+    const theirs = await apiKey(other, ['conversations.read']);
+    expect((await apiListMembers(deps(), theirs.ctx, {})).data.map((m) => m.name)).toEqual([
+      'Owner',
+      'Agent',
+    ]);
+    expect(await apiListTeams(deps(), theirs.ctx, {})).toEqual({ data: [], nextCursor: null });
+  });
+
+  it('assign, reassign, unassign and move conversations as the inbox does, audited as the key', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const supervisor = await joined(c, 'supervisor', 'Sam Supervisor');
+    const { teamId: sales } = await teams().createTeam(owner, { name: 'Sales' });
+    const writer = await apiKey(c, ['conversations.write'], 'Router');
+    const reader = await apiKey(c, ['conversations.read']);
+    await createWebhooksService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      keyring: fx.keyring,
+      egressPolicy: { allowLoopbackForTests: true },
+    }).create(owner, {
+      url: 'https://hooks.receiver.test/assignment',
+      eventTypes: ['conversation.assignment_changed'],
+    });
+    const conv = await conversationWith(c, '919811100190');
+    const update = (body: unknown) => apiUpdateConversation(deps(), writer.ctx, conv.id, body);
+    const live = () =>
+      fx.query<{ type: string; assigned_membership_id: string | null; payload: unknown }>(
+        `SELECT type, assigned_membership_id, payload FROM app.tenant_events
+          WHERE conversation_id = $1 AND type IN ('conversation.assigned', 'conversation.team')
+          ORDER BY id`,
+        [conv.id],
+      );
+    const webhookEvents = () =>
+      fx.query<{ detail: Record<string, unknown> }>(
+        `SELECT detail FROM app.webhook_events
+          WHERE conversation_id = $1 AND type = 'conversation.assignment_changed'
+          ORDER BY created_at, id`,
+        [conv.id],
+      );
+    const before = await conversationRow(conv.id);
+    expect(before).toMatchObject({ assigned: null, team_id: null, status: 'open' });
+
+    // Assigned to the agent, as GET then reads it, audited as the key.
+    const assigned = await update({ assigneeId: agent.membership.id });
+    expect(assigned).toMatchObject({
+      id: conv.id,
+      status: 'open',
+      assigned: true,
+      assigneeId: agent.membership.id,
+      teamId: null,
+    });
+    expect(assigned).toEqual(await apiGetConversation(deps(), reader.ctx, conv.id));
+    expect(await conversationRow(conv.id)).toMatchObject({
+      assigned: agent.membership.id,
+      version: before.version + 1,
+    });
+    expect(await changes(c, conv.id)).toEqual([
+      {
+        action: 'conversation.assigned',
+        actor_type: 'api_key',
+        actor_id: writer.id,
+        correlation_id: writer.ctx.requestId,
+        metadata: { from: null, to: agent.membership.id, source: 'api' },
+      },
+    ]);
+    // What it already has changes nothing, so a retry does no harm.
+    expect(await update({ assigneeId: agent.membership.id })).toEqual(assigned);
+    expect(await conversationRow(conv.id)).toMatchObject({ version: before.version + 1 });
+
+    // Given to another member, then to none: the inbox hears of each change, and webhooks report
+    // a member coming and going, not the move between members (ADR-074).
+    expect((await update({ assigneeId: supervisor.membership.id })).assigneeId).toBe(
+      supervisor.membership.id,
+    );
+    expect(await update({ assigneeId: null })).toMatchObject({ assigned: false, assigneeId: null });
+    expect(await live()).toEqual([
+      {
+        type: 'conversation.assigned',
+        assigned_membership_id: agent.membership.id,
+        payload: { previous: null },
+      },
+      {
+        type: 'conversation.assigned',
+        assigned_membership_id: supervisor.membership.id,
+        payload: { previous: agent.membership.id },
+      },
+      {
+        type: 'conversation.assigned',
+        assigned_membership_id: null,
+        payload: { previous: supervisor.membership.id },
+      },
+    ]);
+    expect((await webhookEvents()).map((e) => e.detail)).toEqual([
+      { assigned: true },
+      { assigned: false },
+    ]);
+
+    // Into a team that assigns by hand and out again: nobody is given the conversation, and the
+    // team it already has changes nothing.
+    expect(await update({ teamId: sales })).toMatchObject({ teamId: sales, assigned: false });
+    const inSales = await conversationRow(conv.id);
+    expect(await update({ teamId: sales })).toMatchObject({ teamId: sales });
+    expect(await conversationRow(conv.id)).toEqual(inSales);
+    expect(await update({ teamId: null })).toMatchObject({ teamId: null, assigned: false });
+
+    // All three at once: the team, then the member, then the status.
+    expect(
+      await update({ status: 'resolved', assigneeId: agent.membership.id, teamId: sales }),
+    ).toMatchObject({
+      status: 'resolved',
+      assigneeId: agent.membership.id,
+      teamId: sales,
+      unreadCount: 0,
+    });
+    const audited = await changes(c, conv.id);
+    expect(audited.map((a) => [a.action, a.metadata])).toEqual([
+      ['conversation.assigned', { from: null, to: agent.membership.id, source: 'api' }],
+      [
+        'conversation.assigned',
+        { from: agent.membership.id, to: supervisor.membership.id, source: 'api' },
+      ],
+      ['conversation.assigned', { from: supervisor.membership.id, to: null, source: 'api' }],
+      ['conversation.team_changed', { from: null, to: sales, source: 'api' }],
+      ['conversation.team_changed', { from: sales, to: null, source: 'api' }],
+      ['conversation.team_changed', { from: null, to: sales, source: 'api' }],
+      ['conversation.assigned', { from: null, to: agent.membership.id, source: 'api' }],
+      ['conversation.status_changed', { from: 'open', to: 'resolved', source: 'api' }],
+    ]);
+    expect(audited.every((a) => a.actor_type === 'api_key' && a.actor_id === writer.id)).toBe(true);
+    // The inbox heard of the team moves, and of the status with the member it now has.
+    expect(
+      (await live()).filter((e) => e.type === 'conversation.team').map((e) => e.payload),
+    ).toEqual([{ teamId: sales }, { teamId: null }, { teamId: sales }]);
+    expect(
+      await fx.query(
+        `SELECT assigned_membership_id, payload FROM app.tenant_events
+          WHERE conversation_id = $1 AND type = 'conversation.status'`,
+        [conv.id],
+      ),
+    ).toEqual([{ assigned_membership_id: agent.membership.id, payload: { status: 'resolved' } }]);
+
+    // Lists by member and team, or those without one.
+    const unrouted = await conversationWith(c, '919811100191');
+    const ids = async (query: Record<string, string>) =>
+      (await apiListConversations(deps(), reader.ctx, query)).data.map((x) => x.id);
+    expect(await ids({ assigneeId: agent.membership.id })).toEqual([conv.id]);
+    expect(await ids({ assigneeId: 'none' })).toEqual([unrouted.id]);
+    expect(await ids({ assigneeId: supervisor.membership.id })).toEqual([]);
+    expect(await ids({ teamId: sales })).toEqual([conv.id]);
+    expect(await ids({ teamId: 'none' })).toEqual([unrouted.id]);
+    expect(await ids({ teamId: 'none', status: 'resolved' })).toEqual([]);
+  });
+
+  it('give a conversation moved to a round-robin team to its next available member when it has none', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const supervisor = await joined(c, 'supervisor', 'Sam Supervisor');
+    const { teamId: support } = await teams().createTeam(owner, {
+      name: 'Support',
+      assignment: 'round_robin',
+      memberIds: [agent.membership.id, supervisor.membership.id],
+    });
+    await teams().setAvailability(agent, { available: true });
+    const writer = await apiKey(c, ['conversations.write']);
+    const update = (id: string, body: unknown) =>
+      apiUpdateConversation(deps(), writer.ctx, id, body);
+
+    // Open and unassigned: routed at once, as the inbox's team control does.
+    const routed = await conversationWith(c, '919811100192');
+    expect(await update(routed.id, { teamId: support })).toMatchObject({
+      teamId: support,
+      assigneeId: agent.membership.id,
+    });
+    expect((await changes(c, routed.id)).map((a) => [a.action, a.actor_type])).toEqual([
+      ['conversation.team_changed', 'api_key'],
+      ['conversation.routed', 'system'],
+    ]);
+    // Moved with no member named, or with none (as the minute sweep would a moment later).
+    const unnamed = await conversationWith(c, '919811100199');
+    expect(await update(unnamed.id, { teamId: support, assigneeId: null })).toMatchObject({
+      assigneeId: agent.membership.id,
+    });
+    // A member named in the same request keeps it, even one routing would pass over.
+    const named = await conversationWith(c, '919811100193');
+    expect(
+      await update(named.id, { teamId: support, assigneeId: supervisor.membership.id }),
+    ).toMatchObject({ teamId: support, assigneeId: supervisor.membership.id });
+    // A conversation resolved in the same request, and one with a member, keep theirs.
+    const resolved = await conversationWith(c, '919811100194');
+    expect(await update(resolved.id, { status: 'resolved', teamId: support })).toMatchObject({
+      status: 'resolved',
+      teamId: support,
+      assigned: false,
+    });
+    const owned = await conversationWith(c, '919811100195');
+    await update(owned.id, { assigneeId: owner.membership.id });
+    expect(await update(owned.id, { teamId: support })).toMatchObject({
+      teamId: support,
+      assigneeId: owner.membership.id,
+    });
+    for (const id of [named.id, resolved.id, owned.id]) {
+      expect((await changes(c, id)).map((a) => a.action)).not.toContain('conversation.routed');
+    }
+    // Unassigned in a round-robin team, it goes out again from the minute sweep.
+    expect(await update(routed.id, { assigneeId: null })).toMatchObject({ assigned: false });
+    await routeDueConversations(fx.dbs.app);
+    expect((await conversationRow(routed.id)).assigned).toBe(agent.membership.id);
+  });
+
+  it('refuse members who cannot answer conversations and teams of other companies, changing nothing', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const marketer = await fx.ctx(c, c.marketer);
+    const billing = await joined(c, 'billing', 'Bea Billing');
+    const leaving = await joined(c, 'agent', 'Lee Leaving');
+    await tenancy().setMemberStatus(owner, {
+      membershipId: leaving.membership.id,
+      status: 'suspended',
+    });
+    const other = await fx.company();
+    const theirAgent = await fx.ctx(other, other.agent);
+    const { teamId: sales } = await teams().createTeam(owner, { name: 'Sales' });
+    const { teamId: foreign } = await teams().createTeam(await fx.ctx(other, other.owner), {
+      name: 'Foreign',
+    });
+    const writer = await apiKey(c, ['conversations.write']);
+    const theirs = await apiKey(other, ['conversations.write']);
+    const conv = await conversationWith(c, '919811100196');
+    const before = await conversationRow(conv.id);
+    const refused = async (body: unknown, path: 'assigneeId' | 'teamId') => {
+      const error = await expectAppError(
+        apiUpdateConversation(deps(), writer.ctx, conv.id, body),
+        'validation_failed',
+      );
+      expect(isAppError(error) && error.issues).toEqual([{ path, message: expect.any(String) }]);
+    };
+    for (const member of [marketer, billing, leaving, theirAgent]) {
+      await refused({ assigneeId: member.membership.id }, 'assigneeId');
+    }
+    await refused({ assigneeId: uuidv7() }, 'assigneeId');
+    for (const teamId of [foreign, uuidv7()]) await refused({ teamId }, 'teamId');
+    // A refused member undoes the team named with it; a refused team, the rest.
+    await refused({ teamId: sales, assigneeId: marketer.membership.id }, 'assigneeId');
+    await refused(
+      { teamId: foreign, assigneeId: agent.membership.id, status: 'resolved' },
+      'teamId',
+    );
+    expect(await conversationRow(conv.id)).toEqual(before);
+    expect(await changes(c, conv.id)).toEqual([]);
+
+    // Another company's key does not find the conversation; nothing changes while the company is
+    // suspended or its plan has ended; an erased contact's conversation is not found.
+    await expectAppError(
+      apiUpdateConversation(deps(), theirs.ctx, conv.id, { assigneeId: theirAgent.membership.id }),
+      'not_found',
+    );
+    for (const status of ['suspended', 'restricted'] as const) {
+      const ctx = { ...writer.ctx, tenant: { ...writer.ctx.tenant, status } };
+      await expectAppError(
+        apiUpdateConversation(deps(), ctx, conv.id, { assigneeId: agent.membership.id }),
+        'tenant_suspended',
+      );
+    }
+    const erased = await conversationWith(c, '919811100197');
+    await createContactsService({ db: fx.dbs.app, clock: systemClock }).eraseContact(owner, {
+      contactId: erased.contact_id,
+      suppress: false,
+    });
+    await expectAppError(
+      apiUpdateConversation(deps(), writer.ctx, erased.id, { assigneeId: agent.membership.id }),
+      'not_found',
+    );
+    expect(await conversationRow(conv.id)).toEqual(before);
+  });
+
+  it('wait for a member being suspended or a team being deleted, then refuse them', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const { teamId: sales } = await teams().createTeam(owner, { name: 'Sales' });
+    const writer = await apiKey(c, ['conversations.write']);
+    const conv = await conversationWith(c, '919811100198');
+    const before = await conversationRow(conv.id);
+
+    /** The request's outcome when another transaction holds rows with `statement` as it comes. */
+    async function whileHeld(statement: string, id: string, body: unknown) {
+      const holder = await fx.dbs.adminPool.connect();
+      let outcome: Promise<unknown> | undefined;
+      try {
+        await holder.query('BEGIN');
+        await holder.query(statement, [id]);
+        const [lock] = (await holder.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows;
+        outcome = apiUpdateConversation(deps(), writer.ctx, conv.id, body).then(
+          () => 'changed',
+          (error: unknown) => (isAppError(error) ? error.code : error),
+        );
+        await vi.waitFor(
+          async () => {
+            const [waiting] = await fx.query<{ n: number }>(
+              'SELECT count(*)::int AS n FROM pg_stat_activity a WHERE $1 = ANY (pg_blocking_pids(a.pid))',
+              [lock!.pid],
+            );
+            if (waiting!.n < 1) throw new Error('the request is not waiting yet');
+          },
+          { timeout: 4_000, interval: 20 },
+        );
+      } finally {
+        await holder.query('COMMIT');
+        holder.release();
+      }
+      return outcome;
+    }
+
+    // Without the locks the request would assign a member being suspended (their suspension
+    // releasing nothing it cannot see yet), or fail on the deleted team's foreign key.
+    expect(
+      await whileHeld(
+        `UPDATE app.memberships SET status = 'suspended' WHERE id = $1`,
+        agent.membership.id,
+        {
+          assigneeId: agent.membership.id,
+        },
+      ),
+    ).toBe('validation_failed');
+    expect(await whileHeld('DELETE FROM app.teams WHERE id = $1', sales, { teamId: sales })).toBe(
+      'validation_failed',
+    );
+    expect(await conversationRow(conv.id)).toEqual(before);
+    expect(await changes(c, conv.id)).toEqual([]);
   });
 });
 
