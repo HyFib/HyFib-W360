@@ -3449,8 +3449,8 @@ describe('assigning conversations (ADR-093)', () => {
     expect(await update({ assigneeId: agent.membership.id })).toEqual(assigned);
     expect(await conversationRow(conv.id)).toMatchObject({ version: before.version + 1 });
 
-    // Given to another member, then to none: the inbox hears of each change, and webhooks report
-    // a member coming and going, not the move between members (ADR-074).
+    // Given to another member, then to none: the inbox and webhooks hear of each change, the webhook
+    // naming the member before and after (ADR-094).
     expect((await update({ assigneeId: supervisor.membership.id })).assigneeId).toBe(
       supervisor.membership.id,
     );
@@ -3473,8 +3473,13 @@ describe('assigning conversations (ADR-093)', () => {
       },
     ]);
     expect((await webhookEvents()).map((e) => e.detail)).toEqual([
-      { assigned: true },
-      { assigned: false },
+      { assigned: true, assigneeId: agent.membership.id, previousAssigneeId: null },
+      {
+        assigned: true,
+        assigneeId: supervisor.membership.id,
+        previousAssigneeId: agent.membership.id,
+      },
+      { assigned: false, assigneeId: null, previousAssigneeId: supervisor.membership.id },
     ]);
 
     // Into a team that assigns by hand and out again: nobody is given the conversation, and the

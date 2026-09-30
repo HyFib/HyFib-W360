@@ -467,10 +467,15 @@ verification, app review, Embedded Signup configuration).
   before it, whoever changes it, Razorpay's payment through the worker included; no Payment Link or
   payment details). **[Campaign events built, locally verified]** (ADR-087:
   `campaign.status_changed` for every status change, by members or the runner, with the status
-  before it and why it paused or completed; counts only, no recipients or members). Remaining:
-  filters beyond the event type (such as by automation or status), custom headers, mutual TLS,
-  fixed egress addresses, custom field changes, member and team identities, delivery counts in
-  campaign events, events for store orders, Payment Links and each step of a run, load tests.
+  before it and why it paused or completed; counts only, no recipients or members). **[Member and
+  team ids in conversation events built, locally verified]** (ADR-094: `conversation.assignment_changed`
+  for every change of the member with the member before and after, a new
+  `conversation.team_changed` for every change of the team, whoever makes it, a team's deletion
+  included; ids as `GET /members` and `GET /teams` list them, no names or emails; stamped with the
+  time each change is captured). Remaining: filters beyond the event type (such as by automation or
+  status), custom headers, mutual TLS, fixed egress addresses, custom field changes, delivery
+  counts in campaign events, events for store orders, Payment Links and each step of a run,
+  `createdAt` finer than the millisecond, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,

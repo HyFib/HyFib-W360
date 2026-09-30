@@ -3,9 +3,9 @@ import type { WebhookEventType } from '@w360/db';
 export type { WebhookEventType } from '@w360/db';
 
 /**
- * Outgoing webhooks (P5-09, ADR-053, ADR-074, ADR-078, ADR-085, ADR-087): the parts the settings page
- * and the services share. Pure definitions without server dependencies, so pages can use them in the
- * browser.
+ * Outgoing webhooks (P5-09, ADR-053, ADR-074, ADR-078, ADR-085, ADR-087, ADR-094): the parts the
+ * settings page and the services share. Pure definitions without server dependencies, so pages can
+ * use them in the browser.
  */
 
 export const WEBHOOK_EVENT_KEYS = [
@@ -15,6 +15,7 @@ export const WEBHOOK_EVENT_KEYS = [
   'template.status_changed',
   'conversation.status_changed',
   'conversation.assignment_changed',
+  'conversation.team_changed',
   'contact.created',
   'contact.updated',
   'contact.erased',
@@ -52,7 +53,12 @@ export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; descr
     'conversation.assignment_changed': {
       label: 'Conversation assignment',
       description:
-        'A member was assigned to a conversation nobody had, or it went back to nobody. Moves between members are not sent.',
+        'A member was assigned to a conversation, it moved to another member, or it went back to nobody.',
+    },
+    'conversation.team_changed': {
+      label: 'Conversation team',
+      description:
+        'A conversation was placed in a team, moved to another or taken out of one: by routing, a member, an automation, an API key or the team being deleted.',
     },
     'contact.created': {
       label: 'Contact added',

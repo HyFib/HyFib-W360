@@ -587,9 +587,10 @@ Phase 5 rules (outgoing webhooks, P5-09):
   signatures older than 5 minutes.
 - Secrets (`whsec_` + 32 random bytes) are shown once, kept only in the page's memory, and stored
   encrypted with the AAD `webhook-secret:<company>:<endpoint>:<version>`.
-- Conversation and contact events (ADR-074) follow the same rules. Conversation events say whether
-  a member is assigned, never who (the API names the member by id to `conversations.read` keys since
-  ADR-093; webhooks do not). Contact events carry the contact in the
+- Conversation and contact events (ADR-074) follow the same rules. Conversation events name the
+  member and the team by id only (ADR-094), the ids the API gives `conversations.read` keys
+  (ADR-093): names are read through `GET /members` and `GET /teams` with such a key, and no email or
+  role is sent. Contact events carry the contact in the
   API's words; an erased contact, whichever event is delivered, has only its id, source and creation
   time. `contact.erased` deletes the created and updated events its own transaction captured, with
   their deliveries: `app.capture_contact_webhook_event` can delete only as the definer role that

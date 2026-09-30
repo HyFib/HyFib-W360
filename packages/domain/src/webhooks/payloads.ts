@@ -175,6 +175,14 @@ export const conversationStatusPayloadSchema = envelope(
       status: conversationStatusSchema.describe('The status this event reports.'),
       previousStatus: conversationStatusSchema.describe('The status before it.'),
       assigned: z.boolean().describe('Whether a member is assigned when the event is delivered.'),
+      assigneeId: z
+        .uuid()
+        .nullable()
+        .describe('The member assigned when the event is delivered, as GET /members lists them.'),
+      teamId: z
+        .uuid()
+        .nullable()
+        .describe('The team when the event is delivered, as GET /teams lists them.'),
       resolvedAt: z.iso
         .datetime()
         .nullable()
@@ -193,9 +201,42 @@ export const conversationAssignmentPayloadSchema = envelope(
       status: conversationStatusSchema.describe('The status when the event is delivered.'),
       assigned: z
         .boolean()
+        .describe('Whether a member is assigned after the change this event reports.'),
+      assigneeId: z
+        .uuid()
+        .nullable()
         .describe(
-          'Whether a member is assigned: the change this event reports. Moves between members are not sent.',
+          'The member assigned by the change, as GET /members lists them; null for none. Null too for events captured before members were named (ADR-094).',
         ),
+      previousAssigneeId: z
+        .uuid()
+        .nullable()
+        .describe('The member before the change; null for none, or for events captured before.'),
+      teamId: z
+        .uuid()
+        .nullable()
+        .describe('The team when the event is delivered, as GET /teams lists them.'),
+    }),
+    contact: contactSchema,
+    channel: channelSchema,
+  }),
+);
+
+export const conversationTeamPayloadSchema = envelope(
+  'conversation.team_changed',
+  z.object({
+    conversation: z.object({
+      id: z.uuid(),
+      status: conversationStatusSchema.describe('The status when the event is delivered.'),
+      teamId: z
+        .uuid()
+        .nullable()
+        .describe('The team after the change, as GET /teams lists them; null for none.'),
+      previousTeamId: z.uuid().nullable().describe('The team before the change; null for none.'),
+      assigneeId: z
+        .uuid()
+        .nullable()
+        .describe('The member assigned when the event is delivered, as GET /members lists them.'),
     }),
     contact: contactSchema,
     channel: channelSchema,
@@ -542,6 +583,7 @@ async function conversationContext(tx: Tx, tenantId: string, conversationId: str
     .select({
       status: conversations.status,
       assignedMembershipId: conversations.assignedMembershipId,
+      teamId: conversations.teamId,
       resolvedAt: conversations.resolvedAt,
       contactId: conversations.contactId,
       channelId: conversations.channelAccountId,
@@ -752,7 +794,8 @@ export async function buildWebhookPayload(
       };
     }
     case 'conversation.status_changed':
-    case 'conversation.assignment_changed': {
+    case 'conversation.assignment_changed':
+    case 'conversation.team_changed': {
       const conversation = await conversationContext(tx, tenantId, event.conversationId);
       if (!conversation) throw new WebhookEventGoneError();
       const contact = await contactOf(tx, tenantId, conversation.contactId);
@@ -766,7 +809,26 @@ export async function buildWebhookPayload(
               status: event.status,
               previousStatus: str(event.detail.previousStatus),
               assigned: conversation.assignedMembershipId !== null,
+              assigneeId: conversation.assignedMembershipId,
+              teamId: conversation.teamId,
               resolvedAt: conversation.resolvedAt?.toISOString() ?? null,
+            },
+            contact,
+            channel,
+          },
+        };
+      }
+      // The change as captured (ADR-094); the rest as the conversation is now.
+      if (event.type === 'conversation.team_changed') {
+        return {
+          ...base,
+          data: {
+            conversation: {
+              id: event.conversationId,
+              status: conversation.status,
+              teamId: str(event.detail.teamId),
+              previousTeamId: str(event.detail.previousTeamId),
+              assigneeId: conversation.assignedMembershipId,
             },
             contact,
             channel,
@@ -780,6 +842,9 @@ export async function buildWebhookPayload(
             id: event.conversationId,
             status: conversation.status,
             assigned: event.detail.assigned === true,
+            assigneeId: str(event.detail.assigneeId),
+            previousAssigneeId: str(event.detail.previousAssigneeId),
+            teamId: conversation.teamId,
           },
           contact,
           channel,

@@ -29,6 +29,7 @@ import {
   contactUpdatedPayloadSchema,
   conversationAssignmentPayloadSchema,
   conversationStatusPayloadSchema,
+  conversationTeamPayloadSchema,
   inboundSummary,
   messageReceivedPayloadSchema,
   messageStatusPayloadSchema,
@@ -246,7 +247,9 @@ describe('webhook payload schemas', () => {
     ).toBe(true);
   });
 
-  it('describe the conversation and contact events (ADR-074)', () => {
+  it('describe the conversation and contact events (ADR-074, ADR-094)', () => {
+    const member = '0192a1b2-0000-7000-8000-000000000007';
+    const team = '0192a1b2-0000-7000-8000-000000000008';
     expect(
       conversationStatusPayloadSchema.safeParse({
         ...base,
@@ -257,6 +260,8 @@ describe('webhook payload schemas', () => {
             status: 'resolved',
             previousStatus: 'open',
             assigned: true,
+            assigneeId: member,
+            teamId: team,
             resolvedAt: base.createdAt,
           },
           contact,
@@ -264,13 +269,82 @@ describe('webhook payload schemas', () => {
         },
       }).success,
     ).toBe(true);
+    // Moved from one member to none; captured before members were named, both ids are null.
+    for (const [assigneeId, previousAssigneeId] of [
+      [null, member],
+      [member, null],
+      [null, null],
+    ]) {
+      expect(
+        conversationAssignmentPayloadSchema.safeParse({
+          ...base,
+          type: 'conversation.assignment_changed',
+          data: {
+            conversation: {
+              id: base.id,
+              status: 'open',
+              assigned: assigneeId !== null,
+              assigneeId,
+              previousAssigneeId,
+              teamId: null,
+            },
+            contact,
+            channel,
+          },
+        }).success,
+      ).toBe(true);
+    }
+    // The member is required: a body without it does not match.
     expect(
       conversationAssignmentPayloadSchema.safeParse({
         ...base,
         type: 'conversation.assignment_changed',
-        data: { conversation: { id: base.id, status: 'open', assigned: false }, contact, channel },
+        data: {
+          conversation: {
+            id: base.id,
+            status: 'open',
+            assigned: false,
+            previousAssigneeId: member,
+            teamId: null,
+          },
+          contact,
+          channel,
+        },
       }).success,
-    ).toBe(true);
+    ).toBe(false);
+    for (const [teamId, previousTeamId] of [
+      [team, null],
+      [null, team],
+    ]) {
+      expect(
+        conversationTeamPayloadSchema.safeParse({
+          ...base,
+          type: 'conversation.team_changed',
+          data: {
+            conversation: { id: base.id, status: 'open', teamId, previousTeamId, assigneeId: null },
+            contact,
+            channel,
+          },
+        }).success,
+      ).toBe(true);
+    }
+    expect(
+      conversationTeamPayloadSchema.safeParse({
+        ...base,
+        type: 'conversation.team_changed',
+        data: {
+          conversation: {
+            id: base.id,
+            status: 'open',
+            teamId: 'support',
+            previousTeamId: null,
+            assigneeId: null,
+          },
+          contact,
+          channel,
+        },
+      }).success,
+    ).toBe(false);
     const person = {
       id: contact.id,
       name: 'Priya',
@@ -316,6 +390,8 @@ describe('webhook payload schemas', () => {
             status: 'closed',
             previousStatus: 'open',
             assigned: false,
+            assigneeId: null,
+            teamId: null,
             resolvedAt: null,
           },
           contact,
@@ -639,6 +715,7 @@ describe('the OpenAPI document', () => {
       'template.status_changed',
       'conversation.status_changed',
       'conversation.assignment_changed',
+      'conversation.team_changed',
       'contact.created',
       'contact.updated',
       'contact.erased',

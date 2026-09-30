@@ -25,6 +25,7 @@ import {
   contactUpdatedPayloadSchema,
   conversationAssignmentPayloadSchema,
   conversationStatusPayloadSchema,
+  conversationTeamPayloadSchema,
   tappedReplySchema,
   messageReceivedPayloadSchema,
   messageStatusPayloadSchema,
@@ -1081,8 +1082,14 @@ export function buildOpenApiDocument(serverUrl: string) {
       'conversation.assignment_changed': webhook(
         'webhookConversationAssignmentChanged',
         WEBHOOK_EVENT_INFO['conversation.assignment_changed'].label,
-        WEBHOOK_EVENT_INFO['conversation.assignment_changed'].description,
+        `${WEBHOOK_EVENT_INFO['conversation.assignment_changed'].description} conversation.assigneeId and conversation.previousAssigneeId are the change (members as GET /members lists them); the rest is the conversation when the event is delivered. Deliveries are not ordered: the latest change is the one with the latest createdAt. createdAt is given to the millisecond, and one request can change the member twice (taking it off and moving the conversation to a team whose routing gives it out again): when two events of a conversation share a createdAt, GET /conversations/{id} gives the member it has.`,
         'WebhookConversationAssignmentChanged',
+      ),
+      'conversation.team_changed': webhook(
+        'webhookConversationTeamChanged',
+        WEBHOOK_EVENT_INFO['conversation.team_changed'].label,
+        `${WEBHOOK_EVENT_INFO['conversation.team_changed'].description} conversation.teamId and conversation.previousTeamId are the change (teams as GET /teams lists them); the rest is the conversation when the event is delivered. Deleting a team sends one event for each of its conversations. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
+        'WebhookConversationTeamChanged',
       ),
       'contact.created': webhook(
         'webhookContactCreated',
@@ -1232,6 +1239,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         WebhookTemplateStatusChanged: jsonSchema(templateStatusPayloadSchema),
         WebhookConversationStatusChanged: jsonSchema(conversationStatusPayloadSchema),
         WebhookConversationAssignmentChanged: jsonSchema(conversationAssignmentPayloadSchema),
+        WebhookConversationTeamChanged: jsonSchema(conversationTeamPayloadSchema),
         WebhookContactCreated: jsonSchema(contactCreatedPayloadSchema),
         WebhookContactUpdated: jsonSchema(contactUpdatedPayloadSchema),
         WebhookContactErased: jsonSchema(contactErasedPayloadSchema),

@@ -16,6 +16,7 @@ import {
 import {
   advanceAutomationRun,
   apiStartAutomationRun,
+  apiUpdateConversation,
   authenticateApiToken,
   automationRunEndedPayloadSchema,
   automationRunStartedPayloadSchema,
@@ -25,6 +26,7 @@ import {
   contactUpdatedPayloadSchema,
   conversationAssignmentPayloadSchema,
   conversationStatusPayloadSchema,
+  conversationTeamPayloadSchema,
   createApiKeysService,
   createAutomationService,
   createCampaignsService,
@@ -32,6 +34,7 @@ import {
   createConsentService,
   createContactsService,
   createInboxService,
+  createTeamsService,
   createTemplatesService,
   createWebhooksService,
   messageReceivedPayloadSchema,
@@ -273,6 +276,8 @@ describe('conversation events', () => {
           status: 'resolved',
           previousStatus: 'open',
           assigned: false,
+          assigneeId: null,
+          teamId: null,
           resolvedAt: null,
         },
         contact: { id: contactId, phone: `+${from}`, name: 'Priya Customer' },
@@ -284,7 +289,7 @@ describe('conversation events', () => {
     });
   });
 
-  it('sends assignment changes when a member is assigned or unassigned, not moves between members', async () => {
+  it('sends every change of the member, naming the member before and after (ADR-094)', async () => {
     const c = await fx.company();
     const endpoint = await addEndpoint(c, ['conversation.assignment_changed']);
     const { conversation_id: conversationId } = await inbound(c, waId(), 'Hello');
@@ -297,20 +302,199 @@ describe('conversation events', () => {
     await assign(c, conversationId, null);
     const events = await eventsOf(c, 'conversation.');
     expect(events.map((e) => [e.type, e.detail, e.deliveries])).toEqual([
-      ['conversation.assignment_changed', { assigned: true }, 1],
-      ['conversation.assignment_changed', { assigned: false }, 1],
+      [
+        'conversation.assignment_changed',
+        { assigned: true, assigneeId: agent, previousAssigneeId: null },
+        1,
+      ],
+      [
+        'conversation.assignment_changed',
+        { assigned: true, assigneeId: owner, previousAssigneeId: agent },
+        1,
+      ],
+      [
+        'conversation.assignment_changed',
+        { assigned: false, assigneeId: null, previousAssigneeId: owner },
+        1,
+      ],
     ]);
 
     await deliverDue(c);
     const bodies = bodiesAt(endpoint.path);
-    expect(bodies).toHaveLength(2);
+    expect(bodies).toHaveLength(3);
     for (const body of bodies) {
       expect(conversationAssignmentPayloadSchema.safeParse(body).success).toBe(true);
     }
+    // The change is as captured; the status and team are the conversation's now.
+    const shown = { id: conversationId, status: 'resolved', teamId: null };
     expect(bodies.map((b) => b.data.conversation)).toEqual([
-      { id: conversationId, status: 'resolved', assigned: true },
-      { id: conversationId, status: 'resolved', assigned: false },
+      { ...shown, assigned: true, assigneeId: agent, previousAssigneeId: null },
+      { ...shown, assigned: true, assigneeId: owner, previousAssigneeId: agent },
+      { ...shown, assigned: false, assigneeId: null, previousAssigneeId: owner },
     ]);
+  });
+
+  it('sends every change of the team: routing, a member, an API key and the team being deleted (ADR-094)', async () => {
+    const c = await fx.company();
+    const endpoint = await addEndpoint(c, [
+      'conversation.team_changed',
+      'conversation.assignment_changed',
+    ]);
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const teams = createTeamsService({ db: fx.dbs.app, clock: systemClock });
+    // New conversations on the number go to Support, which gives them out in turn.
+    const { teamId: support } = await teams.createTeam(owner, {
+      name: 'Support',
+      assignment: 'round_robin',
+      memberIds: [agent.membership.id],
+      channelIds: [c.channelAccountId],
+    });
+    const { teamId: sales } = await teams.createTeam(owner, { name: 'Sales' });
+    const { teamId: returns } = await teams.createTeam(owner, { name: 'Returns' });
+    await teams.setAvailability(agent, { available: true });
+
+    // Routing places the new conversation in the team and gives it the agent in one change: one
+    // event of each type.
+    const { conversation_id: conversationId, contact_id: contactId } = await inbound(
+      c,
+      waId(),
+      'Hello',
+    );
+    // A member moves it, then a key does, then its team is deleted.
+    await inbox().setTeam(owner, {
+      conversationId,
+      teamId: sales,
+      expectedVersion: await versionOf(conversationId),
+    });
+    const created = await createApiKeysService({ db: fx.dbs.app, clock: systemClock }).create(
+      owner,
+      { name: 'Router', scopes: ['conversations.write'], expiresInDays: 0 },
+    );
+    const key = await authenticateApiToken(fx.dbs.app, created.token, uuidv7());
+    if (!key) throw new Error('a new key does not authenticate');
+    await apiUpdateConversation({ db: fx.dbs.app, clock: systemClock }, key, conversationId, {
+      teamId: returns,
+    });
+    await teams.deleteTeam(owner, returns);
+
+    const events = await eventsOf(c, 'conversation.');
+    const teamEvents = events.filter((e) => e.type === 'conversation.team_changed');
+    expect(teamEvents.map((e) => [e.detail, e.deliveries])).toEqual([
+      [{ teamId: support, previousTeamId: null }, 1],
+      [{ teamId: sales, previousTeamId: support }, 1],
+      [{ teamId: returns, previousTeamId: sales }, 1],
+      [{ teamId: null, previousTeamId: returns }, 1],
+    ]);
+    expect(teamEvents.every((e) => e.contact_id === contactId)).toBe(true);
+    expect(
+      events.filter((e) => e.type === 'conversation.assignment_changed').map((e) => e.detail),
+    ).toEqual([{ assigned: true, assigneeId: agent.membership.id, previousAssigneeId: null }]);
+
+    await deliverDue(c);
+    const bodies = bodiesAt(endpoint.path).filter((b) => b.type === 'conversation.team_changed');
+    expect(bodies.map((b) => b.id)).toEqual(teamEvents.map((e) => e.id));
+    for (const body of bodies) {
+      expect(conversationTeamPayloadSchema.safeParse(body).success).toBe(true);
+    }
+    // The change is as captured; the status and member are the conversation's now.
+    const shown = { id: conversationId, status: 'open', assigneeId: agent.membership.id };
+    expect(bodies.map((b) => b.data.conversation)).toEqual([
+      { ...shown, teamId: support, previousTeamId: null },
+      { ...shown, teamId: sales, previousTeamId: support },
+      { ...shown, teamId: returns, previousTeamId: sales },
+      { ...shown, teamId: null, previousTeamId: returns },
+    ]);
+    expect(bodies[0]).toMatchObject({
+      data: { contact: { id: contactId }, channel: { id: c.channelAccountId } },
+    });
+  });
+
+  it('keeps the order of two changes in one transaction, and gives the member and team as delivered (ADR-094)', async () => {
+    const c = await fx.company();
+    const endpoint = await addEndpoint(c, [
+      'conversation.assignment_changed',
+      'conversation.status_changed',
+    ]);
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const teams = createTeamsService({ db: fx.dbs.app, clock: systemClock });
+    const { teamId: support } = await teams.createTeam(owner, {
+      name: 'Support',
+      assignment: 'round_robin',
+      memberIds: [agent.membership.id],
+    });
+    await teams.setAvailability(agent, { available: true });
+    const { conversation_id: conversationId } = await inbound(c, waId(), 'Hello');
+    await assign(c, conversationId, owner.membership.id);
+
+    // One request takes the conversation from the owner and moves it to the team, whose routing
+    // gives it to the agent: two changes of the member in one transaction.
+    const created = await createApiKeysService({ db: fx.dbs.app, clock: systemClock }).create(
+      owner,
+      { name: 'Router', scopes: ['conversations.write'], expiresInDays: 0 },
+    );
+    const key = await authenticateApiToken(fx.dbs.app, created.token, uuidv7());
+    if (!key) throw new Error('a new key does not authenticate');
+    expect(
+      await apiUpdateConversation({ db: fx.dbs.app, clock: systemClock }, key, conversationId, {
+        teamId: support,
+        assigneeId: null,
+      }),
+    ).toMatchObject({ assigneeId: agent.membership.id, teamId: support });
+
+    const rows = await fx.query<{ id: string; detail: Record<string, unknown> }>(
+      `SELECT id, detail FROM app.webhook_events
+        WHERE tenant_id = $1 AND conversation_id = $2 AND type = 'conversation.assignment_changed'
+        ORDER BY occurred_at`,
+      [c.tenant.id, conversationId],
+    );
+    expect(rows.map((r) => r.detail)).toEqual([
+      { assigned: true, assigneeId: owner.membership.id, previousAssigneeId: null },
+      { assigned: false, assigneeId: null, previousAssigneeId: owner.membership.id },
+      { assigned: true, assigneeId: agent.membership.id, previousAssigneeId: null },
+    ]);
+    // Two transactions captured the three events, each at its own time.
+    expect(
+      await fx.query(
+        `SELECT count(DISTINCT created_at)::int AS transactions,
+                count(DISTINCT occurred_at)::int AS times
+           FROM app.webhook_events
+          WHERE tenant_id = $1 AND conversation_id = $2
+            AND type = 'conversation.assignment_changed'`,
+        [c.tenant.id, conversationId],
+      ),
+    ).toEqual([{ transactions: 2, times: 3 }]);
+
+    // The key resolves it: the status event gives the member and team it has.
+    await apiUpdateConversation({ db: fx.dbs.app, clock: systemClock }, key, conversationId, {
+      status: 'resolved',
+    });
+
+    // Delivered with that time: the later change never has the earlier createdAt.
+    await deliverDue(c);
+    const bodies = bodiesAt(endpoint.path);
+    const assignments = bodies.filter((b) => b.type === 'conversation.assignment_changed');
+    const createdAt = new Map(
+      assignments.map((b) => [b.id, (b as { createdAt?: string }).createdAt]),
+    );
+    expect(createdAt.size).toBe(3);
+    const inOrder = rows.map((r) => createdAt.get(r.id) ?? '');
+    expect([...inOrder].sort()).toEqual(inOrder);
+    // The member changes are as captured; the team is the conversation's now.
+    expect(
+      assignments.map((b) => (b.data.conversation as { teamId: string | null }).teamId),
+    ).toEqual([support, support, support]);
+    const statuses = bodies.filter((b) => b.type === 'conversation.status_changed');
+    expect(statuses).toHaveLength(1);
+    expect(conversationStatusPayloadSchema.safeParse(statuses[0]).success).toBe(true);
+    expect(statuses[0]!.data.conversation).toMatchObject({
+      status: 'resolved',
+      previousStatus: 'open',
+      assigned: true,
+      assigneeId: agent.membership.id,
+      teamId: support,
+    });
   });
 });
 

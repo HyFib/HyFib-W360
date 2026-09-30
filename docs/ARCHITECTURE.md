@@ -868,7 +868,8 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   status, contact, number and `updatedSince`), `GET /conversations/{id}` and
   `GET /conversations/{id}/messages` (newest first), all in `api/conversations.ts`. Conversations
   join their contact, so an erased contact's conversation is neither listed nor read (404). A
-  conversation says whether a member is assigned (not who), the unread count, the last message and
+  conversation says whether a member is assigned (and, since ADR-093, the member's and the team's
+  ids), the unread count, the last message and
   inbound times and when the 24-hour window ends; a message reads in the webhooks' words
   (`inboundSummary` for inbound; for outbound the text, a template's rendered body or an interactive
   message's body), with who sent it (`agent`, `bot`, `campaign`, `api`, `system`), the key for API
@@ -1064,8 +1065,9 @@ true`); the same key with another request (method, path and body hashed) answers
   sends an empty `w360_webhooks` notification.
 - **Conversation and contact events** (migrations 0047–0049, ADR-074): triggers on
   `app.conversations` (`conversation.status_changed` with the status before;
-  `conversation.assignment_changed` when an assignee appears or goes, not for moves between
-  members), `app.contacts` (`contact.created`; `contact.updated` for the name, number or email;
+  `conversation.assignment_changed` for every change of the member and, since 0070 (ADR-094),
+  `conversation.team_changed` for every change of the team, each with the ids before and after and
+  stamped with the time it is captured), `app.contacts` (`contact.created`; `contact.updated` for the name, number or email;
   `contact.erased`) and `app.contact_tags` (`contact.updated`). Contact events go through
   `app.capture_contact_webhook_event`: `contact.created` and `contact.updated` are captured when an
   active endpoint takes either, once per contact and top-level transaction (`captured_xact`, found

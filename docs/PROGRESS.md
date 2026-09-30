@@ -1,5 +1,90 @@
 # Progress
 
+## 2026-09-30 — Phase 5: webhook conversation events name the member and team (P5-09, ADR-094)
+
+Status: **Implemented and locally verified (no customer data; webhooks delivered to local test
+receivers only).** Since ADR-093 the API names a conversation's member and team and changes both,
+but webhooks said only whether a member was assigned, sent nothing when a conversation moved from
+one member to another, and nothing about teams.
+
+### Completed
+
+- **Design (ADR-094):** `conversation.assignment_changed` for every change of the member, with the
+  member before and after; a new `conversation.team_changed` for every change of the team, whoever
+  makes it, a team's deletion included (one event per conversation). Ids as `GET /members` and
+  `GET /teams` list them; no names, emails or roles. The change is as captured, the rest as
+  delivered; the status event also gives the member and team.
+- **Migration 0070:** the endpoint check takes 15 types; the event type check is replaced
+  `NOT VALID`; the conversation capture function and trigger are replaced: the trigger also fires
+  when the team changes, captures one event per fact that changed and stamps each with
+  `clock_timestamp()`, so two changes in one transaction keep their order (the campaign events'
+  approach). **0071** validates the check without blocking writes.
+- **Domain:** the new type in `WEBHOOK_EVENT_TYPES`, `WEBHOOK_EVENT_KEYS` and `WEBHOOK_EVENT_INFO`
+  ("Conversation team"); the payloads (`conversationTeamPayloadSchema`; `assigneeId` and
+  `previousAssigneeId` in the assignment event, `assigneeId` and `teamId` in the status event), built
+  when delivered; the OpenAPI entries, with the order receivers can rely on.
+- **Web:** Settings → Webhooks lists the new event (from the shared list); API keys with
+  `webhooks.manage` can choose it too.
+- **Tests:**
+  - Unit: the payload schemas (members named, both null for events captured before, the member
+    required, team ids only), the new webhook in the OpenAPI document and the list of event types.
+  - Integration in `webhook-events.test.ts` (1 replaced, 2 new):
+    - every change of the member (assigned, moved to another, none), with the members before and
+      after, delivered with the status and team as they are then;
+    - every change of the team: routing placing a new conversation in its number's team and giving
+      it a member in one statement (one event of each type), a member's move, an API key's move and
+      the team's deletion, each captured once and delivered to the endpoint;
+    - a request that takes the member off and moves the conversation to a round-robin team whose
+      routing gives it out again: two assignment events in one transaction, each stamped with its
+      own time and delivered in that order, with the team as delivered; the status event that
+      follows gives the member and team.
+  - Integration in `api.test.ts`: the ADR-093 test now expects the webhook for every change of the
+    member, naming both.
+  - e2e `webhook-events.spec.ts`: a member moves a conversation into a team and assigns it in the
+    inbox, then deletes the team: three signed events naming the team and the member.
+- **Docs:** ADR-094; SECURITY (webhooks); THREAT-MODEL T92, T111 and T112; RUNBOOKS (member and team
+  events; migrations 0070 and 0071); ARCHITECTURE; DATA-RETENTION; BACKLOG P5-09; FEATURE-MATRIX
+  W-138 and H-014.
+- **Also fixed (2bc8a7a, before ADR-091):** the commerce e2e catalog test was flaky on WebKit on
+  abc552a. It left the live inbox with a page load, which cancels the inbox's own refresh; Next.js
+  then reloads the current page and cuts off the test's navigation. It now leaves through the main
+  navigation and the settings tabs, as the new webhook test does.
+- **Mutation checks:** 25 regressions tried one at a time; 24 make a test fail, and the other (a
+  redundant REVOKE: 0047 revoked it and `CREATE OR REPLACE` keeps the grants) cannot be observed.
+  - 11 in the capture: moves between members not captured; the assignment event without the member
+    or the member before; the team event not captured, or naming the new team as the one before;
+    the trigger not firing when only the team changes (its column list or its condition);
+    assignment events stamped with the transaction's start; the new type refused by the endpoint or
+    the event check; endpoints still limited to 14 types.
+  - 9 in the payloads: the team body giving the team now rather than the change, or without the team
+    before or the member; the assignment body giving the member now, or without the member before
+    or the team; the status body without the member or the team; team events built as assignment
+    events.
+  - 4 in the schemas and the OpenAPI document: a team body taking any string as a team; an
+    assignment body without the member; endpoints unable to choose the new type; the OpenAPI
+    document without the team webhook. The first run missed the first two: the unit tests' invalid
+    bodies lacked other fields too, so they failed for another reason. Each now lacks only the field
+    under test, and both are caught.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                     | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted (after joining one line of `webhooks/payloads.ts` that the first run flagged) / all workspace packages pass                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `pnpm test` (unit)                                                          | 425 passed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 568 passed, including 2 new and 1 replaced in `webhook-events.test.ts`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 568 passed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / first run on `webhook-events.spec.ts`, `webhooks.spec.ts`, `api.spec.ts`, `inbox-teams.spec.ts` and `inbox.spec.ts`: 32 passed and the new test failed on both projects (it looked for the team's delete button without opening the team's editor); after the fix, `webhook-events.spec.ts`: 10 passed (2.5 min); after the new test and the commerce test stopped leaving the live inbox with page loads, `webhook-events.spec.ts` and `commerce.spec.ts`: 12 passed (3.1 min); on the local database created for the day's runs, migrated to 0071 |
+| Mutation checks                                                             | 25 regressions tried; 24 make a test fail, and the other (a redundant REVOKE) cannot be observed                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+
+### Known gaps
+
+- Not built: member names or emails in bodies, events for a member's availability or a team's
+  settings, conversations started, `createdAt` finer than the millisecond, and filters beyond the
+  event type.
+- While the release rolls out, a worker of the previous release delivers assignment events in the
+  previous shape (`assigned` only), moves between members included.
+
 ## 2026-09-30 — Phase 5: assigning conversations through the API (P5-08, ADR-093)
 
 Status: **Implemented and locally verified (no customer data).** An integration could read,

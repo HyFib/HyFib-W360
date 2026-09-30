@@ -3136,3 +3136,54 @@ Not built: webhooks naming the member and team (and so moves between members or 
 many conversations in one call, members' emails, team settings through the API, and a precondition
 on the conversation's state (the inbox checks the version a member saw; the API has no
 counterpart).
+
+## ADR-094 Webhook conversation events name the member and the team (2026-09-30)
+
+Context: since ADR-093 the API names a conversation's member and team (`assigneeId`, `teamId`,
+`GET /members`, `GET /teams`) and changes both, but the webhooks of ADR-074 still said only whether
+a member was assigned, sent nothing when a conversation moved from one member to another, and
+nothing about teams. A helpdesk or CRM that keeps its own owners in step with HyFib's had to poll
+the API to notice such moves (listed as not built in ADR-074 and ADR-093, P5-09).
+
+Decision:
+
+- **Assignment events name the member:** `conversation.assignment_changed` is now captured for
+  every change of the member: one assigned where there was none, a move from one member to
+  another, and none any more (unassigned, the member suspended or removed, routing). It carries
+  `assigneeId` and `previousAssigneeId`, members as `GET /members` lists them (null for none), with
+  `assigned` as before.
+- **A new event for teams:** `conversation.team_changed` ("Conversation team"), chosen per endpoint
+  like the others (an endpoint may now take all 15): a conversation placed in a team, moved to
+  another or taken out of one, whoever does it: routing placing a new conversation in its number's
+  team, a member, an automation's hand-off, an API key, or the team being deleted (each of its
+  conversations leaves it, one event each). It carries `teamId` and `previousTeamId`, teams as
+  `GET /teams` lists them.
+- **What each body says:** the change an event reports is as captured; the rest is the
+  conversation when the event is delivered, as in ADR-074. The assignment event also gives the
+  team, the team event the member, and the status event now gives both (`assigneeId`, `teamId`)
+  beside `assigned`. Assignment events captured before this release are delivered with both member
+  ids null. Fields are only added, so receivers of the existing events keep working.
+- **Capture:** the trigger of 0047 now also fires when the team changes (migration 0070) and
+  captures one event for each fact that changed: routing that places a new conversation in a team
+  and gives it a member in one statement captures a team event and an assignment event. A team's
+  deletion sets its conversations' team to none through the foreign key (0009), which fires the
+  trigger for each of them. As before, nothing is captured unless an active endpoint of the company
+  takes the event's type.
+- **Order:** conversation events are now stamped with the time each change is captured
+  (`clock_timestamp()`), not the transaction's start, as campaign events are (ADR-087). One request
+  can change the member twice (taking it off and moving the conversation to a team whose routing
+  gives it out again), and a transaction that started earlier but waited for the conversation's row
+  could otherwise stamp a later change earlier. `createdAt` is given to the millisecond, so two
+  changes in one request can share it; the OpenAPI document says to read the conversation then.
+- **What is not given:** members are ids only, with their names through `GET /members`
+  (`conversations.read`); no names, emails or roles travel in webhook bodies.
+- **Migrations:** 0070 widens the endpoint check to 15 types, replaces the event type check
+  `NOT VALID` (as 0065) and replaces the capture function (still not executable by `PUBLIC`) and
+  the trigger; 0071 validates the check without blocking writes. Endpoints can take the new type
+  only once this release's web app runs, after the migrations and the workers. Between the
+  migrations and the new workers, a worker of the previous release delivers assignment events in
+  the previous shape (`assigned` only), moves between members included.
+
+Not built: member names or emails in bodies, events for a member's availability or a team's
+settings, conversations started, `createdAt` finer than the millisecond, and filters beyond the
+event type.

@@ -12,7 +12,7 @@ import {
   sendSignedWebhook,
   standInRequests,
 } from './messaging-support';
-import { signUpAndVerify, uniqueEmail } from './support';
+import { openFromNav, signUpAndVerify, uniqueEmail } from './support';
 
 const PASSWORD = 'correct horse battery staple 42';
 /** Resolves to 127.0.0.1 on the test machine; see webhooks.spec.ts. */
@@ -165,6 +165,114 @@ test('conversation and contact events reach an endpoint: a customer writes, a me
   // Nothing else arrives for these changes.
   await page.goto(`/c/${slug}/settings/webhooks`);
   expect(forUs()).toHaveLength(4);
+});
+
+test('conversation team and assignment events name the team and the member: a member moves and assigns a conversation, and deleting the team sends its change', async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(180_000);
+  const email = uniqueEmail('hookteam');
+  const slug = `hookteam-${Date.now().toString(36)}`;
+  const path = `/teams/${slug}`;
+  const forUs = () =>
+    received
+      .filter((r) => r.path === path)
+      .map((r) => ({ ...r, json: JSON.parse(r.body) as EventBody }));
+  await signUpAndVerify(page, { name: 'Mira Moves', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('Move Traders');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+  const { wabaId, phoneNumberId } = await connectTestChannel({ ownerEmail: email, slug });
+
+  // A team that assigns by hand (moving a conversation into it gives nobody the conversation).
+  await page.goto(`/c/${slug}/settings/teams`);
+  const form = page.locator('form', { has: page.getByRole('button', { name: 'Create team' }) });
+  await form.getByLabel('Team name').fill('Returns');
+  await form.getByLabel('Mira Moves').check();
+  await form.getByRole('button', { name: 'Create team' }).click();
+  await expect(page.getByText('Team created.')).toBeVisible();
+
+  // An endpoint for the conversation's team and member.
+  await page.goto(`/c/${slug}/settings/webhooks`);
+  await page.getByLabel('Endpoint URL').fill(`http://${HOST}:${port}${path}`);
+  await page.getByRole('checkbox', { name: /Conversation assignment/ }).check();
+  await page.getByRole('checkbox', { name: /Conversation team/ }).check();
+  await page.getByRole('button', { name: 'Add endpoint' }).click();
+  const secretField = page.getByLabel('Signing secret');
+  await expect(secretField).toBeVisible();
+  const secret = await secretField.inputValue();
+  await page.getByRole('button', { name: 'I have stored the secret' }).click();
+
+  // A customer writes: the conversation has no team and no member yet, so nothing is sent.
+  const waId = randomWaId();
+  await sendSignedWebhook(request, inboundMessage(wabaId, phoneNumberId, waId, 'Wrong size'));
+  await page.goto(`/c/${slug}/inbox`);
+  const item = page.getByRole('link', { name: /Priya Customer/ });
+  await expect(item).toContainText('Unassigned', { timeout: 30_000 });
+  await item.click();
+  await expect(page.getByText('Wrong size')).toBeVisible();
+  // The conversation's controls, not the list's team filter or the CRM task form beside them.
+  const teamControl = page
+    .getByLabel('Team', { exact: true })
+    .and(page.locator('select:not([name="team"])'));
+  const assigneeControl = page
+    .getByLabel('Assigned to', { exact: true })
+    .filter({ has: page.getByRole('option', { name: 'Unassigned', exact: true }) });
+
+  // Into the team: one event naming it, and the team before (none).
+  const [teamId] = await teamControl.selectOption({ label: 'Returns' });
+  await expect(async () => expect(forUs()).toHaveLength(1)).toPass({ timeout: 30_000 });
+  const moved = forUs()[0]!;
+  expect(signatureValid(moved.headers, moved.body, secret)).toBe(true);
+  expect(moved.headers['w360-event-type']).toBe('conversation.team_changed');
+  expect(moved.json).toMatchObject({
+    type: 'conversation.team_changed',
+    data: {
+      conversation: { status: 'open', teamId, previousTeamId: null, assigneeId: null },
+      contact: { phone: `+${waId}` },
+    },
+  });
+
+  // Assigned to the member: one event naming them, and the member before (none). The team control
+  // shows the move once the action's refresh arrives, with the version the next change needs.
+  await expect(teamControl).toHaveValue(teamId!);
+  const [memberId] = await assigneeControl.selectOption({ label: 'Mira Moves (you)' });
+  await expect(async () => expect(forUs()).toHaveLength(2)).toPass({ timeout: 30_000 });
+  const assigned = forUs()[1]!;
+  expect(signatureValid(assigned.headers, assigned.body, secret)).toBe(true);
+  expect(assigned.json).toMatchObject({
+    type: 'conversation.assignment_changed',
+    data: {
+      conversation: { assigned: true, assigneeId: memberId, previousAssigneeId: null, teamId },
+    },
+  });
+
+  // Deleting the team takes the conversation out of it: one event, and the member stays. The live
+  // inbox is left through the navigation, not a page load (see openFromNav).
+  await openFromNav(page, 'Settings');
+  await page
+    .getByRole('navigation', { name: 'Settings sections' })
+    .getByRole('link', { name: 'Teams' })
+    .click();
+  await page.locator('summary', { hasText: 'Edit Returns' }).click();
+  await page.getByRole('button', { name: 'Delete… team Returns' }).click();
+  await page.getByRole('button', { name: 'Delete team' }).click();
+  await expect(page.getByRole('heading', { name: /Returns/ })).toHaveCount(0);
+  await expect(async () => expect(forUs()).toHaveLength(3)).toPass({ timeout: 30_000 });
+  const left = forUs()[2]!;
+  expect(signatureValid(left.headers, left.body, secret)).toBe(true);
+  expect(left.json).toMatchObject({
+    type: 'conversation.team_changed',
+    data: {
+      conversation: { teamId: null, previousTeamId: teamId, assigneeId: memberId },
+    },
+  });
+  // Nothing else arrives for these changes.
+  await openFromNav(page, 'Inbox');
+  await expect(item).toContainText('Assigned to Mira Moves');
+  expect(forUs()).toHaveLength(3);
 });
 
 /** An automation run event body, as far as this test reads it. */

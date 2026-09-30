@@ -14,6 +14,7 @@ export const WEBHOOK_EVENT_TYPES = [
   'template.status_changed',
   'conversation.status_changed',
   'conversation.assignment_changed',
+  'conversation.team_changed',
   'contact.created',
   'contact.updated',
   'contact.erased',

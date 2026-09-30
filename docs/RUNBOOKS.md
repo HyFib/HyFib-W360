@@ -1407,10 +1407,10 @@ bootstrap roles are missing (`infra/db/bootstrap-roles.sql`).
 `contact.updated` receives one event per contact for each change saved: an import sends one per
 contact it adds or changes, delivered like any other event. A receiver that asks why an erased
 contact's `contact.created` arrived with no name or number: payloads are built when delivered, and
-the contact was erased in between; `contact.erased` follows if the endpoint takes it. Moves of a
-conversation between members send nothing (`conversation.assignment_changed` reports only whether
-a member is assigned). To see what a transaction captured, `app.webhook_events.captured_xact` holds
-its id for contact events.
+the contact was erased in between; `contact.erased` follows if the endpoint takes it. Since
+ADR-094 every change of a conversation's member sends `conversation.assignment_changed`, moves
+between members included (see the entry on member and team events below). To see what a
+transaction captured, `app.webhook_events.captured_xact` holds its id for contact events.
 
 **Migration 0047, 0048 or 0049 failed.** 0047 runs in one transaction, so a failure applies
 nothing: it widens the event type checks (the one on `app.webhook_events` `NOT VALID`), adds
@@ -1475,6 +1475,27 @@ function and the trigger on `app.campaigns`. A failure usually means a check was
 (`webhook_endpoints_event_types_check`, `webhook_events_type_check`) or a trigger of the same name
 exists. 0066 validates the type check without blocking writes; it fails only if a stored event has
 a type outside the list, which no code writes: look for the row by `type` before running it again.
+
+**Member and team events (ADR-094).** `conversation.assignment_changed` is sent for every change of
+a conversation's member (one assigned, a move to another, none any more) with `assigneeId` and
+`previousAssigneeId`, and `conversation.team_changed` for every change of its team with `teamId` and
+`previousTeamId`, whoever makes it: routing, a member, an automation's hand-off, an API key.
+Deleting a team sends one `conversation.team_changed` for each conversation it had, delivered like
+any other event: expect a burst after a busy team is deleted. Ids are memberships and teams as
+`GET /members` and `GET /teams` list them; a member removed since is not listed there any more.
+An assignment event with both member ids null was captured before migration 0070; one without the
+fields at all was delivered by a worker of the previous release while the release rolled out. Two
+changes made by one request (a member taken off, then routing giving the conversation out) can
+share a `createdAt` to the millisecond: the receiver reads the conversation for where it stands.
+The events keep the ids before and after in `app.webhook_events.detail`, stamped with the time each
+change was captured (`occurred_at`).
+
+**Migration 0070 or 0071 failed.** 0070 runs in one transaction, so a failure applies nothing: it
+widens the event type checks (the one on `app.webhook_events` `NOT VALID`) and replaces the
+conversation capture function and its trigger (`conversations_webhook`). A failure usually means a
+check was renamed by hand (`webhook_endpoints_event_types_check`, `webhook_events_type_check`).
+0071 validates the type check without blocking writes; it fails only if a stored event has a type
+outside the list, which no code writes: look for the row by `type` before running it again.
 
 ## 10P. Platform operations console
 
