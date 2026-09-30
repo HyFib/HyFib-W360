@@ -1155,6 +1155,31 @@ describe('emails', () => {
     expect(marked.rows[0]!.marked).toBe(false);
     expect((await requestRow(third)).decline_notified_at).toBeNull();
     expect(await tellDeclines()).toEqual({ notified: 1, failed: [] });
+
+    // A note as long as a decline allows (1,000 characters) is told in full, over several lines:
+    // a billing notice's line holds at most 500.
+    const long = 'Refunds are for unused credit only; see the terms and ticket 4410. '
+      .repeat(15)
+      .slice(0, 1000)
+      .trimEnd();
+    expect(long.length).toBeGreaterThan(990);
+    const { requestId: fourth } = await ask(c, topupId, '30');
+    await decide(owner, fourth, 'decline', long);
+    expect(await tellDeclines()).toEqual({ notified: 1, failed: [] });
+    const all = await billingEmails(c.tenantId, 'HyFib declined your refund request');
+    expect(all).toHaveLength(8);
+    for (const email of all.slice(-2)) {
+      expect(email.lines[0]).toBe(
+        'HyFib declined your request to refund ₹30.00 of unused service credit.',
+      );
+      expect(email.lines.at(-1)).toBe(
+        'The credit stays in your wallet. You can ask again from the payment’s receipt.',
+      );
+      const note = email.lines.slice(1, -1);
+      expect(note.length).toBeGreaterThan(2);
+      expect(note.every((line) => line.length <= 500)).toBe(true);
+      expect(note.join(' ')).toBe(`HyFib's note: ${long}`);
+    }
   });
 });
 

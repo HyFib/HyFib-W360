@@ -1,5 +1,35 @@
 # Progress
 
+## 2026-09-30 — Fix: refund decline emails with a long note
+
+Status: **Fixed and verified locally (PostgreSQL 18.6 and 17.11).** A platform owner may decline a
+company's refund request with a note of up to 1,000 characters (ADR-073), but a billing notice holds
+at most 500 characters a line and the note went on one line. With a note over 486 characters, the
+minute sweep's email to the billing managers failed its payload check every minute, so the company
+was never told of the decline (the sweep reported the failure and tried again). Found while writing
+the emails for company deletion started by staff, whose reasons are emailed too.
+
+### Completed
+
+- **Long notes split over lines:** `splitEmailText` (email templates) breaks text a person wrote into
+  lines within a notice's limit, between words (a word longer than a line is cut, never inside a
+  surrogate pair). The decline email puts the note through it, so a 1,000-character note arrives in
+  full over three lines. The limits now live in one place, `NOTICE_LINE_MAX`.
+- **Tests:** a decline with a 1,000-character note in the integration test of the decline email (it
+  failed before the fix with "Too big: expected string to have <=500 characters"), and unit tests of
+  the split.
+- **Mutation checks:** 6 regressions tried (the note on one line again, split at the company
+  notice's limit of 600, a line one character too long, surrogate pairs cut, line breaks kept, long
+  words kept whole); all make a test fail, the third only once a test at the exact limit was added.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                               | Result                                                                            |
+| --------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                  | 0 problems / all files formatted / all workspace packages pass                    |
+| `pnpm test` (unit)                                                    | 412 passed, including 6 new in `email/templates.test.ts`                          |
+| `tests/integration/refund-requests.test.ts` (PostgreSQL 18.6 / 17.11) | 17 passed / 17 passed; before the fix, the decline email test failed as described |
+
 ## 2026-09-30 — Phase 5: reading internal notes through the public API (P5-08, ADR-089)
 
 Status: **Implemented and locally verified (no customer data).** Keys added notes to conversations

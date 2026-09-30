@@ -1,5 +1,37 @@
 import { z } from 'zod';
 
+/** The longest line of a notice: text a person wrote goes through `splitEmailText`. */
+export const NOTICE_LINE_MAX = { billing: 500, tenant: 600 } as const;
+
+/**
+ * Splits text for a notice into lines of at most `max` characters, breaking between words (a word
+ * longer than a line is cut, never inside a surrogate pair). Runs of spaces and line breaks become
+ * one space. For text a person wrote that may be longer than a line, such as a note of up to 1,000
+ * characters; the lines read as consecutive paragraphs.
+ */
+export function splitEmailText(text: string, max: number): string[] {
+  const lines: string[] = [];
+  let line = '';
+  for (let word of text.split(/\s+/).filter(Boolean)) {
+    while (word.length > max) {
+      if (line) lines.push(line);
+      line = '';
+      const code = word.charCodeAt(max - 1);
+      const cut = code >= 0xd800 && code <= 0xdbff ? max - 1 : max;
+      lines.push(word.slice(0, cut));
+      word = word.slice(cut);
+    }
+    if (!line) line = word;
+    else if (line.length + 1 + word.length <= max) line = `${line} ${word}`;
+    else {
+      lines.push(line);
+      line = word;
+    }
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
 /**
  * Transactional email templates. Text and HTML are generated from typed payloads; every
  * interpolated value is HTML-escaped. Copy is original HyFib W360 wording.
@@ -29,14 +61,14 @@ export const emailPayloadSchema = z.discriminatedUnion('kind', [
     kind: z.literal('billing.notice'),
     companyName: z.string().max(120),
     subject: z.string().max(200),
-    lines: z.array(z.string().max(500)).max(10),
+    lines: z.array(z.string().max(NOTICE_LINE_MAX.billing)).max(10),
     url: z.url().optional(),
   }),
   z.object({
     kind: z.literal('tenant.notice'),
     companyName: z.string().max(120),
     subject: z.string().max(200),
-    lines: z.array(z.string().max(600)).max(12),
+    lines: z.array(z.string().max(NOTICE_LINE_MAX.tenant)).max(12),
     url: z.url().optional(),
     actionLabel: z.string().max(60).optional(),
   }),

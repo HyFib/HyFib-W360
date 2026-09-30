@@ -25,6 +25,7 @@ import { recordAudit, type RequestMeta } from '../audit';
 import { assertCan, type TenantContext } from '../authz/context';
 import { assertRecentSignIn } from '../authz/step-up';
 import { enqueueEmail, type OutboxDeps } from '../email/outbox';
+import { NOTICE_LINE_MAX, splitEmailText } from '../email/templates';
 import { parseInput } from '../validation';
 import { notifyBillingManagers, type BillingNoticeDeps } from './notices';
 
@@ -547,7 +548,11 @@ export async function notifyRefundRequestDeclines(
           subject: 'HyFib declined your refund request',
           lines: [
             `HyFib declined your request to refund ${inr(request.amountMinor)} of unused service credit.`,
-            `HyFib's note: ${request.decisionNote ?? ''}`,
+            // The note may hold 1,000 characters, twice a notice's line.
+            ...splitEmailText(
+              `HyFib's note: ${request.decisionNote ?? ''}`,
+              NOTICE_LINE_MAX.billing,
+            ),
             'The credit stays in your wallet. You can ask again from the payment’s receipt.',
           ],
           billingPath: `receipts/${request.topupId}`,
