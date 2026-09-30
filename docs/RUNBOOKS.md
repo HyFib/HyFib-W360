@@ -1248,14 +1248,17 @@ inbox thread's older messages and the audit log could skip rows written in the s
 a page's last row; cursors issued before still work.
 
 **An API request is refused with `ip_not_allowed` (403).** The key lists the networks it accepts
-(Settings → API keys, "Accepts requests from"; ADR-076) and the request came from another address;
-the error message names the address the API saw. If that address is a load balancer's or proxy's
-rather than the integration's, `TRUSTED_PROXIES` is missing a hop (DEPLOYMENT.md): fix the
-configuration, do not add the proxy's address to the key. If the integration moved, a member who
-manages keys changes the key's addresses (a recent sign-in is needed); the change applies to the
-next request and is in the audit log (`api_key.networks_changed`). Refused requests count against
-the address's failed-authentication limit, so a client that keeps trying is answered 429 for a
-while. The web log has `api request refused: the key does not accept the address` with the key and
+(Settings → API keys, "Accepts requests from"; ADR-076), or the company lists addresses for all its
+keys ("Addresses for all keys"; ADR-099), and the request came from another address; the error
+message names the address the API saw and says whose list refused it ("This API key…" or "The
+company this API key belongs to…"). If that address is a load balancer's or proxy's rather than the
+integration's, `TRUSTED_PROXIES` is missing a hop (DEPLOYMENT.md): fix the configuration, do not add
+the proxy's address to the key or the company's list. If the integration moved, a member who manages
+keys changes the list that refused it (a recent sign-in is needed); the change applies to the next
+request and is in the audit log (`api_key.networks_changed`, or `api.networks_changed` for the
+company's list). Refused requests count against the address's failed-authentication limit, so a
+client that keeps trying is answered 429 for a while. The web log has `api request refused: the key
+does not accept the address` (or `the company does not accept the address`) with the key and
 company ids.
 
 **An integration cannot resolve or reopen a conversation, or a resolve did something unexpected.**
@@ -1397,6 +1400,14 @@ already stored: a short `ACCESS EXCLUSIVE` lock on the keys table), creates `app
 row security and its grants, and registers deletion step 855 with the definer's grants and
 policies. A failure usually means a lock wait on `app.api_keys` timed out (run the migrations again
 when requests are quieter) or the bootstrap roles are missing.
+
+**Migration 0076 failed.** It runs in one transaction, so a failure applies nothing, and the
+authentication function stays as it was. It creates `app.api_settings` with row security, its grants
+and deletion step 857, and rebuilds `ops.api_key_authenticate(text, inet)`: the migration role drops
+it as the owner of the `ops` schema, creates it, grants it to `w360_app` and hands it to
+`w360_definer`. A failure usually means the bootstrap roles are missing (`w360_owner` must be able to
+`SET ROLE w360_definer`) or a lock wait timed out: run the migrations again. While it runs, requests
+keep using the old function; web servers of the previous release keep working after it.
 
 **Migration 0075 failed.** It runs in one transaction, so a failure applies nothing. It adds
 `warned_at` and `notified_at` to `app.api_key_usage` with their grant, a partial index, and

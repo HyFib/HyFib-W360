@@ -202,6 +202,67 @@ test('a key limited to listed addresses refuses requests from other addresses un
   await expectNoHorizontalOverflow(page);
 });
 
+test('addresses for all keys refuse requests from other addresses for every key, until they are removed', async ({
+  page,
+  request,
+}) => {
+  const email = uniqueEmail('cnets');
+  const suffix = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`;
+  const slug = `cnets-${suffix}`;
+  const companyName = `Company Nets ${suffix}`;
+  await signUpAndVerify(page, { name: 'Chitra Nets', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill(companyName);
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page.getByRole('heading', { name: companyName })).toBeVisible();
+
+  // A key without addresses of its own.
+  await page.goto(`/c/${slug}/settings/api-keys`);
+  await page.getByLabel('Name', { exact: true }).fill('Warehouse');
+  await page.getByRole('checkbox', { name: /Read contacts/ }).check();
+  await page.getByRole('button', { name: 'Create API key' }).click();
+  const token = await page.getByLabel('API key', { exact: true }).inputValue();
+  await page.getByRole('button', { name: 'I have stored the key' }).click();
+  const anyAddress = page.getByText(
+    'Keys accept requests from any address, unless a key lists its own.',
+  );
+  await expect(anyAddress).toBeVisible();
+
+  // The client's address comes from X-Forwarded-For (no proxy is trusted in this setup).
+  const from = (address: string) =>
+    request.get('/api/v1/contacts', {
+      headers: { Authorization: `Bearer ${token}`, 'X-Forwarded-For': address },
+    });
+  expect((await from('203.0.113.40')).status()).toBe(200);
+
+  // The owner holds every key to the office's network (ADR-099).
+  await page.getByRole('button', { name: 'Addresses for all keys' }).click();
+  const dialog = page.getByRole('alertdialog');
+  await dialog.getByLabel('Addresses for all keys (optional)').fill('198.51.100.0/24');
+  await dialog.getByRole('button', { name: 'Save addresses' }).click();
+  await expect(page.getByText('198.51.100.0/24', { exact: true })).toBeVisible();
+  await expect(page.getByText('Accepts requests from the addresses for all keys')).toBeVisible();
+  const outside = await from('203.0.113.40');
+  expect(outside.status()).toBe(403);
+  const refusal = (await outside.json()) as {
+    error: { code: string; reason: string; message: string };
+  };
+  expect(refusal.error).toMatchObject({
+    code: 'forbidden',
+    reason: 'ip_not_allowed',
+    message: 'The company this API key belongs to does not accept API requests from 203.0.113.40.',
+  });
+  expect((await from('198.51.100.40')).status()).toBe(200);
+
+  // Removed, the key accepts requests from any address again.
+  await page.getByRole('button', { name: 'Addresses for all keys' }).click();
+  await dialog.getByLabel('Addresses for all keys (optional)').fill('');
+  await dialog.getByRole('button', { name: 'Save addresses' }).click();
+  await expect(anyAddress).toBeVisible();
+  expect((await from('203.0.113.40')).status()).toBe(200);
+  await expectNoHorizontalOverflow(page);
+});
+
 test('a key with its own monthly limit is refused once it is used up, and its owner emailed, until the limit is raised', async ({
   page,
   request,

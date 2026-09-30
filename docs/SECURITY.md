@@ -453,6 +453,13 @@ Phase 5 rules (Public API, P5-08):
   `allowed_networks` through column grants in the company's scope, and the definer function reads it
   to authenticate. The address is the one audit uses (`X-Forwarded-For` behind `TRUSTED_PROXIES`), so
   the protection depends on the edge overwriting or appending that header.
+- The company may list up to 20 networks for all its keys (ADR-099): a request must come from one of
+  them, and from one of its key's own networks when the key lists any. The lookup checks both before
+  the key is marked used and says which list refused the address; the refusal is the same 403
+  `ip_not_allowed`, counted against the address's failed-authentication limit. Members who manage
+  keys change the list with a recent sign-in, audited with the lists before and after; the runtime
+  role reads and changes only its company's row of `app.api_settings` (no delete), and the definer
+  function reads the list of the key's company to authenticate.
 - Template sends through the API apply the members' template-send checks (approval, category scope,
   consent, suppression, erasure, the marketing frequency cap) and are checked again before dispatch.
   The API can read the status only of messages sent through the API.

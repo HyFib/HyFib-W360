@@ -62,6 +62,10 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
     omitted: { token_hash: "Only a hash of the key's token." },
   },
   {
+    table: 'app.api_settings',
+    columns: ['id', 'allowed_networks', 'created_at', 'updated_at'],
+  },
+  {
     table: 'app.audit_events',
     columns: [
       'id',

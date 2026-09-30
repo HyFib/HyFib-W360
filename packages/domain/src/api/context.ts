@@ -34,16 +34,31 @@ export interface ApiContext extends ApiKeyContext {
 
 /**
  * What a token presented from an address gets: the key, or a key that does not accept requests
- * from that address (ADR-076), which is refused without a context.
+ * from that address, which is refused without a context. `by` says whose networks leave the
+ * address out: the key's (ADR-076) or the company's (ADR-099).
  */
 export type ApiAuthentication =
-  { authenticated: ApiKeyContext } | { refused: 'address'; keyId: string; tenantId: string };
+  | { authenticated: ApiKeyContext }
+  | { refused: 'address'; by: 'key' | 'company'; keyId: string; tenantId: string };
+
+/** The message of a 403 `ip_not_allowed`: whose networks leave the address out, and the address. */
+export function apiAddressRefusal(by: 'key' | 'company', address: string | null): string {
+  if (by === 'company') {
+    return address
+      ? `The company this API key belongs to does not accept API requests from ${address}.`
+      : 'The company this API key belongs to accepts API requests only from its listed addresses, and this request’s address could not be determined.';
+  }
+  return address
+    ? `This API key does not accept requests from ${address}.`
+    : 'This API key accepts requests only from its listed addresses, and this request’s address could not be determined.';
+}
 
 /**
  * The key a token belongs to, through `ops.api_key_authenticate` (unknown, revoked and expired
- * keys, and companies being deleted, give nothing). A key that lists networks accepts only a client
- * address inside one of them; an address that could not be determined is refused by such a key.
- * The token itself is only hashed here.
+ * keys, and companies being deleted, give nothing). A key that lists networks, or whose company
+ * lists networks for all its keys, accepts only a client address inside one of them (inside both
+ * when both list networks); an address that could not be determined is refused by such a key. The
+ * token itself is only hashed here.
  */
 export async function authenticateApiRequest(
   db: Database,
@@ -59,15 +74,22 @@ export async function authenticateApiRequest(
       scopes: ApiScope[];
       tenant_status: TenantStatus;
       address_allowed: boolean;
+      refused_by: 'key' | 'company' | null;
     }>(
-      sql`select key_id, tenant_id, scopes, tenant_status, address_allowed
+      sql`select key_id, tenant_id, scopes, tenant_status, address_allowed, refused_by
             from ops.api_key_authenticate(${hashApiToken(token)}, ${address}::inet)`,
     ),
   );
   const row = res.rows[0];
   if (!row) return null;
-  if (!row.address_allowed)
-    return { refused: 'address', keyId: row.key_id, tenantId: row.tenant_id };
+  if (!row.address_allowed) {
+    return {
+      refused: 'address',
+      by: row.refused_by === 'company' ? 'company' : 'key',
+      keyId: row.key_id,
+      tenantId: row.tenant_id,
+    };
+  }
   return {
     authenticated: {
       tenant: { id: row.tenant_id, status: row.tenant_status },

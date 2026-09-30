@@ -3343,3 +3343,39 @@ Decision:
 
 Not built: a choice of recipients or thresholds, emails for keys without a limit of their own, and
 notices in the product beyond the settings page.
+
+## ADR-099 Addresses for all of a company's API keys (2026-09-30)
+
+Context: a key can be held to the networks its systems call from (ADR-076), but a company that
+wants all its API traffic to come from its own servers had to set every key, and a key created
+without networks accepted requests from anywhere (listed as not built under P5-08: networks for
+the whole company).
+
+Decision:
+
+- **One list for the company:** up to 20 IPv4 or IPv6 addresses or networks for all of the
+  company's keys (`app.api_settings.allowed_networks`, one row per company, made when first set,
+  migration 0076), typed, checked and kept as a key's are (ADR-076); empty accepts any address.
+- **Both lists apply:** a request must come from one of the company's networks, and from one of
+  its key's own networks when the key lists any; the key's own list is checked first. Keys created
+  later are held to the company's list from their first request.
+- **Who sets it:** members who manage keys (`developer.manage`) after a recent sign-in (ADR-056),
+  in Settings → API keys ("Addresses for all keys"). Each change is audited as
+  `api.networks_changed` with the lists before and after; the same list again records nothing.
+  Changes take the company's key lock, so two first changes at once make one row and the second
+  sees the first.
+- **Checked in the lookup:** `ops.api_key_authenticate` reads the company's networks after the
+  key's own and before the key is marked used, so a refused request does not mark it used, and says
+  which list refused the address (`refused_by`). The API answers 403 `ip_not_allowed` naming the
+  address and whose list refused it ("The company this API key belongs to does not accept API
+  requests from …"), and counts the attempt against the per-address limit of failed
+  authentication, as for a key's networks.
+- **Data:** the list is in the company export and deleted with the company (deletion step 857);
+  the runtime role reads and changes only its company's row and cannot delete it.
+- **Rollout:** migration 0076 rebuilds the function with the same arguments and one more column.
+  Web servers of the previous release select the columns they know by name, so during a rolling
+  deploy they keep working, and answer a company refusal with the key's message until replaced.
+
+Not built: exceptions for single keys, networks per scope or endpoint, hostnames, time windows,
+and alerts or a list of refused requests (the web server logs each refusal with the key and
+company).

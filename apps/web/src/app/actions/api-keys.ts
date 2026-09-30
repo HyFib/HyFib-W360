@@ -52,6 +52,20 @@ export async function setApiKeyNetworksAction(
   });
 }
 
+/** The addresses every key of the company accepts requests from (ADR-099); empty accepts any. */
+export async function setCompanyApiNetworksAction(
+  slug: string,
+  input: { allowedNetworks: string },
+): Promise<ActionResult> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { apiKeys } = await getRuntime();
+    await apiKeys.setCompanyNetworks(ctx, input, await requestMeta());
+    refresh();
+    return null;
+  });
+}
+
 /** A key's own monthly request limit (ADR-097); empty text removes it. */
 export async function setApiKeyLimitAction(
   slug: string,

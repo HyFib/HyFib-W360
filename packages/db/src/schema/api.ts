@@ -57,6 +57,16 @@ export const apiKeyUsage = appSchema.table('api_key_usage', {
   notifiedAt: tz('notified_at'),
 });
 
+/** The company's API settings (ADR-099, migration 0076): one row, made when first set. */
+export const apiSettings = appSchema.table('api_settings', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  /** The networks every key of the company accepts requests from; null accepts any address. */
+  allowedNetworks: cidr('allowed_networks').array(),
+  createdAt: tz('created_at').notNull().defaultNow(),
+  updatedAt: tz('updated_at').notNull().defaultNow(),
+});
+
 /** Stored responses of requests sent with an Idempotency-Key (24 hours). */
 export const apiIdempotencyKeys = appSchema.table('api_idempotency_keys', {
   id: uuid('id').primaryKey(),

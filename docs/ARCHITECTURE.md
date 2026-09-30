@@ -826,12 +826,15 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   for 0 to 72 hours (0 revokes it); revocation is immediate. Each change is audited without the
   token. A key may list up to 20 networks it accepts requests from (`allowed_networks cidr[]`, 0051,
   ADR-076): checked for shape in the service, canonicalised by PostgreSQL (`pg_input_is_valid`,
-  `::cidr`), editable for an active key with a recent sign-in (`setAllowedNetworks`, audited).
+  `::cidr`), editable for an active key with a recent sign-in (`setAllowedNetworks`, audited). The
+  company may list up to 20 networks for all its keys the same way (`app.api_settings`, 0076,
+  ADR-099; `setCompanyNetworks` under the company's key lock, audited `api.networks_changed`).
 - **Requests** (`apps/web/src/server/api.ts`): the bearer token is checked by shape, then through
   the definer function with the client's address (`authenticateApiRequest`,
-  `ops.api_key_authenticate(hash, inet)`): a key whose networks do not contain the address (or any
-  key with networks when the address is unknown) answers 403 `ip_not_allowed`, is not marked used and
-  counts as a failed authentication for the address; the request acts in its company's scope as the
+  `ops.api_key_authenticate(hash, inet)`): a key whose networks, or whose company's networks for all
+  keys, do not contain the address (or any such key when the address is unknown) answers 403
+  `ip_not_allowed` naming whose list refused it (`refused_by`), is not marked used and counts as a
+  failed authentication for the address; the request acts in its company's scope as the
   key (`ApiContext`, no user), so no company id is ever read from the request. Failed authentication is limited per client
   address (bursts of 20, one every 5 seconds), then each key (bursts of 50, 10 a second) and each
   company (bursts of 200, 30 a second) have token buckets (`admitFailedApiAuthentication`,

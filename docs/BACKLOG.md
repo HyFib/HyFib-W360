@@ -445,14 +445,15 @@ verification, app review, Embedded Signup configuration).
   `key_quota_exceeded`) counts for neither the key nor the company, nor one the company refuses;
   Settings → API keys shows each key's requests this period); **[emails about a key's limit
   built, locally verified]** (ADR-098: owners and administrators are emailed once at 80% of a key's
-  own limit and once at the limit, in each period, and again after the limit changes).
+  own limit and once at the limit, in each period, and again after the limit changes); **[addresses
+  for all keys built, locally verified]** (ADR-099: owners and administrators list up to 20 networks
+  every key of the company accepts requests from, on top of each key's own).
   Remaining: media messages, call-to-action messages through the API, taking reactions back,
   assigning many conversations at once, media downloads, statuses changed since a time, starting or
-  stopping runs for many contacts in one call, bulk sends in one call, networks for the whole
-  company, limits per endpoint, availability per single endpoint (plans choose per scope since
-  ADR-092). The one-argument key lookup kept for rolling
-  deploys (0051) is dropped (0074). Replaying many deliveries in one call is built with P5-09
-  (ADR-095).
+  stopping runs for many contacts in one call, bulk sends in one call, limits per endpoint,
+  availability per single endpoint (plans choose per scope since ADR-092). The one-argument key
+  lookup kept for rolling deploys (0051) is dropped (0074). Replaying many deliveries in one call
+  is built with P5-09 (ADR-095).
 - **P5-09 Outgoing webhooks** **[built, locally verified; delivered to local test receivers only]**
   (ADR-053): up to 10 endpoints per company (`developer.manage`) for `message.received`,
   `message.status`, `consent.changed` and `template.status_changed`, captured by database triggers

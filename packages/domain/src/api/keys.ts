@@ -6,6 +6,7 @@ import {
   and,
   apiKeyUsage,
   apiKeys,
+  apiSettings,
   desc,
   eq,
   gt,
@@ -144,6 +145,7 @@ const createSchema = z.object({
 });
 
 const keyIdSchema = z.object({ keyId: z.uuid() });
+const companyNetworksSchema = z.object({ allowedNetworks: allowedNetworksSchema });
 
 const networksSchema = keyIdSchema.extend({ allowedNetworks: allowedNetworksSchema });
 
@@ -500,6 +502,75 @@ export function createApiKeysService(deps: { db: Database; clock: Clock }) {
             subjectType: 'api_key',
             subjectId: data.keyId,
             metadata: { keyPrefix: key.keyPrefix, from: key.allowedNetworks, to: allowedNetworks },
+          },
+          meta,
+        );
+        return { allowedNetworks };
+      });
+    },
+
+    /**
+     * The networks every key of the company accepts requests from (ADR-099), on top of each key's
+     * own; null accepts any address.
+     */
+    async companyNetworks(ctx: TenantContext): Promise<{ allowedNetworks: string[] | null }> {
+      assertCan(ctx, 'developer.manage');
+      return db.run(
+        ctx.scope,
+        async (tx) => {
+          const [row] = await tx
+            .select({ allowedNetworks: apiSettings.allowedNetworks })
+            .from(apiSettings)
+            .where(eq(apiSettings.tenantId, ctx.tenant.id));
+          return { allowedNetworks: row?.allowedNetworks ?? null };
+        },
+        { accessMode: 'read only' },
+      );
+    },
+
+    /**
+     * Changes the networks every key of the company accepts requests from (ADR-099); an empty list
+     * accepts any address, leaving each key's own networks. A request must come from one of these
+     * and from one of its key's networks when the key lists any. The change applies to the next
+     * request and is audited with the lists before and after.
+     */
+    async setCompanyNetworks(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
+      assertCan(ctx, 'developer.manage');
+      const now = clock.now();
+      assertRecentSignIn(ctx, now);
+      const data = parseInput(companyNetworksSchema, input);
+      return db.run(ctx.scope, async (tx) => {
+        // The company's key lock: two changes at once cannot both find no row to update.
+        await lockKeys(tx, ctx.tenant.id);
+        const [row] = await tx
+          .select({ allowedNetworks: apiSettings.allowedNetworks })
+          .from(apiSettings)
+          .where(eq(apiSettings.tenantId, ctx.tenant.id));
+        const before = row?.allowedNetworks ?? null;
+        const allowedNetworks = await canonicalNetworks(tx, data.allowedNetworks);
+        if (sameNetworks(before, allowedNetworks)) return { allowedNetworks };
+        if (row) {
+          await tx
+            .update(apiSettings)
+            .set({ allowedNetworks, updatedAt: now })
+            .where(eq(apiSettings.tenantId, ctx.tenant.id));
+        } else {
+          await tx.insert(apiSettings).values({
+            id: uuidv7(),
+            tenantId: ctx.tenant.id,
+            allowedNetworks,
+            createdAt: now,
+            updatedAt: now,
+          });
+        }
+        await recordAudit(
+          tx,
+          ctx,
+          {
+            action: 'api.networks_changed',
+            subjectType: 'tenant',
+            subjectId: ctx.tenant.id,
+            metadata: { from: before, to: allowedNetworks },
           },
           meta,
         );

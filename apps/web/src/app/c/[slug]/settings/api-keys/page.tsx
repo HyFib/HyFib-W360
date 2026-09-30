@@ -14,7 +14,11 @@ import {
   type ApiKeyView,
 } from '@w360/domain';
 import { Alert, Badge, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
-import { ApiKeyActions, CreateApiKeyForm } from '@/components/settings/api-keys';
+import {
+  ApiKeyActions,
+  CompanyApiNetworks,
+  CreateApiKeyForm,
+} from '@/components/settings/api-keys';
 import { CopyField } from '@/components/growth/copy-field';
 import { SignInAgain } from '@/components/sign-in-again';
 import { formatDate, formatDateTime } from '@/lib/format';
@@ -36,6 +40,7 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
   if (!can(ctx, 'developer.manage')) notFound();
   const { apiKeys, config, clock, plans } = await getRuntime();
   const keys = await apiKeys.list(ctx);
+  const { allowedNetworks: companyNetworks } = await apiKeys.companyNetworks(ctx);
   const usage = await plans.usage(ctx);
   const apiLimit = usage.limits.apiRequests;
   const inPlan = apiLimit !== 0;
@@ -129,6 +134,33 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
 
       <Card>
         <CardHeader>
+          <CardTitle>Addresses for all keys</CardTitle>
+          <CardDescription>
+            Hold every key of the company to the addresses your systems call from, including keys
+            created later. A key that lists addresses of its own accepts only requests from both
+            lists.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-3">
+          <p className="text-sm">
+            {companyNetworks ? (
+              <>
+                Keys accept requests only from{' '}
+                <span className="font-mono text-xs">
+                  {companyNetworks.map(formatAllowedNetwork).join(', ')}
+                </span>
+                .
+              </>
+            ) : (
+              'Keys accept requests from any address, unless a key lists its own.'
+            )}
+          </p>
+          <CompanyApiNetworks slug={ctx.tenant.slug} allowedNetworks={companyNetworks} />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
           <CardTitle>API keys</CardTitle>
           <CardDescription>
             {activeCount} of {API_KEY_LIMITS.activeKeys} active keys. A key’s secret part is shown
@@ -182,9 +214,14 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
                         <span className="font-mono text-foreground">
                           {k.allowedNetworks.map(formatAllowedNetwork).join(', ')}
                         </span>
+                      ) : companyNetworks ? (
+                        'the addresses for all keys'
                       ) : (
                         'any address'
                       )}
+                      {k.allowedNetworks && companyNetworks
+                        ? ', when they are also among the addresses for all keys'
+                        : ''}
                     </p>
                     <p className="text-xs text-muted-foreground">
                       Requests this period:{' '}

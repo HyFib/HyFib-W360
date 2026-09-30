@@ -16,6 +16,7 @@ import {
   rotateApiKeyAction,
   setApiKeyLimitAction,
   setApiKeyNetworksAction,
+  setCompanyApiNetworksAction,
 } from '@/app/actions/api-keys';
 import { ActionFailure, type ActionFailureState } from '@/components/action-failure';
 import { ClientButton, ClientForm } from '@/components/client-form';
@@ -39,18 +40,20 @@ const OVERLAP_OPTIONS = [
 const NETWORKS_HELP =
   'One IPv4 or IPv6 address or network per line, such as 203.0.113.7 or 203.0.113.0/24. Requests from any other address are refused. Leave it empty to accept any address.';
 
-/** The addresses field of the create form and the edit dialog. */
+/** The addresses field of the create form and the edit dialogs. */
 function NetworksField({
   id,
+  label = 'Allowed addresses (optional)',
   value,
   onChange,
 }: {
   id: string;
+  label?: string;
   value: string;
   onChange: (value: string) => void;
 }) {
   return (
-    <Field id={id} label="Allowed addresses (optional)" description={NETWORKS_HELP}>
+    <Field id={id} label={label} description={NETWORKS_HELP}>
       {(aria) => (
         <Textarea
           {...aria}
@@ -446,6 +449,58 @@ export function ApiKeyActions({
           ) : null}
         </div>
       ) : null}
+      <ActionFailure failure={error} />
+    </div>
+  );
+}
+
+/** The addresses every key of the company accepts requests from (ADR-099). */
+export function CompanyApiNetworks({
+  slug,
+  allowedNetworks,
+}: {
+  slug: string;
+  allowedNetworks: string[] | null;
+}) {
+  const prefix = useId();
+  const current = (allowedNetworks ?? []).map(formatAllowedNetwork).join('\n');
+  const [networks, setNetworks] = useState(current);
+  const [error, setError] = useState<ActionFailureState | null>(null);
+  const [busy, setBusy] = useState(false);
+  return (
+    <div className="grid gap-2">
+      <div className="flex flex-wrap gap-2">
+        <ConfirmDialog
+          trigger={
+            <ClientButton
+              size="sm"
+              variant="outline"
+              disabled={busy}
+              onClick={() => setNetworks(current)}
+            >
+              Addresses for all keys
+            </ClientButton>
+          }
+          title="Addresses for all keys"
+          description="Every key accepts requests only from these addresses, and only from its own too when it lists any. Changes apply to the next request."
+          confirmLabel="Save addresses"
+          onConfirm={() => {
+            setBusy(true);
+            setError(null);
+            void setCompanyApiNetworksAction(slug, { allowedNetworks: networks }).then((r) => {
+              setBusy(false);
+              if (!r.ok) setError(r);
+            });
+          }}
+        >
+          <NetworksField
+            id={`${prefix}-company-networks`}
+            label="Addresses for all keys (optional)"
+            value={networks}
+            onChange={setNetworks}
+          />
+        </ConfirmDialog>
+      </div>
       <ActionFailure failure={error} />
     </div>
   );

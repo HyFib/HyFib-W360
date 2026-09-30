@@ -7,7 +7,13 @@ import { API_SCOPES } from '@w360/db';
 import { PERMISSIONS, ROLE_PERMISSIONS } from '../authz/permissions';
 import { apiErrorResponse, apiRequestError } from './errors';
 import { allowedNetworksSchema, bearerToken, generateApiToken, networkEntryProblem } from './keys';
-import { assertAnyScope, assertScope, hasScope, type ApiContext } from './context';
+import {
+  apiAddressRefusal,
+  assertAnyScope,
+  assertScope,
+  hasScope,
+  type ApiContext,
+} from './context';
 import { apiScopesNotInPlan, scopesNotInPlan } from '../plans/entitlements';
 import {
   apiAddConversationNote,
@@ -1426,6 +1432,30 @@ describe('allowed networks (ADR-076)', () => {
     expect(formatAllowedNetwork('203.0.113.0/24')).toBe('203.0.113.0/24');
     expect(formatAllowedNetwork('2001:db8::1/128')).toBe('2001:db8::1');
     expect(formatAllowedNetwork('2001:db8::/32')).toBe('2001:db8::/32');
+  });
+});
+
+describe('addresses for all keys (ADR-099)', () => {
+  it('names whose addresses refused the request, and the address it came from', () => {
+    expect(apiAddressRefusal('key', '198.51.100.9')).toBe(
+      'This API key does not accept requests from 198.51.100.9.',
+    );
+    expect(apiAddressRefusal('company', '198.51.100.9')).toBe(
+      'The company this API key belongs to does not accept API requests from 198.51.100.9.',
+    );
+    expect(apiAddressRefusal('key', null)).toBe(
+      'This API key accepts requests only from its listed addresses, and this request’s address could not be determined.',
+    );
+    expect(apiAddressRefusal('company', null)).toBe(
+      'The company this API key belongs to accepts API requests only from its listed addresses, and this request’s address could not be determined.',
+    );
+  });
+
+  it('says in the OpenAPI document that the company can limit the addresses of all its keys', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    expect(doc.info.description).toContain(
+      'A key, and the company for all its keys, can be limited to the addresses its systems call from',
+    );
   });
 });
 

@@ -1,5 +1,91 @@
 # Progress
 
+## 2026-09-30 — Phase 5: addresses for all of a company's API keys (P5-08, ADR-099)
+
+Status: **Implemented and locally verified (test data only).** A key can be held to the networks
+its systems call from (ADR-076), but a company that wanted all its API traffic to come from its own
+servers had to set every key, and a key created without networks accepted requests from anywhere.
+
+### Completed
+
+- **Design (ADR-099):** owners and administrators (`developer.manage`) can list up to 20 IPv4 or
+  IPv6 addresses or networks for all of the company's keys, typed, checked and kept as a key's are.
+  A request must come from one of them, and from one of its key's own networks when the key lists
+  any; keys created later are held to them from their first request. Empty accepts any address.
+- **Migration 0076:** `app.api_settings` (one row per company, made when first set; row security;
+  the runtime role reads, inserts and updates `allowed_networks` and `updated_at` only, and cannot
+  delete it), checked to hold 1 to 20 networks or none; deletion step 857. The lookup
+  `ops.api_key_authenticate(token_hash, client_ip)` (SECURITY DEFINER, pinned `search_path`,
+  runtime role only) is rebuilt with one more column, `refused_by`: it checks the company's
+  networks after the key's own and before the key is marked used, and says which list refused the
+  address. Web servers of the previous release select the columns they know by name, so they keep
+  working during a rolling deploy.
+- **Domain:** the keys service reads the company's networks (`companyNetworks`) and changes them
+  (`setCompanyNetworks`) after a recent sign-in, under the company's key lock, so two first changes
+  at once make one row; each change is audited as `api.networks_changed` with the lists before and
+  after, and the same list again records nothing. Authentication returns whose list refused the
+  address, and the 403 `ip_not_allowed` says so ("The company this API key belongs to does not
+  accept API requests from …"); the attempt counts against the per-address limit of failed
+  authentication, as for a key's networks, and the web server logs which list refused it. The
+  OpenAPI document says that the company can limit the addresses of all its keys.
+- **Web:** Settings → API keys has an "Addresses for all keys" card with the list and a dialog to
+  change it; each key says whether it accepts requests from its own addresses, the company's, or
+  both.
+- **Export:** the company's list is in the company export (`app.api_settings`).
+- **Tests:**
+  - Unit (`api.test.ts`, 2 new): the refusal's wording for each list, with and without an address;
+    the OpenAPI text.
+  - Integration (`api.test.ts`, 4 new):
+    - every key of the company is held to the list, including one created later, while another
+      company's keys are not; refused addresses (and an unknown one) leave the key unused, an
+      IPv4-mapped address inside is accepted, and an emptied list accepts any address again;
+    - with both lists, an address must be on both, and the key's list is checked first;
+    - changes are audited before and after (the same list again records nothing), refused with a
+      stale sign-in, for an agent and for bad input, and kept to the company for the service and
+      the runtime role, which cannot delete the row; the table refuses an empty list and more than
+      20 networks;
+    - two first changes while the company's key lock is held make one row, the second seeing the
+      first.
+  - The company data tests check that the list is deleted with the company and exported.
+  - e2e (`api-keys.spec.ts`): the owner lists the office's network for all keys; a key without
+    addresses of its own is then refused from another address (403 `ip_not_allowed`, naming the
+    company's list) and accepted from the network, and accepts any address again once the list is
+    removed.
+- **Docs:** ADR-099; SECURITY; THREAT-MODEL T94; RUNBOOKS (`ip_not_allowed`, migration 0076);
+  ARCHITECTURE; DATA-RETENTION; BACKLOG P5-08; FEATURE-MATRIX W-135 and H-033.
+- **Mutation checks:** 22 regressions tried one at a time, all caught (2 through the e2e test).
+  - 10 in the lookup and the table: the company's list not checked; an unknown address accepted
+    by it; a company refusal reported as the key's; the key marked used before the company's list
+    is checked; the company's list checked before the key's own; the definer unable to read the
+    lists; the runtime role allowed to delete the row; empty or long lists stored; the row not
+    deleted with the company, or not deletable by the deletion.
+  - 7 in the settings service: changes without `developer.manage` or a recent sign-in; the list
+    read without `developer.manage`; entries stored as typed; the same list audited again; changes
+    audited under another action; two first changes not serialised.
+  - 3 elsewhere: every refusal named as the key's; the company's refusal worded as the key's; the
+    list left out of the export.
+  - 2 through the e2e test: the API gate wording every refusal as the key's; the page offering no
+    company list.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                                                                                                                             | Result                                                            |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                                | clean                                                             |
+| `pnpm test`                                                                                                                                                                         | 440 passed                                                        |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                                                                 | 592 passed on each                                                |
+| `pnpm build` and `pnpm test:e2e` for `api-keys.spec.ts` and `api-quota.spec.ts` on chromium and mobile-chromium, on the local database created for the day's runs, migrated to 0076 | 14 passed (3.9 min), with the new test for addresses for all keys |
+| Mutation checks                                                                                                                                                                     | 22 regressions, all caught (listed above)                         |
+| gitleaks 8.30.1 on the commit                                                                                                                                                       | no leaks                                                          |
+
+### Known gaps
+
+- Exceptions for single keys, networks per scope or endpoint, hostnames and time windows are not
+  built; nor are alerts or a list of refused requests (the web server logs each refusal with the key
+  and company).
+- The check is only as sound as the proxy configuration (`TRUSTED_PROXIES`, DEPLOYMENT.md), as for
+  a key's own networks.
+
 ## 2026-09-30 — Phase 5: emails about an API key's own monthly limit (P5-08, ADR-098)
 
 Status: **Implemented and locally verified (test data only).** A key with a monthly limit of its own
