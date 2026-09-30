@@ -1,5 +1,41 @@
 # Progress
 
+## 2026-09-30 — Fix: the email outbox lease test in a busy test database
+
+Status: **Fixed and verified locally (PostgreSQL 18.6 and 17.11).** The integration test "a worker
+that died mid-delivery leaves a lease that the sweeper recovers after expiry" (`jobs.test.ts`)
+failed now and then with "expected [ Array(500) ] to deep equally contain { … }": once in a full
+PostgreSQL 18 run, then in the fifth of five back-to-back full runs made to catch it (the first four
+passed). Only the test changed: the sweeper and email delivery are unchanged.
+
+### Cause
+
+- The sweeper (`findStaleOutboxRows`, which the worker runs every minute) reads at most 500 stale
+  rows, in no order: pending rows due more than a minute ago, and rows whose delivery lease
+  expired. The integration test files share one database, and some leave pending notices behind
+  (nothing sends them there). When more than 500 were pending as this test ran, which depends on
+  the order the files ran in, the one batch the test read could leave out its row.
+- Reproduced every time by adding 600 pending notices at the start of the test: the same failure,
+  with exactly 500 rows returned.
+- The worker is not affected this way: every row a sweep signals again is then sent, rescheduled or
+  marked failed, so it leaves the stale rows and later sweeps read the rest.
+
+### Completed
+
+- **The test reads every stale row** (a limit of 100,000 instead of the sweeper's 500), with a
+  comment saying why: it checks that the expired lease makes the row stale, not which batch the row
+  lands in.
+- **Mutation checks:** both deliberate regressions in the sweeper's query (expired leases left out,
+  the lease compared the wrong way) still make the test fail.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                                         | Result                                                          |
+| ----------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| The test with 600 more pending notices added at its start, before and after the fix             | failed (500 rows returned, without the test's row), then passed |
+| `npx vitest run --project integration tests/integration/jobs.test.ts` (PostgreSQL 18.6 / 17.11) | 15 passed / 15 passed                                           |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                            | 0 problems / all files formatted / all workspace packages pass  |
+
 ## 2026-09-30 — Phase 5: webhook events for WhatsApp orders (P5-09, ADR-085)
 
 Status: **Implemented and locally verified with local test receivers (no customer data).** An order
