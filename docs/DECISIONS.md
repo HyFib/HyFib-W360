@@ -3313,3 +3313,33 @@ Decision:
 Not built: warnings before a key's limit (the company's warning at 80% stays, ADR-062), emails
 when a key's month is used up, per-key limits per endpoint, and per-key usage on HyFib's platform
 pages.
+
+## ADR-098 Emails about an API key's own monthly limit (2026-09-30)
+
+Context: a key with a monthly limit of its own (ADR-097) was refused once its month was used up
+without anyone being told, while the company's limit warns the billing managers at 80% (ADR-062)
+and tells them when it is reached (ADR-061). The integration behind the key simply started failing.
+
+Decision:
+
+- **Who and when:** the company's active owners and administrators, the roles that manage keys (as
+  for the expiry reminders, ADR-067), are emailed once when a key's requests reach 80% of its limit
+  (rounded up) in a usage period, and once when they reach the limit. A period that reaches the
+  limit before the sweep saw it at 80% gets only the second email, and limits of 1 to 4 have no
+  warning (80% of them rounded up is the limit), as for the company (ADR-062).
+- **How:** `app.api_key_usage` gains `warned_at` and `notified_at`. The minute messaging sweep lists
+  the counters due through `ops.api_key_usage_notices_due` (SECURITY DEFINER, the worker's role
+  only, ids only): of the last month, of a usable key with a limit, of a company whose keys still
+  work (not being deleted). Each is locked and checked again in the company's own scope, including
+  that it is the current period's counter, and marked in the transaction that queues the emails, so
+  two sweeps at once send one email. A counter of an earlier period is marked without an email (as
+  the company's, ADR-062), so that the sweep stops listing it; one of a later period, counted by a
+  server whose clock is ahead, waits until it is current.
+- **Changing the limit arms them again:** a new limit (or none) clears this period's marks, so the
+  emails follow the new limit; the next period's counter is a new row, armed from the start.
+- **What the email says:** the key's name and public prefix (never a token), the requests used, the
+  limit and when the period ends in the company's time zone, and where to change the limit.
+  Settings → API keys shows when each email went out this period.
+
+Not built: a choice of recipients or thresholds, emails for keys without a limit of their own, and
+notices in the product beyond the settings page.

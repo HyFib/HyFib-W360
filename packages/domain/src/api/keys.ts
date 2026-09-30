@@ -176,6 +176,9 @@ export interface ApiKeyView {
   monthlyRequestLimit: number | null;
   /** Requests the key made in the company's current usage period (ADR-097). */
   requestsThisPeriod: number;
+  /** When owners and administrators were emailed this period: at 80% and at the limit (ADR-098). */
+  usageWarnedAt: Date | null;
+  usageNotifiedAt: Date | null;
   state: 'active' | 'revoked' | 'expired';
 }
 
@@ -307,6 +310,8 @@ export function createApiKeysService(deps: { db: Database; clock: Clock }) {
               allowedNetworks: apiKeys.allowedNetworks,
               monthlyRequestLimit: apiKeys.monthlyRequestLimit,
               requestsThisPeriod: sql<number>`coalesce(${apiKeyUsage.used}, 0)::int`,
+              usageWarnedAt: apiKeyUsage.warnedAt,
+              usageNotifiedAt: apiKeyUsage.notifiedAt,
             })
             .from(apiKeys)
             .leftJoin(users, eq(users.id, apiKeys.createdByUserId))
@@ -506,7 +511,8 @@ export function createApiKeysService(deps: { db: Database; clock: Clock }) {
      * Changes an active key's own monthly request limit (ADR-097); empty removes it, leaving only
      * the plan's. It applies from the key's next request, to the requests already counted this
      * period: a request reads the limit under a key share lock, which waits for this change. The
-     * change is audited with the limits before and after.
+     * emails at 80% and at the limit are armed again for it (ADR-098), and the change is audited
+     * with the limits before and after.
      */
     async setMonthlyLimit(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
       assertCan(ctx, 'developer.manage');
@@ -535,6 +541,18 @@ export function createApiKeysService(deps: { db: Database; clock: Clock }) {
           .update(apiKeys)
           .set({ monthlyRequestLimit })
           .where(and(eq(apiKeys.tenantId, ctx.tenant.id), eq(apiKeys.id, data.keyId)));
+        // This period's emails were about the old limit.
+        const { start } = usagePeriod((await loadEntitlements(tx, ctx.tenant.id)).usageAnchor, now);
+        await tx
+          .update(apiKeyUsage)
+          .set({ warnedAt: null, notifiedAt: null })
+          .where(
+            and(
+              eq(apiKeyUsage.tenantId, ctx.tenant.id),
+              eq(apiKeyUsage.apiKeyId, data.keyId),
+              eq(apiKeyUsage.periodStart, start),
+            ),
+          );
         await recordAudit(
           tx,
           ctx,

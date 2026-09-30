@@ -1,5 +1,78 @@
 # Progress
 
+## 2026-09-30 — Phase 5: emails about an API key's own monthly limit (P5-08, ADR-098)
+
+Status: **Implemented and locally verified (test data only).** A key with a monthly limit of its own
+(ADR-097) was refused once its month was used up without anyone being told, while the company's
+limit warns at 80% (ADR-062) and tells when it is reached (ADR-061).
+
+### Completed
+
+- **Design (ADR-098):** the company's active owners and administrators are emailed once when a key's
+  requests reach 80% of its own limit (rounded up) in a usage period, and once when they reach the
+  limit. A period that reaches the limit before the sweep saw it at 80% gets only the second email,
+  and limits of 1 to 4 have no warning. A new limit (or none) arms both again for the current
+  period, and the next period's counter is armed from the start.
+- **Migration 0075:** `warned_at` and `notified_at` on `app.api_key_usage` (the runtime role may set
+  them); a partial index on the counters not told; `ops.api_key_usage_notices_due` (SECURITY
+  DEFINER, executable by the runtime role only, ids only) lists the counters of the last month, of
+  a usable key with a limit, of a company not being deleted, at the limit and not told, or at 80%
+  and neither warned nor told.
+- **Domain:** `api/key-usage-notices.ts`. `noticeApiKeyUsageDue` lists the counters due;
+  `noticeApiKeyUsage` locks each in its company's scope, checks it again (the company's status, an
+  active key with a limit, the current period, the email due) and marks it in the transaction that
+  queues a company notice to the owners and administrators. A counter of an earlier period is
+  marked without an email, so that the sweep stops listing it; one of a later period (a server
+  whose clock is ahead) waits until it is current. `setMonthlyLimit` clears the current period's
+  marks, and the keys list returns when each email went out this period.
+- **Worker:** the minute messaging sweep runs the notices after the key expiry reminders, logging
+  the counts and each failure (nothing is marked, and the next minute tries again).
+- **Web:** Settings → API keys shows when "80% of its limit emailed" and "Limit reached emailed"
+  happened this period.
+- **Export:** the counts' `warned_at` and `notified_at` are in the company export.
+- **Tests:**
+  - Unit (`key-usage-notices.test.ts`, 4): the warning and the limit notice with the requests used,
+    the limit and the period's end in the company's time zone; a one-line subject whatever the
+    key's name holds; the notice rendered as a company email with the name escaped.
+  - Integration (`api-quota.test.ts`, 4 new):
+    - warned once at 80% and told once at the limit, owners and administrators only, with the link
+      to Settings → API keys; a new limit arms both again; the next period's counter is warned
+      again;
+    - a counter at the limit before any sweep is told once; limits of 1 to 4 are never warned;
+    - left out: keys without a limit, revoked and expired keys, another company's counter and a
+      company being deleted; a previous period's counter is marked without an email and not listed
+      again, and a next period's counter is left until then;
+    - two sweeps at once send each email once.
+  - The isolation suite lists the new function among those the runtime role may execute.
+  - e2e (`api-keys.spec.ts`): the per-key limit test waits for the owner's email that the key used
+    all three of its requests (through the worker's sweep and Mailpit), without the token, and for
+    "Limit reached emailed" on the page.
+- **Docs:** ADR-098; SECURITY; THREAT-MODEL T86 and T115; RUNBOOKS (the email, migration 0075);
+  ARCHITECTURE; DATA-RETENTION; BACKLOG P5-08; FEATURE-MATRIX W-136 and H-039.
+- **Mutation checks:** 21 regressions tried one at a time, all caught: 18 before the change for
+  earlier periods (2 through the e2e test), then 3 on the period checks after it.
+  - 6 in listing what is due: warned at 90% instead of 80%; warned or told counters listed again;
+    revoked keys or companies being deleted listed; the marks not updatable by the runtime role.
+  - 7 in checking again and marking: an earlier period told; a warning sent twice; the counter not
+    locked (two sweeps at once); a revoked key or a company being deleted told; every member
+    emailed; the requests used told as the limit.
+  - 3 elsewhere: the warning worded as the limit notice; a new limit keeping the old marks; the
+    marks left out of the export.
+  - 2 through the e2e test: the worker not sweeping; the page not showing the email.
+  - 3 after the change for earlier periods: an earlier period told; an earlier counter left to be
+    listed again (the behaviour before the change); a later period's counter closed.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                                                                                                                             | Result                                                                                              |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                                | clean; the format check first flagged a long line in the worker's sweep, wrapped                    |
+| `pnpm test`                                                                                                                                                                         | 438 passed                                                                                          |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                                                                 | 588 passed on each                                                                                  |
+| `pnpm build` and `pnpm test:e2e` for `api-keys.spec.ts` and `api-quota.spec.ts` on chromium and mobile-chromium, on the local database created for the day's runs, migrated to 0075 | 12 passed (2.8 min), the per-key limit test waiting for the owner’s email                           |
+| Mutation checks                                                                                                                                                                     | 21 regressions, all caught (listed above)                                                           |
+| gitleaks 8.30.1 on the commit                                                                                                                                                       | no leaks; a first scan flagged the unit test's made-up key prefix, replaced with one of low entropy |
+
 ## 2026-09-30 — Phase 5: a key's limit read under a lock (P5-08, ADR-097 review finding)
 
 Status: **Implemented and locally verified.** The Codex review of PR #18 found that a request could

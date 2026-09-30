@@ -1040,6 +1040,13 @@ true`); the same key with another request (method, path and body hashed) answers
   every request. The keys service sets the
   limit at creation, changes it for an active key after a recent sign-in (`setMonthlyLimit`,
   audited `api_key.limit_changed`), copies it on rotation, and lists each key's count this period.
+- **Emails about a key's limit (0075, ADR-098):** after the expiry reminders, the minute messaging
+  sweep (`api/key-usage-notices.ts`) lists through `ops.api_key_usage_notices_due` the counters of
+  usable keys with a limit at 80% of it (not warned) or at it (not told), then locks and checks each
+  again in its company's scope (the current period only) and sets `warned_at` or `notified_at` in
+  the transaction that queues a company notice to the active owners and administrators. A counter
+  of an earlier period is marked without an email, so that it is not listed again. Changing a key's
+  limit clears this period's marks.
 - **OpenAPI** (`api/openapi.ts`): `GET /api/v1/openapi.json` (no key; cacheable 5 minutes) is built
   from the zod schemas that validate requests; a unit test checks it against the route handlers.
 - **Expiry reminders (0040, ADR-067):** the minute messaging sweep (`api/expiry-reminders.ts`) lists,

@@ -159,6 +159,8 @@ describe('database roles', () => {
       'ops.api_key_authenticate(text,inet)',
       'ops.purge_api_idempotency_keys(integer)',
       'ops.api_key_expiry_reminders_due(integer,integer)',
+      // The counters due an email about a key's own limit (0075), for the worker.
+      'ops.api_key_usage_notices_due(integer)',
       // The purge of full rate limit buckets (0041), for the worker.
       'ops.purge_rate_limit_buckets(integer)',
     ]) {

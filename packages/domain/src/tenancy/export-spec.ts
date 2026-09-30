@@ -39,7 +39,7 @@ export const EXPORT_EXCLUDED_TABLES: Readonly<Record<string, string>> = {
 export const EXPORT_TABLES: readonly ExportTableSpec[] = [
   {
     table: 'app.api_key_usage',
-    columns: ['id', 'api_key_id', 'period_start', 'used'],
+    columns: ['id', 'api_key_id', 'period_start', 'used', 'warned_at', 'notified_at'],
   },
   {
     table: 'app.api_keys',

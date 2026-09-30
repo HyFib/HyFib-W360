@@ -234,6 +234,18 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
                           <dd className="inline">{formatDateTime(k.expiryRemindedAt, tz)}</dd>
                         </div>
                       ) : null}
+                      {k.usageWarnedAt ? (
+                        <div>
+                          <dt className="inline">80% of its limit emailed </dt>
+                          <dd className="inline">{formatDateTime(k.usageWarnedAt, tz)}</dd>
+                        </div>
+                      ) : null}
+                      {k.usageNotifiedAt ? (
+                        <div>
+                          <dt className="inline">Limit reached emailed </dt>
+                          <dd className="inline">{formatDateTime(k.usageNotifiedAt, tz)}</dd>
+                        </div>
+                      ) : null}
                     </dl>
                     <ApiKeyActions
                       slug={ctx.tenant.slug}

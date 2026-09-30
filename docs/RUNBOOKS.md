@@ -1171,6 +1171,16 @@ applies from the next request, to the requests already counted. Otherwise the ke
 the next usage period starts. The audit log records each change (`api_key.limit_changed`, with the
 limits before and after). A rotated key keeps its predecessor's limit and counts from zero.
 
+**An email about a key's limit did not come, or came again.** Owners and administrators are
+emailed once when a key reaches 80% of its own limit in a period and once when it reaches the limit
+(ADR-098); limits of 1 to 4 get only the second, and so does a key that reached its limit before
+the sweep saw it at 80%. The messaging sweep logs `API key usage emails queued` with the counts,
+and `API key usage email failed; will retry` with the company and counter ids (nothing is marked,
+and the next minute tries again). Settings → API keys shows when each email went out this period.
+Nothing is sent for a key without a limit, a revoked or expired key, or a company being deleted,
+and a counter of an earlier period is marked without an email. Changing a key's limit arms both
+emails again for the new limit.
+
 **403 `not_in_plan` naming a scope.** The company's plan leaves that scope out (ADR-092). The key
 keeps the scope: requests that need it work again, with no change to the key, once the company is
 on a plan version that includes it (a published version's scopes never change, so this is a new
@@ -1387,6 +1397,12 @@ already stored: a short `ACCESS EXCLUSIVE` lock on the keys table), creates `app
 row security and its grants, and registers deletion step 855 with the definer's grants and
 policies. A failure usually means a lock wait on `app.api_keys` timed out (run the migrations again
 when requests are quieter) or the bootstrap roles are missing.
+
+**Migration 0075 failed.** It runs in one transaction, so a failure applies nothing. It adds
+`warned_at` and `notified_at` to `app.api_key_usage` with their grant, a partial index, and
+`ops.api_key_usage_notices_due` (granted to `w360_app`, then handed to `w360_definer`, with the
+definer's column grants and read policy). A failure usually means the bootstrap roles are missing
+or a lock wait on `app.api_key_usage` timed out: run the migrations again when requests are quieter.
 
 **Migration 0074 failed.** It runs in one transaction and only drops
 `ops.api_key_authenticate(text)`, the lookup without the client's address that 0051 kept for web

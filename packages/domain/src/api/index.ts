@@ -8,6 +8,7 @@ export * from './openapi';
 export * from './errors';
 export * from './quota';
 export * from './expiry-reminders';
+export * from './key-usage-notices';
 export * from './rate-limits';
 export * from './conversations';
 export * from './members';

@@ -202,10 +202,11 @@ test('a key limited to listed addresses refuses requests from other addresses un
   await expectNoHorizontalOverflow(page);
 });
 
-test('a key with its own monthly limit is refused once it is used up, until the limit is raised', async ({
+test('a key with its own monthly limit is refused once it is used up, and its owner emailed, until the limit is raised', async ({
   page,
   request,
 }) => {
+  test.setTimeout(180_000);
   const email = uniqueEmail('keylimit');
   const suffix = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`;
   const slug = `keylimit-${suffix}`;
@@ -241,10 +242,21 @@ test('a key with its own monthly limit is refused once it is used up, until the 
   expect(body.error).toMatchObject({ code: 'rate_limited', reason: 'key_quota_exceeded' });
   expect(body.error.message).toContain('This API key allows 3 requests a month');
 
+  // The worker's minute sweep emails the owner that the key used its month (ADR-098).
+  const mail = await waitForEmailContaining(
+    email,
+    'API key “Partner feed” has used all 3 of its requests this month',
+    'The API refuses its requests (429, reason key_quota_exceeded)',
+    90_000,
+  );
+  expect(mail).toContain(`/c/${slug}/settings/api-keys`);
+  expect(mail).not.toContain(token);
+
   // The page shows the key used up; the refused request is not counted for the company.
   await page.reload();
   await expect(page.getByText(/Requests this period:\s*3 of 3/)).toBeVisible();
   await expect(page.getByText('Monthly limit reached', { exact: true })).toBeVisible();
+  await expect(page.getByText('Limit reached emailed')).toBeVisible();
   await expect(
     page.getByText(/:\s*3\s*API requests; your plan has no monthly limit\./),
   ).toBeVisible();

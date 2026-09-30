@@ -577,6 +577,12 @@ Phase 5 rules (Public API, P5-08):
   members with `developer.manage` after a recent sign-in, audited; the runtime role adds to a
   key's count but cannot move it to another key or period or delete it, and a count belongs to a
   key of the same company.
+- The company's owners and administrators are emailed at 80% of a key's own limit and at the limit
+  (ADR-098): the sweep finds counters due only through `ops.api_key_usage_notices_due` (owned by
+  `w360_definer`, executable only by `w360_app`, returning company and counter ids), then locks and
+  checks each again in its company's scope before marking it in the transaction that queues the
+  emails. The email names the key by its name and public prefix; the token is never stored, so it
+  cannot be sent.
 
 Phase 5 rules (outgoing webhooks, P5-09):
 

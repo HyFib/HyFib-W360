@@ -443,12 +443,14 @@ verification, app review, Embedded Signup configuration).
   for its key in the company's usage period, and a key may have its own monthly limit, set at
   creation and changed after a recent sign-in; a request its key refuses (429
   `key_quota_exceeded`) counts for neither the key nor the company, nor one the company refuses;
-  Settings → API keys shows each key's requests this period).
+  Settings → API keys shows each key's requests this period); **[emails about a key's limit
+  built, locally verified]** (ADR-098: owners and administrators are emailed once at 80% of a key's
+  own limit and once at the limit, in each period, and again after the limit changes).
   Remaining: media messages, call-to-action messages through the API, taking reactions back,
   assigning many conversations at once, media downloads, statuses changed since a time, starting or
   stopping runs for many contacts in one call, bulk sends in one call, networks for the whole
   company, limits per endpoint, availability per single endpoint (plans choose per scope since
-  ADR-092) and warnings before a key's own limit. The one-argument key lookup kept for rolling
+  ADR-092). The one-argument key lookup kept for rolling
   deploys (0051) is dropped (0074). Replaying many deliveries in one call is built with P5-09
   (ADR-095).
 - **P5-09 Outgoing webhooks** **[built, locally verified; delivered to local test receivers only]**

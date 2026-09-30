@@ -51,6 +51,10 @@ export const apiKeyUsage = appSchema.table('api_key_usage', {
   apiKeyId: uuid('api_key_id').notNull(),
   periodStart: tz('period_start').notNull(),
   used: integer('used').notNull(),
+  /** When owners and administrators were warned at 80% of the key's limit (ADR-098). */
+  warnedAt: tz('warned_at'),
+  /** When they were told the key reached its limit (ADR-098). */
+  notifiedAt: tz('notified_at'),
 });
 
 /** Stored responses of requests sent with an Idempotency-Key (24 hours). */
