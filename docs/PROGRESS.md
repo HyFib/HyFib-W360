@@ -1,5 +1,77 @@
 # Progress
 
+## 2026-09-30 — Phase 5: webhook events for campaigns (P5-09, ADR-087)
+
+Status: **Implemented and locally verified with local test receivers (no customer data).** A CRM or
+marketing tool kept in step with HyFib heard of each campaign message through `message.status`, but
+not that a campaign was approved, started, paused (and why) or finished.
+
+### Completed
+
+- **Design (ADR-087):** `campaign.status_changed` whenever a campaign's status changes, whoever
+  changes it: a member submitting it for approval, withdrawing, rejecting, approving, pausing,
+  resuming or cancelling it, or the runner starting, pausing (with the reason: a cap, the template,
+  the number, the member whose authority it uses, a missing rate card) or completing it (every
+  recipient processed, or its time ran out). Draft edits, progress and test sends send nothing.
+  Payloads are built when delivered: the campaign's name, template, times and counters (audience,
+  queued, skipped) and its number, with the change and its reason as captured; never a recipient or
+  a member.
+- **Migrations 0065–0066:** the endpoint check takes all 14 types; the event type check is replaced
+  `NOT VALID` in 0065 and validated in 0066 without blocking writes; the capture function (not
+  executable by `PUBLIC`) and a trigger on `app.campaigns` after an update that changes `status`.
+  Events are stamped with `clock_timestamp()`, so a start and a pause the runner makes in one
+  transaction keep their order.
+- **Domain:** the type in `WEBHOOK_EVENT_TYPES`, `WEBHOOK_EVENT_KEYS` and `WEBHOOK_EVENT_INFO`;
+  `CAMPAIGN_COMPLETION_REASONS` exported from the schema; `campaignStatusChangedPayloadSchema` and
+  the campaign read (`campaignOf`) in `webhooks/payloads.ts`; the OpenAPI webhook
+  `campaign.status_changed` (`WebhookCampaignStatusChanged`).
+- **Web:** Settings → Webhooks offers "Campaign status" (from the shared list) and its introduction
+  names campaigns.
+- **Tests:** unit (the payload schema: every status from every other, every pause and completion
+  reason, a draft without a template or number, unknown statuses and reasons, fractional counts and
+  another type refused; the OpenAPI list and body schema). Integration in `webhook-events.test.ts`
+  (local receiver): a campaign submitted, rejected, submitted again, approved, started by the
+  runner, paused by a member, resumed by another and completed by the runner, each change captured
+  once with the status before it and its reason and delivered only to the endpoint that takes
+  campaign events, as the campaign is when delivered; draft edits capturing nothing; a start and a
+  pause by the runner in one transaction (the member lost the permission) captured in order with
+  distinct times; a cancellation before the start; nothing captured without an endpoint for
+  campaigns; a gone campaign failing as `event_gone` without an attempt; an endpoint taking all 14
+  types. e2e `webhook-events.spec.ts`: an endpoint chosen in settings receives signed changes as a
+  member starts a campaign and the runner starts and completes it (draft edits send nothing).
+- **Docs:** ADR-087; ARCHITECTURE (outgoing webhooks); SECURITY (controls, Phase 5 rules);
+  THREAT-MODEL T105; RUNBOOKS (campaign events, migrations 0065–0066); DATA-RETENTION (outgoing
+  webhooks); BACKLOG P5-09; FEATURE-MATRIX H-014 and W-138.
+- **Mutation checks:** 27 regressions tried one at a time; 26 make a test fail. 25 of 26 in the
+  database and domain: no trigger; every update of a campaign captured; the status before a change
+  not kept; the pause or completion reason not kept; the pause reason kept whatever the status
+  (missed at first: a resume clears the reason, so the test now also cancels a paused campaign);
+  events stamped with the transaction's time; no status in the event; endpoints refused the campaign
+  type or limited to 13 types; events refused the type; the status as the campaign is now; the
+  status before it, the reasons or the template's name not read; queued counted as skipped; no
+  number; a gone campaign not detected; the type not offered to endpoints; the webhook or its body
+  schema missing from the OpenAPI document; a pause reason missing from the schema; fractional
+  counts described; a draft without a number not described. The other, dropping the explicit `REVOKE
+… FROM PUBLIC`, cannot be observed: default privileges (migration 0002) already withhold EXECUTE
+  from PUBLIC, which the isolation suite checks. 1 in the web layer through the e2e test: the
+  endpoint form not offering the campaign event.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                     | Result                                                                                                                                                                                        |
+| --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | 0 problems / all files formatted / all workspace packages pass                                                                                                                                |
+| `pnpm test` (unit)                                                          | 400 passed, including 1 new in `webhooks/webhooks.test.ts`                                                                                                                                    |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 542 passed, including 2 new in `webhook-events.test.ts`                                                                                                                                       |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 542 passed                                                                                                                                                                                    |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / on `webhook-events.spec.ts`, `webhooks.spec.ts` and `campaigns.spec.ts`: 16 passed (3.9 min), on a local database created for the day's runs with migrations 0065–0066 applied |
+| Mutation checks                                                             | 27 regressions tried (1 through the e2e test); 26 make a test fail, and the other (a redundant REVOKE) cannot be observed                                                                     |
+
+### Known gaps
+
+- Not built: delivery and read counts in the payload, the campaign in `message.status`, events per
+  recipient, test sends and drafts, reading campaigns through the public API, filters by campaign.
+
 ## 2026-09-30 — Phase 5: product messages through the public API (P5-08, ADR-086)
 
 Status: **Implemented and locally verified (no customer data).** Members send products from the

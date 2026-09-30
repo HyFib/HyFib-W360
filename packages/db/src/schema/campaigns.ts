@@ -56,6 +56,8 @@ export const CAMPAIGN_PAUSE_REASONS = [
 ] as const;
 export type CampaignPauseReason = (typeof CAMPAIGN_PAUSE_REASONS)[number];
 
+export const CAMPAIGN_COMPLETION_REASONS = ['all_processed', 'deadline_passed'] as const;
+
 export const campaigns = appSchema.table('campaigns', {
   id: uuid('id').primaryKey(),
   tenantId: uuid('tenant_id').notNull(),
@@ -96,7 +98,7 @@ export const campaigns = appSchema.table('campaigns', {
   pausedAt: tz('paused_at'),
   pauseReason: text('pause_reason', { enum: CAMPAIGN_PAUSE_REASONS }),
   completedAt: tz('completed_at'),
-  completionReason: text('completion_reason', { enum: ['all_processed', 'deadline_passed'] }),
+  completionReason: text('completion_reason', { enum: CAMPAIGN_COMPLETION_REASONS }),
   canceledAt: tz('canceled_at'),
   canceledByUserId: text('canceled_by_user_id'),
   audienceCount: integer('audience_count').notNull().default(0),

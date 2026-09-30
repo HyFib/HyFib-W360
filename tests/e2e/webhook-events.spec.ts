@@ -393,3 +393,144 @@ test('order events reach an endpoint: a customer sends a cart, and a member conf
     ['order.status_changed', orderId, 'fulfilled', 'confirmed'],
   ]);
 });
+
+/** A delivered campaign event, as far as this test reads it. */
+interface CampaignEventBody {
+  type: string;
+  createdAt: string;
+  data: {
+    campaign: {
+      id: string;
+      status: string;
+      previousStatus: string;
+      completionReason: string | null;
+    } & Record<string, unknown>;
+    channel: { id: string } | null;
+  };
+}
+
+test('campaign events reach an endpoint: a member starts a campaign, and the runner starts and completes it', async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(180_000);
+  const standIn = `http://127.0.0.1:${process.env.E2E_GRAPH_PORT}`;
+  const email = uniqueEmail('hookcmp');
+  const slug = `hookcmp-${Date.now().toString(36)}`;
+  const path = `/campaigns/${slug}`;
+  const forUs = () =>
+    received
+      .filter((r) => r.path === path)
+      .map((r) => ({ ...r, json: JSON.parse(r.body) as CampaignEventBody }))
+      // Deliveries are not ordered; the change captured last has the latest createdAt.
+      .sort((a, b) => a.json.createdAt.localeCompare(b.json.createdAt));
+  await signUpAndVerify(page, { name: 'Cara Campaigns', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('Campaign Hooks');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+  const { wabaId } = await connectTestChannel({ ownerEmail: email, slug });
+
+  // An endpoint for campaign events.
+  await page.goto(`/c/${slug}/settings/webhooks`);
+  await page.getByLabel('Endpoint URL').fill(`http://${HOST}:${port}${path}`);
+  await page.getByRole('checkbox', { name: /Campaign status/ }).check();
+  await page.getByRole('button', { name: 'Add endpoint' }).click();
+  const secretField = page.getByLabel('Signing secret');
+  await expect(secretField).toBeVisible();
+  const secret = await secretField.inputValue();
+  await page.getByRole('button', { name: 'I have stored the secret' }).click();
+
+  // An approved marketing template and a tagged contact who opted in.
+  await page.goto(`/c/${slug}/templates/new`);
+  await page.getByLabel('Name').fill('autumn_sale');
+  await page.getByLabel('Language code').fill('en');
+  await page.getByLabel('Category').selectOption('MARKETING');
+  await page.getByLabel('Body').fill('Hello {{1}}, our autumn sale starts today.');
+  await page.getByLabel('{{1}}').fill('Asha');
+  await page.getByRole('button', { name: 'Save draft' }).click();
+  await expect(page.getByRole('heading', { name: 'autumn_sale', level: 1 })).toBeVisible();
+  await page.getByRole('button', { name: 'Submit to Meta' }).click();
+  await page.getByRole('button', { name: 'Submit for review' }).click();
+  await expect(page.getByRole('button', { name: /^Submit/ })).toHaveCount(0);
+  await expect(async () => {
+    await page.reload();
+    await expect(page.getByText('In review', { exact: true }).first()).toBeVisible({
+      timeout: 1_000,
+    });
+  }).toPass({ timeout: 30_000 });
+  const approved = await request.post(`${standIn}/__stand-in/template-status`, {
+    data: { wabaId, name: 'autumn_sale', status: 'APPROVED' },
+  });
+  expect(approved.status()).toBe(200);
+  await page.goto(`/c/${slug}/templates`);
+  await page.getByRole('button', { name: 'Refresh from Meta' }).click();
+  await expect(page.getByText(/Refresh requested/)).toBeVisible();
+  await expect(async () => {
+    await page.reload();
+    await expect(page.getByText('Approved', { exact: true }).first()).toBeVisible({
+      timeout: 1_000,
+    });
+  }).toPass({ timeout: 30_000 });
+  await page.goto(`/c/${slug}/contacts/new`);
+  await page.getByLabel('Name').fill('Asha Rao');
+  await page.getByLabel('Phone number').fill(`+${randomWaId()}`);
+  await page.getByRole('button', { name: 'Add contact' }).click();
+  await expect(page.getByRole('heading', { name: 'Asha Rao', level: 1 })).toBeVisible();
+  await page.getByLabel('Add tags').fill('vip');
+  await page.getByRole('button', { name: 'Add', exact: true }).click();
+  await expect(page.getByRole('list', { name: 'Tags' })).toContainText('vip');
+  await page.getByLabel('How and when did they tell you?').fill('Signed up at the counter');
+  await page.getByRole('button', { name: 'Record consent' }).click();
+  await expect(page.getByText('Consent recorded.')).toBeVisible();
+
+  // Editing the draft sends nothing; starting it does.
+  await page.goto(`/c/${slug}/campaigns`);
+  await page.getByRole('link', { name: 'New campaign' }).click();
+  await page.getByLabel('Campaign name').fill('Autumn launch');
+  await page.getByRole('button', { name: 'Create draft' }).click();
+  await expect(page.getByRole('heading', { name: 'Autumn launch', level: 1 })).toBeVisible();
+  await page.getByLabel('Send from').selectOption({ index: 1 });
+  await page.getByLabel('Template').selectOption({ label: 'autumn_sale (en, marketing)' });
+  await page.getByLabel('Body variable {{1}}').selectOption('name');
+  await page.getByLabel('Tag', { exact: true }).fill('vip');
+  await page.getByRole('button', { name: 'Save draft' }).click();
+  await expect(page.getByText('Draft saved. The review below is updated.')).toBeVisible();
+  expect(forUs()).toEqual([]);
+  await page.getByRole('button', { name: 'Start campaign' }).click();
+  await page.getByRole('alertdialog').getByRole('button', { name: 'Start campaign' }).click();
+
+  // Scheduled by the member, started by the runner, completed on its next tick.
+  await expect(async () => expect(forUs()).toHaveLength(3)).toPass({ timeout: 60_000 });
+  for (const event of forUs()) {
+    expect(signatureValid(event.headers, event.body, secret)).toBe(true);
+    expect(event.headers['w360-event-type']).toBe('campaign.status_changed');
+  }
+  const campaignId = forUs()[0]!.json.data.campaign.id;
+  expect(
+    forUs().map((e) => [
+      e.json.data.campaign.id,
+      e.json.data.campaign.status,
+      e.json.data.campaign.previousStatus,
+      e.json.data.campaign.completionReason,
+    ]),
+  ).toEqual([
+    [campaignId, 'scheduled', 'draft', null],
+    [campaignId, 'running', 'scheduled', null],
+    [campaignId, 'completed', 'running', 'all_processed'],
+  ]);
+  expect(forUs()[2]!.json.data).toMatchObject({
+    campaign: {
+      name: 'Autumn launch',
+      templateName: 'autumn_sale',
+      pauseReason: null,
+      audienceCount: 1,
+      queuedCount: 1,
+      skippedCount: 0,
+      completedAt: expect.any(String),
+    },
+    channel: { id: expect.any(String) },
+  });
+  await page.reload();
+  await expect(page.getByText('Completed', { exact: true }).first()).toBeVisible();
+});

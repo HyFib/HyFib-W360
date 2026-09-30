@@ -17,6 +17,7 @@ import {
 import {
   automationRunEndedPayloadSchema,
   automationRunStartedPayloadSchema,
+  campaignStatusChangedPayloadSchema,
   consentChangedPayloadSchema,
   contactCreatedPayloadSchema,
   contactErasedPayloadSchema,
@@ -996,6 +997,12 @@ export function buildOpenApiDocument(serverUrl: string) {
         `${WEBHOOK_EVENT_INFO['order.status_changed'].description} order.status and order.previousStatus are the change; the rest is the order when the event is delivered. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
         'WebhookOrderStatusChanged',
       ),
+      'campaign.status_changed': webhook(
+        'webhookCampaignStatusChanged',
+        WEBHOOK_EVENT_INFO['campaign.status_changed'].label,
+        `${WEBHOOK_EVENT_INFO['campaign.status_changed'].description} campaign.status and campaign.previousStatus are the change, with why it paused or completed; the rest is the campaign when the event is delivered. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
+        'WebhookCampaignStatusChanged',
+      ),
       ping: webhook(
         'webhookPing',
         'Test event',
@@ -1100,6 +1107,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         WebhookAutomationRunEnded: jsonSchema(automationRunEndedPayloadSchema),
         WebhookOrderReceived: jsonSchema(orderReceivedPayloadSchema),
         WebhookOrderStatusChanged: jsonSchema(orderStatusChangedPayloadSchema),
+        WebhookCampaignStatusChanged: jsonSchema(campaignStatusChangedPayloadSchema),
         WebhookPing: jsonSchema(pingPayloadSchema),
       },
     },

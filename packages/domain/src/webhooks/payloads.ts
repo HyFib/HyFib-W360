@@ -6,6 +6,10 @@ import {
   AUTOMATION_RUN_STATUSES,
   automationRuns,
   automations,
+  CAMPAIGN_COMPLETION_REASONS,
+  CAMPAIGN_PAUSE_REASONS,
+  CAMPAIGN_STATUSES,
+  campaigns,
   channelAccounts,
   commerceOrderItems,
   commerceOrders,
@@ -24,7 +28,7 @@ import { COMMERCE_LIMITS } from '../commerce/model';
 import { findAnsweredMessageId } from '../messaging/reply-context';
 
 /**
- * The JSON bodies of outgoing webhooks (ADR-053, ADR-074, ADR-078, ADR-085). The zod schemas
+ * The JSON bodies of outgoing webhooks (ADR-053, ADR-074, ADR-078, ADR-085, ADR-087). The zod schemas
  * describe them in the OpenAPI document; `buildWebhookPayload` builds them from an event when it is
  * delivered, reading the company's current data (an erased contact has no number or name).
  */
@@ -345,6 +349,50 @@ export const orderStatusChangedPayloadSchema = envelope(
   webhookOrderDataSchema,
 );
 
+const campaignStatusSchema = z.enum(CAMPAIGN_STATUSES);
+
+const webhookCampaignSchema = z.object({
+  id: z.uuid(),
+  name: z.string().describe('The campaign’s name when the event is delivered.'),
+  status: campaignStatusSchema.describe('The status this event reports.'),
+  previousStatus: campaignStatusSchema.describe('The status before it.'),
+  pauseReason: z
+    .enum(CAMPAIGN_PAUSE_REASONS)
+    .nullable()
+    .describe(
+      'Why it paused, when the status is paused: a member paused it (manual), the spending or message cap was reached, the template is no longer approved, the number is not active, the member whose authority it runs under left or lost the permission, or no rate card is published for its spending cap. Null otherwise.',
+    ),
+  completionReason: z
+    .enum(CAMPAIGN_COMPLETION_REASONS)
+    .nullable()
+    .describe(
+      'Why it completed, when the status is completed: every recipient was processed, or its sending time ran out. Null otherwise.',
+    ),
+  templateId: z.uuid().nullable(),
+  templateName: z.string().nullable().describe('The template’s name when the event is delivered.'),
+  scheduledAt: z.iso.datetime().nullable().describe('When it was set to start.'),
+  startedAt: z.iso.datetime().nullable(),
+  completedAt: z.iso.datetime().nullable(),
+  canceledAt: z.iso.datetime().nullable(),
+  audienceCount: z
+    .number()
+    .int()
+    .describe('Contacts in the audience taken when it was submitted; 0 while it is a draft.'),
+  queuedCount: z.number().int().describe('Recipients whose message has been queued.'),
+  skippedCount: z
+    .number()
+    .int()
+    .describe('Recipients skipped: no consent, suppressed, erased, over a cap and the like.'),
+});
+
+export const campaignStatusChangedPayloadSchema = envelope(
+  'campaign.status_changed',
+  z.object({
+    campaign: webhookCampaignSchema,
+    channel: channelSchema.nullable().describe('The number it sends from; null if none is set.'),
+  }),
+);
+
 export const pingPayloadSchema = envelope(
   'ping',
   z.object({ endpointId: z.uuid(), message: z.string() }),
@@ -613,6 +661,44 @@ async function orderOf(tx: Tx, tenantId: string, orderId: string | null) {
   return { ...row, items };
 }
 
+/** A campaign with its template's name and its number, in the company. */
+async function campaignOf(tx: Tx, tenantId: string, campaignId: string | null) {
+  if (!campaignId || !z.uuid().safeParse(campaignId).success) return null;
+  const [row] = await tx
+    .select({
+      id: campaigns.id,
+      name: campaigns.name,
+      templateId: campaigns.templateId,
+      templateName: messageTemplates.name,
+      scheduledAt: campaigns.scheduledAt,
+      startedAt: campaigns.startedAt,
+      completedAt: campaigns.completedAt,
+      canceledAt: campaigns.canceledAt,
+      audienceCount: campaigns.audienceCount,
+      queuedCount: campaigns.queuedCount,
+      skippedCount: campaigns.skippedCount,
+      channelId: campaigns.channelAccountId,
+      channelPhone: channelAccounts.displayPhoneNumber,
+    })
+    .from(campaigns)
+    .leftJoin(
+      messageTemplates,
+      and(
+        eq(messageTemplates.tenantId, campaigns.tenantId),
+        eq(messageTemplates.id, campaigns.templateId),
+      ),
+    )
+    .leftJoin(
+      channelAccounts,
+      and(
+        eq(channelAccounts.tenantId, campaigns.tenantId),
+        eq(channelAccounts.id, campaigns.channelAccountId),
+      ),
+    )
+    .where(and(eq(campaigns.tenantId, tenantId), eq(campaigns.id, campaignId)));
+  return row ?? null;
+}
+
 const sentBy = (senderType: string | undefined) =>
   senderType === 'agent' ||
   senderType === 'bot' ||
@@ -762,6 +848,37 @@ export async function buildWebhookPayload(
           conversation: { id: order.conversationId },
           contact: await contactOf(tx, tenantId, order.contactId),
           channel: { id: order.channelId, phone: order.channelPhone ?? null },
+        },
+      };
+    }
+    case 'campaign.status_changed': {
+      // The status, the one before it and why it paused or completed as captured; the rest as it
+      // is now.
+      const campaign = await campaignOf(tx, tenantId, str(event.detail.campaignId));
+      if (!campaign) throw new WebhookEventGoneError();
+      return {
+        ...base,
+        data: {
+          campaign: {
+            id: campaign.id,
+            name: campaign.name,
+            status: event.status,
+            previousStatus: str(event.detail.previousStatus),
+            pauseReason: str(event.detail.pauseReason),
+            completionReason: str(event.detail.completionReason),
+            templateId: campaign.templateId,
+            templateName: campaign.templateName ?? null,
+            scheduledAt: campaign.scheduledAt?.toISOString() ?? null,
+            startedAt: campaign.startedAt?.toISOString() ?? null,
+            completedAt: campaign.completedAt?.toISOString() ?? null,
+            canceledAt: campaign.canceledAt?.toISOString() ?? null,
+            audienceCount: campaign.audienceCount,
+            queuedCount: campaign.queuedCount,
+            skippedCount: campaign.skippedCount,
+          },
+          channel: campaign.channelId
+            ? { id: campaign.channelId, phone: campaign.channelPhone ?? null }
+            : null,
         },
       };
     }

@@ -1419,6 +1419,25 @@ same name exists. 0064 validates the type check without blocking writes; it fail
 event has a type outside the list, which no code writes: look for the row by `type` before running
 it again.
 
+**Campaign events (ADR-087).** An endpoint that takes `campaign.status_changed` hears of every
+status change a campaign makes, whoever makes it: a member (submit, withdraw, reject, approve,
+pause, resume, cancel) or the runner (start, pause with its reason, complete). A campaign the runner
+starts and pauses in one tick (its member lost the permission, the template or number stopped
+working) sends both changes, `running` then `paused`, in capture order. Editing a draft and sending
+tests send nothing. `campaign.status` and `campaign.previousStatus` are the change itself, with
+`pauseReason` or `completionReason`; the name, times and counters are as they are when the event
+is delivered, so a late delivery can show counts from after the change. Delivery and read numbers
+are not in the payload: they come with `message.status` for each message or from the campaign's
+report. The event keeps the campaign id, the status before it and the reason in
+`app.webhook_events.detail`.
+
+**Migration 0065 or 0066 failed.** 0065 runs in one transaction, so a failure applies nothing: it
+widens the event type checks (the one on `app.webhook_events` `NOT VALID`) and adds the capture
+function and the trigger on `app.campaigns`. A failure usually means a check was renamed by hand
+(`webhook_endpoints_event_types_check`, `webhook_events_type_check`) or a trigger of the same name
+exists. 0066 validates the type check without blocking writes; it fails only if a stored event has
+a type outside the list, which no code writes: look for the row by `type` before running it again.
+
 ## 10P. Platform operations console
 
 `/platform/ops` is for platform owners and operators (MFA). It shows counts, states, error codes,

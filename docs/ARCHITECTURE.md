@@ -1058,6 +1058,14 @@ true`); the same key with another request (method, path and body hashed) answers
   when delivered: the order with its items in cart order and amounts in minor units (the statuses
   as captured, the note null once erased), the conversation id, the contact and the number; never
   Payment Link or Razorpay payment details. Store orders send nothing.
+- **Campaign events** (migrations 0065–0066, ADR-087): a trigger on `app.campaigns` captures
+  `campaign.status_changed` when an update changes a campaign's status (a member submitting,
+  withdrawing, rejecting, approving, pausing, resuming or cancelling it, or the runner starting,
+  pausing or completing it), through `app.capture_webhook_event` (the campaign id, the status before
+  it and a pause or completion reason, in `detail`), stamped with `clock_timestamp()` so that a
+  start and a pause made in one runner transaction keep their order. Their payloads are built when
+  delivered: the campaign's name, template, times and counters now, the statuses and reason as
+  captured, and the number; never a recipient or a member.
 - **Dispatch:** the worker's LISTEN connection (`apps/worker/src/webhook-listener.ts`) turns a
   notification into a lookup of active companies with due deliveries (`ops.webhook_dispatch_due`,
   SECURITY DEFINER), at most one lookup every 250 ms; the per-minute messaging sweep does the same

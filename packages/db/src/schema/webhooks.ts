@@ -21,6 +21,7 @@ export const WEBHOOK_EVENT_TYPES = [
   'automation.run_ended',
   'order.received',
   'order.status_changed',
+  'campaign.status_changed',
 ] as const;
 export type WebhookEventType = (typeof WEBHOOK_EVENT_TYPES)[number];
 

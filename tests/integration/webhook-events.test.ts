@@ -19,6 +19,7 @@ import {
   authenticateApiToken,
   automationRunEndedPayloadSchema,
   automationRunStartedPayloadSchema,
+  campaignStatusChangedPayloadSchema,
   contactCreatedPayloadSchema,
   contactErasedPayloadSchema,
   contactUpdatedPayloadSchema,
@@ -26,7 +27,9 @@ import {
   conversationStatusPayloadSchema,
   createApiKeysService,
   createAutomationService,
+  createCampaignsService,
   createCommerceService,
+  createConsentService,
   createContactsService,
   createInboxService,
   createTemplatesService,
@@ -40,6 +43,7 @@ import {
   processSendIntent,
   processTemplateSubmit,
   processWebhookDeliveries,
+  runCampaignTick,
   syncTemplates,
   WEBHOOK_EVENT_KEYS,
   type AutomationTrigger,
@@ -52,13 +56,13 @@ import { startRazorpayStandIn, type RazorpayStandIn } from '../support/razorpay-
 import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './whatsapp-fixture';
 
 /**
- * Webhook events for conversations and contacts (ADR-074), automation runs (ADR-078) and WhatsApp
- * orders (ADR-085) against real PostgreSQL and a local receiver: capture by the triggers from every
- * kind of change, one contact event per contact and transaction (savepoints included), erasure
- * sending only `contact.erased`, the start and end of live runs (not test runs), orders and every
- * status change whoever makes it (members, Razorpay through the worker), delivery to the endpoints
- * that take each type, payloads built when delivered, and the capture function's limits for the
- * company role.
+ * Webhook events for conversations and contacts (ADR-074), automation runs (ADR-078), WhatsApp
+ * orders (ADR-085) and campaigns (ADR-087) against real PostgreSQL and a local receiver: capture by
+ * the triggers from every kind of change, one contact event per contact and transaction (savepoints
+ * included), erasure sending only `contact.erased`, the start and end of live runs (not test runs),
+ * orders and campaigns and every status change whoever makes it (members, Razorpay through the
+ * worker, the campaign runner), delivery to the endpoints that take each type, payloads built when
+ * delivered, and the capture function's limits for the company role.
  */
 let fx: WhatsAppFixture;
 let receiver: Server;
@@ -153,7 +157,10 @@ interface EventRow extends Record<string, unknown> {
 }
 
 /** The company's captured events of the given types, oldest first, with their delivery counts. */
-const eventsOf = (c: Company, prefix: 'conversation.' | 'contact.' | 'automation.' | 'order.') =>
+const eventsOf = (
+  c: Company,
+  prefix: 'conversation.' | 'contact.' | 'automation.' | 'order.' | 'campaign.',
+) =>
   fx.query<EventRow>(
     `SELECT e.id, e.type, e.status, e.detail, e.conversation_id, e.contact_id,
             (SELECT count(*)::int FROM app.webhook_deliveries d
@@ -1424,6 +1431,347 @@ describe('order events (ADR-085)', () => {
     expect(bodiesAt(gone.path)).toEqual([]);
 
     // An endpoint can take every event type, orders included.
+    const everything = await addEndpoint(c, [...WEBHOOK_EVENT_KEYS]);
+    expect(
+      await fx.query('SELECT event_types FROM app.webhook_endpoints WHERE id = $1', [
+        everything.id,
+      ]),
+    ).toEqual([{ event_types: [...WEBHOOK_EVENT_KEYS] }]);
+  });
+});
+
+describe('campaign events (ADR-087)', () => {
+  class TestClock implements Clock {
+    private offset = 0;
+    now() {
+      return new Date(Date.now() + this.offset);
+    }
+    advance(ms: number) {
+      this.offset += ms;
+    }
+  }
+
+  const promo: TemplateDefinition = {
+    category: 'MARKETING',
+    header: { type: 'none' },
+    body: { text: 'Hello {{1}}, our festive sale starts today.', examples: ['Asha'] },
+    footer: null,
+    buttons: [{ type: 'QUICK_REPLY', text: 'Stop promotions' }],
+  };
+
+  /**
+   * A company ready to send campaigns: an approved marketing template, contacts tagged vip who
+   * opted in to marketing, the campaigns service on a clock the test moves, and the runner.
+   */
+  async function campaignCompany(contactCount: number) {
+    const c = await fx.company();
+    const clock = new TestClock();
+    const deps = { db: fx.dbs.app, jobs: fx.jobs(), signer: fx.signer, clock };
+    const owner = await fx.ctx(c, c.owner);
+    const templateName = `festive_${randomBytes(4).toString('hex')}`;
+    const templates = createTemplatesService({ ...deps, clock: systemClock });
+    const { id: templateId } = await templates.createDraft(owner, {
+      whatsappAccountId: c.whatsappAccountId,
+      name: templateName,
+      language: 'en',
+      definition: promo,
+    });
+    await templates.submitTemplate(owner, templateId);
+    const graphDeps = { ...deps, clock: systemClock, keyring: fx.keyring, graph: fx.graph };
+    const scope = authorizedTenantScope(c.tenant.id, null);
+    expect(await processTemplateSubmit(graphDeps, scope, templateId)).toBe('done');
+    const template = fx.standIn.state.templates.get(c.wabaId)?.find((t) => t.name === templateName);
+    if (!template) throw new Error('template not at the stand-in');
+    template.status = 'APPROVED';
+    await syncTemplates(graphDeps, scope, c.whatsappAccountId);
+
+    const consent = createConsentService({ db: fx.dbs.app, clock: systemClock });
+    for (let i = 0; i < contactCount; i += 1) {
+      const { id } = await contactsService().createContact(owner, {
+        phone: `+${waId()}`,
+        displayName: `Shopper ${i}`,
+        tags: ['vip'],
+      });
+      await consent.recordConsent(owner, {
+        contactId: id,
+        purpose: 'marketing',
+        action: 'opt_in',
+        note: 'Signed up at the store',
+      });
+    }
+    const campaigns = createCampaignsService(deps);
+    return {
+      c,
+      clock,
+      campaigns,
+      templateId,
+      templateName,
+      /** A draft sending the template to the vip contacts, now unless a time is given. */
+      async draft(ctx: TenantContext, name: string, schedule: Record<string, unknown> = {}) {
+        const { id } = await campaigns.createDraft(ctx, { name }, {});
+        await campaigns.updateDraft(
+          ctx,
+          id,
+          {
+            expectedVersion: 0,
+            name,
+            channelAccountId: c.channelAccountId,
+            templateId,
+            variables: { header: [], body: [{ source: 'name', fallback: 'there' }] },
+            audience: {
+              kind: 'conditions',
+              definition: { match: 'all', conditions: [{ type: 'tag', op: 'has', tag: 'vip' }] },
+            },
+            schedule: { kind: 'now', timezone: 'Asia/Kolkata', ...schedule },
+            window: null,
+            ratePerMinute: null,
+            maxMessages: null,
+            budget: null,
+            stopAfterHours: 24,
+          },
+          {},
+        );
+        return id;
+      },
+      tick(campaignId: string) {
+        return runCampaignTick(
+          { db: fx.dbs.app, jobs: fx.jobs(), signer: fx.signer, clock, sendRatePerSecond: 100 },
+          scope,
+          campaignId,
+        );
+      },
+      /** Hands the campaign's queued sends to the Graph stand-in; their outcomes. */
+      async dispatch(campaignId: string) {
+        const intents = await fx.query<{ id: string }>(
+          `SELECT s.id FROM app.send_intents s JOIN app.messages m ON m.id = s.message_id
+            WHERE m.campaign_id = $1 AND s.state = 'queued' ORDER BY s.id`,
+          [campaignId],
+        );
+        const outcomes: string[] = [];
+        for (const intent of intents) {
+          const result = await processSendIntent(
+            { ...graphDeps, rate: { capacity: 1000, refillPerSecond: 1000 } },
+            scope,
+            intent.id,
+          );
+          outcomes.push(result.outcome);
+        }
+        return outcomes;
+      },
+    };
+  }
+
+  /**
+   * The campaign's captured events in the order they were captured, each as [status, previous
+   * status, pause reason, completion reason, deliveries].
+   */
+  const changesOf = async (campaignId: string) =>
+    (
+      await fx.query<{
+        status: string;
+        previous: string;
+        pause_reason: string | null;
+        completion_reason: string | null;
+        deliveries: number;
+      }>(
+        `SELECT e.status, e.detail->>'previousStatus' AS previous,
+                e.detail->>'pauseReason' AS pause_reason,
+                e.detail->>'completionReason' AS completion_reason,
+                (SELECT count(*)::int FROM app.webhook_deliveries d
+                  WHERE d.tenant_id = e.tenant_id AND d.event_id = e.id) AS deliveries
+           FROM app.webhook_events e
+          WHERE e.type = 'campaign.status_changed' AND e.detail->>'campaignId' = $1
+          ORDER BY e.occurred_at, e.id`,
+        [campaignId],
+      )
+    ).map((e) => [e.status, e.previous, e.pause_reason, e.completion_reason, e.deliveries]);
+
+  it('sends each status change with the status before it and why it paused or completed, from members and from the runner', async () => {
+    const s = await campaignCompany(2);
+    const { c } = s;
+    const owner = await fx.ctx(c, c.owner);
+    const marketer = await fx.ctx(c, c.marketer);
+    const hook = await addEndpoint(c, ['campaign.status_changed']);
+    const other = await addEndpoint(c, ['message.status', 'order.status_changed']);
+    await s.campaigns.updateSettings(
+      owner,
+      { approvalRequired: true, cap: null, costCurrency: null },
+      {},
+    );
+
+    // Creating and editing a draft changes no status: nothing is captured.
+    const id = await s.draft(marketer, 'Festive sale');
+    expect(await eventsOf(c, 'campaign.')).toEqual([]);
+
+    // Submitted, rejected, submitted again and approved by members.
+    await s.campaigns.submitCampaign(marketer, id, { expectedVersion: 1 }, {});
+    await s.campaigns.rejectCampaign(owner, id, { note: 'Add the store address' }, {});
+    const view = await s.campaigns.getCampaign(owner, id);
+    await s.campaigns.submitCampaign(marketer, id, { expectedVersion: view.campaign.version }, {});
+    await s.campaigns.approveCampaign(owner, id, { note: 'Looks good' }, {});
+    // The runner starts it; a member pauses it (its unsent messages go back) and another resumes.
+    expect(await s.tick(id)).toMatchObject({ outcome: 'progress', queued: 2 });
+    expect(await s.campaigns.pauseCampaign(marketer, id, {})).toEqual({ released: 2 });
+    await s.campaigns.resumeCampaign(owner, id, {});
+    expect(await s.tick(id)).toMatchObject({ queued: 2 });
+    expect(await s.dispatch(id)).toEqual(['accepted', 'accepted']);
+    // With every recipient processed, the runner completes it.
+    s.clock.advance(11_000);
+    expect(await s.tick(id)).toMatchObject({ outcome: 'completed' });
+
+    // Each change captured once, only for the endpoint that takes campaign events.
+    expect(await changesOf(id)).toEqual([
+      ['pending_approval', 'draft', null, null, 1],
+      ['draft', 'pending_approval', null, null, 1],
+      ['pending_approval', 'draft', null, null, 1],
+      ['scheduled', 'pending_approval', null, null, 1],
+      ['running', 'scheduled', null, null, 1],
+      ['paused', 'running', 'manual', null, 1],
+      ['running', 'paused', null, null, 1],
+      ['completed', 'running', null, 'all_processed', 1],
+    ]);
+
+    // Delivered signed as the campaign is now, with each change and its reason as captured.
+    await deliverDue(c);
+    const bodies = bodiesAt(hook.path);
+    expect(bodies.map((b) => b.type)).toEqual(Array(8).fill('campaign.status_changed'));
+    for (const body of bodies) {
+      expect(campaignStatusChangedPayloadSchema.safeParse(body).success).toBe(true);
+    }
+    const [row] = await fx.query<{
+      scheduled_at: Date;
+      started_at: Date;
+      completed_at: Date;
+    }>('SELECT scheduled_at, started_at, completed_at FROM app.campaigns WHERE id = $1', [id]);
+    const now = {
+      id,
+      name: 'Festive sale',
+      templateId: s.templateId,
+      templateName: s.templateName,
+      scheduledAt: row!.scheduled_at.toISOString(),
+      startedAt: row!.started_at.toISOString(),
+      completedAt: row!.completed_at.toISOString(),
+      canceledAt: null,
+      audienceCount: 2,
+      queuedCount: 2,
+      skippedCount: 0,
+    };
+    const channel = { id: c.channelAccountId, phone: '+91 90000 00000' };
+    expect(bodies[5]!.data).toEqual({
+      campaign: {
+        ...now,
+        status: 'paused',
+        previousStatus: 'running',
+        pauseReason: 'manual',
+        completionReason: null,
+      },
+      channel,
+    });
+    expect(bodies[7]!.data).toEqual({
+      campaign: {
+        ...now,
+        status: 'completed',
+        previousStatus: 'running',
+        pauseReason: null,
+        completionReason: 'all_processed',
+      },
+      channel,
+    });
+    // The other endpoint heard of the campaign's messages, not of the campaign.
+    expect(bodiesAt(other.path).some((b) => b.type === 'campaign.status_changed')).toBe(false);
+  });
+
+  it('sends pauses by the runner and cancellations, captures nothing without an endpoint for campaigns, and fails a delivery whose campaign is gone', async () => {
+    const s = await campaignCompany(1);
+    const { c } = s;
+    const owner = await fx.ctx(c, c.owner);
+    const marketer = await fx.ctx(c, c.marketer);
+
+    // No endpoint takes campaign events: a campaign that starts captures nothing.
+    await addEndpoint(c, ['message.received', 'order.status_changed']);
+    const quiet = await s.draft(owner, 'Quiet');
+    await s.campaigns.submitCampaign(owner, quiet, { expectedVersion: 1 }, {});
+    expect(await s.tick(quiet)).toMatchObject({ outcome: 'progress' });
+    expect(await eventsOf(c, 'campaign.')).toEqual([]);
+
+    const hook = await addEndpoint(c, ['campaign.status_changed']);
+    // The runner pauses a campaign whose member lost the permission to send it.
+    const paused = await s.draft(marketer, 'Launcher loses access');
+    await s.campaigns.submitCampaign(marketer, paused, { expectedVersion: 1 }, {});
+    await fx.query(
+      `UPDATE app.memberships SET roles = '{analyst}' WHERE tenant_id = $1 AND user_id = $2`,
+      [c.tenant.id, c.marketer.id],
+    );
+    expect(await s.tick(paused)).toMatchObject({
+      outcome: 'paused',
+      pauseReason: 'launcher_not_permitted',
+    });
+    // A member cancels a campaign scheduled for later, before it starts.
+    const tomorrow = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
+    const later = await s.draft(owner, 'Tomorrow', { kind: 'later', local: `${tomorrow}T09:00` });
+    await s.campaigns.submitCampaign(owner, later, { expectedVersion: 1 }, {});
+    await s.campaigns.cancelCampaign(owner, later, {});
+    // The runner starts it before it checks the member, as the campaign's history shows; each
+    // change is stamped when it is captured, so the two made in one transaction keep their order.
+    // Cancelled while paused: the pause's reason stays with the pause.
+    await s.campaigns.cancelCampaign(owner, paused, {});
+    expect(await changesOf(paused)).toEqual([
+      ['scheduled', 'draft', null, null, 1],
+      ['running', 'scheduled', null, null, 1],
+      ['paused', 'running', 'launcher_not_permitted', null, 1],
+      ['canceled', 'paused', null, null, 1],
+    ]);
+    expect(
+      await fx.query(
+        `SELECT count(DISTINCT occurred_at)::int AS times FROM app.webhook_events
+          WHERE detail->>'campaignId' = $1`,
+        [paused],
+      ),
+    ).toEqual([{ times: 4 }]);
+    expect(await changesOf(later)).toEqual([
+      ['scheduled', 'draft', null, null, 1],
+      ['canceled', 'scheduled', null, null, 1],
+    ]);
+    await deliverDue(c);
+    const canceled = bodiesAt(hook.path).find(
+      (b) => (b.data.campaign as { status: string }).status === 'canceled',
+    );
+    expect(canceled?.data.campaign).toMatchObject({
+      id: later,
+      name: 'Tomorrow',
+      previousStatus: 'scheduled',
+      startedAt: null,
+      canceledAt: expect.any(String),
+    });
+
+    // An event whose campaign no longer exists fails without an attempt.
+    const gone = await addEndpoint(c, ['campaign.status_changed']);
+    const eventId = uuidv7();
+    await fx.dbs.app.run(authorizedTenantScope(c.tenant.id, null), async (tx) => {
+      await tx.insert(webhookEvents).values({
+        id: eventId,
+        tenantId: c.tenant.id,
+        type: 'campaign.status_changed',
+        status: 'completed',
+        detail: { campaignId: uuidv7(), previousStatus: 'running' },
+      });
+      await tx.insert(webhookDeliveries).values({
+        id: uuidv7(),
+        tenantId: c.tenant.id,
+        endpointId: gone.id,
+        eventId,
+      });
+    });
+    await deliverDue(c);
+    expect(
+      await fx.query(
+        'SELECT state, attempts, last_error FROM app.webhook_deliveries WHERE endpoint_id = $1',
+        [gone.id],
+      ),
+    ).toEqual([{ state: 'failed', attempts: 0, last_error: 'event_gone' }]);
+    expect(bodiesAt(gone.path)).toEqual([]);
+
+    // An endpoint can take every event type, campaigns included.
     const everything = await addEndpoint(c, [...WEBHOOK_EVENT_KEYS]);
     expect(
       await fx.query('SELECT event_types FROM app.webhook_endpoints WHERE id = $1', [

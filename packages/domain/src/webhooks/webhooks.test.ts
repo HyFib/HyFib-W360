@@ -1,6 +1,12 @@
 import { createHmac } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { AUTOMATION_END_REASONS, ORDER_STATUSES } from '@w360/db';
+import {
+  AUTOMATION_END_REASONS,
+  CAMPAIGN_COMPLETION_REASONS,
+  CAMPAIGN_PAUSE_REASONS,
+  CAMPAIGN_STATUSES,
+  ORDER_STATUSES,
+} from '@w360/db';
 import { apiContactSchema } from '../api/contact-view';
 import { buildOpenApiDocument } from '../api/openapi';
 import { renderEmail } from '../email/templates';
@@ -16,6 +22,7 @@ import {
 import {
   automationRunEndedPayloadSchema,
   automationRunStartedPayloadSchema,
+  campaignStatusChangedPayloadSchema,
   consentChangedPayloadSchema,
   contactCreatedPayloadSchema,
   contactErasedPayloadSchema,
@@ -457,6 +464,109 @@ describe('webhook payload schemas', () => {
     }
   });
 
+  it('describe the campaign event (ADR-087)', () => {
+    const campaign = {
+      id: base.id,
+      name: 'Festive sale',
+      status: 'running',
+      previousStatus: 'scheduled',
+      pauseReason: null,
+      completionReason: null,
+      templateId: base.id,
+      templateName: 'festive_sale',
+      scheduledAt: base.createdAt,
+      startedAt: base.createdAt,
+      completedAt: null,
+      canceledAt: null,
+      audienceCount: 1_200,
+      queuedCount: 350,
+      skippedCount: 12,
+    };
+    const channel = { id: base.id, phone: '+91 98765 43210' };
+    const event = { ...base, type: 'campaign.status_changed', data: { campaign, channel } };
+    expect(campaignStatusChangedPayloadSchema.safeParse(event).success).toBe(true);
+    // Every status a campaign can reach, from every other one.
+    for (const status of CAMPAIGN_STATUSES) {
+      for (const previousStatus of CAMPAIGN_STATUSES) {
+        expect(
+          campaignStatusChangedPayloadSchema.safeParse({
+            ...event,
+            data: { campaign: { ...campaign, status, previousStatus }, channel },
+          }).success,
+          `${previousStatus} → ${status}`,
+        ).toBe(true);
+      }
+    }
+    // Every reason for a pause or a completion.
+    for (const pauseReason of CAMPAIGN_PAUSE_REASONS) {
+      expect(
+        campaignStatusChangedPayloadSchema.safeParse({
+          ...event,
+          data: { campaign: { ...campaign, status: 'paused', pauseReason }, channel },
+        }).success,
+        pauseReason,
+      ).toBe(true);
+    }
+    for (const completionReason of CAMPAIGN_COMPLETION_REASONS) {
+      expect(
+        campaignStatusChangedPayloadSchema.safeParse({
+          ...event,
+          data: {
+            campaign: {
+              ...campaign,
+              status: 'completed',
+              completionReason,
+              completedAt: base.createdAt,
+            },
+            channel,
+          },
+        }).success,
+        completionReason,
+      ).toBe(true);
+    }
+    // A draft without a template or a number is described too.
+    expect(
+      campaignStatusChangedPayloadSchema.safeParse({
+        ...event,
+        data: {
+          campaign: {
+            ...campaign,
+            status: 'draft',
+            previousStatus: 'pending_approval',
+            templateId: null,
+            templateName: null,
+            scheduledAt: null,
+            startedAt: null,
+            audienceCount: 0,
+            queuedCount: 0,
+            skippedCount: 0,
+          },
+          channel: null,
+        },
+      }).success,
+    ).toBe(true);
+    // An unknown status or reason, a fractional count or another type is not described.
+    for (const change of [
+      { status: 'archived' },
+      { previousStatus: 'sent' },
+      { pauseReason: 'tired' },
+      { completionReason: 'done' },
+      { queuedCount: 1.5 },
+    ]) {
+      expect(
+        campaignStatusChangedPayloadSchema.safeParse({
+          ...event,
+          data: { campaign: { ...campaign, ...change }, channel },
+        }).success,
+        JSON.stringify(change),
+      ).toBe(false);
+    }
+    expect(
+      campaignStatusChangedPayloadSchema.safeParse({ ...event, type: 'order.status_changed' })
+        .success,
+    ).toBe(false);
+  });
+
   it('refuse a body of another type or with an unknown status', () => {
     expect(pingPayloadSchema.safeParse({ ...base, type: 'message.status', data: {} }).success).toBe(
       false,
@@ -536,6 +646,7 @@ describe('the OpenAPI document', () => {
       'automation.run_ended',
       'order.received',
       'order.status_changed',
+      'campaign.status_changed',
     ]);
     const schemas = doc.components.schemas as Record<string, unknown>;
     const parameters = doc.components.parameters as Record<string, { name: string }>;

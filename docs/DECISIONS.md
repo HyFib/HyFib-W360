@@ -2807,3 +2807,50 @@ Not built: Flows, call-to-action and order messages through the API (`cta_url` i
 Meta publishes, research M-043), product names or prices in the request, reading catalogs and
 products through the API, and sending products outside the customer service window (templates with
 product buttons).
+
+## ADR-087 Outgoing webhook events for campaigns (2026-09-30)
+
+Context: companies send marketing campaigns to their contacts (P3-04): members draft them, submit
+them for approval when the company asks for it (ADR-024), and the runner starts, paces, pauses and
+completes them (ADR-022; it pauses on a cap, the template, the number or the member whose authority
+the sends use). A CRM or a marketing tool kept in step with HyFib learns of each campaign message
+through `message.status`, but not that a campaign was approved, started, paused (and why) or
+finished, and the public API does not read campaigns.
+
+Decision:
+
+- **One event type,** chosen per endpoint like the others (an endpoint may now take all 14):
+  `campaign.status_changed`, whenever a campaign's status changes, whoever changes it: a member
+  submitting it for approval, withdrawing it, rejecting it (both back to draft), approving it
+  (scheduled), pausing, resuming or cancelling it, or the runner starting it (running), pausing it
+  (a cap reached, the template no longer approved, the number not active, the member whose authority
+  it uses gone or without the permission, no rate card for its spending cap) or completing it.
+  Creating and editing drafts, the runner's progress and test sends change no status and send
+  nothing.
+- **Capture** by a trigger on `app.campaigns` after an update of `status` that changes it, in the
+  transaction that makes the change, as ADR-053. It runs with the rights of whoever makes the
+  change: the runtime role in the company's scope, the only role that changes a campaign's status.
+  The event keeps the campaign id, the status it reports, the status before it and, for a pause or
+  a completion, the reason, and is stamped with the time it is captured (`clock_timestamp()`), not
+  the transaction's: the runner starts a campaign and may pause it in the same transaction (as the
+  campaign's own history records), and the two changes must keep their order.
+- **Payloads are built when delivered** (ADR-053): `campaign` (id, name, the status the event
+  reports and the one before it, the pause or completion reason, the template's id and name, when
+  it was scheduled, started, completed or cancelled, and its counters: the audience taken when it
+  was submitted, the recipients queued and skipped) and `channel` (the number, null if none is set).
+  The statuses and reasons are as captured and the rest as when delivered. No member is named, as
+  in every other event, and no recipient: the payload carries counts only. A campaign that no
+  longer exists fails the delivery as `event_gone` (campaigns are kept until the company is
+  deleted, which removes its webhook history first).
+- **Order:** deliveries are not ordered (ADR-053); the latest change is the one with the latest
+  `createdAt`. Receivers deduplicate on the event id.
+- **Volume:** a handful of events per campaign: submission, approval, the start, pauses and resumes,
+  the end.
+- **Migrations:** 0065 widens the endpoint check to 14 types and replaces the event type check
+  `NOT VALID` (as 0063 did), and adds the capture function (not executable by `PUBLIC`) and the
+  trigger; 0066 validates the check without blocking writes. Endpoints can take the new type only
+  once this release's web app runs, after the migrations and the workers.
+
+Not built: delivery and read counts in the payload (they change with every message status; the
+reports have them), the campaign in `message.status`, events for each recipient, test sends and
+drafts, reading campaigns through the public API, and filters by campaign.
