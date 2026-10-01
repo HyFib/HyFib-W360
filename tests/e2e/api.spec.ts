@@ -772,7 +772,11 @@ test('a key quotes a customer’s message and reacts to it: the inbox shows both
       }),
     ]);
   }).toPass({ timeout: 20_000 });
-  await page.reload();
+  // The conversation refreshes itself, so it is left through the navigation and opened again, not
+  // reloaded (see openFromNav; `page.reload` was aborted here in Firefox on 2e85734).
+  await openFromNav(page, 'Inbox');
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}/inbox$`));
+  await page.getByRole('link', { name: /Priya Customer/ }).click({ timeout: 20_000 });
   await expect(thread.filter({ hasText: 'Reacted 🙏' })).toContainText(
     'to “Thursday at 11:00 works.”',
   );
