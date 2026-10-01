@@ -13,6 +13,8 @@ import {
 } from './support';
 
 const PASSWORD = 'correct horse battery staple 42';
+const ASK_REASON = 'We moved to a smaller team this month and asked to cancel the seats.';
+const NOTE = 'Declined for now: the seats were used this month, see ticket 5153.';
 const standInUrl = `http://127.0.0.1:${process.env.E2E_RAZORPAY_PORT ?? '0'}`;
 
 test.skip(
@@ -32,7 +34,7 @@ test('a company pays for its plan by subscription, a renewal counts from Razorpa
   page,
   request,
 }) => {
-  test.setTimeout(420_000);
+  test.setTimeout(600_000);
   const email = uniqueEmail('plansub');
   const suffix = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`;
   const slug = `plansub-${suffix}`;
@@ -52,6 +54,7 @@ test('a company pays for its plan by subscription, a renewal counts from Razorpa
     await page.getByLabel('Reason', { exact: true }).fill('GST on plan prices, ticket 9001');
     await page.getByRole('button', { name: 'Save tax' }).click();
     await expect(page.getByText('New subscriptions add this tax')).toBeVisible();
+    await expectNoHorizontalOverflow(page);
     await page.getByRole('link', { name: 'New plan' }).click();
     await page.getByLabel('Code', { exact: true }).fill(`grow-${suffix}`);
     await page.getByLabel('Name shown to companies').fill('Growth');
@@ -152,6 +155,111 @@ test('a company pays for its plan by subscription, a renewal counts from Razorpa
     await expect(page.getByText(/^Refunded on /)).toBeVisible();
     await expect(page.getByText('Started by HyFib', { exact: false })).toBeVisible();
     await expect(page.getByText('₹1,314.82 (INR)', { exact: true })).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+
+    // The owner asks HyFib for a refund of more of it from the receipt (ADR-104).
+    const ask = page.getByRole('form', { name: 'Ask for a refund' });
+    await expect(ask.getByLabel('Amount in rupees')).toHaveValue('1314.82');
+    await ask.getByLabel('Amount in rupees').fill('₹200');
+    await ask.getByLabel(/^Why you want the refund/).fill(ASK_REASON);
+    await ask.getByRole('button', { name: 'Ask for a refund' }).click();
+    const firstAsk = page.getByRole('row').filter({ hasText: 'Waiting for HyFib' });
+    await expect(firstAsk).toContainText('₹200.00');
+    await expect(firstAsk).toContainText('by Priya Payer');
+    await expect(
+      page.getByText('You asked for a refund of this payment; HyFib has not decided yet.'),
+    ).toBeVisible();
+    await expect(ask).toHaveCount(0);
+    await expectNoHorizontalOverflow(page);
+    // Platform owners are emailed a count, naming no company, amount or reason.
+    const announced = await waitForEmailContaining(
+      email,
+      'waiting for a decision',
+      'plan payment',
+      120_000,
+    );
+    expect(announced).toContain('/platform/refunds');
+    expect(announced).not.toContain(companyName);
+    expect(announced).not.toContain(ASK_REASON);
+    expect(announced).not.toContain('₹');
+
+    // A platform owner declines it with a note, from the plan payments' refunds.
+    await page.goto('/platform/refunds');
+    await page
+      .getByRole('navigation', { name: 'Refunds of' })
+      .getByRole('link', { name: 'Plan payments' })
+      .click();
+    const waiting = page
+      .getByRole('row')
+      .filter({ hasText: companyName })
+      .filter({ hasText: 'Waiting for a decision' });
+    await expect(waiting).toContainText(ASK_REASON);
+    await expect(waiting).toContainText('₹200.00');
+    await expect(waiting).toContainText('₹1,314.82 left of the payment');
+    const decision = waiting.getByRole('form', { name: 'Decide the refund request' });
+    await expect(decision.getByRole('button', { name: 'Decline' })).toBeDisabled();
+    await decision.getByLabel(/^Note for the company/).fill(NOTE);
+    await decision.getByRole('button', { name: 'Decline' }).click();
+    await expect(waiting).toHaveCount(0);
+    await expectNoHorizontalOverflow(page);
+
+    // The receipt shows the note; the owner asks again, and a platform owner approves, which
+    // refunds the amount as a refund from the company's platform page does.
+    await page.goto(`/c/${slug}/billing`);
+    await paying.getByRole('link', { name: /^Receipt/ }).click();
+    await expect(page.getByRole('row').filter({ hasText: 'Declined' })).toContainText(
+      `HyFib’s note: ${NOTE}`,
+    );
+    await ask.getByLabel('Amount in rupees').fill('150');
+    await ask.getByLabel(/^Why you want the refund/).fill(ASK_REASON);
+    await ask.getByRole('button', { name: 'Ask for a refund' }).click();
+    await expect(page.getByRole('row').filter({ hasText: 'Waiting for HyFib' })).toContainText(
+      '₹150.00',
+    );
+    await page.goto('/platform/refunds?kind=plan');
+    const second = page
+      .getByRole('row')
+      .filter({ hasText: companyName })
+      .filter({ hasText: 'Waiting for a decision' });
+    await expect(second).toContainText('₹150.00');
+    const approve = second.getByRole('form', { name: 'Decide the refund request' });
+    await approve.getByLabel(/^Approving refunds ₹150\.00/).check();
+    await approve.getByRole('button', { name: 'Approve and refund' }).click();
+    await expect(second).toHaveCount(0);
+    const answered = page
+      .getByRole('row')
+      .filter({ hasText: companyName })
+      .filter({ hasText: `Asked for by the company: ${ASK_REASON}` });
+    await expect(answered).toContainText('₹150.00');
+    await expectNoHorizontalOverflow(page);
+
+    // The minute sweep emails the billing managers the note, and the worker refunds the approved
+    // amount; the company is emailed, and the receipt shows both.
+    const declined = await waitForEmailContaining(
+      email,
+      'HyFib declined your refund request',
+      NOTE,
+      120_000,
+    );
+    expect(declined).toMatch(/₹200\.00 of your plan payment inv_/);
+    await waitForEmailContaining(
+      email,
+      'HyFib is refunding a plan payment',
+      '₹150.00 of your plan payment',
+      150_000,
+    );
+    await page.goto(`/c/${slug}/billing`);
+    await paying.getByRole('link', { name: /^Receipt/ }).click();
+    // The link navigates in the page: reloading before the receipt shows would reload Billing.
+    await expect(page.getByRole('heading', { name: 'Plan payment receipt' })).toBeVisible();
+    await expect(async () => {
+      await page.reload();
+      await expect(page.getByRole('row').filter({ hasText: 'Approved' })).toContainText(
+        'Refunded.',
+        { timeout: 1_000 },
+      );
+    }).toPass({ timeout: 60_000 });
+    await expect(page.getByText('₹1,164.82 (INR)', { exact: true })).toBeVisible();
     await expectNoHorizontalOverflow(page);
 
     // Razorpay charges the next month; its event carries only ids, and HyFib fetches the rest.

@@ -1324,6 +1324,28 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
     },
   },
   {
+    table: 'app.plan_payment_refund_requests',
+    columns: [
+      'id',
+      'plan_payment_id',
+      'amount_minor',
+      'reason',
+      'status',
+      'requested_by_user_id',
+      'requested_at',
+      'withdrawn_at',
+      'decided_at',
+      'decision_note',
+      'plan_payment_refund_id',
+      'updated_at',
+    ],
+    omitted: {
+      decided_by_user_id: 'The HyFib platform owner who decided; platform-only.',
+      announced_at: 'When HyFib staff were emailed about the request; internal bookkeeping.',
+      decline_notified_at: 'When the decline email was queued; internal bookkeeping.',
+    },
+  },
+  {
     table: 'app.plan_subscriptions',
     columns: [
       'id',

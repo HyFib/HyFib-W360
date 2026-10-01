@@ -279,7 +279,7 @@ export default async function ReceiptPage({
                   recent ? (
                     <RefundRequestForm
                       slug={ctx.tenant.slug}
-                      topupId={receipt.topupId}
+                      target={{ kind: 'topup', topupId: receipt.topupId }}
                       maxAmount={formatMinorUnits(BigInt(asked.askable.maxMinor), 'INR')}
                       maxLabel={inr(asked.askable.maxMinor)}
                     />

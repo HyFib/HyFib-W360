@@ -189,6 +189,13 @@ made. This checklist records the evidence required per gate; unchecked items blo
       receipt shows it, and the subscription and its next charge do not change (R-121, unconfirmed
       point 29); a refund made in the Dashboard is recorded once from its webhook, and a fetched
       refund returns its notes (R-120)
+- [ ] Refund requests of plan payments (ADR-104) on the same staging deployment, after migration
+      0081 and before the new web and worker images: a billing manager asks from a test-mode plan
+      payment's receipt; platform owners receive the count email with its link to the plan
+      payments' list; a decline with a note reaches the billing managers; an approval starts the
+      staff refund above, which appears in the Razorpay Dashboard once; a request for more than is
+      left after a Dashboard refund is refused on approval and stays open; agree who watches
+      `/platform/refunds` → Plan payments and how quickly requests are decided
 - [ ] Tenant-isolation and security gates passing in CI on the release commit
 - [ ] Measured load behaviour against the test envelope (k6 results)
 - [ ] Backup restoration drill performed and timings recorded (RPO/RTO)

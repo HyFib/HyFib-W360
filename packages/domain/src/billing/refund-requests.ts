@@ -11,6 +11,8 @@ import {
   inArray,
   isUniqueViolation,
   ledgerAccounts,
+  planPaymentRefundRequests,
+  planPayments,
   sql,
   systemScope,
   tenants,
@@ -19,6 +21,7 @@ import {
   type CreditRefundRequestStatus,
   type CreditRefundStatus,
   type Database,
+  type TenantScope,
   type Tx,
 } from '@w360/db';
 import { recordAudit, type RequestMeta } from '../audit';
@@ -82,7 +85,8 @@ export interface RefundRequestDeps {
 
 const inr = (minor: number) => displayMoney(BigInt(minor), 'INR');
 
-function amountFromInput(amount: string): number {
+/** A refund amount typed in rupees, in paise (above ₹0). */
+export function refundAmountFromInput(amount: string): number {
   let minor: number;
   try {
     minor = Number(parseMajorUnits(amount, 'INR'));
@@ -97,6 +101,42 @@ function amountFromInput(amount: string): number {
     });
   }
   return minor;
+}
+
+/**
+ * The daily limit on a company's refund requests, of service credit (ADR-073) and of plan payments
+ * (ADR-104) together, counted under one per-company lock so concurrent requests cannot pass it. The
+ * lock keeps the key requests of service credit took before ADR-104, so servers of both releases
+ * serialise during a rolling deploy.
+ */
+export async function assertRefundRequestAllowance(tx: Tx, tenantId: string): Promise<void> {
+  await tx.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`credit_refund_request:${tenantId}`}, 0))`,
+  );
+  const [credit] = await tx
+    .select({ n: sql<number>`count(*)::int` })
+    .from(creditRefundRequests)
+    .where(
+      and(
+        eq(creditRefundRequests.tenantId, tenantId),
+        gt(creditRefundRequests.requestedAt, sql`now() - interval '24 hours'`),
+      ),
+    );
+  const [plan] = await tx
+    .select({ n: sql<number>`count(*)::int` })
+    .from(planPaymentRefundRequests)
+    .where(
+      and(
+        eq(planPaymentRefundRequests.tenantId, tenantId),
+        gt(planPaymentRefundRequests.requestedAt, sql`now() - interval '24 hours'`),
+      ),
+    );
+  if ((credit?.n ?? 0) + (plan?.n ?? 0) >= REFUND_REQUEST_LIMITS.perDay) {
+    throw new AppError(
+      'rate_limited',
+      `A company can ask for ${REFUND_REQUEST_LIMITS.perDay} refunds a day. Try again tomorrow.`,
+    );
+  }
 }
 
 export function createRefundRequestsService(deps: RefundRequestDeps) {
@@ -115,7 +155,7 @@ export function createRefundRequestsService(deps: RefundRequestDeps) {
       assertCan(ctx, 'billing.manage');
       assertRecentSignIn(ctx, clock.now());
       const data = parseInput(askSchema, input);
-      const amountMinor = amountFromInput(data.amount);
+      const amountMinor = refundAmountFromInput(data.amount);
       const requestId = uuidv7();
       try {
         await db.run(ctx.scope, async (tx) => {
@@ -134,25 +174,7 @@ export function createRefundRequestsService(deps: RefundRequestDeps) {
               'The company is being deleted, so it can no longer ask for refunds.',
             );
           }
-          // Counted under a per-company lock, so concurrent requests cannot pass the daily limit.
-          await tx.execute(
-            sql`select pg_advisory_xact_lock(hashtextextended(${`credit_refund_request:${ctx.tenant.id}`}, 0))`,
-          );
-          const [today] = await tx
-            .select({ n: sql<number>`count(*)::int` })
-            .from(creditRefundRequests)
-            .where(
-              and(
-                eq(creditRefundRequests.tenantId, ctx.tenant.id),
-                gt(creditRefundRequests.requestedAt, sql`now() - interval '24 hours'`),
-              ),
-            );
-          if ((today?.n ?? 0) >= REFUND_REQUEST_LIMITS.perDay) {
-            throw new AppError(
-              'rate_limited',
-              `A company can ask for ${REFUND_REQUEST_LIMITS.perDay} refunds a day. Try again tomorrow.`,
-            );
-          }
+          await assertRefundRequestAllowance(tx, ctx.tenant.id);
           const [topup] = await tx
             .select({
               status: topups.status,
@@ -421,24 +443,45 @@ async function selectRequests(
 
 export type RefundRequestsService = ReturnType<typeof createRefundRequestsService>;
 
-/** The email platform owners get about requests waiting for a decision: a count only. */
+/**
+ * The email platform owners get about requests waiting for a decision: counts only, of service credit
+ * (ADR-073) and of plan payments (ADR-104).
+ */
 export function refundRequestsAnnouncement(
-  count: number,
+  credit: number,
   appBaseUrl: string,
+  plan = 0,
 ): { subject: string; lines: string[]; url: string; actionLabel: string } {
+  const count = credit + plan;
+  const what =
+    plan === 0
+      ? count === 1
+        ? 'A company asked HyFib to refund unused service credit from a paid top-up.'
+        : `Companies asked HyFib ${count} times to refund unused service credit from paid top-ups.`
+      : credit === 0
+        ? count === 1
+          ? 'A company asked HyFib to refund a plan payment.'
+          : `Companies asked HyFib ${count} times to refund plan payments.`
+        : `Companies asked HyFib ${count} times for refunds: ${credit} of unused service credit and ${plan} of plan payments.`;
   return {
     subject:
       count === 1
         ? 'A refund request is waiting for a decision'
         : `${count} refund requests are waiting for a decision`,
     lines: [
-      count === 1
-        ? 'A company asked HyFib to refund unused service credit from a paid top-up.'
-        : `Companies asked HyFib ${count} times to refund unused service credit from paid top-ups.`,
+      what,
       'A platform owner approves each request, which refunds it through Razorpay as a staff refund does, or declines it with a note the company reads.',
-      'Platform → Refunds lists them with the companies, amounts and reasons.',
+      plan === 0
+        ? 'Platform → Refunds lists them with the companies, amounts and reasons.'
+        : credit === 0
+          ? 'Platform → Refunds → Plan payments lists them with the companies, amounts and reasons.'
+          : 'Platform → Refunds lists them with the companies, amounts and reasons, under Service credit and Plan payments.',
     ],
-    url: new URL('/platform/refunds', appBaseUrl).toString(),
+    // Straight to the plan payments' list when every request is of a plan payment.
+    url: new URL(
+      plan > 0 && credit === 0 ? '/platform/refunds?kind=plan' : '/platform/refunds',
+      appBaseUrl,
+    ).toString(),
     actionLabel: 'Open refunds',
   };
 }
@@ -451,9 +494,9 @@ export interface RefundRequestNoticeDeps {
 }
 
 /**
- * The minute sweep's email to platform owners about requests not announced yet (a count only), each
- * marked in the transaction that queues the email. Nothing is marked while there is no platform owner,
- * so the requests are announced once there is one.
+ * The minute sweep's email to platform owners about requests not announced yet, of both kinds (counts
+ * only), each marked in the transaction that queues the email. Nothing is marked while there is no
+ * platform owner, so the requests are announced once there is one.
  */
 export async function announceRefundRequests(
   deps: Pick<RefundRequestNoticeDeps, 'db' | 'outbox' | 'appBaseUrl'>,
@@ -461,13 +504,22 @@ export async function announceRefundRequests(
 ): Promise<{ announced: number; unsent: number; recipients: number }> {
   const due = await deps.db.run(
     systemScope,
-    (tx) =>
-      tx.execute<{ request_id: string }>(
+    async (tx) => {
+      const credit = await tx.execute<{ request_id: string }>(
         sql`select request_id from ops.credit_refund_requests_to_announce(${limit}::int)`,
-      ),
+      );
+      const plan = await tx.execute<{ request_id: string }>(
+        sql`select request_id from ops.plan_payment_refund_requests_to_announce(${limit}::int)`,
+      );
+      return {
+        credit: credit.rows.map((r) => r.request_id),
+        plan: plan.rows.map((r) => r.request_id),
+      };
+    },
     { accessMode: 'read only' },
   );
-  if (due.rows.length === 0) return { announced: 0, unsent: 0, recipients: 0 };
+  const dueCount = due.credit.length + due.plan.length;
+  if (dueCount === 0) return { announced: 0, unsent: 0, recipients: 0 };
   const recipients = await deps.db.run(
     systemScope,
     (tx) =>
@@ -477,17 +529,26 @@ export async function announceRefundRequests(
     { accessMode: 'read only' },
   );
   if (recipients.rows.length === 0) {
-    return { announced: 0, unsent: due.rows.length, recipients: 0 };
+    return { announced: 0, unsent: dueCount, recipients: 0 };
   }
-  const ids = due.rows.map((r) => r.request_id);
   return deps.db.run(systemScope, async (tx) => {
-    const marked = await tx.execute<{ request_id: string }>(
-      sql`select request_id from ops.credit_refund_requests_mark_announced(${sql.param(ids)}::uuid[])`,
-    );
-    if (marked.rows.length === 0) {
+    const credit =
+      due.credit.length > 0
+        ? await tx.execute<{ request_id: string }>(
+            sql`select request_id from ops.credit_refund_requests_mark_announced(${sql.param(due.credit)}::uuid[])`,
+          )
+        : { rows: [] };
+    const plan =
+      due.plan.length > 0
+        ? await tx.execute<{ request_id: string }>(
+            sql`select request_id from ops.plan_payment_refund_requests_mark_announced(${sql.param(due.plan)}::uuid[])`,
+          )
+        : { rows: [] };
+    const announced = credit.rows.length + plan.rows.length;
+    if (announced === 0) {
       return { announced: 0, unsent: 0, recipients: recipients.rows.length };
     }
-    const alert = refundRequestsAnnouncement(marked.rows.length, deps.appBaseUrl);
+    const alert = refundRequestsAnnouncement(credit.rows.length, deps.appBaseUrl, plan.rows.length);
     for (const recipient of recipients.rows) {
       await enqueueEmail(deps.outbox, tx, {
         to: recipient.email,
@@ -496,73 +557,143 @@ export async function announceRefundRequests(
         payload: { kind: 'platform.notice', ...alert },
       });
     }
-    return { announced: marked.rows.length, unsent: 0, recipients: recipients.rows.length };
+    return { announced, unsent: 0, recipients: recipients.rows.length };
   });
 }
 
 /**
- * The minute sweep's email to a company's billing managers about a declined request, with the note,
- * marked in the company's own scope in the transaction that queues it. A company that fails is
- * reported and tried again the next minute.
+ * The minute sweep's email to a company's billing managers about a declined request, of service credit
+ * (ADR-073) or of a plan payment (ADR-104), with the note, marked in the company's own scope in the
+ * transaction that queues it. A company that fails is reported and tried again the next minute.
  */
 export async function notifyRefundRequestDeclines(
   deps: Pick<RefundRequestNoticeDeps, 'db' | 'notices'>,
   limit: number = REFUND_REQUEST_LIMITS.sweepBatch,
 ): Promise<{
   notified: number;
-  failed: { tenantId: string; requestId: string; error: unknown }[];
+  failed: {
+    kind: 'credit' | 'plan_payment';
+    tenantId: string;
+    requestId: string;
+    error: unknown;
+  }[];
 }> {
   const due = await deps.db.run(
     systemScope,
-    (tx) =>
-      tx.execute<{ tenant_id: string; request_id: string }>(
+    async (tx) => {
+      const credit = await tx.execute<{ tenant_id: string; request_id: string }>(
         sql`select tenant_id, request_id from ops.credit_refund_request_declines_due(${limit}::int)`,
-      ),
+      );
+      const plan = await tx.execute<{ tenant_id: string; request_id: string }>(
+        sql`select tenant_id, request_id from ops.plan_payment_refund_request_declines_due(${limit}::int)`,
+      );
+      return [
+        ...credit.rows.map((r) => ({ kind: 'credit' as const, ...r })),
+        ...plan.rows.map((r) => ({ kind: 'plan_payment' as const, ...r })),
+      ];
+    },
     { accessMode: 'read only' },
   );
   let notified = 0;
-  const failed: { tenantId: string; requestId: string; error: unknown }[] = [];
-  for (const { tenant_id: tenantId, request_id: requestId } of due.rows) {
+  const failed: {
+    kind: 'credit' | 'plan_payment';
+    tenantId: string;
+    requestId: string;
+    error: unknown;
+  }[] = [];
+  for (const { kind, tenant_id: tenantId, request_id: requestId } of due) {
     const scope = authorizedTenantScope(tenantId, null);
     try {
-      const told = await deps.db.run(scope, async (tx) => {
-        const marked = await tx.execute<{ marked: boolean }>(
-          sql`select app.credit_refund_request_mark_decline_notified(${requestId}::uuid) as marked`,
-        );
-        if (marked.rows[0]?.marked !== true) return false;
-        const [request] = await tx
-          .select({
-            amountMinor: creditRefundRequests.amountMinor,
-            topupId: creditRefundRequests.topupId,
-            decisionNote: creditRefundRequests.decisionNote,
-          })
-          .from(creditRefundRequests)
-          .where(
-            and(
-              eq(creditRefundRequests.tenantId, tenantId),
-              eq(creditRefundRequests.id, requestId),
-            ),
-          );
-        if (!request) return false;
-        await notifyBillingManagers(deps.notices, tx, scope, {
-          subject: 'HyFib declined your refund request',
-          lines: [
-            `HyFib declined your request to refund ${inr(request.amountMinor)} of unused service credit.`,
-            // The note may hold 1,000 characters, twice a notice's line.
-            ...splitEmailText(
-              `HyFib's note: ${request.decisionNote ?? ''}`,
-              NOTICE_LINE_MAX.billing,
-            ),
-            'The credit stays in your wallet. You can ask again from the payment’s receipt.',
-          ],
-          billingPath: `receipts/${request.topupId}`,
-        });
-        return true;
-      });
+      const told = await deps.db.run(scope, (tx) =>
+        kind === 'credit'
+          ? tellCreditDecline(deps, tx, scope, requestId)
+          : tellPlanPaymentDecline(deps, tx, scope, requestId),
+      );
       if (told) notified += 1;
     } catch (error) {
-      failed.push({ tenantId, requestId, error });
+      failed.push({ kind, tenantId, requestId, error });
     }
   }
   return { notified, failed };
+}
+
+async function tellCreditDecline(
+  deps: Pick<RefundRequestNoticeDeps, 'notices'>,
+  tx: Tx,
+  scope: TenantScope,
+  requestId: string,
+): Promise<boolean> {
+  const marked = await tx.execute<{ marked: boolean }>(
+    sql`select app.credit_refund_request_mark_decline_notified(${requestId}::uuid) as marked`,
+  );
+  if (marked.rows[0]?.marked !== true) return false;
+  const [request] = await tx
+    .select({
+      amountMinor: creditRefundRequests.amountMinor,
+      topupId: creditRefundRequests.topupId,
+      decisionNote: creditRefundRequests.decisionNote,
+    })
+    .from(creditRefundRequests)
+    .where(
+      and(
+        eq(creditRefundRequests.tenantId, scope.tenantId),
+        eq(creditRefundRequests.id, requestId),
+      ),
+    );
+  if (!request) return false;
+  await notifyBillingManagers(deps.notices, tx, scope, {
+    subject: 'HyFib declined your refund request',
+    lines: [
+      `HyFib declined your request to refund ${inr(request.amountMinor)} of unused service credit.`,
+      // The note may hold 1,000 characters, twice a notice's line.
+      ...splitEmailText(`HyFib's note: ${request.decisionNote ?? ''}`, NOTICE_LINE_MAX.billing),
+      'The credit stays in your wallet. You can ask again from the payment’s receipt.',
+    ],
+    billingPath: `receipts/${request.topupId}`,
+  });
+  return true;
+}
+
+async function tellPlanPaymentDecline(
+  deps: Pick<RefundRequestNoticeDeps, 'notices'>,
+  tx: Tx,
+  scope: TenantScope,
+  requestId: string,
+): Promise<boolean> {
+  const marked = await tx.execute<{ marked: boolean }>(
+    sql`select app.plan_payment_refund_request_mark_decline_notified(${requestId}::uuid) as marked`,
+  );
+  if (marked.rows[0]?.marked !== true) return false;
+  const [request] = await tx
+    .select({
+      amountMinor: planPaymentRefundRequests.amountMinor,
+      planPaymentId: planPaymentRefundRequests.planPaymentId,
+      decisionNote: planPaymentRefundRequests.decisionNote,
+      receipt: planPayments.providerInvoiceId,
+    })
+    .from(planPaymentRefundRequests)
+    .innerJoin(
+      planPayments,
+      and(
+        eq(planPayments.tenantId, planPaymentRefundRequests.tenantId),
+        eq(planPayments.id, planPaymentRefundRequests.planPaymentId),
+      ),
+    )
+    .where(
+      and(
+        eq(planPaymentRefundRequests.tenantId, scope.tenantId),
+        eq(planPaymentRefundRequests.id, requestId),
+      ),
+    );
+  if (!request) return false;
+  await notifyBillingManagers(deps.notices, tx, scope, {
+    subject: 'HyFib declined your refund request',
+    lines: [
+      `HyFib declined your request to refund ${inr(request.amountMinor)} of your plan payment ${request.receipt}.`,
+      ...splitEmailText(`HyFib's note: ${request.decisionNote ?? ''}`, NOTICE_LINE_MAX.billing),
+      'Your plan and its paid period do not change. You can ask again from the payment’s receipt.',
+    ],
+    billingPath: `plan-payments/${request.planPaymentId}`,
+  });
+  return true;
 }

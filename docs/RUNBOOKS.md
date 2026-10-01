@@ -229,8 +229,9 @@ but there is no platform owner to email` (make someone a platform owner; the req
 emailed`, or `refund request decline notice failed for a company; will retry` with the
         company; `decline_notified_at` is set when the email was queued. An approval sends no email
         of its own: the refund's emails follow.
-      - **"We asked too often":** a company can ask 5 times in 24 hours (withdrawn requests count);
-        the next request is accepted once the oldest of those is a day old.
+      - **"We asked too often":** a company can ask 5 times in 24 hours (withdrawn requests count,
+        and so do requests for refunds of plan payments, ADR-104); the next request is accepted
+        once the oldest of those is a day old.
 11. **Settlement reconciliation** (`/platform/reconciliation`, ADR-059). Each day from 06:00 India
     time the worker reads Razorpay's settlement report for the previous day and matches every
     transaction. Look at the list once a day; "Need a person" counts what is still open. Platform
@@ -993,6 +994,27 @@ for. A refund made in the Dashboard is recorded from `refund.processed` or the d
 as made at Razorpay, and shows on the company's receipt. For a company being deleted, refund in the
 Dashboard; a due deletion waits for a refund in progress.
 
+**Refund requests of plan payments (ADR-104).** A company's billing managers ask from a plan
+payment's receipt for a refund of part or all of it, with a reason. Platform owners get the same
+email as for requests of service credit within a minute, counting both kinds (when every waiting
+request is of a plan payment it links straight to them), and decide on `/platform/refunds` → Plan
+payments (operators only read). Approving starts the refund above for the amount asked, with the
+same checks, and its staff reason reads "Asked for by the company:" and the company's reason;
+declining needs a note, which the company's billing managers are emailed within a minute. Neither
+changes the plan. `SELECT status, requested_at, announced_at, decided_at, decline_notified_at,
+plan_payment_refund_id FROM app.plan_payment_refund_requests WHERE tenant_id = … ORDER BY
+requested_at DESC`:
+
+- **"Approving was refused":** the request no longer fits (Razorpay refunded part of the payment
+  since, for example in the Dashboard, a refund of it started meanwhile, or the company asked for
+  deletion); the page shows the reason and the request stays open. Decline it with a note, or refund
+  a smaller amount from the company's platform page and decline the request saying so.
+- **No email about a request, or about a decline:** as for requests of service credit (section 9,
+  item 10): the worker logs the same lines for both kinds, and a failed decline notice names the
+  kind (`credit` or `plan_payment`).
+- **"We asked too often":** 5 requests in 24 hours per company, of plan payments and service credit
+  together (withdrawn requests count).
+
 **Cancelling a company's subscription.** Owners and billing managers cancel in Billing (an active
 one at the end of the paid period, otherwise at once). Platform owners cancel at once on the
 company's platform page with a reason (needed before changing the company's plan, which staff
@@ -1457,6 +1479,15 @@ already stored: a short `ACCESS EXCLUSIVE` lock on the keys table), creates `app
 row security and its grants, and registers deletion step 855 with the definer's grants and
 policies. A failure usually means a lock wait on `app.api_keys` timed out (run the migrations again
 when requests are quieter) or the bootstrap roles are missing.
+
+**Migration 0081 failed.** It runs in one transaction, so a failure applies nothing. It creates
+`app.plan_payment_refund_requests` (empty, with row security, column grants, a restrictive policy
+for the company role and deletion step 77), the notice functions for the worker, the platform lists
+and `ops.platform_decide_plan_payment_refund_request`, each granted before it is handed to
+`w360_definer`. A failure usually means a deletion step numbered 77 already exists, a function of
+the same name was created by hand, or the bootstrap roles are missing. Web and worker images from
+before it never read the new table and keep working. The new images need it: without it, asking for
+a refund of service credit and the minute billing sweep fail (migrate first).
 
 **Migration 0080 failed.** It runs in one transaction, so a failure applies nothing. It creates
 `app.plan_payment_refunds` (empty, with row security, a rule that nobody deletes a row and the

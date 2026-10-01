@@ -32,6 +32,7 @@ import {
   createStoreMessagesService,
   createCrmService,
   createBillingService,
+  createPlanRefundRequestsService,
   createRefundRequestsService,
   createBillingHistoryService,
   createBusinessHoursService,
@@ -73,6 +74,7 @@ import {
   type CrmService,
   type BillingService,
   type BillingHistoryService,
+  type PlanRefundRequestsService,
   type RefundRequestsService,
   type BusinessHoursService,
   type CampaignsService,
@@ -199,6 +201,7 @@ export interface Runtime {
   billingHistory: BillingHistoryService;
   /** Refunds of unused credit asked for by the company (ADR-073). */
   refundRequests: RefundRequestsService;
+  planRefundRequests: PlanRefundRequestsService;
   events: TenantEventHub;
   shutdown(): Promise<void>;
 }
@@ -429,6 +432,7 @@ async function init(): Promise<Runtime> {
   });
   const billingHistory = createBillingHistoryService({ db, clock: systemClock });
   const refundRequests = createRefundRequestsService({ db, clock: systemClock });
+  const planRefundRequests = createPlanRefundRequestsService({ db, clock: systemClock });
   const events = createTenantEventHub({ connectionString: config.DATABASE_URL_APP, logger });
 
   logger.info({ env: config.APP_ENV }, 'web runtime initialised');
@@ -487,6 +491,7 @@ async function init(): Promise<Runtime> {
     planPayments,
     billingHistory,
     refundRequests,
+    planRefundRequests,
     events,
     async shutdown() {
       await events.close();

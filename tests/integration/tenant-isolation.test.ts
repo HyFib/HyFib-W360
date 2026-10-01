@@ -198,14 +198,19 @@ describe('database roles', () => {
     for (const role of ['w360_app', 'w360_auth', 'w360_platform']) {
       expect(await can(role, 'ops.settlement_unsettled_topups()'), role).toBe(false);
     }
-    // Refund requests (0046): the notice sweeps and the platform owners' addresses for the worker,
-    // and the decline mark in the company's scope; the lists and the decision for platform staff.
+    // Refund requests (0046, and of plan payments 0081): the notice sweeps and the platform owners'
+    // addresses for the worker, and the decline marks in the company's scope; the lists and the
+    // decisions for platform staff.
     for (const fn of [
       'ops.platform_owner_recipients()',
       'ops.credit_refund_requests_to_announce(integer)',
       'ops.credit_refund_requests_mark_announced(uuid[])',
       'ops.credit_refund_request_declines_due(integer)',
       'app.credit_refund_request_mark_decline_notified(uuid)',
+      'ops.plan_payment_refund_requests_to_announce(integer)',
+      'ops.plan_payment_refund_requests_mark_announced(uuid[])',
+      'ops.plan_payment_refund_request_declines_due(integer)',
+      'app.plan_payment_refund_request_mark_decline_notified(uuid)',
     ]) {
       expect(await can('w360_app', fn), fn).toBe(true);
       expect(await can('w360_auth', fn), fn).toBe(false);
@@ -215,6 +220,9 @@ describe('database roles', () => {
       'ops.platform_credit_refund_requests(text,timestamp with time zone,uuid,integer)',
       'ops.platform_credit_refunds(timestamp with time zone,uuid,integer)',
       'ops.platform_decide_credit_refund_request(uuid,boolean,text,text)',
+      'ops.platform_plan_payment_refund_requests(text,timestamp with time zone,uuid,integer)',
+      'ops.platform_plan_payment_refunds(timestamp with time zone,uuid,integer)',
+      'ops.platform_decide_plan_payment_refund_request(uuid,boolean,text,text)',
     ]) {
       expect(await can('w360_platform', fn), fn).toBe(true);
       expect(await can('w360_app', fn), fn).toBe(false);

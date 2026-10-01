@@ -300,51 +300,56 @@ export function PlanPaymentCard({
         ) : null}
 
         {payments.length > 0 ? (
-          <Table>
-            <THead>
-              <TR>
-                <TH>Paid</TH>
-                <TH>Period</TH>
-                <TH className="text-right">Amount</TH>
-                <TH>Method</TH>
-                <TH>
-                  <span className="sr-only">Receipt</span>
-                </TH>
-              </TR>
-            </THead>
-            <TBody>
-              {payments.map((p) => (
-                <TR key={p.id}>
-                  <TD>{day(p.paidAt)}</TD>
-                  <TD>
-                    {day(p.periodStart)} to {day(p.periodEnd)}
-                  </TD>
-                  <TD className="text-right tabular-nums">
-                    {inr(p.amountMinor)}
-                    {p.refundedMinor > 0 ? (
-                      <span className="block text-xs text-muted-foreground">
-                        {inr(p.refundedMinor)} refunded
-                      </span>
-                    ) : null}
-                    {p.openRefundMinor !== null ? (
-                      <span className="block text-xs text-muted-foreground">
-                        Refund of {inr(p.openRefundMinor)} in progress
-                      </span>
-                    ) : null}
-                  </TD>
-                  <TD>{p.method ?? '—'}</TD>
-                  <TD className="whitespace-nowrap">
-                    <Link
-                      href={`/c/${slug}/billing/plan-payments/${p.id}`}
-                      className="text-sm text-primary underline-offset-4 hover:underline"
-                    >
-                      Receipt<span className="sr-only"> for {day(p.paidAt)}</span>
-                    </Link>
-                  </TD>
+          <>
+            <Table>
+              <THead>
+                <TR>
+                  <TH>Paid</TH>
+                  <TH>Period</TH>
+                  <TH className="text-right">Amount</TH>
+                  <TH>Method</TH>
+                  <TH>
+                    <span className="sr-only">Receipt</span>
+                  </TH>
                 </TR>
-              ))}
-            </TBody>
-          </Table>
+              </THead>
+              <TBody>
+                {payments.map((p) => (
+                  <TR key={p.id}>
+                    <TD>{day(p.paidAt)}</TD>
+                    <TD>
+                      {day(p.periodStart)} to {day(p.periodEnd)}
+                    </TD>
+                    <TD className="text-right tabular-nums">
+                      {inr(p.amountMinor)}
+                      {p.refundedMinor > 0 ? (
+                        <span className="block text-xs text-muted-foreground">
+                          {inr(p.refundedMinor)} refunded
+                        </span>
+                      ) : null}
+                      {p.openRefundMinor !== null ? (
+                        <span className="block text-xs text-muted-foreground">
+                          Refund of {inr(p.openRefundMinor)} in progress
+                        </span>
+                      ) : null}
+                    </TD>
+                    <TD>{p.method ?? '—'}</TD>
+                    <TD className="whitespace-nowrap">
+                      <Link
+                        href={`/c/${slug}/billing/plan-payments/${p.id}`}
+                        className="text-sm text-primary underline-offset-4 hover:underline"
+                      >
+                        Receipt<span className="sr-only"> for {day(p.paidAt)}</span>
+                      </Link>
+                    </TD>
+                  </TR>
+                ))}
+              </TBody>
+            </Table>
+            <p className="text-xs text-muted-foreground">
+              To ask HyFib for a refund of a plan payment, open its receipt.
+            </p>
+          </>
         ) : null}
       </CardContent>
     </Card>

@@ -1,5 +1,161 @@
 # Progress
 
+## 2026-10-01 — Phase 5: refund requests of plan payments (P5-07, ADR-104)
+
+Status: **Implemented and locally verified against the Razorpay stand-in (test data only).** Since
+ADR-103 a platform owner could refund a plan payment, but a company could only write to support to
+ask for one, and `/platform/refunds` (ADR-073) listed only refunds of service credit.
+
+### Completed
+
+- **Design (ADR-104):** billing managers with a sign-in within 15 minutes ask from a plan payment's
+  receipt for a refund of part or all of it, with a reason (10 to 1,000 characters): at most what
+  Razorpay has not refunded of it, none while a refund of it runs, one open request per payment,
+  none once the company asked for its deletion. Requests of plan payments and of service credit
+  share one limit of 5 a day per company, counted under the advisory lock requests of service credit
+  already take (the same key, so servers of both releases serialise during a rolling deploy). A
+  platform owner approves, which starts ADR-103's staff refund for the amount asked in the same
+  transaction (every check again under its lock; a request that no longer fits stays open), or
+  declines with a note. A request moves no money and never changes the plan.
+- **Migration 0081:** `app.plan_payment_refund_requests` (state and notice checks, composite foreign
+  keys to the payment and the refund, one open request per payment, row security; the company role
+  inserts only an open request's columns, moves an open request only to withdrawn and cannot read
+  who decided or the notice marks; deletion step 77); the worker's notice functions (the waiting
+  requests and their mark, the declines due and the decline mark in the company's scope); the
+  platform lists of requests and of every refund of a plan payment; and
+  `ops.platform_decide_plan_payment_refund_request` (platform owners only, checked in SQL, with the
+  platform audit entry).
+- **Domain:** `plan-refund-requests.ts` (asking, withdrawing, what a receipt offers); the daily
+  limit shared with requests of service credit (`assertRefundRequestAllowance`); the minute sweep's
+  announcement counts both kinds (its wording names them, and it links straight to the plan
+  payments' list when every request is one) and its decline notices tell both kinds (the plan
+  payment's receipt number and link); the platform service's lists and decision; the export spec.
+- **Web:** the plan payment receipt's "Refund of this payment" section (the requests with their
+  status, HyFib's note and the refund, a withdraw button, and the form or why nothing can be asked
+  for, or the sign-in prompt); `/platform/refunds` with a switch between service credit and plan
+  payments, the plan payments' requests (with what is left of the payment, a refund in progress and
+  the decision form for owners) and every refund of a plan payment; a hint under Billing's plan
+  payments.
+- **Worker:** the minute billing sweep's refund request notices cover both kinds; a failed decline
+  notice is logged with its kind.
+- **Tests:**
+  - Unit (1 new): the announcement's wording for requests of plan payments alone and of both kinds,
+    its link straight to the plan payments' list when every request is one, the wording for service
+    credit alone unchanged, and each rendered with no amount, currency or receipt number.
+  - Integration (`plan-refund-requests.test.ts`, 18 new):
+    - a billing manager asks for part of a payment with a reason: nothing is refunded or asked of
+      Razorpay, the plan is unchanged, the company audit entry, the receipt's view (and why nothing
+      more can be asked for), and platform staff's view with the payment, what Razorpay refunded
+      of it and any refund running;
+    - `billing.manage` and a sign-in within 15 minutes (agents, administrators, stale and unknown
+      sign-ins), and withdrawing without a fresh sign-in;
+    - bad input, more than is left (also after a refund made at Razorpay), a failed refund refunding
+      nothing, a refund in progress, a payment refunded in full, unknown payments and another
+      company's payment;
+    - one open request per payment, with two sent at once;
+    - 5 requests a day of plan payments and service credit together, each service refusing when
+      the other kind filled the day, and requests older than a day no longer counting;
+    - the limit under one lock: six requests of both kinds at once letting five through, and a
+      request waiting while another session holds the lock's key;
+    - a company being deleted (the status read now, not the context's; staff can still decline,
+      approving is refused), and the status read under a share lock while the deletion is asked
+      for;
+    - withdrawing once, audited, and asking again; another company unable to withdraw;
+    - approving: the staff refund for the amount asked with the company's reason, linked and in
+      both audit logs, the company's and staff's views, the list of every refund linked to the
+      request, the worker's call with the refund's key and notes, the email without HyFib's reason
+      and the plan unchanged; decided once;
+    - approving checked again: refused while a refund started from the company's page runs, and
+      once Razorpay refunded it and less is left than was asked, the request staying open to be
+      declined;
+    - declining needs a note (the service and the function), audited, and the company can ask
+      again;
+    - platform owners only, in the service and the function, for approving and declining; a claimed
+      role refused; the company role unable to call the decision or the lists; an unknown filter;
+    - the company role's grants and policy (no decision or notice columns, no decided request, no
+      deletion, a withdrawn request not reopened) and another company's scope (nothing seen,
+      moved or inserted, and no request on another company's payment);
+    - the owners' email: one request alone, both kinds in one email, a withdrawn request not
+      announced, two sweeps at once announcing once, and no platform owner leaving it due;
+    - the decline email: once to the billing managers with the note and the receipt link, not for
+      an approved request, two sweeps at once telling once, the mark refused in another company's
+      scope, and a note of 1,000 characters told in full over several lines;
+    - the lists paging on equal microseconds, filters, bad cursors, and a refund made at Razorpay
+      beside HyFib's own.
+  - Integration elsewhere: the company deletion deletes the requests and keeps the refund an
+    approval started (`company-data`); the export classification; the new functions' grants
+    (`tenant-isolation`).
+  - e2e (`plan-subscription.spec.ts`): the owner asks from the receipt for ₹200, platform owners'
+    email names no company, amount or reason, a platform owner declines it with a note on the
+    plan payments' requests, the receipt shows the note, the owner asks for ₹150, a platform owner
+    approves, the decline email arrives with the note, the worker refunds the ₹150 and emails the
+    company, and the receipt shows the request refunded and ₹1,164.82 after both refunds.
+- **Docs:** ADR-104 (and a note in ADR-103); SECURITY; THREAT-MODEL T117; RUNBOOKS (refund
+  requests of plan payments, the shared daily limit, migration 0081); ARCHITECTURE;
+  DATA-RETENTION; RELEASE-CHECKLIST; BACKLOG P5-07; FEATURE-MATRIX H-043, H-044.
+- **Found while finishing:**
+  - The first local e2e run used the day's e2e database without migration 0081: asking for a refund
+    of service credit (which now counts both kinds) and the minute billing sweep failed. The new
+    web and worker images need the migration first; the runbook says so.
+  - The local e2e database collected 137 platform owners over the day's runs, and each owner
+    announcement queues one email per owner, which the outbox sends at about two a second: the
+    credit refund test's 60-second wait for its next email ran out on one run. The final runs used
+    a fresh database, as CI does (CI's database starts empty, so at most a few dozen owners exist).
+  - The new e2e steps first reloaded Billing instead of the receipt: the receipt link navigates in
+    the page, and the reload loop started before the receipt showed. The test now waits for the
+    receipt's heading first.
+  - `/platform/plans` was wider than a phone's screen: its grid let the plans table widen the page
+    (555 px on a 412 px phone), so the phone browser zoomed out and, on a fresh database, the e2e
+    test's first click there missed its button. The page now has one column that never grows past
+    the screen, as the other platform pages do (the table scrolls in its card), and the test checks
+    it for horizontal overflow. The other platform pages were measured at the phone's width.
+  - Removing the withdrawal's own "open requests only" filter changed nothing: the company role's
+    update policy refuses a request that is not open. Removing the policy's condition is caught.
+- **Mutation checks:** 53 regressions tried one at a time, 52 caught (3 through the e2e test).
+  - 25 in the migration: operators allowed to decide; a decided or withdrawn request decided again;
+    a decline without a note; the refund for another amount, or without the company's reason; the
+    decision missing from the platform audit log; either platform list open to anyone; decided
+    requests listed as open; requests paged on the time alone; a requested refund not shown as in
+    progress; refunds in progress counted as refunded; refunds linked to every request of their
+    payment; the company role reading who decided, inserting a status, writing the decision note,
+    moving a request to approved or reopening a withdrawn one; several open requests per payment;
+    withdrawn requests announced, or a request announced twice; the decline mark not limited to the
+    current company; requests not deleted with the company; the runtime role able to decide; the
+    platform role able to mark declines told.
+  - 14 in asking and withdrawing: administrators, or a stale sign-in, able to ask; the company's
+    status not read, or read without the share lock; no daily limit; more than is left, a payment
+    refunded in full, or a request while a refund runs accepted; failed refunds counted as
+    refunded; a second open request not told as such; the request missing from the company audit
+    log; administrators able to withdraw; the receipt offering the form while a request is open;
+    and the withdrawal's own filter for open requests removed, the one not caught: the company
+    role's update policy repeats it, and removing the policy's condition is caught (above).
+  - 8 in the shared limit and the notices: the limit counting only requests of service credit, or
+    under another lock; requests of plan payments not announced, or counted as service credit; the
+    announcement of plan payments linking to service credit; declines of plan payments not told;
+    the decline email linking to a top-up receipt; a long note not split into lines.
+  - 3 in the platform service and the export: every request asked for as a status; what was
+    refunded read from the payment's amount; the export including who decided.
+  - 3 through the e2e test: the receipt not offering the form; the refunds page ignoring the plan
+    payments tab; a decision on a plan payment sent as one on service credit.
+
+### Test commands and results (local, 2026-10-01)
+
+| Command                                                                                                                                                                    | Result                                   |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                       | clean                                    |
+| `pnpm test`                                                                                                                                                                | 455 passed                               |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                                                        | 638 passed on each                       |
+| `pnpm build` and `pnpm test:e2e` for `plan-subscription.spec.ts` and `refund-requests.spec.ts` on chromium and mobile-chromium, on a fresh local database migrated to 0081 | 4 passed (11.6 min)                      |
+| Mutation checks                                                                                                                                                            | 53 regressions, 52 caught (listed above) |
+| gitleaks 8.30.1 on the commit                                                                                                                                              | no leaks                                 |
+
+### Known gaps
+
+- Approving a different amount than asked (decline with a note, then refund from the company's
+  platform page), several open requests per payment, reminders about waiting requests, in-app
+  notices and refund requests through the public API are not built.
+- Razorpay test mode has not been run (RELEASE-CHECKLIST).
+
 ## 2026-09-30 — Phase 5: refunds of plan payments (P5-07, ADR-103)
 
 Status: **Implemented and locally verified against the Razorpay stand-in (test data only).** HyFib

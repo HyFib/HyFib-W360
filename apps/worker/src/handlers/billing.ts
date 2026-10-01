@@ -341,8 +341,8 @@ export function billingSweepHandler(rt: WorkerRuntime) {
         'payments were not settled but there is no platform owner to email',
       );
     }
-    // Refund requests from companies (ADR-073): platform owners hear of new ones, billing managers of
-    // a decline.
+    // Refund requests from companies, of service credit (ADR-073) and of plan payments (ADR-104):
+    // platform owners hear of new ones, billing managers of a decline.
     const requests = await announceRefundRequests({
       db: rt.db,
       outbox: rt.notices.outbox,
@@ -364,6 +364,7 @@ export function billingSweepHandler(rt: WorkerRuntime) {
     for (const failure of declines.failed) {
       rt.logger.warn(
         {
+          kind: failure.kind,
           tenantId: failure.tenantId,
           requestId: failure.requestId,
           err: toError(failure.error).message,

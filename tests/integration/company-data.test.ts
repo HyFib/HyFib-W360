@@ -17,6 +17,7 @@ import {
   createContactsService,
   createGrowthService,
   createPlanAdminService,
+  createPlanRefundRequestsService,
   createPlatformBillingService,
   createPlatformService,
   createRefundRequestsService,
@@ -1302,7 +1303,7 @@ describe('running a deletion', () => {
     );
   });
 
-  it('waits for a refund of a plan payment in progress, and keeps it (ADR-103)', async () => {
+  it('waits for a refund of a plan payment in progress, keeps it and deletes the requests (ADR-103, ADR-104)', async () => {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);
     const providerSubscriptionId = await addPlanSubscription(c);
@@ -1329,7 +1330,24 @@ describe('running a deletion', () => {
       amount: '100',
       reason: 'Charged twice by mistake, ticket 5150',
     };
-    const { refundId } = await plans.requestPlanPaymentRefund(actor, ask);
+    // The company asks (ADR-104), withdraws, asks again, and the platform owner's approval starts
+    // the refund.
+    const requests = createPlanRefundRequestsService({ db: fx.dbs.app, clock: systemClock });
+    const reason = 'We were charged twice for this month of our plan.';
+    const first = await requests.ask(owner, { planPaymentId, amount: '10', reason });
+    await requests.withdraw(owner, first.requestId);
+    const second = await requests.ask(owner, { planPaymentId, amount: '100', reason });
+    const { refundId: approved } = await createPlatformBillingService({
+      platformDb: fx.dbs.platform,
+    }).decidePlanRefundRequest(actor, { requestId: second.requestId, decision: 'approve' });
+    const refundId = approved!;
+    expect(
+      await fx.query<{ status: string }>(
+        `SELECT status FROM app.plan_payment_refund_requests WHERE tenant_id = $1
+          ORDER BY requested_at, id`,
+        [c.tenant.id],
+      ),
+    ).toEqual([{ status: 'withdrawn' }, { status: 'approved' }]);
     const scope = authorizedTenantScope(c.tenant.id, null);
     const refundDeps = {
       db: fx.dbs.app,
@@ -1369,6 +1387,12 @@ describe('running a deletion', () => {
         [refundId],
       ),
     ).toEqual([{ status: 'processed', amount_minor: 10_000 }]);
+    // The requests, the company's own text, are deleted with it; the refund they led to is kept.
+    expect(
+      await fx.query('SELECT id FROM app.plan_payment_refund_requests WHERE tenant_id = $1', [
+        c.tenant.id,
+      ]),
+    ).toEqual([]);
     expect(await tenantRow(c.tenant.id)).toMatchObject({ status: 'deleted' });
   });
 

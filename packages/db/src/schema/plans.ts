@@ -215,6 +215,35 @@ export const planPaymentRefunds = appSchema.table('plan_payment_refunds', {
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });
 
+/**
+ * A company's request for a refund of a plan payment (0081, ADR-104): it inserts open requests and
+ * withdraws open ones; platform owners decide through a definer function, and approving starts the
+ * staff refund of ADR-103. Who decided and the notice marks are not readable by the company.
+ */
+export const PLAN_PAYMENT_REFUND_REQUEST_STATUSES = [
+  'open',
+  'approved',
+  'declined',
+  'withdrawn',
+] as const;
+export type PlanPaymentRefundRequestStatus = (typeof PLAN_PAYMENT_REFUND_REQUEST_STATUSES)[number];
+
+export const planPaymentRefundRequests = appSchema.table('plan_payment_refund_requests', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  planPaymentId: uuid('plan_payment_id').notNull(),
+  amountMinor: bigint('amount_minor', { mode: 'number' }).notNull(),
+  reason: text('reason').notNull(),
+  status: text('status', { enum: PLAN_PAYMENT_REFUND_REQUEST_STATUSES }).notNull().default('open'),
+  requestedByUserId: text('requested_by_user_id').notNull(),
+  requestedAt: tz('requested_at').notNull().defaultNow(),
+  withdrawnAt: tz('withdrawn_at'),
+  decidedAt: tz('decided_at'),
+  decisionNote: text('decision_note'),
+  planPaymentRefundId: uuid('plan_payment_refund_id'),
+  updatedAt: tz('updated_at').notNull().defaultNow(),
+});
+
 export const USAGE_METRICS = ['automation_runs', 'api_requests'] as const;
 export type UsageMetric = (typeof USAGE_METRICS)[number];
 

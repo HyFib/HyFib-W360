@@ -1387,6 +1387,21 @@ WHERE used < limit`), per monthly period from `usage_anchor`; the sweep announce
   processed refunds never exceed the payment. The runtime role may only move a request to submitted
   or failed. A refund never changes the plan state or the subscription. The receipt and Billing's
   payments table show refunds; the platform page lists them and has the form.
+- **Refund requests of plan payments (0081, ADR-104) [built]:** a member with `billing.manage` and
+  a sign-in within 15 minutes asks from a plan payment's receipt for a refund of part or all of it,
+  with a reason. `createPlanRefundRequestsService` reads the company's status under a share lock,
+  counts the company's refund requests of both kinds in the last 24 hours (at most 5) under the
+  advisory lock requests of service credit take (`assertRefundRequestAllowance`, shared with
+  ADR-073), and checks what Razorpay has not refunded of the payment and a refund of it in progress;
+  it inserts the open request with only the columns the company role may insert, and
+  `plan_payment_refund_requests_one_open_uq` keeps one open request per payment. The company can
+  withdraw an open request. `ops.platform_decide_plan_payment_refund_request` (platform owners)
+  approves by calling `ops.platform_request_plan_payment_refund` (ADR-103) for the request's amount
+  in the same transaction, which checks everything again, and links the refund; declining needs a
+  note. The minute billing sweep's announcement to platform owners and its decline notices (0046)
+  cover both kinds. `/platform/refunds?kind=plan` lists the requests
+  (`ops.platform_plan_payment_refund_requests`) and every refund of a plan payment across companies
+  (`ops.platform_plan_payment_refunds`), each newest first on exact keyset pages.
 - **Ledger (0004_billing):** one INR wallet per company with five accounts (`wallet_available`,
   `wallet_held`, `payment_clearing`, `service_revenue`, `dispute_losses`). `ledger_transactions` and
   `ledger_entries` are append-only (trigger), balances are maintained by trigger from the entries,

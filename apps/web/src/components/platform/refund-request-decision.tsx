@@ -1,22 +1,24 @@
 'use client';
 import { useState } from 'react';
 import { Checkbox, Field, Label, Textarea } from '@w360/ui';
-import { decideRefundRequestAction } from '@/app/actions/platform';
+import { decidePlanRefundRequestAction, decideRefundRequestAction } from '@/app/actions/platform';
 import { ClientButton, ClientForm } from '@/components/client-form';
 import { FormError } from '@/components/form-status';
 
 /**
- * Approves or declines a company's refund request (platform owners, ADR-073). Approving starts the
- * staff refund of ADR-058 for the amount asked, and the server checks every rule again under its
- * locks; declining needs a note the company reads. A decided request leaves the open list, and this
- * form with it.
+ * Approves or declines a company's refund request (platform owners): of service credit (ADR-073),
+ * where approving starts the staff refund of ADR-058, or of a plan payment (ADR-104), where it starts
+ * the staff refund of ADR-103. The server checks every rule again under its locks; declining needs a
+ * note the company reads. A decided request leaves the open list, and this form with it.
  */
 export function RefundRequestDecision({
   requestId,
   amountLabel,
+  kind = 'credit',
 }: {
   requestId: string;
   amountLabel: string;
+  kind?: 'credit' | 'plan_payment';
 }) {
   const [note, setNote] = useState('');
   const [confirmed, setConfirmed] = useState(false);
@@ -26,7 +28,9 @@ export function RefundRequestDecision({
   async function decide(decision: 'approve' | 'decline') {
     setBusy(true);
     setError(null);
-    const result = await decideRefundRequestAction({
+    const decideAction =
+      kind === 'plan_payment' ? decidePlanRefundRequestAction : decideRefundRequestAction;
+    const result = await decideAction({
       requestId,
       decision,
       note: note.trim() === '' ? undefined : note,
@@ -66,6 +70,7 @@ export function RefundRequestDecision({
         <Label htmlFor={`refund-decision-confirm-${requestId}`} className="font-normal">
           Approving refunds {amountLabel} to the card, UPI or bank account the payment came from,
           from HyFib’s Razorpay balance. It cannot be taken back, and Razorpay keeps its fee.
+          {kind === 'plan_payment' ? ' The company’s plan and its paid period do not change.' : ''}
         </Label>
       </div>
       <div className="flex flex-wrap gap-2">

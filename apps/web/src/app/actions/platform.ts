@@ -100,6 +100,17 @@ export async function decideRefundRequestAction(
   });
 }
 
+export async function decidePlanRefundRequestAction(
+  input: unknown,
+): Promise<ActionResult<{ refundId: string | null }>> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    const result = await runtime.platformBilling.decidePlanRefundRequest(actor, input);
+    refresh();
+    return result;
+  });
+}
+
 export async function requestSettlementReconAction(
   input: unknown,
 ): Promise<ActionResult<{ runId: string }>> {

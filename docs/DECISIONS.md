@@ -3575,4 +3575,50 @@ Not built: refunds asked for by companies, ending the plan with a refund, instan
 payments, plan payment refunds in the platform-wide refunds list (ADR-073), emails about refunds
 made in the Dashboard, and the "HyFib is refunding" email for a staff refund that Razorpay reports
 processed before HyFib stored its id (recognised by its notes after a lost response; the receipt
-shows it).
+shows it). ADR-104 builds refunds asked for by companies and plan refunds in the platform-wide list.
+
+## ADR-104 Refunds of plan payments asked for by companies; plan refunds in the platform-wide list (2026-10-01)
+
+Context: since ADR-103 a platform owner can refund a plan payment from the company's platform page,
+but a company could not ask for one except by writing to support, and `/platform/refunds` (ADR-073)
+listed only refunds of service credit. Both were listed as not built in ADR-103.
+
+Decision:
+
+- **Asking, as for service credit (ADR-073):** members with `billing.manage` and a sign-in within the
+  last 15 minutes (ADR-056) ask from a plan payment's receipt for a refund of part or all of it, with a
+  reason of 10 to 1,000 characters. The amount is at least ₹0.01 and at most what Razorpay has not
+  refunded of the payment; no request while a refund of the payment is in progress, one open request
+  per payment (a partial unique index), none once the company asked for its deletion (its status read
+  under a share lock in the request's transaction). The company can withdraw an open request. A
+  request moves no money and changes nothing about the plan.
+- **One daily limit:** a company may make 5 refund requests in 24 hours, of either kind, counted under
+  the same per-company advisory lock that requests of service credit already take.
+- **Deciding:** only a platform owner decides. `ops.platform_decide_plan_payment_refund_request`
+  locks the open request; approving calls `ops.platform_request_plan_payment_refund` (ADR-103) for
+  the request's amount in the same transaction, so every check runs again under its lock (what
+  Razorpay has not refunded of the payment, a refund in progress, a company being deleted): a request
+  that no longer fits is refused with the reason and stays open for a decline. The refund's staff
+  reason reads "Asked for by the company:" and the company's reason. Declining needs a note the
+  company reads. Both are in the platform audit log; the company never sees who decided (column
+  grants). The refund, as any staff refund of a plan payment, never changes the plan or the
+  subscription.
+- **Hearing about it:** the minute billing sweep's email to platform owners about new requests counts
+  both kinds (still a count only: no company, amount or reason; its wording names the kinds, and it
+  links straight to the plan payments' list when every request it announces is of a plan payment). A
+  declined request is emailed to the company's billing managers once, with the note, marked in the
+  company's own scope in the transaction that queues it. An approval needs no email of its own: the
+  refund's emails (ADR-103) follow.
+- **The platform-wide list:** `/platform/refunds` shows service credit or plan payments. For plan
+  payments it lists the companies' requests (waiting, decided or all) with the payment, what
+  Razorpay has not refunded of it and whether a refund is in progress, and every refund of a plan
+  payment across companies (started by HyFib, answering a request, or made at Razorpay), newest
+  first on exact keyset pages (ADR-072).
+- **Data:** `app.plan_payment_refund_requests` is a company table (RLS; the company reads all but who
+  decided and the notice marks, inserts open requests and moves an open request only to withdrawn).
+  It is exported with the company's data and deleted with the company (ADR-055, step 77); the
+  refunds it led to stay as billing records (ADR-103).
+
+Not built: approving a different amount (decline with a note and refund from the company's page),
+several open requests per payment, reminders about waiting requests, in-app notices, and refund
+requests through the public API.
