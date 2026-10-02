@@ -353,6 +353,7 @@ describe('webhook payload schemas', () => {
       phone: '+919876543210',
       email: 'priya@example.com',
       tags: ['vip'],
+      fields: { city: 'Chennai', orders: 3, birthday: '1990-04-01', vip: true },
       consent: { marketing: 'opted_in', utility: null },
       source: 'whatsapp',
       createdAt: base.createdAt,
@@ -364,6 +365,7 @@ describe('webhook payload schemas', () => {
       phone: null,
       email: null,
       tags: [],
+      fields: {},
       consent: { marketing: null, utility: null },
       erased: true,
     };
@@ -375,6 +377,13 @@ describe('webhook payload schemas', () => {
       for (const shown of [person, erased]) {
         expect(schema.safeParse({ ...base, type, data: { contact: shown } }).success, type).toBe(
           true,
+        );
+      }
+      // Custom field values are strings, numbers or booleans (ADR-112).
+      for (const fields of [{ city: null }, { city: ['a'] }, { city: { name: 'a' } }]) {
+        const shown = { ...person, fields };
+        expect(schema.safeParse({ ...base, type, data: { contact: shown } }).success, type).toBe(
+          false,
         );
       }
     }

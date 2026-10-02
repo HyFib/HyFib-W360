@@ -33,7 +33,7 @@ import {
   type ResolvedProductMessage,
 } from '../commerce/model';
 import { checkTemplateEligibility, recordConsentEvents } from '../consent/service';
-import { normalizeEmail, normalizeTag } from '../contacts/fields';
+import { MAX_TAGS_PER_CONTACT, normalizeEmail, type AttributeValue } from '../contacts/fields';
 import { normalizePhone, phoneFromWaId, waRecipientFromPhone } from '../contacts/phone';
 import { contactForPhone } from '../contacts/service';
 import { emitTenantEvent } from '../messaging/events';
@@ -63,6 +63,7 @@ import {
 } from '../templates/definition';
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
 import { apiContactById, apiContactColumns, toApiContact, type ApiContact } from './contact-view';
+import { apiContactFieldsSchema, apiFieldChanges, apiTags } from './contacts';
 import { apiActor, assertAnyScope, assertScope, type ApiContext } from './context';
 import {
   claimIdempotencyKey,
@@ -92,6 +93,7 @@ export const apiContactCreateSchema = z
       .max(20)
       .optional()
       .describe('Tags to add (lower-cased; commas are not allowed).'),
+    fields: apiContactFieldsSchema.optional(),
   })
   .strict();
 
@@ -652,7 +654,8 @@ export async function apiGetContact(
 
 /**
  * Creates a contact, or answers with the existing one for the number (200 instead of 201); a
- * name, email or tags given for an existing contact fill only what is empty (tags are added).
+ * name, email or custom field values given for an existing contact fill only what is empty, and
+ * tags are added (50 at most per contact, as members keep them).
  */
 export async function apiCreateContact(
   deps: Pick<OutboundDeps, 'db' | 'clock'>,
@@ -665,15 +668,17 @@ export async function apiCreateContact(
   const phone = explicitPhone(data.phone);
   const email = normalizeEmail(data.email ?? '');
   if (!email.ok) throw new AppError('validation_failed', email.message);
-  const tags: string[] = [];
-  for (const raw of data.tags ?? []) {
-    const tag = normalizeTag(raw);
-    if (!tag.ok) throw new AppError('validation_failed', tag.message);
-    if (!tags.includes(tag.tag)) tags.push(tag.tag);
-  }
+  const tags = apiTags(data.tags ?? [], 'tags');
   const now = deps.clock.now();
   return deps.db.run(ctx.scope, (tx) =>
     idempotent(tx, ctx, idempotency, now, async () => {
+      // Values only: an empty string, which clears a value elsewhere, gives none here.
+      const values: Record<string, AttributeValue> = {};
+      for (const [key, value] of Object.entries(
+        await apiFieldChanges(tx, ctx.tenant.id, data.fields ?? {}),
+      )) {
+        if (value !== null) values[key] = value;
+      }
       const [suppressed] = await tx
         .select({ id: suppressions.id })
         .from(suppressions)
@@ -693,6 +698,7 @@ export async function apiCreateContact(
           displayName: data.name || null,
           phoneE164: phone,
           email: email.email,
+          attributes: values,
           source: 'api',
         })
         .onConflictDoNothing({
@@ -715,8 +721,23 @@ export async function apiCreateContact(
           .set({
             displayName: sql`coalesce(${contacts.displayName}, ${data.name || null})`,
             email: sql`coalesce(${contacts.email}, ${email.email})`,
+            // The contact's own values win over the request's.
+            attributes: sql`${JSON.stringify(values)}::jsonb || ${contacts.attributes}`,
           })
           .where(and(eq(contacts.tenantId, ctx.tenant.id), eq(contacts.id, id)));
+        if (tags.length > 0) {
+          const existing = await tx
+            .select({ tag: contactTags.tag })
+            .from(contactTags)
+            .where(and(eq(contactTags.tenantId, ctx.tenant.id), eq(contactTags.contactId, id)));
+          const all = new Set([...existing.map((e) => e.tag), ...tags]);
+          if (all.size > MAX_TAGS_PER_CONTACT) {
+            const message = `A contact can have at most ${MAX_TAGS_PER_CONTACT} tags.`;
+            throw new AppError('validation_failed', message, {
+              issues: [{ path: 'tags', message }],
+            });
+          }
+        }
       }
       if (tags.length > 0) {
         await tx

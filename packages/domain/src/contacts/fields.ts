@@ -10,6 +10,8 @@ export const MAX_TAGS_PER_CONTACT = 50;
 export const MAX_CONTACT_FIELDS = 50;
 export const MAX_TEXT_VALUE_LENGTH = 500;
 export const EMAIL_RE = /^[^@\s]+@[^@\s]+$/;
+/** A number value as members type it: at most 15 digits before the point and 6 after. */
+const NUMBER_RE = /^-?\d{1,15}(\.\d{1,6})?$/;
 
 export type AttributeValue = string | number | boolean;
 
@@ -72,8 +74,7 @@ export function coerceFieldValue(
           }
         : { ok: true, value };
     case 'number': {
-      if (!/^-?\d{1,15}(\.\d{1,6})?$/.test(value))
-        return { ok: false, message: `${field.label} must be a number.` };
+      if (!NUMBER_RE.test(value)) return { ok: false, message: `${field.label} must be a number.` };
       return { ok: true, value: Number(value) };
     }
     case 'date':
@@ -86,6 +87,42 @@ export function coerceFieldValue(
       if (['false', 'no', 'n', '0'].includes(v)) return { ok: true, value: false };
       return { ok: false, message: `${field.label} must be yes or no.` };
     }
+  }
+}
+
+/**
+ * Checks a value sent through the public API against the field's type (ADR-112), strictly: a string
+ * for text (at most 500 characters), a number for a number (as members type them), a real date as
+ * a `YYYY-MM-DD` string for a date and a boolean for yes/no. Null, or an empty string for text and
+ * dates, means "remove the value" (`value: null`), as an empty field does in the app.
+ */
+export function apiFieldValue(
+  field: { label: string; type: ContactFieldType },
+  value: unknown,
+): { ok: true; value: AttributeValue | null } | { ok: false; message: string } {
+  if (value === null) return { ok: true, value: null };
+  switch (field.type) {
+    case 'text':
+      return typeof value === 'string'
+        ? coerceFieldValue(field, value)
+        : { ok: false, message: `${field.label} takes text.` };
+    case 'date':
+      return typeof value === 'string'
+        ? coerceFieldValue(field, value)
+        : { ok: false, message: `${field.label} takes a date written as YYYY-MM-DD.` };
+    case 'number':
+      if (typeof value !== 'number' || !Number.isFinite(value))
+        return { ok: false, message: `${field.label} takes a number.` };
+      return NUMBER_RE.test(String(value))
+        ? { ok: true, value }
+        : {
+            ok: false,
+            message: `${field.label} takes a number with at most 15 digits before the point and 6 after.`,
+          };
+    case 'boolean':
+      return typeof value === 'boolean'
+        ? { ok: true, value }
+        : { ok: false, message: `${field.label} takes true or false.` };
   }
 }
 

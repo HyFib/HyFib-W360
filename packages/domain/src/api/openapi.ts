@@ -36,6 +36,7 @@ import {
 } from '../webhooks/payloads';
 import { apiStartAutomationSchema } from './automations';
 import { apiContactSchema } from './contact-view';
+import { apiContactFieldSchema, apiContactUpdateSchema } from './contacts';
 import {
   API_MESSAGE_FEED_WINDOW,
   apiAddNoteSchema,
@@ -542,7 +543,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         post: {
           operationId: 'createContact',
           summary: 'Create a contact, or get the existing one for the number',
-          description: `${scopeNote('contacts.write')} An existing contact answers 200 with \`created: false\`; empty name and email are filled and tags added.`,
+          description: `${scopeNote('contacts.write')} An existing contact answers 200 with \`created: false\`; an empty name, email or custom field is filled, values it has are kept, and tags are added (50 at most per contact).`,
           parameters: [{ $ref: '#/components/parameters/IdempotencyKeyOptional' }],
           requestBody: { required: true, content: json(ref('ContactCreate')) },
           responses: {
@@ -575,6 +576,34 @@ export function buildOpenApiDocument(serverUrl: string) {
           responses: {
             '200': { description: 'The contact.', content: json(dataOf(ref('Contact'))) },
             ...errors(401, 403, 404, 429, 500),
+          },
+        },
+        patch: {
+          operationId: 'updateContact',
+          summary: 'Change a contact’s name, email, custom fields or tags',
+          description: `${scopeNote('contacts.write')} A field's value must have its type (GET /contact-fields); a refusal names \`fields.<key>\` and saves nothing. Tags are lower-cased, 50 at most per contact. The phone number is not changed through the API. What the contact already has changes nothing, so a retry is safe without an \`Idempotency-Key\`. Erased contacts are not found.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          requestBody: { required: true, content: json(ref('ContactUpdate')) },
+          responses: {
+            '200': {
+              description: 'The contact as it is now.',
+              content: json(dataOf(ref('Contact'))),
+            },
+            ...errors(400, 401, 403, 404, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/contact-fields': {
+        get: {
+          operationId: 'listContactFields',
+          summary: 'The company’s custom fields',
+          description: `${scopeNote('contacts.read')} The keys and types of the values \`fields\` holds, by label. Members add, rename and delete fields in the app.`,
+          responses: {
+            '200': {
+              description: 'The fields (at most 50).',
+              content: json(dataOf({ type: 'array', items: ref('ContactField') })),
+            },
+            ...errors(401, 403, 429, 500),
           },
         },
       },
@@ -1237,6 +1266,8 @@ export function buildOpenApiDocument(serverUrl: string) {
       schemas: {
         Contact: jsonSchema(apiContactSchema),
         ContactCreate: jsonSchema(apiContactCreateSchema, 'input'),
+        ContactUpdate: jsonSchema(apiContactUpdateSchema, 'input'),
+        ContactField: jsonSchema(apiContactFieldSchema),
         Consent: jsonSchema(apiConsentSchema, 'input'),
         Template: jsonSchema(apiTemplateSchema),
         SendTemplate: jsonSchema(apiSendMessageSchema, 'input'),
@@ -1295,7 +1326,9 @@ export const API_ROUTES = [
   ['get', '/contacts'],
   ['post', '/contacts'],
   ['get', '/contacts/{id}'],
+  ['patch', '/contacts/{id}'],
   ['post', '/contacts/{id}/consent'],
+  ['get', '/contact-fields'],
   ['post', '/messages'],
   ['get', '/messages'],
   ['get', '/messages/{id}'],

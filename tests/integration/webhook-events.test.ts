@@ -539,12 +539,12 @@ describe('contact events', () => {
     });
   });
 
-  it('sends one contact.updated per save of the name, number, email or tags, and nothing for custom fields or an unchanged save', async () => {
+  it('sends one contact.updated per save of the name, number, email, tags or custom field values, and nothing for an unchanged save or a field renamed or deleted', async () => {
     const c = await fx.company();
     const endpoint = await addEndpoint(c, ['contact.updated']);
     const owner = await fx.ctx(c, c.owner);
     const service = contactsService();
-    await service.createField(owner, { label: 'City', key: 'city', type: 'text' });
+    const city = await service.createField(owner, { label: 'City', key: 'city', type: 'text' });
     const { id: contactId } = await service.createContact(owner, {
       displayName: 'Bina',
       phone: '+919811100012',
@@ -572,23 +572,33 @@ describe('contact events', () => {
     counts.push(await updatesSoFar());
     await service.removeTag(owner, contactId, 'gold');
     counts.push(await updatesSoFar());
-    // A custom field and a save that changes nothing send nothing.
+    // A custom field's value is part of the contact (ADR-112); a save that changes nothing sends
+    // nothing.
     await service.updateContact(owner, contactId, {
       displayName: 'Bina Rao',
       attributes: { city: 'Pune' },
     });
-    await service.updateContact(owner, contactId, { displayName: 'Bina Rao' });
     counts.push(await updatesSoFar());
-    expect(counts).toEqual([1, 2, 3, 4, 5, 6, 6]);
+    await service.updateContact(owner, contactId, {
+      displayName: 'Bina Rao',
+      attributes: { city: 'Pune' },
+    });
+    counts.push(await updatesSoFar());
+    // Renaming the field changes no value, and deleting it removes its value from every contact at
+    // once, without an event for each.
+    await service.renameField(owner, city.id, 'Town');
+    await service.deleteField(owner, city.id);
+    counts.push(await updatesSoFar());
+    expect(counts).toEqual([1, 2, 3, 4, 5, 6, 7, 7, 7]);
     const events = await eventsOf(c, 'contact.');
     expect(events.map((e) => [e.type, e.deliveries])).toEqual([
       ['contact.created', 0],
-      ...Array.from({ length: 6 }, () => ['contact.updated', 1]),
+      ...Array.from({ length: 7 }, () => ['contact.updated', 1]),
     ]);
 
     await deliverDue(c);
     const bodies = bodiesAt(endpoint.path);
-    expect(bodies).toHaveLength(6);
+    expect(bodies).toHaveLength(7);
     for (const body of bodies) {
       expect(contactUpdatedPayloadSchema.safeParse(body).success).toBe(true);
       // Built when delivered: every body shows the contact as it is now.
@@ -599,6 +609,8 @@ describe('contact events', () => {
         tags: ['north'],
         erased: false,
       });
+      // The deleted field's value is gone.
+      expect((body.data.contact as { fields: unknown }).fields).toEqual({});
     }
   });
 

@@ -1,5 +1,104 @@
 # Progress
 
+## 2026-10-02 — Phase 5: contact custom fields and contact changes through the public API (P5-08, P5-09, ADR-112)
+
+Status: **Implemented and locally verified (test data only; webhooks delivered to local test
+receivers only).** A company describes its contacts with up to 50 custom fields that members,
+imports, automations and Flows fill, but the API's contact had no custom fields, `POST /contacts`
+could not set them, nothing changed a contact once it existed apart from tags and consent, and
+`contact.updated` (ADR-074) ignored custom field changes, so an integration kept in step with HyFib
+missed every answer an automation or a Flow saved.
+
+### Completed
+
+- **Design (ADR-112):** the API's contact carries `fields`, the values of the company's custom
+  fields by key, typed (strings for text and dates, numbers, booleans), and only of fields the
+  company has; `GET /contact-fields` lists the fields; `POST /contacts` sets them on a new contact
+  and fills only an existing contact's empty ones; `PATCH /contacts/{id}` changes the name, email,
+  field values and tags, each value checked strictly against its field's type, a refusal saving
+  nothing; the phone number is not changed through the API. `contact.updated` also fires for a
+  change of a custom field's value, whoever makes it, once per contact and transaction.
+- **Migration 0090:** `app.webhook_capture_contact_fields()` and its trigger on `app.contacts`
+  (after an update of `attributes` while the contact is not erased), comparing the values of the
+  company's field keys only, so a field's deletion or rename captures nothing; not executable by
+  PUBLIC.
+- **Domain:** `api/contacts.ts` (the schemas, `apiFieldChanges` locking the named fields `FOR SHARE`
+  before the contact row, as a field's deletion takes them, `apiListContactFields`,
+  `apiUpdateContact` under the contact's row lock, writing and auditing only what differs);
+  `apiFieldValue` in `contacts/fields.ts` (JSON types, no coercion; numbers within what members can
+  type); the API contact's `fields` subquery (`api/contact-view.ts`), shared with the contact
+  webhooks (an erased contact's `fields` is empty); `POST /contacts` takes `fields` and keeps the
+  50-tag limit; the OpenAPI document (`updateContact`, `listContactFields`, `ContactUpdate`,
+  `ContactField`); the scope's wording ("Create and change contacts and record consent").
+- **Web:** the `PATCH /api/v1/contacts/{id}` and `GET /api/v1/contact-fields` routes; Settings → API
+  keys describes what `contacts.write` now allows.
+- **Tests:**
+  - Unit: the value rule for each type (JSON types, the number bounds, real dates, null and empty
+    strings clearing), the schemas (at least one change, nothing else, 50 fields at most), the order
+    of refusals before anything is read, the OpenAPI entries, the webhook payloads with `fields`.
+  - Integration (`api-contact-fields.test.ts`, 9): the field list by label for `contacts.read` only,
+    a rename changing the label and not the key; typed values in every contact read, never a key no
+    field has; creating with fields and filling only an existing contact's empty ones, refusals
+    creating nothing; the 50-tag limit through `POST /contacts`; a change of name, email, fields and
+    tags with its audit, the same change again saving nothing, empty values clearing; refusals
+    naming `fields.<key>`, `email`, `addTags` or `removeTags`, saving nothing; another company's,
+    erased or unknown contacts not found, another company's fields unknown, a reading key refused,
+    a suspended company refused; a change waiting for a field's deletion without holding the
+    contact, then refusing the deleted key with no value left; `contact.updated` captured once per
+    transaction for a value changed by a key, a member or the runtime role, never for the same
+    value, a key no field has, a rename or a deletion, delivered with the fields, and an erasure
+    sending only `contact.erased` with no values. `webhook-events.test.ts`: a custom field change
+    now sends `contact.updated` (ADR-074's test said it sent nothing).
+  - e2e (`api-contact-fields.spec.ts`, chromium and mobile-chromium): a key reads the fields, adds a
+    contact with a value, is refused a value of another type by name and changes a number and a tag;
+    the contact page shows them and a member changes the city; both changes reach a signed endpoint,
+    the last with the member's city; the key reads it.
+- **Docs:** ADR-112 (and ADR-074 annotated); SECURITY; THREAT-MODEL T125; RUNBOOKS (a refused
+  change or a missing value, custom field events, migration 0090); ARCHITECTURE (and two stale "not
+  built" lists corrected: networks for all keys were built by ADR-099, and conversation, campaign,
+  automation, contact and order events by ADR-074 to ADR-087); DATA-RETENTION; BACKLOG P5-08 and
+  P5-09; FEATURE-MATRIX W-134, W-138, H-033, H-014.
+- **Found while building:** `POST /contacts` added up to 20 tags to an existing contact without the
+  50-tag limit members and automations keep, so repeated calls could pass it. It is now refused,
+  naming `tags`.
+- **Mutation checks:** 47 regressions tried, 45 caught:
+  - 8 in the value rule (null, each type taking another, infinite and oversized numbers, 16
+    digits), 23 in the change (the scope, the id check, the field lock and its order before the
+    contact, unknown keys, unchecked values, unchanged values saved, clearing, the tag limit and
+    counts, the audit, a tag both added and removed, a bad email, the write, commas, the field
+    list's scope and order), 2 in the read (fields without a value, keys no field has), 4 in the
+    create (overwriting values, the tag limit, unchecked values, empty strings), 4 in migration
+    0090 and the payloads (no capture, every key compared, an erasure captured, an erased
+    contact's values), 2 in the OpenAPI routes, all caught; 2 through the e2e test (the change
+    route reading no body, the field list answering nothing), both caught.
+  - Not caught, as they remove defenses something else repeats: the early refusal of an erased
+    contact (the final read refuses it too, rolling the change back) and the migration's
+    `REVOKE … FROM PUBLIC` (0002's default privileges).
+  - The first run missed two more, now caught: a tag given twice counted twice (a unit test of the
+    tags and a tag given twice in the change test), and values in an erased contact's payload (the
+    assertion matched any object; it, and ADR-074's test of a deleted field, now compare exactly).
+  - The lock-order regression was caught only after the deletion test was changed to run the
+    deletion's statements in its own order around the waiting change.
+
+### Test commands and results (local, 2026-10-02)
+
+| Command                                                                                                                                                                                                   | Result                                                                                                                                                                                                                                              |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                                                      | clean                                                                                                                                                                                                                                               |
+| `pnpm test`                                                                                                                                                                                               | 494 passed                                                                                                                                                                                                                                          |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                                                                                       | 705 passed on each                                                                                                                                                                                                                                  |
+| `pnpm build`, then `api-contact-fields.spec.ts`, `api.spec.ts`, `contacts.spec.ts`, `webhook-events.spec.ts` and `webhooks.spec.ts` on chromium and mobile-chromium, on a fresh database migrated to 0090 | 23 passed, 11 failed: 9 webhook tests on chromium found no receiver (the test host's name had dropped out of the container's hosts file; restored before the mobile run, where they passed) and the new test's own tag check was too strict on both |
+| The new test and both webhook specs again on both, after restoring the host name and fixing the check (no app change)                                                                                     | 20 passed                                                                                                                                                                                                                                           |
+| `pnpm build` on the final tree                                                                                                                                                                            | succeeded                                                                                                                                                                                                                                           |
+| Mutation checks                                                                                                                                                                                           | 47 regressions, 45 caught (2 through the e2e test; the other 2 listed above)                                                                                                                                                                        |
+| gitleaks 8.30.1 on the commit                                                                                                                                                                             | no leaks                                                                                                                                                                                                                                            |
+
+### Known gaps
+
+- Defining fields through the API, filtering contacts by a field value, changing numbers through the
+  API, changing many contacts in one call, and an event that says which fields changed are not
+  built.
+
 ## 2026-10-02 — Phase 5: work that runs out of retries ends where the company can see it (P5-10, ADR-111)
 
 Status: **Implemented and locally verified against the Graph and Razorpay stand-ins (test data

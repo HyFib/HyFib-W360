@@ -2252,7 +2252,8 @@ Decision:
   - `contact.created`: a contact was added, whatever the source (a first message, a member, an
     import, the API, a store).
   - `contact.updated`: the contact's name, number, email or tags changed. Custom field values are
-    not part of the API's contact and do not send it; consent has its own event.
+    not part of the API's contact and do not send it (since ADR-112 they are, and a change of one
+    sends it); consent has its own event.
   - `contact.erased`: the contact was erased, so a receiver can delete its copy.
 - **Capture** by triggers in the transaction that makes the change, as ADR-053: on
   `app.conversations` (status; an assignee appearing or going), `app.contacts` (added; name,
@@ -2284,8 +2285,8 @@ Decision:
   types before the web app of this release runs, which is after the migrations, so the lookups
   the index serves never run without it.
 
-Not built: custom field changes, member and team identities (and so moves between members or
-teams), conversations started, notes, merges, events for campaigns, automations or orders, and
+Not built: custom field changes (since ADR-112), member and team identities (and so moves between
+members or teams), conversations started, notes, merges, events for campaigns, automations or orders, and
 filters beyond the event type.
 
 ## ADR-075 Resolving and reopening conversations through the public API (2026-09-29)
@@ -4114,3 +4115,68 @@ Decision:
 
 Not built: settling the work of other queues that already signal it again, a company notice beyond
 the state each page shows (no email), and automatic retries of number setup.
+
+## ADR-112 Contact custom fields and contact changes through the public API (2026-10-02)
+
+Context: a company describes its contacts with up to 50 custom fields (text, number, date or yes/no,
+P3-01). Members set them on the contact page and in imports, automations and Flows save answers
+into them, segments filter on them and templates fill variables from them. Integrations could do
+none of this: the API's contact (ADR-052) had no custom fields, `POST /contacts` could not set them,
+nothing changed a contact once it existed apart from adding tags and recording consent, and the
+`contact.updated` webhook (ADR-074) fired for name, number, email and tag changes only, so a CRM kept
+in step with HyFib missed every answer an automation or a Flow saved.
+
+Decision:
+
+- **Reading:** the API's contact gains `fields`, the values of the company's custom fields keyed by
+  field key: text and dates as strings (dates `YYYY-MM-DD`), numbers as numbers, yes/no as booleans;
+  a field without a value is left out. Only keys of fields the company has are read, so a value
+  written for a field deleted at the same moment never shows. Every contact the API returns
+  (`GET /contacts`, `GET /contacts/{id}`, a create or a change) and the contact in the contact
+  webhooks (one shape since ADR-074) carry it; an erased contact's `fields` is empty.
+- **The fields themselves:** `GET /api/v1/contact-fields` (`listContactFields`, `contacts.read`)
+  lists the company's custom fields by label with key, label, type and creation time, at most 50
+  and so in one page, for an integration to map its own fields. Members still add, rename and
+  delete fields in the app.
+- **Creating:** `POST /contacts` accepts `fields`. A new contact gets them; an existing one gets only
+  the fields it has no value for, as it gets an empty name or email (a create never overwrites).
+- **Changing:** `PATCH /api/v1/contacts/{id}` (`updateContact`, `contacts.write`) sets the name, the
+  email and field values (null or an empty string clears one; fields left out keep theirs), and adds
+  or removes tags, at least one of these and nothing else. Values must have their field's type: a
+  string of at most 500 characters for text, a JSON number with at most 15 digits before the point
+  and 6 after for a number (what members can type), a real date as a `YYYY-MM-DD` string for a date,
+  true or false for yes/no; strings are not converted. An unknown key, a value of another type or a
+  bad value is refused (422) naming `fields.<key>`, and nothing is saved. Emails are checked as
+  members' are, and tags follow the app's rules (lower-cased, without commas, 50 at most per
+  contact; a tag both added and removed is refused). The phone number is not changed through the
+  API: a number from WhatsApp is the contact's identity, and members change typed numbers in the
+  app.
+  - In one transaction with the contact row locked, as a member's change: another company's or an
+    erased contact is not found, a change that alters nothing saves nothing (no audit entry, no
+    webhook event), and two requests for one contact apply in turn. Setting values is idempotent,
+    so a retry needs no `Idempotency-Key`.
+  - The fields named are locked (`FOR SHARE`) before the contact row, in the order a field's
+    deletion takes them: a change waits for a deletion in progress, then refuses the deleted key, so
+    no value outlives its field (a field added later with the same key would otherwise show it).
+  - Audited as `contact.updated` by the key, naming what changed (name, email, field keys, the
+    number of tags added and removed), never values.
+- **Webhooks:** `contact.updated` also fires when a custom field's value changes, whoever changes it
+  (members, imports, automations, Flows, the API), in the transaction that changes it and once per
+  contact and transaction (ADR-074's rule), so a name and a field changed together send one event.
+  The trigger compares the values of the company's field keys only: deleting a field removes its
+  row before its values, so it sends nothing (the field is gone for every contact at once, and one
+  company can have thousands), and renaming one changes no value.
+- **Scope wording:** `contacts.write` is now "Create and change contacts and record consent". Keys
+  that have it can change contacts from this release; only members who can change contacts grant
+  it (ADR-052).
+- **Migration 0090 (forward-only):** `app.webhook_capture_contact_fields()` and its trigger on
+  `app.contacts` (after an update of `attributes` while the contact is not erased), not executable
+  by PUBLIC.
+
+Found while building: `POST /contacts` added up to 20 tags to an existing contact without the
+50-tag limit members and automations keep, so repeated calls could pass it. It is now refused,
+naming `tags`.
+
+Not built: defining fields through the API, filtering the contact list by a field value, changing
+numbers through the API, changing many contacts in one call, and an event that says which fields
+changed (the payload is the contact as it is when delivered, as before).

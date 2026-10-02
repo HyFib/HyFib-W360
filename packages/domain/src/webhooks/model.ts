@@ -67,7 +67,7 @@ export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; descr
     },
     'contact.updated': {
       label: 'Contact changed',
-      description: 'A contact’s name, number, email or tags changed.',
+      description: 'A contact’s name, number, email, tags or custom field values changed.',
     },
     'contact.erased': {
       label: 'Contact erased',

@@ -63,14 +63,15 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
           <CardTitle>Using the API</CardTitle>
           <CardDescription>
             Your systems can send approved templates and replies (text, buttons, lists, products and
-            reactions, quoting a message if they like), create contacts, record consent, read
-            conversations, their messages (one conversation or all of them) and their notes, resolve
-            and reopen conversations and add notes to them, start and stop automations, add webhook
-            endpoints and follow their deliveries, and read message status through the HyFib W360
-            API. Each key belongs to the company and has only the scopes chosen for it. The audit
-            log records changes to keys, the contacts and consent a key records, the conversations
-            it resolves or reopens, the automation runs it starts and stops, the webhook endpoints
-            it adds and changes, and the deliveries it replays.
+            reactions, quoting a message if they like), create contacts and change their details,
+            custom fields and tags, record consent, read conversations, their messages (one
+            conversation or all of them) and their notes, resolve and reopen conversations and add
+            notes to them, start and stop automations, add webhook endpoints and follow their
+            deliveries, and read message status through the HyFib W360 API. Each key belongs to the
+            company and has only the scopes chosen for it. The audit log records changes to keys,
+            the contacts and consent a key records or changes, the conversations it resolves or
+            reopens, the automation runs it starts and stops, the webhook endpoints it adds and
+            changes, and the deliveries it replays.
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4">

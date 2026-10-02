@@ -1615,8 +1615,21 @@ means the delivery or endpoint was added by a member (keys see only what keys ad
 another company, or was deleted after 30 days. A delivery shows no body (payloads are built when
 delivered and never stored): match it to the receiver's log by `eventId`.
 
-**The company is suspended or its plan ended.** Keys keep reading; creating contacts, recording
-consent, sending, resolving conversations and adding notes to them, starting and stopping
+**A contact change through the API is refused, or a custom field value is missing (ADR-112).**
+A 422 names what it refused in `issues`: `fields.<key>` for a key the company has no field for
+(`GET /api/v1/contact-fields` lists the keys; a label is not a key), a value of another type (text
+and dates are strings, dates `YYYY-MM-DD`, numbers are JSON numbers, yes/no are `true` or `false`;
+`"3"` is not a number) or a bad value, `email`, `addTags` (51 tags, commas) or `removeTags`. Nothing
+of a refused request is saved, so the integration fixes the value and sends it again. A 404 means
+the contact is erased, belongs to another company or does not exist. A field that a member deleted
+while the request waited is refused as unknown. A value missing from a contact's `fields` was never
+set, was cleared, or belongs to a field that was deleted (deleting a field removes its values from
+every contact and sends no event); a create (`POST /contacts`) fills only the fields an existing
+contact has no value for, so a change of a value needs `PATCH /contacts/{id}`. Changes are audited
+as `contact.updated` by the key with the field keys, never the values.
+
+**The company is suspended or its plan ended.** Keys keep reading; creating and changing contacts,
+recording consent, sending, resolving conversations and adding notes to them, starting and stopping
 automations, and managing webhook endpoints (reading them and their deliveries included) answer 423
 until the company is active again.
 
@@ -1929,6 +1942,19 @@ conversation capture function and its trigger (`conversations_webhook`). A failu
 check was renamed by hand (`webhook_endpoints_event_types_check`, `webhook_events_type_check`).
 0071 validates the type check without blocking writes; it fails only if a stored event has a type
 outside the list, which no code writes: look for the row by `type` before running it again.
+
+**Custom field events (ADR-112).** Since migration 0090 `contact.updated` is also sent when a value
+of one of the company's custom fields changes, whoever changes it: an automation or a Flow that
+saves an answer sends one per contact, as an import does, and a name and a field changed together
+send one. Deleting or renaming a field sends nothing, so a receiver keeps a deleted field's values
+until it reads the contact again (`GET /api/v1/contact-fields` lists the fields there are). A
+receiver that asks which field changed: the payload is the contact as it is when delivered, with
+its `fields`, to compare with its own copy.
+
+**Migration 0090 failed.** It runs in one transaction, so a failure applies nothing: it creates
+`app.webhook_capture_contact_fields()` and the trigger `contacts_webhook_fields` on `app.contacts`.
+A failure usually means the bootstrap roles (fix them and run the migrations again) or a function or
+trigger of that name created by hand. Until it is applied, custom field changes send no event.
 
 ## 10P. Platform operations console
 

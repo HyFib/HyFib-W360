@@ -567,6 +567,16 @@ Phase 5 rules (Public API, P5-08):
   only the key's company's conversations whose contacts are not erased (others answer 404). A note
   says whether a member or a key wrote it and, for a key's note, which key; never which member, and
   mentions are never read.
+- Contact custom fields (ADR-112): every contact the API or a contact webhook describes carries the
+  values of the company's own fields only, so a value left by a field deleted at the same moment is
+  never read. `contacts.read` also lists the fields (keys, labels and types). Changing a contact
+  (`PATCH /contacts/{id}`) needs `contacts.write`, which only members who can change contacts grant,
+  and an active company; it changes the name, email, field values and tags, never the phone number,
+  under the contact's row lock and with the field rows locked against a deletion at the same time
+  (taken first, in a deletion's order); erased and other companies' contacts are not found. Values
+  must have their field's type and a refusal saves nothing; tags keep the 50 a contact may have,
+  which `POST /contacts` now checks too. The audit entry names what changed and which fields, never
+  a value.
 - Only the token's SHA-256 is stored; the runtime role cannot read it. The token is shown once in
   the browser and kept only in the page's memory; it is never logged, and audit entries carry the
   public prefix only.
@@ -631,7 +641,10 @@ Phase 5 rules (outgoing webhooks, P5-09):
   time. `contact.erased` deletes the created and updated events its own transaction captured, with
   their deliveries: `app.capture_contact_webhook_event` can delete only as the definer role that
   erasure runs as (the company role has no delete on webhook events, tested). One contact event per
-  contact and transaction keeps imports and tag changes from multiplying deliveries.
+  contact and transaction keeps imports and tag changes from multiplying deliveries. Since ADR-112
+  a change of a custom field's value captures `contact.updated` too (a trigger compares the company's
+  field keys only, as the role that made the change), and the payload carries the values; a field's
+  deletion sends nothing for each contact it removes the value from.
 - Automation run events (ADR-078) follow the same rules. They are captured for live runs only (a
   member's test run sends nothing), by triggers running as the role that changes the run (the
   runtime role, or `w360_definer` when erasure stops a run), so each event stays in the run's

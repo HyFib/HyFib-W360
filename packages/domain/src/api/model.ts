@@ -37,13 +37,15 @@ export const API_SCOPE_INFO: Record<
   },
   'contacts.read': {
     label: 'Read contacts',
-    description: 'Find contacts by phone number and read their details and consent.',
+    description:
+      "Find contacts by phone number and read their details, custom fields and consent, and the company's custom fields.",
     permission: 'contacts.read',
     writes: false,
   },
   'contacts.write': {
-    label: 'Create contacts and record consent',
-    description: 'Create contacts and record opt-ins and opt-outs with their evidence.',
+    label: 'Create and change contacts and record consent',
+    description:
+      'Create contacts, change their name, email, custom fields and tags, and record opt-ins and opt-outs with their evidence.',
     permission: 'contacts.write',
     writes: true,
   },

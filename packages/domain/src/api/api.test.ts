@@ -27,6 +27,14 @@ import {
   apiUpdateConversationSchema,
 } from './conversations';
 import { apiListMembers, apiListTeams, apiMemberListQuerySchema } from './members';
+import { apiContactSchema } from './contact-view';
+import {
+  apiContactFieldsSchema,
+  apiContactUpdateSchema,
+  apiListContactFields,
+  apiTags,
+  apiUpdateContact,
+} from './contacts';
 import {
   API_LIMITS,
   API_SCOPE_INFO,
@@ -1759,5 +1767,140 @@ describe('OpenAPI document', () => {
         new RegExp(`export (async )?function ${method.toUpperCase()}\\(`),
       );
     }
+  });
+});
+
+describe('contact custom fields and changes (ADR-112)', () => {
+  const ctx = (scopes: string[], status = 'active') =>
+    ({
+      tenant: { id: 't', status },
+      key: { id: 'k', scopes: new Set(scopes) },
+      planScopes: null,
+    }) as unknown as ApiContext;
+  const id = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f01';
+  const code = (promise: Promise<unknown>) =>
+    promise.then(
+      () => 'done',
+      (error: unknown) => (isAppError(error) ? error.code : String(error)),
+    );
+
+  it('take field values as strings, numbers or booleans, null only to clear one in a change', () => {
+    expect(apiContactFieldsSchema.parse({ city: 'Chennai', orders: 3, vip: true })).toEqual({
+      city: 'Chennai',
+      orders: 3,
+      vip: true,
+    });
+    for (const bad of [
+      { city: null },
+      { city: ['a'] },
+      { city: { a: 1 } },
+      { ['k'.repeat(41)]: 'x' },
+    ]) {
+      expect(apiContactFieldsSchema.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
+    }
+    const fifty = Object.fromEntries(Array.from({ length: 50 }, (_, i) => [`f${i}`, 'x']));
+    expect(apiContactFieldsSchema.safeParse(fifty).success).toBe(true);
+    expect(apiContactFieldsSchema.safeParse({ ...fifty, f50: 'x' }).success).toBe(false);
+    expect(apiContactUpdateSchema.parse({ fields: { city: null, orders: 4 } })).toEqual({
+      fields: { city: null, orders: 4 },
+    });
+    expect(apiContactUpdateSchema.safeParse({ fields: { ...fifty, f50: null } }).success).toBe(
+      false,
+    );
+  });
+
+  it('keep each tag once, as the app writes it', () => {
+    expect(apiTags(['VIP', ' vip ', 'New', 'new'], 'addTags')).toEqual(['vip', 'new']);
+    expect(apiTags([], 'removeTags')).toEqual([]);
+  });
+
+  it('change at least one of name, email, fields and tags, and nothing else', () => {
+    expect(apiContactUpdateSchema.parse({ name: '  Priya  ', email: null })).toEqual({
+      name: 'Priya',
+      email: null,
+    });
+    expect(apiContactUpdateSchema.parse({ addTags: ['vip'], removeTags: ['new'] })).toEqual({
+      addTags: ['vip'],
+      removeTags: ['new'],
+    });
+    for (const bad of [
+      {},
+      { phone: '+919876543210' },
+      { name: 'x'.repeat(201) },
+      { email: 7 },
+      { addTags: Array.from({ length: 21 }, (_, i) => `t${i}`) },
+      { tags: ['vip'] },
+      'Priya',
+      null,
+    ]) {
+      expect(apiContactUpdateSchema.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  it('are refused before anything is read: without the scope, while the company is not active, for ids that are not ids, and for other bodies', async () => {
+    const update = (c: ApiContext, contactId: string, body: unknown) =>
+      code(apiUpdateContact({} as never, c, contactId, body));
+    const body = { name: 'Priya' };
+    expect(await update(ctx(['contacts.read']), id, body)).toBe('forbidden');
+    for (const status of ['suspended', 'restricted']) {
+      expect(await update(ctx(['contacts.write'], status), id, body)).toBe('tenant_suspended');
+    }
+    expect(await update(ctx(['contacts.write']), 'not-a-uuid', body)).toBe('not_found');
+    expect(await update(ctx(['contacts.write']), id, {})).toBe('validation_failed');
+    expect(await update(ctx(['contacts.write']), id, { email: 'not an address' })).toBe(
+      'validation_failed',
+    );
+    expect(await update(ctx(['contacts.write']), id, { addTags: ['a,b'] })).toBe(
+      'validation_failed',
+    );
+    // A tag both added and removed, however it is written.
+    const both = await apiUpdateContact({} as never, ctx(['contacts.write']), id, {
+      addTags: ['VIP'],
+      removeTags: [' vip '],
+    }).catch((error: unknown) => error);
+    expect(isAppError(both) && both.issues).toEqual([
+      { path: 'removeTags', message: 'The tag vip cannot be both added and removed.' },
+    ]);
+    expect(await code(apiListContactFields({} as never, ctx(['contacts.write'])))).toBe(
+      'forbidden',
+    );
+  });
+
+  it('are described: the fields in every contact, their definitions, and the change', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const paths = doc.paths as unknown as Record<
+      string,
+      Record<string, { operationId: string; description: string; requestBody?: unknown }>
+    >;
+    expect(paths['/contacts/{id}']?.patch?.operationId).toBe('updateContact');
+    expect(paths['/contacts/{id}']?.patch?.description).toContain('`contacts.write`');
+    expect(paths['/contacts/{id}']?.patch?.description).toContain('`fields.<key>`');
+    expect(paths['/contacts/{id}']?.patch?.description).toContain(
+      'The phone number is not changed through the API.',
+    );
+    expect(paths['/contact-fields']?.get?.operationId).toBe('listContactFields');
+    expect(paths['/contact-fields']?.get?.description).toContain('`contacts.read`');
+    const schemas = doc.components.schemas as Record<
+      string,
+      { required?: string[]; additionalProperties?: unknown; properties?: Record<string, unknown> }
+    >;
+    expect(schemas.ContactUpdate?.additionalProperties).toBe(false);
+    expect(schemas.ContactUpdate?.required ?? []).toEqual([]);
+    expect(Object.keys(schemas.ContactUpdate?.properties ?? {}).sort()).toEqual([
+      'addTags',
+      'email',
+      'fields',
+      'name',
+      'removeTags',
+    ]);
+    expect(schemas.ContactCreate?.properties).toHaveProperty('fields');
+    expect(schemas.ContactField?.required).toEqual(
+      expect.arrayContaining(['key', 'label', 'type', 'createdAt']),
+    );
+    expect(schemas.Contact?.required).toContain('fields');
+    expect(Object.keys(apiContactSchema.shape)).toContain('fields');
+    expect(API_SCOPE_INFO['contacts.write'].label).toBe(
+      'Create and change contacts and record consent',
+    );
   });
 });

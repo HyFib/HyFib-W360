@@ -476,10 +476,17 @@ verification, app review, Embedded Signup configuration).
   for all keys built, locally verified]** (ADR-099: owners and administrators list up to 20 networks
   every key of the company accepts requests from, on top of each key's own); **[packs of extra API
   requests built, locally verified against the stand-in]** (ADR-110, see P5-01: they raise the
-  company's monthly limit, never a key's own).
+  company's monthly limit, never a key's own); **[custom fields and contact changes built, locally
+  verified]** (ADR-112: every contact the API returns carries the values of the company's custom
+  fields, typed; `GET /contact-fields` lists the fields; `POST /contacts` sets them on a new contact
+  and fills an existing one's empty ones; `PATCH /contacts/{id}` changes the name, email, field
+  values and tags of a contact under its row lock, each value checked strictly against its field's
+  type and a refusal saving nothing; the 50-tag limit now holds through `POST /contacts` too).
   Remaining: media messages, call-to-action messages through the API, taking reactions back,
   assigning many conversations at once, media downloads, statuses changed since a time, starting or
-  stopping runs for many contacts in one call, bulk sends in one call, limits per endpoint,
+  stopping runs for many contacts in one call, bulk sends in one call, defining contact fields,
+  changing numbers or many contacts in one call, filtering contacts by a field value, limits per
+  endpoint,
   availability per single endpoint (plans choose per scope since ADR-092). The one-argument key
   lookup kept for rolling deploys (0051) is dropped (0074). Replaying many deliveries in one call
   is built with P5-09 (ADR-095).
@@ -514,9 +521,12 @@ verification, app review, Embedded Signup configuration).
   locally verified]** (ADR-095: every event whose deliveries to an endpoint that is on all failed
   since a chosen time, 500 at most per call, oldest first, each once, from Settings → Webhooks or
   `POST /webhook-endpoints/{id}/replay-failed`; events delivered or waiting, gone events and test
-  events left out; audited once per call). Remaining: filters beyond the event type (such as by
-  automation or status), custom headers, mutual TLS, fixed egress addresses, custom field changes,
-  delivery counts in campaign events, events for store orders, Payment Links and each step of a
+  events left out; audited once per call). **[Custom field changes built, locally verified]**
+  (ADR-112: `contact.updated` also for a change of a custom field's value, whoever makes it, once per
+  contact and transaction; the contact carries its `fields`; a field's deletion or rename sends
+  nothing). Remaining: filters beyond the event type (such as by
+  automation or status), custom headers, mutual TLS, fixed egress addresses, which custom fields
+  changed (the contact is sent as it is, ADR-112), delivery counts in campaign events, events for store orders, Payment Links and each step of a
   run, `createdAt` finer than the millisecond, replays across endpoints or by event type, load
   tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):

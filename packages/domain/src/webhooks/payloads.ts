@@ -616,6 +616,7 @@ async function webhookContactOf(tx: Tx, tenantId: string, contactId: string | nu
     phone: null,
     email: null,
     tags: [],
+    fields: {},
     consent: { marketing: null, utility: null },
     source: row.source,
     createdAt: row.createdAt.toISOString(),

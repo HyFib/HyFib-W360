@@ -70,7 +70,9 @@ test('an API key created in settings sends an approved template once, and stops 
   await expect(page.getByText('No API keys yet.')).toBeVisible();
   await page.getByLabel('Name', { exact: true }).fill('Order system');
   await page.getByRole('checkbox', { name: /Read templates/ }).check();
-  await page.getByRole('checkbox', { name: /Create contacts and record consent/ }).check();
+  await page
+    .getByRole('checkbox', { name: /Create and change contacts and record consent/ })
+    .check();
   await page.getByRole('checkbox', { name: /Send utility templates/ }).check();
   await page.getByRole('button', { name: 'Create API key' }).click();
   const tokenField = page.getByLabel('API key', { exact: true });

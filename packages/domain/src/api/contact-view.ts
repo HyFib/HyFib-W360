@@ -1,9 +1,13 @@
 import { z } from 'zod';
 import { and, contacts, eq, isNull, outerColumn, sql, type Tx } from '@w360/db';
 
+/** A custom field's value: text and dates (`YYYY-MM-DD`) as strings, numbers, yes/no as booleans. */
+export type ApiFieldValue = string | number | boolean;
+
 /**
  * A contact in the API's words (ADR-052), shared by the API and the contact webhooks (ADR-074), so
- * both describe a contact the same way.
+ * both describe a contact the same way. `fields` holds the values of the company's custom fields by
+ * key (ADR-112).
  */
 export interface ApiContact {
   id: string;
@@ -11,6 +15,7 @@ export interface ApiContact {
   phone: string | null;
   email: string | null;
   tags: string[];
+  fields: Record<string, ApiFieldValue>;
   consent: { marketing: 'opted_in' | 'opted_out' | null; utility: 'opted_in' | 'opted_out' | null };
   source: string;
   createdAt: string;
@@ -25,6 +30,11 @@ export const apiContactSchema = z.object({
   phone: z.string().nullable().describe('E.164, like +919876543210.'),
   email: z.string().nullable(),
   tags: z.array(z.string()),
+  fields: z
+    .record(z.string(), z.union([z.string(), z.number(), z.boolean()]))
+    .describe(
+      'Custom field values by field key (GET /contact-fields): text and dates (YYYY-MM-DD) as strings, numbers as numbers, yes/no as booleans. A field without a value is left out.',
+    ),
   consent: z.object({ marketing: consentValue, utility: consentValue }),
   source: z.string().describe('Where the contact came from: whatsapp, manual, import, api, store.'),
   createdAt: z.iso.datetime(),
@@ -37,6 +47,14 @@ const consentState = (purpose: 'marketing' | 'utility') =>
     where cc.tenant_id = ${outerColumn(contacts.tenantId)} and cc.contact_id = ${outerColumn(contacts.id)}
       and cc.purpose = ${purpose})`;
 
+// Values of the fields the company defines only, so a value written for a field deleted at the
+// same moment is never read.
+const definedFieldValues = sql<Record<string, ApiFieldValue>>`coalesce((select
+    jsonb_object_agg(f.key, ${outerColumn(contacts.attributes)} -> f.key)
+  from app.contact_fields f
+  where f.tenant_id = ${outerColumn(contacts.tenantId)}
+    and ${outerColumn(contacts.attributes)} ? f.key), '{}'::jsonb)`;
+
 export const apiContactColumns = {
   id: contacts.id,
   name: contacts.displayName,
@@ -47,6 +65,7 @@ export const apiContactColumns = {
   erasedAt: contacts.erasedAt,
   tags: sql<string[]>`coalesce((select array_agg(t.tag order by t.tag) from app.contact_tags t
     where t.tenant_id = ${outerColumn(contacts.tenantId)} and t.contact_id = ${outerColumn(contacts.id)}), '{}')`,
+  fields: definedFieldValues,
   marketing: consentState('marketing'),
   utility: consentState('utility'),
 };
@@ -60,6 +79,7 @@ export type ApiContactRow = {
   createdAt: Date;
   erasedAt: Date | null;
   tags: string[];
+  fields: Record<string, ApiFieldValue>;
   marketing: 'opted_in' | 'opted_out' | null;
   utility: 'opted_in' | 'opted_out' | null;
 };
@@ -70,6 +90,7 @@ export const toApiContact = (r: ApiContactRow): ApiContact => ({
   phone: r.phone,
   email: r.email,
   tags: r.tags,
+  fields: r.fields,
   consent: { marketing: r.marketing, utility: r.utility },
   source: r.source,
   createdAt: r.createdAt.toISOString(),

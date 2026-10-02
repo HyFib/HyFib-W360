@@ -858,6 +858,19 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   the marketing frequency cap under the campaign runner's lock), a conversation created resolved,
   a send intent without a user and the `message.send` job, re-checked before dispatch like every
   template send; the status of messages the API sent, with their type.
+- **Contact custom fields and changes (0090, ADR-112):** every contact the API returns, and the
+  contact in the contact webhooks, carries `fields`: the values of the company's custom fields by
+  key, typed (strings for text and dates, numbers, booleans), read by a subquery over
+  `app.contact_fields` (`apiContactColumns` in `api/contact-view.ts`) so a key no field has is never
+  returned. `GET /contact-fields` (`api/contacts.ts`, `contacts.read`) lists the fields by label.
+  `POST /contacts` takes `fields` (an existing contact gets only those it has no value for, merged
+  under its own values), and `PATCH /contacts/{id}` (`apiUpdateContact`, `contacts.write`) changes
+  the name, email, field values and tags in one transaction: `apiFieldChanges` reads the named
+  fields `FOR SHARE` (the order a field's deletion takes its locks) and checks each value with
+  `apiFieldValue` (`contacts/fields.ts`: JSON types, no coercion), then the contact row is locked
+  `FOR UPDATE`; only what differs is written and audited as `contact.updated` (keys and counts, no
+  values). A refused value names `fields.<key>` in `issues` and nothing is saved. Both writes keep
+  the app's 50-tag limit.
 - **Text replies (0042, ADR-070):** `POST /messages` with `type: "text"` (`apiSendMessage` picks
   `apiSendText`; no `type` is a template) needs `messages.reply`. It finds an existing, not erased
   contact by number and locks its conversation on the number (`from`, or the only active one); a
@@ -1072,8 +1085,8 @@ true`); the same key with another request (method, path and body hashed) answers
   memory); rotation with an overlap; revocation.
 - **Not built yet:** media and call-to-action messages, taking reactions back, assigning many
   conversations or starting many runs in one call, bulk sends, media downloads, statuses changed
-  since a time, networks for the whole company, limits and availability per endpoint and OAuth
-  apps (BACKLOG P5-08). Packs of extra API requests are plan add-ons (ADR-110, section 7). Outgoing
+  since a time, defining contact fields, changing numbers or many contacts in one call, limits and
+  availability per endpoint and OAuth apps (BACKLOG P5-08). Packs of extra API requests are plan add-ons (ADR-110, section 7). Outgoing
   webhooks are section 6O.
 
 ## 6O. Outgoing webhooks **[built — verified with local test receivers only; no customer endpoints yet]**
@@ -1101,8 +1114,10 @@ true`); the same key with another request (method, path and body hashed) answers
   `app.conversations` (`conversation.status_changed` with the status before;
   `conversation.assignment_changed` for every change of the member and, since 0070 (ADR-094),
   `conversation.team_changed` for every change of the team, each with the ids before and after and
-  stamped with the time it is captured), `app.contacts` (`contact.created`; `contact.updated` for the name, number or email;
-  `contact.erased`) and `app.contact_tags` (`contact.updated`). Contact events go through
+  stamped with the time it is captured), `app.contacts` (`contact.created`; `contact.updated` for the name, number or email,
+  and since 0090 (ADR-112) for a value of one of the company's custom fields, compared by key so
+  that a field's deletion captures nothing; `contact.erased`) and `app.contact_tags`
+  (`contact.updated`). Contact events go through
   `app.capture_contact_webhook_event`: `contact.created` and `contact.updated` are captured when an
   active endpoint takes either, once per contact and top-level transaction (`captured_xact`, found
   by a partial index built concurrently), and `contact.erased` first deletes what its own
@@ -1174,8 +1189,8 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   and edits the URL, description and events. The OpenAPI document describes every event under
   `webhooks`. Audit entries name the endpoint's host, never its full URL or secret.
 - **Not built yet:** filters beyond the event type, ordering, custom headers, mutual TLS, fixed
-  egress addresses for receivers' allowlists, endpoints per number, and events for conversations,
-  campaigns, automations, contact changes or orders.
+  egress addresses for receivers' allowlists, endpoints per number, events for conversations
+  started, notes or merges, and an event naming the contact fields that changed.
 
 ## 6P. Platform operations console **[built — verified with local test data only; no production companies yet]**
 
