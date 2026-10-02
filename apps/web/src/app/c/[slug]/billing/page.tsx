@@ -97,13 +97,15 @@ export default async function BillingPage({ params }: { params: Promise<{ slug: 
   const { slug } = await params;
   const ctx = await requireTenant(slug);
   assertCan(ctx, 'billing.read');
-  const { billing, plans, planPayments, refundRequests, planChoices, clock } = await getRuntime();
-  const [overview, plan, planPayment, asked, choices] = await Promise.all([
+  const { billing, plans, planPayments, refundRequests, planChoices, planAddOns, clock } =
+    await getRuntime();
+  const [overview, plan, planPayment, asked, choices, addOns] = await Promise.all([
     billing.overview(ctx),
     plans.overview(ctx),
     planPayments.overview(ctx),
     refundRequests.list(ctx),
     planChoices.choices(ctx),
+    planAddOns.addOns(ctx),
   ]);
   // Plans HyFib offers that the company could choose instead of its own (ADR-105).
   const otherChoices =
@@ -171,6 +173,18 @@ export default async function BillingPage({ params }: { params: Promise<{ slug: 
             </Link>
             : HyFib offers {otherChoices === 1 ? 'another plan' : `${otherChoices} other plans`} you
             can choose and pay for instead.
+          </p>
+        ) : null}
+        {addOns.unavailable === null && addOns.options.length > 0 ? (
+          <p className="text-sm text-muted-foreground">
+            <Link
+              href={`/c/${ctx.tenant.slug}/billing/add-ons`}
+              className="text-primary underline-offset-4 hover:underline"
+            >
+              Add-ons
+            </Link>
+            : choose extra seats, WhatsApp numbers or automation run packs for your plan, and pay
+            for them with it.
           </p>
         ) : null}
         <PlanPaymentCard

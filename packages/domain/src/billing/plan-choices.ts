@@ -76,6 +76,31 @@ export const PLAN_CHOICE_UNAVAILABLE_TEXT: Record<PlanChoiceUnavailable, string>
     'Your plan has a paid period. You can choose a plan once it ends, or ask HyFib to change it.',
 };
 
+/**
+ * Whether a company may change its plan or its add-ons now (ADR-105, ADR-106): null when it may,
+ * otherwise why not. `app.choose_plan` and `app.choose_add_ons` check the same in SQL.
+ */
+export function planChangeUnavailable(facts: {
+  companyStatus: string;
+  planStatus: TenantPlanStatus;
+  /** The company's subscription Razorpay may still charge, if any. */
+  live: { status: string; startsAt: Date | null; paidCount: number } | undefined;
+  subscriptionsEnabled: boolean;
+  taxBp: number | null;
+}): PlanChoiceUnavailable | null {
+  const { companyStatus, planStatus, live } = facts;
+  if (companyStatus === 'pending_deletion' || companyStatus === 'deleted') return 'deleting';
+  if (companyStatus === 'suspended') return 'suspended';
+  if (!facts.subscriptionsEnabled || facts.taxBp === null) return 'not_offered';
+  if (planStatus === 'complimentary') return 'complimentary';
+  if (live) {
+    if (['creating', 'created'].includes(live.status)) return 'payment_started';
+    return live.startsAt !== null && live.paidCount === 0 ? 'paying_from_trial_end' : 'subscribed';
+  }
+  if (planStatus === 'active') return 'paid_period';
+  return null;
+}
+
 /** A plan version the company could choose, as the company sees it. */
 export interface PlanChoice {
   id: string;
@@ -191,24 +216,13 @@ export function createPlanChoicesService(deps: PlanChoicesServiceDeps) {
             .orderBy(asc(plans.priceMinor), asc(plans.name), asc(plans.id));
           const holdings = await holdingsOf(tx, ctx.tenant.id, now);
 
-          let unavailable: PlanChoiceUnavailable | null = null;
-          if (company.status === 'pending_deletion' || company.status === 'deleted') {
-            unavailable = 'deleting';
-          } else if (company.status === 'suspended') {
-            unavailable = 'suspended';
-          } else if (!deps.subscriptionsEnabled || taxBp === null) {
-            unavailable = 'not_offered';
-          } else if (state.status === 'complimentary') {
-            unavailable = 'complimentary';
-          } else if (live) {
-            unavailable = ['creating', 'created'].includes(live.status)
-              ? 'payment_started'
-              : live.startsAt !== null && live.paidCount === 0
-                ? 'paying_from_trial_end'
-                : 'subscribed';
-          } else if (state.status === 'active') {
-            unavailable = 'paid_period';
-          }
+          const unavailable = planChangeUnavailable({
+            companyStatus: company.status,
+            planStatus: state.status,
+            live,
+            subscriptionsEnabled: deps.subscriptionsEnabled,
+            taxBp,
+          });
 
           const addOns = {
             extraSeats: state.extraSeats,

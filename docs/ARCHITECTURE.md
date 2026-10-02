@@ -1421,6 +1421,20 @@ WHERE used < limit`), per monthly period from `usage_anchor`; the sweep announce
   shortfall, and audits `billing.plan_chosen`. Billing links to `/c/<slug>/billing/plans` when
   another offered version can be chosen; paying is unchanged (ADR-063): the payment offer and a
   started subscription use the version the company is on.
+- **Plan add-ons (0084, ADR-106) [built]:** `createPlanAddOnsService` lists, for `billing.read`, the
+  add-ons the company's version sells (extra seats, extra WhatsApp numbers, run packs) with each
+  one's price, quantity, the most the version allows and the fewest that still hold what the
+  company uses, the current quote, and why the company cannot change them now
+  (`planChangeUnavailable`, shared with plan choices, plus a version no longer published). `choose`
+  (`billing.manage`, a recent sign-in, digits only) takes the four limit locks and calls
+  `app.choose_add_ons(seats, numbers, packs)` (SECURITY DEFINER, runtime role), which takes the
+  company and member from the session's scope and the locks of `app.choose_plan`, checks the same
+  conditions with a published version instead of an offered one, and changes only the three
+  quantities, the note, who and when, and the version; the plan state's guard keeps them to what the
+  version sells. The service then refuses a total that cannot be paid and, after a decrease, seats
+  (with waiting invitations) or WhatsApp numbers that no longer fit, and audits
+  `billing.add_ons_chosen`. Billing links to `/c/<slug>/billing/add-ons`, whose form shows the
+  total as the quantities change (`planPaymentQuote` in the browser); paying is unchanged.
 - **Ledger (0004_billing):** one INR wallet per company with five accounts (`wallet_available`,
   `wallet_held`, `payment_clearing`, `service_revenue`, `dispute_losses`). `ledger_transactions` and
   `ledger_entries` are append-only (trigger), balances are maintained by trigger from the entries,

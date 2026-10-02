@@ -3677,3 +3677,46 @@ Decision:
 Not built: changing a plan a subscription pays for (a new subscription from the period's end,
 R-069), choosing add-ons, a price list for visitors before sign-up, proration, and emails about a
 company's choice.
+
+## ADR-106 Companies choose their add-ons (2026-10-02)
+
+Context: since ADR-105 a company chooses its plan version, but only HyFib staff set its add-ons
+(extra seats, extra WhatsApp numbers and automation run packs, ADR-051), so a company whose team
+outgrew its version's seats needed staff, or a bigger version, before it could pay for more.
+Changing add-ons a subscription already pays for meets the problem of changing its plan (R-069):
+it would need a new subscription from the end of the paid period.
+
+Decision:
+
+- **Who and when:** as for choosing a plan (ADR-105): owners and billing managers
+  (`billing.manage`) with a sign-in within the last 15 minutes, while the company is neither
+  suspended nor being deleted, has no subscription that may still be charged, is on a trial, past
+  due, expired or canceled, and paying for plans is available (Razorpay subscriptions on and the
+  tax on plan prices set). The company's version must still be published: a retired version cannot
+  be paid for (ADR-063), so its add-ons stay as staff left them until the company chooses another
+  plan. The version need not be offered: a company pays for the version it is on.
+- **What changes:** only the three quantities, through `app.choose_add_ons` (SECURITY DEFINER, the
+  runtime role only), which takes the company and member from the session's scope and checks all
+  of the above in SQL under the locks of `app.choose_plan` (the subscription-start lock, the company
+  row shared, the plan state for update). The plan state's guard keeps them to what the version
+  sells, within its maximums (its most seats, its most WhatsApp numbers or 100, and 10,000 run
+  packs). The version, the status, the trial's end, the paid period and the monthly usage period
+  stay as they are. The version is read without a lock: a retirement committing meanwhile leaves
+  the company on its version, as it leaves every company on it.
+- **Limits:** a decrease cannot leave fewer seats (members and waiting invitations) or WhatsApp
+  numbers than the company uses, counted in the change's transaction after the advisory locks that
+  additions take (ADR-051). An increase is always allowed, even when the company is still over the
+  limit after it. Fewer run packs refuse nothing: what the month used counts against the smaller
+  allowance (as a monthly limit does on a change of plan, ADR-105). A total with the add-ons and the
+  tax above what one plan payment can be is refused, as paying it would be.
+- **Trials:** during a trial the add-ons apply at once, until the trial's end, which does not move.
+  A company can therefore try more seats or numbers within its trial; platform owners bound them
+  with each version's maximums and prices.
+- **Recorded:** in the company audit log (`billing.add_ons_chosen`, with the quantities before and
+  after), and in the plan state's note ("Add-ons chosen by the company.") with the member, which
+  staff see on the company's platform page. A staff plan change not yet emailed (ADR-100) is not
+  emailed once the company changed its add-ons after it. No email: the member who chose sees the
+  result.
+
+Not built: changing add-ons a subscription pays for (R-069) and proration, add-ons through the
+public API, and emails about a company's change.

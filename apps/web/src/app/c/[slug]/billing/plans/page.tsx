@@ -25,7 +25,6 @@ import {
 } from '@w360/ui';
 import { ChoosePlanButton } from '@/components/billing/plan-choice';
 import { PageHeader } from '@/components/page-header';
-import { RequireOwnDocument } from '@/components/require-own-document';
 import { SignInAgain } from '@/components/sign-in-again';
 import { formatDate } from '@/lib/format';
 import { getRuntime } from '@/server/runtime';
@@ -166,7 +165,6 @@ export default async function ChoosePlanPage({ params }: { params: Promise<{ slu
 
   return (
     <>
-      <RequireOwnDocument />
       <PageHeader
         title="Choose a plan"
         description="The plans HyFib offers. Choose one, then pay for it under Billing."

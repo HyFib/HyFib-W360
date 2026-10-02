@@ -1042,7 +1042,8 @@ lists what is offered.
   off), or chooses a larger version. Monthly limits never refuse a choice.
 - **A version is listed without a button ("Your add-ons are not sold with this plan…"):** the
   version does not sell the company's extra seats, numbers or run packs, or the total is more than a
-  plan payment can be. Staff change the company's plan and add-ons instead.
+  plan payment can be. The company removes those add-ons under Billing → Add-ons first (ADR-106),
+  or staff change the company's plan and add-ons.
 - **A version is missing from the list:** it is not offered, was retired, or is a draft.
 - **"… costs more than can be paid here with your add-ons and the tax":** the version, with the
   company's add-ons and the tax on plan prices, is more than a plan payment can be (the page shows
@@ -1050,6 +1051,33 @@ lists what is offered.
 - **Stopping an offer or retiring a version takes a moment longer than usual:** it waits for
   choices of that version being committed at that instant (milliseconds), so none of them lands on
   a version no longer offered.
+
+**Add-ons that companies choose (ADR-106).** Under Billing → Add-ons, owners and billing managers
+with a sign-in within 15 minutes set the extra seats, extra WhatsApp numbers and automation run
+packs of the version the company is on, when it is on a trial, past due, ended or canceled (the
+same companies that can choose a plan), and then pay for them with the plan. The version must still
+be published (offered or not) and sell the add-on, within its most seats and numbers. The new
+limits apply at once, during a trial too; the trial's end does not move. Nothing is emailed: the
+company's audit log shows `billing.add_ons_chosen` with the quantities before and after, and its
+platform page shows "Last change …: Add-ons chosen by the company.". `SELECT extra_seats,
+extra_numbers, run_packs, note, changed_by_user_id, changed_at FROM app.tenant_plans WHERE
+tenant_id = …` shows them.
+
+- **"You cannot change your add-ons now":** the page says why, as for choosing a plan above; also
+  when the company's version was retired (it cannot be paid for, so its add-ons stay as staff left
+  them: the company chooses another plan, or staff change it).
+- **"With these add-ons your plan holds … where your company uses …":** a decrease would leave
+  fewer seats (members and invitations still waiting) or WhatsApp numbers than the company uses.
+  The company frees some first (revokes invitations, removes members, disconnects numbers), or
+  keeps more. An increase is never refused for this, even when the company stays over its limit
+  (for example after staff removed add-ons); fewer run packs refuse nothing, and the month's runs
+  already used count against the smaller allowance.
+- **"… does not sell that many extra seats" (or numbers, or run packs):** the version does not sell
+  that add-on, or not that many; the page shows only what it sells and the most it allows.
+- **"With these add-ons your plan costs more than can be paid here":** the total with the tax is
+  more than one plan payment can be. Choose fewer, or staff change the plan.
+- **"No add-ons to choose":** the version sells none of them (choose another plan), or the company
+  has complimentary access.
 
 **Cancelling a company's subscription.** Owners and billing managers cancel in Billing (an active
 one at the end of the paid period, otherwise at once). Platform owners cancel at once on the
@@ -1515,6 +1543,12 @@ already stored: a short `ACCESS EXCLUSIVE` lock on the keys table), creates `app
 row security and its grants, and registers deletion step 855 with the definer's grants and
 policies. A failure usually means a lock wait on `app.api_keys` timed out (run the migrations again
 when requests are quieter) or the bootstrap roles are missing.
+
+**Migration 0084 failed.** It runs in one transaction, so a failure applies nothing. It adds
+`app.choose_add_ons` (SECURITY DEFINER, owned by `w360_definer`, executable by `w360_app` only) and
+changes no table. A failure usually means the bootstrap roles are missing (`w360_owner` must be a
+member of `w360_definer`). Web images built before it keep working; the new web image needs it for
+Billing → Add-ons, so run it before that image.
 
 **Migration 0083 failed.** It runs in one transaction, so a failure applies nothing. It replaces
 the plan guard `ops.guard_plan()` and recreates `app.choose_plan` (dropped as `w360_definer`,

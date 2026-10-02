@@ -201,6 +201,11 @@ made. This checklist records the evidence required per gate; unchecked items blo
       version; a billing manager on a trial chooses it under Billing → Choose a plan, the plan card
       shows it with the trial's end unchanged, and paying for it creates a Razorpay subscription for
       the chosen version's amount; agree which versions are offered and who stops offering them
+- [ ] Companies choosing their add-ons (ADR-106) on the same staging deployment, after migration
+      0084 and before the new web image: a billing manager on a trial of a test-mode version that
+      sells extra seats sets them under Billing → Add-ons, the plan card and the payment offer show
+      them, a decrease below the seats in use is refused, and paying creates a Razorpay
+      subscription for the amount with the add-ons; agree each version's most seats and numbers
 - [ ] Tenant-isolation and security gates passing in CI on the release commit
 - [ ] Measured load behaviour against the test envelope (k6 results)
 - [ ] Backup restoration drill performed and timings recorded (RPO/RTO)

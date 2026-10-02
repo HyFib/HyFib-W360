@@ -1,5 +1,116 @@
 # Progress
 
+## 2026-10-02 — Phase 5: companies choose their add-ons (P5-01, P5-07, ADR-106)
+
+Status: **Implemented and locally verified against the Razorpay stand-in (test data only).** Since
+ADR-105 a company chooses its plan version, but only HyFib staff set its add-ons, so a company whose
+team outgrew its version's seats needed staff, or a bigger version, before it could pay for more.
+
+### Completed
+
+- **Design (ADR-106):** owners and billing managers with a sign-in within 15 minutes set the extra
+  seats, extra WhatsApp numbers and automation run packs of the version the company is on, under the
+  conditions of choosing a plan (on a trial, past due, expired or canceled; neither suspended nor
+  being deleted; no subscription that may still be charged; Razorpay subscriptions on and the tax on
+  plan prices set), on a version still published (offered or not). Only the quantities change, at
+  once (during a trial too); a decrease cannot leave fewer seats or numbers than the company uses,
+  an increase is never refused for that, and a total that cannot be paid is refused. Changing add-ons
+  a subscription pays for is not built (R-069).
+- **Migration 0084:** `app.choose_add_ons(seats, numbers, packs)` (SECURITY DEFINER, `w360_app`
+  only): the company and member from the session's scope, the locks of `app.choose_plan` (the
+  subscription-start lock, the company row shared, the plan state for update), every condition
+  checked again with a published version instead of an offered one, and only the three quantities,
+  the note, member, time and version number written; the plan state's guard (0023) keeps them to
+  what the version sells, within its maximums. No table changes.
+- **Domain:** `billing/plan-add-ons.ts` (what the version sells, with prices, quantities, the most
+  allowed and the fewest that still hold what the company uses, the current quote and why the
+  company cannot change them now; the change under every limit's lock, digits only, refused when
+  the total cannot be paid or a decrease leaves fewer seats or numbers than in use, audited as
+  `billing.add_ons_chosen`); `planChangeUnavailable` shared with plan choices; `PlanAddOnKind` and
+  `PLAN_ADD_ON_LABELS` in the browser-safe plan model.
+- **Web:** Billing → Add-ons (`/c/<slug>/billing/add-ons`): a field for each add-on the version
+  sells with its price, what the plan includes, what the company uses and its bounds, the total as
+  the quantities change, and what saving does now; why the company cannot change them, the sign-in
+  prompt, or who can. Billing links to it when the company can change add-ons.
+- **Tests:**
+  - Unit: when a company may change its plan or add-ons (4).
+  - Integration (`plan-add-ons.test.ts`, 8, against the Razorpay stand-in): the listing, the quote
+    and a billing manager's change on a trial with only the quantities changing, the new limits at
+    once, the audit and paying for them with the plan; a payment being started and every status
+    Razorpay may still charge holding the change; permissions, recent sign-ins and digits only;
+    what the version sells and its maximums, and a total that cannot be paid; refused in SQL for no
+    tax, outside a member's scope, suspended, being deleted, a retired version, a paid period and
+    complimentary access; decreases below the seats and numbers in use refused, increases allowed
+    when still over, fewer run packs allowed; a restricted company; the locks of a subscription
+    start, a seat addition and a staff change, and two changes at once; a staff notice superseded,
+    another company on the same version untouched and the company role refused.
+  - Integration elsewhere: `app.choose_add_ons` executable by `w360_app` alone (`tenant-isolation`).
+  - e2e (`plan-add-ons.spec.ts`, chromium and mobile-chromium): Billing points to the add-ons; the
+    page shows prices and bounds and the total as the quantities change; a decrease below the seats
+    in use is refused; the saved add-ons appear on the plan card and in what paying costs; the audit
+    log and the staff page show the change; once paying from the trial's end, nothing can change.
+- **Docs:** ADR-106; SECURITY (the plan add-ons row and rules); THREAT-MODEL T119; RUNBOOKS
+  (add-ons companies choose, migration 0084); ARCHITECTURE; DATA-RETENTION; RELEASE-CHECKLIST;
+  BACKLOG P5-01 and P5-07; FEATURE-MATRIX H-046 and W-001.
+- **Found while building:**
+  - A decrease is checked only against the seats and numbers it takes away: a company already over
+    a limit (staff removed add-ons, say) can still add seats, and a team count over the version's
+    limit does not block changing the seats (ADR-105 refuses any shortfall because the whole version
+    changes there).
+  - Values exported from a client component cannot be called from a server page, so the add-on
+    labels live in the browser-safe plan model rather than beside the form.
+  - The form first formatted amounts with the browser's `Intl`, which no other e2e-checked page
+    does in the browser and which Firefox and WebKit could print differently; it now uses the
+    server's own formatter (`displayMoney`, exported as `@w360/core/money`, which has no
+    dependencies), so the page reads the same in every browser and on the server.
+  - The Choose a plan page (ADR-105), copied here, reloaded itself whenever it was reached by a link
+    (`RequireOwnDocument`, which only pages loading a provider's script need: Billing for Razorpay
+    Checkout and Channels for Embedded Signup). The reload could undo a choice or a typed quantity
+    made in the moment before it; neither page reloads now, like the other billing pages.
+  - The first e2e run used a heading locator that also matched the card's own title; it now names
+    the page heading exactly. One page regression did not compile as first written (it removed the
+    check that narrows the plan); it was rewritten as a form that needs a stale sign-in.
+- **Mutation checks:** 52 regressions tried one at a time, 51 caught (4 through the e2e test).
+  - 24 in the migration: a change outside a member's scope; the subscription-start lock not taken;
+    the company row or the plan state read without its lock; a company being deleted or suspended,
+    complimentary access, a paid period, a live subscription, one being started or one authorised,
+    a retired version or no tax allowed; the same quantities recorded again; each quantity, the
+    note, who changed them or the plan state's version not written; other companies on the version
+    changed too; the quantities before reported as the new ones; the platform role allowed to run
+    it; and the migration's `REVOKE … FROM PUBLIC` (not caught: the default privileges of 0002
+    already withhold EXECUTE, as for every function).
+  - 13 in the change: administrators or a stale sign-in allowed; Razorpay subscriptions off; the
+    limits' locks not taken; a total that cannot be paid accepted; a decrease of seats or of numbers
+    not checked; an increase checked against what is in use; the change not audited, or audited
+    without the quantities before; any number format, an empty field refused, or more seats than
+    the table holds accepted.
+  - 7 in what the company sees: a retired version offered add-ons; the fewest seats not shown; the
+    most seats or numbers ignoring the version; numbers or run packs listed when not sold; the quote
+    without the add-ons.
+  - 4 in the shared check of when a company may change its plan or add-ons (unit tests): a payment
+    being started, a paid period, Razorpay subscriptions off and a suspended company not told.
+  - 4 through the e2e test: Billing not pointing to the add-ons; the form sending the seats as the
+    numbers; the total shown without the run packs; the form shown only after a stale sign-in.
+
+### Test commands and results (local, 2026-10-02)
+
+| Command                                                                                                                                                                                                        | Result                                   |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                                                           | clean                                    |
+| `pnpm test`                                                                                                                                                                                                    | 462 passed                               |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                                                                                            | 655 passed on each                       |
+| `pnpm build` and `pnpm test:e2e` for `plan-add-ons.spec.ts`, `plan-choice.spec.ts`, `plans.spec.ts` and `plan-subscription.spec.ts` on chromium and mobile-chromium, on the local database migrated on to 0084 | 8 passed (12.7 min)                      |
+| Mutation checks                                                                                                                                                                                                | 52 regressions, 51 caught (listed above) |
+| gitleaks 8.30.1 on the commit                                                                                                                                                                                  | no leaks                                 |
+
+### Known gaps
+
+- Changing add-ons a subscription pays for (a new subscription from the end of the paid period,
+  R-069), proration, add-ons through the public API and emails about a company's change are not
+  built.
+- Razorpay test mode has not been run (RELEASE-CHECKLIST). Firefox and WebKit are not installed
+  locally; CI runs them.
+
 ## 2026-10-02 — Phase 5: companies choose the plan they pay for (P5-01, P5-07, ADR-105)
 
 Status: **Implemented and locally verified against the Razorpay stand-in (test data only).** A

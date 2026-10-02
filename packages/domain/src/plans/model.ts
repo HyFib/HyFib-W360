@@ -73,6 +73,15 @@ export function addOnsForPlan(
   };
 }
 
+/** The add-ons a plan version can sell (ADR-051), in display order. */
+export type PlanAddOnKind = 'seats' | 'numbers' | 'runPacks';
+
+export const PLAN_ADD_ON_LABELS: Record<PlanAddOnKind, string> = {
+  seats: 'Extra seats',
+  numbers: 'Extra WhatsApp numbers',
+  runPacks: 'Automation run packs',
+};
+
 /** Limits after add-ons; null means no limit. */
 export interface PlanLimits {
   seats: number | null;

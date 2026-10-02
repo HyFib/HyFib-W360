@@ -215,6 +215,28 @@ export async function choosePlanAction(
   });
 }
 
+/** Sets the add-ons of the company's plan version, to pay for them with it (ADR-106). */
+export async function chooseAddOnsAction(
+  slug: string,
+  input: { extraSeats: string; extraNumbers: string; runPacks: string },
+): Promise<ActionResult<{ changed: boolean; totalMinor: number | null }>> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { planAddOns } = await getRuntime();
+    const result = await planAddOns.choose(
+      ctx,
+      {
+        extraSeats: String(input.extraSeats ?? ''),
+        extraNumbers: String(input.extraNumbers ?? ''),
+        runPacks: String(input.runPacks ?? ''),
+      },
+      await requestMeta(),
+    );
+    refresh();
+    return { changed: result.changed, totalMinor: result.quote?.totalMinor ?? null };
+  });
+}
+
 /** Starts paying for the plan (ADR-063): the browser then opens Checkout for the subscription. */
 export async function startPlanSubscriptionAction(
   slug: string,

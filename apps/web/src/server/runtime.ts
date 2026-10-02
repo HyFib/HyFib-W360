@@ -46,6 +46,7 @@ import {
   createInboxService,
   createOnboardingService,
   createPlanAdminService,
+  createPlanAddOnsService,
   createPlanChoicesService,
   createPlanSubscriptionService,
   createPlansService,
@@ -76,6 +77,7 @@ import {
   type BillingService,
   type BillingHistoryService,
   type PlanRefundRequestsService,
+  type PlanAddOnsService,
   type PlanChoicesService,
   type RefundRequestsService,
   type BusinessHoursService,
@@ -206,6 +208,8 @@ export interface Runtime {
   planRefundRequests: PlanRefundRequestsService;
   /** Choosing the plan a company pays for (ADR-105). */
   planChoices: PlanChoicesService;
+  /** A company choosing its add-ons (ADR-106). */
+  planAddOns: PlanAddOnsService;
   events: TenantEventHub;
   shutdown(): Promise<void>;
 }
@@ -442,6 +446,11 @@ async function init(): Promise<Runtime> {
     clock: systemClock,
     subscriptionsEnabled: Boolean(razorpayClient && razorpay?.subscriptionsEnabled),
   });
+  const planAddOns = createPlanAddOnsService({
+    db,
+    clock: systemClock,
+    subscriptionsEnabled: Boolean(razorpayClient && razorpay?.subscriptionsEnabled),
+  });
   const events = createTenantEventHub({ connectionString: config.DATABASE_URL_APP, logger });
 
   logger.info({ env: config.APP_ENV }, 'web runtime initialised');
@@ -502,6 +511,7 @@ async function init(): Promise<Runtime> {
     refundRequests,
     planRefundRequests,
     planChoices,
+    planAddOns,
     events,
     async shutdown() {
       await events.close();
