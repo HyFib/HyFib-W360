@@ -95,9 +95,12 @@ export function PlanCard({
   overview,
   timeZone,
   payment = null,
+  next = null,
 }: {
   overview: CompanyPlanOverview;
   timeZone: string;
+  /** The plan the company changes to from the end of the paid period (ADR-109). */
+  next?: { planName: string; startsAt: Date; authorised: boolean } | null;
   /**
    * Whether the company pays by subscription (ADR-063), has one whose payments start when the
    * trial ends (ADR-102), or can pay for its plan here.
@@ -134,6 +137,11 @@ export function PlanCard({
                 : payHere
                   ? 'HyFib sets plans; you can pay for yours below.'
                   : 'HyFib sets plans and periods; there is nothing to pay here for the plan.'}
+          {next
+            ? next.authorised
+              ? ` From ${day(next.startsAt)}, your plan is ${next.planName}.`
+              : ` Your plan changes to ${next.planName} on ${day(next.startsAt)} once its payment is authorised.`
+            : null}
         </CardDescription>
       </CardHeader>
       <CardContent className="grid gap-6">

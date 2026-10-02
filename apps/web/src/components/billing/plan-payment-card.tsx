@@ -28,6 +28,7 @@ import {
 import { SignInAgain } from '@/components/sign-in-again';
 import { formatDate } from '@/lib/format';
 import { CancelPlanSubscription, PayForPlan } from './plan-payment';
+import { planWithAddOns } from './plan-words';
 
 const inr = (paise: number) => displayMoney(BigInt(paise), 'INR');
 
@@ -82,7 +83,7 @@ export function PlanPaymentCard({
   recentSignIn: boolean;
   timeZone: string;
 }) {
-  const { offer, subscription, payments } = payment;
+  const { offer, subscription, next, payments } = payment;
   const explain = !offer.available && EXPLAINED.includes(offer.reason);
   if (!offer.available && !subscription && payments.length === 0 && !explain) return null;
   const day = (at: Date | null) => formatDate(at, timeZone);
@@ -135,11 +136,19 @@ export function PlanPaymentCard({
                 : ''}
             </p>
             {subscription.cancelAtPeriodEnd && live ? (
-              <Alert tone="info" title="Cancelled">
-                {subscription.paidCount === 0
-                  ? `Razorpay’s first charge is under way: if it goes through, the plan stays paid until ${day(subscription.currentEnd)}, then ends. Nothing more is charged.`
-                  : `Nothing more is charged. The plan ends on ${day(subscription.currentEnd)}, at the end of the paid period.`}
-              </Alert>
+              next ? (
+                <Alert tone="info" title="Ends with the paid period">
+                  {next.subscription.status === 'authenticated'
+                    ? `Nothing more is charged for it. On ${day(subscription.currentEnd)} your plan changes to ${next.planName}.`
+                    : `Nothing more is charged for it. Your plan changes to ${next.planName} on ${day(subscription.currentEnd)} once its payment is authorised; otherwise it ends then.`}
+                </Alert>
+              ) : (
+                <Alert tone="info" title="Cancelled">
+                  {subscription.paidCount === 0
+                    ? `Razorpay’s first charge is under way: if it goes through, the plan stays paid until ${day(subscription.currentEnd)}, then ends. Nothing more is charged.`
+                    : `Nothing more is charged. The plan ends on ${day(subscription.currentEnd)}, at the end of the paid period.`}
+                </Alert>
+              )
             ) : null}
             {subscription.status === 'pending' ? (
               <Alert
@@ -204,6 +213,65 @@ export function PlanPaymentCard({
                 </div>
               ) : (
                 signInFirst('Cancelling the subscription')
+              )
+            ) : null}
+          </div>
+        ) : null}
+
+        {next?.subscription.startsAt ? (
+          <div
+            role="group"
+            aria-label="Next subscription"
+            className="grid gap-3 rounded-md border border-border p-4 text-sm"
+          >
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-medium">
+                From {day(next.subscription.startsAt)}:{' '}
+                {planWithAddOns(next.planName, next.subscription)},{' '}
+                {inr(next.subscription.amountMinor)}{' '}
+                {PLAN_INTERVAL_LABELS[next.subscription.intervalMonths] ?? ''}
+              </span>
+              <Badge tone={STATUS_TONE[next.subscription.status]}>
+                {PLAN_SUBSCRIPTION_STATUS_LABELS[next.subscription.status]}
+              </Badge>
+            </div>
+            <p className="text-muted-foreground">
+              {inr(next.subscription.subtotalMinor)} plus {next.subscription.taxBp / 100}% tax (
+              {inr(next.subscription.taxMinor)}).{' '}
+              {next.subscription.status === 'authenticated'
+                ? `Authorised: Razorpay charges for the first period on ${day(next.subscription.startsAt)}, when the current paid period ends, and ${every(next.subscription.intervalMonths)} after that until you cancel.`
+                : next.subscription.checkoutOpen
+                  ? `Waiting for the payment method to be authorised. You can finish until ${formatDate(next.subscription.authorizeBy, timeZone)}; after that, change your plan again.`
+                  : 'Not authorised in time. Change your plan again to keep it going after the paid period.'}
+            </p>
+            {canManage &&
+            next.subscription.status === 'created' &&
+            next.subscription.checkoutOpen ? (
+              recentSignIn ? (
+                <PayForPlan
+                  slug={slug}
+                  label="Authorise the new plan"
+                  scheduledNotice={`Payment method authorised. Razorpay charges for ${next.planName} on ${day(next.subscription.startsAt)}; nothing is charged for it before then.`}
+                />
+              ) : (
+                signInFirst('Authorising the new plan')
+              )
+            ) : null}
+            {canManage &&
+            (next.subscription.status === 'authenticated' ||
+              (next.subscription.status === 'created' && next.subscription.checkoutOpen)) ? (
+              recentSignIn ? (
+                <div>
+                  <CancelPlanSubscription
+                    slug={slug}
+                    label="Cancel the change"
+                    title={`Cancel the change to ${next.planName}?`}
+                    keepLabel="Keep the change"
+                    description={`Nothing was charged for it. Your current subscription still ends on ${day(next.subscription.startsAt)}, so your plan ends then unless you change it again.`}
+                  />
+                </div>
+              ) : (
+                signInFirst('Cancelling the change')
               )
             ) : null}
           </div>

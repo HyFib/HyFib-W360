@@ -17,7 +17,16 @@ import { CheckoutClosedError, openSubscriptionCheckout } from './razorpay-checko
  * payment method, ADR-102), and the server verifies the response and asks Razorpay before the plan
  * counts as paid. A payment still being confirmed is shown as such.
  */
-export function PayForPlan({ slug, label }: { slug: string; label: string }) {
+export function PayForPlan({
+  slug,
+  label,
+  scheduledNotice = 'Payment method authorised. Razorpay charges for the plan when the trial ends; nothing is charged for it before then.',
+}: {
+  slug: string;
+  label: string;
+  /** What an authorised subscription whose first charge is still ahead means here. */
+  scheduledNotice?: string;
+}) {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -64,10 +73,7 @@ export function PayForPlan({ slug, label }: { slug: string; label: string }) {
         return;
       }
       if (confirmed.data.status === 'active') setNotice('Payment received. Your plan is paid.');
-      else if (confirmed.data.status === 'scheduled')
-        setNotice(
-          'Payment method authorised. Razorpay charges for the plan when the trial ends; nothing is charged for it before then.',
-        );
+      else if (confirmed.data.status === 'scheduled') setNotice(scheduledNotice);
       else if (confirmed.data.status === 'processing')
         setNotice(
           'Payment received and being confirmed. Your plan updates as soon as Razorpay confirms it.',
@@ -98,9 +104,15 @@ export function PayForPlan({ slug, label }: { slug: string; label: string }) {
 export function CancelPlanSubscription({
   slug,
   description,
+  label = 'Cancel subscription',
+  title = 'Cancel the subscription?',
+  keepLabel = 'Keep paying',
 }: {
   slug: string;
   description: string;
+  label?: string;
+  title?: string;
+  keepLabel?: string;
 }) {
   const [error, setError] = useState<ActionFailureState | null>(null);
   const [busy, setBusy] = useState(false);
@@ -110,13 +122,13 @@ export function CancelPlanSubscription({
       <ConfirmDialog
         trigger={
           <ClientButton variant="outline" size="sm" disabled={busy}>
-            Cancel subscription
+            {label}
           </ClientButton>
         }
-        title="Cancel the subscription?"
+        title={title}
         description={description}
-        confirmLabel="Cancel subscription"
-        cancelLabel="Keep paying"
+        confirmLabel={label}
+        cancelLabel={keepLabel}
         destructive
         onConfirm={async () => {
           setBusy(true);

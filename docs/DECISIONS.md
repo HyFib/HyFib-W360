@@ -3832,3 +3832,129 @@ Not built: sweeps that signal the stranded work of `channel.onboard`, `commerce.
 `template.delete` again (they would make most retries unneeded), retrying several dead letters at
 once, whether a retried attempt succeeded (a new failure is listed as a new dead letter), and
 retries through the public API.
+
+## ADR-109 Paying companies change their plan or add-ons from the next period (2026-10-02)
+
+Context: since ADR-105 and ADR-106 a company chooses its plan version and add-ons, but only while
+nothing may still charge it. A company paying by subscription had to ask HyFib staff, and staff
+cannot change a plan while a subscription is live (ADR-063). Razorpay cannot change the plan of a
+subscription paid by a domestic card (only its offer, at a cycle's end) and cannot change one
+authorised through UPI or eMandate at all (R-069). A subscription cancelled at the end of its cycle
+cannot be renewed or reactivated, and the documentation shows no way to undo such a cancellation
+(R-068, R-122). So a change needs a new subscription.
+
+Decision:
+
+- **Who and when:** owners and billing managers with a recent sign-in can change the plan from the
+  end of the paid period. The company must:
+  - not be suspended or being deleted;
+  - be able to pay for plans here (Razorpay subscriptions on, the tax set);
+  - have a plan that is `active` for a period its subscription paid;
+  - have that subscription `active` at Razorpay, or already ending: cancelled at the period's end,
+    or ended without charging again;
+  - be at least 48 hours from the end of the paid period. Razorpay starts a card debit, with the
+    bank's notice, 24 to 36 hours before the debit date (R-073, R-119). So the current
+    subscription's renewal has not started yet, and the new subscription's first charge can be
+    notified in time (as ADR-102).
+- **What:** the company picks the next plan:
+  - a version platform owners offer, or the version it is on while that is published;
+  - add-ons within what that version sells (ADR-106's bounds).
+
+  The change is refused when:
+  - the next plan holds less than the company has now (seats with waiting invitations, WhatsApp
+    numbers, teams, live automations);
+  - its total with the tax cannot be one plan payment;
+  - it is what the company already pays for and the current subscription is not ending.
+
+- **How (Billing → Change plan)**, in this order:
+  1. HyFib cancels the current subscription at the end of its cycle at Razorpay
+     (`cancel_at_cycle_end`, the company's own cancel of ADR-063), unless it already ends then.
+     This cannot be undone.
+  2. HyFib records a new subscription for the next plan's price (written ahead, as ADR-063). It
+     starts at the end of the paid period (`starts_at`), is marked as following the current one
+     (`follows_subscription_id`), and is created at Razorpay with `start_at` (as ADR-102).
+  3. The payer authorises it in Checkout. Razorpay refunds the authorisation payment (R-075,
+     R-119). Nothing is charged before the period ends.
+
+  Because the current subscription is cancelled first, the two can never both charge: the new one
+  exists only once the current one ends with the period. The cost is this: if the payer leaves
+  Checkout without authorising, the current subscription still ends. Billing says so, and the
+  company can authorise again or choose again, including the plan it pays for now, until 48 hours
+  before the period's end. After that, the plan ends with the period, and the company pays again
+  as for any ended plan.
+
+- **At the period's end:** the current subscription ends at Razorpay. The plan transition does not
+  end the plan as canceled when a new subscription (authenticated, active, pending or halted)
+  starts at the period's end. The period is then due like any renewal: past due within the grace
+  days of the current version, or expired if it has none.
+
+  The new subscription's first paid cycle, fetched and checked like every plan payment (ADR-063),
+  goes through `app.apply_plan_subscription_period`. In one transaction it makes the plan active on
+  the next version and add-ons for that cycle and restarts the monthly usage period. It is
+  recorded in the company's audit log with the previous version and add-ons.
+  - A subscription for another version or other add-ons than the plan state is applied only when
+    it follows the subscription that paid the plan's period. Otherwise it is never applied
+    (`mismatch`, as in ADR-063).
+  - A cycle never moves the plan's period back. A cycle of another subscription that ends no later
+    than the period paid by the plan's subscription is `stale`. Before, a subscription renewed
+    after it should have ended could take the plan back to an earlier period.
+  - A version retired since the change was made is applied all the same. The company paid for it,
+    and companies on a retired version keep it (ADR-051). So the plan guard lets a retired version
+    in only as the plan of the paid subscription that follows the one that paid the plan.
+  - Things the company added after the change and beyond the next plan's limits stay, as when
+    staff set a smaller plan. Adding more is refused (ADR-051).
+
+- **Changing again before the period ends:** a new choice replaces the scheduled one. HyFib first
+  cancels the earlier new subscription at Razorpay at once (it was never charged), then creates
+  another. The same plan and add-ons chosen again while the earlier one is still in its Checkout
+  window reopen that Checkout instead; one whose window has closed is cancelled at Razorpay by the
+  next check, as any unpaid subscription (ADR-063). Cancelling the new subscription on Billing leaves the plan to end with the period, since
+  the current subscription already ends then.
+- **Only one subscription keeps charging:** the unique index allowed one live subscription per
+  company. It now allows one live subscription that is not ending at its period's end. So the
+  current subscription, which is ending, and the one that follows it can coexist, but two can
+  never both keep charging.
+
+  A trigger refuses a new subscription that follows another unless all of these hold:
+  - the one it follows paid the company's current period and charges no more after it (`active`
+    and cancelled at the period's end, `cancelled`, `completed` or `expired`);
+  - it starts exactly when that period ends, and at least 48 hours ahead;
+  - its company is not suspended or being deleted;
+  - its version is offered or is the company's current version, and is published;
+  - its add-ons are ones that version sells, within its maximums;
+  - its price is what that version charges for its add-ons, with the tax set now.
+
+- **Emails:**
+  - When the current subscription is cancelled for a change, the email says the plan changes on
+    that date once the new payment is authorised, and ends otherwise.
+  - Once the new subscription is authorised, an email says what the plan becomes, from when, and
+    what Razorpay will charge.
+  - The usual payment email follows the first charge, naming the new plan.
+- **Staff and deletion:** a staff cancel (ADR-063, ADR-101) and company deletion (ADR-055) cancel
+  every subscription that may still charge, including the new one, at once. ADR-101's email is sent
+  once, for the subscription that paid the plan. Staff plan changes stay refused while any
+  subscription is live.
+- **What the company and staff see:**
+  - Billing shows the current subscription and the next one: when it starts, the plan, what it
+    costs, and whether it still needs authorising.
+  - The plan card says what the plan becomes and when.
+  - The platform company page lists both subscriptions.
+
+Not built:
+
+- Changes that take effect at once. Razorpay's immediate, prorated update is not available for
+  domestic cards; refunding the unused part and starting a subscription at once would need its own
+  design.
+- Changes while a trial is paid from its end. The company can cancel that payment and choose again
+  (ADR-105).
+- A reminder email when a change is left unauthorised.
+- Detecting a subscription Razorpay charged after HyFib asked it to end. The `stale` rule keeps it
+  from moving the plan, and its payment stays recorded so it can be refunded.
+- Changes through the public API.
+
+Open questions for Razorpay:
+
+- that a domestic-card subscription cannot be changed in place (research question 14);
+- whether `expire_by` may come before `start_at` (as in ADR-102);
+- what a second cancel at the cycle's end returns, since the fetched subscription does not show a
+  cancellation scheduled for the cycle's end.

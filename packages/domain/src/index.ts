@@ -45,6 +45,7 @@ export * from './billing/plan-payment-refunds';
 export * from './billing/plan-refund-requests';
 export * from './billing/plan-choices';
 export * from './billing/plan-add-ons';
+export * from './billing/plan-changes';
 export * from './billing/price-list';
 export * from './billing/rate-notices';
 export * from './plans/model';

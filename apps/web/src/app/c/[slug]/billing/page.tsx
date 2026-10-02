@@ -36,7 +36,7 @@ import { PlanPaymentCard } from '@/components/billing/plan-payment-card';
 import { PageHeader } from '@/components/page-header';
 import { RequireOwnDocument } from '@/components/require-own-document';
 import { SignInAgain } from '@/components/sign-in-again';
-import { formatDateTime } from '@/lib/format';
+import { formatDate, formatDateTime } from '@/lib/format';
 import { getRuntime } from '@/server/runtime';
 import { requireTenant } from '@/server/session';
 
@@ -97,15 +97,24 @@ export default async function BillingPage({ params }: { params: Promise<{ slug: 
   const { slug } = await params;
   const ctx = await requireTenant(slug);
   assertCan(ctx, 'billing.read');
-  const { billing, plans, planPayments, refundRequests, planChoices, planAddOns, clock } =
-    await getRuntime();
-  const [overview, plan, planPayment, asked, choices, addOns] = await Promise.all([
+  const {
+    billing,
+    plans,
+    planPayments,
+    refundRequests,
+    planChoices,
+    planAddOns,
+    planChanges,
+    clock,
+  } = await getRuntime();
+  const [overview, plan, planPayment, asked, choices, addOns, changes] = await Promise.all([
     billing.overview(ctx),
     plans.overview(ctx),
     planPayments.overview(ctx),
     refundRequests.list(ctx),
     planChoices.choices(ctx),
     planAddOns.addOns(ctx),
+    planChanges.overview(ctx),
   ]);
   // Plans HyFib offers that the company could choose instead of its own (ADR-105).
   const otherChoices =
@@ -145,6 +154,15 @@ export default async function BillingPage({ params }: { params: Promise<{ slug: 
         <PlanCard
           overview={plan}
           timeZone={tz}
+          next={
+            planPayment.next?.subscription.startsAt
+              ? {
+                  planName: planPayment.next.planName,
+                  startsAt: planPayment.next.subscription.startsAt,
+                  authorised: planPayment.next.subscription.status !== 'created',
+                }
+              : null
+          }
           payment={
             // A payment still being started or in Checkout is finished below, so it counts as
             // paying offered here; one Razorpay may charge counts as a subscription (ADR-102).
@@ -185,6 +203,18 @@ export default async function BillingPage({ params }: { params: Promise<{ slug: 
             </Link>
             : choose extra seats, WhatsApp numbers or automation run packs for your plan, and pay
             for them with it.
+          </p>
+        ) : null}
+        {changes.unavailable === null && changes.periodEnd ? (
+          <p className="text-sm text-muted-foreground">
+            <Link
+              href={`/c/${ctx.tenant.slug}/billing/change`}
+              className="text-primary underline-offset-4 hover:underline"
+            >
+              Change plan
+            </Link>
+            : change your plan or add-ons from the end of the paid period, on{' '}
+            {formatDate(changes.periodEnd, tz)}.
           </p>
         ) : null}
         <PlanPaymentCard

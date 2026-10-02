@@ -47,6 +47,7 @@ import {
   createOnboardingService,
   createPlanAdminService,
   createPlanAddOnsService,
+  createPlanChangeService,
   createPlanChoicesService,
   createPriceListService,
   createPlanSubscriptionService,
@@ -79,6 +80,7 @@ import {
   type BillingHistoryService,
   type PlanRefundRequestsService,
   type PlanAddOnsService,
+  type PlanChangeService,
   type PriceListService,
   type PlanChoicesService,
   type RefundRequestsService,
@@ -212,6 +214,8 @@ export interface Runtime {
   planChoices: PlanChoicesService;
   /** A company choosing its add-ons (ADR-106). */
   planAddOns: PlanAddOnsService;
+  /** What a paying company can change its plan to from the end of the paid period (ADR-109). */
+  planChanges: PlanChangeService;
   /** The public price list of offered plan versions (ADR-107). */
   priceList: PriceListService;
   events: TenantEventHub;
@@ -455,6 +459,11 @@ async function init(): Promise<Runtime> {
     clock: systemClock,
     subscriptionsEnabled: Boolean(razorpayClient && razorpay?.subscriptionsEnabled),
   });
+  const planChanges = createPlanChangeService({
+    db,
+    clock: systemClock,
+    subscriptionsEnabled: Boolean(razorpayClient && razorpay?.subscriptionsEnabled),
+  });
   const priceList = createPriceListService({
     db,
     subscriptionsEnabled: Boolean(razorpayClient && razorpay?.subscriptionsEnabled),
@@ -520,6 +529,7 @@ async function init(): Promise<Runtime> {
     planRefundRequests,
     planChoices,
     planAddOns,
+    planChanges,
     priceList,
     events,
     async shutdown() {

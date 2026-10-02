@@ -49,7 +49,7 @@ export const PLAN_ADD_ONS_UNAVAILABLE_TEXT: Record<PlanAddOnsUnavailable, string
   paying_from_trial_end:
     'Your company pays for its plan from the end of the trial. Cancel that payment under Paying for your plan to change your add-ons; the trial goes on.',
   subscribed:
-    'Your company pays for its plan by subscription. Changing add-ons that are being paid for is not available here yet; ask HyFib.',
+    'Your company pays for its plan by subscription. Change its add-ons from the end of the paid period under Billing → Change plan.',
   paid_period:
     'Your plan has a paid period. You can choose add-ons once it ends, or ask HyFib to change them.',
   plan_retired:

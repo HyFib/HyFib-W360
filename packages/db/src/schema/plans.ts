@@ -118,7 +118,11 @@ export const PLAN_SUBSCRIPTION_STATUSES = [
   'failed',
 ] as const;
 export type PlanSubscriptionStatus = (typeof PLAN_SUBSCRIPTION_STATUSES)[number];
-/** Subscriptions that may still be authorised or charged: at most one per company (0037). */
+/**
+ * Subscriptions that may still be authorised or charged. At most one per company keeps charging: the
+ * current one may stay live while it ends at its period's end, next to the one that follows it
+ * (0087, ADR-109).
+ */
 export const LIVE_PLAN_SUBSCRIPTION_STATUSES = [
   'creating',
   'created',
@@ -166,8 +170,13 @@ export const planSubscriptions = appSchema.table('plan_subscriptions', {
    * (ADR-101, migration 0078); the worker's sweep clears it.
    */
   staffCancelNoticeDue: boolean('staff_cancel_notice_due').notNull().default(false),
-  /** When the first charge is due, at the trial's end (ADR-102, 0079); null: charged in Checkout. */
+  /**
+   * When the first charge is due: at the trial's end (ADR-102, 0079) or, for one that follows
+   * another, when the paid period ends (ADR-109); null: charged in Checkout.
+   */
   startsAt: tz('starts_at'),
+  /** The subscription this one follows from the end of its paid period (ADR-109, 0087). */
+  followsSubscriptionId: uuid('follows_subscription_id'),
 });
 
 /** A paid invoice of a subscription: the charge and the billing cycle it paid for (0037). */

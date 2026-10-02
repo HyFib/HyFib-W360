@@ -71,7 +71,7 @@ export const PLAN_CHOICE_UNAVAILABLE_TEXT: Record<PlanChoiceUnavailable, string>
   paying_from_trial_end:
     'Your company pays for its plan from the end of the trial. Cancel that payment under Paying for your plan to choose another plan; the trial goes on.',
   subscribed:
-    'Your company pays for its plan by subscription. Changing a plan that is being paid for is not available here yet; ask HyFib.',
+    'Your company pays for its plan by subscription. Change it from the end of the paid period under Billing → Change plan.',
   paid_period:
     'Your plan has a paid period. You can choose a plan once it ends, or ask HyFib to change it.',
 };

@@ -1036,8 +1036,8 @@ lists what is offered.
   access or a paid period (staff change those plans; the company can choose once the period ends);
   a payment is being started (its Checkout window closes within an hour); a subscription pays from
   the trial's end (the company cancels it under Billing, and the trial goes on) or pays now
-  (changing a plan a subscription pays for is not built: staff cancel the subscription and change
-  the plan); or the company is suspended or being deleted.
+  (the company changes its plan from the end of the paid period under Billing → Change plan,
+  ADR-109, below); or the company is suspended or being deleted.
 - **"… holds less than your company has now":** the version has fewer seats (members and
   invitations still waiting, plus the company's extra seats), WhatsApp numbers, teams or live
   automations than the company uses; the message names each one. The company frees some first
@@ -1081,6 +1081,47 @@ tenant_id = …` shows them.
   more than one plan payment can be. Choose fewer, or staff change the plan.
 - **"No add-ons to choose":** the version sells none of them (choose another plan), or the company
   has complimentary access.
+
+**Changing the plan a subscription pays for (ADR-109).** Under Billing → Change plan, owners and
+billing managers with a sign-in within 15 minutes choose the version (an offered one, or their own
+while published) and add-ons they pay for from the end of the paid period. HyFib cancels the current
+subscription at the end of its cycle at Razorpay (unless it already ends then), records a new
+subscription that follows it from the period's end, and the payer authorises it in Razorpay's
+payment window; nothing is charged for it before the period ends. At the period's end the current
+subscription ends, the period is due like a renewal (past due within the current version's grace
+days, or expired without any), and the new subscription's first paid cycle puts the plan on the new
+version and add-ons. Emails: "Your HyFib plan changes at the end of the paid period" when the
+current subscription is cancelled for the change, "Your HyFib plan changes on …" once the new one
+is authorised, then the usual payment email. The audit log shows `billing.plan_change_started` and
+`billing.plan_subscription_cancelled` (reason `plan_change`), then `plan.subscription_period` with
+the previous version and add-ons. `SELECT id, status, plan_id, starts_at, follows_subscription_id,
+cancel_at_period_end FROM app.plan_subscriptions WHERE tenant_id = … ORDER BY created_at` shows both.
+
+- **"You cannot change your plan here now":** the page says why: paying for plans is off or the tax
+  is not set; the plan has no period paid by subscription (a trial, a period staff set, or an ended
+  plan: the company chooses a plan instead); Razorpay reports the subscription paused or not
+  charging; the paid period ends within 48 hours (Razorpay starts a card debit 24 to 36 hours
+  ahead, so a change then could not take effect at the period's end: the company chooses a plan
+  once the period ends); or the company is suspended or being deleted.
+- **The payer closed Razorpay's window without authorising:** the current subscription still ends
+  with the period (Razorpay cannot undo a cancellation, R-068). Billing shows the next subscription
+  as waiting for the payment method, with "Authorise the new plan" until its window closes an hour
+  after the change (Change plan says "Not authorised yet"); after that the company changes its plan
+  again (any version, including the one it pays for now) until 48 hours before the period
+  ends. Otherwise the plan ends with the period, as after any cancellation, and the company pays
+  again from Billing.
+- **"Cancel the change":** cancels the new subscription at once (it was never charged). The current
+  subscription still ends with the period, so the plan ends then unless the company changes it
+  again. Choosing again replaces a scheduled change the same way.
+- **The plan did not change at the period's end:** the new subscription's first charge has not been
+  recorded yet (the plan is past due meanwhile, as at any renewal); the minute sweep asks Razorpay
+  hourly once the charge is due. If Razorpay reports the charge failed, the subscription retries
+  and halts as any renewal does (the payer changes the card through Razorpay's email).
+- **Staff cancel at once** (platform page) cancels both subscriptions, the current and the new one;
+  company deletion does too. Staff plan changes stay refused while either is live.
+- **Both subscriptions charged for the same period** should not happen (the current one is
+  cancelled before the new one exists). If Razorpay ever renews the cancelled one, its payment is
+  recorded but never applied (`stale`); refund it from the company's platform page (ADR-103).
 
 **The price list for visitors (ADR-107).** Platform owners show it on the platform Plans page
 ("Price list for visitors", then "Show the price list"). Anyone can then see at `/pricing`, without
@@ -1566,6 +1607,17 @@ already stored: a short `ACCESS EXCLUSIVE` lock on the keys table), creates `app
 row security and its grants, and registers deletion step 855 with the definer's grants and
 policies. A failure usually means a lock wait on `app.api_keys` timed out (run the migrations again
 when requests are quieter) or the bootstrap roles are missing.
+
+**Migration 0087 failed.** It runs in one transaction, so a failure applies nothing. It adds
+`app.plan_subscriptions.follows_subscription_id` (nullable, with a composite foreign key and a
+check), replaces the unique index on live subscriptions with one on those not ending at their
+period's end (a short lock on the subscriptions table), adds the follow guard trigger, replaces the
+plan guard `app.guard_tenant_plan()`, and recreates `app.apply_plan_subscription_period` and
+`app.apply_plan_transition` (dropped as `w360_definer`, recreated by the migration role, granted to
+`w360_app` and handed back). A failure usually means the bootstrap roles are missing (`w360_owner`
+must be a member of `w360_definer`). Web and worker images built before it keep working (they never
+record a following subscription); the new web image needs it for Billing → Change plan, so run it
+before that image.
 
 **Migration 0085 failed.** It runs in one transaction, so a failure applies nothing. It adds two
 nullable columns and a check to `ops.plan_settings` (a single row, so the lock is brief), lets the

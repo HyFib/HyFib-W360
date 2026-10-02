@@ -306,7 +306,12 @@ describe('database roles', () => {
         expect(await can(role, fn), `${role} ${fn}`).toBe(false);
       }
     }
-    for (const fn of ['app.sync_tenant_plan_access()', 'app.init_tenant_plan()']) {
+    // The plan-state triggers, and the guard of a subscription that follows another (0087).
+    for (const fn of [
+      'app.sync_tenant_plan_access()',
+      'app.init_tenant_plan()',
+      'app.guard_plan_subscription_follow()',
+    ]) {
       for (const role of ['w360_app', 'w360_auth', 'w360_platform']) {
         expect(await can(role, fn), `${role} ${fn}`).toBe(false);
       }

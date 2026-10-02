@@ -1,5 +1,129 @@
 # Progress
 
+## 2026-10-02 — Phase 5: paying companies change their plan or add-ons from the next period (P5-01, P5-07, ADR-109)
+
+Status: **Implemented and locally verified against the Razorpay stand-in (test data only).** Since
+ADR-105 and ADR-106 a company chooses its plan version and add-ons, but only while nothing may
+still charge it; a company paying by subscription had to ask HyFib staff, who cannot change a plan
+while a subscription is live. Razorpay cannot change the plan of a domestic-card subscription and
+cannot update one authorised through UPI or eMandate (R-069), and a cancelled subscription cannot be
+restarted (R-068, R-122).
+
+### Completed
+
+- **Design (ADR-109):** a change takes effect when the paid period ends. HyFib first cancels the
+  current subscription at the end of its cycle (this cannot be undone), then records a new
+  subscription that follows it from the period's end and creates it with Razorpay's `start_at`;
+  Checkout only authorises it. Because the current one is cancelled first, the two never both
+  charge; if the payer never authorises the new one, the plan ends with the period. Changes are
+  open until 48 hours before the period ends (Razorpay starts a card debit 24 to 36 hours ahead).
+- **Migration 0087:** `app.plan_subscriptions.follows_subscription_id` (composite FK, a check that
+  a following subscription has a start and is not its own); the one-live index now allows one live
+  subscription that keeps charging, so the ending one and its follow-on coexist;
+  `app.guard_plan_subscription_follow()` (BEFORE INSERT, invoker rights) checks the company, the
+  subscription followed, the start, the version, the add-ons and the price with the tax; the plan
+  guard lets a retired version in only as the plan of that paid follow-on, for the cycle it paid;
+  `app.apply_plan_subscription_period` applies a follow-on's version and add-ons (audited with the
+  previous ones) and never moves a period back (`stale`); `app.apply_plan_transition` treats a
+  period followed by an authorised or charging subscription as a renewal (past due within the grace
+  days) instead of ending it as canceled.
+- **Domain:** `billing/plan-changes.ts` (who may change and why not, the versions, the add-ons from
+  the capacity the company has now, the form's schema); `scheduleChange` in the plan subscription
+  service (end the current subscription, replace a waiting change, record and create the
+  follow-on, reopen the same one's Checkout); the company's cancel picks the subscription that keeps
+  charging; staff cancels and company deletion cancel every live subscription, with ADR-101's
+  notice once; emails when the current subscription is cancelled for a change and when the new one
+  is authorised; the company export carries the new column.
+- **Web:** Billing → Change plan (`/c/<slug>/billing/change`) with each version's terms and what it
+  holds less of; `/c/<slug>/billing/change/<planId>` with the add-ons, the total as they change and
+  a confirmation that says what cannot be undone, then Checkout; Billing shows the next subscription
+  (authorise, cancel the change) and the plan card what the plan becomes; the platform company page
+  lists both subscriptions.
+- **Tests:**
+  - Unit (`plan-changes.test.ts`, 5): who may change and why not, in order (company, paying for
+    plans, the paid period, the subscription, the 48-hour boundary); each add-on's bounds from what
+    the version sells and what the company uses; keeping the company's capacity on another version;
+    the form.
+  - Integration (`plan-changes.test.ts`, 13, against the Razorpay stand-in):
+    - the whole change: the current subscription cancelled at the end of its cycle first, the new one
+      following it from the period's end with `start_at`, Checkout reopened for the same change,
+      authorised with nothing charged, the period due like a renewal, the first paid cycle putting the
+      plan on Pro with its seat, audited with the previous version, with the emails;
+    - the same from the plan sweep alone, with extra WhatsApp numbers and run packs;
+    - replacing a waiting change, and cancelling one, which leaves the plan to end with the period;
+    - every refusal before anything is cancelled (the same plan, an unoffered version, unsold or too
+      many add-ons, too little capacity, digits only, a stale sign-in, an agent, within 48 hours, a
+      trial);
+    - the follow guard's conditions one at a time (the subscription followed still charging or not
+      the plan's, the start, the 48 hours, a suspended company, an unoffered or retired version,
+      unsold seats or numbers, each part of the price), one subscription that keeps charging, no role
+      repointing a follow-on, and the constraints behind the trigger;
+    - another version only from the subscription that follows the one that paid the plan; a cycle of
+      another subscription never moving the period back, the same end included; a version retired
+      meanwhile applied, and the plan guard refusing it for another period, without the subscription,
+      or after another subscription;
+    - a period ending the plan as canceled unless an authorised subscription follows it from its end
+      (never authorised, starting later, following another);
+    - staff cancels of both subscriptions with one email, also of a follow-on created during the
+      cancel, and company deletion.
+  - Elsewhere: the company export classifies the new column; the isolation suite lists the guard
+    function for nobody; the deletion results of `plan-subscriptions.test.ts` are now a list.
+  - e2e (`plan-change.spec.ts`, chromium and mobile-chromium): Billing points to Change plan; the
+    versions, the add-ons and the total as they change; the confirmation names what cannot be undone;
+    Checkout authorises the new subscription; both emails; Billing shows the next subscription and the
+    plan card what the plan becomes; the platform company page lists both subscriptions.
+- **Docs:** ADR-109; research R-122 and unconfirmed points 30 and 31 (research question 14
+  extended); SECURITY; THREAT-MODEL T122; RUNBOOKS (plan changes, migration 0087); ARCHITECTURE;
+  DATA-RETENTION; RELEASE-CHECKLIST (Razorpay test-mode checks); BACKLOG P5-01, P5-07;
+  FEATURE-MATRIX H-048 (and W-001, H-041, H-045, H-046).
+- **Found while building:**
+  - The full integration run caught the new column unclassified in the company export; it is
+    exported (which subscription a change follows).
+  - The first mutation run left 20 regressions alive, nearly all database rules no test reached on
+    their own: each follow-guard condition alone, the stale rule at the same end, run packs and numbers
+    from a follow-on, the transition's conditions on the follow-on, the plan guard's rule for a retired
+    version, and the staff cancel's second look. The tests now catch 17 of them. One verdict of that
+    run did not count: its replacement left the plan guard's SQL unbalanced, so it was run again.
+- **Mutation checks:** 58 regressions tried one at a time, 55 caught (none through the e2e test).
+  - 37 in migration 0087, 35 caught: the one-live index; each condition of the follow guard; the
+    trigger, the check and the FK; the plan guard's rule for a retired version; applying another
+    version, its seats and run packs, the note and the audit; the `stale` rule and its boundary; the
+    transition's conditions on the follow-on (removed, its status, start and predecessor); the column
+    grant.
+  - 17 in the services, 16 caught: the permission and the recent sign-in; each refusal before
+    anything is cancelled; the order (ending the current subscription first, replacing a waiting
+    change); the cancel's choice of subscription; deletion and staff cancels of every subscription,
+    the notice once and the second look; the email once authorised; the sync's guard against older
+    answers.
+  - 4 in the rule (unit tests): the 48 hours, a halted subscription, a suspended company, paying for
+    plans being off.
+  - The three survivors remove defenses something else repeats: the migration's revocation from
+    PUBLIC (0002's default privileges already withhold it), the plan guard's condition that the
+    subscription changed (implied by the one it follows being the old one, as none follows itself),
+    and a staff cancel stopping at the first live subscription (a company has at most two, and the
+    second look cancels the other).
+
+### Test commands and results (local, 2026-10-02)
+
+| Command                                                                                                                                                                                                                                                                           | Result                                                         |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                                                                                                                              | clean                                                          |
+| `pnpm test`                                                                                                                                                                                                                                                                       | 479 passed                                                     |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                                                                                                                                                               | 678 passed on each                                             |
+| `pnpm build`, then `plan-change.spec.ts`, `plan-subscription.spec.ts`, `plan-add-ons.spec.ts`, `plan-choice.spec.ts`, `plans.spec.ts`, `billing.spec.ts`, `company-data.spec.ts` and `platform-ops.spec.ts` on chromium and mobile-chromium, on a fresh database migrated to 0087 | 20 passed, 2 failed (`plan-change.spec.ts`, its own selectors) |
+| `plan-change.spec.ts` again on both, after fixing its selectors (no app change)                                                                                                                                                                                                   | 2 passed                                                       |
+| Mutation checks                                                                                                                                                                                                                                                                   | 58 regressions, 55 caught (listed above)                       |
+| gitleaks 8.30.1 on the commit                                                                                                                                                                                                                                                     | no leaks                                                       |
+
+### Known gaps
+
+- Changes that take effect at once (with proration), changes while a trial is paid from its end, a
+  reminder email for a change left unauthorised and changes through the public API are not built.
+- The Razorpay behaviour this relies on (a cancel at the cycle's end followed by a subscription
+  starting then, never undone and never charged twice) is checked against the stand-in only; the
+  test-mode checks are on the release checklist (unconfirmed points 30 and 31).
+- Firefox and WebKit are not installed locally; CI runs them.
+
 ## 2026-10-02 — Phase 5: retrying dead-lettered jobs from the operations console (P5-10, ADR-108)
 
 Status: **Implemented and locally verified (test data only).** ADR-054 left out a redrive button

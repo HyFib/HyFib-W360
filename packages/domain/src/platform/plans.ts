@@ -545,82 +545,110 @@ export function createPlanAdminService(deps: {
     },
 
     /**
-     * Cancels a company's plan subscription at once (platform owners, with a reason), for example
-     * before changing its plan: Razorpay first, then HyFib's record. The period already paid stands.
+     * Cancels a company's plan subscriptions at once (platform owners, with a reason), for example
+     * before changing its plan: every one that may still charge, the one that follows the current
+     * one from the period's end included (ADR-109), Razorpay first, then HyFib's record. The period
+     * already paid stands. The billing managers are emailed once (ADR-101), about the subscription
+     * that paid the plan.
      */
     async cancelTenantSubscription(actor: PlatformActor, input: unknown): Promise<void> {
       if (actor.role !== 'platform_owner') {
         throw forbidden('Only platform owners can cancel a company’s subscription.');
       }
       const { tenantId, reason } = parseInput(cancelSubscriptionSchema, input);
-      const [row] = await platformDb.run(actor.userId, (tx) =>
-        tx
-          .select()
-          .from(planSubscriptions)
-          .where(
-            and(
-              eq(planSubscriptions.tenantId, tenantId),
-              inArray(planSubscriptions.status, [...LIVE_PLAN_SUBSCRIPTION_STATUSES]),
-            ),
-          ),
-      );
-      if (!row) throw notFound('Subscription');
-      if (row.status === 'creating' || !row.providerSubscriptionId) {
-        throw conflict('The company is starting a payment. Try again in a few minutes.');
-      }
-      if (!deps.razorpay) {
-        throw new AppError('provider_unavailable', 'Razorpay is not configured on this platform.');
-      }
-      const res = await deps.razorpay.cancelSubscription(row.providerSubscriptionId, {
-        cancelAtCycleEnd: false,
-      });
-      if (!res.ok) {
-        if (res.kind !== 'permanent') {
-          throw new AppError('provider_unavailable', 'Razorpay did not answer. Try again.');
-        }
-        throw new AppError(
-          'precondition_failed',
-          `Razorpay did not cancel the subscription: ${res.description} HyFib updates its record at its next check with Razorpay.`,
-        );
-      }
-      await platformDb.run(actor.userId, async (tx) => {
-        const now = clock.now();
-        const updated = await tx
-          .update(planSubscriptions)
-          .set({
-            status: 'cancelled',
-            endedAt: now,
-            cancelRequestedAt: now,
-            cancelledByUserId: actor.userId,
-            // The worker emails the company's billing managers about it (ADR-101).
-            staffCancelNoticeDue: true,
-          })
-          .where(
-            and(
-              eq(planSubscriptions.tenantId, tenantId),
-              eq(planSubscriptions.id, row.id),
-              inArray(planSubscriptions.status, [...LIVE_PLAN_SUBSCRIPTION_STATUSES]),
-            ),
-          )
-          .returning({ id: planSubscriptions.id });
-        if (updated.length === 0) return;
-        const metadata = { subscriptionId: row.id, previousStatus: row.status };
-        await tx
-          .insert(platformAuditEvents)
-          .values(audit(actor, 'platform.plan_subscription_cancelled', metadata, reason, tenantId));
-        await tx.insert(auditEvents).values({
-          id: uuidv7(),
-          tenantId,
-          actorType: 'platform_admin',
-          actorId: actor.userId,
-          action: 'platform.plan_subscription_cancelled',
-          subjectType: 'plan_subscription',
-          subjectId: row.id,
-          result: 'success',
-          correlationId: actor.correlationId,
-          metadata: { reason, ...metadata },
+      const razorpay = deps.razorpay;
+      const done = new Set<string>();
+      let noticed = false;
+      // A second look catches a subscription that followed the first while it was cancelled.
+      for (let round = 0; round < 2; round += 1) {
+        const { rows, payingId } = await platformDb.run(actor.userId, async (tx) => {
+          const [state] = await tx
+            .select({ subscriptionId: tenantPlans.subscriptionId })
+            .from(tenantPlans)
+            .where(eq(tenantPlans.tenantId, tenantId));
+          const live = await tx
+            .select()
+            .from(planSubscriptions)
+            .where(
+              and(
+                eq(planSubscriptions.tenantId, tenantId),
+                inArray(planSubscriptions.status, [...LIVE_PLAN_SUBSCRIPTION_STATUSES]),
+              ),
+            )
+            .orderBy(planSubscriptions.createdAt);
+          return { rows: live.filter((r) => !done.has(r.id)), payingId: state?.subscriptionId };
         });
-      });
+        if (rows.length === 0) {
+          if (round === 0) throw notFound('Subscription');
+          break;
+        }
+        if (rows.some((r) => r.status === 'creating' || !r.providerSubscriptionId)) {
+          throw conflict('The company is starting a payment. Try again in a few minutes.');
+        }
+        if (!razorpay) {
+          throw new AppError(
+            'provider_unavailable',
+            'Razorpay is not configured on this platform.',
+          );
+        }
+        const notice = noticed ? undefined : (rows.find((r) => r.id === payingId) ?? rows[0]);
+        for (const row of rows) {
+          const res = await razorpay.cancelSubscription(row.providerSubscriptionId as string, {
+            cancelAtCycleEnd: false,
+          });
+          if (!res.ok) {
+            if (res.kind !== 'permanent') {
+              throw new AppError('provider_unavailable', 'Razorpay did not answer. Try again.');
+            }
+            throw new AppError(
+              'precondition_failed',
+              `Razorpay did not cancel the subscription: ${res.description} HyFib updates its record at its next check with Razorpay.`,
+            );
+          }
+          await platformDb.run(actor.userId, async (tx) => {
+            const now = clock.now();
+            const updated = await tx
+              .update(planSubscriptions)
+              .set({
+                status: 'cancelled',
+                endedAt: now,
+                cancelRequestedAt: now,
+                cancelledByUserId: actor.userId,
+                // The worker emails the company's billing managers about it, once (ADR-101).
+                staffCancelNoticeDue: row === notice,
+              })
+              .where(
+                and(
+                  eq(planSubscriptions.tenantId, tenantId),
+                  eq(planSubscriptions.id, row.id),
+                  inArray(planSubscriptions.status, [...LIVE_PLAN_SUBSCRIPTION_STATUSES]),
+                ),
+              )
+              .returning({ id: planSubscriptions.id });
+            if (updated.length === 0) return;
+            if (row === notice) noticed = true;
+            const metadata = { subscriptionId: row.id, previousStatus: row.status };
+            await tx
+              .insert(platformAuditEvents)
+              .values(
+                audit(actor, 'platform.plan_subscription_cancelled', metadata, reason, tenantId),
+              );
+            await tx.insert(auditEvents).values({
+              id: uuidv7(),
+              tenantId,
+              actorType: 'platform_admin',
+              actorId: actor.userId,
+              action: 'platform.plan_subscription_cancelled',
+              subjectType: 'plan_subscription',
+              subjectId: row.id,
+              result: 'success',
+              correlationId: actor.correlationId,
+              metadata: { reason, ...metadata },
+            });
+          });
+          done.add(row.id);
+        }
+      }
     },
 
     async getPlan(actor: PlatformActor, id: string) {
@@ -1016,10 +1044,13 @@ export function createPlanAdminService(deps: {
           );
         const counted = (metric: string) => counters.find((c) => c.metric === metric)?.used ?? 0;
         const usage = counts.rows[0];
-        const [subscription] = await tx
+        // The live subscriptions (the current one and the one that follows it, ADR-109), or else
+        // the latest one that was paid.
+        const subscriptions = await tx
           .select({
             id: planSubscriptions.id,
             status: planSubscriptions.status,
+            planName: plans.name,
             amountMinor: planSubscriptions.amountMinor,
             taxBp: planSubscriptions.taxBp,
             intervalMonths: planSubscriptions.intervalMonths,
@@ -1031,11 +1062,13 @@ export function createPlanAdminService(deps: {
             failureReason: planSubscriptions.failureReason,
             createdAt: planSubscriptions.createdAt,
             syncedAt: planSubscriptions.syncedAt,
-            // The first charge, due at the trial's end (ADR-102).
+            // The first charge, due at the trial's end (ADR-102) or the paid period's (ADR-109).
             startsAt: planSubscriptions.startsAt,
             paidCount: planSubscriptions.paidCount,
+            followsSubscriptionId: planSubscriptions.followsSubscriptionId,
           })
           .from(planSubscriptions)
+          .innerJoin(plans, eq(plans.id, planSubscriptions.planId))
           .where(
             and(
               eq(planSubscriptions.tenantId, tenantId),
@@ -1046,7 +1079,18 @@ export function createPlanAdminService(deps: {
             ),
           )
           .orderBy(desc(planSubscriptions.createdAt))
-          .limit(1);
+          .limit(5);
+        const isLive = (status: string) =>
+          (LIVE_PLAN_SUBSCRIPTION_STATUSES as readonly string[]).includes(status);
+        const live = subscriptions.filter((r) => isLive(r.status));
+        const subscription =
+          live.find((r) => r.id === state.subscriptionId) ??
+          live.find((r) => !r.cancelAtPeriodEnd) ??
+          live[0] ??
+          subscriptions[0];
+        const next = state.subscriptionId
+          ? live.find((r) => r.followsSubscriptionId === state.subscriptionId && r !== subscription)
+          : undefined;
         const paid = await tx
           .select({
             id: planPayments.id,
@@ -1117,13 +1161,9 @@ export function createPlanAdminService(deps: {
           timezone: company.timezone,
           state,
           subscription: subscription
-            ? {
-                ...subscription,
-                live: (LIVE_PLAN_SUBSCRIPTION_STATUSES as readonly string[]).includes(
-                  subscription.status,
-                ),
-              }
+            ? { ...subscription, live: isLive(subscription.status) }
             : null,
+          nextSubscription: next ?? null,
           payments,
           refunds,
           plan: plan ?? null,

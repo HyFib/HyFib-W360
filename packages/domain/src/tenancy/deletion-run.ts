@@ -199,9 +199,11 @@ async function cleanUpProviders(
     );
   }
 
-  // The plan subscription (ADR-063): cancelled at Razorpay at once, so nothing more is charged.
-  const subscription = await cancelPlanSubscriptionForDeletion(deps, scope);
-  if (subscription) items.push({ kind: 'plan_subscription', ...subscription });
+  // The plan subscriptions (ADR-063), the one that follows the current one included (ADR-109):
+  // each cancelled at Razorpay at once, so nothing more is charged.
+  for (const subscription of await cancelPlanSubscriptionForDeletion(deps, scope)) {
+    items.push({ kind: 'plan_subscription', ...subscription });
+  }
 
   // HyFib's own card mandate: delete the token at Razorpay (how a card mandate is cancelled).
   const mandates = await deps.db.run(

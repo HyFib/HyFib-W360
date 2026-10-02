@@ -1338,15 +1338,16 @@ WHERE used < limit`), per monthly period from `usage_anchor`; the sweep announce
   starting runs, order messages and cart reminders (`not_in_plan`). Public API requests are counted
   the same way against the version's monthly API requests (0035, ADR-061; §6N). Platform staff see
   usage as counts only (`ops.platform_tenant_usage`). Staff set paid periods for payments settled
-  outside HyFib; companies can also pay by Razorpay subscription (below). Self-serve plan changes,
-  proration and plan invoices are not built.
+  outside HyFib; companies can also pay by Razorpay subscription (below) and change the plan it pays
+  for from the end of the paid period (ADR-109). Changes at once, proration and plan invoices are
+  not built.
 - **Paying for plans (0037, ADR-063) [built, behind `RAZORPAY_SUBSCRIPTIONS_ENABLED`]:** Billing →
   Paying for your plan (`packages/domain/src/billing/plan-subscriptions.ts`) quotes the plan version
   with the company's add-ons plus the tax platform owners set (`ops.plan_settings.plan_tax_bp`,
   `planPaymentQuote` in integer paise). Owners and billing managers with a recent sign-in start a
   subscription: `app.plan_subscriptions` is written first (`creating`, amounts, add-ons and the plan
-  fixed by column grants, one live row per company by a partial unique index, an advisory lock per
-  company), then Razorpay's plan (`POST /v1/plans`, monthly, quarterly or yearly) and subscription
+  fixed by column grants, one live row that keeps charging per company by a partial unique index,
+  an advisory lock per company), then Razorpay's plan (`POST /v1/plans`, monthly, quarterly or yearly) and subscription
   (`POST /v1/subscriptions`, five years of cycles, `expire_by` in one hour, `customer_notify`).
   Checkout opens with the `subscription_id`; its signature (`payment_id|subscription_id`, checked
   against OUR stored id) only prompts `syncPlanSubscription`, which is also run by every
@@ -1365,8 +1366,8 @@ WHERE used < limit`), per monthly period from `usage_anchor`; the sweep announce
   `tenant_plans.subscription_id` and restarts the usage period. Company cancels are
   `cancel_at_cycle_end` for an active subscription (at once otherwise); `app.apply_plan_transition`
   ends such a period as canceled without grace days. Platform owners set the tax and cancel a
-  company's subscription at once (`/platform/tenants/<id>`), staff plan changes are refused while a
-  subscription is live, and company deletion cancels it at Razorpay (§6Q). Billing managers are
+  company's subscriptions at once (`/platform/tenants/<id>`), staff plan changes are refused while a
+  subscription is live, and company deletion cancels them at Razorpay (§6Q). Billing managers are
   emailed about payments, failed charges (`pending`), stopped retries (`halted`) and cancels: the
   company's own at once, and a platform owner's by the minute billing sweep, as the platform role
   cannot queue email (`staff_cancel_notice_due`, 0078, ADR-101: listed by
@@ -1461,6 +1462,38 @@ WHERE used < limit`), per monthly period from `usage_anchor`; the sweep announce
   (shown, Razorpay subscriptions on, the tax set, a default trial, a payable version) for the page,
   which is not found otherwise, and for the card on the platform Plans page, which names what is
   missing. `priceListLines` words what each version includes and the add-ons it sells.
+- **Plan changes from the end of the paid period (0087, ADR-109) [built]:** `createPlanChangeService`
+  (`billing/plan-changes.ts`) tells `billing.read` whether the company can change
+  (`planChangeFromPeriodEndUnavailable`: not suspended or being deleted, Razorpay subscriptions on
+  and the tax set, an `active` plan whose period its subscription paid, that subscription `active`
+  or already ended, and at least 48 hours to the period's end), the versions it can change to (the
+  offered ones and its own while published, each with what it holds against what the company
+  uses), the subscription that follows the current one, and for one version the add-ons it sells,
+  starting from the capacity the company has now (`addOnsKeepingCapacity`, `planChangeAddOns`).
+  `scheduleChange` in the plan subscription service (`billing.manage`, a recent sign-in, the
+  subscription advisory lock) checks the same with the add-on bounds, the shortfalls and the quote,
+  then in order: cancels the current subscription at the end of its cycle at Razorpay (the company's
+  own cancel, emailed as a change) unless it already ends; cancels at once a follow-on still waiting
+  (a new choice replaces it); records the follow-on (`starts_at` = the plan's `period_end`,
+  `follows_subscription_id` = the paying subscription, audited `billing.plan_change_started`) and
+  creates it at Razorpay with `start_at`, as ADR-102. Checkout only authorises it.
+  `app.guard_plan_subscription_follow` (BEFORE INSERT, invoker rights) refuses a follow-on whose
+  predecessor is not the plan's paying subscription and charging no more, whose start is not the
+  period's end at least 48 hours ahead, whose company is suspended or being deleted, whose version
+  is not published and offered or current, whose add-ons the version does not sell, or whose price
+  is not the version's with the tax. `plan_subscriptions_one_live_uq` excludes rows cancelled at
+  their period's end, so the ending subscription and its follow-on can coexist but two rows that
+  keep charging cannot. `app.apply_plan_transition` takes the renewal path (past due within the
+  grace days, or expired) instead of canceled when an `authenticated`, `active`, `pending` or
+  `halted` follow-on starts at the period's end. `app.apply_plan_subscription_period` applies a
+  follow-on's paid cycle with its version and add-ons (audited with the previous ones), returns
+  `mismatch` for any other subscription that does not match the plan, and `stale` for a cycle of
+  another subscription that ends no later than the plan's period. The plan guard lets a retired
+  version in only as the plan of that paid follow-on. The company's cancel picks the subscription
+  that keeps charging (the follow-on, if any); staff cancels and company deletion cancel every live
+  one, with ADR-101's notice sent once. Billing shows the next subscription and its status,
+  `/c/<slug>/billing/change` lists the versions and `/c/<slug>/billing/change/<planId>` holds the
+  form (`ChangePlanForm`: live total, a confirmation that names what cannot be undone, Checkout).
 - **Ledger (0004_billing):** one INR wallet per company with five accounts (`wallet_available`,
   `wallet_held`, `payment_clearing`, `service_revenue`, `dispute_losses`). `ledger_transactions` and
   `ledger_entries` are append-only (trigger), balances are maintained by trigger from the entries,

@@ -11,7 +11,7 @@ import {
   planPaymentStart,
   planShortfallText,
   planShortfalls,
-  PLAN_PAYMENT_TRIAL_LEAD_MS,
+  PLAN_PAYMENT_START_LEAD_MS,
   usagePeriod,
   versionHoldingLimits,
   warningThreshold,
@@ -234,8 +234,8 @@ describe('planPaymentStart (ADR-102)', () => {
   const trial = (trialEndsAt: Date | null) => ({ status: 'trialing' as const, trialEndsAt });
 
   it('pays a trial ending at least two days ahead from its end', () => {
-    expect(PLAN_PAYMENT_TRIAL_LEAD_MS).toBe(48 * 3600_000);
-    const exactly = new Date(now.getTime() + PLAN_PAYMENT_TRIAL_LEAD_MS);
+    expect(PLAN_PAYMENT_START_LEAD_MS).toBe(48 * 3600_000);
+    const exactly = new Date(now.getTime() + PLAN_PAYMENT_START_LEAD_MS);
     expect(planPaymentStart(trial(exactly), now)).toEqual(exactly);
     const later = at('2026-10-15T18:30:00Z');
     expect(planPaymentStart(trial(later), now)).toEqual(later);
@@ -243,7 +243,7 @@ describe('planPaymentStart (ADR-102)', () => {
 
   it('charges at once for a trial ending sooner, and for anything but a trial', () => {
     expect(
-      planPaymentStart(trial(new Date(now.getTime() + PLAN_PAYMENT_TRIAL_LEAD_MS - 1)), now),
+      planPaymentStart(trial(new Date(now.getTime() + PLAN_PAYMENT_START_LEAD_MS - 1)), now),
     ).toBeNull();
     expect(planPaymentStart(trial(new Date(now.getTime() - 1)), now)).toBeNull();
     expect(planPaymentStart(trial(null), now)).toBeNull();

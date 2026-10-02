@@ -1325,10 +1325,7 @@ describe('cancelling', () => {
     const scope = authorizedTenantScope(c.tenantId, null);
     expect(
       await cancelPlanSubscriptionForDeletion({ db: dbs.app, clock, razorpay }, scope),
-    ).toEqual({
-      label: 'Plan subscription at Razorpay',
-      outcome: 'done',
-    });
+    ).toEqual([{ label: 'Plan subscription at Razorpay', outcome: 'done' }]);
     expect(standIn.state.subscriptions.get(start.providerSubscriptionId)?.status).toBe('cancelled');
     expect((await subscriptionRow(start.subscriptionId)).status).toBe('cancelled');
     expect(await audits(c.tenantId, 'billing.plan_subscription_cancelled')).toMatchObject([
@@ -1337,7 +1334,7 @@ describe('cancelling', () => {
     // Nothing left to cancel.
     expect(
       await cancelPlanSubscriptionForDeletion({ db: dbs.app, clock, razorpay }, scope),
-    ).toBeNull();
+    ).toEqual([]);
   });
 });
 

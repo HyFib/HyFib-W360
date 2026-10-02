@@ -248,6 +248,32 @@ export async function startPlanSubscriptionAction(
   });
 }
 
+/**
+ * Changes the plan the company pays for from the end of the paid period (ADR-109): the current
+ * subscription ends with the period, and the browser then opens Checkout to authorise the new one.
+ */
+export async function schedulePlanChangeAction(
+  slug: string,
+  input: { planId: string; extraSeats: string; extraNumbers: string; runPacks: string },
+): Promise<ActionResult<SubscriptionCheckoutStart>> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { planPayments } = await getRuntime();
+    const result = await planPayments.scheduleChange(
+      ctx,
+      {
+        planId: String(input.planId ?? ''),
+        extraSeats: String(input.extraSeats ?? ''),
+        extraNumbers: String(input.extraNumbers ?? ''),
+        runPacks: String(input.runPacks ?? ''),
+      },
+      await requestMeta(),
+    );
+    refresh();
+    return result;
+  });
+}
+
 export async function confirmPlanSubscriptionAction(
   slug: string,
   input: { subscriptionId: string; paymentId: string; signature: string },

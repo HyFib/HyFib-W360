@@ -211,6 +211,18 @@ made. This checklist records the evidence required per gate; unchecked items blo
       set, a platform owner shows the price list, `/pricing` lists that version with the prices
       Billing → Choose a plan shows, and hiding it makes `/pricing` not found; agree the wording
       around the prices (legal and commercial review) and who decides to show the list
+- [ ] Plan changes from the end of the paid period (ADR-109) in Razorpay test mode on the same
+      staging deployment, after migration 0087 and before the new web and worker images: a billing
+      manager of a company paying monthly by a test-mode subscription changes to another offered
+      version with an extra seat under Billing → Change plan; the Razorpay Dashboard shows the
+      current subscription cancelled at the end of its cycle (R-122, unconfirmed point 30) and the
+      new one with `start_at` at the end of the paid period, `authenticated` after Checkout with
+      nothing charged; choosing again cancels that one at once and authorises another; at the
+      period's end the current subscription becomes `cancelled` and the new one's first charge makes
+      the plan active on the new version and add-ons from that day, with the audit entry and the
+      payment email, and nothing is charged twice for that cycle (unconfirmed point 31); a payer who
+      leaves Checkout sees the warning on Billing, and the plan ends with the period if nothing is
+      authorised; ask Razorpay research question 14
 - [ ] Tenant-isolation and security gates passing in CI on the release commit
 - [ ] Measured load behaviour against the test envelope (k6 results)
 - [ ] Backup restoration drill performed and timings recorded (RPO/RTO)
