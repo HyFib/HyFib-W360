@@ -585,6 +585,19 @@ describe('choosing a plan', () => {
       'precondition_failed',
       /does not sell that many extra seats/,
     );
+    // A version the company could not pay for with its add-ons and the tax is refused as paying
+    // for it would be, whatever the page showed.
+    const tooDear = await offeredPlan({ name: 'Too dear', price: '9000000000' });
+    expect((await choices().choices(c.ctx)).choices.find((p) => p.id === tooDear)?.quote).toEqual({
+      ok: false,
+      reason: 'too_large',
+    });
+    await refused(
+      choices().choose(c.ctx, { planId: tooDear }),
+      'precondition_failed',
+      /^Too dear costs more than can be paid here with your add-ons and the tax\./,
+    );
+    expect((await stateOf(c.tenantId)).plan_id).toBe(c.starterId);
 
     // No tax on plan prices: paying for plans is not set up, so nothing can be chosen.
     await adminQuery('UPDATE ops.plan_settings SET plan_tax_bp = NULL');
@@ -732,7 +745,7 @@ describe('choosing a plan', () => {
     });
   });
 
-  it('waits for a subscription start, a limit’s addition and a staff change, which therefore never interleave with a choice', async () => {
+  it('waits for a subscription start, a limit’s addition and a staff change, and serialises with the version’s withdrawal or retirement, so none of them interleaves with a choice', async () => {
     const c = await trialCompany();
     const growth = await offeredPlan({ name: 'Growth' });
     const scale = await offeredPlan({ name: 'Scale', price: '2999' });
@@ -744,8 +757,12 @@ describe('choosing a plan', () => {
       [c.tenantId],
     );
     let choosing = choices().choose(c.ctx, { planId: growth });
-    expect(await stillWaiting(choosing)).toBe(true);
-    await release();
+    // Released however the check ends, so a failure here never holds the lock for the tests after.
+    try {
+      expect(await stillWaiting(choosing)).toBe(true);
+    } finally {
+      await release();
+    }
     expect(await choosing).toMatchObject({ changed: true });
 
     // The lock an addition of a seat takes.
@@ -754,8 +771,11 @@ describe('choosing a plan', () => {
       [c.tenantId],
     );
     choosing = choices().choose(c.ctx, { planId: scale });
-    expect(await stillWaiting(choosing)).toBe(true);
-    await release();
+    try {
+      expect(await stillWaiting(choosing)).toBe(true);
+    } finally {
+      await release();
+    }
     expect(await choosing).toMatchObject({ changed: true });
 
     // A staff change holds the company row: the choice waits for it before it locks the plan state
@@ -813,6 +833,44 @@ describe('choosing a plan', () => {
     expect(await choosing).toMatchObject({ changed: true });
     expect(await stateOf(c.tenantId)).toMatchObject({ plan_id: growth, version: version + 2 });
     expect(await audits(c.tenantId, 'billing.plan_chosen')).toHaveLength(6);
+
+    // A retirement in progress holds a choice of the version until it commits; the choice then
+    // sees it and is refused, so no company ends on a version retired meanwhile.
+    const retiring = await offeredPlan({ name: 'Retiring', price: '2499' });
+    const retirement = await dbs.adminPool.connect();
+    try {
+      await retirement.query('BEGIN');
+      await retirement.query(
+        `UPDATE ops.plans SET status = 'retired', retired_at = now(), retired_by_user_id = $2,
+           offered_at = NULL, offered_by_user_id = NULL WHERE id = $1`,
+        [retiring, owner.userId],
+      );
+      choosing = choices().choose(c.ctx, { planId: retiring });
+      expect(await stillWaiting(choosing)).toBe(true);
+      await retirement.query('COMMIT');
+    } catch (error) {
+      await retirement.query('ROLLBACK');
+      throw error;
+    } finally {
+      retirement.release();
+    }
+    await refused(choosing, 'precondition_failed', /not offered/);
+    expect((await stateOf(c.tenantId)).plan_id).toBe(growth);
+
+    // And a choice in progress holds stopping the offer, through the platform service, until it
+    // commits.
+    const choiceInProgress = await hold(
+      "SELECT pg_advisory_xact_lock_shared(hashtextextended('w360:plan-offer:' || $1::text, 0))",
+      [scale],
+    );
+    const withdrawing = admin().withdrawPlanOffer(owner, scale);
+    try {
+      expect(await stillWaiting(withdrawing)).toBe(true);
+    } finally {
+      await choiceInProgress();
+    }
+    await withdrawing;
+    await refused(choices().choose(c.ctx, { planId: scale }), 'precondition_failed', /not offered/);
   });
 
   it('does not tell a staff change made before the company chose, and leaves other companies’ plans alone; the company role cannot change its plan any other way', async () => {

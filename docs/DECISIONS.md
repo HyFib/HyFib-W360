@@ -3655,12 +3655,18 @@ Decision:
   naming each one over. They are counted in the choice's transaction after it takes the advisory
   locks that additions take (ADR-051), so a choice and an addition cannot both pass. Monthly limits
   (automation runs, API requests) refuse nothing: what the period used so far counts against the
-  chosen version's limit.
+  chosen version's limit. A version the company could not pay for with its add-ons and the tax
+  (more than a plan payment can be) is refused as paying for it would be, whatever the page showed
+  when it was loaded.
 - **Serialised with paying and staff changes:** `app.choose_plan` first takes the per-company
   advisory lock that starting a subscription takes, so a start never records the version a choice
   replaces, then the company row (shared, as a deletion request updates it) and the plan state, in
-  the order the plan sweep and staff changes lock them. The plan version itself is read without a
-  lock: a choice that races a withdrawal is as if made just before it.
+  the order the plan sweep and staff changes lock them. The chosen version is then held by a
+  per-version advisory lock, shared, which the plan guard takes exclusively whenever a published
+  version stops being offered (withdrawn, or retired, which clears the offer; migration 0083 after
+  review): a choice either commits before the change, as a company already on the version would
+  have, or waits for it and is refused, so no company ends on a version withdrawn or retired while
+  it chose. (A row lock on the version would need an update grant and policy for the definer.)
 - **Trials:** during a trial the chosen version's limits and modules apply at once, until the
   trial's end, which does not move. A company can therefore try any offered version within its
   trial; platform owners decide which versions are offered.

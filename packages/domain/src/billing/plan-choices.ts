@@ -127,6 +127,13 @@ export interface PlanChoicesServiceDeps {
 
 const chooseSchema = z.object({ planId: z.uuid('Choose a plan.') });
 
+/** Why a version cannot be paid for with the company's add-ons and the tax, after its name. */
+const UNPAYABLE_TEXT: Record<Extract<PlanPaymentQuoteResult, { ok: false }>['reason'], string> = {
+  add_on_not_sold: 'does not sell your add-ons',
+  too_small: 'costs less than can be paid here',
+  too_large: 'costs more than can be paid here with your add-ons and the tax',
+};
+
 async function holdingsOf(tx: Tx, tenantId: string, now: Date): Promise<PlanHoldings> {
   return {
     seats: await seatsInUse(tx, tenantId, now),
@@ -282,6 +289,14 @@ export function createPlanChoicesService(deps: PlanChoicesServiceDeps) {
             : planPaymentQuote(plan, state, settings.taxBp);
         const quote = priced?.ok ? priced.quote : null;
         if (outcome.result === 'unchanged') return { changed: false, planName: plan.name, quote };
+        // A version the company could not pay for is refused as paying for it would be (ADR-063),
+        // whatever the page showed when it was loaded (the tax may have changed since).
+        if (priced && !priced.ok) {
+          throw new AppError(
+            'precondition_failed',
+            `${plan.name} ${UNPAYABLE_TEXT[priced.reason]}. Choose another plan, or ask HyFib to change your plan.`,
+          );
+        }
 
         const { limits } = await loadEntitlements(tx, ctx.tenant.id);
         const shortfalls = planShortfalls(limits, await holdingsOf(tx, ctx.tenant.id, clock.now()));

@@ -1044,6 +1044,12 @@ lists what is offered.
   version does not sell the company's extra seats, numbers or run packs, or the total is more than a
   plan payment can be. Staff change the company's plan and add-ons instead.
 - **A version is missing from the list:** it is not offered, was retired, or is a draft.
+- **"… costs more than can be paid here with your add-ons and the tax":** the version, with the
+  company's add-ons and the tax on plan prices, is more than a plan payment can be (the page shows
+  it without a price). Staff change the company's plan instead.
+- **Stopping an offer or retiring a version takes a moment longer than usual:** it waits for
+  choices of that version being committed at that instant (milliseconds), so none of them lands on
+  a version no longer offered.
 
 **Cancelling a company's subscription.** Owners and billing managers cancel in Billing (an active
 one at the end of the paid period, otherwise at once). Platform owners cancel at once on the
@@ -1509,6 +1515,14 @@ already stored: a short `ACCESS EXCLUSIVE` lock on the keys table), creates `app
 row security and its grants, and registers deletion step 855 with the definer's grants and
 policies. A failure usually means a lock wait on `app.api_keys` timed out (run the migrations again
 when requests are quieter) or the bootstrap roles are missing.
+
+**Migration 0083 failed.** It runs in one transaction, so a failure applies nothing. It replaces
+the plan guard `ops.guard_plan()` and recreates `app.choose_plan` (dropped as `w360_definer`,
+recreated by the migration role, granted to `w360_app` and handed back to `w360_definer`), so that a
+choice waits for a withdrawal or retirement of its version in progress. A failure usually means the
+bootstrap roles are missing (`w360_owner` must be a member of `w360_definer`). Web images built for
+0082 keep working after it (the function keeps its name, argument and result); run it with 0082,
+before the new web image.
 
 **Migration 0082 failed.** It runs in one transaction, so a failure applies nothing. It adds
 `ops.plans.offered_at` and `offered_by_user_id` (nullable, with two checks validated against the

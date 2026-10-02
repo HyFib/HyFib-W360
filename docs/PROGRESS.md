@@ -23,12 +23,16 @@ default trial needed staff before it could pay for another plan.
   (SECURITY DEFINER, `w360_app` only): the company and member from the session's scope, the
   subscription-start lock, the company row shared and the plan state for update, every condition
   checked again, and only the version, note, member, time and version number written.
+- **Migration 0083 (after review):** the plan guard takes a per-version advisory lock exclusively
+  when a published version stops being offered (withdrawn, or retired), and `app.choose_plan`
+  (recreated) takes it shared before it reads the version, so a choice and a withdrawal or
+  retirement never interleave; no new privileges.
 - **Domain:** `plan-choices.ts` (the offered versions with each one's quote with the company's
   add-ons and the tax, what it holds less of and why the company cannot choose now; the choice
-  under every limit's lock, refused when the chosen version holds less, audited as
-  `billing.plan_chosen`); `offerPlan` and `withdrawPlanOffer` (platform owners, platform audit log)
-  and retiring stops the offer; `lockAllLimits`; `versionHoldingLimits`, `planShortfalls` and
-  `planShortfallText`.
+  under every limit's lock, refused when the chosen version holds less or could not be paid for
+  with the company's add-ons and the tax, audited as `billing.plan_chosen`); `offerPlan` and
+  `withdrawPlanOffer` (platform owners, platform audit log) and retiring stops the offer;
+  `lockAllLimits`; `versionHoldingLimits`, `planShortfalls` and `planShortfallText`.
 - **Web:** Billing → Choose a plan (`/c/<slug>/billing/plans`): each offered version as a card with
   its price and what the company would pay, what it includes, what it holds less of, and a choose
   button with a confirmation that says what changes; why the company cannot choose now, the
@@ -57,12 +61,15 @@ default trial needed staff before it could pay for another plan.
     - refused in SQL: versions not offered, withdrawn or unknown, a version that does not sell the
       company's extra seat (shown without a price, refused by the plan state's guard), no tax on
       plan prices, no member in the company's scope, suspended, being deleted, a paid period and
-      complimentary access;
+      complimentary access; and by the service, a version whose total with the add-ons and the tax
+      is more than a plan payment can be;
     - limits: seats counted with a waiting invitation, teams, and holding exactly the limit fits;
     - a restricted company chooses and stays restricted until it pays, charged at once;
     - locks: the choice waits for the subscription-start lock, a seat addition's lock and a staff
       change's company row, before it locks the plan state; a staff change committed while it
-      waits is not lost; two choices at once both apply, in turn;
+      waits is not lost; two choices at once both apply, in turn; a retirement in progress holds a
+      choice of the version, which is then refused, and a choice in progress holds stopping the
+      offer through the platform service;
     - a staff notice not yet emailed is not emailed after the company chose; another company on the
       same version is untouched; the company role cannot update its plan state.
   - Integration elsewhere: `app.choose_plan` executable by `w360_app` alone (`tenant-isolation`).
@@ -75,8 +82,17 @@ default trial needed staff before it could pay for another plan.
     stops offering Growth and the company keeps it; the owner pays from the trial's end, and the
     page then says why another plan cannot be chosen.
 - **Docs:** ADR-105; SECURITY (the plan choices row, the rules, platform owners offer versions);
-  THREAT-MODEL T118; RUNBOOKS (offering plans, why a company cannot choose, migration 0082);
+  THREAT-MODEL T118; RUNBOOKS (offering plans, why a company cannot choose, migrations 0082 and
+  0083);
   ARCHITECTURE; DATA-RETENTION; RELEASE-CHECKLIST; BACKLOG P5-01 and P5-07; FEATURE-MATRIX H-045.
+- **Found in review (Codex on PR #19, two P2 findings, both fixed after the first push):**
+  - The chosen version was read without a lock, so a platform owner retiring it while a company's
+    choice of it committed left the company on a retired version, which cannot be paid for. Fixed
+    by migration 0083's per-version lock (a row lock would have needed an update grant and policy
+    for the definer); stopping an offer serialises the same way.
+  - A version whose total with the company's add-ons and the tax is more than a plan payment can be
+    was chosen anyway when the request bypassed the page (a stale page after a tax change, or a
+    direct call), leaving the company on a plan it could not pay for. The service now refuses it.
 - **Found while finishing:**
   - The first e2e run read the company page's address right after clicking its link, before the
     page changed, and later revisited `/platform` instead of the company page; the test now waits
@@ -88,7 +104,9 @@ default trial needed staff before it could pay for another plan.
     choice waits) and the plan state read under its lock (a staff change committed meanwhile is now
     shown not to be lost), and another company on the same version (the definer's policy reads
     every company, so only the function's own condition keeps the update to one company).
-- **Mutation checks:** 54 regressions tried one at a time, 52 caught (4 through the e2e test).
+- **Mutation checks:** 57 regressions tried one at a time, 55 caught (4 through the e2e test). After
+  migration 0083 replaced the guard and `app.choose_plan`, the 24 regressions of their bodies and
+  grants were run again against 0083's copies, with the same results.
   - 27 in the migration: drafts, retired versions or versions under ₹1 offered; an offer without
     who made it; the plan guard letting a published version be renamed with its offer, the default
     trial be retired or a retired version be published again; a plan chosen outside a member's
@@ -114,17 +132,22 @@ default trial needed staff before it could pay for another plan.
   - 4 through the e2e test: Billing not pointing to the offered plans; a version that holds less
     choosable from the page; the offer button stopping the offer; the choose button sending the
     version the company is on.
+  - 3 for the review fixes: a choice without the version's lock; stopping an offer without waiting
+    for choices of it; a version the company cannot pay for chosen.
+  - The locks the concurrency test holds are released in `finally` blocks, so a regression there
+    fails in seconds instead of holding them until the hook times out (two runs had taken two
+    minutes each).
 
 ### Test commands and results (local, 2026-10-02)
 
-| Command                                                                                                                                                                                 | Result                                   |
-| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
-| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                                    | clean                                    |
-| `pnpm test`                                                                                                                                                                             | 458 passed                               |
-| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                                                                     | 647 passed on each                       |
-| `pnpm build` and `pnpm test:e2e` for `plan-choice.spec.ts`, `plans.spec.ts` and `plan-subscription.spec.ts` on chromium and mobile-chromium, on a fresh local database migrated to 0082 | 6 passed (12.3 min)                      |
-| Mutation checks                                                                                                                                                                         | 54 regressions, 52 caught (listed above) |
-| gitleaks 8.30.1 on the commit                                                                                                                                                           | no leaks                                 |
+| Command                                                                                                                                                                                                                                                        | Result                                   |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                                                                                                           | clean                                    |
+| `pnpm test`                                                                                                                                                                                                                                                    | 458 passed                               |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                                                                                                                                            | 647 passed on each                       |
+| `pnpm build` and `pnpm test:e2e` for `plan-choice.spec.ts`, `plans.spec.ts` and `plan-subscription.spec.ts` on chromium and mobile-chromium, on a fresh local database migrated to 0082, and again after the review fixes on that database migrated on to 0083 | 6 passed each time (12.3 and 12.2 min)   |
+| Mutation checks                                                                                                                                                                                                                                                | 57 regressions, 55 caught (listed above) |
+| gitleaks 8.30.1 on both commits                                                                                                                                                                                                                                | no leaks                                 |
 
 ### Known gaps
 
