@@ -40,7 +40,8 @@ export default async function PlansPage() {
     }));
   const defaultTrial = plans.find((p) => p.id === defaultTrialPlanId);
   return (
-    <div className="grid gap-6">
+    // One column that never grows past the screen: on a phone the plans table scrolls in its card.
+    <div className="grid grid-cols-1 gap-6">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div className="grid gap-1">
           <h1 className="text-2xl font-semibold tracking-tight">Plans</h1>

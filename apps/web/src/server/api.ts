@@ -7,6 +7,7 @@ import {
   admitApiRate,
   admitApiRequest,
   admitFailedApiAuthentication,
+  apiAddressRefusal,
   apiErrorResponse,
   apiRequestError,
   authenticateApiRequest,
@@ -89,14 +90,14 @@ export async function handleApiRequest(
             tenantId: auth.tenantId,
             apiKeyId: auth.keyId,
           },
-          'api request refused: the key does not accept the address',
+          auth.by === 'company'
+            ? 'api request refused: the company does not accept the address'
+            : 'api request refused: the key does not accept the address',
         );
         const e = apiRequestError(
           403,
           'forbidden',
-          ip
-            ? `This API key does not accept requests from ${ip}.`
-            : 'This API key accepts requests only from its listed addresses, and this request’s address could not be determined.',
+          apiAddressRefusal(auth.by, ip),
           requestId,
           'ip_not_allowed',
         );

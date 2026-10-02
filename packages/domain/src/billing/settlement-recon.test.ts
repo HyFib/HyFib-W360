@@ -77,6 +77,12 @@ const facts = indexReconFacts([
   fact('mandate_refund', 'rfnd_M', { subjectId: 'mandate-1', amountMinor: null }),
   fact('refund', 'rfnd_A', { subjectId: 'topup_payment-subject', amountMinor: 5_000 }),
   fact('plan_payment', 'pay_P', { subjectId: 'subscription-1', amountMinor: 117_882 }),
+  fact('plan_refund', 'rfnd_PR', {
+    subjectId: 'plan-payment-1',
+    amountMinor: 20_000,
+    status: 'processed',
+    paymentId: 'pay_P',
+  }),
 ]);
 
 const outcome = (i: RazorpayReconItem) => {
@@ -175,9 +181,26 @@ describe('matching a settled transaction', () => {
     expect(outcome(refund({ entityId: 'rfnd_X', paymentId: 'pay_X', orderId: 'order_X' }))).toBe(
       'not_hyfib:unknown_refund:',
     );
-    // HyFib does not refund plan payments: a refund of one was made outside it, for a person.
+    // A refund of a plan payment HyFib recorded is matched by its id (ADR-103); one it has not
+    // recorded is fetched and recorded, as its webhook would have been.
+    expect(
+      classifyReconItem(
+        refund({ entityId: 'rfnd_PR', paymentId: 'pay_P', orderId: 'order_inv', amount: 20_000 }),
+        facts,
+      ),
+    ).toEqual({
+      status: 'matched',
+      reason: null,
+      tenantId: 'tenant-1',
+      topupId: null,
+      hyfibAmountMinor: 20_000,
+      apply: null,
+    });
+    expect(outcome(refund({ entityId: 'rfnd_PR', paymentId: 'pay_P', orderId: 'order_inv' }))).toBe(
+      'mismatch:amount_differs:',
+    );
     expect(outcome(refund({ entityId: 'rfnd_P', paymentId: 'pay_P', orderId: 'order_inv' }))).toBe(
-      'review:plan_payment_refund:',
+      'mismatch:refund_unavailable:refund',
     );
   });
 

@@ -126,6 +126,42 @@ export async function withdrawRefundRequestAction(
   });
 }
 
+/** Asks HyFib to refund part or all of a plan payment (ADR-104). */
+export async function askForPlanRefundAction(
+  slug: string,
+  input: { planPaymentId: string; amount: string; reason: string },
+): Promise<ActionResult<{ requestId: string }>> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { planRefundRequests } = await getRuntime();
+    const result = await planRefundRequests.ask(
+      ctx,
+      {
+        planPaymentId: input.planPaymentId,
+        amount: typeof input.amount === 'string' ? input.amount.replace(/[,\s₹]/g, '') : '',
+        reason: input.reason,
+      },
+      await requestMeta(),
+    );
+    refresh();
+    return result;
+  });
+}
+
+/** Withdraws the company's open request for a refund of a plan payment (ADR-104). */
+export async function withdrawPlanRefundRequestAction(
+  slug: string,
+  requestId: string,
+): Promise<ActionResult> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { planRefundRequests } = await getRuntime();
+    await planRefundRequests.withdraw(ctx, requestId, await requestMeta());
+    refresh();
+    return null;
+  });
+}
+
 export async function cancelMandateAction(slug: string, mandateId: string): Promise<ActionResult> {
   return runAction(async () => {
     const ctx = await tenantForAction(slug);
@@ -179,7 +215,7 @@ export async function startPlanSubscriptionAction(
 export async function confirmPlanSubscriptionAction(
   slug: string,
   input: { subscriptionId: string; paymentId: string; signature: string },
-): Promise<ActionResult<{ status: 'active' | 'processing' | 'failed' }>> {
+): Promise<ActionResult<{ status: 'active' | 'scheduled' | 'processing' | 'failed' }>> {
   return runAction(async () => {
     const ctx = await tenantForAction(slug);
     const { planPayments } = await getRuntime();

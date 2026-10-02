@@ -64,6 +64,8 @@ export interface RazorpayRefund {
   paymentId: string;
   amount: number;
   status: 'pending' | 'processed' | 'failed' | string;
+  /** The notes given when the refund was created, which Razorpay returns with it (R-120). */
+  notes: Record<string, string>;
 }
 
 export interface RazorpayDispute {
@@ -202,6 +204,30 @@ function causeCode(error: unknown): string | undefined {
 
 const str = (v: unknown): string | null => (typeof v === 'string' && v.length > 0 ? v : null);
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+
+/** String notes only; Razorpay sends notes as [] when there are none. */
+function stringNotes(v: unknown): Record<string, string> {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return {};
+  const notes: Record<string, string> = {};
+  for (const [key, value] of Object.entries(v as Record<string, unknown>)) {
+    if (typeof value === 'string') notes[key] = value;
+  }
+  return notes;
+}
+
+function parseRefund(json: Record<string, unknown>, paymentId: string): RazorpayRefund | null {
+  const id = str(json.id);
+  const amount = num(json.amount);
+  return id && amount !== null
+    ? {
+        id,
+        paymentId: str(json.payment_id) ?? paymentId,
+        amount,
+        status: str(json.status) ?? 'unknown',
+        notes: stringNotes(json.notes),
+      }
+    : null;
+}
 
 function mapPayment(json: Record<string, unknown>): RazorpayPayment | null {
   const id = str(json.id);
@@ -783,18 +809,7 @@ export class RazorpayClient {
         },
         headers: { 'x-refund-idempotency': input.idempotencyKey },
       },
-      (json): RazorpayRefund | null => {
-        const id = str(json.id);
-        const amount = num(json.amount);
-        return id && amount !== null
-          ? {
-              id,
-              paymentId: str(json.payment_id) ?? paymentId,
-              amount,
-              status: str(json.status) ?? 'unknown',
-            }
-          : null;
-      },
+      (json) => parseRefund(json, paymentId),
     );
   }
 
@@ -803,18 +818,7 @@ export class RazorpayClient {
       'GET',
       `/v1/payments/${encodeURIComponent(paymentId)}/refunds/${encodeURIComponent(refundId)}`,
       {},
-      (json): RazorpayRefund | null => {
-        const id = str(json.id);
-        const amount = num(json.amount);
-        return id && amount !== null
-          ? {
-              id,
-              paymentId: str(json.payment_id) ?? paymentId,
-              amount,
-              status: str(json.status) ?? 'unknown',
-            }
-          : null;
-      },
+      (json) => parseRefund(json, paymentId),
     );
   }
 
@@ -867,16 +871,19 @@ export class RazorpayClient {
   }
 
   /**
-   * POST /v1/subscriptions (R-064), starting at once (no `start_at`): Checkout takes the first
-   * cycle's charge. `expireBy` (Unix seconds) closes the authorisation; `customerNotify` lets
-   * Razorpay tell the payer about charges. No idempotency key: a subscription whose creation went
-   * unanswered is never authorised, because no one learns its id before `expireBy` passes.
+   * POST /v1/subscriptions (R-064). Without `startAt` it starts at once: Checkout takes the first
+   * cycle's charge. With `startAt` (Unix seconds, in the future) Checkout only authenticates the
+   * payment method and Razorpay charges the first cycle from then (R-119, ADR-102). `expireBy` (Unix
+   * seconds) closes the authorisation; `customerNotify` lets Razorpay tell the payer about charges.
+   * No idempotency key: a subscription whose creation went unanswered is never authorised, because
+   * no one learns its id before `expireBy` passes.
    */
   createSubscription(input: {
     planId: string;
     totalCount: number;
     expireBy: number;
     customerNotify: boolean;
+    startAt?: number;
     notes?: Record<string, string>;
   }) {
     return this.request(
@@ -889,6 +896,7 @@ export class RazorpayClient {
           quantity: 1,
           expire_by: input.expireBy,
           customer_notify: input.customerNotify,
+          ...(input.startAt !== undefined ? { start_at: input.startAt } : {}),
           ...(input.notes ? { notes: input.notes } : {}),
         },
       },

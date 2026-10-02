@@ -77,6 +77,8 @@ export interface StandInRefund {
   amount: number;
   status: 'pending' | 'processed' | 'failed';
   idempotencyKey: string | null;
+  /** The notes given when the refund was created, returned with it (R-120). */
+  notes?: Record<string, string>;
 }
 
 export interface StandInDispute {
@@ -140,6 +142,8 @@ export interface StandInSubscription {
   paidCount: number;
   cancelAtCycleEnd: boolean;
   createdAt: number;
+  /** Unix seconds: the first charge is due then (`start_at`, R-119); null: charged in Checkout. */
+  startAt: number | null;
 }
 
 /** An invoice of a subscription: one per billing cycle, paid when its charge is captured. */
@@ -245,9 +249,12 @@ export interface RazorpayStandIn {
     options?: { paymentIds?: string[]; refundIds?: string[]; extra?: StandInReconItem[] },
   ): StandInReconItem[];
   /**
-   * Checkout for a subscription that starts at once: the first cycle is charged (captured by
-   * default) and the subscription becomes active; a failed charge leaves it created. Returns the
-   * payment and the handler response Checkout would pass back, signed with the key secret (R-072).
+   * Checkout for a subscription: one that starts at once has its first cycle charged (captured by
+   * default) and becomes active, and a failed charge leaves it created. One whose `start_at` is
+   * still ahead is only authenticated (R-119): its authentication payment pays no invoice and is
+   * refunded (the stand-in does not model its amount, which Razorpay does not document), and a
+   * later `chargeSubscription` charges the first cycle from the start. Returns the payment and the
+   * handler response Checkout would pass back, signed with the key secret (R-072).
    */
   authorizeSubscription(
     subscriptionId: string,
@@ -261,9 +268,10 @@ export interface RazorpayStandIn {
     };
   };
   /**
-   * Razorpay's charge at the start of the next billing cycle (or a retry of the current unpaid one):
-   * captured makes the cycle paid and the subscription active; failed leaves the cycle unpaid and
-   * the subscription pending.
+   * Razorpay's charge at the start of the next billing cycle (the first one, from `start_at`, for a
+   * subscription that started later, R-119), or a retry of the current unpaid one: captured makes
+   * the cycle paid and the subscription active; failed leaves the cycle unpaid and the subscription
+   * pending.
    */
   chargeSubscription(
     subscriptionId: string,
@@ -359,7 +367,7 @@ function subscriptionJson(s: StandInSubscription) {
     // Razorpay sends notes as [] when there are none; the fixture keeps both shapes.
     notes: s.notes ?? [],
     charge_at: s.chargeAt,
-    start_at: s.currentStart,
+    start_at: s.startAt ?? s.currentStart,
     end_at: null,
     auth_attempts: 0,
     total_count: s.totalCount,
@@ -417,6 +425,8 @@ function refundJson(r: StandInRefund) {
     payment_id: r.paymentId,
     amount: r.amount,
     status: r.status,
+    // As for payments, notes are sent as [] when there are none.
+    notes: r.notes && Object.keys(r.notes).length > 0 ? r.notes : [],
   };
 }
 
@@ -608,15 +618,39 @@ export async function startRazorpayStandIn(options: {
       sub.customerId = customer.id;
     }
     const start = nowUnix();
-    const cycle = { start, end: addMonthsUnix(start, cycleMonths(plan)) };
     const status = opts.status ?? 'captured';
-    const { payment } = chargeCycle(sub, cycle, status, opts.method);
-    if (status === 'captured') {
-      sub.status = 'active';
-      sub.currentStart = cycle.start;
-      sub.currentEnd = cycle.end;
-      sub.chargeAt = cycle.end;
-      sub.paidCount += 1;
+    let payment: StandInPayment;
+    if (sub.startAt !== null && sub.startAt > start) {
+      payment = {
+        id: id('pay'),
+        orderId: id('order'),
+        amount: 100,
+        currency: plan.currency,
+        status: status === 'captured' ? 'refunded' : 'failed',
+        captured: false,
+        customerId: sub.customerId,
+        tokenId: null,
+        method: opts.method ?? 'card',
+        errorCode: status === 'failed' ? 'BAD_REQUEST_ERROR' : null,
+        errorDescription: status === 'failed' ? 'Payment failed' : null,
+        amountRefunded: status === 'captured' ? 100 : 0,
+        invoiceId: null,
+      };
+      state.payments.set(payment.id, payment);
+      if (status === 'captured') {
+        sub.status = 'authenticated';
+        sub.chargeAt = sub.startAt;
+      }
+    } else {
+      const cycle = { start, end: addMonthsUnix(start, cycleMonths(plan)) };
+      payment = chargeCycle(sub, cycle, status, opts.method).payment;
+      if (status === 'captured') {
+        sub.status = 'active';
+        sub.currentStart = cycle.start;
+        sub.currentEnd = cycle.end;
+        sub.chargeAt = cycle.end;
+        sub.paidCount += 1;
+      }
     }
     const signature = createHmac('sha256', options.keySecret)
       .update(`${payment.id}|${sub.id}`)
@@ -636,15 +670,20 @@ export async function startRazorpayStandIn(options: {
   ) {
     const sub = subscriptionOf(subscriptionId);
     const plan = state.plans.get(sub.planId);
-    if (!plan || sub.currentEnd === null || sub.currentStart === null) {
+    // The first charge of one that started later: its first cycle begins at its start (R-119).
+    const first = sub.status === 'authenticated' && sub.startAt !== null && sub.currentEnd === null;
+    if (!plan || (!first && (sub.currentEnd === null || sub.currentStart === null))) {
       throw new Error(`stand-in: subscription ${sub.id} has no billing cycle to charge`);
     }
     // A charge while pending or halted retries the current (unpaid) cycle; otherwise the next one
     // starts at the end of the current one.
     const retry = sub.status === 'pending' || sub.status === 'halted';
-    const cycle = retry
-      ? { start: sub.currentStart, end: sub.currentEnd }
-      : { start: sub.currentEnd, end: addMonthsUnix(sub.currentEnd, cycleMonths(plan)) };
+    const cycle =
+      first && sub.startAt !== null
+        ? { start: sub.startAt, end: addMonthsUnix(sub.startAt, cycleMonths(plan)) }
+        : retry
+          ? { start: sub.currentStart!, end: sub.currentEnd! }
+          : { start: sub.currentEnd!, end: addMonthsUnix(sub.currentEnd!, cycleMonths(plan)) };
     const status = opts.status ?? 'captured';
     const charged = chargeCycle(sub, cycle, status);
     sub.currentStart = cycle.start;
@@ -1246,12 +1285,19 @@ export async function startRazorpayStandIn(options: {
               },
             };
           }
+          const notes: Record<string, string> = {};
+          if (body?.notes && typeof body.notes === 'object' && !Array.isArray(body.notes)) {
+            for (const [k, v] of Object.entries(body.notes as Record<string, unknown>)) {
+              if (typeof v === 'string') notes[k] = v;
+            }
+          }
           const refund: StandInRefund = {
             id: id('rfnd'),
             paymentId: payment.id,
             amount,
             status: state.refundStatusOnCreate,
             idempotencyKey: key,
+            notes,
           };
           state.refunds.set(refund.id, refund);
           payment.amountRefunded += amount;
@@ -1413,6 +1459,7 @@ export async function startRazorpayStandIn(options: {
             paidCount: 0,
             cancelAtCycleEnd: false,
             createdAt: nowUnix(),
+            startAt: typeof body?.start_at === 'number' ? body.start_at : null,
           };
           state.subscriptions.set(sub.id, sub);
           return { status: 200, body: subscriptionJson(sub) };

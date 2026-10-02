@@ -6,6 +6,7 @@ import {
   signUpAndVerify,
   turnOnTwoFactor,
   uniqueEmail,
+  waitForEmailContaining,
 } from './support';
 
 const PASSWORD = 'correct horse battery staple 42';
@@ -14,6 +15,8 @@ test('staff publish a plan and put a company on it; the company sees its plan, l
   page,
 }) => {
   test.skip(!configured, 'needs DATABASE_URL_MIGRATE and E2E_DATABASE_URL_AUTH');
+  // Two emails from the worker's minute sweep (ADR-100): each can take a minute.
+  test.setTimeout(240_000);
   const email = uniqueEmail('plans');
   const suffix = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`;
   const slug = `plans-${suffix}`;
@@ -53,10 +56,21 @@ test('staff publish a plan and put a company on it; the company sees its plan, l
     .getByLabel('Plan', { exact: true })
     .selectOption({ label: `Starter (starter-${suffix} v1)` });
   await page
-    .getByLabel('Reason (shown in the company’s audit log)')
+    .getByLabel('Reason (emailed to the billing managers, and shown in the company’s audit log)')
     .fill('Invoice INV-2026-0042 paid by bank transfer');
   await page.getByRole('button', { name: 'Save plan' }).click();
   await expect(page.getByText('The company’s plan was changed.')).toBeVisible();
+
+  // The worker's minute sweep emails the company's billing managers, here its owner (ADR-100).
+  const changed = await waitForEmailContaining(
+    email,
+    'HyFib changed your plan',
+    'It is now on the Starter plan, for the paid period from',
+    90_000,
+  );
+  expect(changed).toContain(`HyFib changed the plan of ${companyName} on`);
+  expect(changed).toContain("HyFib's reason: Invoice INV-2026-0042 paid by bank transfer");
+  expect(changed).toContain(`/c/${slug}/billing`);
 
   // The company's view: the plan, its usage and what it leaves out.
   await page.goto(`/c/${slug}/billing`);
@@ -78,11 +92,18 @@ test('staff publish a plan and put a company on it; the company sees its plan, l
   await page.getByRole('link', { name: companyName }).click();
   await page.getByLabel('The company gets').selectOption('canceled');
   await page
-    .getByLabel('Reason (shown in the company’s audit log)')
+    .getByLabel('Reason (emailed to the billing managers, and shown in the company’s audit log)')
     .fill('Customer asked to stop at the end of the month');
   await page.getByRole('button', { name: 'End the plan' }).click();
   await page.getByRole('alertdialog').getByRole('button', { name: 'End the plan' }).click();
   await expect(page.getByText('The company’s plan was changed.')).toBeVisible();
   await page.goto(`/c/${slug}`);
   await expect(page.getByText("This company's plan has ended")).toBeVisible();
+  const ended = await waitForEmailContaining(
+    email,
+    'HyFib changed your plan',
+    'HyFib ended the Starter plan',
+    90_000,
+  );
+  expect(ended).toContain("HyFib's reason: Customer asked to stop at the end of the month");
 });

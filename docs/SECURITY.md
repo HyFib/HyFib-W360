@@ -42,8 +42,10 @@ security operations. It is not a compliance claim; see `docs/THREAT-MODEL.md` fo
 | Billing history    | Statements and receipts need `billing.read` and are computed from the append-only ledger in the company's scope (RLS), in one read-only snapshot; statement CSVs are audited (`billing.statement_exported`) and formula-safe; receipts show Razorpay references and the payment method Razorpay reported, never card numbers, and say they are not tax invoices; the method is written only by a definer function, once, for the payment that credited the top-up (ADR-057).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | Usage and rates    | Billing → Usage and rates needs `billing.read`, re-checked by the service. It reads published rate cards (platform data) and the company's own delivered-message counts by pricing category in the company's scope (RLS), in one read-only snapshot; it shows no message, number, contact or market breakdown, stores nothing and never posts to the ledger (ADR-060). A week before a card for the company's currency takes effect, its owners and billing managers are emailed once; the sweep's definer function returns ids only, and each notice is checked and recorded in the company's scope (ADR-065).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | Plan payments      | Starting and cancelling need `billing.manage` and a recent sign-in, one start at a time per company. HyFib records its subscription before calling Razorpay and follows it only as Razorpay reports it when asked: Checkout's signature is checked against the stored subscription id and only prompts a fetch, webhook payloads and notes are never trusted, and a plan payment is recorded (once per payment id) only for a paid invoice of our subscription, in INR, for our amount, whose payment Razorpay reports captured. The plan state changes only through `app.apply_plan_subscription_period` in the company's own scope, for exactly the paid cycle; an ended subscription never becomes live again, and an older read changes nothing. A subscription's amounts, add-ons, plan and starter never change (column grants), plan payments are append-only and neither is ever deleted (triggers), and platform staff can only move a subscription to cancelled (policy); platform owners alone set the tax and cancel a company's subscription, with a reason (ADR-063). Plan payment receipts need `billing.read` and are computed in the company's scope from the payment and its subscription (ADR-064).                                      |
+| Trial-end payments | A subscription paid from a trial's end records nothing until Razorpay reports a paid cycle, and its start is written once (no role may update it). The ended trial waits for the first charge only while that subscription may still be charged, and for at most the plan version's grace days, by one SQL rule (`app.trial_charge_wait_until`) used by the transition, the due list and the plan card. After the start, a company's cancellation asks Razorpay first, so a charge already made keeps its paid period; a trial less than 48 hours from its end is charged at once, as Billing says (ADR-102).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | Credit refunds     | Platform owners only (checked in SQL: `ops.platform_request_credit_refund` looks the user up in `ops.platform_admins`), with a reason in the platform audit log; at most the unrefunded amount and the unused credit (under the wallet's row lock), one open refund per top-up, none for a company being deleted. The credit is held at once; only `app.billing_record_refund` (a refund Razorpay reports, fetched first) and `app.billing_fail_credit_refund` settle the request and its hold, and the company role cannot move a request to either state (restrictive policy) or read the reason (column grants). Razorpay is called by the worker with an idempotency key, the same body every time (ADR-058).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| Refund requests    | Members with `billing.manage` and a sign-in within 15 minutes ask from a receipt: at most what is left of the payment and the unused credit, one open request per top-up (unique index), 5 a day per company (counted under an advisory lock), none once deletion is asked for (the company's status read under a share lock in the request's transaction). The company role inserts only open requests (column grant), moves them only to withdrawn (restrictive policy) and cannot read who decided. Only platform owners decide (checked in SQL); approving runs the staff refund's checks again under its locks, and declining needs a note. Platform owners are emailed counts only (ADR-073).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| Plan refunds       | Platform owners only (checked in SQL by `ops.platform_request_plan_payment_refund`), with a reason in the platform audit log; at most what Razorpay has not refunded of the payment, one open refund per payment, none for a company being deleted, under a lock that recordings take too. Only `app.record_plan_payment_refund` (a refund fetched from Razorpay) marks a refund processed or records one made at Razorpay, and processed refunds never exceed the payment; the runtime role may only move a request to submitted or failed (restrictive policy). The company role cannot read the reason or who asked (column grants), and nobody deletes a refund. A refund never changes the plan or the subscription (ADR-103).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| Refund requests    | Members with `billing.manage` and a sign-in within 15 minutes ask from a receipt: of a top-up, at most what is left of the payment and the unused credit; of a plan payment, at most what Razorpay has not refunded of it, and none while a refund of it runs. One open request per payment (unique indexes), 5 a day per company across both kinds (counted under one advisory lock), none once deletion is asked for (the company's status read under a share lock in the request's transaction). The company role inserts only open requests (column grants), moves them only to withdrawn (restrictive policies) and cannot read who decided. Only platform owners decide (checked in SQL); approving runs the staff refund's checks again under its locks, and declining needs a note. Platform owners are emailed counts only (ADR-073, ADR-104).                                                                                                                                                                                                                                                                                                                                                                                                     |
 | Reconciliation     | The worker reads Razorpay's settlement report and writes runs and items only through SECURITY DEFINER functions that check the run's current attempt; neither runtime role can read or write the tables. Companies are found through HyFib's own provider-id mappings; a missed payment or refund is recorded only after fetching it from Razorpay, through the functions its webhook uses (credit exactly once, refunds keyed by id). Platform staff read through functions that check `ops.platform_admins`; only platform owners run a day or resolve an item, with a reason or note in the platform audit log. Items keep ids and amounts, never notes, descriptions, receipts or card fields (ADR-059).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | Templates          | Created, deleted and listed only by the worker with the stored WABA token (never in the browser); webhooks for templates are signals routed through verified WABA bindings and never change status on their own; submission is write-ahead so a lost response cannot create a duplicate.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | Supply chain       | Exact pins + lockfile, pnpm minimum release age, explicit install-script allowlist, `pnpm audit` and gitleaks in CI, GitHub Actions pinned by SHA, Trivy image scanning, Dependabot.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
@@ -453,6 +455,13 @@ Phase 5 rules (Public API, P5-08):
   `allowed_networks` through column grants in the company's scope, and the definer function reads it
   to authenticate. The address is the one audit uses (`X-Forwarded-For` behind `TRUSTED_PROXIES`), so
   the protection depends on the edge overwriting or appending that header.
+- The company may list up to 20 networks for all its keys (ADR-099): a request must come from one of
+  them, and from one of its key's own networks when the key lists any. The lookup checks both before
+  the key is marked used and says which list refused the address; the refusal is the same 403
+  `ip_not_allowed`, counted against the address's failed-authentication limit. Members who manage
+  keys change the list with a recent sign-in, audited with the lists before and after; the runtime
+  role reads and changes only its company's row of `app.api_settings` (no delete), and the definer
+  function reads the list of the key's company to authenticate.
 - Template sends through the API apply the members' template-send checks (approval, category scope,
   consent, suppression, erasure, the marketing frequency cap) and are checked again before dispatch.
   The API can read the status only of messages sent through the API.
@@ -568,6 +577,21 @@ Phase 5 rules (Public API, P5-08):
   status. New keys cannot be given such a scope; existing keys keep theirs and are refused them while
   the plan leaves them out. The list belongs to the plan version (checked by the table, unchangeable
   once published) and is set by platform owners.
+- Each counted request is also counted for its key (ADR-097), in the same transaction and before
+  the company's count, below the key's own monthly limit when it has one: a request its key refuses
+  (429, `key_quota_exceeded`) takes nothing from the company, and one the company refuses is taken
+  back from the key, so a refused request counts for neither. A request reads the key's limit under
+  a lock that a change of the limit holds until it commits, so it is never counted under a limit a
+  committed change replaced. The limit is set and changed only by
+  members with `developer.manage` after a recent sign-in, audited; the runtime role adds to a
+  key's count but cannot move it to another key or period or delete it, and a count belongs to a
+  key of the same company.
+- The company's owners and administrators are emailed at 80% of a key's own limit and at the limit
+  (ADR-098): the sweep finds counters due only through `ops.api_key_usage_notices_due` (owned by
+  `w360_definer`, executable only by `w360_app`, returning company and counter ids), then locks and
+  checks each again in its company's scope before marking it in the transaction that queues the
+  emails. The email names the key by its name and public prefix; the token is never stored, so it
+  cannot be sent.
 
 Phase 5 rules (outgoing webhooks, P5-09):
 
@@ -729,6 +753,33 @@ Phase 5 rules (refund requests from companies, P5-05, ADR-073):
   with the note, in the company's own scope. Each email is marked in the transaction that queues it,
   so it is sent once.
 
+Phase 5 rules (refund requests of plan payments, P5-07, ADR-104):
+
+- As for service credit: a request moves no money and changes nothing about the plan. Only a
+  platform owner's approval starts a refund, through `ops.platform_request_plan_payment_refund`
+  (ADR-103) in the same transaction, so what Razorpay has not refunded of the payment, a refund in
+  progress and a company being deleted are checked again under its lock; a request that no longer
+  fits stays open to be declined. A refund never changes the plan or the subscription.
+- Asking needs `billing.manage` and a sign-in within the last 15 minutes (ADR-056). The service reads
+  the company's plan payment in its own scope (RLS; a composite foreign key keeps a request on the
+  company's own payment), what Razorpay has not refunded of it and a refund in progress, and reads
+  the company's status under the same share lock as requests of service credit. Requests of both
+  kinds count towards one limit of 5 in 24 hours, under the advisory lock requests of service credit
+  already take (the same key, so servers of both releases serialise during a rolling deploy); a
+  partial unique index keeps one open request per payment.
+- The company role inserts only the columns of an open request and may move an open request only to
+  withdrawn (a restrictive policy); it reads the decision note but not who decided or when the
+  emails went out (column grants), and cannot delete a request. Deciding and the notice marks happen
+  only in SECURITY DEFINER functions: `ops.platform_decide_plan_payment_refund_request` (platform
+  role only; it looks the session's user up as a platform owner and writes the platform audit log in
+  the same transaction) and the marks for the worker, the decline mark taking only the current
+  company's request.
+- Platform owners' email about waiting requests counts both kinds (no company, payment, amount or
+  reason). A declined request is emailed to the company's billing managers with the note, in the
+  company's own scope, marked in the transaction that queues it. The platform lists read through
+  functions that check `ops.platform_admins`; the refund's staff reason ("Asked for by the company:"
+  and the company's reason) stays platform-only, as ADR-103's reasons do.
+
 Phase 5 rules (daily settlement reconciliation, P5-05, ADR-059):
 
 - The settlement report is used only to look HyFib's own records up by provider id; a company is
@@ -761,14 +812,24 @@ Platform roles (`ops.platform_admins`): `platform_owner` and `platform_operator`
 all actions are audited; neither can read customer content without a support grant. Both see a
 company's service credit (balances, paid top-ups, refunds) and the settlement reconciliation, which
 are payment data about HyFib's own charges, and the companies' refund requests; only platform owners
-refund unused credit (ADR-058), decide refund requests (ADR-073), run or resolve reconciliations
+refund unused credit (ADR-058), decide refund requests (ADR-073, ADR-104), run or resolve reconciliations
 (ADR-059) and schedule or cancel a company's deletion (ADR-090). Only platform owners set the tax on plan prices and
 cancel a company's plan subscription at Razorpay (ADR-063), and staff cannot change a company's plan
 while its subscription can still be authorised or charged. Only platform
 owners change the plan catalog (create, edit and publish versions, retire them, choose the default
 trial); owners and operators put companies on plans and end them, with a reason shown in the
-company's audit log. Reactivating a suspended company whose plan has lapsed makes it restricted, and
-only a plan change lifts a restriction.
+company's audit log and emailed to its billing managers (ADR-100). The platform role only marks the
+change (`app.tenant_plans.staff_notice_version`, a column grant); the worker queues the emails from
+the company's own scope (`ops.plan_change_notices_due`, and `app.take_plan_change_notice`, which
+takes only the current company's notice), so the platform role gains no outbox, queue or
+member-address access, and the runtime role can neither set nor clear the mark. A platform owner's
+cancellation of a company's subscription is told the same way (ADR-101): the platform role marks it
+(`app.plan_subscriptions.staff_cancel_notice_due`), and the worker lists the marks
+(`ops.plan_subscription_cancel_notices_due`) and takes each in the company's own scope
+(`app.take_plan_subscription_cancel_notice`, which clears only the current company's mark and needs
+the definer's update grant on that one column). Reactivating a
+suspended company whose plan has lapsed makes it restricted, and only a plan change lifts a
+restriction.
 
 The operations console (`/platform/ops`, ADR-054) is open to both platform roles and shows no
 message text, contact details, payloads, email addresses, secrets or full URLs:

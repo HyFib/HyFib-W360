@@ -129,9 +129,10 @@ describe('database roles', () => {
       expect(await can('w360_platform', fn), fn).toBe(false);
     }
     // Plans (0023): the sweep functions for the worker (with the API request notice of 0035, the
-    // warnings of 0036, the subscription functions of 0037 and the rate change notices of 0038),
-    // the usage counts for platform staff, the entitlements for both, and the plan-state triggers
-    // for nobody.
+    // warnings of 0036, the subscription functions of 0037, the rate change notices of 0038, the
+    // notices of staff changes and cancellations of 0077 and 0078, and the refunds of plan payments
+    // of 0080), the usage counts for platform staff, the entitlements for both, and the plan-state
+    // triggers for nobody.
     for (const fn of [
       'ops.plan_transitions_due(integer)',
       'ops.usage_limits_reached(integer)',
@@ -142,11 +143,22 @@ describe('database roles', () => {
       'ops.billing_resolve_plan_payment(text)',
       'app.apply_plan_subscription_period(uuid,uuid)',
       'ops.rate_change_notices_due(integer,integer)',
+      'ops.plan_change_notices_due(integer)',
+      'app.take_plan_change_notice()',
+      'ops.plan_subscription_cancel_notices_due(integer)',
+      'app.take_plan_subscription_cancel_notice(uuid)',
+      'ops.plan_payment_refunds_due(integer)',
+      'app.record_plan_payment_refund(text,text,bigint,uuid)',
     ]) {
       expect(await can('w360_app', fn), fn).toBe(true);
       expect(await can('w360_auth', fn), fn).toBe(false);
       expect(await can('w360_platform', fn), fn).toBe(false);
     }
+    // Refunds of plan payments (0080) are asked for by platform owners only.
+    const planRefund = 'ops.platform_request_plan_payment_refund(uuid,uuid,bigint,text,text)';
+    expect(await can('w360_platform', planRefund)).toBe(true);
+    expect(await can('w360_app', planRefund)).toBe(false);
+    expect(await can('w360_auth', planRefund)).toBe(false);
     expect(await can('w360_platform', 'ops.platform_tenant_usage(uuid)')).toBe(true);
     expect(await can('w360_app', 'ops.platform_tenant_usage(uuid)')).toBe(false);
     expect(await can('w360_app', 'app.tenant_entitlements(uuid)')).toBe(true);
@@ -154,12 +166,13 @@ describe('database roles', () => {
     expect(await can('w360_auth', 'app.tenant_entitlements(uuid)')).toBe(false);
     // Public API (0024): the key lookup and the idempotency sweep, for the runtime app role only,
     // and the listing of keys due an expiry reminder (0040), for the worker. The lookup with the
-    // client's address (0051) replaced the one without, which stays for a rolling deploy.
+    // client's address (0051) replaced the one without, which 0074 drops.
     for (const fn of [
-      'ops.api_key_authenticate(text)',
       'ops.api_key_authenticate(text,inet)',
       'ops.purge_api_idempotency_keys(integer)',
       'ops.api_key_expiry_reminders_due(integer,integer)',
+      // The counters due an email about a key's own limit (0075), for the worker.
+      'ops.api_key_usage_notices_due(integer)',
       // The purge of full rate limit buckets (0041), for the worker.
       'ops.purge_rate_limit_buckets(integer)',
     ]) {
@@ -185,14 +198,19 @@ describe('database roles', () => {
     for (const role of ['w360_app', 'w360_auth', 'w360_platform']) {
       expect(await can(role, 'ops.settlement_unsettled_topups()'), role).toBe(false);
     }
-    // Refund requests (0046): the notice sweeps and the platform owners' addresses for the worker,
-    // and the decline mark in the company's scope; the lists and the decision for platform staff.
+    // Refund requests (0046, and of plan payments 0081): the notice sweeps and the platform owners'
+    // addresses for the worker, and the decline marks in the company's scope; the lists and the
+    // decisions for platform staff.
     for (const fn of [
       'ops.platform_owner_recipients()',
       'ops.credit_refund_requests_to_announce(integer)',
       'ops.credit_refund_requests_mark_announced(uuid[])',
       'ops.credit_refund_request_declines_due(integer)',
       'app.credit_refund_request_mark_decline_notified(uuid)',
+      'ops.plan_payment_refund_requests_to_announce(integer)',
+      'ops.plan_payment_refund_requests_mark_announced(uuid[])',
+      'ops.plan_payment_refund_request_declines_due(integer)',
+      'app.plan_payment_refund_request_mark_decline_notified(uuid)',
     ]) {
       expect(await can('w360_app', fn), fn).toBe(true);
       expect(await can('w360_auth', fn), fn).toBe(false);
@@ -202,6 +220,9 @@ describe('database roles', () => {
       'ops.platform_credit_refund_requests(text,timestamp with time zone,uuid,integer)',
       'ops.platform_credit_refunds(timestamp with time zone,uuid,integer)',
       'ops.platform_decide_credit_refund_request(uuid,boolean,text,text)',
+      'ops.platform_plan_payment_refund_requests(text,timestamp with time zone,uuid,integer)',
+      'ops.platform_plan_payment_refunds(timestamp with time zone,uuid,integer)',
+      'ops.platform_decide_plan_payment_refund_request(uuid,boolean,text,text)',
     ]) {
       expect(await can('w360_platform', fn), fn).toBe(true);
       expect(await can('w360_app', fn), fn).toBe(false);

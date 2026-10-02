@@ -14,7 +14,11 @@ import {
   type ApiKeyView,
 } from '@w360/domain';
 import { Alert, Badge, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
-import { ApiKeyActions, CreateApiKeyForm } from '@/components/settings/api-keys';
+import {
+  ApiKeyActions,
+  CompanyApiNetworks,
+  CreateApiKeyForm,
+} from '@/components/settings/api-keys';
 import { CopyField } from '@/components/growth/copy-field';
 import { SignInAgain } from '@/components/sign-in-again';
 import { formatDate, formatDateTime } from '@/lib/format';
@@ -36,6 +40,7 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
   if (!can(ctx, 'developer.manage')) notFound();
   const { apiKeys, config, clock, plans } = await getRuntime();
   const keys = await apiKeys.list(ctx);
+  const { allowedNetworks: companyNetworks } = await apiKeys.companyNetworks(ctx);
   const usage = await plans.usage(ctx);
   const apiLimit = usage.limits.apiRequests;
   const inPlan = apiLimit !== 0;
@@ -101,8 +106,8 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
             <code className="font-mono text-xs">Authorization: Bearer &lt;key&gt;</code>. Sending a
             message needs an <code className="font-mono text-xs">Idempotency-Key</code> header, so a
             retry never sends twice. Each key can make {API_LIMITS.keyRate.refillPerSecond} requests
-            a second, and can be limited to the addresses your systems call from. The full reference
-            is the{' '}
+            a second, and can be limited to the addresses your systems call from and to a number of
+            requests a month. The full reference is the{' '}
             <a
               className="font-medium underline underline-offset-4"
               href="/api/v1/openapi.json"
@@ -124,6 +129,33 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
               `  -d '{"to":"+919876543210","templateId":"<template id>","variables":{"body":["Asha"]}}'`,
             ].join('\n')}
           />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Addresses for all keys</CardTitle>
+          <CardDescription>
+            Hold every key of the company to the addresses your systems call from, including keys
+            created later. A key that lists addresses of its own accepts only requests from both
+            lists.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-3">
+          <p className="text-sm">
+            {companyNetworks ? (
+              <>
+                Keys accept requests only from{' '}
+                <span className="font-mono text-xs">
+                  {companyNetworks.map(formatAllowedNetwork).join(', ')}
+                </span>
+                .
+              </>
+            ) : (
+              'Keys accept requests from any address, unless a key lists its own.'
+            )}
+          </p>
+          <CompanyApiNetworks slug={ctx.tenant.slug} allowedNetworks={companyNetworks} />
         </CardContent>
       </Card>
 
@@ -156,6 +188,11 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
                           Rotated to {prefixes.get(k.replacedByKeyId) ?? 'a new key'}
                         </Badge>
                       ) : null}
+                      {k.state === 'active' &&
+                      k.monthlyRequestLimit !== null &&
+                      k.requestsThisPeriod >= k.monthlyRequestLimit ? (
+                        <Badge tone="warning">Monthly limit reached</Badge>
+                      ) : null}
                     </div>
                     <p className="font-mono text-xs">{k.keyPrefix}_…</p>
                     <p className="flex flex-wrap gap-1">
@@ -177,9 +214,26 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
                         <span className="font-mono text-foreground">
                           {k.allowedNetworks.map(formatAllowedNetwork).join(', ')}
                         </span>
+                      ) : companyNetworks ? (
+                        'the addresses for all keys'
                       ) : (
                         'any address'
                       )}
+                      {k.allowedNetworks && companyNetworks
+                        ? ', when they are also among the addresses for all keys'
+                        : ''}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      Requests this period:{' '}
+                      <span className="text-foreground">
+                        {k.requestsThisPeriod.toLocaleString('en-IN')}
+                        {k.monthlyRequestLimit === null
+                          ? ''
+                          : ` of ${k.monthlyRequestLimit.toLocaleString('en-IN')}`}
+                      </span>{' '}
+                      {k.monthlyRequestLimit === null
+                        ? '(no limit of its own)'
+                        : '(its own monthly limit)'}
                     </p>
                     <dl className="grid gap-x-4 gap-y-1 text-xs text-muted-foreground sm:grid-cols-2">
                       <div>
@@ -217,6 +271,18 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
                           <dd className="inline">{formatDateTime(k.expiryRemindedAt, tz)}</dd>
                         </div>
                       ) : null}
+                      {k.usageWarnedAt ? (
+                        <div>
+                          <dt className="inline">80% of its limit emailed </dt>
+                          <dd className="inline">{formatDateTime(k.usageWarnedAt, tz)}</dd>
+                        </div>
+                      ) : null}
+                      {k.usageNotifiedAt ? (
+                        <div>
+                          <dt className="inline">Limit reached emailed </dt>
+                          <dd className="inline">{formatDateTime(k.usageNotifiedAt, tz)}</dd>
+                        </div>
+                      ) : null}
                     </dl>
                     <ApiKeyActions
                       slug={ctx.tenant.slug}
@@ -225,6 +291,7 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
                       rotatable={inPlan && k.state === 'active' && !k.replacedByKeyId}
                       revocable={k.state === 'active'}
                       allowedNetworks={k.state === 'active' ? k.allowedNetworks : undefined}
+                      monthlyRequestLimit={k.state === 'active' ? k.monthlyRequestLimit : undefined}
                     />
                   </li>
                 );

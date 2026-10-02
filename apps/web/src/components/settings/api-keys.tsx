@@ -14,7 +14,9 @@ import {
   createApiKeyAction,
   revokeApiKeyAction,
   rotateApiKeyAction,
+  setApiKeyLimitAction,
   setApiKeyNetworksAction,
+  setCompanyApiNetworksAction,
 } from '@/app/actions/api-keys';
 import { ActionFailure, type ActionFailureState } from '@/components/action-failure';
 import { ClientButton, ClientForm } from '@/components/client-form';
@@ -38,8 +40,41 @@ const OVERLAP_OPTIONS = [
 const NETWORKS_HELP =
   'One IPv4 or IPv6 address or network per line, such as 203.0.113.7 or 203.0.113.0/24. Requests from any other address are refused. Leave it empty to accept any address.';
 
-/** The addresses field of the create form and the edit dialog. */
+/** The addresses field of the create form and the edit dialogs. */
 function NetworksField({
+  id,
+  label = 'Allowed addresses (optional)',
+  value,
+  onChange,
+}: {
+  id: string;
+  label?: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <Field id={id} label={label} description={NETWORKS_HELP}>
+      {(aria) => (
+        <Textarea
+          {...aria}
+          rows={3}
+          maxLength={API_KEY_LIMITS.allowedNetworksText}
+          spellCheck={false}
+          autoComplete="off"
+          className="font-mono text-xs"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+        />
+      )}
+    </Field>
+  );
+}
+
+const LIMIT_HELP =
+  'Requests this key may make in a month, counted in your plan’s monthly period. Requests beyond it are refused until the next period. Leave it empty for no limit of its own; the plan’s limit still applies.';
+
+/** The monthly limit field of the create form and the edit dialog (ADR-097). */
+function MonthlyLimitField({
   id,
   value,
   onChange,
@@ -49,15 +84,13 @@ function NetworksField({
   onChange: (value: string) => void;
 }) {
   return (
-    <Field id={id} label="Allowed addresses (optional)" description={NETWORKS_HELP}>
+    <Field id={id} label="Monthly request limit (optional)" description={LIMIT_HELP}>
       {(aria) => (
-        <Textarea
+        <Input
           {...aria}
-          rows={3}
-          maxLength={API_KEY_LIMITS.allowedNetworksText}
-          spellCheck={false}
+          inputMode="numeric"
+          maxLength={16}
           autoComplete="off"
-          className="font-mono text-xs"
           value={value}
           onChange={(e) => onChange(e.target.value)}
         />
@@ -115,6 +148,7 @@ export function CreateApiKeyForm({
   const [scopes, setScopes] = useState<ApiScope[]>([]);
   const [expiresInDays, setExpiresInDays] = useState<number>(90);
   const [networks, setNetworks] = useState('');
+  const [limit, setLimit] = useState('');
   const [error, setError] = useState<ActionFailureState | null>(null);
   const [busy, setBusy] = useState(false);
   const [created, setCreated] = useState<{ token: string; name: string } | null>(null);
@@ -149,6 +183,7 @@ export function CreateApiKeyForm({
           scopes,
           expiresInDays,
           allowedNetworks: networks,
+          monthlyRequestLimit: limit,
         }).then((r) => {
           setBusy(false);
           if (!r.ok) setError(r);
@@ -157,6 +192,7 @@ export function CreateApiKeyForm({
             setName('');
             setScopes([]);
             setNetworks('');
+            setLimit('');
           }
         });
       }}
@@ -235,6 +271,7 @@ export function CreateApiKeyForm({
         })}
       </fieldset>
       <NetworksField id={`${prefix}-networks`} value={networks} onChange={setNetworks} />
+      <MonthlyLimitField id={`${prefix}-limit`} value={limit} onChange={setLimit} />
       <div>
         <Button type="submit" disabled={busy || !name.trim() || scopes.length === 0}>
           {busy ? 'Creating…' : 'Create API key'}
@@ -245,8 +282,9 @@ export function CreateApiKeyForm({
 }
 
 /**
- * Rotation, revocation and the allowed addresses of one key. A rotation shows the new key here,
- * and it stays on screen after the list updates (the old key may then be revoked or rotated).
+ * Rotation, revocation, the allowed addresses and the monthly limit of one key. A rotation shows
+ * the new key here, and it stays on screen after the list updates (the old key may then be revoked
+ * or rotated).
  */
 export function ApiKeyActions({
   slug,
@@ -255,6 +293,7 @@ export function ApiKeyActions({
   rotatable,
   revocable,
   allowedNetworks,
+  monthlyRequestLimit,
 }: {
   slug: string;
   keyId: string;
@@ -263,10 +302,17 @@ export function ApiKeyActions({
   revocable: boolean;
   /** The key's networks when they can be changed (an active key), else undefined. */
   allowedNetworks?: string[] | null;
+  /** The key's own monthly limit when it can be changed (an active key), else undefined. */
+  monthlyRequestLimit?: number | null;
 }) {
   const prefix = useId();
   const current = (allowedNetworks ?? []).map(formatAllowedNetwork).join('\n');
+  const currentLimit =
+    monthlyRequestLimit === null || monthlyRequestLimit === undefined
+      ? ''
+      : String(monthlyRequestLimit);
   const [networks, setNetworks] = useState(current);
+  const [limit, setLimit] = useState(currentLimit);
   const [overlapHours, setOverlapHours] = useState<number>(24);
   const [error, setError] = useState<ActionFailureState | null>(null);
   const [busy, setBusy] = useState(false);
@@ -277,7 +323,10 @@ export function ApiKeyActions({
       {token ? (
         <NewToken token={token} heading={`New key for “${name}”`} onDone={() => setToken(null)} />
       ) : null}
-      {rotatable || revocable || allowedNetworks !== undefined ? (
+      {rotatable ||
+      revocable ||
+      allowedNetworks !== undefined ||
+      monthlyRequestLimit !== undefined ? (
         <div className="flex flex-wrap gap-2">
           {allowedNetworks !== undefined ? (
             <ConfirmDialog
@@ -306,6 +355,33 @@ export function ApiKeyActions({
               }}
             >
               <NetworksField id={`${prefix}-networks`} value={networks} onChange={setNetworks} />
+            </ConfirmDialog>
+          ) : null}
+          {monthlyRequestLimit !== undefined ? (
+            <ConfirmDialog
+              trigger={
+                <ClientButton
+                  size="sm"
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() => setLimit(currentLimit)}
+                >
+                  Limit<span className="sr-only"> for {name}</span>
+                </ClientButton>
+              }
+              title={`Monthly limit for “${name}”`}
+              description="Applies from the key’s next request, counting the requests it already made this period."
+              confirmLabel="Save limit"
+              onConfirm={() => {
+                setBusy(true);
+                setError(null);
+                void setApiKeyLimitAction(slug, { keyId, monthlyRequestLimit: limit }).then((r) => {
+                  setBusy(false);
+                  if (!r.ok) setError(r);
+                });
+              }}
+            >
+              <MonthlyLimitField id={`${prefix}-limit`} value={limit} onChange={setLimit} />
             </ConfirmDialog>
           ) : null}
           {rotatable ? (
@@ -373,6 +449,58 @@ export function ApiKeyActions({
           ) : null}
         </div>
       ) : null}
+      <ActionFailure failure={error} />
+    </div>
+  );
+}
+
+/** The addresses every key of the company accepts requests from (ADR-099). */
+export function CompanyApiNetworks({
+  slug,
+  allowedNetworks,
+}: {
+  slug: string;
+  allowedNetworks: string[] | null;
+}) {
+  const prefix = useId();
+  const current = (allowedNetworks ?? []).map(formatAllowedNetwork).join('\n');
+  const [networks, setNetworks] = useState(current);
+  const [error, setError] = useState<ActionFailureState | null>(null);
+  const [busy, setBusy] = useState(false);
+  return (
+    <div className="grid gap-2">
+      <div className="flex flex-wrap gap-2">
+        <ConfirmDialog
+          trigger={
+            <ClientButton
+              size="sm"
+              variant="outline"
+              disabled={busy}
+              onClick={() => setNetworks(current)}
+            >
+              Addresses for all keys
+            </ClientButton>
+          }
+          title="Addresses for all keys"
+          description="Every key accepts requests only from these addresses, and only from its own too when it lists any. Changes apply to the next request."
+          confirmLabel="Save addresses"
+          onConfirm={() => {
+            setBusy(true);
+            setError(null);
+            void setCompanyApiNetworksAction(slug, { allowedNetworks: networks }).then((r) => {
+              setBusy(false);
+              if (!r.ok) setError(r);
+            });
+          }}
+        >
+          <NetworksField
+            id={`${prefix}-company-networks`}
+            label="Addresses for all keys (optional)"
+            value={networks}
+            onChange={setNetworks}
+          />
+        </ConfirmDialog>
+      </div>
       <ActionFailure failure={error} />
     </div>
   );

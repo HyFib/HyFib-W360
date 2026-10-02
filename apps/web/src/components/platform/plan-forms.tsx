@@ -546,7 +546,7 @@ export function CancelTenantSubscriptionForm({ tenantId }: { tenantId: string })
       <Field
         id="cancel-subscription-reason"
         label="Reason"
-        description="Recorded in the platform audit log and the company’s own log."
+        description="Emailed to the company’s billing managers, and recorded in the platform audit log and the company’s own log."
         error={issues.reason}
       >
         {(aria) => (
@@ -825,7 +825,7 @@ export function TenantPlanForm({
       ) : null}
       <Field
         id="tenant-plan-reason"
-        label="Reason (shown in the company’s audit log)"
+        label="Reason (emailed to the billing managers, and shown in the company’s audit log)"
         description="For example the invoice or ticket reference."
       >
         {(aria) => (

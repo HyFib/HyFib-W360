@@ -122,18 +122,34 @@ export function PlanPaymentCard({
                 : ''}
               {subscription.chargeAt &&
               subscription.status === 'active' &&
+              subscription.paidCount > 0 &&
               !subscription.cancelAtPeriodEnd
                 ? ` Next charge on ${day(subscription.chargeAt)}.`
+                : ''}
+              {subscription.startsAt &&
+              subscription.paidCount === 0 &&
+              (subscription.status === 'authenticated' || subscription.status === 'active')
+                ? subscription.firstChargeAhead
+                  ? ` Razorpay charges for the first period on ${day(subscription.startsAt)}, when the trial ends; nothing is charged before then.`
+                  : ` The first charge was due when the trial ended on ${day(subscription.startsAt)}; Razorpay has not confirmed it yet.`
                 : ''}
             </p>
             {subscription.cancelAtPeriodEnd && live ? (
               <Alert tone="info" title="Cancelled">
-                Nothing more is charged. The plan ends on {day(subscription.currentEnd)}, at the end
-                of the paid period.
+                {subscription.paidCount === 0
+                  ? `Razorpay’s first charge is under way: if it goes through, the plan stays paid until ${day(subscription.currentEnd)}, then ends. Nothing more is charged.`
+                  : `Nothing more is charged. The plan ends on ${day(subscription.currentEnd)}, at the end of the paid period.`}
               </Alert>
             ) : null}
             {subscription.status === 'pending' ? (
-              <Alert tone="warning" title="The last charge failed">
+              <Alert
+                tone="warning"
+                title={
+                  subscription.paidCount === 0
+                    ? 'The first charge failed'
+                    : 'The last charge failed'
+                }
+              >
                 Razorpay is trying again. The payer can change the card through the link in
                 Razorpay’s email.
               </Alert>
@@ -147,13 +163,18 @@ export function PlanPaymentCard({
             ) : null}
             {subscription.status === 'created' && subscription.checkoutOpen ? (
               <p className="text-muted-foreground">
-                Waiting for the first payment. You can finish paying until{' '}
+                {subscription.startsAt
+                  ? 'Waiting for the payment method to be authorised. You can finish until '
+                  : 'Waiting for the first payment. You can finish paying until '}
                 {formatDate(subscription.authorizeBy, timeZone)}; after that, start again.
               </p>
             ) : null}
             {canManage && live && subscription.status === 'created' && subscription.checkoutOpen ? (
               recentSignIn ? (
-                <PayForPlan slug={slug} label="Finish paying" />
+                <PayForPlan
+                  slug={slug}
+                  label={subscription.startsAt ? 'Finish setting up payments' : 'Finish paying'}
+                />
               ) : (
                 signInFirst('Paying for the plan')
               )
@@ -167,9 +188,17 @@ export function PlanPaymentCard({
                   <CancelPlanSubscription
                     slug={slug}
                     description={
-                      subscription.status === 'active' && subscription.currentEnd
-                        ? `Nothing more is charged. The plan stays paid until ${day(subscription.currentEnd)}, then ends without grace days.`
-                        : 'Nothing more is charged, and the subscription ends now.'
+                      subscription.status === 'active' &&
+                      subscription.currentEnd &&
+                      subscription.paidCount === 0
+                        ? `Razorpay’s first charge is under way: if it goes through, the plan stays paid until ${day(subscription.currentEnd)}, then ends without grace days. Nothing more is charged.`
+                        : subscription.status === 'active' && subscription.currentEnd
+                          ? `Nothing more is charged. The plan stays paid until ${day(subscription.currentEnd)}, then ends without grace days.`
+                          : subscription.startsAt && subscription.paidCount === 0
+                            ? subscription.firstChargeAhead
+                              ? `Nothing is charged, and the trial goes on until ${day(subscription.startsAt)}.`
+                              : `Nothing is charged; the trial ended on ${day(subscription.startsAt)}.`
+                            : 'Nothing more is charged, and the subscription ends now.'
                     }
                   />
                 </div>
@@ -226,11 +255,22 @@ export function PlanPaymentCard({
                 </TR>
               </TBody>
             </Table>
-            <p className="text-sm text-muted-foreground">
-              You pay {inr(offer.quote.totalMinor)} now in Razorpay’s payment window, and Razorpay
-              charges {inr(offer.quote.totalMinor)} {every(offer.intervalMonths)} after that until
-              you cancel. The paid period starts today; the rest of a trial is not carried over.
-            </p>
+            {offer.startsAt ? (
+              <p className="text-sm text-muted-foreground">
+                Razorpay’s payment window checks the payment method now; any amount taken for the
+                check is refunded. Razorpay charges {inr(offer.quote.totalMinor)} on{' '}
+                {day(offer.startsAt)}, when the trial ends, and {inr(offer.quote.totalMinor)}{' '}
+                {every(offer.intervalMonths)} after that until you cancel. Nothing is charged for
+                the plan before then.
+              </p>
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                You pay {inr(offer.quote.totalMinor)} now in Razorpay’s payment window, and Razorpay
+                charges {inr(offer.quote.totalMinor)} {every(offer.intervalMonths)} after that until
+                you cancel. The paid period starts today; the rest of a trial ending within two days
+                is not carried over.
+              </p>
+            )}
             {offer.quote.totalMinor > CARD_MANDATE_FRICTIONLESS_MAX_MINOR ? (
               <p className="text-sm text-muted-foreground">
                 Charges above {inr(CARD_MANDATE_FRICTIONLESS_MAX_MINOR)} on an Indian card need the
@@ -242,7 +282,7 @@ export function PlanPaymentCard({
               recentSignIn ? (
                 <PayForPlan
                   slug={slug}
-                  label={`Pay ${inr(offer.quote.totalMinor)} ${PLAN_INTERVAL_LABELS[offer.intervalMonths] ?? ''}`}
+                  label={`Pay ${inr(offer.quote.totalMinor)} ${PLAN_INTERVAL_LABELS[offer.intervalMonths] ?? ''}${offer.startsAt ? ` from ${day(offer.startsAt)}` : ''}`}
                 />
               ) : (
                 signInFirst('Paying for the plan')
@@ -260,39 +300,56 @@ export function PlanPaymentCard({
         ) : null}
 
         {payments.length > 0 ? (
-          <Table>
-            <THead>
-              <TR>
-                <TH>Paid</TH>
-                <TH>Period</TH>
-                <TH className="text-right">Amount</TH>
-                <TH>Method</TH>
-                <TH>
-                  <span className="sr-only">Receipt</span>
-                </TH>
-              </TR>
-            </THead>
-            <TBody>
-              {payments.map((p) => (
-                <TR key={p.id}>
-                  <TD>{day(p.paidAt)}</TD>
-                  <TD>
-                    {day(p.periodStart)} to {day(p.periodEnd)}
-                  </TD>
-                  <TD className="text-right tabular-nums">{inr(p.amountMinor)}</TD>
-                  <TD>{p.method ?? '—'}</TD>
-                  <TD className="whitespace-nowrap">
-                    <Link
-                      href={`/c/${slug}/billing/plan-payments/${p.id}`}
-                      className="text-sm text-primary underline-offset-4 hover:underline"
-                    >
-                      Receipt<span className="sr-only"> for {day(p.paidAt)}</span>
-                    </Link>
-                  </TD>
+          <>
+            <Table>
+              <THead>
+                <TR>
+                  <TH>Paid</TH>
+                  <TH>Period</TH>
+                  <TH className="text-right">Amount</TH>
+                  <TH>Method</TH>
+                  <TH>
+                    <span className="sr-only">Receipt</span>
+                  </TH>
                 </TR>
-              ))}
-            </TBody>
-          </Table>
+              </THead>
+              <TBody>
+                {payments.map((p) => (
+                  <TR key={p.id}>
+                    <TD>{day(p.paidAt)}</TD>
+                    <TD>
+                      {day(p.periodStart)} to {day(p.periodEnd)}
+                    </TD>
+                    <TD className="text-right tabular-nums">
+                      {inr(p.amountMinor)}
+                      {p.refundedMinor > 0 ? (
+                        <span className="block text-xs text-muted-foreground">
+                          {inr(p.refundedMinor)} refunded
+                        </span>
+                      ) : null}
+                      {p.openRefundMinor !== null ? (
+                        <span className="block text-xs text-muted-foreground">
+                          Refund of {inr(p.openRefundMinor)} in progress
+                        </span>
+                      ) : null}
+                    </TD>
+                    <TD>{p.method ?? '—'}</TD>
+                    <TD className="whitespace-nowrap">
+                      <Link
+                        href={`/c/${slug}/billing/plan-payments/${p.id}`}
+                        className="text-sm text-primary underline-offset-4 hover:underline"
+                      >
+                        Receipt<span className="sr-only"> for {day(p.paidAt)}</span>
+                      </Link>
+                    </TD>
+                  </TR>
+                ))}
+              </TBody>
+            </Table>
+            <p className="text-xs text-muted-foreground">
+              To ask HyFib for a refund of a plan payment, open its receipt.
+            </p>
+          </>
         ) : null}
       </CardContent>
     </Card>

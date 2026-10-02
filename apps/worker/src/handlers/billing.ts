@@ -14,11 +14,15 @@ import {
   findAutoRechargeCandidates,
   findBillingReconciliationDue,
   findDueCreditRefunds,
+  findDuePlanPaymentRefunds,
   findDueSettlementRecons,
   findStaleReceipts,
   notifyRefundRequestDeclines,
   notifyStaffDeletions,
+  notifyStaffPlanChanges,
+  notifyStaffSubscriptionCancellations,
   processCreditRefund,
+  processPlanPaymentRefund,
   processRazorpayReceipt,
   reconcileTopup,
   releaseExpiredHolds,
@@ -150,6 +154,33 @@ export function creditRefundHandler(rt: WorkerRuntime) {
 }
 
 /**
+ * `billing.plan-payment-refund`: one step of a refund of a plan payment a platform owner asked for
+ * (ADR-103): ask Razorpay for it, or check a refund Razorpay is processing. Provider failures leave
+ * the request due again for the minute sweep; only unexpected errors fail the job (and are retried).
+ */
+export function planPaymentRefundHandler(rt: WorkerRuntime) {
+  return async ([job]: Job<unknown>[]): Promise<void> => {
+    if (!job) return;
+    const auth = await authorizeJob(rt, job.data, {
+      expectedKind: 'billing.plan-payment-refund',
+      requireActiveTenant: false,
+      requireActiveActor: false,
+    });
+    if (auth.outcome !== 'authorized' || !auth.scope || !UUID_RE.test(auth.envelope.ref)) {
+      rt.logger.warn({ jobId: job.id, outcome: auth.outcome }, 'plan payment refund job dropped');
+      return;
+    }
+    const deps = providerDeps(rt);
+    if (!deps) throw new RetryableJobError('Razorpay is not configured');
+    const outcome = await processPlanPaymentRefund(deps, auth.scope, auth.envelope.ref);
+    rt.logger.info(
+      { jobId: job.id, tenantId: auth.scope.tenantId, refundId: auth.envelope.ref, outcome },
+      'plan payment refund step',
+    );
+  };
+}
+
+/**
  * `billing.settlement-recon`: one attempt at a day's settlement reconciliation (ADR-059). The run
  * row decides: a run that is not due (finished, or held by another attempt) is left alone, and
  * Razorpay failures leave it due again for the minute sweep. Only unexpected errors fail the job.
@@ -192,9 +223,10 @@ export function settlementReconHandler(rt: WorkerRuntime) {
 /**
  * Every minute: move plans whose trial, paid period or grace period ended to their next state
  * (after syncing the Razorpay subscription that paid the period, ADR-063) and announce reached
- * automation run limits (ADR-051); email billing managers before Meta's rates for their currency
- * change (ADR-065) and platform owners about reconciliation days that need a person or failed
- * (ADR-066); re-signal Razorpay receipts whose signal was lost, reconcile
+ * automation run limits (ADR-051); tell billing managers of plans HyFib staff set (ADR-100) and of
+ * subscriptions staff cancelled (ADR-101); email billing managers before Meta's rates for their
+ * currency change (ADR-065) and platform owners about reconciliation days that need a person or
+ * failed (ADR-066); re-signal Razorpay receipts whose signal was lost, reconcile
  * open manual top-ups, due auto-recharge attempts and due plan subscriptions with Razorpay (the
  * backstop for missed webhooks), queue due steps of staff credit refunds (ADR-058) and the
  * settlement reconciliations owed (ADR-059), start auto-recharge checks for companies below their
@@ -227,6 +259,39 @@ export function billingSweepHandler(rt: WorkerRuntime) {
         { transitioned: plans.transitioned, announced: plans.announced },
         'plan sweep',
       );
+    }
+    // Plans HyFib staff set (ADR-100): the company's billing managers are told from here, as the
+    // platform role cannot queue email. After the plan sweep, so a change it replaced is not told.
+    const staffPlans = await notifyStaffPlanChanges({ db: rt.db, notices: rt.notices });
+    for (const failure of staffPlans.failed) {
+      rt.logger.warn(
+        { tenantId: failure.tenantId, err: toError(failure.error).message },
+        'plan change notice failed for a company; will retry',
+      );
+    }
+    if (staffPlans.notified + staffPlans.superseded > 0) {
+      rt.logger.info(
+        { notified: staffPlans.notified, superseded: staffPlans.superseded },
+        'plan change notices',
+      );
+    }
+    // Subscriptions platform owners cancelled (ADR-101), told the same way.
+    const staffCancels = await notifyStaffSubscriptionCancellations({
+      db: rt.db,
+      notices: rt.notices,
+    });
+    for (const failure of staffCancels.failed) {
+      rt.logger.warn(
+        {
+          tenantId: failure.tenantId,
+          subscriptionId: failure.subscriptionId,
+          err: toError(failure.error).message,
+        },
+        'subscription cancellation notice failed for a company; will retry',
+      );
+    }
+    if (staffCancels.notified > 0) {
+      rt.logger.info({ notified: staffCancels.notified }, 'subscription cancellation notices');
     }
     // Rate change notices (ADR-065), reconciliation alerts (ADR-066, ADR-071) and company deletions
     // (ADR-055) run whether or not Razorpay is configured.
@@ -276,8 +341,8 @@ export function billingSweepHandler(rt: WorkerRuntime) {
         'payments were not settled but there is no platform owner to email',
       );
     }
-    // Refund requests from companies (ADR-073): platform owners hear of new ones, billing managers of
-    // a decline.
+    // Refund requests from companies, of service credit (ADR-073) and of plan payments (ADR-104):
+    // platform owners hear of new ones, billing managers of a decline.
     const requests = await announceRefundRequests({
       db: rt.db,
       outbox: rt.notices.outbox,
@@ -299,6 +364,7 @@ export function billingSweepHandler(rt: WorkerRuntime) {
     for (const failure of declines.failed) {
       rt.logger.warn(
         {
+          kind: failure.kind,
           tenantId: failure.tenantId,
           requestId: failure.requestId,
           err: toError(failure.error).message,
@@ -403,6 +469,21 @@ export function billingSweepHandler(rt: WorkerRuntime) {
         QUEUES.billingCreditRefund.name,
         rt.signer.sign({
           kind: 'billing.credit-refund',
+          tenantId: item.tenantId,
+          actorUserId: null,
+          ref: item.refundId,
+        }),
+        { singletonKey: item.refundId },
+      );
+    }
+    // Staff refunds of plan payments (ADR-103): one job per request that is due.
+    const planRefunds = await findDuePlanPaymentRefunds(rt.db);
+    for (const item of planRefunds) {
+      await rt.jobs.enqueue(
+        null,
+        QUEUES.billingPlanPaymentRefund.name,
+        rt.signer.sign({
+          kind: 'billing.plan-payment-refund',
           tenantId: item.tenantId,
           actorUserId: null,
           ref: item.refundId,

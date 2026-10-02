@@ -296,10 +296,15 @@ verification, app review, Embedded Signup configuration).
   Razorpay subscription built, locally verified against the stand-in]** (ADR-063, see P5-07);
   **[API scopes by plan built, locally verified]** (ADR-092, W-137: a version includes every API
   scope or only those chosen; requests needing another are refused with 403 `not_in_plan` whatever
-  the key has, new keys cannot be given one, existing keys keep theirs and are marked).
-  Remaining: billing that starts when a trial ends, self-serve plan changes and higher-plan trials,
-  proration, plan invoices, thresholds chosen per company, in-app notices, plan-change emails to
-  companies, packs of extra API requests and AI credits (Phase 6).
+  the key has, new keys cannot be given one, existing keys keep theirs and are marked);
+  **[emails about plans staff set built, locally verified]** (ADR-100: the company's billing
+  managers are emailed once about each plan HyFib staff set, with the plan now, its dates and
+  add-ons and HyFib's reason, from the worker's minute sweep); **[emails when staff cancel a
+  subscription built, locally verified]** (ADR-101, see P5-07); **[paying from the end of the trial
+  built, locally verified against the stand-in]** (ADR-102, see P5-07).
+  Remaining: self-serve plan changes and higher-plan trials,
+  proration, plan invoices, thresholds chosen per company, in-app notices, packs of extra API
+  requests and AI credits (Phase 6).
 - **P5-02 Ledger** **[built, locally verified]**: accounts, append-only journal balanced at commit,
   balances by trigger, holds, settlements, releases (expiry sweep), refunds and chargebacks as
   compensating postings; INR paise; monthly statements computed from the ledger (ADR-057).
@@ -370,8 +375,7 @@ verification, app review, Embedded Signup configuration).
   active for each cycle Razorpay reports paid, fetched and checked by HyFib (Checkout, webhooks,
   hourly and daily checks, before period ends); failed charges, stopped retries, cancelling at the
   end of the period, staff cancelling at once, deletion cancelling at Razorpay, plan payments in
-  the daily reconciliation); **[plan payment receipts built, locally verified]** (ADR-064: a receipt page per plan payment with the plan, add-ons, billing period and tax, not a tax invoice, linked from Billing and the payment email); **[rate change notices built, locally verified]** (ADR-065: billing managers emailed once when a published card for the company's billing currency takes effect within 7 days, with what it changes). Remaining: invoices (tax review), refunds of
-  plan payments, billing from the end of a trial, plan and add-on changes with proration, pausing,
+  the daily reconciliation); **[plan payment receipts built, locally verified]** (ADR-064: a receipt page per plan payment with the plan, add-ons, billing period and tax, not a tax invoice, linked from Billing and the payment email); **[rate change notices built, locally verified]** (ADR-065: billing managers emailed once when a published card for the company's billing currency takes effect within 7 days, with what it changes); **[emails when staff cancel a subscription built, locally verified]** (ADR-101: the company's billing managers are emailed once when a platform owner cancels its subscription, with HyFib's reason and what the plan keeps, from the worker's minute sweep); **[paying from the end of the trial built, locally verified against the stand-in]** (ADR-102: a trial ending at least 48 hours ahead is paid from its end; Checkout only authorises, Razorpay charges the first cycle when the trial ends, and the ended trial waits for that charge for the plan version's grace days); **[refunds of plan payments built, locally verified against the stand-in]** (ADR-103: platform owners refund part or all of a plan payment from the company's platform page with a reason; the worker asks Razorpay with an idempotency key and the request in the notes, refunds made in the Dashboard are recorded from the webhook or the daily reconciliation, the receipt and Billing show them, and the plan does not change); **[refund requests of plan payments built, locally verified against the stand-in]** (ADR-104: billing managers with a recent sign-in ask from a plan payment's receipt, with one daily limit shared with requests of service credit; platform owners approve, which starts the refund of ADR-103 with every check run again, or decline with a note the billing managers are emailed; `/platform/refunds` lists requests and every refund of plan payments across companies). Remaining: invoices (tax review), plan and add-on changes with proration, pausing,
   offers, Razorpay test-mode checks (RELEASE-CHECKLIST).
 - **P5-08 Public API** **[built, locally verified; sends through the Graph stand-in only]**
   (ADR-052): company API keys (SHA-256 only, scopes granted within the creator's permissions,
@@ -438,13 +442,22 @@ verification, app review, Embedded Signup configuration).
   and moving conversations built, locally verified]** (ADR-093: `conversations.write` gives a
   conversation to a member who can answer it, unassigns it or moves it to a team, routed as the
   inbox routes it; `conversations.read` lists those members, by name, and the teams; conversations
-  name their member and team by id; the inbox now offers and accepts only such members too).
+  name their member and team by id; the inbox now offers and accepts only such members too);
+  **[monthly limits per key built, locally verified]** (ADR-097: every admitted request is counted
+  for its key in the company's usage period, and a key may have its own monthly limit, set at
+  creation and changed after a recent sign-in; a request its key refuses (429
+  `key_quota_exceeded`) counts for neither the key nor the company, nor one the company refuses;
+  Settings → API keys shows each key's requests this period); **[emails about a key's limit
+  built, locally verified]** (ADR-098: owners and administrators are emailed once at 80% of a key's
+  own limit and once at the limit, in each period, and again after the limit changes); **[addresses
+  for all keys built, locally verified]** (ADR-099: owners and administrators list up to 20 networks
+  every key of the company accepts requests from, on top of each key's own).
   Remaining: media messages, call-to-action messages through the API, taking reactions back,
   assigning many conversations at once, media downloads, statuses changed since a time, starting or
-  stopping runs for many contacts in one call, bulk sends in one call, networks for the whole
-  company, per-key quotas, limits per endpoint, availability per single endpoint (plans choose per
-  scope since ADR-092), and dropping the one-argument key lookup kept for rolling deploys (0051).
-  Replaying many deliveries in one call is built with P5-09 (ADR-095).
+  stopping runs for many contacts in one call, bulk sends in one call, limits per endpoint,
+  availability per single endpoint (plans choose per scope since ADR-092). The one-argument key
+  lookup kept for rolling deploys (0051) is dropped (0074). Replaying many deliveries in one call
+  is built with P5-09 (ADR-095).
 - **P5-09 Outgoing webhooks** **[built, locally verified; delivered to local test receivers only]**
   (ADR-053): up to 10 endpoints per company (`developer.manage`) for `message.received`,
   `message.status`, `consent.changed` and `template.status_changed`, captured by database triggers

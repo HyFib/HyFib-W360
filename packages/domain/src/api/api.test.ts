@@ -7,7 +7,13 @@ import { API_SCOPES } from '@w360/db';
 import { PERMISSIONS, ROLE_PERMISSIONS } from '../authz/permissions';
 import { apiErrorResponse, apiRequestError } from './errors';
 import { allowedNetworksSchema, bearerToken, generateApiToken, networkEntryProblem } from './keys';
-import { assertAnyScope, assertScope, hasScope, type ApiContext } from './context';
+import {
+  apiAddressRefusal,
+  assertAnyScope,
+  assertScope,
+  hasScope,
+  type ApiContext,
+} from './context';
 import { apiScopesNotInPlan, scopesNotInPlan } from '../plans/entitlements';
 import {
   apiAddConversationNote,
@@ -1429,6 +1435,30 @@ describe('allowed networks (ADR-076)', () => {
   });
 });
 
+describe('addresses for all keys (ADR-099)', () => {
+  it('names whose addresses refused the request, and the address it came from', () => {
+    expect(apiAddressRefusal('key', '198.51.100.9')).toBe(
+      'This API key does not accept requests from 198.51.100.9.',
+    );
+    expect(apiAddressRefusal('company', '198.51.100.9')).toBe(
+      'The company this API key belongs to does not accept API requests from 198.51.100.9.',
+    );
+    expect(apiAddressRefusal('key', null)).toBe(
+      'This API key accepts requests only from its listed addresses, and this request’s address could not be determined.',
+    );
+    expect(apiAddressRefusal('company', null)).toBe(
+      'The company this API key belongs to accepts API requests only from its listed addresses, and this request’s address could not be determined.',
+    );
+  });
+
+  it('says in the OpenAPI document that the company can limit the addresses of all its keys', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    expect(doc.info.description).toContain(
+      'A key, and the company for all its keys, can be limited to the addresses its systems call from',
+    );
+  });
+});
+
 describe('apiKeyState', () => {
   const now = new Date('2026-09-28T10:00:00.000Z');
   it('is revoked before expired, and expired from the expiry instant on', () => {
@@ -1549,9 +1579,11 @@ describe('OpenAPI document', () => {
   it('names the plan refusals in the 403 and 429 responses and the error reason', () => {
     const responses = paths['/contacts']?.get?.responses as Record<string, { description: string }>;
     expect(responses['403']?.description).toContain('not_in_plan');
-    expect(responses['429']?.description).toContain('quota_exceeded');
+    expect(responses['429']?.description).toContain('reason quota_exceeded');
+    // A key's own monthly limit (ADR-097).
+    expect(responses['429']?.description).toContain('reason key_quota_exceeded');
     expect(JSON.stringify(doc.components)).toContain(
-      'ip_not_allowed, not_in_plan, quota_exceeded or window_closed',
+      'ip_not_allowed, key_quota_exceeded, not_in_plan, quota_exceeded or window_closed',
     );
     expect(responses['403']?.description).toContain('ip_not_allowed');
   });

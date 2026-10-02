@@ -23,6 +23,7 @@ import {
   Table,
 } from '@w360/ui';
 import { CompanyLink, Utc } from '@/components/platform/ops';
+import { PlanRefundsSections } from '@/components/platform/plan-refunds';
 import { RefundRequestDecision } from '@/components/platform/refund-request-decision';
 import { getRuntime } from '@/server/runtime';
 import { requirePlatformActor } from '@/server/session';
@@ -38,6 +39,12 @@ const VIEWS = [
   { key: 'all', label: 'All requests' },
 ] as const;
 type View = (typeof VIEWS)[number]['key'];
+
+const KINDS = [
+  { key: 'credit', label: 'Service credit' },
+  { key: 'plan', label: 'Plan payments' },
+] as const;
+type Kind = (typeof KINDS)[number]['key'];
 
 const REQUEST_TONE: Record<
   PlatformRefundRequest['status'],
@@ -61,8 +68,14 @@ function param(value: string | string[] | undefined): string | undefined {
 }
 
 /** The page's URL with the given list positions (each list pages on its own cursor). */
-function pageHref(view: View, requests: string | undefined, refunds: string | undefined): string {
+function pageHref(
+  kind: Kind,
+  view: string,
+  requests: string | undefined,
+  refunds: string | undefined,
+): string {
   const query = new URLSearchParams();
+  if (kind !== 'credit') query.set('kind', kind);
   if (view !== 'open') query.set('view', view);
   if (requests) query.set('cursor', requests);
   if (refunds) query.set('refunds', refunds);
@@ -71,14 +84,16 @@ function pageHref(view: View, requests: string | undefined, refunds: string | un
 }
 
 /**
- * Refunds of unused service credit across companies (ADR-073): the requests companies made, which
- * platform owners approve or decline, and every refund, staff-started or answering a request.
- * Payments to HyFib only; no company content.
+ * Refunds across companies, of unused service credit (ADR-073) or of plan payments (ADR-104): the
+ * requests companies made, which platform owners approve or decline, and every refund, staff-started,
+ * answering a request or (for plan payments) made at Razorpay. Payments to HyFib only; no company
+ * content.
  */
 export default async function PlatformRefundsPage({
   searchParams,
 }: {
   searchParams: Promise<{
+    kind?: string | string[];
     view?: string | string[];
     cursor?: string | string[];
     refunds?: string | string[];
@@ -86,33 +101,78 @@ export default async function PlatformRefundsPage({
 }) {
   const actor = await requirePlatformActor();
   const query = await searchParams;
+  const kind: Kind = KINDS.find((k) => k.key === param(query.kind))?.key ?? 'credit';
   const view: View = VIEWS.find((v) => v.key === param(query.view))?.key ?? 'open';
   const requestsCursor = param(query.cursor);
   const refundsCursor = param(query.refunds);
   const { platformBilling, clock } = await getRuntime();
-  const [requests, refunds] = await Promise.all([
-    platformBilling.refundRequests(actor, { status: view, cursor: requestsCursor }),
-    platformBilling.creditRefunds(actor, { cursor: refundsCursor }),
-  ]);
   const isOwner = actor.role === 'platform_owner';
   // Razorpay may fail a normal refund of a payment older than 6 months (R-077).
   const sixMonthsAgo = new Date(clock.now());
   sixMonthsAgo.setUTCMonth(sixMonthsAgo.getUTCMonth() - 6);
+  const header = (
+    <div className="grid gap-1">
+      <Link href="/platform" className="text-sm text-primary underline-offset-4 hover:underline">
+        ← Platform administration
+      </Link>
+      <h1 className="text-2xl font-semibold tracking-tight">Refunds</h1>
+      <p className="text-sm text-muted-foreground">
+        Refunds of unused service credit and of plan payments. A company’s billing managers ask from
+        a payment’s receipt; a platform owner approves, which refunds the amount through Razorpay as
+        a refund from the company’s page does, or declines with a note the company reads. Platform
+        owners are emailed when requests arrive.
+      </p>
+      <nav className="mt-2 flex flex-wrap gap-4 text-sm" aria-label="Refunds of">
+        {KINDS.map((k) =>
+          k.key === kind ? (
+            <span key={k.key} className="font-medium" aria-current="page">
+              {k.label}
+            </span>
+          ) : (
+            <Link
+              key={k.key}
+              href={pageHref(k.key, 'open', undefined, undefined)}
+              className="text-primary underline-offset-4 hover:underline"
+            >
+              {k.label}
+            </Link>
+          ),
+        )}
+      </nav>
+    </div>
+  );
+
+  if (kind === 'plan') {
+    const [planRequests, planRefunds] = await Promise.all([
+      platformBilling.planRefundRequests(actor, { status: view, cursor: requestsCursor }),
+      platformBilling.planPaymentRefunds(actor, { cursor: refundsCursor }),
+    ]);
+    return (
+      <div className="grid grid-cols-1 gap-6">
+        {header}
+        <PlanRefundsSections
+          views={VIEWS}
+          view={view}
+          requests={planRequests}
+          refunds={planRefunds}
+          requestsCursor={requestsCursor}
+          refundsCursor={refundsCursor}
+          isOwner={isOwner}
+          sixMonthsAgo={sixMonthsAgo}
+          href={(v, requestsAt, refundsAt) => pageHref('plan', v, requestsAt, refundsAt)}
+        />
+      </div>
+    );
+  }
+
+  const [requests, refunds] = await Promise.all([
+    platformBilling.refundRequests(actor, { status: view, cursor: requestsCursor }),
+    platformBilling.creditRefunds(actor, { cursor: refundsCursor }),
+  ]);
 
   return (
     <div className="grid grid-cols-1 gap-6">
-      <div className="grid gap-1">
-        <Link href="/platform" className="text-sm text-primary underline-offset-4 hover:underline">
-          ← Platform administration
-        </Link>
-        <h1 className="text-2xl font-semibold tracking-tight">Refunds</h1>
-        <p className="text-sm text-muted-foreground">
-          Refunds of unused service credit. A company’s billing managers ask from a payment’s
-          receipt; a platform owner approves, which refunds the amount through Razorpay as a refund
-          from the company’s page does, or declines with a note the company reads. Platform owners
-          are emailed when requests arrive.
-        </p>
-      </div>
+      {header}
       <Card>
         <CardHeader>
           <CardTitle>Requests from companies</CardTitle>
@@ -132,7 +192,7 @@ export default async function PlatformRefundsPage({
               ) : (
                 <Link
                   key={v.key}
-                  href={pageHref(v.key, undefined, refundsCursor)}
+                  href={pageHref('credit', v.key, undefined, refundsCursor)}
                   className="text-primary underline-offset-4 hover:underline"
                 >
                   {v.label}
@@ -260,7 +320,7 @@ export default async function PlatformRefundsPage({
           <div className="flex justify-end gap-3 text-sm">
             {requestsCursor ? (
               <Link
-                href={pageHref(view, undefined, refundsCursor)}
+                href={pageHref('credit', view, undefined, refundsCursor)}
                 className="text-primary underline-offset-4 hover:underline"
               >
                 Newest requests
@@ -268,7 +328,7 @@ export default async function PlatformRefundsPage({
             ) : null}
             {requests.nextCursor ? (
               <Link
-                href={pageHref(view, requests.nextCursor, refundsCursor)}
+                href={pageHref('credit', view, requests.nextCursor, refundsCursor)}
                 className="text-primary underline-offset-4 hover:underline"
               >
                 Older requests
@@ -357,7 +417,7 @@ export default async function PlatformRefundsPage({
           <div className="flex justify-end gap-3 text-sm">
             {refundsCursor ? (
               <Link
-                href={pageHref(view, requestsCursor, undefined)}
+                href={pageHref('credit', view, requestsCursor, undefined)}
                 className="text-primary underline-offset-4 hover:underline"
               >
                 Newest refunds
@@ -365,7 +425,7 @@ export default async function PlatformRefundsPage({
             ) : null}
             {refunds.nextCursor ? (
               <Link
-                href={pageHref(view, requestsCursor, refunds.nextCursor)}
+                href={pageHref('credit', view, requestsCursor, refunds.nextCursor)}
                 className="text-primary underline-offset-4 hover:underline"
               >
                 Older refunds

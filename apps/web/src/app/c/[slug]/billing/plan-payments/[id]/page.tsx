@@ -1,10 +1,37 @@
 import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
-import { displayMoney, isAppError } from '@w360/core';
-import { assertCan, PLAN_INTERVAL_LABELS, type PlanPaymentReceipt } from '@w360/domain';
-import { Badge, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
+import { displayMoney, formatMinorUnits, isAppError } from '@w360/core';
+import {
+  assertCan,
+  can,
+  hasRecentSignIn,
+  PLAN_INTERVAL_LABELS,
+  RECENT_SIGN_IN_MINUTES,
+  REFUND_REQUEST_STATUS_LABELS,
+  type PlanPaymentReceipt,
+  type PlanRefundRequestView,
+} from '@w360/domain';
+import {
+  Badge,
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+  TBody,
+  TD,
+  TH,
+  THead,
+  TR,
+  Table,
+} from '@w360/ui';
 import { PrintButton } from '@/components/billing/print-button';
+import {
+  RefundRequestForm,
+  WithdrawRefundRequestButton,
+} from '@/components/billing/refund-request-form';
 import { PageHeader } from '@/components/page-header';
+import { SignInAgain } from '@/components/sign-in-again';
 import { formatDate, formatDateTime } from '@/lib/format';
 import { getRuntime } from '@/server/runtime';
 import { requireTenant } from '@/server/session';
@@ -15,6 +42,16 @@ export const dynamic = 'force-dynamic';
 const inr = (paise: number) => displayMoney(BigInt(paise), 'INR');
 
 const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+
+const REQUEST_TONE: Record<
+  PlanRefundRequestView['status'],
+  'info' | 'success' | 'danger' | 'neutral'
+> = {
+  open: 'info',
+  approved: 'success',
+  declined: 'danger',
+  withdrawn: 'neutral',
+};
 
 /** The add-ons the payment covered, in words; empty when there were none. */
 function addOns(receipt: PlanPaymentReceipt): string[] {
@@ -40,7 +77,8 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 
 /**
  * The receipt of a plan payment Razorpay charged for the company's subscription (ADR-064): a
- * payment confirmation for the plan, not a tax invoice.
+ * payment confirmation for the plan, not a tax invoice. Billing managers ask here for a refund of
+ * it (ADR-104).
  */
 export default async function PlanPaymentReceiptPage({
   params,
@@ -50,14 +88,18 @@ export default async function PlanPaymentReceiptPage({
   const { slug, id } = await params;
   const ctx = await requireTenant(slug);
   assertCan(ctx, 'billing.read');
-  const { planPayments } = await getRuntime();
+  const { planPayments, planRefundRequests, clock } = await getRuntime();
   let receipt: PlanPaymentReceipt;
+  let asked: Awaited<ReturnType<typeof planRefundRequests.forPlanPayment>>;
   try {
     receipt = await planPayments.receipt(ctx, id);
+    asked = await planRefundRequests.forPlanPayment(ctx, id);
   } catch (error) {
     if (isAppError(error) && error.code === 'not_found') notFound();
     throw error;
   }
+  const canManage = can(ctx, 'billing.manage');
+  const recent = hasRecentSignIn(ctx, clock.now());
   const tz = receipt.timezone;
   const extras = addOns(receipt);
 
@@ -80,7 +122,13 @@ export default async function PlanPaymentReceiptPage({
             <CardTitle>
               {inr(receipt.amountMinor)} for the {receipt.planName} plan
             </CardTitle>
-            <Badge tone="success">Paid</Badge>
+            {receipt.refundedMinor >= receipt.amountMinor ? (
+              <Badge tone="neutral">Refunded</Badge>
+            ) : receipt.refundedMinor > 0 ? (
+              <Badge tone="warning">Partly refunded</Badge>
+            ) : (
+              <Badge tone="success">Paid</Badge>
+            )}
           </div>
           <CardDescription>
             This receipt confirms a payment for your HyFib W360 plan through a Razorpay
@@ -117,6 +165,29 @@ export default async function PlanPaymentReceiptPage({
               </>
             ) : null}
             <Row label="Amount paid">{inr(receipt.amountMinor)} (INR)</Row>
+            {receipt.refunds.map((r) => (
+              <Row
+                key={r.id}
+                label={
+                  r.status === 'processed' && r.processedAt
+                    ? `Refunded on ${formatDate(r.processedAt, tz)}`
+                    : 'Refund in progress'
+                }
+              >
+                {inr(r.amountMinor)}
+                <span className="block text-muted-foreground">
+                  {r.origin === 'staff' ? 'Started by HyFib' : 'Made at Razorpay'}
+                  {r.status === 'processed'
+                    ? ', back to the card, UPI or bank account the payment came from'
+                    : '; Razorpay usually completes a refund in 5–7 working days'}
+                </span>
+              </Row>
+            ))}
+            {receipt.refundedMinor > 0 ? (
+              <Row label="Paid after refunds">
+                {inr(receipt.amountMinor - receipt.refundedMinor)} (INR)
+              </Row>
+            ) : null}
             <Row label="Paid with">
               {receipt.methodLabel ? `${receipt.methodLabel}, through Razorpay` : 'Razorpay'}
             </Row>
@@ -133,9 +204,92 @@ export default async function PlanPaymentReceiptPage({
               </Row>
             ) : null}
           </dl>
+          {asked.requests.length > 0 ||
+          (canManage && receipt.refundedMinor < receipt.amountMinor) ? (
+            <div className="grid gap-3 print:hidden">
+              <h2 className="text-sm font-medium">Refund of this payment</h2>
+              {asked.requests.length > 0 ? (
+                <Table>
+                  <THead>
+                    <TR>
+                      <TH>Asked</TH>
+                      <TH>Status</TH>
+                      <TH className="text-right">Amount</TH>
+                    </TR>
+                  </THead>
+                  <TBody>
+                    {asked.requests.map((r) => (
+                      <TR key={r.id}>
+                        <TD className="whitespace-nowrap">
+                          {formatDateTime(r.requestedAt, tz)}
+                          {r.requestedByName ? (
+                            <span className="block text-xs text-muted-foreground">
+                              by {r.requestedByName}
+                            </span>
+                          ) : null}
+                        </TD>
+                        <TD>
+                          <Badge tone={REQUEST_TONE[r.status]}>
+                            {REFUND_REQUEST_STATUS_LABELS[r.status]}
+                          </Badge>
+                          {r.decisionNote ? (
+                            <span className="block break-words text-xs text-muted-foreground">
+                              HyFib’s note: {r.decisionNote}
+                            </span>
+                          ) : null}
+                          {r.status === 'approved' ? (
+                            <span className="block text-xs text-muted-foreground">
+                              {r.refund?.status === 'processed'
+                                ? 'Refunded.'
+                                : r.refund?.status === 'failed'
+                                  ? 'Razorpay could not complete the refund; nothing was refunded.'
+                                  : 'The refund is on its way.'}
+                            </span>
+                          ) : null}
+                          {r.status === 'open' && canManage ? (
+                            <div className="mt-2">
+                              <WithdrawRefundRequestButton
+                                slug={ctx.tenant.slug}
+                                requestId={r.id}
+                                kind="plan_payment"
+                              />
+                            </div>
+                          ) : null}
+                        </TD>
+                        <TD className="text-right tabular-nums">{inr(r.amountMinor)}</TD>
+                      </TR>
+                    ))}
+                  </TBody>
+                </Table>
+              ) : null}
+              {canManage ? (
+                asked.askable.maxMinor !== null ? (
+                  recent ? (
+                    <RefundRequestForm
+                      slug={ctx.tenant.slug}
+                      target={{ kind: 'plan_payment', planPaymentId: id }}
+                      maxAmount={formatMinorUnits(BigInt(asked.askable.maxMinor), 'INR')}
+                      maxLabel={inr(asked.askable.maxMinor)}
+                    />
+                  ) : (
+                    <SignInAgain
+                      reason={`Asking for a refund needs a sign-in within the last ${RECENT_SIGN_IN_MINUTES} minutes.`}
+                    />
+                  )
+                ) : (
+                  <p className="text-xs text-muted-foreground">{asked.askable.reason}</p>
+                )
+              ) : null}
+              <p className="text-xs text-muted-foreground">
+                HyFib decides each request. A refund goes back to the card, UPI or bank account the
+                payment came from, and your plan and its paid period do not change.
+              </p>
+            </div>
+          ) : null}
           <p className="text-xs text-muted-foreground">
             Times are in {tz}. Card numbers are never stored by HyFib. Tax invoices are not issued
-            yet, and refunds made outside HyFib are not shown here.
+            yet. A refund shows here once HyFib asks Razorpay for it, or once Razorpay reports one
+            made there.
           </p>
         </CardContent>
       </Card>

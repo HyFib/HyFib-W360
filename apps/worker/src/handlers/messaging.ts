@@ -11,6 +11,7 @@ import {
   checkQueueWaits,
   findStaleReceipts,
   findStaleSendIntents,
+  noticeApiKeyUsageDue,
   processChannelOnboarding,
   processMetaWebhookReceipt,
   processSendIntent,
@@ -227,6 +228,27 @@ export function messagingSweepHandler(rt: WorkerRuntime) {
     }
     if (keyReminders.reminded > 0)
       rt.logger.info({ reminded: keyReminders.reminded }, 'API key expiry reminders emailed');
+    // Emails at 80% and at a key's own monthly limit (ADR-098).
+    const keyUsage = await noticeApiKeyUsageDue({
+      db: rt.db,
+      clock: rt.clock,
+      notices: rt.notices,
+    });
+    for (const failure of keyUsage.failed) {
+      rt.logger.warn(
+        {
+          tenantId: failure.tenantId,
+          usageId: failure.usageId,
+          err: toError(failure.error).message,
+        },
+        'API key usage email failed; will retry',
+      );
+    }
+    if (keyUsage.warned + keyUsage.reached > 0)
+      rt.logger.info(
+        { warned: keyUsage.warned, reached: keyUsage.reached },
+        'API key usage emails queued',
+      );
     // Token buckets that are full again limit nothing (ADR-068).
     const buckets = await purgeRateLimitBuckets(rt.db);
     if (buckets > 0) rt.logger.info({ buckets }, 'full rate limit buckets deleted');

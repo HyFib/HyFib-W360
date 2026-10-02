@@ -100,6 +100,17 @@ export async function decideRefundRequestAction(
   });
 }
 
+export async function decidePlanRefundRequestAction(
+  input: unknown,
+): Promise<ActionResult<{ refundId: string | null }>> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    const result = await runtime.platformBilling.decidePlanRefundRequest(actor, input);
+    refresh();
+    return result;
+  });
+}
+
 export async function requestSettlementReconAction(
   input: unknown,
 ): Promise<ActionResult<{ runId: string }>> {
@@ -210,6 +221,18 @@ export async function setPlanTaxAction(input: unknown): Promise<ActionResult> {
     await runtime.planAdmin.setPlanTax(actor, input);
     refresh();
     return null;
+  });
+}
+
+/** Refunds part or all of a plan payment (platform owners, ADR-103). */
+export async function requestPlanPaymentRefundAction(
+  input: unknown,
+): Promise<ActionResult<{ refundId: string }>> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    const result = await runtime.planAdmin.requestPlanPaymentRefund(actor, input);
+    refresh();
+    return result;
   });
 }
 

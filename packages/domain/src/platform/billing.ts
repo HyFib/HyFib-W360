@@ -1,5 +1,12 @@
 import { AppError, parseMajorUnits } from '@w360/core';
-import { sql, type CreditRefundRequestStatus, type CreditRefundStatus } from '@w360/db';
+import {
+  sql,
+  type CreditRefundRequestStatus,
+  type CreditRefundStatus,
+  type PlanPaymentRefundOrigin,
+  type PlanPaymentRefundRequestStatus,
+  type PlanPaymentRefundStatus,
+} from '@w360/db';
 import type { PlatformDatabase } from '@w360/db/platform';
 import { z } from 'zod';
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
@@ -80,6 +87,57 @@ export interface PlatformCreditRefund {
   amountMinor: number;
   status: CreditRefundStatus;
   reason: string;
+  requestedByName: string | null;
+  requestedAt: Date;
+  submittedAt: Date | null;
+  processedAt: Date | null;
+  failedAt: Date | null;
+  lastError: string | null;
+  /** The company request it answers, if any. */
+  requestId: string | null;
+}
+
+/** A company's request for a refund of a plan payment as platform staff see it (ADR-104). */
+export interface PlatformPlanRefundRequest {
+  id: string;
+  tenantId: string;
+  companyName: string;
+  companySlug: string;
+  companyStatus: string;
+  planPaymentId: string;
+  paymentReceipt: string;
+  paymentAmountMinor: number;
+  /** What Razorpay refunded of the payment (processed refunds). */
+  paymentRefundedMinor: number;
+  paymentPaidAt: Date | null;
+  /** A refund of the payment is already running (approving would be refused). */
+  refundInProgress: boolean;
+  amountMinor: number;
+  reason: string;
+  status: PlanPaymentRefundRequestStatus;
+  requestedByName: string | null;
+  requestedAt: Date;
+  decidedAt: Date | null;
+  decidedByName: string | null;
+  decisionNote: string | null;
+  planPaymentRefundId: string | null;
+  planPaymentRefundStatus: PlanPaymentRefundStatus | null;
+}
+
+/** A refund of a plan payment in the platform-wide list (ADR-104). */
+export interface PlatformPlanRefundListItem {
+  id: string;
+  tenantId: string;
+  companyName: string;
+  companySlug: string;
+  planPaymentId: string;
+  paymentReceipt: string;
+  /** Started by HyFib (`staff`) or made at Razorpay, for example in its Dashboard. */
+  origin: PlanPaymentRefundOrigin;
+  amountMinor: number;
+  status: PlanPaymentRefundStatus;
+  /** The staff reason; none for a refund made at Razorpay. */
+  reason: string | null;
   requestedByName: string | null;
   requestedAt: Date;
   submittedAt: Date | null;
@@ -233,6 +291,55 @@ function parseRefundRequest(r: Row): PlatformRefundRequest {
   };
 }
 
+function parsePlanRefundRequest(r: Row): PlatformPlanRefundRequest {
+  return {
+    id: String(r.id),
+    tenantId: String(r.tenant_id),
+    companyName: String(r.company_name ?? ''),
+    companySlug: String(r.company_slug ?? ''),
+    companyStatus: String(r.company_status ?? ''),
+    planPaymentId: String(r.plan_payment_id),
+    paymentReceipt: String(r.payment_receipt ?? ''),
+    paymentAmountMinor: num(r.payment_amount_minor),
+    paymentRefundedMinor: num(r.payment_refunded_minor),
+    paymentPaidAt: optionalDate(r.payment_paid_at),
+    refundInProgress: r.refund_in_progress === true,
+    amountMinor: num(r.amount_minor),
+    reason: String(r.reason ?? ''),
+    status: String(r.status) as PlanPaymentRefundRequestStatus,
+    requestedByName: text(r.requested_by_name),
+    requestedAt: requiredDate(r.requested_at),
+    decidedAt: optionalDate(r.decided_at),
+    decidedByName: text(r.decided_by_name),
+    decisionNote: text(r.decision_note),
+    planPaymentRefundId: text(r.plan_payment_refund_id),
+    planPaymentRefundStatus:
+      (text(r.plan_payment_refund_status) as PlanPaymentRefundStatus | null) ?? null,
+  };
+}
+
+function parsePlanRefund(r: Row): PlatformPlanRefundListItem {
+  return {
+    id: String(r.id),
+    tenantId: String(r.tenant_id),
+    companyName: String(r.company_name ?? ''),
+    companySlug: String(r.company_slug ?? ''),
+    planPaymentId: String(r.plan_payment_id),
+    paymentReceipt: String(r.payment_receipt ?? ''),
+    origin: String(r.origin) as PlanPaymentRefundOrigin,
+    amountMinor: num(r.amount_minor),
+    status: String(r.status) as PlanPaymentRefundStatus,
+    reason: text(r.reason),
+    requestedByName: text(r.requested_by_name),
+    requestedAt: requiredDate(r.requested_at),
+    submittedAt: optionalDate(r.submitted_at),
+    processedAt: optionalDate(r.processed_at),
+    failedAt: optionalDate(r.failed_at),
+    lastError: text(r.last_error),
+    requestId: text(r.request_id),
+  };
+}
+
 function parseCreditRefund(r: Row): PlatformCreditRefund {
   return {
     id: String(r.id),
@@ -252,6 +359,22 @@ function parseCreditRefund(r: Row): PlatformCreditRefund {
     lastError: text(r.last_error),
     requestId: text(r.request_id),
   };
+}
+
+/** A decision's note: required to decline (the company reads it), optional to approve. */
+function decisionNote(decision: 'approve' | 'decline', typed: string | undefined): string | null {
+  const note = typed ? typed : null;
+  if (decision === 'decline' && (note === null || note.length < 10)) {
+    throw new AppError('validation_failed', 'Write a note of at least 10 characters.', {
+      issues: [{ path: 'note', message: 'The company reads this note' }],
+    });
+  }
+  if (note !== null && note.length < 10) {
+    throw new AppError('validation_failed', 'Write a note of at least 10 characters, or none.', {
+      issues: [{ path: 'note', message: 'At least 10 characters' }],
+    });
+  }
+  return note;
 }
 
 /** A page from rows fetched one past the page size, with the exact cursor of its last row. */
@@ -320,24 +443,73 @@ export function createPlatformBillingService(deps: PlatformBillingDeps) {
         throw new AppError('forbidden', 'Only a platform owner can decide a refund request.');
       }
       const data = parseInput(decisionSchema, input);
-      const note = data.note ? data.note : null;
-      if (data.decision === 'decline' && (note === null || note.length < 10)) {
-        throw new AppError('validation_failed', 'Write a note of at least 10 characters.', {
-          issues: [{ path: 'note', message: 'The company reads this note' }],
-        });
-      }
-      if (note !== null && note.length < 10) {
-        throw new AppError(
-          'validation_failed',
-          'Write a note of at least 10 characters, or none.',
-          {
-            issues: [{ path: 'note', message: 'At least 10 characters' }],
-          },
-        );
-      }
+      const note = decisionNote(data.decision, data.note);
       return platformDb.run(actor.userId, async (tx) => {
         const result = await tx.execute<{ id: string | null }>(
           sql`select ops.platform_decide_credit_refund_request(${data.requestId}::uuid,
+                ${data.decision === 'approve'}::boolean, ${note}::text, ${actor.correlationId}) as id`,
+        );
+        return { refundId: result.rows[0]?.id ?? null };
+      });
+    },
+
+    /**
+     * Requests for refunds of plan payments companies made (ADR-104), newest first: open ones,
+     * decided ones or all, for any platform staff member (only owners decide).
+     */
+    async planRefundRequests(
+      actor: PlatformActor,
+      input: unknown = {},
+    ): Promise<{ items: PlatformPlanRefundRequest[]; nextCursor: string | null }> {
+      const data = parseInput(requestListSchema, input);
+      const cursor = decodeKeysetCursor(data.cursor);
+      const status = data.status === 'all' ? null : data.status;
+      return platformDb.run(actor.userId, async (tx) => {
+        const result = await tx.execute<Row>(
+          sql`select * from ops.platform_plan_payment_refund_requests(${status}::text,
+                ${cursor?.at ?? null}::timestamptz, ${cursor?.id ?? null}::uuid,
+                ${PLATFORM_REFUNDS_PAGE + 1}::int)`,
+        );
+        return pageOf(result.rows, parsePlanRefundRequest);
+      });
+    },
+
+    /**
+     * Every refund of a plan payment across companies, newest first (ADR-104): started by HyFib,
+     * answering a request, or made at Razorpay.
+     */
+    async planPaymentRefunds(
+      actor: PlatformActor,
+      input: unknown = {},
+    ): Promise<{ items: PlatformPlanRefundListItem[]; nextCursor: string | null }> {
+      const data = parseInput(refundListSchema, input);
+      const cursor = decodeKeysetCursor(data.cursor);
+      return platformDb.run(actor.userId, async (tx) => {
+        const result = await tx.execute<Row>(
+          sql`select * from ops.platform_plan_payment_refunds(${cursor?.at ?? null}::timestamptz,
+                ${cursor?.id ?? null}::uuid, ${PLATFORM_REFUNDS_PAGE + 1}::int)`,
+        );
+        return pageOf(result.rows, parsePlanRefund);
+      });
+    },
+
+    /**
+     * Decides a company's open request for a refund of a plan payment (platform owners). Approving
+     * starts the staff refund of ADR-103 for the request's amount, checked again under its lock;
+     * declining needs a note the company reads. Both are in the platform audit log.
+     */
+    async decidePlanRefundRequest(
+      actor: PlatformActor,
+      input: unknown,
+    ): Promise<{ refundId: string | null }> {
+      if (actor.role !== 'platform_owner') {
+        throw new AppError('forbidden', 'Only a platform owner can decide a refund request.');
+      }
+      const data = parseInput(decisionSchema, input);
+      const note = decisionNote(data.decision, data.note);
+      return platformDb.run(actor.userId, async (tx) => {
+        const result = await tx.execute<{ id: string | null }>(
+          sql`select ops.platform_decide_plan_payment_refund_request(${data.requestId}::uuid,
                 ${data.decision === 'approve'}::boolean, ${note}::text, ${actor.correlationId}) as id`,
         );
         return { refundId: result.rows[0]?.id ?? null };

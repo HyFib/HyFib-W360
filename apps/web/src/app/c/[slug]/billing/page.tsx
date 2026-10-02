@@ -140,14 +140,21 @@ export default async function BillingPage({ params }: { params: Promise<{ slug: 
           overview={plan}
           timeZone={tz}
           payment={
+            // A payment still being started or in Checkout is finished below, so it counts as
+            // paying offered here; one Razorpay may charge counts as a subscription (ADR-102).
             planPayment.subscription &&
-            !['cancelled', 'completed', 'expired', 'failed'].includes(
-              planPayment.subscription.status,
-            )
-              ? 'subscribed'
-              : planPayment.offer.available
-                ? 'offered'
-                : null
+            ['creating', 'created'].includes(planPayment.subscription.status)
+              ? 'offered'
+              : planPayment.subscription &&
+                  !['cancelled', 'completed', 'expired', 'failed'].includes(
+                    planPayment.subscription.status,
+                  )
+                ? plan.status === 'trialing' && planPayment.subscription.startsAt
+                  ? 'from_trial_end'
+                  : 'subscribed'
+                : planPayment.offer.available
+                  ? 'offered'
+                  : null
           }
         />
         <PlanPaymentCard

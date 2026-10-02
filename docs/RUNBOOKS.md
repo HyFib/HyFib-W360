@@ -229,8 +229,9 @@ but there is no platform owner to email` (make someone a platform owner; the req
 emailed`, or `refund request decline notice failed for a company; will retry` with the
         company; `decline_notified_at` is set when the email was queued. An approval sends no email
         of its own: the refund's emails follow.
-      - **"We asked too often":** a company can ask 5 times in 24 hours (withdrawn requests count);
-        the next request is accepted once the oldest of those is a day old.
+      - **"We asked too often":** a company can ask 5 times in 24 hours (withdrawn requests count,
+        and so do requests for refunds of plan payments, ADR-104); the next request is accepted
+        once the oldest of those is a day old.
 11. **Settlement reconciliation** (`/platform/reconciliation`, ADR-059). Each day from 06:00 India
     time the worker reads Razorpay's settlement report for the previous day and matches every
     transaction. Look at the list once a day; "Need a person" counts what is still open. Platform
@@ -910,9 +911,31 @@ new checks hold for existing rows; a failure usually means the bootstrap roles a
 **Putting a company on a plan.** Platform → the company → Plan: choose a trial of a published
 version until a day, a paid period of one (from a day until a day, in the company's time zone; the
 period ends at the start of the "until" day), complimentary access, or end the plan. Give the
-invoice or ticket as the reason: it is shown in the company's audit log. A form older than the
-current plan state is refused ("The plan changed while you were editing"); reload. Nothing is
-charged in HyFib: set the period after the payment is settled elsewhere.
+invoice or ticket as the reason: it is shown in the company's audit log and emailed to its
+billing managers. A form older than the current plan state is refused ("The plan changed while you
+were editing"); reload. Nothing is charged in HyFib: set the period after the payment is settled
+elsewhere.
+
+**A company says it was not told of a plan change (ADR-100).** The worker's minute billing sweep
+emails the company's active owners and billing members "HyFib changed your plan" after each staff
+change, with the plan now, its dates and add-ons and the reason. Two changes within a minute make
+one email with the latest; a change the plan sweep or a subscription replaced before the sweep ran
+is not told (their own emails are). A change not told yet has
+`app.tenant_plans.staff_notice_version` set; it stays set for a company being deleted. The worker
+logs `plan change notices` with the counts, and `plan change notice failed for a company; will
+retry` with the company id on failure (the change is told the next minute). If the email was
+queued, follow section 2 (Email not arriving).
+
+**A company says it was not told that HyFib cancelled its subscription (ADR-101).** The same sweep
+emails the company's active owners and billing members "HyFib cancelled your plan subscription"
+after a platform owner cancels it, with the reason and what the plan keeps (the period the
+subscription paid, its grace days, or that the plan is not changed). The company's own
+cancellations send their own email ("Your HyFib plan subscription is cancelled"); those of a
+company deletion send none. A cancellation not told yet has
+`app.plan_subscriptions.staff_cancel_notice_due` set; it stays set for a company being deleted. The
+worker logs `subscription cancellation notices` with the count, and `subscription cancellation
+notice failed for a company; will retry` with the company and subscription ids on failure (it is
+told the next minute). If the email was queued, follow section 2 (Email not arriving).
 
 **Paying for plans by Razorpay subscription (ADR-063).** Turn it on only after Razorpay activated
 Subscriptions (and Flash Checkout, which Subscriptions need) on HyFib's account and the webhook
@@ -926,8 +949,8 @@ why for the last two.
 **A company paid but its plan did not change.** Open the company's platform page → Plan
 subscription: status, cycle, last checked and any note. The plan changes only when Razorpay reports
 the cycle paid, fetched by HyFib: after Checkout, on each `subscription.*` or `payment.*` webhook, and
-by the minute sweep (every live subscription at least daily, hourly once its cycle has ended, and
-just before the plan sweep would move the period on). The worker logs `plan subscription check
+by the minute sweep (every live subscription at least daily, hourly once its cycle has ended or its
+first charge is due, and just before the plan sweep would move the period on). The worker logs `plan subscription check
 failed; will retry` with the subscription id when Razorpay cannot answer; it is tried again. A note such as "Razorpay
 returned a subscription for another plan" or a payment Razorpay reports for another amount means
 the records disagree: compare with the Razorpay Dashboard before doing anything by hand, and never
@@ -940,11 +963,67 @@ a later successful charge makes it active again. The company can also cancel the
 pay again. Charges above ₹15,000 on Indian cards wait for the payer's approval through their bank
 every time (RBI rules, Razorpay's FAQ): a charge that stays unpaid for that reason looks the same.
 
+**A trial paid from its end (ADR-102).** A company whose trial ends more than two days ahead pays
+from the trial's end: Checkout only authorises the card, the company's platform page → Plan
+subscription shows "Authorised" and the day of the first charge, and the plan stays a trial. At the
+trial's end Razorpay charges the first cycle, and the plan becomes active once HyFib records it (the
+webhook, or the sweep's hourly check once the charge is due). Until then the ended trial waits, for
+at most the plan version's grace days, and Billing says until when. A trial still waiting: check
+`SELECT status, starts_at, paid_count, synced_at, failure_reason FROM app.plan_subscriptions WHERE
+tenant_id = … ORDER BY created_at DESC LIMIT 1`; `authenticated`, `active` and `pending` wait (the
+last one while Razorpay retries a failed first charge), anything else ends the trial at the next
+sweep. After the grace days the trial expires; a later charge still makes the plan active. A
+company that cancelled just as the first charge was made may show "a payment of a HyFib plan
+subscription that syncing the subscription did not record" in the daily reconciliation: the charge
+is on a cancelled subscription and HyFib gave no period for it, so refund it in the Dashboard.
+
+**Refunding a plan payment (ADR-103).** Platform owners refund part or all of a plan payment on the
+company's platform page → Plan subscription → Refund a plan payment, with a reason (kept in the
+platform audit log, never shown to the company). The plan and the subscription do not change: to end
+the plan as well, cancel the subscription and then change the plan. The worker asks Razorpay within a
+minute or two with `X-Refund-Idempotency: ppr_<request id>` and the note `hyfib_plan_refund`, and the
+company's billing managers are emailed when Razorpay accepts it. A request that does not move: check
+`SELECT status, attempts, provider_refund_id, last_error, next_attempt_at FROM
+app.plan_payment_refunds WHERE id = …`. `requested` with attempts rising: Razorpay is unreachable or
+answering unclearly; the same call (same key, so never a second refund) is repeated after 1, 5, 15
+and 60 minutes, then hourly. `submitted` for days is normal up to about 7 working days; if the
+Dashboard shows it processed, redeliver `refund.processed` or wait for the job's check. `failed`:
+`last_error` is Razorpay's code and description (for example a payment already refunded in the
+Dashboard, or older than Razorpay refunds); the company was emailed, and another refund can be asked
+for. A refund made in the Dashboard is recorded from `refund.processed` or the daily reconciliation,
+as made at Razorpay, and shows on the company's receipt. For a company being deleted, refund in the
+Dashboard; a due deletion waits for a refund in progress.
+
+**Refund requests of plan payments (ADR-104).** A company's billing managers ask from a plan
+payment's receipt for a refund of part or all of it, with a reason. Platform owners get the same
+email as for requests of service credit within a minute, counting both kinds (when every waiting
+request is of a plan payment it links straight to them), and decide on `/platform/refunds` → Plan
+payments (operators only read). Approving starts the refund above for the amount asked, with the
+same checks, and its staff reason reads "Asked for by the company:" and the company's reason;
+declining needs a note, which the company's billing managers are emailed within a minute. Neither
+changes the plan. `SELECT status, requested_at, announced_at, decided_at, decline_notified_at,
+plan_payment_refund_id FROM app.plan_payment_refund_requests WHERE tenant_id = … ORDER BY
+requested_at DESC`:
+
+- **"Approving was refused":** the request no longer fits (Razorpay refunded part of the payment
+  since, for example in the Dashboard, a refund of it started meanwhile, or the company asked for
+  deletion); the page shows the reason and the request stays open. Decline it with a note, or refund
+  a smaller amount from the company's platform page and decline the request saying so.
+- **No email about a request, or about a decline:** as for requests of service credit (section 9,
+  item 10): the worker logs the same lines for both kinds, and a failed decline notice names the
+  kind (`credit` or `plan_payment`).
+- **"We asked too often":** 5 requests in 24 hours per company, of plan payments and service credit
+  together (withdrawn requests count).
+
 **Cancelling a company's subscription.** Owners and billing managers cancel in Billing (an active
 one at the end of the paid period, otherwise at once). Platform owners cancel at once on the
 company's platform page with a reason (needed before changing the company's plan, which staff
 cannot do while a subscription is live); the paid period stands and the plan then ends as canceled,
-without grace days. A company that cancelled pays again from Billing once the paid period has ended
+without grace days, and the company's billing managers are emailed the reason (ADR-101). A
+subscription paid from a trial's end is cancelled at once by the company before its start (nothing
+was charged, and the trial goes on); after the start HyFib asks Razorpay first, and one already
+charged is cancelled at the end of the period it paid (ADR-102). A company
+that cancelled pays again from Billing once the paid period has ended
 (there is no resume). Deleting a company cancels its subscription first; a failure shows as "Plan
 subscription at Razorpay: failed" in the deletion's provider outcomes: cancel it in the Razorpay
 Dashboard.
@@ -1059,9 +1138,9 @@ find it with `SELECT id, trigger_type, api_key_id FROM app.automation_runs WHERE
 `app.api_keys.allowed_networks` with its check and grants, creates
 `ops.api_key_authenticate(text, inet)` and rebuilds the one-argument lookup on it (dropped and
 created again, granted to `w360_app`, then handed to `w360_definer`). A failure usually means the
-bootstrap roles are missing or the lookup was changed by hand. The one-argument lookup is kept only
-for web servers of the previous release during a rolling deploy and refuses keys that list networks;
-drop it in a later release once no older web server runs.
+bootstrap roles are missing or the lookup was changed by hand. The one-argument lookup was kept only
+for web servers of the previous release during a rolling deploy and refused keys that list networks;
+0074 drops it.
 
 **Migration 0050 failed.** It runs in one transaction, so a failure applies nothing. It replaces
 the check on `app.api_keys.scopes` with one that also allows `conversations.write` (up to eight
@@ -1163,6 +1242,24 @@ and 30 a second; wait for `Retry-After` and retry with the same `Idempotency-Key
 reason `quota_exceeded` means the plan's API requests for the month are used up (ADR-061): the
 requests work again when the next usage period starts, or with a larger plan.
 
+**429 with the reason `key_quota_exceeded`.** The key used up its own monthly limit (ADR-097); the
+company's other keys are not affected, and requests the key was refused are not counted for the
+company. Settings → API keys shows each key's requests this period, marks a key whose limit is
+reached, and lets an owner or administrator (after a recent sign-in) raise or remove the limit: it
+applies from the next request, to the requests already counted. Otherwise the key works again when
+the next usage period starts. The audit log records each change (`api_key.limit_changed`, with the
+limits before and after). A rotated key keeps its predecessor's limit and counts from zero.
+
+**An email about a key's limit did not come, or came again.** Owners and administrators are
+emailed once when a key reaches 80% of its own limit in a period and once when it reaches the limit
+(ADR-098); limits of 1 to 4 get only the second, and so does a key that reached its limit before
+the sweep saw it at 80%. The messaging sweep logs `API key usage emails queued` with the counts,
+and `API key usage email failed; will retry` with the company and counter ids (nothing is marked,
+and the next minute tries again). Settings → API keys shows when each email went out this period.
+Nothing is sent for a key without a limit, a revoked or expired key, or a company being deleted,
+and a counter of an earlier period is marked without an email. Changing a key's limit arms both
+emails again for the new limit.
+
 **403 `not_in_plan` naming a scope.** The company's plan leaves that scope out (ADR-092). The key
 keeps the scope: requests that need it work again, with no change to the key, once the company is
 on a plan version that includes it (a published version's scopes never change, so this is a new
@@ -1230,14 +1327,17 @@ inbox thread's older messages and the audit log could skip rows written in the s
 a page's last row; cursors issued before still work.
 
 **An API request is refused with `ip_not_allowed` (403).** The key lists the networks it accepts
-(Settings → API keys, "Accepts requests from"; ADR-076) and the request came from another address;
-the error message names the address the API saw. If that address is a load balancer's or proxy's
-rather than the integration's, `TRUSTED_PROXIES` is missing a hop (DEPLOYMENT.md): fix the
-configuration, do not add the proxy's address to the key. If the integration moved, a member who
-manages keys changes the key's addresses (a recent sign-in is needed); the change applies to the
-next request and is in the audit log (`api_key.networks_changed`). Refused requests count against
-the address's failed-authentication limit, so a client that keeps trying is answered 429 for a
-while. The web log has `api request refused: the key does not accept the address` with the key and
+(Settings → API keys, "Accepts requests from"; ADR-076), or the company lists addresses for all its
+keys ("Addresses for all keys"; ADR-099), and the request came from another address; the error
+message names the address the API saw and says whose list refused it ("This API key…" or "The
+company this API key belongs to…"). If that address is a load balancer's or proxy's rather than the
+integration's, `TRUSTED_PROXIES` is missing a hop (DEPLOYMENT.md): fix the configuration, do not add
+the proxy's address to the key or the company's list. If the integration moved, a member who manages
+keys changes the list that refused it (a recent sign-in is needed); the change applies to the next
+request and is in the audit log (`api_key.networks_changed`, or `api.networks_changed` for the
+company's list). Refused requests count against the address's failed-authentication limit, so a
+client that keeps trying is answered 429 for a while. The web log has `api request refused: the key
+does not accept the address` (or `the company does not accept the address`) with the key and
 company ids.
 
 **An integration cannot resolve or reopen a conversation, or a resolve did something unexpected.**
@@ -1372,6 +1472,78 @@ until the company is active again.
 the two SECURITY DEFINER functions (granted to `w360_app` before their ownership moves to
 `w360_definer`), adds `messages.api_key_id` and widens the consent actor check. A failure usually
 means the bootstrap roles are missing (`infra/db/bootstrap-roles.sql`).
+
+**Migration 0073 failed.** It runs in one transaction, so a failure applies nothing. It adds
+`app.api_keys.monthly_request_limit` (a nullable column with a check, validated against the keys
+already stored: a short `ACCESS EXCLUSIVE` lock on the keys table), creates `app.api_key_usage` with
+row security and its grants, and registers deletion step 855 with the definer's grants and
+policies. A failure usually means a lock wait on `app.api_keys` timed out (run the migrations again
+when requests are quieter) or the bootstrap roles are missing.
+
+**Migration 0081 failed.** It runs in one transaction, so a failure applies nothing. It creates
+`app.plan_payment_refund_requests` (empty, with row security, column grants, a restrictive policy
+for the company role and deletion step 77), the notice functions for the worker, the platform lists
+and `ops.platform_decide_plan_payment_refund_request`, each granted before it is handed to
+`w360_definer`. A failure usually means a deletion step numbered 77 already exists, a function of
+the same name was created by hand, or the bootstrap roles are missing. Web and worker images from
+before it never read the new table and keep working. The new images need it: without it, asking for
+a refund of service credit and the minute billing sweep fail (migrate first).
+
+**Migration 0080 failed.** It runs in one transaction, so a failure applies nothing. It creates
+`app.plan_payment_refunds` (empty, with row security, a rule that nobody deletes a row and the
+roles' grants), `ops.platform_request_plan_payment_refund` (platform role), and
+`ops.plan_payment_refunds_due` and `app.record_plan_payment_refund` (runtime role), each handed to
+`w360_definer`, and rebuilds `ops.settlement_recon_facts`: `w360_definer` drops it, and the migration
+role recreates it, grants it to `w360_app` and hands it back. A failure usually means the bootstrap
+roles are missing: run the migrations again. Web and worker images from before it do not know
+refunds of plan payments and leave refunds made in the Dashboard unrecorded, as before; the new
+images need it (migrate first).
+
+**Migration 0079 failed.** It runs in one transaction, so a failure applies nothing. It adds
+`starts_at` to `app.plan_subscriptions` (nullable, with a check validated against the rows stored: a
+short lock on the table), creates `app.trial_charge_wait_until` (granted to `w360_app` and
+`w360_definer`), and rebuilds `app.apply_plan_transition`, `ops.plan_transitions_due` and
+`ops.plan_subscriptions_due`: `w360_definer` drops each, and the migration role recreates it, grants
+it to `w360_app` and hands it back to `w360_definer`. A failure usually means the bootstrap roles
+are missing or a lock wait on `app.plan_subscriptions` timed out: run the migrations again. Web and
+worker images from before it keep charging trials at once; the new images need it (migrate first).
+
+**Migration 0078 failed.** It runs in one transaction, so a failure applies nothing. It adds
+`staff_cancel_notice_due` to `app.plan_subscriptions` (a boolean defaulting to false, so no rows are
+rewritten) with a partial index, the platform role's update grant on it,
+`ops.plan_subscription_cancel_notices_due` and `app.take_plan_subscription_cancel_notice` (granted
+to `w360_app`, then handed to `w360_definer`), and the definer's update grant and policy for that
+column. A failure usually means the bootstrap roles are missing or a lock wait on
+`app.plan_subscriptions` timed out: run the migrations again. Cancellations made before it are not
+told.
+
+**Migration 0077 failed.** It runs in one transaction, so a failure applies nothing. It adds
+`staff_notice_version` to `app.tenant_plans` with a check and a partial index (a short lock on the
+table, one row per company), the platform role's update grant on it, and
+`ops.plan_change_notices_due` and `app.take_plan_change_notice` (granted to `w360_app`, then handed
+to `w360_definer`). A failure usually means the bootstrap roles are missing or a lock wait on
+`app.tenant_plans` timed out: run the migrations again. Staff changes made before it are not told.
+
+**Migration 0076 failed.** It runs in one transaction, so a failure applies nothing, and the
+authentication function stays as it was. It creates `app.api_settings` with row security, its grants
+and deletion step 857, and rebuilds `ops.api_key_authenticate(text, inet)`: the migration role drops
+it as the owner of the `ops` schema, creates it, grants it to `w360_app` and hands it to
+`w360_definer`. A failure usually means the bootstrap roles are missing (`w360_owner` must be able to
+`SET ROLE w360_definer`) or a lock wait timed out: run the migrations again. While it runs, requests
+keep using the old function; web servers of the previous release keep working after it.
+
+**Migration 0075 failed.** It runs in one transaction, so a failure applies nothing. It adds
+`warned_at` and `notified_at` to `app.api_key_usage` with their grant, a partial index, and
+`ops.api_key_usage_notices_due` (granted to `w360_app`, then handed to `w360_definer`, with the
+definer's column grants and read policy). A failure usually means the bootstrap roles are missing
+or a lock wait on `app.api_key_usage` timed out: run the migrations again when requests are quieter.
+
+**Migration 0074 failed.** It runs in one transaction and only drops
+`ops.api_key_authenticate(text)`, the lookup without the client's address that 0051 kept for web
+servers of the previous release. A failure usually means something created since depends on it
+(nothing in the application does): find it with `SELECT * FROM pg_depend WHERE refobjid =
+'ops.api_key_authenticate(text)'::regprocedure` before running it again. Web servers of a release
+before 0051 can no longer authenticate keys once it has run.
 
 ## 10O. Outgoing webhooks
 

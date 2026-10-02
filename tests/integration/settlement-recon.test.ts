@@ -1141,7 +1141,7 @@ describe('payments not seen in a settlement', () => {
 });
 
 describe('plan subscription payments (ADR-063)', () => {
-  it('matches recorded plan payments, records a missed one by syncing its subscription, and leaves refunds of them to a person', async () => {
+  it('matches recorded plan payments, records a missed one by syncing its subscription, and records a missed refund of one (ADR-103)', async () => {
     const D = day(-50);
     const c = await company('Recon Epsilon Plans');
     const plans = createPlanAdminService({ platformDb: dbs.platform, clock });
@@ -1218,7 +1218,7 @@ describe('plan subscription payments (ADR-063)', () => {
       refundIds: [refund.id],
     });
     const { result } = await runDay(D);
-    expect(result).toMatchObject({ outcome: 'completed', items: 4, recorded: 1 });
+    expect(result).toMatchObject({ outcome: 'completed', items: 4, recorded: 2 });
     const byId = await itemsOf(D);
     expect(byId.get(first.payment.id)).toMatchObject({
       status: 'matched',
@@ -1238,14 +1238,24 @@ describe('plan subscription payments (ADR-063)', () => {
       reason: 'unknown_payment',
       tenantId: null,
     });
+    // The Dashboard refund of a plan payment is fetched and recorded, as its webhook would have.
     expect(byId.get(refund.id)).toMatchObject({
-      status: 'review',
-      reason: 'plan_payment_refund',
+      status: 'recorded',
+      reason: 'refund_recorded',
       tenantId: c.tenantId,
     });
+    const planRefunds = async () =>
+      adminQuery<{ origin: string; status: string; amount_minor: number }>(
+        `SELECT origin, status, amount_minor::int AS amount_minor FROM app.plan_payment_refunds
+          WHERE provider_refund_id = $1`,
+        [refund.id],
+      );
+    expect(await planRefunds()).toEqual([
+      { origin: 'razorpay', status: 'processed', amount_minor: 5_000 },
+    ]);
     expect(await planPaymentCount()).toBe(2);
 
-    // The day again: the missed payment is now matched, nothing is recorded twice.
+    // The day again: the missed payment and refund are now matched, nothing is recorded twice.
     const again = await runDay(D);
     expect(again.result).toMatchObject({ outcome: 'completed', items: 4 });
     expect((await itemsOf(D)).get(renewal.payment.id)).toMatchObject({
@@ -1253,6 +1263,18 @@ describe('plan subscription payments (ADR-063)', () => {
       reason: 'plan_payment_recorded',
     });
     expect(await planPaymentCount()).toBe(2);
+    expect(await planRefunds()).toHaveLength(1);
+    // The report showing the recorded refund for another amount: the difference waits for a person.
+    const refundItem = standIn.state.settlements.get(D)!.find((i) => i.entity_id === refund.id)!;
+    refundItem.amount = 4_000;
+    await runDay(D);
+    expect((await itemsOf(D)).get(refund.id)).toMatchObject({
+      status: 'mismatch',
+      reason: 'amount_differs',
+      tenantId: c.tenantId,
+      hyfibAmountMinor: 5_000,
+    });
+    expect(await planRefunds()).toHaveLength(1);
 
     // A later renewal the report shows for another amount than Razorpay's payment: it is recorded
     // from the payment, and the difference waits for a person.

@@ -367,7 +367,7 @@ export const apiErrorSchema = z.object({
       .string()
       .optional()
       .describe(
-        'A finer reason: automation_busy, automation_limit, automation_paused, automation_quota, automation_unavailable, channel_unavailable, conversation_assigned, idempotency_key_reused, ip_not_allowed, not_in_plan, quota_exceeded or window_closed.',
+        'A finer reason: automation_busy, automation_limit, automation_paused, automation_quota, automation_unavailable, channel_unavailable, conversation_assigned, idempotency_key_reused, ip_not_allowed, key_quota_exceeded, not_in_plan, quota_exceeded or window_closed.',
       ),
     issues: z.array(z.object({ path: z.string(), message: z.string() })).optional(),
   }),
@@ -396,14 +396,14 @@ const errors = (...statuses: number[]) =>
           {
             400: 'The request is malformed (for example invalid JSON or a missing header).',
             401: 'No valid API key: missing, unknown, revoked or expired.',
-            403: "The key lacks the scope this needs, the company's plan does not include the API, the scope this needs, automations when starting one or Commerce when sending products (reason not_in_plan), or the key does not accept requests from the client's address (reason ip_not_allowed).",
+            403: "The key lacks the scope this needs, the company's plan does not include the API, the scope this needs, automations when starting one or Commerce when sending products (reason not_in_plan), or the key, or its company for all its keys, does not accept requests from the client's address (reason ip_not_allowed).",
             404: 'Not found in the company.',
             409: 'The request conflicts with the current state. Starting an automation: another automation handles the conversation (reason automation_busy), a member is assigned to it (conversation_assigned), or it had as many runs in the last hour as allowed (automation_limit).',
             412: "A condition for sending or saving is not met (consent, suppression, state). With reason window_closed, the number has not written to the WhatsApp number in the last 24 hours, so only templates can be sent to it. Starting an automation: it is not published, archived or not started through the API (automation_unavailable), paused (automation_paused), its number is not active (channel_unavailable), or the plan's automation runs for the month are used up (automation_quota).",
             415: 'The body must be JSON (Content-Type: application/json).',
             422: 'The request body or parameters are invalid.',
             423: 'The company is suspended or its plan has ended: reading only.',
-            429: "Too many requests: wait for Retry-After seconds. With reason quota_exceeded, the plan's API requests for the month are used up, and Retry-After counts the seconds until the next month's period starts.",
+            429: "Too many requests: wait for Retry-After seconds. With reason quota_exceeded, the plan's API requests for the month are used up; with reason key_quota_exceeded, the key's own monthly limit is (set in Settings → API keys). Either way Retry-After counts the seconds until the next month's period starts.",
             500: 'Something went wrong on our side; retry later (with the same Idempotency-Key).',
           }[status] ?? 'Error',
         content: json(ref('Error')),
@@ -473,7 +473,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       description: [
         'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations, their messages (one conversation or all of them) and their notes, resolve, reopen and assign conversations or move them between teams, manage contacts and consent, and read message status for your company.',
         '',
-        'Authenticate with `Authorization: Bearer <API key>`; keys are created in Settings → API keys and belong to the company. A key can be limited to the addresses its systems call from: a request from any other address is refused with 403 (reason `ip_not_allowed`).',
+        'Authenticate with `Authorization: Bearer <API key>`; keys are created in Settings → API keys and belong to the company. A key, and the company for all its keys, can be limited to the addresses its systems call from: a request from any other address is refused with 403 (reason `ip_not_allowed`).',
         `Scopes: ${API_SCOPE_KEYS.map((s) => `\`${s}\` (${API_SCOPE_INFO[s].label.toLowerCase()})`).join(', ')}. A company's plan may include only some of them: a request that needs a scope the plan leaves out is refused with 403 (reason \`not_in_plan\`), whatever scopes its key has.`,
         '',
         `Limits: ${API_LIMITS.keyRate.refillPerSecond} requests a second per key (bursts of ${API_LIMITS.keyRate.capacity}) and ${API_LIMITS.companyRate.refillPerSecond} per company; JSON bodies up to ${API_LIMITS.bodyBytes / 1024} KB.`,

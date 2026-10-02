@@ -91,6 +91,11 @@ export const tenantPlans = appSchema.table('tenant_plans', {
   version: integer('version').notNull().default(1),
   /** The subscription that paid the current period; null for periods staff set (ADR-063). */
   subscriptionId: uuid('subscription_id'),
+  /**
+   * The version staff set that the company's billing managers were not emailed about yet
+   * (ADR-100, migration 0077); the worker's sweep clears it.
+   */
+  staffNoticeVersion: integer('staff_notice_version'),
 });
 
 export const PLAN_SUBSCRIPTION_STATUSES = [
@@ -150,6 +155,13 @@ export const planSubscriptions = appSchema.table('plan_subscriptions', {
   createdAt: tz('created_at').notNull().defaultNow(),
   syncedAt: tz('synced_at'),
   updatedAt: tz('updated_at').notNull().defaultNow(),
+  /**
+   * A cancellation by HyFib staff the company's billing managers were not emailed about yet
+   * (ADR-101, migration 0078); the worker's sweep clears it.
+   */
+  staffCancelNoticeDue: boolean('staff_cancel_notice_due').notNull().default(false),
+  /** When the first charge is due, at the trial's end (ADR-102, 0079); null: charged in Checkout. */
+  startsAt: tz('starts_at'),
 });
 
 /** A paid invoice of a subscription: the charge and the billing cycle it paid for (0037). */
@@ -166,6 +178,70 @@ export const planPayments = appSchema.table('plan_payments', {
   paidAt: tz('paid_at').notNull(),
   method: text('method'),
   createdAt: tz('created_at').notNull().defaultNow(),
+});
+
+export const PLAN_PAYMENT_REFUND_STATUSES = [
+  'requested',
+  'submitted',
+  'processed',
+  'failed',
+] as const;
+export type PlanPaymentRefundStatus = (typeof PLAN_PAYMENT_REFUND_STATUSES)[number];
+export const PLAN_PAYMENT_REFUND_ORIGINS = ['staff', 'razorpay'] as const;
+export type PlanPaymentRefundOrigin = (typeof PLAN_PAYMENT_REFUND_ORIGINS)[number];
+
+/**
+ * Refunds of plan payments (0080, ADR-103): asked for by a platform owner, or made at Razorpay and
+ * recorded from what it reports. The company role reads every column except the staff reason and
+ * who asked (column grants).
+ */
+export const planPaymentRefunds = appSchema.table('plan_payment_refunds', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  planPaymentId: uuid('plan_payment_id').notNull(),
+  origin: text('origin', { enum: PLAN_PAYMENT_REFUND_ORIGINS }).notNull(),
+  amountMinor: bigint('amount_minor', { mode: 'number' }).notNull(),
+  status: text('status', { enum: PLAN_PAYMENT_REFUND_STATUSES }).notNull().default('requested'),
+  reason: text('reason'),
+  requestedByUserId: text('requested_by_user_id'),
+  providerRefundId: text('provider_refund_id'),
+  attempts: integer('attempts').notNull().default(0),
+  nextAttemptAt: tz('next_attempt_at').notNull().defaultNow(),
+  lastError: text('last_error'),
+  requestedAt: tz('requested_at').notNull().defaultNow(),
+  submittedAt: tz('submitted_at'),
+  processedAt: tz('processed_at'),
+  failedAt: tz('failed_at'),
+  updatedAt: tz('updated_at').notNull().defaultNow(),
+});
+
+/**
+ * A company's request for a refund of a plan payment (0081, ADR-104): it inserts open requests and
+ * withdraws open ones; platform owners decide through a definer function, and approving starts the
+ * staff refund of ADR-103. Who decided and the notice marks are not readable by the company.
+ */
+export const PLAN_PAYMENT_REFUND_REQUEST_STATUSES = [
+  'open',
+  'approved',
+  'declined',
+  'withdrawn',
+] as const;
+export type PlanPaymentRefundRequestStatus = (typeof PLAN_PAYMENT_REFUND_REQUEST_STATUSES)[number];
+
+export const planPaymentRefundRequests = appSchema.table('plan_payment_refund_requests', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  planPaymentId: uuid('plan_payment_id').notNull(),
+  amountMinor: bigint('amount_minor', { mode: 'number' }).notNull(),
+  reason: text('reason').notNull(),
+  status: text('status', { enum: PLAN_PAYMENT_REFUND_REQUEST_STATUSES }).notNull().default('open'),
+  requestedByUserId: text('requested_by_user_id').notNull(),
+  requestedAt: tz('requested_at').notNull().defaultNow(),
+  withdrawnAt: tz('withdrawn_at'),
+  decidedAt: tz('decided_at'),
+  decisionNote: text('decision_note'),
+  planPaymentRefundId: uuid('plan_payment_refund_id'),
+  updatedAt: tz('updated_at').notNull().defaultNow(),
 });
 
 export const USAGE_METRICS = ['automation_runs', 'api_requests'] as const;

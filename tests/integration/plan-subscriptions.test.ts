@@ -1,8 +1,8 @@
 import { createHmac, randomBytes } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest';
 import { PgBoss } from 'pg-boss';
 import { Keyring, isAppError, uuidv7, type Clock, type RazorpayConfig } from '@w360/core';
-import { authorizedTenantScope, sql } from '@w360/db';
+import { authorizedTenantScope, sql, systemScope } from '@w360/db';
 import {
   JobSigner,
   PgBossJobQueue,
@@ -10,7 +10,9 @@ import {
   cancelPlanSubscriptionForDeletion,
   createPlanAdminService,
   createPlanSubscriptionService,
+  createPlansService,
   dayOf,
+  notifyStaffSubscriptionCancellations,
   outboxAad,
   processRazorpayReceipt,
   resolveTenantContext,
@@ -21,6 +23,7 @@ import {
   type BillingNoticeDeps,
   type BillingProviderDeps,
   type PlatformActor,
+  type SubscriptionCancelNoticeResult,
   type TenantContext,
 } from '@w360/domain';
 import {
@@ -144,8 +147,11 @@ async function plan(): Promise<string> {
 
 const day = (offset: number) => dayOf(new Date(Date.now() + offset * DAY_MS), 'Asia/Kolkata');
 
-/** A company on a trial of a fresh plan version, with two extra seats. */
-async function trialing(): Promise<Company> {
+/**
+ * A company on a trial of a fresh plan version, with two extra seats. The trial ends within two
+ * days unless told otherwise, so paying is charged at once in Checkout (ADR-102).
+ */
+async function trialing(trialEndsOn = day(2)): Promise<Company> {
   const planId = await plan();
   const user = await createUser(dbs, { name: 'Billing Owner' });
   const tenant = await createTenant(dbs, user);
@@ -156,7 +162,7 @@ async function trialing(): Promise<Company> {
     reason: 'Trial agreed on the sales call',
     status: 'trialing',
     planId,
-    trialEndsOn: day(10),
+    trialEndsOn,
     extraSeats: '2',
   });
   return {
@@ -184,6 +190,79 @@ async function subscribed(c: Company, beforeConfirm?: (subscriptionId: string) =
   });
   return { start, response, confirmed };
 }
+
+/** A day as the company's emails and pages show it (companies here are in India's time zone). */
+const shown = (at: Date) =>
+  new Intl.DateTimeFormat('en-IN', { dateStyle: 'medium', timeZone: 'Asia/Kolkata' }).format(at);
+
+/** The company's own view of its plan (the Billing page's plan card). */
+const plansService = () => createPlansService({ db: dbs.app, clock });
+
+/**
+ * Starts paying for a trial that ends more than two days ahead and authorises the payment method in
+ * Checkout (ADR-102): nothing is charged until the trial ends.
+ */
+async function scheduled(c: Company) {
+  const start = await service().start(c.ctx);
+  const { payment, response } = standIn.authorizeSubscription(start.providerSubscriptionId);
+  const confirmed = await service().confirmCheckout(c.ctx, {
+    subscriptionId: start.subscriptionId,
+    paymentId: response.razorpay_payment_id,
+    signature: response.razorpay_signature,
+  });
+  return { start, payment, confirmed };
+}
+
+/**
+ * Moves the end of a trial paid from its end `hours` into the past, as if it had run out: the
+ * plan's trial end, the subscription's start (and its creation, which comes before it), and the
+ * stand-in's `start_at` with any cycle and invoices it has already made.
+ */
+async function trialEnded(
+  c: Company,
+  start: { subscriptionId: string; providerSubscriptionId: string },
+  hours: number,
+) {
+  const endedAt = new Date(Math.floor((Date.now() - hours * 3600_000) / 1000) * 1000);
+  await adminQuery('UPDATE app.tenant_plans SET trial_ends_at = $2 WHERE tenant_id = $1', [
+    c.tenantId,
+    endedAt,
+  ]);
+  await adminQuery(
+    `UPDATE app.plan_subscriptions
+        SET created_at = $2::timestamptz - interval '3 days', starts_at = $2
+      WHERE id = $1`,
+    [start.subscriptionId, endedAt],
+  );
+  const sub = standIn.state.subscriptions.get(start.providerSubscriptionId)!;
+  const by = sub.startAt! - endedAt.getTime() / 1000;
+  sub.startAt = endedAt.getTime() / 1000;
+  if (sub.currentStart !== null) sub.currentStart -= by;
+  if (sub.currentEnd !== null) sub.currentEnd -= by;
+  if (sub.chargeAt !== null) sub.chargeAt -= by;
+  for (const invoice of standIn.state.invoices.values()) {
+    if (invoice.subscriptionId !== start.providerSubscriptionId) continue;
+    invoice.billingStart = (invoice.billingStart ?? 0) - by;
+    invoice.billingEnd = (invoice.billingEnd ?? 0) - by;
+  }
+  return endedAt;
+}
+
+/** Companies the plan sweep would move on now. */
+const transitionsDue = async () =>
+  (
+    await adminQuery<{ tenant_id: string }>(
+      'SELECT tenant_id FROM ops.plan_transitions_due(1000) AS tenant_id',
+    )
+  ).map((r) => r.tenant_id);
+
+/** Subscriptions the sweep would check with Razorpay now. */
+const checksDue = async () =>
+  (
+    await adminQuery<{ subscription_id: string }>(
+      'SELECT subscription_id FROM ops.plan_subscriptions_due(1000)',
+    )
+  ).map((r) => r.subscription_id);
 
 /** The stand-in's invoices of a subscription. */
 const invoicesOf = (providerSubscriptionId: string) =>
@@ -214,6 +293,9 @@ async function subscriptionRow(id: string) {
     provider_plan_id: string | null;
     provider_subscription_id: string | null;
     authorize_by: Date;
+    starts_at: Date | null;
+    synced_at: Date | null;
+    created_at: Date;
     current_start: Date | null;
     current_end: Date | null;
     paid_count: number;
@@ -387,6 +469,8 @@ describe('what a company pays', () => {
     expect((await service().overview(c.ctx)).offer).toEqual({
       available: true,
       intervalMonths: 1,
+      // The trial ends within two days: charged at once (ADR-102).
+      startsAt: null,
       quote: {
         planMinor: 99_900,
         seatsMinor: 20_000,
@@ -1257,6 +1341,351 @@ describe('cancelling', () => {
   });
 });
 
+describe('staff cancellation notices (ADR-101)', () => {
+  /** Every cancellation due, as successive minute sweeps would tell them (50 at a time). */
+  const notify = async (): Promise<SubscriptionCancelNoticeResult> => {
+    const total: SubscriptionCancelNoticeResult = { notified: 0, failed: [] };
+    for (let sweep = 0; sweep < 20; sweep += 1) {
+      const result = await notifyStaffSubscriptionCancellations({
+        db: dbs.app,
+        notices: notices(),
+      });
+      total.notified += result.notified;
+      total.failed.push(...result.failed);
+      if (result.notified === 0 || result.failed.length > 0) break;
+    }
+    return total;
+  };
+  const cancelEmails = async (tenantId: string) =>
+    (await billingEmails(tenantId)).filter(
+      (e) => e.subject === 'HyFib cancelled your plan subscription',
+    );
+  const markOf = async (subscriptionId: string) =>
+    (
+      await adminQuery<{ due: boolean }>(
+        'SELECT staff_cancel_notice_due AS due FROM app.plan_subscriptions WHERE id = $1',
+        [subscriptionId],
+      )
+    )[0]!.due;
+
+  it('tells the billing managers once that HyFib cancelled, with the paid period and the reason', async () => {
+    offsetMs = 0;
+    const c = await trialing();
+    const { start } = await subscribed(c);
+    const reason = 'Customer asked by phone, ticket 882';
+    await admin().cancelTenantSubscription(owner, { tenantId: c.tenantId, reason });
+    expect(await markOf(start.subscriptionId)).toBe(true);
+
+    expect(await notify()).toMatchObject({ failed: [] });
+    const emails = await cancelEmails(c.tenantId);
+    expect(emails.map((e) => e.to)).toEqual([c.owner.email]);
+    expect(emails[0]!.lines[0]).toMatch(
+      /^HyFib cancelled the Razorpay subscription for the Growth plan of .+ on \d{1,2} \w+ \d{4}, so nothing more is charged\.$/,
+    );
+    // The plan is still on the period the subscription paid.
+    expect((await planState(c.tenantId)).status).toBe('active');
+    expect(emails[0]!.lines[1]).toMatch(
+      /^The period it paid runs until \d{1,2} \w+ \d{4}; the plan then ends, and Billing shows how to continue\.$/,
+    );
+    expect(emails[0]!.lines).toContain(`HyFib's reason: ${reason}`);
+    expect(emails[0]!.url).toBe(`http://localhost:3000/c/${c.slug}/billing`);
+    expect(await markOf(start.subscriptionId)).toBe(false);
+
+    // Told once.
+    await notify();
+    expect(await cancelEmails(c.tenantId)).toHaveLength(1);
+  });
+
+  it('tells nothing of the company’s own or a deletion’s cancellation, and two sweeps tell one once', async () => {
+    offsetMs = 0;
+    const own = await trialing();
+    const ownSub = await subscribed(own);
+    await service().cancel(own.ctx);
+    expect(await markOf(ownSub.start.subscriptionId)).toBe(false);
+    const deleting = await trialing();
+    const deletingSub = await subscribed(deleting);
+    await cancelPlanSubscriptionForDeletion(
+      { db: dbs.app, clock, razorpay },
+      authorizedTenantScope(deleting.tenantId, null),
+    );
+    expect(await markOf(deletingSub.start.subscriptionId)).toBe(false);
+
+    // A company being deleted after staff cancelled is not listed.
+    const leaving = await trialing();
+    const leavingSub = await subscribed(leaving);
+    await admin().cancelTenantSubscription(owner, {
+      tenantId: leaving.tenantId,
+      reason: 'Closing the account, ticket 883',
+    });
+    await adminQuery(`UPDATE app.tenants SET status = 'pending_deletion' WHERE id = $1`, [
+      leaving.tenantId,
+    ]);
+    const due = await dbs.app.run(
+      systemScope,
+      (tx) =>
+        tx.execute<{ subscription_id: string }>(
+          sql`select subscription_id from ops.plan_subscription_cancel_notices_due(500)`,
+        ),
+      { accessMode: 'read only' },
+    );
+    expect(due.rows.map((r) => r.subscription_id)).not.toContain(leavingSub.start.subscriptionId);
+
+    const twice = await trialing();
+    await subscribed(twice);
+    await admin().cancelTenantSubscription(owner, {
+      tenantId: twice.tenantId,
+      reason: 'Customer asked by email, ticket 884',
+    });
+    const [first, second] = await Promise.all([notify(), notify()]);
+    expect([...first.failed, ...second.failed]).toEqual([]);
+    expect(await cancelEmails(twice.tenantId)).toHaveLength(1);
+    for (const c of [own, deleting, leaving]) {
+      expect(await cancelEmails(c.tenantId)).toEqual([]);
+    }
+    expect(await markOf(leavingSub.start.subscriptionId)).toBe(true);
+  });
+
+  it('tells the plan as it is when the email goes out: grace days, or a plan the cancellation leaves', async () => {
+    offsetMs = 0;
+    const secondLine = async (c: Company) => {
+      const emails = await cancelEmails(c.tenantId);
+      expect(emails).toHaveLength(1);
+      return emails[0]!.lines[1];
+    };
+    // Grace days after the last period the subscription paid.
+    const late = await trialing();
+    await subscribed(late);
+    await admin().cancelTenantSubscription(owner, {
+      tenantId: late.tenantId,
+      reason: 'Customer asked by phone, ticket 887',
+    });
+    await adminQuery(
+      `UPDATE app.tenant_plans
+          SET status = 'past_due', period_start = now() - interval '32 days',
+              period_end = now() - interval '2 days', grace_ends_at = now() + interval '5 days'
+        WHERE tenant_id = $1`,
+      [late.tenantId],
+    );
+    // A plan staff set after cancelling.
+    const moved = await trialing();
+    await subscribed(moved);
+    await admin().cancelTenantSubscription(owner, {
+      tenantId: moved.tenantId,
+      reason: 'Moving to a larger plan, ticket 888',
+    });
+    const view = await admin().tenantPlan(owner, moved.tenantId);
+    await admin().setTenantPlan(owner, {
+      tenantId: moved.tenantId,
+      version: view.state.version,
+      reason: 'Moving the company to a larger plan',
+      status: 'active',
+      planId: moved.planId,
+      periodStart: day(0),
+      periodEnd: day(60),
+    });
+    // A period the plan sweep has not moved on yet.
+    const lapsed = await trialing();
+    await subscribed(lapsed);
+    await admin().cancelTenantSubscription(owner, {
+      tenantId: lapsed.tenantId,
+      reason: 'Customer asked by email, ticket 889',
+    });
+    await adminQuery(
+      `UPDATE app.tenant_plans
+          SET period_start = now() - interval '31 days', period_end = now() - interval '1 minute'
+        WHERE tenant_id = $1`,
+      [lapsed.tenantId],
+    );
+
+    // Grace days the plan sweep has not moved on yet.
+    const lapsedGrace = await trialing();
+    await subscribed(lapsedGrace);
+    await admin().cancelTenantSubscription(owner, {
+      tenantId: lapsedGrace.tenantId,
+      reason: 'Customer asked by email, ticket 890',
+    });
+    await adminQuery(
+      `UPDATE app.tenant_plans
+          SET status = 'past_due', period_start = now() - interval '40 days',
+              period_end = now() - interval '10 days', grace_ends_at = now() - interval '1 minute'
+        WHERE tenant_id = $1`,
+      [lapsedGrace.tenantId],
+    );
+
+    expect(await notify()).toMatchObject({ failed: [] });
+    expect(await secondLine(late)).toMatch(
+      /^Its last paid period ended on \d{1,2} \w+ \d{4}, and the plan ends when its grace days end on \d{1,2} \w+ \d{4}; Billing shows how to continue\.$/,
+    );
+    for (const c of [moved, lapsed, lapsedGrace]) {
+      expect(await secondLine(c)).toBe(
+        'This does not change the company’s plan; the plan card in Billing shows it.',
+      );
+    }
+  });
+
+  it('two cancellations before a sweep are each told, with their own reason', async () => {
+    offsetMs = 0;
+    const c = await trialing();
+    const first = await subscribed(c);
+    await admin().cancelTenantSubscription(owner, {
+      tenantId: c.tenantId,
+      reason: 'First subscription stopped, ticket 891',
+    });
+    // Staff put the company back on a trial, and it pays again by a new subscription.
+    const view = await admin().tenantPlan(owner, c.tenantId);
+    await admin().setTenantPlan(owner, {
+      tenantId: c.tenantId,
+      version: view.state.version,
+      reason: 'Trial again after the call',
+      status: 'trialing',
+      planId: c.planId,
+      trialEndsOn: day(2),
+      extraSeats: '2',
+    });
+    const second = await subscribed(c);
+    expect(second.start.subscriptionId).not.toBe(first.start.subscriptionId);
+    await admin().cancelTenantSubscription(owner, {
+      tenantId: c.tenantId,
+      reason: 'Second subscription stopped, ticket 892',
+    });
+
+    expect(await notify()).toMatchObject({ failed: [] });
+    const emails = await cancelEmails(c.tenantId);
+    expect(emails).toHaveLength(2);
+    const told = (reason: string) =>
+      emails.find((e) => e.lines.includes(`HyFib's reason: ${reason}`));
+    // The first subscription no longer paid the plan; the second one's period still runs.
+    expect(told('First subscription stopped, ticket 891')?.lines[1]).toBe(
+      'This does not change the company’s plan; the plan card in Billing shows it.',
+    );
+    expect(told('Second subscription stopped, ticket 892')?.lines[1]).toMatch(
+      /^The period it paid runs until /,
+    );
+  });
+
+  it('is marked only by staff and taken only in the company’s own scope', async () => {
+    offsetMs = 0;
+    const c = await trialing();
+    const { start } = await subscribed(c);
+    const other = await trialing();
+    await admin().cancelTenantSubscription(owner, {
+      tenantId: c.tenantId,
+      reason: 'Customer asked by phone, ticket 885',
+    });
+    const inScope = <T extends Record<string, unknown>>(
+      tenantId: string,
+      query: ReturnType<typeof sql>,
+    ) =>
+      dbs.app.run(authorizedTenantScope(tenantId, null), async (tx) => {
+        const res = await tx.execute<T>(query);
+        return res.rows;
+      });
+    // The runtime role can neither set nor clear the mark.
+    for (const value of [true, false]) {
+      expect(
+        (
+          await refusal(
+            inScope(
+              c.tenantId,
+              sql`update app.plan_subscriptions set staff_cancel_notice_due = ${value}`,
+            ),
+          )
+        ).code,
+      ).toBe('forbidden');
+    }
+    const take = (tenantId: string) =>
+      inScope<{ taken: boolean }>(
+        tenantId,
+        sql`select app.take_plan_subscription_cancel_notice(${start.subscriptionId}::uuid) as taken`,
+      );
+    await expect(
+      dbs.app.run(systemScope, (tx) =>
+        tx.execute(
+          sql`select app.take_plan_subscription_cancel_notice(${start.subscriptionId}::uuid)`,
+        ),
+      ),
+    ).rejects.toThrow();
+    expect(await take(other.tenantId)).toEqual([{ taken: false }]);
+    expect(await markOf(start.subscriptionId)).toBe(true);
+    expect(await take(c.tenantId)).toEqual([{ taken: true }]);
+    expect(await take(c.tenantId)).toEqual([{ taken: false }]);
+  });
+
+  it('locks the company before its subscription, so a staff change during a notice waits for it', async () => {
+    offsetMs = 0;
+    const c = await trialing();
+    const { start } = await subscribed(c);
+    await admin().cancelTenantSubscription(owner, {
+      tenantId: c.tenantId,
+      reason: 'Customer asked by phone, ticket 886',
+    });
+    const holder = await dbs.adminPool.connect();
+    let sending: Promise<unknown> | undefined;
+    try {
+      await holder.query('BEGIN');
+      await holder.query('SELECT 1 FROM app.tenants WHERE id = $1 FOR UPDATE', [c.tenantId]);
+      const [lock] = (await holder.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows;
+      sending = notify();
+      await vi.waitFor(
+        async () => {
+          const [waiting] = await adminQuery<{ n: number }>(
+            'SELECT count(*)::int AS n FROM pg_stat_activity a WHERE $1 = ANY (pg_blocking_pids(a.pid))',
+            [lock!.pid],
+          );
+          if (waiting!.n < 1) throw new Error('the notice is not waiting yet');
+        },
+        { timeout: 4_000, interval: 20 },
+      );
+      // The waiting notice holds nothing on the subscription.
+      await holder.query('SELECT 1 FROM app.plan_subscriptions WHERE id = $1 FOR UPDATE NOWAIT', [
+        start.subscriptionId,
+      ]);
+    } finally {
+      await holder.query('COMMIT');
+      holder.release();
+    }
+    expect(await sending).toMatchObject({ failed: [] });
+    expect(await cancelEmails(c.tenantId)).toHaveLength(1);
+  });
+
+  it('a subscription whose payments were to start at the trial’s end: the trial goes on, or is over if it ended (ADR-102)', async () => {
+    offsetMs = 0;
+    const c = await trialing(day(10));
+    await scheduled(c);
+    const trialEndsAt = (await planState(c.tenantId)).trial_ends_at!;
+    await admin().cancelTenantSubscription(owner, {
+      tenantId: c.tenantId,
+      reason: 'Customer will pay by invoice, ticket 893',
+    });
+    expect(await notify()).toMatchObject({ failed: [] });
+    const [running] = await cancelEmails(c.tenantId);
+    expect(running!.lines[1]).toBe(
+      `Its payments were to start when the trial ends on ${shown(trialEndsAt)}. The trial goes on until then; Billing shows how to continue after it.`,
+    );
+    expect(await planState(c.tenantId)).toMatchObject({
+      status: 'trialing',
+      trial_ends_at: trialEndsAt,
+    });
+
+    // Cancelled while the ended trial waited for its first charge: the trial is over, told so
+    // also when the plan sweep ended it before the notice went out.
+    const d = await trialing(day(10));
+    const { start } = await scheduled(d);
+    const endedAt = await trialEnded(d, start, 3);
+    await admin().cancelTenantSubscription(owner, {
+      tenantId: d.tenantId,
+      reason: 'Card declined twice, customer asked to stop, ticket 894',
+    });
+    await sweepPlanStates(sweepDeps(), 1000);
+    expect((await planState(d.tenantId)).status).toBe('expired');
+    expect(await notify()).toMatchObject({ failed: [] });
+    const [over] = await cancelEmails(d.tenantId);
+    expect(over!.lines[1]).toBe(
+      `Its payments were to start when the trial ended on ${shown(endedAt)}, so the trial is over; Billing shows how to continue.`,
+    );
+  });
+});
+
 describe('the sweep', () => {
   it('fails a subscription never created at Razorpay and cancels an unpaid one whose window closed', async () => {
     offsetMs = 0;
@@ -1342,5 +1771,420 @@ describe('the sweep', () => {
     expect(await planPayments(c.tenantId)).toHaveLength(2);
     const sub = standIn.state.subscriptions.get(start.providerSubscriptionId)!;
     expect((await planState(c.tenantId)).period_end?.getTime()).toBe(sub.currentEnd! * 1000);
+  });
+});
+
+describe('paying from the end of the trial (ADR-102)', () => {
+  it('a trial ending more than two days ahead is paid from its end: Checkout only authorises, and the trial goes on', async () => {
+    offsetMs = 0;
+    const c = await trialing(day(10));
+    const trialEndsAt = (await planState(c.tenantId)).trial_ends_at!;
+    expect((await service().overview(c.ctx)).offer).toMatchObject({
+      available: true,
+      startsAt: trialEndsAt,
+      quote: { totalMinor: 141_482 },
+    });
+    const before = standIn.state.calls.length;
+    const { start, payment, confirmed } = await scheduled(c);
+    const subCall = standIn.state.calls
+      .slice(before)
+      .find((call) => call.path === '/v1/subscriptions');
+    expect(subCall?.body).toMatchObject({
+      start_at: trialEndsAt.getTime() / 1000,
+      total_count: 60,
+      customer_notify: true,
+    });
+    // Checkout's authentication pays no invoice and is no plan payment.
+    expect(payment).toMatchObject({ invoiceId: null, status: 'refunded' });
+    expect(confirmed).toEqual({ status: 'scheduled' });
+    expect(await subscriptionRow(start.subscriptionId)).toMatchObject({
+      status: 'authenticated',
+      starts_at: trialEndsAt,
+      paid_count: 0,
+      current_start: null,
+    });
+    expect(await planState(c.tenantId)).toMatchObject({
+      status: 'trialing',
+      trial_ends_at: trialEndsAt,
+      subscription_id: null,
+    });
+    expect(await planPayments(c.tenantId)).toEqual([]);
+    expect(await audits(c.tenantId, 'billing.plan_subscription_started')).toMatchObject([
+      { metadata: { startsAt: trialEndsAt.toISOString() } },
+    ]);
+    const emails = await billingEmails(c.tenantId);
+    expect(emails.map((e) => e.subject)).toEqual([
+      'Payments for your HyFib plan start when the trial ends',
+    ]);
+    expect(emails[0]!.lines).toEqual([
+      `Razorpay charges ₹1,414.82 for the Growth plan on ${shown(trialEndsAt)}, when the trial ends, and every month after that until the subscription is cancelled in billing.`,
+      'Nothing is charged for the plan before then, and the trial goes on as it is.',
+    ]);
+    const overview = await service().overview(c.ctx);
+    expect(overview.offer).toEqual({ available: false, reason: 'subscribed' });
+    expect(overview.subscription).toMatchObject({
+      status: 'authenticated',
+      startsAt: trialEndsAt,
+      paidCount: 0,
+      firstChargeAhead: true,
+    });
+    expect(overview.payments).toEqual([]);
+    // The trial has not ended, so it waits for nothing yet, and Razorpay is not asked before the
+    // start (beyond the daily check).
+    expect((await plansService().overview(c.ctx)).trialWaitsUntil).toBeNull();
+    await adminQuery(
+      `UPDATE app.plan_subscriptions SET synced_at = now() - interval '2 hours' WHERE id = $1`,
+      [start.subscriptionId],
+    );
+    expect(await checksDue()).not.toContain(start.subscriptionId);
+
+    // Events and syncs of the same state tell nothing more, and a second subscription is refused.
+    await deliver('subscription.authenticated', subscriptionEvent(start.providerSubscriptionId));
+    await syncPlanSubscriptionOfPlan(provider(), authorizedTenantScope(c.tenantId, null));
+    expect(await billingEmails(c.tenantId)).toHaveLength(1);
+    expect(await refusal(service().start(c.ctx))).toMatchObject({ code: 'conflict' });
+    // Staff plan changes wait for it, as for any subscription that may still be charged.
+    const view = await admin().tenantPlan(owner, c.tenantId);
+    expect(
+      await refusal(
+        admin().setTenantPlan(owner, {
+          tenantId: c.tenantId,
+          version: view.state.version,
+          reason: 'Longer trial agreed on the call',
+          status: 'trialing',
+          planId: c.planId,
+          trialEndsOn: day(20),
+          extraSeats: '2',
+        }),
+      ),
+    ).toMatchObject({ code: 'precondition_failed' });
+  });
+
+  it('the first charge at the trial’s end makes the plan active from then, also when its events are missed', async () => {
+    offsetMs = 0;
+    const c = await trialing(day(10));
+    const { start } = await scheduled(c);
+    const endedAt = await trialEnded(c, start, 2);
+
+    // The ended trial waits for the charge: the sweep does not list it, the transition leaves it,
+    // and the plan card says until when.
+    expect(await transitionsDue()).not.toContain(c.tenantId);
+    const scope = authorizedTenantScope(c.tenantId, null);
+    const moved = await dbs.app.run(scope, (tx) =>
+      tx.execute(sql`select * from app.apply_plan_transition(${c.tenantId}::uuid)`),
+    );
+    expect(moved.rows).toEqual([]);
+    expect((await planState(c.tenantId)).status).toBe('trialing');
+    expect((await plansService().overview(c.ctx)).trialWaitsUntil).toEqual(
+      new Date(endedAt.getTime() + 7 * DAY_MS),
+    );
+    expect((await service().overview(c.ctx)).subscription).toMatchObject({
+      status: 'authenticated',
+      firstChargeAhead: false,
+    });
+
+    // Razorpay is asked hourly once the charge is due, also while Razorpay makes it (`active`
+    // before a paid cycle is recorded).
+    expect(await checksDue()).not.toContain(start.subscriptionId);
+    await adminQuery(
+      `UPDATE app.plan_subscriptions SET synced_at = now() - interval '61 minutes' WHERE id = $1`,
+      [start.subscriptionId],
+    );
+    expect(await checksDue()).toContain(start.subscriptionId);
+    await adminQuery(`UPDATE app.plan_subscriptions SET status = 'active' WHERE id = $1`, [
+      start.subscriptionId,
+    ]);
+    expect(await checksDue()).toContain(start.subscriptionId);
+    await adminQuery(`UPDATE app.plan_subscriptions SET status = 'authenticated' WHERE id = $1`, [
+      start.subscriptionId,
+    ]);
+
+    // Razorpay charges the first cycle from the trial's end; its events never arrive.
+    standIn.chargeSubscription(start.providerSubscriptionId);
+    await sweepPlanSubscriptions(provider());
+    const sub = standIn.state.subscriptions.get(start.providerSubscriptionId)!;
+    const state = await planState(c.tenantId);
+    expect(state).toMatchObject({
+      status: 'active',
+      trial_ends_at: null,
+      subscription_id: start.subscriptionId,
+    });
+    expect(state.period_start).toEqual(endedAt);
+    expect(state.period_end?.getTime()).toBe(sub.currentEnd! * 1000);
+    expect(await planPayments(c.tenantId)).toHaveLength(1);
+    expect(await audits(c.tenantId, 'plan.subscription_period')).toMatchObject([
+      { actor_type: 'system', metadata: { previous_status: 'trialing' } },
+    ]);
+    expect((await subjects(c.tenantId)).at(-1)).toBe('Payment received for your HyFib plan');
+    expect((await plansService().overview(c.ctx)).trialWaitsUntil).toBeNull();
+    // With the charge recorded, the hourly check stops.
+    await adminQuery(
+      `UPDATE app.plan_subscriptions SET synced_at = now() - interval '61 minutes' WHERE id = $1`,
+      [start.subscriptionId],
+    );
+    expect(await checksDue()).not.toContain(start.subscriptionId);
+  });
+
+  it('a failed first charge: the trial waits the plan’s grace days, then ends; a later charge still pays for the plan', async () => {
+    offsetMs = 0;
+    const c = await trialing(day(10));
+    const { start } = await scheduled(c);
+    const endedAt = await trialEnded(c, start, 2);
+    const failed = standIn.chargeSubscription(start.providerSubscriptionId, { status: 'failed' });
+    await deliver(
+      'subscription.pending',
+      subscriptionEvent(start.providerSubscriptionId, failed.payment.id),
+    );
+    expect((await subscriptionRow(start.subscriptionId)).status).toBe('pending');
+    const [failure] = (await billingEmails(c.tenantId)).slice(-1);
+    expect(failure).toMatchObject({ subject: 'A payment for your HyFib plan failed' });
+    expect(failure!.lines[1]).toBe(
+      `Everything keeps working until ${shown(new Date(endedAt.getTime() + 7 * DAY_MS))} while Razorpay tries again; the payer can change the card through the link in Razorpay’s email.`,
+    );
+    expect((await service().overview(c.ctx)).subscription).toMatchObject({
+      status: 'pending',
+      paidCount: 0,
+    });
+    // Within the grace days, the sweep leaves the trial alone.
+    await sweepPlanStates(sweepDeps(), 1000);
+    expect((await planState(c.tenantId)).status).toBe('trialing');
+
+    // The grace days pass without a charge: the trial ends, and the email says how it is paid.
+    await trialEnded(c, start, 8 * 24);
+    const swept = await sweepPlanStates(sweepDeps(), 1000);
+    expect(swept.failed.filter((f) => f.tenantId === c.tenantId)).toEqual([]);
+    expect(await planState(c.tenantId)).toMatchObject({
+      status: 'expired',
+      note: 'The trial ended.',
+    });
+    const [ended] = (await billingEmails(c.tenantId)).slice(-1);
+    expect(ended).toMatchObject({ subject: 'Your HyFib trial has ended' });
+    expect(ended!.lines[2]).toBe(
+      'The plan is paid once Razorpay’s first charge goes through (the payer can change the card through the link in Razorpay’s email), or cancel the subscription in billing and pay again.',
+    );
+
+    // Razorpay's retry goes through: the plan is paid for the cycle it charged.
+    const retry = standIn.chargeSubscription(start.providerSubscriptionId);
+    await deliver(
+      'subscription.charged',
+      subscriptionEvent(start.providerSubscriptionId, retry.payment.id),
+    );
+    const sub = standIn.state.subscriptions.get(start.providerSubscriptionId)!;
+    const state = await planState(c.tenantId);
+    expect(state).toMatchObject({ status: 'active', subscription_id: start.subscriptionId });
+    expect(state.period_start?.getTime()).toBe(sub.currentStart! * 1000);
+    expect(await planPayments(c.tenantId)).toHaveLength(1);
+  });
+
+  it('the trial waits only for a subscription starting at its end, while it may be charged, for the plan’s grace days', async () => {
+    offsetMs = 0;
+    const c = await trialing(day(10));
+    const { start } = await scheduled(c);
+    const endedAt = await trialEnded(c, start, 2);
+    const scope = authorizedTenantScope(c.tenantId, null);
+    // Read as the company's own scope reads it.
+    const waitsUntil = async () =>
+      (
+        await dbs.app.run(scope, (tx) =>
+          tx.execute<{ until: Date | null }>(
+            sql`select app.trial_charge_wait_until(${c.tenantId}::uuid) as until`,
+          ),
+        )
+      ).rows[0]!.until;
+    const due = async () =>
+      (
+        await adminQuery<{ tenant_id: string }>(
+          'SELECT tenant_id FROM ops.plan_transitions_due(1000) AS tenant_id',
+        )
+      ).some((r) => r.tenant_id === c.tenantId);
+    expect(new Date((await waitsUntil())!)).toEqual(new Date(endedAt.getTime() + 7 * DAY_MS));
+    expect(await due()).toBe(false);
+
+    const statuses = [
+      ['active', true],
+      ['pending', true],
+      ['halted', false],
+      ['paused', false],
+      ['cancelled', false],
+      ['expired', false],
+    ] as const;
+    for (const [status, waiting] of statuses) {
+      await adminQuery('UPDATE app.plan_subscriptions SET status = $2 WHERE id = $1', [
+        start.subscriptionId,
+        status,
+      ]);
+      expect({ status, waits: (await waitsUntil()) !== null, due: await due() }).toEqual({
+        status,
+        waits: waiting,
+        due: !waiting,
+      });
+    }
+    await adminQuery(`UPDATE app.plan_subscriptions SET status = 'authenticated' WHERE id = $1`, [
+      start.subscriptionId,
+    ]);
+    // A subscription starting at another time does not hold the trial.
+    await adminQuery(
+      `UPDATE app.plan_subscriptions SET starts_at = starts_at + interval '1 second' WHERE id = $1`,
+      [start.subscriptionId],
+    );
+    expect(await waitsUntil()).toBeNull();
+    expect(await due()).toBe(true);
+    await adminQuery(
+      `UPDATE app.plan_subscriptions SET starts_at = starts_at - interval '1 second' WHERE id = $1`,
+      [start.subscriptionId],
+    );
+    expect(await due()).toBe(false);
+
+    // A start is always after the subscription was recorded.
+    await expect(
+      adminQuery('UPDATE app.plan_subscriptions SET starts_at = created_at WHERE id = $1', [
+        start.subscriptionId,
+      ]),
+    ).rejects.toThrow(/plan_subscriptions_starts_at_check/);
+
+    // The wait is the plan version's grace days: once they have passed, the trial ends.
+    await trialEnded(c, start, 7 * 24 + 1);
+    expect(await due()).toBe(true);
+    const moved = await dbs.app.run(scope, (tx) =>
+      tx.execute(sql`select * from app.apply_plan_transition(${c.tenantId}::uuid)`),
+    );
+    expect(moved.rows).toMatchObject([{ previous_status: 'trialing', new_status: 'expired' }]);
+  });
+
+  it('cancelling before the start charges nothing and the trial goes on; after it, Razorpay is asked first', async () => {
+    offsetMs = 0;
+    const early = await trialing(day(10));
+    const { start } = await scheduled(early);
+    const trialEndsAt = (await planState(early.tenantId)).trial_ends_at!;
+    expect(await service().cancel(early.ctx)).toEqual({ atPeriodEnd: false, periodEnd: null });
+    expect(standIn.state.subscriptions.get(start.providerSubscriptionId)).toMatchObject({
+      status: 'cancelled',
+      cancelAtCycleEnd: false,
+    });
+    expect(await subscriptionRow(start.subscriptionId)).toMatchObject({
+      status: 'cancelled',
+      paid_count: 0,
+    });
+    const [told] = (await billingEmails(early.tenantId)).slice(-1);
+    expect(told).toMatchObject({ subject: 'Your HyFib plan subscription is cancelled' });
+    expect(told!.lines[1]).toBe(
+      `Nothing was charged for it, and the trial goes on until ${shown(trialEndsAt)}.`,
+    );
+    expect(await planState(early.tenantId)).toMatchObject({
+      status: 'trialing',
+      trial_ends_at: trialEndsAt,
+    });
+    expect(await planPayments(early.tenantId)).toEqual([]);
+    // It can pay from the trial's end again.
+    expect((await service().overview(early.ctx)).offer).toMatchObject({
+      available: true,
+      startsAt: trialEndsAt,
+    });
+
+    // After the start Razorpay charged the first cycle, but its events have not arrived: the
+    // cancellation asks first, so the paid period stands and the subscription ends with it.
+    const late = await trialing(day(10));
+    const lateSub = await scheduled(late);
+    const endedAt = await trialEnded(late, lateSub.start, 1);
+    standIn.chargeSubscription(lateSub.start.providerSubscriptionId);
+    const cancelled = await service().cancel(late.ctx);
+    const charged = standIn.state.subscriptions.get(lateSub.start.providerSubscriptionId)!;
+    expect(cancelled).toEqual({
+      atPeriodEnd: true,
+      periodEnd: new Date(charged.currentEnd! * 1000),
+    });
+    expect(charged).toMatchObject({ status: 'active', cancelAtCycleEnd: true });
+    const paid = await planState(late.tenantId);
+    expect(paid).toMatchObject({ status: 'active', subscription_id: lateSub.start.subscriptionId });
+    expect(paid.period_start).toEqual(endedAt);
+    expect(await planPayments(late.tenantId)).toHaveLength(1);
+    expect((await billingEmails(late.tenantId)).at(-1)!.lines[1]).toBe(
+      `The plan ends on ${shown(new Date(charged.currentEnd! * 1000))}, at the end of the paid period.`,
+    );
+
+    // After the start with no charge made: cancelled at once, and the trial is over.
+    const lapsed = await trialing(day(10));
+    const lapsedSub = await scheduled(lapsed);
+    const lapsedEnd = await trialEnded(lapsed, lapsedSub.start, 1);
+    expect((await service().cancel(lapsed.ctx)).atPeriodEnd).toBe(false);
+    expect(standIn.state.subscriptions.get(lapsedSub.start.providerSubscriptionId)?.status).toBe(
+      'cancelled',
+    );
+    expect((await billingEmails(lapsed.tenantId)).at(-1)!.lines[1]).toBe(
+      `Nothing was charged for it, and the trial ended on ${shown(lapsedEnd)}.`,
+    );
+    await sweepPlanStates(sweepDeps(), 1000);
+    expect((await planState(lapsed.tenantId)).status).toBe('expired');
+
+    // Razorpay not answering the check: nothing is cancelled, and the company is told to retry.
+    const unsure = await trialing(day(10));
+    const unsureSub = await scheduled(unsure);
+    await trialEnded(unsure, unsureSub.start, 1);
+    standIn.state.queues.subscriptionFetch.push({ kind: 'error', status: 503 });
+    expect(await refusal(service().cancel(unsure.ctx))).toMatchObject({
+      code: 'provider_unavailable',
+    });
+    expect(standIn.state.subscriptions.get(unsureSub.start.providerSubscriptionId)?.status).toBe(
+      'authenticated',
+    );
+  });
+
+  it('a first charge whose events were missed is found before the trial would end', async () => {
+    offsetMs = 0;
+    const c = await trialing(day(10));
+    const { start } = await scheduled(c);
+    const endedAt = await trialEnded(c, start, 8 * 24);
+    // Razorpay charged at the start; nothing reached HyFib, and the grace days are over.
+    standIn.chargeSubscription(start.providerSubscriptionId);
+    expect(await transitionsDue()).toContain(c.tenantId);
+    const swept = await sweepPlanStates(sweepDeps(), 1000);
+    expect(swept.failed.filter((f) => f.tenantId === c.tenantId)).toEqual([]);
+    const state = await planState(c.tenantId);
+    expect(state).toMatchObject({ status: 'active', subscription_id: start.subscriptionId });
+    expect(state.period_start).toEqual(endedAt);
+    expect(await planPayments(c.tenantId)).toHaveLength(1);
+    expect(await subjects(c.tenantId)).not.toContain('Your HyFib trial has ended');
+  });
+
+  it('Razorpay stopping its retries of the first charge ends the wait', async () => {
+    offsetMs = 0;
+    const c = await trialing(day(10));
+    const { start } = await scheduled(c);
+    await trialEnded(c, start, 2);
+    const failed = standIn.chargeSubscription(start.providerSubscriptionId, { status: 'failed' });
+    await deliver(
+      'subscription.pending',
+      subscriptionEvent(start.providerSubscriptionId, failed.payment.id),
+    );
+    standIn.setSubscriptionStatus(start.providerSubscriptionId, 'halted');
+    await deliver('subscription.halted', subscriptionEvent(start.providerSubscriptionId));
+    const [stopped] = (await billingEmails(c.tenantId)).slice(-1);
+    expect(stopped).toMatchObject({ subject: 'Payments for your HyFib plan have stopped' });
+    expect(stopped!.lines[1]).toBe(
+      'The payer can change the card through the link in Razorpay’s email; the plan is paid once a charge goes through. You can also cancel the subscription in billing and pay again.',
+    );
+    // Halted is no longer a charge to wait for: the trial ends at the next sweep.
+    expect(await transitionsDue()).toContain(c.tenantId);
+    await sweepPlanStates(sweepDeps(), 1000);
+    expect((await planState(c.tenantId)).status).toBe('expired');
+  });
+
+  it('a payment window still open when a trial ends does not count as paying', async () => {
+    offsetMs = 0;
+    const c = await trialing();
+    // Checkout opened (charged at once, the trial ending within two days) and never finished.
+    const start = await service().start(c.ctx);
+    expect((await subscriptionRow(start.subscriptionId)).status).toBe('created');
+    await adminQuery(
+      `UPDATE app.tenant_plans SET trial_ends_at = now() - interval '1 minute' WHERE tenant_id = $1`,
+      [c.tenantId],
+    );
+    await sweepPlanStates(sweepDeps(), 1000);
+    expect((await planState(c.tenantId)).status).toBe('expired');
+    const [ended] = (await billingEmails(c.tenantId)).slice(-1);
+    expect(ended).toMatchObject({ subject: 'Your HyFib trial has ended' });
+    expect(ended!.lines[2]).toBe(
+      'Pay for the plan in billing, or ask HyFib to choose a plan, to continue.',
+    );
   });
 });

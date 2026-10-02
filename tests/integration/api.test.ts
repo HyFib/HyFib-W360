@@ -4029,17 +4029,11 @@ describe('allowed networks (ADR-076)', () => {
     // An unknown token is unknown from any address.
     expect(await from(generateApiToken().token, '203.0.113.1')).toBe('unknown');
 
-    // The previous release's lookup, kept for a rolling deploy, refuses keys that list networks.
-    const oldLookup = (token: string) =>
-      fx.dbs.app.run(authorizedTenantScope(c.tenant.id, null), async (tx) =>
-        (
-          await tx.execute<{ key_id: string }>(
-            sql`select key_id from ops.api_key_authenticate(${sha256Hex(token)})`,
-          )
-        ).rows.map((r) => r.key_id),
-      );
-    expect(await oldLookup(key.token)).toEqual([]);
-    expect(await oldLookup(open.token)).toEqual([open.id]);
+    // The lookup without an address, kept for a rolling deploy by 0051, is gone (0074).
+    const [old] = await fx.query<{ fn: string | null }>(
+      `SELECT to_regprocedure('ops.api_key_authenticate(text)')::text AS fn`,
+    );
+    expect(old?.fn).toBeNull();
   });
 
   it('check what they are given as networks', async () => {
@@ -4146,6 +4140,232 @@ describe('allowed networks (ADR-076)', () => {
     );
     const listed = (await keys.list(owner)).find((k) => k.id === rotated.id);
     expect(listed?.allowedNetworks).toEqual(['2001:db8::/48']);
+  });
+});
+
+describe('addresses for all keys (ADR-099)', () => {
+  const create = (owner: TenantContext, allowedNetworks?: string) =>
+    keys.create(owner, {
+      name: 'Server',
+      scopes: ['contacts.read'],
+      expiresInDays: 30,
+      ...(allowedNetworks === undefined ? {} : { allowedNetworks }),
+    });
+  const lastUsed = async (id: string) => {
+    const [row] = await fx.query<{ last_used_at: Date | null }>(
+      'SELECT last_used_at FROM app.api_keys WHERE id = $1',
+      [id],
+    );
+    return row!.last_used_at;
+  };
+  const settingsRows = (tenantId: string) =>
+    fx.query<{ allowed_networks: string[] | null }>(
+      'SELECT allowed_networks::text[] AS allowed_networks FROM app.api_settings WHERE tenant_id = $1',
+      [tenantId],
+    );
+  /** What a request with the token from `ip` gets: its key, whose addresses refused it, or nothing. */
+  const from = async (token: string, ip: string | null) => {
+    const auth = await authenticateApiRequest(fx.dbs.app, token, uuidv7(), ip);
+    if (!auth) return 'unknown';
+    return 'authenticated' in auth ? 'accepted' : `refused by the ${auth.by}`;
+  };
+
+  it('hold every key of the company to them, and a refused request does not use the key', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const key = await create(owner);
+    const otherKey = await create(await fx.ctx(other, other.owner));
+    expect(await keys.companyNetworks(owner)).toEqual({ allowedNetworks: null });
+    expect(await settingsRows(c.tenant.id)).toEqual([]);
+
+    const listed = ['203.0.113.0/24', '2001:db8::/32', '198.51.100.7/32'];
+    expect(
+      await keys.setCompanyNetworks(owner, {
+        allowedNetworks: '203.0.113.0/24\n2001:db8::/32, 198.51.100.7 203.0.113.0/24',
+      }),
+    ).toEqual({ allowedNetworks: listed });
+    expect(await keys.companyNetworks(owner)).toEqual({ allowedNetworks: listed });
+    expect(await settingsRows(c.tenant.id)).toEqual([{ allowed_networks: listed }]);
+
+    // Refused addresses leave the key unused.
+    for (const ip of ['203.0.114.1', '198.51.100.8', '2001:db9::1', '10.0.0.1', null]) {
+      expect(await from(key.token, ip), String(ip)).toBe('refused by the company');
+    }
+    expect(await lastUsed(key.id)).toBeNull();
+    for (const ip of ['203.0.113.1', '198.51.100.7', '2001:db8::1', '::ffff:203.0.113.9']) {
+      expect(await from(key.token, ip), ip).toBe('accepted');
+    }
+    expect(await lastUsed(key.id)).not.toBeNull();
+    // A key created later is held to them too; another company's keys are not.
+    const later = await create(owner);
+    expect(await from(later.token, '10.0.0.1')).toBe('refused by the company');
+    expect(await from(otherKey.token, '10.0.0.1')).toBe('accepted');
+    expect(await authenticateApiToken(fx.dbs.app, later.token, 'r', '10.0.0.1')).toBeNull();
+    expect(await authenticateApiToken(fx.dbs.app, later.token, 'r', '203.0.113.1')).not.toBeNull();
+
+    // Emptied, the company's keys accept any address again, and none.
+    expect(await keys.setCompanyNetworks(owner, { allowedNetworks: ' \n ' })).toEqual({
+      allowedNetworks: null,
+    });
+    expect(await from(key.token, '10.0.0.1')).toBe('accepted');
+    expect(await from(key.token, null)).toBe('accepted');
+    expect(await settingsRows(c.tenant.id)).toEqual([{ allowed_networks: null }]);
+  });
+
+  it("accept a key's requests only from addresses on both lists when the key lists its own", async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const key = await create(owner, '203.0.113.0/24\n198.51.100.0/24');
+    await keys.setCompanyNetworks(owner, { allowedNetworks: '198.51.100.0/24\n192.0.2.0/24' });
+    expect(await from(key.token, '198.51.100.9')).toBe('accepted');
+    // The key's own list is checked first.
+    expect(await from(key.token, '203.0.113.9')).toBe('refused by the company');
+    expect(await from(key.token, '192.0.2.9')).toBe('refused by the key');
+    expect(await from(key.token, '10.0.0.1')).toBe('refused by the key');
+    expect(await from(key.token, null)).toBe('refused by the key');
+  });
+
+  it('change after a recent sign-in, by members who manage keys, audited and kept to the company', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const audit = async () =>
+      (
+        await fx.query<{ subject_type: string; subject_id: string; metadata: unknown }>(
+          `SELECT subject_type, subject_id, metadata FROM app.audit_events
+            WHERE action = 'api.networks_changed' AND tenant_id = $1 ORDER BY occurred_at, id`,
+          [c.tenant.id],
+        )
+      ).map((a) => [a.subject_type, a.subject_id, a.metadata]);
+
+    await keys.setCompanyNetworks(owner, { allowedNetworks: '203.0.113.0/24' });
+    await keys.setCompanyNetworks(owner, { allowedNetworks: '203.0.113.0/24\n198.51.100.0/24' });
+    // The same list again changes nothing and records nothing.
+    await keys.setCompanyNetworks(owner, { allowedNetworks: '203.0.113.0/24, 198.51.100.0/24' });
+    await keys.setCompanyNetworks(owner, { allowedNetworks: '' });
+    expect(await audit()).toEqual([
+      ['tenant', c.tenant.id, { from: null, to: ['203.0.113.0/24'] }],
+      [
+        'tenant',
+        c.tenant.id,
+        { from: ['203.0.113.0/24'], to: ['203.0.113.0/24', '198.51.100.0/24'] },
+      ],
+      ['tenant', c.tenant.id, { from: ['203.0.113.0/24', '198.51.100.0/24'], to: null }],
+    ]);
+
+    // A stale sign-in, a member who does not manage keys, and bad input change nothing.
+    const stale: TenantContext = { ...owner, signedInAt: new Date(Date.now() - 16 * 60_000) };
+    await expectAppError(
+      keys.setCompanyNetworks(stale, { allowedNetworks: '203.0.113.0/24' }),
+      'step_up_required',
+    );
+    const agent = await fx.ctx(c, c.agent);
+    await expectAppError(
+      keys.setCompanyNetworks(agent, { allowedNetworks: '203.0.113.0/24' }),
+      'forbidden',
+    );
+    await expectAppError(keys.companyNetworks(agent), 'forbidden');
+    const refusals: [string, RegExp][] = [
+      ['example.com', /not an IP address or network/],
+      ['203.0.113.7/24', /did you mean 203\.0\.113\.0\/24\?/],
+      ['10.0.0.0/0', /accept every address/],
+      [Array.from({ length: 21 }, (_, i) => `198.51.100.${i}`).join('\n'), /at most 20/],
+    ];
+    for (const [text, reason] of refusals) {
+      await expectAppError(
+        keys.setCompanyNetworks(owner, { allowedNetworks: text }),
+        'validation_failed',
+        reason,
+      );
+    }
+    expect(await settingsRows(c.tenant.id)).toEqual([{ allowed_networks: null }]);
+    expect(await audit()).toHaveLength(3);
+
+    // Each company's addresses are its own, for the service and for the runtime role.
+    await keys.setCompanyNetworks(await fx.ctx(other, other.owner), {
+      allowedNetworks: '192.0.2.0/24',
+    });
+    expect(await keys.companyNetworks(owner)).toEqual({ allowedNetworks: null });
+    const inCompany = (tenantId: string, query: ReturnType<typeof sql>) =>
+      fx.dbs.app.run(authorizedTenantScope(tenantId, null), async (tx) => {
+        const res = await tx.execute<{ allowed_networks: string[] | null }>(query);
+        return res.rows;
+      });
+    expect(
+      await inCompany(
+        c.tenant.id,
+        sql`select allowed_networks::text[] as allowed_networks from app.api_settings`,
+      ),
+    ).toEqual([{ allowed_networks: null }]);
+    expect(
+      await inCompany(
+        c.tenant.id,
+        sql`update app.api_settings set allowed_networks = null where tenant_id = ${other.tenant.id}::uuid returning allowed_networks`,
+      ),
+    ).toEqual([]);
+    expect(await settingsRows(other.tenant.id)).toEqual([{ allowed_networks: ['192.0.2.0/24'] }]);
+    await expect(inCompany(c.tenant.id, sql`delete from app.api_settings`)).rejects.toThrow();
+    // The table refuses an empty list (none is NULL) and more than 20 networks.
+    for (const value of [
+      '{}',
+      `{${Array.from({ length: 21 }, (_, i) => `198.51.100.${i}`).join(',')}}`,
+    ]) {
+      await expect(
+        fx.dbs.adminPool.query(
+          'UPDATE app.api_settings SET allowed_networks = $2::cidr[] WHERE tenant_id = $1',
+          [c.tenant.id, value],
+        ),
+      ).rejects.toThrow(/api_settings_allowed_networks_check/);
+    }
+  });
+
+  it('let two first changes at once make one row, one after the other', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    // Another transaction holds the company's key lock while both changes come.
+    const holder = await fx.dbs.adminPool.connect();
+    let changes: Promise<unknown>[] | undefined;
+    try {
+      await holder.query('BEGIN');
+      await holder.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [
+        `api-keys:${c.tenant.id}`,
+      ]);
+      const [lock] = (await holder.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows;
+      changes = ['203.0.113.0/24', '198.51.100.0/24'].map((allowedNetworks) =>
+        keys.setCompanyNetworks(owner, { allowedNetworks }),
+      );
+      await vi.waitFor(
+        async () => {
+          const [waiting] = await fx.query<{ n: number }>(
+            'SELECT count(*)::int AS n FROM pg_stat_activity a WHERE $1 = ANY (pg_blocking_pids(a.pid))',
+            [lock!.pid],
+          );
+          if (waiting!.n < 2) throw new Error('the changes are not waiting yet');
+        },
+        { timeout: 4_000, interval: 20 },
+      );
+    } finally {
+      await holder.query('COMMIT');
+      holder.release();
+    }
+    const results = await Promise.allSettled(changes ?? []);
+    expect(results.map((r) => r.status)).toEqual(['fulfilled', 'fulfilled']);
+    const rows = await settingsRows(c.tenant.id);
+    expect(rows).toHaveLength(1);
+    const entries = await fx.query<{ metadata: { from: string[] | null; to: string[] | null } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE action = 'api.networks_changed' AND tenant_id = $1`,
+      [c.tenant.id],
+    );
+    // The second change saw the first: its "from" is the first's "to". (Both transactions began
+    // before either took the lock, so their audit times need not follow the order they ran in.)
+    expect(entries).toHaveLength(2);
+    const first = entries.find((e) => e.metadata.from === null);
+    const second = entries.find((e) => e !== first);
+    expect(first).toBeDefined();
+    expect(second!.metadata.from).toEqual(first!.metadata.to);
+    expect(rows[0]!.allowed_networks).toEqual(second!.metadata.to);
   });
 });
 
@@ -5241,7 +5461,6 @@ describe('isolation and retention', () => {
         ])
       )[0]!.ok;
     for (const fn of [
-      'ops.api_key_authenticate(text)',
       'ops.api_key_authenticate(text,inet)',
       'ops.purge_api_idempotency_keys(integer)',
     ]) {

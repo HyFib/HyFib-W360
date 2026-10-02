@@ -4,7 +4,9 @@ import { z } from 'zod';
 import { AppError, notFound, sha256Hex, uuidv7, type Clock } from '@w360/core';
 import {
   and,
+  apiKeyUsage,
   apiKeys,
+  apiSettings,
   desc,
   eq,
   gt,
@@ -21,6 +23,7 @@ import { assertCan, type TenantContext } from '../authz/context';
 import { assertRecentSignIn } from '../authz/step-up';
 import { TOKEN_ALPHABET, randomToken } from '../growth/model';
 import { assertApiInPlan, assertScopesInPlan, loadEntitlements } from '../plans/entitlements';
+import { usagePeriod } from '../plans/model';
 import { parseInput } from '../validation';
 import {
   API_KEY_EXPIRY_DAYS,
@@ -105,6 +108,28 @@ export const allowedNetworksSchema = z
     return entries.length > 0 ? entries : null;
   });
 
+const MONTHLY_LIMIT_MESSAGE = `A key's monthly limit is a whole number of requests from 1 to ${API_KEY_LIMITS.monthlyRequests.toLocaleString('en-US')}, or empty for none.`;
+
+/**
+ * A key's own monthly request limit (ADR-097): empty for none. Digits only, with commas or spaces
+ * between them if typed so.
+ */
+const monthlyLimitSchema = z.preprocess(
+  (v) => {
+    if (v === undefined || v === null) return null;
+    if (typeof v !== 'string') return v;
+    const digits = v.replace(/[\s,]/g, '');
+    if (digits === '') return null;
+    return /^\d+$/.test(digits) ? Number(digits) : Number.NaN;
+  },
+  z
+    .number({ error: MONTHLY_LIMIT_MESSAGE })
+    .int(MONTHLY_LIMIT_MESSAGE)
+    .min(1, MONTHLY_LIMIT_MESSAGE)
+    .max(API_KEY_LIMITS.monthlyRequests, MONTHLY_LIMIT_MESSAGE)
+    .nullable(),
+);
+
 const createSchema = z.object({
   name: z
     .string({ error: 'Name the key' })
@@ -116,11 +141,15 @@ const createSchema = z.object({
     .number()
     .refine((d) => (API_KEY_EXPIRY_DAYS as readonly number[]).includes(d), 'Choose an expiry'),
   allowedNetworks: allowedNetworksSchema,
+  monthlyRequestLimit: monthlyLimitSchema,
 });
 
 const keyIdSchema = z.object({ keyId: z.uuid() });
+const companyNetworksSchema = z.object({ allowedNetworks: allowedNetworksSchema });
 
 const networksSchema = keyIdSchema.extend({ allowedNetworks: allowedNetworksSchema });
+
+const monthlyLimitInputSchema = keyIdSchema.extend({ monthlyRequestLimit: monthlyLimitSchema });
 
 const rotateSchema = keyIdSchema.extend({
   overlapHours: z.coerce
@@ -145,6 +174,13 @@ export interface ApiKeyView {
   expiryRemindedAt: Date | null;
   /** The networks the key accepts requests from (ADR-076); null accepts any address. */
   allowedNetworks: string[] | null;
+  /** The key's own monthly request limit (ADR-097); null when only the plan limits it. */
+  monthlyRequestLimit: number | null;
+  /** Requests the key made in the company's current usage period (ADR-097). */
+  requestsThisPeriod: number;
+  /** When owners and administrators were emailed this period: at 80% and at the limit (ADR-098). */
+  usageWarnedAt: Date | null;
+  usageNotifiedAt: Date | null;
   state: 'active' | 'revoked' | 'expired';
 }
 
@@ -228,6 +264,7 @@ export function createApiKeysService(deps: { db: Database; clock: Clock }) {
       scopes: ApiScope[];
       expiresAt: Date | null;
       allowedNetworks: string[] | null;
+      monthlyRequestLimit: number | null;
     },
   ) {
     const id = uuidv7();
@@ -242,6 +279,7 @@ export function createApiKeysService(deps: { db: Database; clock: Clock }) {
       createdByUserId: ctx.user.id,
       expiresAt: input.expiresAt,
       allowedNetworks: input.allowedNetworks,
+      monthlyRequestLimit: input.monthlyRequestLimit,
     });
     return { id, keyPrefix, token };
   }
@@ -253,6 +291,11 @@ export function createApiKeysService(deps: { db: Database; clock: Clock }) {
       return db.run(
         ctx.scope,
         async (tx) => {
+          // Each key's requests are counted in the company's usage period (ADR-097).
+          const { start } = usagePeriod(
+            (await loadEntitlements(tx, ctx.tenant.id)).usageAnchor,
+            now,
+          );
           const rows = await tx
             .select({
               id: apiKeys.id,
@@ -267,9 +310,21 @@ export function createApiKeysService(deps: { db: Database; clock: Clock }) {
               replacedByKeyId: apiKeys.replacedByKeyId,
               expiryRemindedAt: apiKeys.expiryRemindedAt,
               allowedNetworks: apiKeys.allowedNetworks,
+              monthlyRequestLimit: apiKeys.monthlyRequestLimit,
+              requestsThisPeriod: sql<number>`coalesce(${apiKeyUsage.used}, 0)::int`,
+              usageWarnedAt: apiKeyUsage.warnedAt,
+              usageNotifiedAt: apiKeyUsage.notifiedAt,
             })
             .from(apiKeys)
             .leftJoin(users, eq(users.id, apiKeys.createdByUserId))
+            .leftJoin(
+              apiKeyUsage,
+              and(
+                eq(apiKeyUsage.tenantId, apiKeys.tenantId),
+                eq(apiKeyUsage.apiKeyId, apiKeys.id),
+                eq(apiKeyUsage.periodStart, start),
+              ),
+            )
             .where(eq(apiKeys.tenantId, ctx.tenant.id))
             .orderBy(desc(apiKeys.createdAt), desc(apiKeys.id))
             .limit(200);
@@ -308,6 +363,7 @@ export function createApiKeysService(deps: { db: Database; clock: Clock }) {
           scopes: data.scopes,
           expiresAt,
           allowedNetworks,
+          monthlyRequestLimit: data.monthlyRequestLimit,
         });
         await recordAudit(
           tx,
@@ -322,6 +378,7 @@ export function createApiKeysService(deps: { db: Database; clock: Clock }) {
               scopes: data.scopes,
               expiresAt: expiresAt?.toISOString() ?? null,
               allowedNetworks,
+              monthlyRequestLimit: data.monthlyRequestLimit,
             },
           },
           meta,
@@ -331,9 +388,10 @@ export function createApiKeysService(deps: { db: Database; clock: Clock }) {
     },
 
     /**
-     * A new key with the same name, scopes and expiry period; the old key stays valid for the
-     * overlap (0 to 72 hours) so integrations can switch, then stops working. Scopes the plan
-     * leaves out are kept: requests are refused them while it does (ADR-092).
+     * A new key with the same name, scopes, expiry period, addresses and monthly limit; the old key
+     * stays valid for the overlap (0 to 72 hours) so integrations can switch, then stops working.
+     * Scopes the plan leaves out are kept: requests are refused them while it does (ADR-092). The
+     * new key's requests are counted from zero (ADR-097).
      */
     async rotate(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
       assertCan(ctx, 'developer.manage');
@@ -354,6 +412,7 @@ export function createApiKeysService(deps: { db: Database; clock: Clock }) {
             revokedAt: apiKeys.revokedAt,
             replacedByKeyId: apiKeys.replacedByKeyId,
             allowedNetworks: apiKeys.allowedNetworks,
+            monthlyRequestLimit: apiKeys.monthlyRequestLimit,
           })
           .from(apiKeys)
           .where(and(eq(apiKeys.tenantId, ctx.tenant.id), eq(apiKeys.id, data.keyId)))
@@ -371,6 +430,7 @@ export function createApiKeysService(deps: { db: Database; clock: Clock }) {
           scopes: old.scopes,
           expiresAt: lifetime === null ? null : new Date(now.getTime() + lifetime),
           allowedNetworks: old.allowedNetworks,
+          monthlyRequestLimit: old.monthlyRequestLimit,
         });
         const overlapEnds = new Date(now.getTime() + data.overlapHours * 3_600_000);
         await tx
@@ -446,6 +506,140 @@ export function createApiKeysService(deps: { db: Database; clock: Clock }) {
           meta,
         );
         return { allowedNetworks };
+      });
+    },
+
+    /**
+     * The networks every key of the company accepts requests from (ADR-099), on top of each key's
+     * own; null accepts any address.
+     */
+    async companyNetworks(ctx: TenantContext): Promise<{ allowedNetworks: string[] | null }> {
+      assertCan(ctx, 'developer.manage');
+      return db.run(
+        ctx.scope,
+        async (tx) => {
+          const [row] = await tx
+            .select({ allowedNetworks: apiSettings.allowedNetworks })
+            .from(apiSettings)
+            .where(eq(apiSettings.tenantId, ctx.tenant.id));
+          return { allowedNetworks: row?.allowedNetworks ?? null };
+        },
+        { accessMode: 'read only' },
+      );
+    },
+
+    /**
+     * Changes the networks every key of the company accepts requests from (ADR-099); an empty list
+     * accepts any address, leaving each key's own networks. A request must come from one of these
+     * and from one of its key's networks when the key lists any. The change applies to the next
+     * request and is audited with the lists before and after.
+     */
+    async setCompanyNetworks(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
+      assertCan(ctx, 'developer.manage');
+      const now = clock.now();
+      assertRecentSignIn(ctx, now);
+      const data = parseInput(companyNetworksSchema, input);
+      return db.run(ctx.scope, async (tx) => {
+        // The company's key lock: two changes at once cannot both find no row to update.
+        await lockKeys(tx, ctx.tenant.id);
+        const [row] = await tx
+          .select({ allowedNetworks: apiSettings.allowedNetworks })
+          .from(apiSettings)
+          .where(eq(apiSettings.tenantId, ctx.tenant.id));
+        const before = row?.allowedNetworks ?? null;
+        const allowedNetworks = await canonicalNetworks(tx, data.allowedNetworks);
+        if (sameNetworks(before, allowedNetworks)) return { allowedNetworks };
+        if (row) {
+          await tx
+            .update(apiSettings)
+            .set({ allowedNetworks, updatedAt: now })
+            .where(eq(apiSettings.tenantId, ctx.tenant.id));
+        } else {
+          await tx.insert(apiSettings).values({
+            id: uuidv7(),
+            tenantId: ctx.tenant.id,
+            allowedNetworks,
+            createdAt: now,
+            updatedAt: now,
+          });
+        }
+        await recordAudit(
+          tx,
+          ctx,
+          {
+            action: 'api.networks_changed',
+            subjectType: 'tenant',
+            subjectId: ctx.tenant.id,
+            metadata: { from: before, to: allowedNetworks },
+          },
+          meta,
+        );
+        return { allowedNetworks };
+      });
+    },
+
+    /**
+     * Changes an active key's own monthly request limit (ADR-097); empty removes it, leaving only
+     * the plan's. It applies from the key's next request, to the requests already counted this
+     * period: a request reads the limit under a key share lock, which waits for this change. The
+     * emails at 80% and at the limit are armed again for it (ADR-098), and the change is audited
+     * with the limits before and after.
+     */
+    async setMonthlyLimit(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
+      assertCan(ctx, 'developer.manage');
+      const now = clock.now();
+      assertRecentSignIn(ctx, now);
+      const data = parseInput(monthlyLimitInputSchema, input);
+      return db.run(ctx.scope, async (tx) => {
+        const [key] = await tx
+          .select({
+            keyPrefix: apiKeys.keyPrefix,
+            expiresAt: apiKeys.expiresAt,
+            revokedAt: apiKeys.revokedAt,
+            monthlyRequestLimit: apiKeys.monthlyRequestLimit,
+          })
+          .from(apiKeys)
+          .where(and(eq(apiKeys.tenantId, ctx.tenant.id), eq(apiKeys.id, data.keyId)))
+          // FOR UPDATE, which a request's key share lock waits for (NO KEY UPDATE it would not).
+          .for('update');
+        if (!key) throw notFound('API key');
+        if (apiKeyState(key, now) !== 'active') {
+          throw new AppError('conflict', 'Only the limit of an active key can be changed.');
+        }
+        const monthlyRequestLimit = data.monthlyRequestLimit;
+        if (key.monthlyRequestLimit === monthlyRequestLimit) return { monthlyRequestLimit };
+        await tx
+          .update(apiKeys)
+          .set({ monthlyRequestLimit })
+          .where(and(eq(apiKeys.tenantId, ctx.tenant.id), eq(apiKeys.id, data.keyId)));
+        // This period's emails were about the old limit.
+        const { start } = usagePeriod((await loadEntitlements(tx, ctx.tenant.id)).usageAnchor, now);
+        await tx
+          .update(apiKeyUsage)
+          .set({ warnedAt: null, notifiedAt: null })
+          .where(
+            and(
+              eq(apiKeyUsage.tenantId, ctx.tenant.id),
+              eq(apiKeyUsage.apiKeyId, data.keyId),
+              eq(apiKeyUsage.periodStart, start),
+            ),
+          );
+        await recordAudit(
+          tx,
+          ctx,
+          {
+            action: 'api_key.limit_changed',
+            subjectType: 'api_key',
+            subjectId: data.keyId,
+            metadata: {
+              keyPrefix: key.keyPrefix,
+              from: key.monthlyRequestLimit,
+              to: monthlyRequestLimit,
+            },
+          },
+          meta,
+        );
+        return { monthlyRequestLimit };
       });
     },
 

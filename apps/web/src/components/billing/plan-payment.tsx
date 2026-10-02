@@ -13,8 +13,9 @@ import { CheckoutClosedError, openSubscriptionCheckout } from './razorpay-checko
 
 /**
  * Paying for the plan (ADR-063): the server records the subscription and creates it at Razorpay,
- * Checkout takes the first period's payment, and the server verifies the response and asks
- * Razorpay before the plan counts as paid. A payment still being confirmed is shown as such.
+ * Checkout takes the first period's payment (or, for a trial paid from its end, only authorises the
+ * payment method, ADR-102), and the server verifies the response and asks Razorpay before the plan
+ * counts as paid. A payment still being confirmed is shown as such.
  */
 export function PayForPlan({ slug, label }: { slug: string; label: string }) {
   const [error, setError] = useState<string | null>(null);
@@ -63,6 +64,10 @@ export function PayForPlan({ slug, label }: { slug: string; label: string }) {
         return;
       }
       if (confirmed.data.status === 'active') setNotice('Payment received. Your plan is paid.');
+      else if (confirmed.data.status === 'scheduled')
+        setNotice(
+          'Payment method authorised. Razorpay charges for the plan when the trial ends; nothing is charged for it before then.',
+        );
       else if (confirmed.data.status === 'processing')
         setNotice(
           'Payment received and being confirmed. Your plan updates as soon as Razorpay confirms it.',

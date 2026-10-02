@@ -826,12 +826,15 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   for 0 to 72 hours (0 revokes it); revocation is immediate. Each change is audited without the
   token. A key may list up to 20 networks it accepts requests from (`allowed_networks cidr[]`, 0051,
   ADR-076): checked for shape in the service, canonicalised by PostgreSQL (`pg_input_is_valid`,
-  `::cidr`), editable for an active key with a recent sign-in (`setAllowedNetworks`, audited).
+  `::cidr`), editable for an active key with a recent sign-in (`setAllowedNetworks`, audited). The
+  company may list up to 20 networks for all its keys the same way (`app.api_settings`, 0076,
+  ADR-099; `setCompanyNetworks` under the company's key lock, audited `api.networks_changed`).
 - **Requests** (`apps/web/src/server/api.ts`): the bearer token is checked by shape, then through
   the definer function with the client's address (`authenticateApiRequest`,
-  `ops.api_key_authenticate(hash, inet)`): a key whose networks do not contain the address (or any
-  key with networks when the address is unknown) answers 403 `ip_not_allowed`, is not marked used and
-  counts as a failed authentication for the address; the request acts in its company's scope as the
+  `ops.api_key_authenticate(hash, inet)`): a key whose networks, or whose company's networks for all
+  keys, do not contain the address (or any such key when the address is unknown) answers 403
+  `ip_not_allowed` naming whose list refused it (`refused_by`), is not marked used and counts as a
+  failed authentication for the address; the request acts in its company's scope as the
   key (`ApiContext`, no user), so no company id is ever read from the request. Failed authentication is limited per client
   address (bursts of 20, one every 5 seconds), then each key (bursts of 50, 10 a second) and each
   company (bursts of 200, 30 a second) have token buckets (`admitFailedApiAuthentication`,
@@ -1030,6 +1033,23 @@ true`); the same key with another request (method, path and body hashed) answers
   then the company's status for writing scopes. Creating a key checks its scopes against the plan
   (`assertScopesInPlan`); rotating keeps them. `authenticateApiToken`, used by the tests, loads the
   plan's scopes without counting a request.
+- **Monthly requests per key (0073, ADR-097):** `consumeApiRequest` (`plans/entitlements.ts`) also
+  counts each admitted request for its key in `app.api_key_usage` (one row per key and usage
+  period), before the company's count and in the same transaction: one upsert below the key's
+  `monthly_request_limit` when it has one (429 `rate_limited`, reason `key_quota_exceeded`, nothing
+  counted for the company), then the company's; a company refusal rolls back to a savepoint taken
+  before the key's count. The key's limit is read `FOR KEY SHARE`, so a request waits for a change
+  of the limit in progress, which holds the key `FOR UPDATE`. Keys lock before companies, for
+  every request. The keys service sets the
+  limit at creation, changes it for an active key after a recent sign-in (`setMonthlyLimit`,
+  audited `api_key.limit_changed`), copies it on rotation, and lists each key's count this period.
+- **Emails about a key's limit (0075, ADR-098):** after the expiry reminders, the minute messaging
+  sweep (`api/key-usage-notices.ts`) lists through `ops.api_key_usage_notices_due` the counters of
+  usable keys with a limit at 80% of it (not warned) or at it (not told), then locks and checks each
+  again in its company's scope (the current period only) and sets `warned_at` or `notified_at` in
+  the transaction that queues a company notice to the active owners and administrators. A counter
+  of an earlier period is marked without an email, so that it is not listed again. Changing a key's
+  limit clears this period's marks.
 - **OpenAPI** (`api/openapi.ts`): `GET /api/v1/openapi.json` (no key; cacheable 5 minutes) is built
   from the zod schemas that validate requests; a unit test checks it against the route handlers.
 - **Expiry reminders (0040, ADR-067):** the minute messaging sweep (`api/expiry-reminders.ts`) lists,
@@ -1043,12 +1063,14 @@ true`); the same key with another request (method, path and body hashed) answers
 - **Web:** Settings → API keys (`developer.manage`): the month's API requests and the plan's limit
   (or that the plan leaves the API out), the base URL and an example, the keys with state, prefix,
   scopes, author, last use and expiry, a mark on keys that expire within 7 days and when their
-  reminder was emailed; creation with the scopes the member may grant; the new token shown once
-  with a copy button (kept only in the page's memory); rotation with an overlap; revocation.
-- **Not built yet:** media, interactive and reaction messages, replies to a given message, listing
-  conversations and messages, resolving or assigning conversations, starting automations, OAuth
-  apps, IP allowlists per key, packs of extra API requests and per-key quotas. Outgoing webhooks are
-  section 6O.
+  reminder was emailed, each key's requests this period and its own monthly limit (marked when
+  reached, changed in a dialog); creation with the scopes the member may grant, allowed addresses
+  and a monthly limit; the new token shown once with a copy button (kept only in the page's
+  memory); rotation with an overlap; revocation.
+- **Not built yet:** media and call-to-action messages, taking reactions back, assigning many
+  conversations or starting many runs in one call, bulk sends, media downloads, statuses changed
+  since a time, networks for the whole company, limits and availability per endpoint, OAuth apps
+  and packs of extra API requests (BACKLOG P5-08). Outgoing webhooks are section 6O.
 
 ## 6O. Outgoing webhooks **[built — verified with local test receivers only; no customer endpoints yet]**
 
@@ -1279,7 +1301,12 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   company is created (a trial of `ops.plan_settings.default_trial_plan_id`, else complimentary) and
   written afterwards only by platform staff (`setTenantPlan`, with both audit logs and a version
   check) and by `app.apply_plan_transition`, which the minute billing sweep calls in the company's
-  scope for trials, paid periods and grace periods that have ended (notices to billing managers). An
+  scope for trials, paid periods and grace periods that have ended (notices to billing managers). A
+  staff change marks the version it writes (`staff_notice_version`, 0077, ADR-100), and the same
+  sweep emails the billing managers about it (`notifyStaffPlanChanges`: listed by
+  `ops.plan_change_notices_due`, taken by `app.take_plan_change_notice()` in the company's scope,
+  company row first, in the transaction that queues the emails; a change replaced first is not
+  told). An
   expired or canceled plan sets `tenants.status = 'restricted'` through a trigger; restricted
   behaves like suspended (`ALLOWED_WHEN_SUSPENDED`, jobs deferred, sweeps skip it, public
   lookups still resolve), suspension wins, and a plan that gives access again lifts it.
@@ -1325,9 +1352,56 @@ WHERE used < limit`), per monthly period from `usage_anchor`; the sweep announce
   ends such a period as canceled without grace days. Platform owners set the tax and cancel a
   company's subscription at once (`/platform/tenants/<id>`), staff plan changes are refused while a
   subscription is live, and company deletion cancels it at Razorpay (§6Q). Billing managers are
-  emailed about payments, failed charges (`pending`), stopped retries (`halted`) and cancels. Each
+  emailed about payments, failed charges (`pending`), stopped retries (`halted`) and cancels: the
+  company's own at once, and a platform owner's by the minute billing sweep, as the platform role
+  cannot queue email (`staff_cancel_notice_due`, 0078, ADR-101: listed by
+  `ops.plan_subscription_cancel_notices_due`, taken by `app.take_plan_subscription_cancel_notice()`
+  in the company's scope, company row first, in the transaction that queues the emails, with the
+  reason from the company's audit log and what the plan keeps, read from its plan state). Each
   plan payment has a receipt page (`billing/plan-payments/<id>`, ADR-064) computed from the payment
   and its subscription, linked from the payments table and the payment email; not a tax invoice.
+- **Paying from the end of the trial (0079, ADR-102) [built]:** `planPaymentStart` offers a trial
+  that ends at least 48 hours ahead a subscription starting at the trial's end: its `starts_at`
+  (written once) is sent as Razorpay's `start_at`, Checkout only authorises the payment method
+  (`authenticated`, no payment recorded, `confirmCheckout` answers `scheduled`), and the first
+  charge at the start makes the plan active through `app.apply_plan_subscription_period`, as any
+  paid cycle. `app.trial_charge_wait_until(tenant)` (an ordinary SQL function, run by the company's
+  scope and by the definer functions) is the one rule by which an ended trial waits for that charge:
+  while a subscription starting at the trial's end is `authenticated`, `active` or `pending`, until
+  the plan version's grace days have passed. `app.apply_plan_transition` and
+  `ops.plan_transitions_due` leave a waiting trial alone, the plan card shows until when, and
+  `ops.plan_subscriptions_due` re-reads a due first charge hourly until a paid cycle is recorded.
+  The company's cancel before the start is at once; after it, the subscription is synced first, so
+  a charge already made is kept and cancelled at the end of its cycle.
+- **Refunds of plan payments (0080, ADR-103) [built]:** `app.plan_payment_refunds` holds each refund
+  of a plan payment: asked for by a platform owner (`origin = 'staff'`, with the reason and who
+  asked, which the company role cannot read) or made at Razorpay (`origin = 'razorpay'`, recorded
+  as processed). `ops.platform_request_plan_payment_refund` (platform role) checks the owner, the
+  reason, the company's status and the amount; `ops.plan_payment_refunds_due` feeds the minute
+  billing sweep, which queues one signed `billing.plan-payment-refund` job per request;
+  `processPlanPaymentRefund` asks Razorpay with `ppr_<id>` as the idempotency key and the request's
+  id in the notes, and checks the refund until it is processed or failed. Only
+  `app.record_plan_payment_refund` (company scope, a refund fetched from Razorpay: from the job,
+  `refund.processed` or the daily reconciliation) marks a refund processed, recognising HyFib's own
+  by refund id or by its note, and it and the request take one advisory lock per payment so
+  processed refunds never exceed the payment. The runtime role may only move a request to submitted
+  or failed. A refund never changes the plan state or the subscription. The receipt and Billing's
+  payments table show refunds; the platform page lists them and has the form.
+- **Refund requests of plan payments (0081, ADR-104) [built]:** a member with `billing.manage` and
+  a sign-in within 15 minutes asks from a plan payment's receipt for a refund of part or all of it,
+  with a reason. `createPlanRefundRequestsService` reads the company's status under a share lock,
+  counts the company's refund requests of both kinds in the last 24 hours (at most 5) under the
+  advisory lock requests of service credit take (`assertRefundRequestAllowance`, shared with
+  ADR-073), and checks what Razorpay has not refunded of the payment and a refund of it in progress;
+  it inserts the open request with only the columns the company role may insert, and
+  `plan_payment_refund_requests_one_open_uq` keeps one open request per payment. The company can
+  withdraw an open request. `ops.platform_decide_plan_payment_refund_request` (platform owners)
+  approves by calling `ops.platform_request_plan_payment_refund` (ADR-103) for the request's amount
+  in the same transaction, which checks everything again, and links the refund; declining needs a
+  note. The minute billing sweep's announcement to platform owners and its decline notices (0046)
+  cover both kinds. `/platform/refunds?kind=plan` lists the requests
+  (`ops.platform_plan_payment_refund_requests`) and every refund of a plan payment across companies
+  (`ops.platform_plan_payment_refunds`), each newest first on exact keyset pages.
 - **Ledger (0004_billing):** one INR wallet per company with five accounts (`wallet_available`,
   `wallet_held`, `payment_clearing`, `service_revenue`, `dispute_losses`). `ledger_transactions` and
   `ledger_entries` are append-only (trigger), balances are maintained by trigger from the entries,

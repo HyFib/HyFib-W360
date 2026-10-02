@@ -7,9 +7,11 @@ import {
   creditRefunds,
   eq,
   inArray,
+  isNull,
   lt,
   or,
   paymentMandates,
+  planPaymentRefunds,
   sql,
   type MandateStatus,
   systemScope,
@@ -25,12 +27,20 @@ import { cancelPendingAutoRecharge, failTopup } from './attempts';
 import { failCreditRefund } from './credit-refunds';
 import { notifyBillingManagers } from './notices';
 import {
+  failPlanPaymentRefund,
+  PLAN_REFUND_NOTE,
+  recordPlanPaymentRefund,
+} from './plan-payment-refunds';
+import {
+  findPlanPayment,
   resolvePlanSubscription,
   syncPlanSubscription,
   syncPlanSubscriptionForPayment,
 } from './plan-subscriptions';
 import { transient, type BillingProviderDeps } from './provider';
-import type { RazorpayPayment, RazorpayToken } from './razorpay';
+import type { RazorpayPayment, RazorpayRefund, RazorpayToken } from './razorpay';
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 export { TransientProviderError, type BillingProviderDeps } from './provider';
 
@@ -416,8 +426,9 @@ async function retireToken(deps: BillingProviderDeps, customerId: string, tokenI
 
 /**
  * Records a refund Razorpay processed, fetched first (never from a payload): the refund of a payment
- * that credited a top-up goes through app.billing_record_refund, once per refund id. Used for
- * `refund.processed` and by the settlement reconciliation (ADR-059).
+ * that credited a top-up goes through app.billing_record_refund, once per refund id, and the refund
+ * of a plan payment through app.record_plan_payment_refund (ADR-103). Used for `refund.processed`
+ * and by the settlement reconciliation (ADR-059).
  */
 export async function applyRefundById(
   deps: BillingProviderDeps,
@@ -435,9 +446,19 @@ export async function applyRefundById(
     if (payment.kind === 'permanent') return 'unknown_refund' as const;
     throw transient(payment, 'payment fetch');
   }
-  if (!payment.data.orderId) return 'unknown_refund' as const;
-  const binding = await resolveProviderOrder(deps.db, payment.data.orderId);
-  if (!binding) return 'unknown_refund' as const;
+  const binding = payment.data.orderId
+    ? await resolveProviderOrder(deps.db, payment.data.orderId)
+    : null;
+  if (!binding) {
+    // A subscription's charge is on an order Razorpay made for its invoice, not one of HyFib's: the
+    // plan payment HyFib recorded for the payment, if any, names the company.
+    const plan = await findPlanPayment(deps.db, payment.data.id);
+    if (!plan) return 'unknown_refund' as const;
+    const scope = authorizedTenantScope(plan.tenantId, null);
+    return deps.db.run(scope, (tx) =>
+      recordPlanPaymentRefund(tx, scope, { ...refund.data, paymentId: payment.data.id }),
+    );
+  }
   if (binding.subject === 'mandate') return 'mandate_authorization_refund' as const;
   return deps.db.run(authorizedTenantScope(binding.tenantId, null), async (tx) => {
     const res = await tx.execute<{ result: string }>(
@@ -464,9 +485,11 @@ async function applyRefundFailure(deps: BillingProviderDeps, paymentId: string, 
     if (payment.kind === 'permanent') return 'unknown_refund' as const;
     throw transient(payment, 'payment fetch');
   }
-  if (!payment.data.orderId) return 'unknown_refund' as const;
-  const binding = await resolveProviderOrder(deps.db, payment.data.orderId);
-  if (!binding || binding.subject !== 'topup') return 'unknown_refund' as const;
+  const binding = payment.data.orderId
+    ? await resolveProviderOrder(deps.db, payment.data.orderId)
+    : null;
+  if (!binding) return applyPlanRefundFailure(deps, payment.data.id, refund.data);
+  if (binding.subject !== 'topup') return 'unknown_refund' as const;
   const scope = authorizedTenantScope(binding.tenantId, null);
   const [request] = await deps.db.run(
     scope,
@@ -490,6 +513,51 @@ async function applyRefundFailure(deps: BillingProviderDeps, paymentId: string, 
     'failed: Razorpay failed the refund',
   );
   return outcome === 'failed' ? ('credit_refund_failed' as const) : ('already_settled' as const);
+}
+
+/**
+ * A failed refund of a plan payment (ADR-103): the staff request it belongs to (by refund id, or by
+ * the request its notes name) fails and the billing managers are emailed. A failed refund nobody
+ * asked for through HyFib changes nothing.
+ */
+async function applyPlanRefundFailure(
+  deps: BillingProviderDeps,
+  paymentId: string,
+  refund: RazorpayRefund,
+) {
+  const plan = await findPlanPayment(deps.db, paymentId);
+  if (!plan) return 'unknown_refund' as const;
+  const scope = authorizedTenantScope(plan.tenantId, null);
+  const note = refund.notes[PLAN_REFUND_NOTE];
+  const [request] = await deps.db.run(
+    scope,
+    (tx) =>
+      tx
+        .select({ id: planPaymentRefunds.id })
+        .from(planPaymentRefunds)
+        .where(
+          and(
+            eq(planPaymentRefunds.tenantId, plan.tenantId),
+            eq(planPaymentRefunds.planPaymentId, plan.planPaymentId),
+            eq(planPaymentRefunds.origin, 'staff'),
+            note && UUID_RE.test(note)
+              ? or(
+                  eq(planPaymentRefunds.providerRefundId, refund.id),
+                  and(eq(planPaymentRefunds.id, note), isNull(planPaymentRefunds.providerRefundId)),
+                )
+              : eq(planPaymentRefunds.providerRefundId, refund.id),
+          ),
+        ),
+    { accessMode: 'read only' },
+  );
+  if (!request) return 'refund_failed_not_requested' as const;
+  const outcome = await failPlanPaymentRefund(
+    deps,
+    scope,
+    request.id,
+    'failed: Razorpay failed the refund',
+  );
+  return outcome === 'failed' ? ('plan_refund_failed' as const) : ('already_settled' as const);
 }
 
 async function applyDispute(deps: BillingProviderDeps, disputeId: string) {

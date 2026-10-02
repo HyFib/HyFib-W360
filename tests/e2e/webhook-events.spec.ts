@@ -135,8 +135,11 @@ test('conversation and contact events reach an endpoint: a customer writes, a me
     },
   });
 
-  // A member tags the contact: one change.
-  await page.goto(`/c/${slug}/contacts`);
+  // A member tags the contact: one change. The resolved conversation refreshes itself, so it is
+  // left through the navigation, not a page load (see openFromNav; `page.goto` was interrupted
+  // here in WebKit on 6a3b0da).
+  await openFromNav(page, 'Contacts');
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}/contacts$`));
   await page.getByRole('link', { name: 'Priya Customer' }).click();
   await expect(page.getByRole('heading', { name: 'Priya Customer', level: 1 })).toBeVisible();
   await page.getByLabel('Add tags').fill('vip, repeat');

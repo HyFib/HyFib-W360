@@ -38,6 +38,10 @@ export const EXPORT_EXCLUDED_TABLES: Readonly<Record<string, string>> = {
 
 export const EXPORT_TABLES: readonly ExportTableSpec[] = [
   {
+    table: 'app.api_key_usage',
+    columns: ['id', 'api_key_id', 'period_start', 'used', 'warned_at', 'notified_at'],
+  },
+  {
     table: 'app.api_keys',
     columns: [
       'id',
@@ -53,8 +57,13 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'replaced_by_key_id',
       'expiry_reminded_at',
       'allowed_networks',
+      'monthly_request_limit',
     ],
     omitted: { token_hash: "Only a hash of the key's token." },
+  },
+  {
+    table: 'app.api_settings',
+    columns: ['id', 'allowed_networks', 'created_at', 'updated_at'],
   },
   {
     table: 'app.audit_events',
@@ -1292,6 +1301,51 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
     ],
   },
   {
+    table: 'app.plan_payment_refunds',
+    columns: [
+      'id',
+      'plan_payment_id',
+      'origin',
+      'amount_minor',
+      'status',
+      'provider_refund_id',
+      'attempts',
+      'next_attempt_at',
+      'last_error',
+      'requested_at',
+      'submitted_at',
+      'processed_at',
+      'failed_at',
+      'updated_at',
+    ],
+    omitted: {
+      reason: "The platform owner's note on why HyFib refunded; platform-only.",
+      requested_by_user_id: 'The HyFib staff member who asked for the refund; platform-only.',
+    },
+  },
+  {
+    table: 'app.plan_payment_refund_requests',
+    columns: [
+      'id',
+      'plan_payment_id',
+      'amount_minor',
+      'reason',
+      'status',
+      'requested_by_user_id',
+      'requested_at',
+      'withdrawn_at',
+      'decided_at',
+      'decision_note',
+      'plan_payment_refund_id',
+      'updated_at',
+    ],
+    omitted: {
+      decided_by_user_id: 'The HyFib platform owner who decided; platform-only.',
+      announced_at: 'When HyFib staff were emailed about the request; internal bookkeeping.',
+      decline_notified_at: 'When the decline email was queued; internal bookkeeping.',
+    },
+  },
+  {
     table: 'app.plan_subscriptions',
     columns: [
       'id',
@@ -1313,6 +1367,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'current_start',
       'current_end',
       'charge_at',
+      'starts_at',
       'paid_count',
       'ended_at',
       'cancel_at_period_end',
@@ -1324,6 +1379,10 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'synced_at',
       'updated_at',
     ],
+    omitted: {
+      staff_cancel_notice_due:
+        "The worker's mark of a cancellation by staff not emailed yet (ADR-101); the cancellation itself is exported.",
+    },
   },
   {
     table: 'app.rate_change_notices',
@@ -1402,6 +1461,10 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'version',
       'subscription_id',
     ],
+    omitted: {
+      staff_notice_version:
+        "The worker's mark of a staff change not emailed yet (ADR-100); the change itself is exported.",
+    },
   },
   {
     table: 'app.topups',

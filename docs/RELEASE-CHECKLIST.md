@@ -176,6 +176,26 @@ made. This checklist records the evidence required per gate; unchecked items blo
       quarterly plan authorised on a domestic card (as-presented, R-116); a charge above ₹15,000
       asks for the payer's approval (R-117); a settled plan payment matched by the daily
       reconciliation
+- [ ] Paying for a plan from the end of the trial (ADR-102) in Razorpay test mode: a subscription
+      for a trial ending more than 48 hours ahead is created with `start_at` at the trial's end and
+      an `expire_by` before it (R-119, unconfirmed point 27); Checkout's authentication makes it
+      `authenticated` with no invoice paid; the first charge at the start activates the plan from
+      the trial's end, and a failed one leaves the trial waiting for the plan's grace days;
+      cancelling before the start charges nothing and the trial goes on
+- [ ] Refunds of plan payments (ADR-103) in Razorpay test mode on the same staging deployment: a
+      platform owner refunds part of a test-mode plan payment; the refund appears in the Razorpay
+      Dashboard once, with the note `hyfib_plan_refund` and the request's `X-Refund-Idempotency`
+      key; `refund.processed` records it (and the worker's check with the webhook switched off), the
+      receipt shows it, and the subscription and its next charge do not change (R-121, unconfirmed
+      point 29); a refund made in the Dashboard is recorded once from its webhook, and a fetched
+      refund returns its notes (R-120)
+- [ ] Refund requests of plan payments (ADR-104) on the same staging deployment, after migration
+      0081 and before the new web and worker images: a billing manager asks from a test-mode plan
+      payment's receipt; platform owners receive the count email with its link to the plan
+      payments' list; a decline with a note reaches the billing managers; an approval starts the
+      staff refund above, which appears in the Razorpay Dashboard once; a request for more than is
+      left after a Dashboard refund is refused on approval and stays open; agree who watches
+      `/platform/refunds` → Plan payments and how quickly requests are decided
 - [ ] Tenant-isolation and security gates passing in CI on the release commit
 - [ ] Measured load behaviour against the test envelope (k6 results)
 - [ ] Backup restoration drill performed and timings recorded (RPO/RTO)

@@ -1,5 +1,914 @@
 # Progress
 
+## 2026-10-01 — Phase 5: refund requests of plan payments (P5-07, ADR-104)
+
+Status: **Implemented and locally verified against the Razorpay stand-in (test data only).** Since
+ADR-103 a platform owner could refund a plan payment, but a company could only write to support to
+ask for one, and `/platform/refunds` (ADR-073) listed only refunds of service credit.
+
+### Completed
+
+- **Design (ADR-104):** billing managers with a sign-in within 15 minutes ask from a plan payment's
+  receipt for a refund of part or all of it, with a reason (10 to 1,000 characters): at most what
+  Razorpay has not refunded of it, none while a refund of it runs, one open request per payment,
+  none once the company asked for its deletion. Requests of plan payments and of service credit
+  share one limit of 5 a day per company, counted under the advisory lock requests of service credit
+  already take (the same key, so servers of both releases serialise during a rolling deploy). A
+  platform owner approves, which starts ADR-103's staff refund for the amount asked in the same
+  transaction (every check again under its lock; a request that no longer fits stays open), or
+  declines with a note. A request moves no money and never changes the plan.
+- **Migration 0081:** `app.plan_payment_refund_requests` (state and notice checks, composite foreign
+  keys to the payment and the refund, one open request per payment, row security; the company role
+  inserts only an open request's columns, moves an open request only to withdrawn and cannot read
+  who decided or the notice marks; deletion step 77); the worker's notice functions (the waiting
+  requests and their mark, the declines due and the decline mark in the company's scope); the
+  platform lists of requests and of every refund of a plan payment; and
+  `ops.platform_decide_plan_payment_refund_request` (platform owners only, checked in SQL, with the
+  platform audit entry).
+- **Domain:** `plan-refund-requests.ts` (asking, withdrawing, what a receipt offers); the daily
+  limit shared with requests of service credit (`assertRefundRequestAllowance`); the minute sweep's
+  announcement counts both kinds (its wording names them, and it links straight to the plan
+  payments' list when every request is one) and its decline notices tell both kinds (the plan
+  payment's receipt number and link); the platform service's lists and decision; the export spec.
+- **Web:** the plan payment receipt's "Refund of this payment" section (the requests with their
+  status, HyFib's note and the refund, a withdraw button, and the form or why nothing can be asked
+  for, or the sign-in prompt); `/platform/refunds` with a switch between service credit and plan
+  payments, the plan payments' requests (with what is left of the payment, a refund in progress and
+  the decision form for owners) and every refund of a plan payment; a hint under Billing's plan
+  payments.
+- **Worker:** the minute billing sweep's refund request notices cover both kinds; a failed decline
+  notice is logged with its kind.
+- **Tests:**
+  - Unit (1 new): the announcement's wording for requests of plan payments alone and of both kinds,
+    its link straight to the plan payments' list when every request is one, the wording for service
+    credit alone unchanged, and each rendered with no amount, currency or receipt number.
+  - Integration (`plan-refund-requests.test.ts`, 18 new):
+    - a billing manager asks for part of a payment with a reason: nothing is refunded or asked of
+      Razorpay, the plan is unchanged, the company audit entry, the receipt's view (and why nothing
+      more can be asked for), and platform staff's view with the payment, what Razorpay refunded
+      of it and any refund running;
+    - `billing.manage` and a sign-in within 15 minutes (agents, administrators, stale and unknown
+      sign-ins), and withdrawing without a fresh sign-in;
+    - bad input, more than is left (also after a refund made at Razorpay), a failed refund refunding
+      nothing, a refund in progress, a payment refunded in full, unknown payments and another
+      company's payment;
+    - one open request per payment, with two sent at once;
+    - 5 requests a day of plan payments and service credit together, each service refusing when
+      the other kind filled the day, and requests older than a day no longer counting;
+    - the limit under one lock: six requests of both kinds at once letting five through, and a
+      request waiting while another session holds the lock's key;
+    - a company being deleted (the status read now, not the context's; staff can still decline,
+      approving is refused), and the status read under a share lock while the deletion is asked
+      for;
+    - withdrawing once, audited, and asking again; another company unable to withdraw;
+    - approving: the staff refund for the amount asked with the company's reason, linked and in
+      both audit logs, the company's and staff's views, the list of every refund linked to the
+      request, the worker's call with the refund's key and notes, the email without HyFib's reason
+      and the plan unchanged; decided once;
+    - approving checked again: refused while a refund started from the company's page runs, and
+      once Razorpay refunded it and less is left than was asked, the request staying open to be
+      declined;
+    - declining needs a note (the service and the function), audited, and the company can ask
+      again;
+    - platform owners only, in the service and the function, for approving and declining; a claimed
+      role refused; the company role unable to call the decision or the lists; an unknown filter;
+    - the company role's grants and policy (no decision or notice columns, no decided request, no
+      deletion, a withdrawn request not reopened) and another company's scope (nothing seen,
+      moved or inserted, and no request on another company's payment);
+    - the owners' email: one request alone, both kinds in one email, a withdrawn request not
+      announced, two sweeps at once announcing once, and no platform owner leaving it due;
+    - the decline email: once to the billing managers with the note and the receipt link, not for
+      an approved request, two sweeps at once telling once, the mark refused in another company's
+      scope, and a note of 1,000 characters told in full over several lines;
+    - the lists paging on equal microseconds, filters, bad cursors, and a refund made at Razorpay
+      beside HyFib's own.
+  - Integration elsewhere: the company deletion deletes the requests and keeps the refund an
+    approval started (`company-data`); the export classification; the new functions' grants
+    (`tenant-isolation`).
+  - e2e (`plan-subscription.spec.ts`): the owner asks from the receipt for ₹200, platform owners'
+    email names no company, amount or reason, a platform owner declines it with a note on the
+    plan payments' requests, the receipt shows the note, the owner asks for ₹150, a platform owner
+    approves, the decline email arrives with the note, the worker refunds the ₹150 and emails the
+    company, and the receipt shows the request refunded and ₹1,164.82 after both refunds.
+- **Docs:** ADR-104 (and a note in ADR-103); SECURITY; THREAT-MODEL T117; RUNBOOKS (refund
+  requests of plan payments, the shared daily limit, migration 0081); ARCHITECTURE;
+  DATA-RETENTION; RELEASE-CHECKLIST; BACKLOG P5-07; FEATURE-MATRIX H-043, H-044.
+- **Found while finishing:**
+  - The first local e2e run used the day's e2e database without migration 0081: asking for a refund
+    of service credit (which now counts both kinds) and the minute billing sweep failed. The new
+    web and worker images need the migration first; the runbook says so.
+  - The local e2e database collected 137 platform owners over the day's runs, and each owner
+    announcement queues one email per owner, which the outbox sends at about two a second: the
+    credit refund test's 60-second wait for its next email ran out on one run. The final runs used
+    a fresh database, as CI does (CI's database starts empty, so at most a few dozen owners exist).
+  - The new e2e steps first reloaded Billing instead of the receipt: the receipt link navigates in
+    the page, and the reload loop started before the receipt showed. The test now waits for the
+    receipt's heading first.
+  - `/platform/plans` was wider than a phone's screen: its grid let the plans table widen the page
+    (555 px on a 412 px phone), so the phone browser zoomed out and, on a fresh database, the e2e
+    test's first click there missed its button. The page now has one column that never grows past
+    the screen, as the other platform pages do (the table scrolls in its card), and the test checks
+    it for horizontal overflow. The other platform pages were measured at the phone's width.
+  - Removing the withdrawal's own "open requests only" filter changed nothing: the company role's
+    update policy refuses a request that is not open. Removing the policy's condition is caught.
+- **Mutation checks:** 53 regressions tried one at a time, 52 caught (3 through the e2e test).
+  - 25 in the migration: operators allowed to decide; a decided or withdrawn request decided again;
+    a decline without a note; the refund for another amount, or without the company's reason; the
+    decision missing from the platform audit log; either platform list open to anyone; decided
+    requests listed as open; requests paged on the time alone; a requested refund not shown as in
+    progress; refunds in progress counted as refunded; refunds linked to every request of their
+    payment; the company role reading who decided, inserting a status, writing the decision note,
+    moving a request to approved or reopening a withdrawn one; several open requests per payment;
+    withdrawn requests announced, or a request announced twice; the decline mark not limited to the
+    current company; requests not deleted with the company; the runtime role able to decide; the
+    platform role able to mark declines told.
+  - 14 in asking and withdrawing: administrators, or a stale sign-in, able to ask; the company's
+    status not read, or read without the share lock; no daily limit; more than is left, a payment
+    refunded in full, or a request while a refund runs accepted; failed refunds counted as
+    refunded; a second open request not told as such; the request missing from the company audit
+    log; administrators able to withdraw; the receipt offering the form while a request is open;
+    and the withdrawal's own filter for open requests removed, the one not caught: the company
+    role's update policy repeats it, and removing the policy's condition is caught (above).
+  - 8 in the shared limit and the notices: the limit counting only requests of service credit, or
+    under another lock; requests of plan payments not announced, or counted as service credit; the
+    announcement of plan payments linking to service credit; declines of plan payments not told;
+    the decline email linking to a top-up receipt; a long note not split into lines.
+  - 3 in the platform service and the export: every request asked for as a status; what was
+    refunded read from the payment's amount; the export including who decided.
+  - 3 through the e2e test: the receipt not offering the form; the refunds page ignoring the plan
+    payments tab; a decision on a plan payment sent as one on service credit.
+
+### Test commands and results (local, 2026-10-01)
+
+| Command                                                                                                                                                                    | Result                                   |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                       | clean                                    |
+| `pnpm test`                                                                                                                                                                | 455 passed                               |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                                                        | 638 passed on each                       |
+| `pnpm build` and `pnpm test:e2e` for `plan-subscription.spec.ts` and `refund-requests.spec.ts` on chromium and mobile-chromium, on a fresh local database migrated to 0081 | 4 passed (11.6 min)                      |
+| Mutation checks                                                                                                                                                            | 53 regressions, 52 caught (listed above) |
+| gitleaks 8.30.1 on the commit                                                                                                                                              | no leaks                                 |
+
+### Known gaps
+
+- Approving a different amount than asked (decline with a note, then refund from the company's
+  platform page), several open requests per payment, reminders about waiting requests, in-app
+  notices and refund requests through the public API are not built.
+- Razorpay test mode has not been run (RELEASE-CHECKLIST).
+
+## 2026-09-30 — Phase 5: refunds of plan payments (P5-07, ADR-103)
+
+Status: **Implemented and locally verified against the Razorpay stand-in (test data only).** HyFib
+could not refund a plan payment (ADR-063), and a refund made in Razorpay's Dashboard was not
+recorded: `refund.processed` set it aside as an unknown refund, the receipt did not show it and the
+daily reconciliation left it to a person.
+
+### Completed
+
+- **Research (R-120, R-121, read 2026-09-30 from Razorpay's documentation repository):** a refund
+  carries the notes it was created with, and fetching it returns them; subscription charges are
+  auto-captured payments, and a captured payment can be refunded in full or in part. No page says
+  whether a refund of a subscription's payment changes the subscription or its invoice (unconfirmed
+  point 29, in the release checklist's test-mode check).
+- **Design (ADR-103):** platform owners refund part or all of a recorded plan payment from the
+  company's platform page, with a reason (10 to 2,000 characters, platform audit log): at least
+  ₹0.01, at most what Razorpay has not refunded of it, one open refund per payment, none for a
+  company being deleted. Operators see refunds only. A refund never changes the plan or the
+  subscription (to end the plan, staff cancel the subscription and change the plan, as the form
+  says). The flow follows staff credit refunds (ADR-058) without a hold: the worker asks Razorpay
+  with `X-Refund-Idempotency: ppr_<request id>` and the note `hyfib_plan_refund: <request id>`, and
+  only a refund fetched from Razorpay is recorded.
+- **Migration 0080:** `app.plan_payment_refunds` (origin `staff` with the reason and who asked, which
+  the company role cannot read, or `razorpay` for refunds made there; one open refund per payment;
+  refund ids unique; append-only); `ops.platform_request_plan_payment_refund` (platform owners only,
+  checked in SQL, with the platform audit entry); `ops.plan_payment_refunds_due` for the minute
+  billing sweep; `app.record_plan_payment_refund`, which marks HyFib's refund processed by its
+  refund id, or by the request its notes name after a lost response (same amount, no refund id
+  yet), records any other processed refund as made at Razorpay, and never lets processed refunds
+  exceed the payment; requests and recordings of a payment's refunds take one advisory lock. The
+  runtime role may only move a request to submitted or failed (column grants and a restrictive
+  policy). The reconciliation's facts include recorded plan refunds.
+- **Domain:** `plan-payment-refunds.ts` (the due list, the job's step: the attempt written down first,
+  the call with the same key and body every time, a refusal failing the request, anything uncertain
+  tried again after 1, 5, 15 and 60 minutes, then hourly, and the refund checked until Razorpay
+  processes or fails it; the billing managers' emails when Razorpay accepts or fails it);
+  `refund.processed` and `refund.failed` for plan payments (a payment without a HyFib order is
+  looked up among recorded plan payments); the reconciliation matches a plan refund by id and
+  records one HyFib missed, instead of leaving it to a person; the company deletion waits for an open
+  refund; the export omits the reason and who asked; the Razorpay client reads a refund's notes
+  (string values only).
+- **Worker:** the `billing.plan-payment-refund` job, signed and run in the company's scope, queued by
+  the minute billing sweep.
+- **Web:** the platform page lists a company's plan refunds with the reason and who asked, and a form
+  for platform owners (the payments that can be refunded, with what is left of each, the amount, the
+  reason and a confirmation); the receipt lists the payment's refunds (in progress, refunded on a
+  day, started by HyFib or made at Razorpay) and the amount paid after refunds; Billing's payments
+  table marks refunded amounts and a refund in progress.
+- **Stand-in (tests only):** refunds keep and return their notes.
+- **Tests:**
+  - Unit (3 new): a refund's notes sent and read back, string values only; the payments offered for a
+    refund (what is left, none with a refund in progress); operators and bad amounts refused before
+    the database; the reconciliation's matching of plan refunds by id and amount.
+  - Integration (`plan-payment-refunds.test.ts`, 7 new):
+    - the request's key and notes sent once, the company's audit entry and email (without the
+      reason), the plan and the subscription unchanged, the refund checked until processed;
+    - operators, short reasons, bad amounts, another company's payment and a company being deleted
+      refused;
+    - Dashboard refunds recorded once from their webhook (the refund fetched from Razorpay, not the
+      event's forged amount and notes); a failed staff refund failing its request with one email,
+      and a failed Dashboard refund changing nothing;
+    - a refund whose response was lost recognised by its notes, with the webhook first and with the
+      next try (the same key returning the same refund), a 409 waiting, and notes naming the request
+      with another amount recorded as made at Razorpay;
+    - never more than the payment, whoever reports the refund; a refusal failing the request with
+      the email; another company's scope unable to record a refund of the payment;
+    - the company role reading refunds without the reason or who asked, never marking one processed,
+      inserting or deleting one, failing only an open request, and another company seeing nothing;
+    - each origin's fields and a processed refund's id and time.
+  - Integration elsewhere: the reconciliation records a missed plan refund (`settlement-recon`); the
+    deletion waits for an open plan refund, then runs and keeps it (`company-data`); the export
+    classification; the new functions' grants (`tenant-isolation`).
+  - e2e (`plan-subscription.spec.ts`): a platform owner refunds ₹100 of the company's plan payment
+    with a reason, the worker asks Razorpay, the billing manager's email arrives without the reason,
+    the platform page shows the refund and the payment's refunded amount, Billing shows the refunded
+    amount with the plan still active, and the receipt shows the refund and ₹1,314.82 after it.
+- **Docs:** ADR-103 (and notes in ADR-063 and ADR-064); research R-120, R-121 and unconfirmed point
+  29; RELEASE-CHECKLIST (test-mode check); SECURITY; THREAT-MODEL T116; RUNBOOKS (refunding a plan
+  payment, migration 0080); ARCHITECTURE; DATA-RETENTION; BACKLOG P5-07; FEATURE-MATRIX H-041, H-044.
+- **Found while finishing:**
+  - The refund form's reason field made the e2e test's existing locator for the staff cancellation's
+    reason match two fields on the platform page; the test now matches labels exactly.
+  - Removing the job's own "open requests only" filter from failing a request changed nothing: the
+    runtime role's update policy already refuses a settled request. A 41st mutation removed that
+    policy's condition instead, and a test catches it.
+- **Mutation checks:** 41 regressions tried one at a time, 40 caught (4 through the e2e test).
+  - 19 in the migration: operators allowed to ask; more than what is left, a second open refund, a
+    company being deleted or a short reason accepted; the request missing from the platform audit
+    log; processed refunds exceeding the payment; a processed refund recorded again; a refund whose
+    response was lost not recognised by its notes, or notes naming a request for another amount
+    taken as it; the reconciliation not knowing recorded plan refunds; the company role reading the
+    reason, marking a refund processed or changing a settled one; a refund deletable; a refund made
+    at Razorpay stored before it is processed; the recording function granted to platform staff
+    instead of the runtime role; the runtime role able to ask for refunds; a request listed before
+    it is due.
+  - 7 in the job: the idempotency key per payment instead of per request; the request not named in
+    the notes; a 409 or an unknown outcome failing the request; the billing managers not told when
+    Razorpay accepts; the notes ignored when recording; and the job's own filter for open requests
+    removed when failing one, the one not caught: the runtime role's update policy repeats it, and
+    removing the policy's condition is caught (the 41st, above).
+  - 11 elsewhere in the domain: plan refund webhooks not recorded; a failed Dashboard refund failing
+    a staff request; the reconciliation leaving plan refunds to a person again, or matching them
+    whatever their amount; the deletion not waiting; the export including the reason; Billing, or
+    staff, counting a refund in progress as refunded; the receipt listing failed refunds; a payment
+    with a refund in progress offered again; refund notes not read from Razorpay.
+  - 4 through the e2e test: the sweep not queueing refunds; the receipt, the platform page or
+    Billing not showing them.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                                                                                                                                  | Result                                                                            |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                                     | clean                                                                             |
+| `pnpm test`                                                                                                                                                                              | 454 passed                                                                        |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                                                                      | 620 passed on each                                                                |
+| `pnpm build` and `pnpm test:e2e` for `plan-subscription.spec.ts` and `plans.spec.ts` on chromium and mobile-chromium, on the local database created for the day's runs, migrated to 0080 | 4 passed (8.0 min), the plan subscription test refunding ₹100 of the plan payment |
+| Mutation checks                                                                                                                                                                          | 41 regressions, 40 caught (listed above)                                          |
+| gitleaks 8.30.1 on the commit                                                                                                                                                            | no leaks                                                                          |
+
+### Known gaps
+
+- Companies cannot ask for a refund of a plan payment (ADR-073's requests are for top-ups), a refund
+  never ends the plan, and plan refunds are not in the platform-wide refunds list.
+- A staff refund that Razorpay reports processed before HyFib stored its id (recognised by its notes
+  after a lost response) is recorded without the "HyFib is refunding" email; the receipt shows it.
+- Razorpay test mode has not been run, including whether a refund of a subscription's payment
+  changes the subscription (RELEASE-CHECKLIST, unconfirmed point 29).
+
+## 2026-09-30 — Phase 5: paying for a plan from the end of the trial (P5-01/P5-07, ADR-102)
+
+Status: **Implemented and locally verified against the Razorpay stand-in (test data only).** A
+company on a trial that started paying by subscription (ADR-063) was charged in Checkout at once,
+and the rest of its trial was lost (Billing said so). Razorpay subscriptions can start in the
+future (`start_at`), which Razorpay documents as its way to give a trial (R-119).
+
+### Completed
+
+- **Research (R-119, read 2026-09-30 from Razorpay's documentation repository):** `start_at`; a
+  subscription without an add-on is `authenticated` after Checkout's authentication transaction,
+  becomes `active` when its first cycle starts and is then charged; the authentication payment is
+  auto-refunded; a card debit starts with the bank's notice 36 hours before it; either side may
+  cancel before the start. Not documented, and recorded as unconfirmed: whether an `expire_by`
+  earlier than `start_at` is accepted, and the authentication payment's amount (the release
+  checklist has the test-mode check).
+- **Design (ADR-102):** a trial ending at least 48 hours ahead is paid from its end; a nearer one is
+  charged at once, as before. Checkout only authorises; nothing is recorded until Razorpay reports a
+  paid cycle, and the first charge makes the plan active through the definer function of ADR-063.
+  The ended trial waits for that charge while the subscription is `authenticated`, `active` or
+  `pending`, for at most the plan version's grace days. After the start, the company's cancel asks
+  Razorpay first, so a charge made but not yet heard of keeps its paid period.
+- **Migration 0079:** `app.plan_subscriptions.starts_at` (written once; no role may update it; after
+  the subscription's creation); `app.trial_charge_wait_until(tenant)`, the one wait rule (an ordinary
+  SQL function granted to the runtime and definer roles only); `app.apply_plan_transition` and
+  `ops.plan_transitions_due` leave a waiting trial alone; `ops.plan_subscriptions_due` asks Razorpay
+  hourly once a first charge is due, until a paid cycle is recorded.
+- **Domain:** `planPaymentStart` (the 48-hour rule) in the offer; the start records `starts_at` and
+  sends `start_at`; `confirmCheckout` answers `scheduled`; the sync emails "Payments for your HyFib
+  plan start when the trial ends" once, and a failed first charge's email says until when everything
+  keeps working; the plan sweep syncs the company's live subscription before a trial would end, and
+  its emails no longer say "paid again" for a trial's first charge; the plan overview's
+  `trialWaitsUntil`; the company's cancel asks Razorpay first after the start and words its email by
+  whether the trial goes on; the staff cancellation email (ADR-101) names the trial the payments were
+  to start after, going on or over.
+- **Web:** Billing's offer names the first charge's day on the button and in the text (the payment
+  method is checked now, any amount taken for the check is refunded, nothing is charged before the
+  trial ends); the subscription panel shows the first charge's day or that it is due, "The first
+  charge failed", "Finish setting up payments", and a cancel description that says whether the trial
+  goes on; the plan card says the trial's payments start when it ends, or that an ended trial is
+  waiting for the first charge and until when; Checkout's `scheduled` answer has its own notice.
+  The company's platform page shows the first charge's day, and its note says the company pays from
+  the trial's end.
+- **Export:** `starts_at` is exported with the company's subscriptions.
+- **Stand-in (tests only):** a subscription with `start_at` ahead is authenticated in Checkout with a
+  refunded payment that pays no invoice; the first charge covers the cycle from the start.
+- **Tests:**
+  - Unit: `planPaymentStart` at exactly 48 hours, just under, past, without a trial end and for
+    every other plan state; the staff cancellation email's trial line, going on and over; the
+    Razorpay client sends `start_at`.
+  - Integration (`plan-subscriptions.test.ts`, 9 new, and the existing tests kept on the pay-now path
+    with a trial ending within two days):
+    - the offer's start, `start_at` sent, Checkout authorising only, nothing recorded, the trial
+      unchanged, one email however many events and syncs, a second start and staff plan changes
+      refused, no hourly check before the start;
+    - the ended trial held by the transition and the due list, the plan card's wait, the hourly
+      check (also for `active` before a paid cycle), the first charge found by the sweep making the
+      plan active from the trial's end, and the hourly check stopping;
+    - a failed first charge: the email's wait, the trial held within the grace days, ended after
+      them with the trial wording, and a later charge still paying for the plan;
+    - the wait rule itself, read in the company's scope: each subscription status, a start at
+      another time, the grace days, the start's check constraint;
+    - cancelling before the start (nothing charged, the trial goes on, it can pay again), after the
+      start with a charge HyFib had not heard of (kept, cancelled at the period's end), after the
+      start with none (at once, the trial ends), and with Razorpay not answering the check (nothing
+      cancelled);
+    - a missed first charge found before the trial would end; Razorpay stopping its retries ending
+      the wait;
+    - a payment window still open when a trial ends not counted as paying (the email says to pay in
+      billing);
+    - the staff cancellation email for a trial going on, and for one the plan sweep ended first.
+  - e2e (`plan-subscription.spec.ts`): after the staff cancellation, staff put the company on a
+    longer trial; the owner pays from the trial's end in the fake Checkout, Billing shows the
+    subscription authorised with its first charge day and the plan card's wording, the email
+    arrives, staff see the first charge's day on the company's platform page, and the owner cancels
+    with the trial going on (the dialog and the email say so).
+- **Docs:** ADR-102 (and ADR-063's not-built list); research R-119 and two unconfirmed points;
+  RELEASE-CHECKLIST (test-mode check); SECURITY; THREAT-MODEL T87, T88; RUNBOOKS (a trial paid from
+  its end, cancelling, the hourly check, migration 0079); ARCHITECTURE; DATA-RETENTION; BACKLOG P5-01
+  and P5-07; FEATURE-MATRIX W-006, H-041.
+- **Found while finishing:**
+  - Razorpay's states page says a subscription becomes `active` when its first cycle starts and is
+    then charged, so `active` without a paid cycle is waited for and checked hourly too.
+  - A company cancelling just after the start could have been cancelled at once while Razorpay's
+    charge was already made: the charge would not have been recorded for the cancelled subscription.
+    The cancel now asks Razorpay first; the moment between that check and the cancel remains, and
+    the daily reconciliation reports such a charge (RUNBOOKS).
+  - The plan sweep's email and the plan card said a company with a live subscription would be
+    "paid again", and the staff cancellation email told any trial as "not changed": both are wrong
+    for a trial waiting for its first charge, and now say what happens.
+  - Widening the plan sweep's check for a paying subscription (it only looked at the one linked to
+    the plan's period) first counted a payment window left open as paying, so a trial ending during
+    an unfinished Checkout would have been told it gets paid automatically. It now counts only
+    subscriptions Razorpay can charge without the payer; a test and two mutations cover it.
+    Billing's plan card likewise shows a payment still being started or in Checkout as a payment
+    to finish below, not as a subscription that pays the plan.
+- **Mutation checks:** 44 regressions tried one at a time (41, then 3 more after the fixes found while
+  finishing), all caught (4 through the e2e test).
+  - 15 in the migration: the ended trial not held by the transition; the due list still listing a
+    waiting trial; a halted subscription holding the trial; a pending first charge not holding it; a
+    subscription starting at another time holding it; the wait not bounded by the grace days, or a
+    day shorter than them; a due first charge not checked hourly, or not while `active`; still
+    checked hourly after the first charge; checked every minute before the start; a start before the
+    subscription allowed; the wait function granted to PUBLIC (caught by the isolation suite); the
+    company scope, or the definer functions, unable to read the wait.
+  - 22 in the domain: a trial always charged at once; a trial exactly 48 hours ahead charged at
+    once; a plan other than a trial paid from a trial's end; `start_at` not sent; the start not
+    recorded; a scheduled Checkout told as processing; the scheduled email never sent, or sent on
+    every sync; an authorised subscription not synced before the trial would end; the first charge
+    always told as ahead; the cancel not asking Razorpay first, ignoring Razorpay not answering, or
+    skipping the check once the charge is due; the cancel email saying the trial goes on after it
+    ended; the failed first charge email without the wait; the stopped first charge email saying
+    "paid again"; the plan card never showing the wait, or showing one before the trial ends; the
+    sweep's emails missing a subscription not linked to the plan (before and after the fix below);
+    a payment window still open counted as paying; the trial's end email saying "paid again".
+  - 3 in the staff cancellation email: the trial never told; a trial the plan sweep ended told as
+    unchanged; an ended trial told as going on.
+  - 4 through the e2e test: the pay button without the first charge's day; the plan card saying
+    "paid by subscription" during the trial; the cancel dialog saying the subscription ends now;
+    staff not shown the first charge.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                                                                                                                                  | Result                                                                                                             |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                                     | clean                                                                                                              |
+| `pnpm test`                                                                                                                                                                              | 451 passed                                                                                                         |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                                                                      | 612 passed on each                                                                                                 |
+| `pnpm build` and `pnpm test:e2e` for `plan-subscription.spec.ts` and `plans.spec.ts` on chromium and mobile-chromium, on the local database created for the day's runs, migrated to 0079 | 4 passed (5.6 min), the plan subscription test paying from the end of a longer trial and cancelling before it ends |
+| Mutation checks                                                                                                                                                                          | 44 regressions, all caught (listed above)                                                                          |
+| gitleaks 8.30.1 on the commit                                                                                                                                                            | no leaks                                                                                                           |
+
+### Known gaps
+
+- Staff cannot extend a trial under a subscription that starts at its end (they cancel it first, as
+  for other plan changes), and payments cannot start on another day.
+- Razorpay test mode has not been run: whether it accepts an `expire_by` before the start is the
+  first check (RELEASE-CHECKLIST).
+
+## 2026-09-30 — Phase 5: emails when HyFib staff cancel a company's plan subscription (P5-07, ADR-101)
+
+Status: **Implemented and locally verified (test data only).** A platform owner can cancel a
+company's Razorpay subscription at once (ADR-063), for example before changing its plan. The
+cancellation was audited in both audit logs, but nobody at the company was told until the plan
+ended, while the company's own cancellations email its billing managers (a known gap of ADR-100).
+
+### Completed
+
+- **Design (ADR-101):** the company's active billing managers (owners and members with the billing
+  role) get one email, "HyFib cancelled your plan subscription", with the plan and the day in the
+  company's time zone, that nothing more is charged, what the plan keeps and HyFib's reason (the one
+  the company's audit log shows). What the plan keeps is read from the plan state when the email
+  goes out: the period the subscription paid, still running (the plan then ends, without grace
+  days); the grace days after the last period it paid; or neither (a trial, a plan staff set since,
+  or a plan that already ended), which the cancellation does not change. A period or grace days the
+  plan sweep has not moved on yet are not told as running. The company's own cancellations and
+  those of a company deletion are not marked.
+- **Migration 0078:** `app.plan_subscriptions.staff_cancel_notice_due` (false by default; the
+  platform role may update it, the runtime role no column) with a partial index;
+  `ops.plan_subscription_cancel_notices_due` lists the marked subscriptions, oldest cancellation
+  first, not companies being deleted; `app.take_plan_subscription_cancel_notice(subscription)` takes
+  one in the company's own scope, locking the company row first, and returns true only for the call
+  that cleared the mark. Both SECURITY DEFINER with a pinned `search_path`, executable by the runtime
+  role only; the definer may update that one column (with a policy for it).
+- **Domain:** `cancelTenantSubscription` marks the cancellation; `plans/change-notices.ts` has the
+  email's text (`subscriptionCancelNotice`) and the sweep (`notifyStaffSubscriptionCancellations`),
+  which reads the reason from the cancellation's entry in the company's audit log and the plan state,
+  in the transaction that takes the notice and queues the emails.
+- **Worker:** the minute billing sweep tells the cancellations after the staff plan changes, logging
+  the count and each failure (it is told the next minute).
+- **Web:** the platform form's reason says it is emailed to the company's billing managers.
+- **Tests:**
+  - Unit (`change-notices.test.ts`, 3 new): the paid period in the company's time zone with the
+    reason; the grace days, and a plan the cancellation does not change, without a blank reason; a
+    long reason and the longest company and plan names within a billing notice.
+  - Integration (`plan-subscriptions.test.ts`, 6 new):
+    - once to the owner, with the paid period, the reason and the Billing link; the next sweep sends
+      nothing;
+    - nothing for the company's own cancellation or a deletion's; a company being deleted not
+      listed (its mark kept); two sweeps at once tell a cancellation once;
+    - the plan as it is when the email goes out: grace days after the last paid period; a plan staff
+      set after cancelling, a period and grace days the plan sweep had not moved on, told as not
+      changed;
+    - two cancellations of one company before a sweep, each told with its own reason and plan;
+    - the runtime role can neither set nor clear the mark; taking needs a company scope and takes
+      only that company's notice, once;
+    - the company row locked before the subscription: while another transaction holds the company
+      row, the waiting notice holds nothing on the subscription (`FOR UPDATE NOWAIT` succeeds).
+  - The isolation suite lists both functions among those only the runtime role may execute.
+  - e2e (`plan-subscription.spec.ts`): after the owner cancels at the end of the period, a platform
+    owner cancels at once from the company's platform page with a reason, and the test waits for the
+    email to the owner through the worker's sweep and Mailpit, with the reason and the paid period.
+- **Docs:** ADR-101; SECURITY (platform roles); THREAT-MODEL T65; RUNBOOKS (cancelling, a company
+  not told, migration 0078); ARCHITECTURE; BACKLOG P5-01 and P5-07; FEATURE-MATRIX H-041.
+- **Found while finishing:**
+  - Checking the plan transitions before writing the email's second line: a plan past due has
+    already passed its period's end (its grace days run), and a plan staff set after the
+    cancellation is not on the subscription's period, so "paid until the period's end" would have
+    been wrong for both. The line now follows the plan state.
+  - The first full integration run on PostgreSQL 18 failed the ADR-100 test of a plan change's
+    email, and running `plan-subscriptions.test.ts` before `plans.test.ts` reproduced it. A sweep
+    takes the 50 oldest changes, and with this part's tests the companies that files run earlier
+    put on plans passed 50, so the test's own company was not reached. Both notice tests now repeat
+    the sweep until nothing is left to tell, as the minute sweeps would. The same run had passed on
+    PostgreSQL 17.
+- **Mutation checks:** 21 regressions tried one at a time, all caught (1 through the e2e test).
+  - 10 in the migration: the company row not locked first; the mark not cleared when taken; a
+    notice taken again after it was taken; another company's notice taken; taking without a company
+    scope; companies being deleted listed; the runtime role allowed to set the mark; the definer
+    unable to clear it; the take function, or the due list, granted to PUBLIC.
+  - 5 in the domain: staff cancellations not marked; the company's own cancellation marked; the
+    take function's answer ignored; the reason left out; the reason read from another
+    cancellation's audit entry.
+  - 5 in what the email tells: dates in UTC rather than the company's time zone; a period told as
+    running after it ended; a plan staff set since told as paid; grace days told as an unchanged
+    plan, or as running after they ended.
+  - 1 through the e2e test: the worker never telling.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                                                                                                                                  | Result                                                                                         |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                                     | clean                                                                                          |
+| `pnpm test`                                                                                                                                                                              | 448 passed                                                                                     |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                                                                      | 603 passed on each, after the notice tests' sweeps were made to reach every due notice (above) |
+| `pnpm build` and `pnpm test:e2e` for `plan-subscription.spec.ts` and `plans.spec.ts` on chromium and mobile-chromium, on the local database created for the day's runs, migrated to 0078 | 4 passed (5.7 min), the plan subscription test waiting for the email of a staff cancellation   |
+| Mutation checks                                                                                                                                                                          | 21 regressions, all caught (listed above)                                                      |
+| gitleaks 8.30.1 on the commit                                                                                                                                                            | no leaks                                                                                       |
+
+### Known gaps
+
+- There is no choice of recipients. A subscription that ends at Razorpay without a cancellation in
+  HyFib (for example one cancelled in the Razorpay Dashboard) is not emailed; the plan sweep's email
+  tells the company when its plan ends.
+
+## 2026-09-30 — Phase 5: emails to companies about plans HyFib staff set (P5-01, ADR-100)
+
+Status: **Implemented and locally verified (test data only).** Staff changes to a company's plan
+(ADR-051) were audited in both audit logs, but nobody at the company was told, although ending a
+plan restricts the company at once.
+
+### Completed
+
+- **Design (ADR-100):** the company's active billing managers (owners and members with the billing
+  role) get one email per staff change, "HyFib changed your plan", with the plan now (a trial and
+  its end, a paid period and its days in the company's time zone, complimentary access, or an ended
+  plan and what that pauses), its add-ons and HyFib's reason, linking to Billing. Two changes before
+  the sweep make one email with the latest; a change the plan sweep or a subscription replaced
+  before the email went out is not told (their own emails are); the same plan saved again tells
+  nothing.
+- **Migration 0077:** `app.tenant_plans.staff_notice_version` (checked to be at most the plan
+  state's version; the platform role may update it, the runtime role no column) with a partial
+  index; `ops.plan_change_notices_due` lists the companies with a mark, oldest change first, not
+  companies being deleted; `app.take_plan_change_notice()` takes the company's notice in its own
+  scope, locking the company row before the plan state (the order staff changes and the plan sweep
+  use, as the emails' outbox rows reference the company row), clears the mark and says whether the
+  plan is still the one staff set. Both SECURITY DEFINER with a pinned `search_path`, executable by
+  the runtime role only.
+- **Domain:** `setTenantPlan` marks the version it writes; `plans/change-notices.ts` has the
+  email's text (`planChangeNotice`) and the sweep (`notifyStaffPlanChanges`), which takes each
+  notice in the transaction that queues the emails to the billing managers.
+- **Worker:** the minute billing sweep tells the changes right after the plan sweep, logging the
+  counts and each failure (the change is told the next minute).
+- **Web:** the platform plan form's reason is labelled "emailed to the billing managers, and shown
+  in the company’s audit log".
+- **Tests:**
+  - Unit (`change-notices.test.ts`, 5): a paid period in the company's time zone with the reason;
+    a trial, complimentary access and an ended plan (without its add-ons); add-ons counted; a long
+    reason split within the notice's lines, and a state without its dates refused; the rendered
+    billing notice with the company's name escaped.
+  - Integration (`plans.test.ts`, 5 new):
+    - once to the owner and the billing member (not the administrator) with the paid period, the
+      add-ons, the reason and the Billing link; the next sweep sends nothing;
+    - two changes before the sweep told once with the latest; the same plan again not marked; a
+      trial the plan sweep ended before the notice not told, and counted as replaced;
+    - a company being deleted not listed (its mark kept); two sweeps at once tell a change once;
+    - the company row locked before the plan state: while another transaction holds the company
+      row, the waiting notice holds nothing on the plan state (`FOR UPDATE NOWAIT` succeeds);
+    - the runtime role cannot clear the mark; taking needs a company scope and takes only that
+      company's notice; the table refuses a mark beyond the version.
+  - The isolation suite lists both functions among those only the runtime role may execute.
+  - e2e (`plans.spec.ts`): after staff put the company on a paid period and later end the plan,
+    the test waits for both emails to the owner through the worker's sweep and Mailpit, with the
+    plan, the reason and the Billing link. The specs using the reason field follow its new label.
+- **Docs:** ADR-100; SECURITY (platform roles); THREAT-MODEL T65; RUNBOOKS (a company not told,
+  migration 0077); ARCHITECTURE; BACKLOG P5-01; FEATURE-MATRIX H-032.
+- **Found while finishing:** the first full integration run failed the company export's
+  classification test, which requires every column of a company table to be exported or left out
+  with a reason: `staff_notice_version` is now left out as the worker's mark (the change itself is
+  exported). The same run failed the ADR-099 test of two first changes once on PostgreSQL 17: it
+  ordered the audit entries by time, but both transactions begin before either takes the lock, so
+  their audit times need not follow the order they ran in. The test now follows the entries'
+  chain (amended into the ADR-099 commit before it was pushed).
+- **Mutation checks:** 19 regressions tried one at a time, 18 caught (1 through the e2e test).
+  - 10 in the migration: the company row not locked first; the mark not cleared when taken; a
+    replaced change told; companies being deleted listed; taking clearing every company's mark;
+    taking without a company scope; the runtime role allowed to set the mark; a mark beyond the
+    version stored; the take function granted to PUBLIC; the platform role unable to mark.
+  - 4 in the domain: staff changes not marked; a replaced change emailed, or not counted as
+    replaced; the reason left out.
+  - 3 in the email's text: the add-ons left out; dates in UTC rather than the company's time zone;
+    a trial worded as a paid period.
+  - 1 through the e2e test: the worker never telling.
+  - Not observable: removing the migration's `REVOKE EXECUTE … FROM PUBLIC` on the take function,
+    as the default privileges of migration 0002 already withhold it (the isolation suite checks
+    that nothing is executable by PUBLIC, and catches an explicit grant).
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                                                                                                                                                       | Result                                                                             |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                                                          | clean; the format check first flagged two long lines in the notice module, wrapped |
+| `pnpm test`                                                                                                                                                                                                   | 445 passed                                                                         |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                                                                                           | 597 passed on each, after the two failures described above were fixed              |
+| `pnpm build` and `pnpm test:e2e` for `plans.spec.ts`, `api-quota.spec.ts` and `plan-subscription.spec.ts` on chromium and mobile-chromium, on the local database created for the day's runs, migrated to 0077 | 8 passed (4.2 min), the plans test waiting for both emails                         |
+| Mutation checks                                                                                                                                                                                               | 19 regressions, 18 caught, 1 not observable (listed above)                         |
+| gitleaks 8.30.1 on the commit                                                                                                                                                                                 | no leaks                                                                           |
+
+### Known gaps
+
+- Staff cancelling a company's subscription is not emailed to the company, and there is no choice
+  of recipients or notice in the product beyond the plan card.
+- A change the plan sweep or a subscription replaced within the minute is not told: their own
+  emails describe the newer state.
+
+## 2026-09-30 — Phase 5: addresses for all of a company's API keys (P5-08, ADR-099)
+
+Status: **Implemented and locally verified (test data only).** A key can be held to the networks
+its systems call from (ADR-076), but a company that wanted all its API traffic to come from its own
+servers had to set every key, and a key created without networks accepted requests from anywhere.
+
+### Completed
+
+- **Design (ADR-099):** owners and administrators (`developer.manage`) can list up to 20 IPv4 or
+  IPv6 addresses or networks for all of the company's keys, typed, checked and kept as a key's are.
+  A request must come from one of them, and from one of its key's own networks when the key lists
+  any; keys created later are held to them from their first request. Empty accepts any address.
+- **Migration 0076:** `app.api_settings` (one row per company, made when first set; row security;
+  the runtime role reads, inserts and updates `allowed_networks` and `updated_at` only, and cannot
+  delete it), checked to hold 1 to 20 networks or none; deletion step 857. The lookup
+  `ops.api_key_authenticate(token_hash, client_ip)` (SECURITY DEFINER, pinned `search_path`,
+  runtime role only) is rebuilt with one more column, `refused_by`: it checks the company's
+  networks after the key's own and before the key is marked used, and says which list refused the
+  address. Web servers of the previous release select the columns they know by name, so they keep
+  working during a rolling deploy.
+- **Domain:** the keys service reads the company's networks (`companyNetworks`) and changes them
+  (`setCompanyNetworks`) after a recent sign-in, under the company's key lock, so two first changes
+  at once make one row; each change is audited as `api.networks_changed` with the lists before and
+  after, and the same list again records nothing. Authentication returns whose list refused the
+  address, and the 403 `ip_not_allowed` says so ("The company this API key belongs to does not
+  accept API requests from …"); the attempt counts against the per-address limit of failed
+  authentication, as for a key's networks, and the web server logs which list refused it. The
+  OpenAPI document says that the company can limit the addresses of all its keys.
+- **Web:** Settings → API keys has an "Addresses for all keys" card with the list and a dialog to
+  change it; each key says whether it accepts requests from its own addresses, the company's, or
+  both.
+- **Export:** the company's list is in the company export (`app.api_settings`).
+- **Tests:**
+  - Unit (`api.test.ts`, 2 new): the refusal's wording for each list, with and without an address;
+    the OpenAPI text.
+  - Integration (`api.test.ts`, 4 new):
+    - every key of the company is held to the list, including one created later, while another
+      company's keys are not; refused addresses (and an unknown one) leave the key unused, an
+      IPv4-mapped address inside is accepted, and an emptied list accepts any address again;
+    - with both lists, an address must be on both, and the key's list is checked first;
+    - changes are audited before and after (the same list again records nothing), refused with a
+      stale sign-in, for an agent and for bad input, and kept to the company for the service and
+      the runtime role, which cannot delete the row; the table refuses an empty list and more than
+      20 networks;
+    - two first changes while the company's key lock is held make one row, the second seeing the
+      first.
+  - The company data tests check that the list is deleted with the company and exported.
+  - e2e (`api-keys.spec.ts`): the owner lists the office's network for all keys; a key without
+    addresses of its own is then refused from another address (403 `ip_not_allowed`, naming the
+    company's list) and accepted from the network, and accepts any address again once the list is
+    removed.
+- **Docs:** ADR-099; SECURITY; THREAT-MODEL T94; RUNBOOKS (`ip_not_allowed`, migration 0076);
+  ARCHITECTURE; DATA-RETENTION; BACKLOG P5-08; FEATURE-MATRIX W-135 and H-033.
+- **Mutation checks:** 22 regressions tried one at a time, all caught (2 through the e2e test).
+  - 10 in the lookup and the table: the company's list not checked; an unknown address accepted
+    by it; a company refusal reported as the key's; the key marked used before the company's list
+    is checked; the company's list checked before the key's own; the definer unable to read the
+    lists; the runtime role allowed to delete the row; empty or long lists stored; the row not
+    deleted with the company, or not deletable by the deletion.
+  - 7 in the settings service: changes without `developer.manage` or a recent sign-in; the list
+    read without `developer.manage`; entries stored as typed; the same list audited again; changes
+    audited under another action; two first changes not serialised.
+  - 3 elsewhere: every refusal named as the key's; the company's refusal worded as the key's; the
+    list left out of the export.
+  - 2 through the e2e test: the API gate wording every refusal as the key's; the page offering no
+    company list.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                                                                                                                             | Result                                                            |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                                | clean                                                             |
+| `pnpm test`                                                                                                                                                                         | 440 passed                                                        |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                                                                 | 592 passed on each                                                |
+| `pnpm build` and `pnpm test:e2e` for `api-keys.spec.ts` and `api-quota.spec.ts` on chromium and mobile-chromium, on the local database created for the day's runs, migrated to 0076 | 14 passed (3.9 min), with the new test for addresses for all keys |
+| Mutation checks                                                                                                                                                                     | 22 regressions, all caught (listed above)                         |
+| gitleaks 8.30.1 on the commit                                                                                                                                                       | no leaks                                                          |
+
+### Known gaps
+
+- Exceptions for single keys, networks per scope or endpoint, hostnames and time windows are not
+  built; nor are alerts or a list of refused requests (the web server logs each refusal with the key
+  and company).
+- The check is only as sound as the proxy configuration (`TRUSTED_PROXIES`, DEPLOYMENT.md), as for
+  a key's own networks.
+
+## 2026-09-30 — Phase 5: emails about an API key's own monthly limit (P5-08, ADR-098)
+
+Status: **Implemented and locally verified (test data only).** A key with a monthly limit of its own
+(ADR-097) was refused once its month was used up without anyone being told, while the company's
+limit warns at 80% (ADR-062) and tells when it is reached (ADR-061).
+
+### Completed
+
+- **Design (ADR-098):** the company's active owners and administrators are emailed once when a key's
+  requests reach 80% of its own limit (rounded up) in a usage period, and once when they reach the
+  limit. A period that reaches the limit before the sweep saw it at 80% gets only the second email,
+  and limits of 1 to 4 have no warning. A new limit (or none) arms both again for the current
+  period, and the next period's counter is armed from the start.
+- **Migration 0075:** `warned_at` and `notified_at` on `app.api_key_usage` (the runtime role may set
+  them); a partial index on the counters not told; `ops.api_key_usage_notices_due` (SECURITY
+  DEFINER, executable by the runtime role only, ids only) lists the counters of the last month, of
+  a usable key with a limit, of a company not being deleted, at the limit and not told, or at 80%
+  and neither warned nor told.
+- **Domain:** `api/key-usage-notices.ts`. `noticeApiKeyUsageDue` lists the counters due;
+  `noticeApiKeyUsage` locks each in its company's scope, checks it again (the company's status, an
+  active key with a limit, the current period, the email due) and marks it in the transaction that
+  queues a company notice to the owners and administrators. A counter of an earlier period is
+  marked without an email, so that the sweep stops listing it; one of a later period (a server
+  whose clock is ahead) waits until it is current. `setMonthlyLimit` clears the current period's
+  marks, and the keys list returns when each email went out this period.
+- **Worker:** the minute messaging sweep runs the notices after the key expiry reminders, logging
+  the counts and each failure (nothing is marked, and the next minute tries again).
+- **Web:** Settings → API keys shows when "80% of its limit emailed" and "Limit reached emailed"
+  happened this period.
+- **Export:** the counts' `warned_at` and `notified_at` are in the company export.
+- **Tests:**
+  - Unit (`key-usage-notices.test.ts`, 4): the warning and the limit notice with the requests used,
+    the limit and the period's end in the company's time zone; a one-line subject whatever the
+    key's name holds; the notice rendered as a company email with the name escaped.
+  - Integration (`api-quota.test.ts`, 4 new):
+    - warned once at 80% and told once at the limit, owners and administrators only, with the link
+      to Settings → API keys; a new limit arms both again; the next period's counter is warned
+      again;
+    - a counter at the limit before any sweep is told once; limits of 1 to 4 are never warned;
+    - left out: keys without a limit, revoked and expired keys, another company's counter and a
+      company being deleted; a previous period's counter is marked without an email and not listed
+      again, and a next period's counter is left until then;
+    - two sweeps at once send each email once.
+  - The isolation suite lists the new function among those the runtime role may execute.
+  - e2e (`api-keys.spec.ts`): the per-key limit test waits for the owner's email that the key used
+    all three of its requests (through the worker's sweep and Mailpit), without the token, and for
+    "Limit reached emailed" on the page.
+- **Docs:** ADR-098; SECURITY; THREAT-MODEL T86 and T115; RUNBOOKS (the email, migration 0075);
+  ARCHITECTURE; DATA-RETENTION; BACKLOG P5-08; FEATURE-MATRIX W-136 and H-039.
+- **Mutation checks:** 21 regressions tried one at a time, all caught: 18 before the change for
+  earlier periods (2 through the e2e test), then 3 on the period checks after it.
+  - 6 in listing what is due: warned at 90% instead of 80%; warned or told counters listed again;
+    revoked keys or companies being deleted listed; the marks not updatable by the runtime role.
+  - 7 in checking again and marking: an earlier period told; a warning sent twice; the counter not
+    locked (two sweeps at once); a revoked key or a company being deleted told; every member
+    emailed; the requests used told as the limit.
+  - 3 elsewhere: the warning worded as the limit notice; a new limit keeping the old marks; the
+    marks left out of the export.
+  - 2 through the e2e test: the worker not sweeping; the page not showing the email.
+  - 3 after the change for earlier periods: an earlier period told; an earlier counter left to be
+    listed again (the behaviour before the change); a later period's counter closed.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                                                                                                                             | Result                                                                                              |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                                | clean; the format check first flagged a long line in the worker's sweep, wrapped                    |
+| `pnpm test`                                                                                                                                                                         | 438 passed                                                                                          |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                                                                 | 588 passed on each                                                                                  |
+| `pnpm build` and `pnpm test:e2e` for `api-keys.spec.ts` and `api-quota.spec.ts` on chromium and mobile-chromium, on the local database created for the day's runs, migrated to 0075 | 12 passed (2.8 min), the per-key limit test waiting for the owner’s email                           |
+| Mutation checks                                                                                                                                                                     | 21 regressions, all caught (listed above)                                                           |
+| gitleaks 8.30.1 on the commit                                                                                                                                                       | no leaks; a first scan flagged the unit test's made-up key prefix, replaced with one of low entropy |
+
+## 2026-09-30 — Phase 5: a key's limit read under a lock (P5-08, ADR-097 review finding)
+
+Status: **Implemented and locally verified.** The Codex review of PR #18 found that a request could
+read its key's limit just before an owner lowered it, and still be counted under the old limit after
+the change committed: the read took no lock, so it did not wait for the change.
+
+### Completed
+
+- **Domain:** `consumeApiRequest` reads the key's limit `FOR KEY SHARE`. A change of the limit
+  (`setMonthlyLimit`) holds the key's row `FOR UPDATE` until it commits, so a request arriving
+  meanwhile waits for it and is counted under the new limit, and a change arriving while a request
+  counts waits for that request. The last-used update of authentication already skips a locked key
+  (`SKIP LOCKED`, at most once a minute), and every request still locks its key, then the key's
+  count, then the company's.
+- **Test:** in `api-quota.test.ts`, the owner lowers a key's limit from five to the two requests
+  counted while its audit entry waits behind a table lock, so the change holds the key's row; a
+  request sent meanwhile waits for the change and is refused (`key_quota_exceeded`, limit 2), and
+  the key's count stays at two.
+- **Docs:** ADR-097 (admission); SECURITY (Phase 5 rules); ARCHITECTURE (monthly requests per
+  key); THREAT-MODEL T115.
+- **Mutation checks:** the limit read without a lock, and the change locking `FOR NO KEY UPDATE`
+  (which a key share lock does not wait for): the new test fails on each.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                              | Result                                     |
+| ---------------------------------------------------- | ------------------------------------------ |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck` | clean                                      |
+| `pnpm test`                                          | 434 passed                                 |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)  | 584 passed on each (the new test included) |
+| Mutation checks                                      | 2 regressions, both caught by the new test |
+| gitleaks 8.30.1 on the fix and migration 0074        | no leaks                                   |
+
+## 2026-09-30 — Phase 5: the one-argument API key lookup dropped (P5-08, migration 0074)
+
+Status: **Implemented and locally verified.** Migration 0051 (ADR-076) kept
+`ops.api_key_authenticate(text)`, rebuilt so that it refuses every key that lists networks, only for
+web servers of the previous release during a rolling deploy. Every release since calls the lookup
+with the client's address, so nothing calls it any more.
+
+### Completed
+
+- **Migration 0074:** drops `ops.api_key_authenticate(text)`: one definer function fewer that reads
+  the keys.
+- **Tests:** the ADR-076 test that the old lookup refused keys with networks now checks that it is
+  gone; the grant lists in `api.test.ts` and the isolation suite drop it.
+- **Docs:** ADR-076's rollout note; RUNBOOKS (migrations 0074 and, missing from ADR-097, 0073);
+  THREAT-MODEL T94; BACKLOG P5-08.
+- **Mutation check:** a migration that keeps the function makes the ADR-076 test fail.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                                                    | Result                                                                                        |
+| ---------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `pnpm vitest run --project integration` for `api.test.ts` and `tenant-isolation.test.ts` (PostgreSQL 18.6) | 111 passed; the local databases were started again first, after the cloud container restarted |
+| Mutation check                                                                                             | the migration keeping the function: the ADR-076 test fails                                    |
+
+## 2026-09-30 — Phase 5: monthly request limits per API key (P5-08, ADR-097)
+
+Status: **Implemented and locally verified (test data only).** A company's plan limits the API
+requests of the whole company in a month (ADR-061), so one integration could use up the month's
+requests every other integration needs, and nobody could see which key used what.
+
+### Completed
+
+- **Design (ADR-097):** every request the API admits is also counted for its key, in the company's
+  usage period; a key may have its own monthly limit (1 to a billion, or none), set at creation,
+  changed for an active key after a recent sign-in (audited) and kept on rotation, where the new
+  key counts from zero. The key's count comes first, in the transaction that counts the company's:
+  a request its key refuses (429, `key_quota_exceeded`) takes nothing from the company, and one the
+  company refuses is taken back from the key, so a refused request counts for neither.
+- **Migration 0073:** `app.api_keys.monthly_request_limit` (checked 1 to a billion; the runtime role
+  reads and updates it); `app.api_key_usage` (one row per key and period, a composite foreign key to
+  the company's key, row security, the runtime role adding to counts but unable to move or delete
+  them); deleted with the company before its keys (deletion step 855).
+- **Domain:** `consumeApiRequest` counts the key below its limit and then the company, rolling the
+  key's count back to a savepoint when the company refuses; `admitApiRequest` gives the key's
+  refusal with the limit, the period's end and Retry-After; the keys service takes a limit at
+  creation, changes it (`setMonthlyLimit`, audited `api_key.limit_changed`), copies it on rotation
+  and lists each key's requests this period; the OpenAPI document names the new reason; the company
+  export includes the counts and the limit.
+- **Web:** Settings → API keys shows each key's requests this period with its own limit, marks a
+  key whose limit is reached, and takes a limit when creating a key and in a "Limit" dialog.
+- **Tests:**
+  - Unit: the OpenAPI document names `key_quota_exceeded` in the 429 response and the reasons.
+  - Integration in `api-quota.test.ts` (5 new, 1 extended):
+    - counting apart: keys with and without a limit, eight requests at once admitting three of a
+      three-request key, the refusals (message, Retry-After) uncounted for the company, the next
+      period counting from zero while the list shows the current one;
+    - a refusal by the key or by the company counted for neither; the key's refusal given when both
+      are used up;
+    - three keys sending 24 requests at once admit exactly the company's ten, each key within its
+      own limit and its count what was admitted;
+    - changing the limit: at once, to the requests already counted, the same limit a no-op, emptied,
+      thousands separators; audited before and after, and on creation; refused with a stale
+      sign-in, without `developer.manage`, for another company, for bad input and for a revoked
+      key; rotation keeping the limit and counting from zero;
+    - grants and isolation: counts read only in their company, never moved to another key or period
+      nor deleted by the runtime role, a count's key the company's, the limit's check;
+    - the ADR-061 test of a plan without the API now also checks that nothing is counted for the key.
+  - e2e `api-keys.spec.ts`: a key created with a limit of three is refused on the fourth request
+    (429, `key_quota_exceeded`, Retry-After), the page marks it and counts the company's three, and
+    raising the limit, then removing it, lets requests through again.
+- **Docs:** ADR-097; SECURITY; THREAT-MODEL T115; RUNBOOKS (429 `key_quota_exceeded`); ARCHITECTURE
+  (and its outdated list of what the API lacks); DATA-RETENTION; BACKLOG P5-08; FEATURE-MATRIX W-136
+  and H-039.
+- **Mutation checks:** 31 regressions tried one at a time (3 through the e2e test), all caught.
+  - 7 in counting: a key's limit not enforced or off by one; a company refusal kept in the key's
+    count; keys without a limit not counted; a key counted per request time rather than per
+    period; the company counted before the key without taking it back; the key counted when the
+    plan leaves the API out.
+  - 3 in the refusal: given as the company's; without Retry-After; missing from the OpenAPI
+    document.
+  - 11 in the keys service: a new key given no limit; the limit missing from the creation's audit
+    entry; a rotated key without its limit; changes without a recent sign-in, by members without
+    `developer.manage`, to a revoked key, unaudited, or audited for the same limit; a limit of 0,
+    or any number text, accepted; each period of a key listed.
+  - 7 in the schema and export: counts movable to another key, deletable, naming another company's
+    key or without row security; limits outside 1 to a billion stored; counts not deleted with the
+    company or left out of the export.
+  - 3 through the e2e test: the create form sending no limit; a used-up key not marked; the limit
+    dialog saving the old limit.
+
+### Test commands and results (local, 2026-09-30)
+
+| Command                                                                     | Result                                                                                                                                                                                  |
+| --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                        | the first lint flagged a loose `== null` in the settings component, replaced by explicit checks; then 0 problems / all files formatted / all workspace packages pass                    |
+| `pnpm test` (unit)                                                          | 434 passed; the OpenAPI test first failed on the new reason, and now expects it                                                                                                         |
+| `pnpm test:integration` (PostgreSQL 18.6)                                   | 583 passed, including 5 new in `api-quota.test.ts`; the grants test first matched the mapped error's text ("Operation not permitted.") instead of PostgreSQL's, and now reads the cause |
+| `pnpm test:integration` against PostgreSQL 17.11 (Docker)                   | 583 passed                                                                                                                                                                              |
+| `pnpm build` / `pnpm test:e2e --project=chromium --project=mobile-chromium` | build passes / `api-keys.spec.ts` and `api-quota.spec.ts`: 12 passed (2.2 min), on the local database created for the day's runs, migrated to 0073                                      |
+| Mutation checks                                                             | 31 regressions tried (3 through the e2e test), all caught                                                                                                                               |
+
+### Known gaps
+
+- Not built: warnings before a key's own limit (the company's warning at 80% stays, ADR-062), an
+  email when a key's month is used up, limits per endpoint for a key, and per-key usage on HyFib's
+  platform pages.
+- A rotated key counts from zero, by design: the same members manage limits and rotation.
+
 ## 2026-09-30 — Phase 5: queue waits and alerts for late queues (P5-10, ADR-096)
 
 Status: **Implemented and locally verified (test data only; alerts go to the local test mailbox).**

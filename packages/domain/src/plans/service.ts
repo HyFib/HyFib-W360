@@ -2,6 +2,7 @@ import type { Clock } from '@w360/core';
 import {
   eq,
   plans,
+  sql,
   tenantPlans,
   type ApiScope,
   type Database,
@@ -43,6 +44,11 @@ export interface PlanUsage {
 export interface CompanyPlanOverview {
   status: TenantPlanStatus;
   trialEndsAt: Date | null;
+  /**
+   * A trial that has ended while its subscription's first charge is due waits for that charge
+   * until then (ADR-102); null otherwise.
+   */
+  trialWaitsUntil: Date | null;
   periodStart: Date | null;
   periodEnd: Date | null;
   graceEndsAt: Date | null;
@@ -140,9 +146,22 @@ export function createPlansService(deps: PlansServiceDeps) {
             : [];
           const usage = await usageIn(tx, ctx.tenant.id);
           const { modules, ...planDetails } = plan ?? { modules: [...PLAN_MODULE_KEYS] };
+          let trialWaitsUntil: Date | null = null;
+          if (
+            state.status === 'trialing' &&
+            state.trialEndsAt &&
+            state.trialEndsAt <= clock.now()
+          ) {
+            const wait = await tx.execute<{ until: Date | string | null }>(
+              sql`select app.trial_charge_wait_until(${ctx.tenant.id}::uuid) as until`,
+            );
+            const until = wait.rows[0]?.until ?? null;
+            trialWaitsUntil = until === null ? null : new Date(until);
+          }
           return {
             status: state.status,
             trialEndsAt: state.trialEndsAt,
+            trialWaitsUntil,
             periodStart: state.periodStart,
             periodEnd: state.periodEnd,
             graceEndsAt: state.graceEndsAt,

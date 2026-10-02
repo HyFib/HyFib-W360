@@ -64,7 +64,7 @@ test('a plan allows five API requests a month: nearly used up at four, the sixth
     .getByLabel('Plan', { exact: true })
     .selectOption({ label: `Developer (api-${suffix} v1)` });
   await page
-    .getByLabel('Reason (shown in the company’s audit log)')
+    .getByLabel('Reason (emailed to the billing managers, and shown in the company’s audit log)')
     .fill('Invoice INV-2026-0099 paid by bank transfer');
   await page.getByRole('button', { name: 'Save plan' }).click();
   await expect(page.getByText('The company’s plan was changed.')).toBeVisible();
@@ -151,7 +151,7 @@ test('a plan without webhook management: its keys and requests follow the scopes
     .getByLabel('Plan', { exact: true })
     .selectOption({ label: `Read only (scopes-${suffix} v1)` });
   await page
-    .getByLabel('Reason (shown in the company’s audit log)')
+    .getByLabel('Reason (emailed to the billing managers, and shown in the company’s audit log)')
     .fill('Invoice INV-2026-0142 paid by bank transfer');
   await page.getByRole('button', { name: 'Save plan' }).click();
   await expect(page.getByText('The company’s plan was changed.')).toBeVisible();

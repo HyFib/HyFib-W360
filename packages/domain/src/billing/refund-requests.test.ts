@@ -24,6 +24,43 @@ describe('the refund request announcement to platform owners (ADR-073)', () => {
     expect(several.lines.slice(1)).toEqual(refundRequestsAnnouncement(1, BASE).lines.slice(1));
   });
 
+  it('counts requests of plan payments apart, and links straight to them when they are all there is (ADR-104)', () => {
+    const credit = refundRequestsAnnouncement(1, BASE);
+    const plan = refundRequestsAnnouncement(0, BASE, 1);
+    expect(plan).toEqual({
+      subject: 'A refund request is waiting for a decision',
+      lines: [
+        'A company asked HyFib to refund a plan payment.',
+        credit.lines[1],
+        'Platform → Refunds → Plan payments lists them with the companies, amounts and reasons.',
+      ],
+      url: `${BASE}/platform/refunds?kind=plan`,
+      actionLabel: 'Open refunds',
+    });
+    const plans = refundRequestsAnnouncement(0, BASE, 2);
+    expect(plans.subject).toBe('2 refund requests are waiting for a decision');
+    expect(plans.lines[0]).toBe('Companies asked HyFib 2 times to refund plan payments.');
+    expect(plans.url).toBe(`${BASE}/platform/refunds?kind=plan`);
+    const both = refundRequestsAnnouncement(2, BASE, 1);
+    expect(both).toEqual({
+      subject: '3 refund requests are waiting for a decision',
+      lines: [
+        'Companies asked HyFib 3 times for refunds: 2 of unused service credit and 1 of plan payments.',
+        credit.lines[1],
+        'Platform → Refunds lists them with the companies, amounts and reasons, under Service credit and Plan payments.',
+      ],
+      url: `${BASE}/platform/refunds`,
+      actionLabel: 'Open refunds',
+    });
+    // Service credit alone reads as before plan payments could be refunded.
+    expect(refundRequestsAnnouncement(3, BASE, 0)).toEqual(refundRequestsAnnouncement(3, BASE));
+    for (const alert of [plan, plans, both]) {
+      const email = renderEmail({ kind: 'platform.notice', ...alert });
+      expect(email.text).not.toMatch(/₹|INR|inv_/);
+      expect(email.html).toContain(`href="${alert.url}"`);
+    }
+  });
+
   it('renders as a platform notice with the link', () => {
     const alert = refundRequestsAnnouncement(2, BASE);
     const email = renderEmail({ kind: 'platform.notice', ...alert });

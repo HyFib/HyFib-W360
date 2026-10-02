@@ -1830,7 +1830,7 @@ Decision:
   of being quarantined as an unknown order; an event for a subscription HyFib does not know is
   quarantined. The daily settlement reconciliation (ADR-059) matches recorded plan payments by
   payment id, looks up unknown payments the same way (recording a missed one), and leaves refunds of
-  plan payments to a person, since HyFib does not refund them.
+  plan payments to a person, since HyFib does not refund them (since ADR-103 it records them).
 - **Flag:** `RAZORPAY_SUBSCRIPTIONS_ENABLED`, off by default: Razorpay Subscriptions (and Flash
   Checkout, which Razorpay requires for them) must be activated on the account, and the tax
   treatment of plan prices needs review (ADR-012). Events for existing subscriptions are processed
@@ -1844,9 +1844,9 @@ quarantined for a person); and how a quarterly plan behaves on domestic cards, w
 Razorpay registers "as presented" for frequencies other than weekly, monthly and yearly. The
 release checklist has the test-mode checks.
 
-Not built: billing that starts at the end of a trial, self-serve plan and add-on changes with
-proration, pausing, offers, plan payment receipts (since ADR-064) and GST invoices, refunds of plan payments, and
-emails about a subscription beyond charges, failures and endings.
+Not built: billing that starts at the end of a trial (since ADR-102), self-serve plan and add-on changes with
+proration, pausing, offers, plan payment receipts (since ADR-064) and GST invoices, refunds of plan payments (since
+ADR-103), and emails about a subscription beyond charges, failures and endings.
 
 ## ADR-064 Receipts for plan payments (2026-09-29)
 
@@ -1868,7 +1868,8 @@ read with `billing.read` in the company's scope like top-up receipts. It shows:
 Like top-up receipts, it says it is a payment confirmation and **not a tax invoice**; the operator's
 legal name, address and GSTIN are not configured, and tax invoices wait for tax review. HyFib does
 not refund plan payments, so a refund made in Razorpay's Dashboard is not shown (the daily
-reconciliation leaves it to a person). Nothing is stored: the page is computed from the plan payment
+reconciliation leaves it to a person). Since ADR-103 the receipt lists every refund of the payment,
+HyFib's own and those made at Razorpay. Nothing is stored: the page is computed from the plan payment
 and its subscription. The payments table in Billing links each payment to its receipt, and the
 payment-received email links to the receipt of the payment that paid the new period.
 
@@ -2338,6 +2339,7 @@ Decision:
 - **Rollout:** the one-argument lookup of 0024 stays for web servers of the previous release during
   a rolling deploy, rebuilt on the new one so that it refuses every key that lists networks (it
   cannot check an address); a later release drops it.
+  (Migration 0074, 2026-09-30, drops it: every release since calls the lookup with the address.)
 
 Not built: networks for the whole company, per scope or per endpoint; hostnames; time windows; and
 alerts or a list of refused requests (the web server logs each refusal with the key and company).
@@ -3271,3 +3273,352 @@ Not built: an email when the worker itself stops (an alert the worker sends cann
 its liveness and readiness probes are for it, see DEPLOYMENT, and the console says when the last
 check was), a reminder while a queue stays late, an email when it has caught up, limits changed
 without a release, and trends of waits over time.
+
+## ADR-097 Monthly request limits per API key (2026-09-30)
+
+Context: a company's plan limits the API requests of the whole company in a month (ADR-061), and
+the rate limits (ADR-068) bound each key only by the second. One integration (a partner's feed, a
+script run in a loop) could use up the month's requests every other integration of the company
+needs, and nobody could tell which key used what: keys showed only when they were last used.
+
+Decision:
+
+- **Counted per key:** every request the API admits is also counted for the key that made it, in
+  `app.api_key_usage` (one row per key and period), in the company's usage period (ADR-061), so a
+  key's month is the plan's month. Keys without a limit are counted too, so Settings → API keys
+  shows each key's requests this period.
+- **A key's own limit:** optional, a whole number from 1 to a billion (`api_keys.monthly_request_limit`,
+  null for none). Set when the key is created and changed later for an active key, by owners and
+  administrators (`developer.manage`) after a recent sign-in (ADR-056), like its addresses
+  (ADR-076); the change applies from the key's next request, to the requests already counted this
+  period, and is audited with the limits before and after (`api_key.limit_changed`; a creation's
+  audit entry carries the limit). A rotated key's successor keeps the limit, and its own requests
+  are counted from zero: the same people manage both, so this is no way around a limit they could
+  change anyway.
+- **Admission:** in the transaction that counts the company's request (ADR-061), the key's count
+  is taken first, below its limit (one upsert, atomic whatever runs in parallel), then the
+  company's; a request its key refuses takes nothing from the company, as with the rate limits,
+  and a request the company refuses is taken back from its key (a savepoint), so a refused request
+  counts for neither. The key's limit is read under a key share lock, which waits for a change of
+  the limit in progress (the change holds the key's row FOR UPDATE), so a request is never counted
+  under a limit just replaced; the last-used update (at most once a minute) already skips a locked
+  key and is made by a later request. Every request locks its key, then the key's count, then the
+  company's, so requests cannot deadlock. A key that used up its month gets 429 `rate_limited` with reason
+  `key_quota_exceeded`, the limit and when requests are accepted again in the message, and
+  Retry-After until the next period; with both used up, the key's refusal is the one given.
+- **Access and data:** the runtime role reads the counts, adds to them and cannot move them to
+  another key or period or delete them (column grants); a count belongs to a key of the same
+  company (a composite foreign key). The counts are in the company export and are deleted with the
+  company, before its keys.
+
+Not built: warnings before a key's limit (the company's warning at 80% stays, ADR-062), emails
+when a key's month is used up, per-key limits per endpoint, and per-key usage on HyFib's platform
+pages.
+
+## ADR-098 Emails about an API key's own monthly limit (2026-09-30)
+
+Context: a key with a monthly limit of its own (ADR-097) was refused once its month was used up
+without anyone being told, while the company's limit warns the billing managers at 80% (ADR-062)
+and tells them when it is reached (ADR-061). The integration behind the key simply started failing.
+
+Decision:
+
+- **Who and when:** the company's active owners and administrators, the roles that manage keys (as
+  for the expiry reminders, ADR-067), are emailed once when a key's requests reach 80% of its limit
+  (rounded up) in a usage period, and once when they reach the limit. A period that reaches the
+  limit before the sweep saw it at 80% gets only the second email, and limits of 1 to 4 have no
+  warning (80% of them rounded up is the limit), as for the company (ADR-062).
+- **How:** `app.api_key_usage` gains `warned_at` and `notified_at`. The minute messaging sweep lists
+  the counters due through `ops.api_key_usage_notices_due` (SECURITY DEFINER, the worker's role
+  only, ids only): of the last month, of a usable key with a limit, of a company whose keys still
+  work (not being deleted). Each is locked and checked again in the company's own scope, including
+  that it is the current period's counter, and marked in the transaction that queues the emails, so
+  two sweeps at once send one email. A counter of an earlier period is marked without an email (as
+  the company's, ADR-062), so that the sweep stops listing it; one of a later period, counted by a
+  server whose clock is ahead, waits until it is current.
+- **Changing the limit arms them again:** a new limit (or none) clears this period's marks, so the
+  emails follow the new limit; the next period's counter is a new row, armed from the start.
+- **What the email says:** the key's name and public prefix (never a token), the requests used, the
+  limit and when the period ends in the company's time zone, and where to change the limit.
+  Settings → API keys shows when each email went out this period.
+
+Not built: a choice of recipients or thresholds, emails for keys without a limit of their own, and
+notices in the product beyond the settings page.
+
+## ADR-099 Addresses for all of a company's API keys (2026-09-30)
+
+Context: a key can be held to the networks its systems call from (ADR-076), but a company that
+wants all its API traffic to come from its own servers had to set every key, and a key created
+without networks accepted requests from anywhere (listed as not built under P5-08: networks for
+the whole company).
+
+Decision:
+
+- **One list for the company:** up to 20 IPv4 or IPv6 addresses or networks for all of the
+  company's keys (`app.api_settings.allowed_networks`, one row per company, made when first set,
+  migration 0076), typed, checked and kept as a key's are (ADR-076); empty accepts any address.
+- **Both lists apply:** a request must come from one of the company's networks, and from one of
+  its key's own networks when the key lists any; the key's own list is checked first. Keys created
+  later are held to the company's list from their first request.
+- **Who sets it:** members who manage keys (`developer.manage`) after a recent sign-in (ADR-056),
+  in Settings → API keys ("Addresses for all keys"). Each change is audited as
+  `api.networks_changed` with the lists before and after; the same list again records nothing.
+  Changes take the company's key lock, so two first changes at once make one row and the second
+  sees the first.
+- **Checked in the lookup:** `ops.api_key_authenticate` reads the company's networks after the
+  key's own and before the key is marked used, so a refused request does not mark it used, and says
+  which list refused the address (`refused_by`). The API answers 403 `ip_not_allowed` naming the
+  address and whose list refused it ("The company this API key belongs to does not accept API
+  requests from …"), and counts the attempt against the per-address limit of failed
+  authentication, as for a key's networks.
+- **Data:** the list is in the company export and deleted with the company (deletion step 857);
+  the runtime role reads and changes only its company's row and cannot delete it.
+- **Rollout:** migration 0076 rebuilds the function with the same arguments and one more column.
+  Web servers of the previous release select the columns they know by name, so during a rolling
+  deploy they keep working, and answer a company refusal with the key's message until replaced.
+
+Not built: exceptions for single keys, networks per scope or endpoint, hostnames, time windows,
+and alerts or a list of refused requests (the web server logs each refusal with the key and
+company).
+
+## ADR-100 Emails to companies about plans HyFib staff set (2026-09-30)
+
+Context: platform staff put a company on a plan, start or extend its trial, set a paid period,
+change its add-ons, make it complimentary or end its plan from the company's platform page
+(ADR-051). Each change was audited in both audit logs, but nobody at the company was told: the plan
+sweep emails billing managers when a trial or period ends (ADR-051), and subscriptions email about
+payments (ADR-063), while a change by staff could restrict the company without warning (listed as
+not built under P5-01: plan-change emails to companies).
+
+Decision:
+
+- **Who and what:** the company's active billing managers (owners and members with the billing
+  role, as for the other billing notices) get one email per change, "HyFib changed your plan", with
+  what the plan is now: a trial and its end, a paid period and its days (in the company's time
+  zone), complimentary access, or an ended plan and what that pauses; the add-ons it includes; and
+  HyFib's reason, which the company's audit log already showed. It links to Billing. The platform
+  form says that the reason is emailed.
+- **Marked by the change, sent by the worker:** the platform role cannot queue email (ADR-090), so a
+  staff change sets `app.tenant_plans.staff_notice_version` to the version it writes (migration
+  0077; the platform role may update that column, the runtime role no column). The worker's minute
+  billing sweep lists the companies with a mark (`ops.plan_change_notices_due`, not companies being
+  deleted), and takes each company's notice in its own scope
+  (`app.take_plan_change_notice()`), in the transaction that queues the emails: the mark is cleared,
+  so a change is told at most once, and two sweeps at once tell it once.
+- **The latest state, or nothing:** two changes before the sweep make one email with the plan as it
+  is. A change that the plan sweep (a trial or period that ended) or a subscription replaced before
+  the email went out is not told, as their own emails tell the company the newer state; the same
+  plan saved again changes nothing and tells nothing.
+- **Lock order:** taking the notice locks the company row before the plan state, as staff changes
+  and the plan sweep do; the emails' outbox rows reference the company row, so the other order
+  could deadlock with a staff change.
+
+Not built: emails when staff cancel a company's subscription, a choice of recipients, notices in
+the product beyond the plan card, and emails for plan changes the company makes itself (its
+subscription emails cover those).
+
+## ADR-101 Emails to companies when HyFib staff cancel their plan subscription (2026-09-30)
+
+Context: a platform owner can cancel a company's Razorpay subscription at once from the company's
+platform page, with a reason (ADR-063), for example before changing its plan, which staff cannot do
+while a subscription is live. The cancellation went to both audit logs, but nobody at the company
+was told: a company's own cancellation emails its billing managers, while a cancellation by staff
+stopped the charges without a word until the plan ended (listed as not built in ADR-100 and P5-01).
+
+Decision:
+
+- **Who and what:** the company's active billing managers (owners and members with the billing
+  role) get one email, "HyFib cancelled your plan subscription": the plan and the day (in the
+  company's time zone), that nothing more is charged, what the plan keeps, and HyFib's reason (the
+  one the company's audit log shows). What the plan keeps is read from the plan state when the email
+  goes out: a period the subscription paid that is still running ("runs until …; the plan then
+  ends", as `app.apply_plan_transition` ends it as canceled, without grace days), the grace days
+  after the last period it paid (when its charges had failed), or neither (a trial, a plan staff set
+  since, or a plan that already ended), which the cancellation does not change. A period or grace
+  days the plan sweep has not moved on yet (Razorpay did not answer) are not told as running. The
+  email links to Billing, which shows how to continue; the platform form says the reason is emailed.
+- **Marked by the cancellation, sent by the worker:** as for plan changes (ADR-100), the platform
+  role cannot queue email, so a cancellation by staff sets
+  `app.plan_subscriptions.staff_cancel_notice_due` (migration 0078; the platform role may update
+  that column, the runtime role no column). The worker's minute billing sweep lists marked
+  subscriptions after the staff plan changes (`ops.plan_subscription_cancel_notices_due`, oldest
+  first, not companies being deleted) and takes each one in the company's own scope
+  (`app.take_plan_subscription_cancel_notice(subscription)`, true only for the call that cleared the
+  mark), in the transaction that queues the emails: each cancellation is told at most once, and two
+  sweeps at once tell it once. The company's own cancellations (which email it already) and those
+  of a company deletion are never marked.
+- **Lock order:** taking the notice locks the company row before the subscription: the emails'
+  outbox rows reference the company row, and staff plan changes and the plan sweep lock it first.
+  Only a cancelled subscription is taken, and the subscription sync never applies a period for
+  one, so the sync's own order (the subscription, then the company row for a period it applies)
+  cannot meet it.
+
+Not built: a choice of recipients, and emails for subscriptions that end at Razorpay without a
+cancellation in HyFib (for example one cancelled in the Razorpay Dashboard); the plan sweep's email
+tells the company when its plan ends.
+
+## ADR-102 Paying for a plan from the end of the trial (2026-09-30)
+
+Context: a company on a trial that started paying by subscription (ADR-063) was charged in
+Checkout at once, and its paid period started then: the rest of the trial was lost, and the page
+said so. A company had no reason to pay before the trial's last day, and one that forgot then lost
+its plan. A Razorpay subscription can start in the future (`start_at`): Checkout then only
+authorises the payment method, the subscription is `authenticated`, and Razorpay starts the first
+billing cycle and charges it at that time, which Razorpay itself calls a trial period (R-119).
+
+Decision:
+
+- **When:** a company whose trial ends at least 48 hours ahead starts its subscription at the
+  trial's end (`start_at`, stored as `starts_at`); a nearer trial end is charged at once, as before.
+  Razorpay starts a card debit with the bank's notice to the payer 36 hours before it (R-073,
+  R-119), so a nearer first charge could not be notified in time. Billing names the day on the
+  button ("Pay ₹… per month from …") and says that Checkout checks the payment method now, that any
+  amount taken for the check is refunded (Razorpay documents no amount, so none is stated), and that
+  nothing is charged for the plan before the trial ends.
+- **Authorised, not paid:** Checkout's signed response prompts a fetch, as before; an authenticated
+  subscription with a start records no payment and leaves the plan state alone, so the trial goes on
+  with its limits. The billing managers are emailed once ("Payments for your HyFib plan start when
+  the trial ends": the amount, the day and how often), and Billing shows the day. Staff plan changes
+  stay refused while the subscription may be charged, as for any live one, so the trial's end cannot
+  move away from the start.
+- **The first charge:** Razorpay makes the subscription `active` when the first cycle starts and
+  then charges it (R-119). The recorded charge makes the plan active for Razorpay's cycle through
+  the definer function of ADR-063, which ends the trial and restarts the usage period.
+- **The trial waits for the charge:** without it, the trial's end would expire the plan in the
+  minutes before Razorpay's charge is recorded. A trial whose company has a subscription starting
+  at the trial's end that may still be charged (`authenticated`, `active` or `pending`) waits for
+  that charge until the plan version's grace days have passed, as a paid period waits for its
+  renewal. One SQL function, `app.trial_charge_wait_until` (migration 0079), holds the rule for the
+  plan transition, the sweep's due list and the plan card ("The trial ended on …. Everything keeps
+  working while Razorpay makes the first charge, until … at the latest."). A failed first charge's
+  email says until when. After the grace days the trial ends as before, and its email says the plan
+  is paid once Razorpay's first charge goes through; a later charge still makes the plan active.
+- **Missed events:** once the first charge is due, the sweep asks Razorpay hourly until a paid
+  cycle is recorded, as after a paid cycle ends.
+- **Cancelling:** before the start, the company cancels at once: nothing was charged, and the trial
+  goes on. After the start, HyFib asks Razorpay first, so a charge made but not yet heard of is
+  recorded, the period it paid stands and the subscription ends with it (as for any active one); if
+  Razorpay does not answer, nothing is cancelled and the company is asked to try again. A
+  cancellation racing Razorpay's charge in the moment between that check and the cancel can still
+  leave a charge on a cancelled subscription: the daily reconciliation reports it as a plan payment
+  not recorded (ADR-059), for a person to refund. Staff cancellations are emailed as before
+  (ADR-101), naming the trial the payments were to start after: going on, or over when it ended
+  waiting for the first charge.
+
+Uncertain: whether Razorpay accepts an `expire_by` (HyFib's one-hour Checkout window) earlier than
+the start, which its example puts after it, and the amount of the authentication payment. The
+release checklist has the test-mode check (R-119).
+
+Not built: moving the start when staff extend a trial (they cancel the subscription first, as for
+other plan changes), and payments starting on a day other than the trial's end.
+
+## ADR-103 Refunds of plan payments (2026-09-30)
+
+Context: companies pay for plans by Razorpay subscription (ADR-063), and HyFib could not refund a
+plan payment. A refund made in Razorpay's Dashboard was not recorded either: `refund.processed`
+found no top-up for the payment and was set aside as an unknown refund, the receipt (ADR-064) did
+not show it, and the daily reconciliation (ADR-059) left it to a person. Staff need to refund a plan
+payment, for example a charge made after the company asked to cancel, or a goodwill refund.
+
+Decision:
+
+- **Who:** platform owners, from the company's platform page, with a written reason (10 to 2,000
+  characters, kept in the platform audit log). Operators see refunds but cannot start them. Part or
+  all of a recorded plan payment can be refunded: at least ₹0.01 and at most what Razorpay has not
+  refunded of it, one refund of a payment at a time. Not for a company being deleted (refund in the
+  Razorpay Dashboard; the webhook now records it), and a deletion that is due waits until no refund
+  of a plan payment is open, as for refunds of service credit (ADR-058).
+- **The plan does not change:** a refund never changes the plan state or the subscription. Reasons
+  vary (a goodwill refund, part of a price, a charge after a late cancel), and ending a plan on a
+  partial refund would be wrong. To end the plan, staff cancel the subscription (ADR-063) and then
+  change the plan (ADR-051); the form says so. Plan payments never touch the wallet, so nothing is
+  held.
+- **Flow, as ADR-058:**
+  1. `ops.platform_request_plan_payment_refund` (SECURITY DEFINER, platform role only) checks the
+     role, the reason, the company's status, the payment and the amount, and records the request
+     with the platform audit entry. Requests and recordings of one payment's refunds take the same
+     transaction lock, so what is refunded never exceeds what was paid.
+  2. The minute billing sweep lists due requests (`ops.plan_payment_refunds_due`) and queues one
+     signed `billing.plan-payment-refund` job each, run in the company's scope. The attempt is written
+     down first; then `POST /v1/payments/:id/refund` with the amount, speed `normal`,
+     `X-Refund-Idempotency: ppr_<request id>` (R-086) and the note `hyfib_plan_refund: <request id>`.
+     A plan payment is refunded like any captured payment (R-121; whether Razorpay changes the
+     subscription or its invoice is unconfirmed point 29, checked in test mode before release).
+     A refund returned makes the request `submitted` (company audit log, billing managers emailed),
+     and one already processed is recorded at once; a refusal (a 4xx other than 401 and 409) fails
+     the request and emails the billing managers; anything else is tried again with the same key
+     after 1, 5, 15 and 60 minutes, then hourly.
+  3. `refund.processed`, the job's own check (every 15 minutes, backing off to 6 hours) and the daily
+     reconciliation fetch the refund and its payment from Razorpay and call
+     `app.record_plan_payment_refund` in the company's scope. The refund with this id completes its
+     request. A refund whose id HyFib never stored (the creation's response was lost) completes the
+     request its notes name, when the amount is the same: Razorpay returns a refund's notes (R-120),
+     so it is never recorded as a second refund. Any other processed refund of the payment was made
+     at Razorpay and is recorded as such. Processed refunds of a payment never exceed it (W3412).
+  4. `refund.failed`, or a fetched refund that failed, fails the staff request it belongs to and
+     emails the billing managers; a failed refund nobody asked for through HyFib changes nothing.
+     Failing moves no money, so the runtime role may fail an open request; only the definer function
+     marks a refund processed or records one made at Razorpay.
+- **What people see:** the plan payment's receipt lists its refunds (in progress, or refunded on a
+  day, started by HyFib or made at Razorpay) and the amount paid after refunds; Billing's payments
+  table marks refunded amounts and a refund in progress; the platform page lists the refunds with the
+  reason and who asked, and the form. The company never reads the reason or who asked (column
+  grants), and its emails give neither.
+- **Reconciliation:** a refund of a plan payment in the settlement report is matched against the
+  recorded refund by id (amounts compared); one HyFib has not recorded is fetched and recorded
+  through the same path, as its webhook would have been, instead of waiting for a person.
+- **Records:** refunds of plan payments are billing records, kept after the company's deletion with
+  the payments they refund (no role may delete them), and exported without the reason and who asked.
+
+Not built: refunds asked for by companies, ending the plan with a refund, instant refunds
+(`optimum`), several open refunds of one payment, credit notes and tax invoices, disputes of plan
+payments, plan payment refunds in the platform-wide refunds list (ADR-073), emails about refunds
+made in the Dashboard, and the "HyFib is refunding" email for a staff refund that Razorpay reports
+processed before HyFib stored its id (recognised by its notes after a lost response; the receipt
+shows it). ADR-104 builds refunds asked for by companies and plan refunds in the platform-wide list.
+
+## ADR-104 Refunds of plan payments asked for by companies; plan refunds in the platform-wide list (2026-10-01)
+
+Context: since ADR-103 a platform owner can refund a plan payment from the company's platform page,
+but a company could not ask for one except by writing to support, and `/platform/refunds` (ADR-073)
+listed only refunds of service credit. Both were listed as not built in ADR-103.
+
+Decision:
+
+- **Asking, as for service credit (ADR-073):** members with `billing.manage` and a sign-in within the
+  last 15 minutes (ADR-056) ask from a plan payment's receipt for a refund of part or all of it, with a
+  reason of 10 to 1,000 characters. The amount is at least ₹0.01 and at most what Razorpay has not
+  refunded of the payment; no request while a refund of the payment is in progress, one open request
+  per payment (a partial unique index), none once the company asked for its deletion (its status read
+  under a share lock in the request's transaction). The company can withdraw an open request. A
+  request moves no money and changes nothing about the plan.
+- **One daily limit:** a company may make 5 refund requests in 24 hours, of either kind, counted under
+  the same per-company advisory lock that requests of service credit already take.
+- **Deciding:** only a platform owner decides. `ops.platform_decide_plan_payment_refund_request`
+  locks the open request; approving calls `ops.platform_request_plan_payment_refund` (ADR-103) for
+  the request's amount in the same transaction, so every check runs again under its lock (what
+  Razorpay has not refunded of the payment, a refund in progress, a company being deleted): a request
+  that no longer fits is refused with the reason and stays open for a decline. The refund's staff
+  reason reads "Asked for by the company:" and the company's reason. Declining needs a note the
+  company reads. Both are in the platform audit log; the company never sees who decided (column
+  grants). The refund, as any staff refund of a plan payment, never changes the plan or the
+  subscription.
+- **Hearing about it:** the minute billing sweep's email to platform owners about new requests counts
+  both kinds (still a count only: no company, amount or reason; its wording names the kinds, and it
+  links straight to the plan payments' list when every request it announces is of a plan payment). A
+  declined request is emailed to the company's billing managers once, with the note, marked in the
+  company's own scope in the transaction that queues it. An approval needs no email of its own: the
+  refund's emails (ADR-103) follow.
+- **The platform-wide list:** `/platform/refunds` shows service credit or plan payments. For plan
+  payments it lists the companies' requests (waiting, decided or all) with the payment, what
+  Razorpay has not refunded of it and whether a refund is in progress, and every refund of a plan
+  payment across companies (started by HyFib, answering a request, or made at Razorpay), newest
+  first on exact keyset pages (ADR-072).
+- **Data:** `app.plan_payment_refund_requests` is a company table (RLS; the company reads all but who
+  decided and the notice marks, inserts open requests and moves an open request only to withdrawn).
+  It is exported with the company's data and deleted with the company (ADR-055, step 77); the
+  refunds it led to stay as billing records (ADR-103).
+
+Not built: approving a different amount (decline with a note and refund from the company's page),
+several open requests per payment, reminders about waiting requests, in-app notices, and refund
+requests through the public API.

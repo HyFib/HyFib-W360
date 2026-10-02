@@ -122,6 +122,28 @@ export const PLAN_TAX_MAX_BP = 5000;
  */
 export const CARD_MANDATE_FRICTIONLESS_MAX_MINOR = 1_500_000;
 
+/**
+ * A trial ending at least this far away is paid from its end (ADR-102): Razorpay starts a card debit
+ * with the bank's notice to the payer 24 to 36 hours before it (R-073, R-119), so a closer first
+ * charge is taken at once instead.
+ */
+export const PLAN_PAYMENT_TRIAL_LEAD_MS = 48 * 3600_000;
+
+/**
+ * When a subscription started now would first be charged (ADR-102): at the end of a trial at least
+ * PLAN_PAYMENT_TRIAL_LEAD_MS away, else null (charged at once in Checkout, and the rest of any
+ * trial is not carried over).
+ */
+export function planPaymentStart(
+  state: { status: TenantPlanStatus; trialEndsAt: Date | null },
+  now: Date,
+): Date | null {
+  if (state.status !== 'trialing' || !state.trialEndsAt) return null;
+  return state.trialEndsAt.getTime() - now.getTime() >= PLAN_PAYMENT_TRIAL_LEAD_MS
+    ? state.trialEndsAt
+    : null;
+}
+
 /** What a company pays for its plan each billing interval (ADR-063), in paise. */
 export interface PlanPaymentQuote {
   planMinor: number;
