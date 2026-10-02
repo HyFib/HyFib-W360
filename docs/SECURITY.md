@@ -617,6 +617,10 @@ Phase 5 rules (outgoing webhooks, P5-09):
   number and name, the message's text or reply and template names, never media, and nothing of a
   contact erased before delivery. Receivers are told to deduplicate on the event id and to reject
   signatures older than 5 minutes.
+- A delivery whose payload or signature cannot be built fails alone as `payload_failed`, and the
+  worker logs only the company, delivery, endpoint, event type, what failed and the error's class
+  and code: never the payload or the error's message, which can quote data (a failed query's
+  message repeats its parameters). Tested.
 - Secrets (`whsec_` + 32 random bytes) are shown once, kept only in the page's memory, and stored
   encrypted with the AAD `webhook-secret:<company>:<endpoint>:<version>`.
 - Conversation and contact events (ADR-074) follow the same rules. Conversation events name the

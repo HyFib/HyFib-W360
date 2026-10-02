@@ -960,8 +960,9 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 - **Replaying failed deliveries (ADR-095):** `replayFailedWebhookDeliveries` (webhooks service)
   locks the endpoint (refused when off), selects for each event the latest failed delivery to it
   queued since the given time (`DISTINCT ON (event_id)` over `webhook_deliveries_endpoint_idx`),
-  drops `event_gone` failures, `ping` events and events with any delivery to the endpoint that did
-  not fail (`webhook_deliveries_event_idx`), and inserts up to `WEBHOOK_LIMITS.replayBatch` (500)
+  drops `event_gone` failures (but not `payload_failed` ones, sent once HyFib fixed the cause),
+  `ping` events and events with any delivery to the endpoint that did not fail
+  (`webhook_deliveries_event_idx`), and inserts up to `WEBHOOK_LIMITS.replayBatch` (500)
   new deliveries oldest event first, reading one more row to say whether more remain. Settings
   (`webhooks.replayFailed`, a period) and the API (`POST /webhook-endpoints/{id}/replay-failed`,
   `since`, inside `idempotent`, `keysOnly`) call it and audit once per call.
@@ -1140,14 +1141,20 @@ true`); the same key with another request (method, path and body hashed) answers
 LOCKED`; pending ones due now, then `delivering` ones whose lease expired), builds each payload
   from the company's current data (`webhooks/payloads.ts`; an erased contact has no number or name,
   a message, conversation, contact, run or order that is gone ends the delivery as `event_gone`),
-  signs it, sets the lease (the 10 s egress deadline plus 35 s) and commits. The POSTs go through the
-  egress client (DNS pinned, private, loopback, link-local, metadata and reserved addresses refused,
-  no redirects, 64 KB sent, responses read up to 256 KB and discarded) with no transaction open.
+  signs it, sets the lease (the 10 s egress deadline plus 35 s) and commits. A delivery whose payload
+  or signature cannot be built (a bug, data the builder cannot describe, a secret the keyring cannot
+  open, or a database error while building, each build running in a savepoint) ends at once as
+  `payload_failed` without an attempt, and the rest of the batch goes on; the worker logs its
+  company, delivery, endpoint, event type, what failed and the error's class and code, never the
+  payload or the error's message. The POSTs go through the egress client (DNS pinned, private,
+  loopback, link-local, metadata and reserved addresses refused, no redirects, 64 KB sent, responses
+  read up to 256 KB and discarded) with no transaction open.
   Each outcome is recorded in its own transaction, locking the endpoint before the delivery; an
   outcome whose attempt no longer owns the delivery (lease expired and re-claimed, or the endpoint
   deleted) is dropped. A 2xx answer succeeds; anything else is retried at 1 min, 5 min, 30 min, 2 h,
   6 h, 12 h and 24 h, and the eighth failure fails the delivery; an interrupted delivery with no
-  attempt left fails as `interrupted`. After 200 attempts a job queues its successor.
+  attempt left fails as `interrupted`. After 200 deliveries, attempted or ended at their claim, a
+  job queues its successor.
 - **Signing:** `W360-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256 of "<t>.<body>">`, one `v1` per
   secret (the previous secret also signs for 24 hours after a rotation), with `W360-Event-Id`,
   `W360-Event-Type`, `W360-Delivery-Id`, `W360-Delivery-Attempt` and `User-Agent:

@@ -158,6 +158,16 @@ export async function acceptInvitation(
   });
 }
 
+/**
+ * The webhook delivery job's logger where every delivery should be prepared: anything it logs (a
+ * delivery that failed as `payload_failed`) fails the test, with the ids and the error's class.
+ */
+export const failOnLog = {
+  error(fields: Record<string, unknown>, message: string): never {
+    throw new Error(`${message}: ${JSON.stringify(fields)}`);
+  },
+};
+
 /** Two companies with owners plus an extra member in A, the standard adversarial fixture. */
 export async function twoTenantFixture(dbs: TestDatabases) {
   const ownerA = await createUser(dbs, { name: 'Owner A' });

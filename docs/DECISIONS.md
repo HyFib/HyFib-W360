@@ -1169,6 +1169,28 @@ read up to the guard's limit and discarded; only the status, a short error code 
 are kept. Deliveries are not ordered. Suspended and restricted companies are not delivered to
 (their events wait, within retention, until the company is active again).
 
+**Deliveries that cannot be prepared (2026-10-02).** A delivery whose payload or signature cannot
+be built (a bug in a payload builder, data it cannot describe, a secret the keyring cannot open, or
+a database error while building) fails at once as `payload_failed`, as `event_gone` does: no
+request is made, so it uses no attempt (attempts and `W360-Delivery-Attempt` count requests, as
+ADR-083 says) and leaves the endpoint's health alone. Each build runs in a savepoint, so a database
+error leaves the claim's transaction usable, and the rest of the batch is claimed and sent. Before,
+the error rolled back the whole claim: none of the batch was claimed, the failing delivery used no
+attempt, so the cap never ended it, and the minute sweep woke the job for the same deliveries every
+minute. One such delivery held up every delivery of its company and filled the dead letters with
+the same failure. Retrying is not chosen: the same code and data fail the same way, and counting it
+as an attempt would misstate what the receiver saw. Once HyFib has fixed the cause, a member or a
+key replays it, alone or with ADR-095's replay of failed deliveries, which leaves out only
+`event_gone`. The worker logs the company, delivery, endpoint, event type, what failed (`payload`
+or `signature`) and the error's class and code (a SQLSTATE for a database error); never the
+payload or the error's message, which can quote data. Settings → Webhooks shows "HyFib could not
+build or sign the request", and a code that ended a delivery without an attempt now shows instead
+of the status an earlier attempt left. Deliveries ended at their claim, whatever the reason, now
+count toward the job's 200 with its attempts (though not as attempts), so a backlog that cannot be
+built hands over to a successor as an attempted one does, instead of holding a worker while such
+deliveries keep arriving. Accepted: a database error that a retry would have passed (a lock or
+statement timeout) also ends its delivery, which then needs a replay.
+
 **Signing.** Each endpoint has a secret (`whsec_` and 32 random bytes), shown once, stored encrypted
 with the keyring (it is needed to sign) and bound to the company, the endpoint and its version.
 Requests carry `W360-Signature: t=<unix time>,v1=<hex HMAC-SHA256 of "<t>.<body>">`, plus

@@ -94,3 +94,27 @@ export function toError(value: unknown): Error {
   if (value instanceof Error) return value;
   return new Error(typeof value === 'string' ? value : 'Non-error value thrown', { cause: value });
 }
+
+const ERROR_CLASS = /^[A-Za-z_$][A-Za-z0-9_$]{0,63}$/;
+const ERROR_CODE = /^[A-Za-z0-9_]{1,64}$/;
+
+/**
+ * What a log line may say about an error whose message can quote data: its class and the first
+ * code along its causes (an application error code, a Node.js code or a SQLSTATE), never its
+ * message, stack or details. A failed query's error, for example, repeats the query's parameters.
+ */
+export function errorClassAndCode(value: unknown): {
+  errorClass: string;
+  errorCode: string | null;
+} {
+  const name = value instanceof Error ? value.constructor.name : typeof value;
+  let errorCode: string | null = null;
+  let current: unknown = value;
+  for (let depth = 0; depth < 5 && current instanceof Error && errorCode === null; depth += 1) {
+    const code = (current as { code?: unknown }).code;
+    const text = typeof code === 'number' && Number.isInteger(code) ? String(code) : code;
+    if (typeof text === 'string' && ERROR_CODE.test(text)) errorCode = text;
+    current = current.cause;
+  }
+  return { errorClass: ERROR_CLASS.test(name) ? name : 'Error', errorCode };
+}

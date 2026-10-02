@@ -56,6 +56,7 @@ import {
   type WebhookEventType,
 } from '@w360/domain';
 import { startRazorpayStandIn, type RazorpayStandIn } from '../support/razorpay-stand-in';
+import { failOnLog } from './helpers';
 import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './whatsapp-fixture';
 
 /**
@@ -138,6 +139,7 @@ async function deliverDue(c: Company) {
         outbox: { keyring: fx.keyring, jobs, signer: fx.signer },
         appBaseUrl: 'https://app.w360.test',
       },
+      logger: failOnLog,
     },
     authorizedTenantScope(c.tenant.id, null),
   );
