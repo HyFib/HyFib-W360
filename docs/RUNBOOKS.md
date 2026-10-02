@@ -1079,6 +1079,26 @@ tenant_id = …` shows them.
 - **"No add-ons to choose":** the version sells none of them (choose another plan), or the company
   has complimentary access.
 
+**The price list for visitors (ADR-107).** Platform owners show it on the platform Plans page
+("Price list for visitors", then "Show the price list"). Anyone can then see at `/pricing`, without
+signing in, every version offered to companies with its price before and with the tax, what it
+includes and its add-ons, the default trial's length, and that Meta bills WhatsApp's own message
+charges directly. "Hide the price list" takes it down at once. Both are in the platform audit log
+(`platform.price_list_shown`, `platform.price_list_hidden`). Changes to the offers, the tax or the
+default trial show on the next view: nothing is cached.
+
+- **`/pricing` says "Page not found":** the card on the Plans page names what keeps it from
+  visitors. Either the list is hidden, or paying for plans is turned off on this platform (Razorpay
+  subscriptions), or no tax on plan prices is set. It also stays hidden when there is no default
+  trial (new companies would start complimentary and could not choose a plan), or when no offered
+  version can be paid with one plan payment, tax included. Fix what the card names; the page
+  appears on the next view.
+- **A version is missing from the list:** it is not offered (offer it on its platform page), it is
+  a draft or retired, or its price with the tax is more than one plan payment can be.
+- **To take a price down at once** (a wrong price, say): hide the price list, or stop offering the
+  version. A published version never changes: publish a corrected version, offer it, and stop
+  offering the wrong one.
+
 **Cancelling a company's subscription.** Owners and billing managers cancel in Billing (an active
 one at the end of the paid period, otherwise at once). Platform owners cancel at once on the
 company's platform page with a reason (needed before changing the company's plan, which staff
@@ -1543,6 +1563,13 @@ already stored: a short `ACCESS EXCLUSIVE` lock on the keys table), creates `app
 row security and its grants, and registers deletion step 855 with the definer's grants and
 policies. A failure usually means a lock wait on `app.api_keys` timed out (run the migrations again
 when requests are quieter) or the bootstrap roles are missing.
+
+**Migration 0085 failed.** It runs in one transaction, so a failure applies nothing. It adds two
+nullable columns and a check to `ops.plan_settings` (a single row, so the lock is brief), lets the
+platform role update them, and lets the runtime role read the default trial and whether the price
+list is shown. A failure usually means the bootstrap roles are missing. Web images built before it
+keep working; the new web image needs it for `/pricing` and the platform Plans page, so run it
+before that image.
 
 **Migration 0084 failed.** It runs in one transaction, so a failure applies nothing. It adds
 `app.choose_add_ons` (SECURITY DEFINER, owned by `w360_definer`, executable by `w360_app` only) and

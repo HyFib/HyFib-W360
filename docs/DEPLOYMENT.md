@@ -25,7 +25,7 @@ PostgreSQL 18; CI workflow authored).
 ## Production topology (target)
 
 - Load balancer with TLS 1.2+ and HTTP/2 (SSE), WAF/rate limiting at the edge (including the public
-  chat-link and widget routes, see below).
+  chat-link, widget and price list routes, see below).
 - `web` ≥ 2 replicas (stateless); `worker` ≥ 2 replicas (jobs are claim-safe; schedules are
   deduplicated by pg-boss).
 - Managed PostgreSQL 17 or 18 with high availability, encryption at rest, automated backups and
@@ -121,6 +121,19 @@ companies' sites).
   privacy notice if kept.
 - **Headers.** The routes set their own `Cache-Control`, `Referrer-Policy: no-referrer` (links) and
   `Cross-Origin-Resource-Policy: cross-origin` (script); do not override them at the edge.
+
+## Price list for visitors
+
+`GET /pricing` (ADR-107) is public by design once a platform owner shows the price list; while it
+is hidden it answers 404. Each view reads the database in one read-only transaction (two small
+queries) and renders per request with the page's CSP nonce.
+
+- **Rate limits.** Apply the per-address limits of the public routes above at the edge (the app
+  does not limit it).
+- **Caching.** Do not cache it at the edge or CDN: a cached copy would keep prices a platform owner
+  has hidden or changed, and would reuse a CSP nonce.
+- **Indexing.** The app asks search engines not to index any page, this one included; HyFib's own
+  site links to it.
 
 ## WhatsApp Flows data endpoint
 

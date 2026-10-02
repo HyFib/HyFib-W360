@@ -48,6 +48,7 @@ import {
   createPlanAdminService,
   createPlanAddOnsService,
   createPlanChoicesService,
+  createPriceListService,
   createPlanSubscriptionService,
   createPlansService,
   createPlatformService,
@@ -78,6 +79,7 @@ import {
   type BillingHistoryService,
   type PlanRefundRequestsService,
   type PlanAddOnsService,
+  type PriceListService,
   type PlanChoicesService,
   type RefundRequestsService,
   type BusinessHoursService,
@@ -210,6 +212,8 @@ export interface Runtime {
   planChoices: PlanChoicesService;
   /** A company choosing its add-ons (ADR-106). */
   planAddOns: PlanAddOnsService;
+  /** The public price list of offered plan versions (ADR-107). */
+  priceList: PriceListService;
   events: TenantEventHub;
   shutdown(): Promise<void>;
 }
@@ -451,6 +455,10 @@ async function init(): Promise<Runtime> {
     clock: systemClock,
     subscriptionsEnabled: Boolean(razorpayClient && razorpay?.subscriptionsEnabled),
   });
+  const priceList = createPriceListService({
+    db,
+    subscriptionsEnabled: Boolean(razorpayClient && razorpay?.subscriptionsEnabled),
+  });
   const events = createTenantEventHub({ connectionString: config.DATABASE_URL_APP, logger });
 
   logger.info({ env: config.APP_ENV }, 'web runtime initialised');
@@ -512,6 +520,7 @@ async function init(): Promise<Runtime> {
     planRefundRequests,
     planChoices,
     planAddOns,
+    priceList,
     events,
     async shutdown() {
       await events.close();

@@ -62,6 +62,9 @@ export const planSettings = opsSchema.table('plan_settings', {
   planTaxBp: integer('plan_tax_bp'),
   updatedByUserId: text('updated_by_user_id'),
   updatedAt: tz('updated_at').notNull().defaultNow(),
+  /** The public price list of offered versions is shown; null: hidden (ADR-107). */
+  priceListShownAt: tz('price_list_shown_at'),
+  priceListShownByUserId: text('price_list_shown_by_user_id'),
 });
 
 export const TENANT_PLAN_STATUSES = [

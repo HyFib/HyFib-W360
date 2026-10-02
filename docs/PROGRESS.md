@@ -1,5 +1,96 @@
 # Progress
 
+## 2026-10-02 — Phase 5: a price list for visitors (P5-01, P5-07, ADR-107)
+
+Status: **Implemented and locally verified (test data only).** Since ADR-105 platform owners offer
+plan versions that companies choose and pay for under Billing, but someone deciding whether to sign
+up could not see them: prices appeared only inside a company.
+
+### Completed
+
+- **Design (ADR-107):** platform owners show or hide a public price list of the versions offered to
+  companies; it is hidden until shown, because offering a version to companies is not the same as
+  publishing its price. Visitors see it at `/pricing` only when they could follow it: paying for
+  plans available (Razorpay subscriptions on and the tax set), a default trial, and an offered
+  version one plan payment can cover; otherwise the page is not found.
+- **Migration 0085:** `ops.plan_settings.price_list_shown_at` and `price_list_shown_by_user_id`
+  (paired by a check constraint), the platform role's update grant on them, and the runtime role's
+  read grant on whether the list is shown and the default trial (not who showed it).
+- **Domain:** `billing/price-list.ts` (`publicPriceList`, read in the system scope in a read-only
+  transaction: the commercial terms of published, offered versions, cheapest first, with their
+  totals with the tax, leaving out a version one plan payment cannot cover; `priceListGaps`, the
+  rule the page and the platform card share; `priceListLines`, the wording of what a version
+  includes and the add-ons it sells); `showPriceList` / `hidePriceList` and `priceListShown` in the
+  plan admin service.
+- **Web:** `/pricing` (no sign-in): the offered versions with their prices before and with the tax,
+  what they include, their add-ons, the default trial's length and that Meta bills WhatsApp's own
+  message charges directly, with links to sign in and create an account; not found otherwise. The
+  platform Plans page has a "Price list for visitors" card with what keeps it from visitors and the
+  show and hide controls.
+- **Tests:**
+  - Unit: the visibility rule and the wording of each version (5).
+  - Integration (`price-list.test.ts`, 4): hidden until shown, then only published, offered versions
+    one plan payment can cover, cheapest first, with their terms and totals with the tax; nothing
+    while paying for plans is off, without the tax or without a default trial; only platform owners
+    show or hide it, each change once in the platform audit log; the runtime role reads whether it
+    is shown, the tax and the default trial, never who showed it, and writes nothing; the check
+    pairing the shown time with who showed it.
+  - e2e (`price-list.spec.ts`, chromium and mobile-chromium): not found while hidden; a platform
+    owner sets the tax, offers a version with a trial, makes it the default trial and shows the
+    list; a visitor sees it with its prices and terms, without horizontal scrolling, and goes on to
+    create an account; hidden again it is not found.
+- **Docs:** ADR-107; SECURITY (the price list row and rules); THREAT-MODEL T120; RUNBOOKS (the price
+  list, migration 0085); DEPLOYMENT (edge limits, no caching); ARCHITECTURE; DATA-RETENTION;
+  RELEASE-CHECKLIST; BACKLOG P5-01 and P5-07; FEATURE-MATRIX H-047 and W-001.
+- **Found while building:**
+  - Without a default trial a new company starts complimentary and cannot choose a plan (ADR-105),
+    so a price list then would invite visitors to something they cannot do: a default trial is one
+    of the conditions.
+  - Every test file shares the plan settings (the tax, the default trial and now the list), and
+    earlier files leave versions offered, so the integration test saves the settings first,
+    restores them after, and checks only its own versions' order.
+  - The sign-in and sign-up pages render without the database; a link to the price list there would
+    add a query to every sign-in, so they do not link to it (HyFib's own site does).
+  - A mutation run showed that the e2e test's clean-up stopped at its first failing step, leaving
+    the tax and the default trial set for the tests after it. It now restores those first, then
+    hides the list and withdraws the offer, each only when needed.
+- **Mutation checks:** 37 regressions tried one at a time, all caught (5 through the e2e test).
+  - 5 in the migration: the check pairing the shown time with who showed it removed; the runtime
+    role reading who showed the list, or allowed to change whether it is shown; the platform role
+    unable to record who showed it; the runtime role unable to read whether it is shown.
+  - 10 in the public read: versions not offered, or drafts and retired versions, listed; a version
+    one plan payment cannot cover listed; listed while hidden or while paying for plans is off; the
+    visibility rule not applied; totals without the tax; not cheapest first; a limited API not
+    flagged; the trial's length taken from another version.
+  - 7 in showing and hiding: operators allowed; showing twice changing it again; a change not
+    audited; who showed it not recorded; hiding keeping who showed it; hiding showing the list; the
+    platform not told the list is shown.
+  - 10 in the rule and the wording (unit tests): each of the five gaps not named (a hidden list,
+    payments off, no tax, no default trial, versions one payment cannot cover counted); automation
+    limits or run packs listed without the module; the most seats, a limited API or the modules
+    left out not stated.
+  - 5 through the e2e test: the page shown while hidden; the price with the tax not shown; the
+    platform card offering the wrong control, or naming a hidden list as missing; creating an
+    account leading elsewhere.
+
+### Test commands and results (local, 2026-10-02)
+
+| Command                                                                                                                                                                         | Result                                    |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                            | clean                                     |
+| `pnpm test`                                                                                                                                                                     | 467 passed                                |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                                                             | 659 passed on each                        |
+| `pnpm build` and `pnpm test:e2e` for `price-list.spec.ts`, `plans.spec.ts` and `plan-choice.spec.ts` on chromium and mobile-chromium, on the local database migrated on to 0085 | 6 passed (4.4 min)                        |
+| Mutation checks                                                                                                                                                                 | 37 regressions, all caught (listed above) |
+| gitleaks 8.30.1 on the commit                                                                                                                                                   | no leaks                                  |
+
+### Known gaps
+
+- Links from the sign-in and sign-up pages, caching, prices in other currencies and the price list
+  through the public API are not built.
+- The wording around the prices needs legal and commercial review before the list is shown in
+  production (RELEASE-CHECKLIST). Firefox and WebKit are not installed locally; CI runs them.
+
 ## 2026-10-02 — Phase 5: companies choose their add-ons (P5-01, P5-07, ADR-106)
 
 Status: **Implemented and locally verified against the Razorpay stand-in (test data only).** Since

@@ -9,12 +9,14 @@ import {
   cancelTenantSubscriptionAction,
   createPlanAction,
   createPlanVersionAction,
+  hidePriceListAction,
   offerPlanAction,
   publishPlanAction,
   retirePlanAction,
   setDefaultTrialAction,
   setPlanTaxAction,
   setTenantPlanAction,
+  showPriceListAction,
   updatePlanDraftAction,
   withdrawPlanOfferAction,
 } from '@/app/actions/platform';
@@ -470,6 +472,44 @@ export function PlanOfferActions({
           }
         />
       ) : null}
+    </div>
+  );
+}
+
+/** Showing or hiding the public price list of offered versions (ADR-107). */
+export function PriceListActions({ shown }: { shown: boolean }) {
+  const [error, setError] = useState<string | null>(null);
+  const fail = (r: { ok: boolean; message?: string }) => {
+    if (!r.ok) setError(r.message ?? 'Something went wrong.');
+  };
+  return (
+    <div className="grid gap-2">
+      <FormError message={error} />
+      {shown ? (
+        <ConfirmDialog
+          title="Hide the price list?"
+          description="Visitors no longer see the plans and prices at /pricing. Companies can still choose an offered version under Billing."
+          confirmLabel="Hide"
+          onConfirm={() => void hidePriceListAction().then(fail)}
+          trigger={
+            <ClientButton variant="outline" className="justify-self-start">
+              Hide the price list
+            </ClientButton>
+          }
+        />
+      ) : (
+        <ConfirmDialog
+          title="Show the price list?"
+          description="Anyone can then see, without signing in, every version offered to companies with its price, what it includes and its add-ons, at /pricing."
+          confirmLabel="Show"
+          onConfirm={() => void showPriceListAction().then(fail)}
+          trigger={
+            <ClientButton variant="outline" className="justify-self-start">
+              Show the price list
+            </ClientButton>
+          }
+        />
+      )}
     </div>
   );
 }

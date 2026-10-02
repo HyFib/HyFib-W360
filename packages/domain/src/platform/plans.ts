@@ -406,6 +406,34 @@ export function createPlanAdminService(deps: {
     metadata,
   });
 
+  /** Shows or hides the price list for visitors (platform owners, ADR-107). */
+  const setPriceListShown = async (actor: PlatformActor, shown: boolean): Promise<void> => {
+    if (actor.role !== 'platform_owner')
+      throw forbidden('Only platform owners can show or hide the price list.');
+    await platformDb.run(actor.userId, async (tx) => {
+      const [settings] = await tx
+        .select({ shownAt: planSettings.priceListShownAt })
+        .from(planSettings)
+        .for('update');
+      if (Boolean(settings?.shownAt) === shown) return;
+      const now = clock.now();
+      await tx
+        .update(planSettings)
+        .set({
+          priceListShownAt: shown ? now : null,
+          priceListShownByUserId: shown ? actor.userId : null,
+          updatedByUserId: actor.userId,
+          updatedAt: now,
+        })
+        .where(eq(planSettings.id, true));
+      await tx
+        .insert(platformAuditEvents)
+        .values(
+          audit(actor, shown ? 'platform.price_list_shown' : 'platform.price_list_hidden', {}),
+        );
+    });
+  };
+
   return {
     /** Every version of every plan, with the companies on each, and the default trial. */
     async listPlans(actor: PlatformActor) {
@@ -433,12 +461,15 @@ export function createPlanAdminService(deps: {
           .select({
             defaultTrialPlanId: planSettings.defaultTrialPlanId,
             planTaxBp: planSettings.planTaxBp,
+            priceListShownAt: planSettings.priceListShownAt,
           })
           .from(planSettings);
         return {
           plans: rows,
           defaultTrialPlanId: settings?.defaultTrialPlanId ?? null,
           planTaxBp: settings?.planTaxBp ?? null,
+          /** The price list for visitors is shown (ADR-107). */
+          priceListShown: Boolean(settings?.priceListShownAt),
         };
       });
     },
@@ -879,6 +910,19 @@ export function createPlanAdminService(deps: {
             ),
           );
       });
+    },
+
+    /**
+     * Shows the versions offered to companies on the public price list (ADR-107). Visitors see it
+     * once paying for plans is available, a default trial is set and a version can be paid for.
+     */
+    async showPriceList(actor: PlatformActor): Promise<void> {
+      await setPriceListShown(actor, true);
+    },
+
+    /** Hides the public price list: `/pricing` is not found again (ADR-107). */
+    async hidePriceList(actor: PlatformActor): Promise<void> {
+      await setPriceListShown(actor, false);
     },
 
     /** The version new companies start a trial of; none means new companies are complimentary. */

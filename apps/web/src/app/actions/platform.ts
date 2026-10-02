@@ -244,6 +244,26 @@ export async function setPlanTaxAction(input: unknown): Promise<ActionResult> {
   });
 }
 
+/** Shows the offered plan versions on the public price list (platform owners, ADR-107). */
+export async function showPriceListAction(): Promise<ActionResult> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    await runtime.planAdmin.showPriceList(actor);
+    refresh();
+    return null;
+  });
+}
+
+/** Hides the public price list (platform owners, ADR-107). */
+export async function hidePriceListAction(): Promise<ActionResult> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    await runtime.planAdmin.hidePriceList(actor);
+    refresh();
+    return null;
+  });
+}
+
 /** Refunds part or all of a plan payment (platform owners, ADR-103). */
 export async function requestPlanPaymentRefundAction(
   input: unknown,

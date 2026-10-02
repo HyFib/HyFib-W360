@@ -206,6 +206,11 @@ made. This checklist records the evidence required per gate; unchecked items blo
       sells extra seats sets them under Billing → Add-ons, the plan card and the payment offer show
       them, a decrease below the seats in use is refused, and paying creates a Razorpay
       subscription for the amount with the add-ons; agree each version's most seats and numbers
+- [ ] The price list for visitors (ADR-107) on the same staging deployment, after migration 0085
+      and before the new web image: with the tax, a default trial and an offered test-mode version
+      set, a platform owner shows the price list, `/pricing` lists that version with the prices
+      Billing → Choose a plan shows, and hiding it makes `/pricing` not found; agree the wording
+      around the prices (legal and commercial review) and who decides to show the list
 - [ ] Tenant-isolation and security gates passing in CI on the release commit
 - [ ] Measured load behaviour against the test envelope (k6 results)
 - [ ] Backup restoration drill performed and timings recorded (RPO/RTO)

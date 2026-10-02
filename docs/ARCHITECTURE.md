@@ -1435,6 +1435,17 @@ WHERE used < limit`), per monthly period from `usage_anchor`; the sweep announce
   (with waiting invitations) or WhatsApp numbers that no longer fit, and audits
   `billing.add_ons_chosen`. Billing links to `/c/<slug>/billing/add-ons`, whose form shows the
   total as the quantities change (`planPaymentQuote` in the browser); paying is unchanged.
+- **Price list for visitors (0085, ADR-107) [built]:** platform owners show or hide it
+  (`showPriceList` / `hidePriceList` in the plan admin service, writing
+  `ops.plan_settings.price_list_shown_at` and `price_list_shown_by_user_id`, audited). The public
+  page `/pricing` (no sign-in) calls `createPriceListService().publicPriceList()`, which reads in
+  the system scope as the runtime role, in a read-only transaction, whether the list is shown, the
+  tax and the default trial (column grants from 0085), then the commercial terms of the published,
+  offered versions, cheapest first, each with its total with the tax from `planPaymentQuote`; a
+  version one plan payment cannot cover is left out. `priceListGaps` decides whether visitors see it
+  (shown, Razorpay subscriptions on, the tax set, a default trial, a payable version) for the page,
+  which is not found otherwise, and for the card on the platform Plans page, which names what is
+  missing. `priceListLines` words what each version includes and the add-ons it sells.
 - **Ledger (0004_billing):** one INR wallet per company with five accounts (`wallet_available`,
   `wallet_held`, `payment_clearing`, `service_revenue`, `dispute_losses`). `ledger_transactions` and
   `ledger_entries` are append-only (trigger), balances are maintained by trigger from the entries,

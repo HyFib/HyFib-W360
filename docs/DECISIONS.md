@@ -3720,3 +3720,45 @@ Decision:
 
 Not built: changing add-ons a subscription pays for (R-069) and proration, add-ons through the
 public API, and emails about a company's change.
+
+## ADR-107 A price list for visitors (2026-10-02)
+
+Context: since ADR-105 platform owners offer plan versions that companies choose and pay for under
+Billing, but someone deciding whether to sign up cannot see them: prices appear only inside a
+company. Offering a version to companies is not the same as publishing its price to anyone on the
+internet (a version may be offered to existing companies first), so a public price list needs its
+own decision.
+
+Decision:
+
+- **Shown by platform owners:** `ops.plan_settings.price_list_shown_at` and
+  `price_list_shown_by_user_id` (migration 0085, paired by a check constraint), set and cleared by
+  platform owners on the platform Plans page ("Show the price list" and "Hide the price list"), each
+  in the platform audit log (`platform.price_list_shown`, `platform.price_list_hidden`). It is
+  hidden until a platform owner shows it.
+- **What visitors see:** `/pricing`, without signing in: every version that is published and
+  offered, as companies see them under Billing → Choose a plan (cheapest first), with its price
+  before tax and with the tax, what it includes (seats, WhatsApp numbers, teams, live automations
+  and monthly automation runs when it has automations, monthly public API requests and whether only
+  part of the API, the modules with and without), the add-ons it sells with their prices and
+  maximums, the default trial's length, and that Meta bills WhatsApp's own message charges directly
+  (ADR-011). Links to sign in and to create an account. Nothing about any company or person, and
+  nothing of drafts, retired versions or versions that are not offered.
+- **Only when a visitor could follow it:** the page lists versions only while the list is shown,
+  paying for plans is available (Razorpay subscriptions on and the tax set, as for choosing a plan),
+  there is a default trial (without one a new company starts complimentary and cannot choose a plan,
+  ADR-105), and an offered version can be paid for with the tax: a version whose price with the tax
+  is more than one plan payment can be is left out, as choosing it would be refused. Otherwise
+  `/pricing` is not found. The platform card says which of these is missing, from the same rule
+  (`priceListGaps`).
+- **How it reads:** in the system scope as the runtime role, in a read-only transaction, without a
+  function: the role already reads published and retired versions (0023) and the tax (0037); 0085
+  grants it whether the list is shown and the default trial, not who showed it. Each view is one
+  transaction of two small queries, with no rate limit or cache of its own: like the public chat
+  links (`/l/{slug}`), the edge limits requests per address and must not cache it (DEPLOYMENT).
+- **Not indexed:** search engines are asked not to index it, as for every page of the app; HyFib's
+  own site links to it.
+
+Not built: links from the sign-in and sign-up pages (they render without the database), versions
+listed without being offered or offered without being listed, prices in other currencies,
+comparisons by feature, caching, and the price list through the public API.
