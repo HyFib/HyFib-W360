@@ -63,24 +63,41 @@ export const planGivesAccess = (status: TenantPlanStatus): boolean =>
  * sell are zero, so a quantity kept from a previous plan cannot block the change.
  */
 export function addOnsForPlan(
-  plan: { sellsSeats: boolean; sellsNumbers: boolean; sellsRunPacks: boolean } | undefined,
-  addOns: { extraSeats: string; extraNumbers: string; runPacks: string },
-): { extraSeats: string; extraNumbers: string; runPacks: string } {
+  plan:
+    | {
+        sellsSeats: boolean;
+        sellsNumbers: boolean;
+        sellsRunPacks: boolean;
+        sellsApiRequestPacks: boolean;
+      }
+    | undefined,
+  addOns: { extraSeats: string; extraNumbers: string; runPacks: string; apiRequestPacks: string },
+): { extraSeats: string; extraNumbers: string; runPacks: string; apiRequestPacks: string } {
   return {
     extraSeats: plan?.sellsSeats ? addOns.extraSeats : '0',
     extraNumbers: plan?.sellsNumbers ? addOns.extraNumbers : '0',
     runPacks: plan?.sellsRunPacks ? addOns.runPacks : '0',
+    apiRequestPacks: plan?.sellsApiRequestPacks ? addOns.apiRequestPacks : '0',
   };
 }
 
-/** The add-ons a plan version can sell (ADR-051), in display order. */
-export type PlanAddOnKind = 'seats' | 'numbers' | 'runPacks';
+/** The add-ons a plan version can sell (ADR-051, API request packs ADR-110), in display order. */
+export type PlanAddOnKind = 'seats' | 'numbers' | 'runPacks' | 'apiRequestPacks';
 
 export const PLAN_ADD_ON_LABELS: Record<PlanAddOnKind, string> = {
   seats: 'Extra seats',
   numbers: 'Extra WhatsApp numbers',
   runPacks: 'Automation run packs',
+  apiRequestPacks: 'API request packs',
 };
+
+/** A company's add-on quantities (the plan state's, or a subscription's). */
+export interface PlanAddOnQuantities {
+  extraSeats: number;
+  extraNumbers: number;
+  runPacks: number;
+  apiRequestPacks: number;
+}
 
 /** Limits after add-ons; null means no limit. */
 export interface PlanLimits {
@@ -106,7 +123,24 @@ export const PLAN_BOUNDS = {
   runPackSize: 10_000_000,
   addOnUnits: 10_000,
   apiRequests: 1_000_000_000,
+  apiRequestPackSize: 100_000_000,
+  /**
+   * The most a monthly limit can be with its packs (ADR-110): the database returns limits as 32-bit
+   * integers, and the plan state's guard refuses more packs.
+   */
+  limitWithPacks: 2_000_000_000,
 } as const;
+
+/**
+ * The most packs of `size` a version sells on top of the `included` monthly limit: 10,000, or fewer
+ * when more would take the limit past PLAN_BOUNDS.limitWithPacks (ADR-110).
+ */
+export function packsMax(included: number, size: number): number {
+  return Math.max(
+    0,
+    Math.min(PLAN_BOUNDS.addOnUnits, Math.floor((PLAN_BOUNDS.limitWithPacks - included) / size)),
+  );
+}
 
 /**
  * The count at which the billing managers are warned before a monthly limit (ADR-062): 80% of the
@@ -159,6 +193,7 @@ export interface PlanPaymentQuote {
   seatsMinor: number;
   numbersMinor: number;
   runPacksMinor: number;
+  apiRequestPacksMinor: number;
   subtotalMinor: number;
   taxBp: number;
   taxMinor: number;
@@ -169,19 +204,23 @@ export type PlanPaymentQuoteResult =
   | { ok: true; quote: PlanPaymentQuote }
   | { ok: false; reason: 'add_on_not_sold' | 'too_small' | 'too_large' };
 
+/** A plan version's price and the prices of its add-ons per billing interval, in paise. */
+export interface PlanPrices {
+  priceMinor: number;
+  seatPriceMinor: number | null;
+  numberPriceMinor: number | null;
+  runPackPriceMinor: number | null;
+  apiRequestPackPriceMinor: number | null;
+}
+
 /**
  * The price of a plan version with add-ons at the version's prices, plus the tax on plan prices
  * (rounded half up to the paisa). Exact integer arithmetic: a quantity of an add-on the version
  * does not sell, a total below ₹1 or above HyFib's ceiling is refused.
  */
 export function planPaymentQuote(
-  prices: {
-    priceMinor: number;
-    seatPriceMinor: number | null;
-    numberPriceMinor: number | null;
-    runPackPriceMinor: number | null;
-  },
-  addOns: { extraSeats: number; extraNumbers: number; runPacks: number },
+  prices: PlanPrices,
+  addOns: PlanAddOnQuantities,
   taxBp: number,
 ): PlanPaymentQuoteResult {
   const line = (quantity: number, price: number | null): bigint | null =>
@@ -189,10 +228,11 @@ export function planPaymentQuote(
   const seats = line(addOns.extraSeats, prices.seatPriceMinor);
   const numbers = line(addOns.extraNumbers, prices.numberPriceMinor);
   const runPacks = line(addOns.runPacks, prices.runPackPriceMinor);
-  if (seats === null || numbers === null || runPacks === null) {
+  const apiRequestPacks = line(addOns.apiRequestPacks, prices.apiRequestPackPriceMinor);
+  if (seats === null || numbers === null || runPacks === null || apiRequestPacks === null) {
     return { ok: false, reason: 'add_on_not_sold' };
   }
-  const subtotal = BigInt(prices.priceMinor) + seats + numbers + runPacks;
+  const subtotal = BigInt(prices.priceMinor) + seats + numbers + runPacks + apiRequestPacks;
   const tax = (subtotal * BigInt(taxBp) + 5000n) / 10000n;
   const total = subtotal + tax;
   if (total < BigInt(PLAN_PAYMENT_MIN_MINOR)) return { ok: false, reason: 'too_small' };
@@ -204,6 +244,7 @@ export function planPaymentQuote(
       seatsMinor: Number(seats),
       numbersMinor: Number(numbers),
       runPacksMinor: Number(runPacks),
+      apiRequestPacksMinor: Number(apiRequestPacks),
       subtotalMinor: Number(subtotal),
       taxBp,
       taxMinor: Number(tax),

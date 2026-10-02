@@ -69,6 +69,9 @@ function VersionCard({
     version.runPackPriceMinor !== null && version.runPackSize !== null
       ? `packs of ${version.runPackSize.toLocaleString('en-IN')} automation runs at ${inr(version.runPackPriceMinor)}`
       : '',
+    version.apiRequestPackPriceMinor !== null && version.apiRequestPackSize !== null
+      ? `packs of ${version.apiRequestPackSize.toLocaleString('en-IN')} API requests at ${inr(version.apiRequestPackPriceMinor)}`
+      : '',
   ].filter(Boolean);
   const titleId = `plan-change-${version.id}`;
   return (

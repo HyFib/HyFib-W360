@@ -223,6 +223,14 @@ made. This checklist records the evidence required per gate; unchecked items blo
       payment email, and nothing is charged twice for that cycle (unconfirmed point 31); a payer who
       leaves Checkout sees the warning on Billing, and the plan ends with the period if nothing is
       authorised; ask Razorpay research question 14
+- [ ] API request packs (ADR-110) on the same staging deployment, after migration 0088 and before
+      the new web and worker images: a platform owner publishes a test-mode version with a monthly
+      API request limit and packs; staff set a pack, and a billing manager on a trial sets more under
+      Billing → Add-ons; the plan card, Settings → API keys and the platform company page show the
+      limit with the packs, a key's requests beyond the version's own limit and within the packs are
+      admitted, and paying creates a Razorpay subscription for the amount with the packs; before the
+      migration, confirm no company's automation run limit with its run packs passes 2,000,000,000
+      (RUNBOOKS, "API request packs"); agree each version's pack size and price
 - [ ] Tenant-isolation and security gates passing in CI on the release commit
 - [ ] Measured load behaviour against the test envelope (k6 results)
 - [ ] Backup restoration drill performed and timings recorded (RPO/RTO)

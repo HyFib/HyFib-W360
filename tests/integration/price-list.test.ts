@@ -203,6 +203,8 @@ describe('the price list for visitors', () => {
       numbersMax: null,
       runPackSize: 500,
       runPackPriceMinor: 25_000,
+      apiRequestPackSize: null,
+      apiRequestPackPriceMinor: null,
     });
     expect(mine[0]).toMatchObject({ priceMinor: 49_900, totalMinor: 58_882, someApiScopes: false });
     // Every listed version is published and offered, whichever file made it.

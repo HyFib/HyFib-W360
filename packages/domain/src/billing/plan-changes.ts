@@ -25,8 +25,10 @@ import {
   PLAN_BOUNDS,
   PLAN_MODULE_KEYS,
   PLAN_PAYMENT_START_LEAD_MS,
+  packsMax,
   planShortfalls,
   versionHoldingLimits,
+  type PlanAddOnQuantities,
   type PlanHoldings,
   type PlanShortfall,
 } from '../plans/model';
@@ -108,6 +110,8 @@ export interface PlanChangeVersion {
   numberPriceMinor: number | null;
   runPackSize: number | null;
   runPackPriceMinor: number | null;
+  apiRequestPackSize: number | null;
+  apiRequestPackPriceMinor: number | null;
   /** The version the company is on. */
   current: boolean;
   /** What the company has that the version cannot hold, even with the most add-ons it sells. */
@@ -115,27 +119,21 @@ export interface PlanChangeVersion {
 }
 
 /** The plan the company pays for now. */
-export interface PlanChangeCurrent {
+export interface PlanChangeCurrent extends PlanAddOnQuantities {
   planId: string;
   name: string;
   intervalMonths: number;
-  extraSeats: number;
-  extraNumbers: number;
-  runPacks: number;
   /** What the subscription that paid the period charges each interval. */
   amountMinor: number | null;
 }
 
 /** The subscription that follows the current one from the end of the paid period. */
-export interface PlanChangeNext {
+export interface PlanChangeNext extends PlanAddOnQuantities {
   id: string;
   status: PlanSubscriptionStatus;
   planId: string;
   planName: string;
   intervalMonths: number;
-  extraSeats: number;
-  extraNumbers: number;
-  runPacks: number;
   amountMinor: number;
   startsAt: Date;
   authorizeBy: Date;
@@ -196,8 +194,11 @@ export function planChangeAddOns(
     | 'runPackSize'
     | 'runPackPriceMinor'
     | 'automationRunsMonthly'
+    | 'apiRequestPackSize'
+    | 'apiRequestPackPriceMinor'
+    | 'apiRequestsMonthly'
   >,
-  start: { extraSeats: number; extraNumbers: number; runPacks: number },
+  start: PlanAddOnQuantities,
   used: { seats: number; numbers: number },
 ): PlanAddOnOption[] {
   const options: PlanAddOnOption[] = [];
@@ -237,51 +238,80 @@ export function planChangeAddOns(
     version.runPackPriceMinor !== null &&
     version.automationRunsMonthly !== null
   ) {
+    const max = packsMax(version.automationRunsMonthly, version.runPackSize);
     options.push({
       kind: 'runPacks',
-      quantity: clamp(start.runPacks, 0, PLAN_BOUNDS.addOnUnits),
+      quantity: clamp(start.runPacks, 0, max),
       min: 0,
-      max: PLAN_BOUNDS.addOnUnits,
+      max,
       unitPriceMinor: version.runPackPriceMinor,
       unitSize: version.runPackSize,
       included: version.automationRunsMonthly,
       used: null,
     });
   }
+  if (
+    version.apiRequestPackSize !== null &&
+    version.apiRequestPackPriceMinor !== null &&
+    version.apiRequestsMonthly !== null
+  ) {
+    const max = packsMax(version.apiRequestsMonthly, version.apiRequestPackSize);
+    options.push({
+      kind: 'apiRequestPacks',
+      quantity: clamp(start.apiRequestPacks, 0, max),
+      min: 0,
+      max,
+      unitPriceMinor: version.apiRequestPackPriceMinor,
+      unitSize: version.apiRequestPackSize,
+      included: version.apiRequestsMonthly,
+      used: null,
+    });
+  }
   return options;
 }
 
+type CapacityFields =
+  | 'seatsIncluded'
+  | 'numbersIncluded'
+  | 'automationRunsMonthly'
+  | 'runPackSize'
+  | 'apiRequestsMonthly'
+  | 'apiRequestPackSize';
+
+/** The packs of `size` on top of `included` that give at least `wanted` a month; 0 for no limit. */
+function packsFor(wanted: number | null, included: number | null, size: number | null): number {
+  if (wanted === null || included === null || size === null) return 0;
+  return Math.ceil(Math.max(0, wanted - included) / size);
+}
+
 /**
- * Add-ons on another version that keep what the company has now: as many seats, WhatsApp numbers
- * and automation runs a month as its current version and add-ons give (planChangeAddOns then keeps
- * them within what the version sells). The form for its current version starts from its add-ons.
+ * Add-ons on another version that keep what the company has now: as many seats, WhatsApp numbers,
+ * automation runs and API requests a month as its current version and add-ons give
+ * (planChangeAddOns then keeps them within what the version sells). The form for its current
+ * version starts from its add-ons.
  */
 export function addOnsKeepingCapacity(
-  current: Pick<
-    PlanRow,
-    'seatsIncluded' | 'numbersIncluded' | 'automationRunsMonthly' | 'runPackSize'
-  > | null,
-  have: { extraSeats: number; extraNumbers: number; runPacks: number },
-  version: Pick<
-    PlanRow,
-    'seatsIncluded' | 'numbersIncluded' | 'automationRunsMonthly' | 'runPackSize'
-  >,
-): { extraSeats: number; extraNumbers: number; runPacks: number } {
-  if (!current) return { extraSeats: 0, extraNumbers: 0, runPacks: 0 };
+  current: Pick<PlanRow, CapacityFields> | null,
+  have: PlanAddOnQuantities,
+  version: Pick<PlanRow, CapacityFields>,
+): PlanAddOnQuantities {
+  if (!current) return { extraSeats: 0, extraNumbers: 0, runPacks: 0, apiRequestPacks: 0 };
   const runs =
     current.automationRunsMonthly === null
       ? null
       : current.automationRunsMonthly + have.runPacks * (current.runPackSize ?? 0);
+  const requests =
+    current.apiRequestsMonthly === null
+      ? null
+      : current.apiRequestsMonthly + have.apiRequestPacks * (current.apiRequestPackSize ?? 0);
   return {
     extraSeats: Math.max(0, current.seatsIncluded + have.extraSeats - version.seatsIncluded),
     extraNumbers: Math.max(
       0,
       current.numbersIncluded + have.extraNumbers - version.numbersIncluded,
     ),
-    runPacks:
-      runs === null || version.automationRunsMonthly === null || version.runPackSize === null
-        ? 0
-        : Math.ceil(Math.max(0, runs - version.automationRunsMonthly) / version.runPackSize),
+    runPacks: packsFor(runs, version.automationRunsMonthly, version.runPackSize),
+    apiRequestPacks: packsFor(requests, version.apiRequestsMonthly, version.apiRequestPackSize),
   };
 }
 
@@ -323,6 +353,8 @@ function versionOf(p: PlanRow, currentPlanId: string | null, holdings: PlanHoldi
     numberPriceMinor: p.numberPriceMinor,
     runPackSize: p.runPackSize,
     runPackPriceMinor: p.runPackPriceMinor,
+    apiRequestPackSize: p.apiRequestPackSize,
+    apiRequestPackPriceMinor: p.apiRequestPackPriceMinor,
     current: p.id === currentPlanId,
     shortfalls: planShortfalls(versionHoldingLimits(p, mostAddOns(p)), holdings),
   } satisfies PlanChangeVersion;
@@ -362,6 +394,10 @@ export const planChangeSchema = z.object({
   extraSeats: count(PLAN_BOUNDS.addOnUnits, 'Extra seats are a whole number up to 10,000.'),
   extraNumbers: count(PLAN_BOUNDS.numbers, 'Extra WhatsApp numbers are a whole number up to 100.'),
   runPacks: count(PLAN_BOUNDS.addOnUnits, 'Run packs are a whole number up to 10,000.'),
+  apiRequestPacks: count(
+    PLAN_BOUNDS.addOnUnits,
+    'API request packs are a whole number up to 10,000.',
+  ),
 });
 
 export function createPlanChangeService(deps: PlanChangeServiceDeps) {
@@ -431,6 +467,7 @@ export function createPlanChangeService(deps: PlanChangeServiceDeps) {
             extraSeats: state.extraSeats,
             extraNumbers: state.extraNumbers,
             runPacks: state.runPacks,
+            apiRequestPacks: state.apiRequestPacks,
             amountMinor: paying?.amountMinor ?? null,
           }
         : null,
@@ -449,6 +486,7 @@ export function createPlanChangeService(deps: PlanChangeServiceDeps) {
               extraSeats: next.row.extraSeats,
               extraNumbers: next.row.extraNumbers,
               runPacks: next.row.runPacks,
+              apiRequestPacks: next.row.apiRequestPacks,
               amountMinor: next.row.amountMinor,
               startsAt: next.row.startsAt,
               authorizeBy: next.row.authorizeBy,

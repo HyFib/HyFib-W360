@@ -476,6 +476,7 @@ describe('what a company pays', () => {
         seatsMinor: 20_000,
         numbersMinor: 0,
         runPacksMinor: 0,
+        apiRequestPacksMinor: 0,
         subtotalMinor: 119_900,
         taxBp: 1800,
         taxMinor: 21_582,
@@ -1213,6 +1214,29 @@ describe('the paid period in the database', () => {
       c.tenantId,
     ]);
     expect(await apply(c.tenantId)).toBe('mismatch');
+    await adminQuery('UPDATE app.tenant_plans SET extra_seats = 2 WHERE tenant_id = $1', [
+      c.tenantId,
+    ]);
+    expect(await apply(c.tenantId)).toBe('unchanged');
+    // Other API request packs neither (ADR-110). The version sells none, so they are written past
+    // the plan state's guard, and taken away again: every later update of the row (the sweeps')
+    // would be refused.
+    const client = await dbs.adminPool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SET LOCAL session_replication_role = replica');
+      await client.query('UPDATE app.tenant_plans SET api_request_packs = 1 WHERE tenant_id = $1', [
+        c.tenantId,
+      ]);
+      await client.query('COMMIT');
+      expect(await apply(c.tenantId)).toBe('mismatch');
+    } finally {
+      await client.query('ROLLBACK').catch(() => undefined);
+      client.release();
+      await adminQuery('UPDATE app.tenant_plans SET api_request_packs = 0 WHERE tenant_id = $1', [
+        c.tenantId,
+      ]);
+    }
   });
 });
 

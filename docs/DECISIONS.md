@@ -3980,3 +3980,61 @@ Open questions for Razorpay:
 - whether `expire_by` may come before `start_at` (as in ADR-102);
 - what a second cancel at the cycle's end returns, since the fetched subscription does not show a
   cancellation scheduled for the cycle's end.
+
+## ADR-110 Packs of extra API requests (2026-10-02)
+
+Context: a plan limits a company's public API requests per monthly usage period (ADR-061). At the
+limit every request is refused with 429 `quota_exceeded` until the next period, and the company's
+only way out is another plan. Automation runs have packs that raise their monthly limit (ADR-051);
+API requests had none (BACKLOG P5-08, ARCHITECTURE "Not built yet"). While adding them, a fault in
+run packs turned up: a limit with packs is computed in 32-bit integers, and 10,000 packs of up to
+10,000,000 runs on top of up to 100,000,000 runs pass that range. A company with such packs got
+"integer out of range" from every entitlement check, and the minute sweep's lookups, which compute
+every company's limit in one query, failed for every company.
+
+Decision:
+
+- **What a version sells:** a version with a monthly API request limit above 0 may sell API request
+  packs, as it sells run packs: a pack size (1 to 100,000,000 requests a month) and a price per
+  billing interval, both or neither. A version without a limit, or without the API (0), sells none:
+  there is no limit to raise. Check constraints hold this whatever writes the row (a pack without
+  any limit too, which a plain `api_requests_monthly > 0` would let through as NULL), and a
+  published version keeps its packs (the plan guard compares the two columns).
+- **What a company has:** `tenant_plans.api_request_packs`, 0 to 10,000, none without a plan. Staff
+  set it with the plan from the company's platform page (ADR-051), and the company sets it under
+  Billing → Add-ons (ADR-106) and Billing → Change plan (ADR-109), with the other add-ons and under
+  the same conditions. The plan state's guard keeps it to versions that sell packs.
+- **The limit:** the version's monthly requests plus packs × pack size. `app.tenant_entitlements`
+  returns it, so request admission (ADR-061), the plan card, Settings → API keys and the platform
+  company page count the packs; the sweep's lookups for the 80% warning (ADR-062) and the used-up
+  notice count them too. Fewer packs lower the limit at once, as fewer run packs do.
+- **At most 2,000,000,000 with packs:** the guards of the plan state and of a following subscription
+  refuse packs that would take a limit past 2,000,000,000, for run packs as for API request packs,
+  and the forms say how many a version sells (`packsMax`: 10,000, or fewer near the bound). The
+  sums are made in 64 bits, so a refusal never fails on the integer range itself. The three sweep
+  lookups (`usage_limits_reached`, `api_quota_reached`, `usage_warnings_due`) compare in 64 bits, so
+  no company's plan state can stop them for every company; `app.tenant_entitlements` casts its
+  64-bit sums back to 32 bits, so a plan state written before this migration that passes the bound
+  fails loudly for that company alone rather than wrapping. None can exist in production: nothing
+  is deployed yet.
+- **Paying:** a subscription records its packs (`plan_subscriptions.api_request_packs`) and charges
+  them at the version's price with the other add-ons and the tax (ADR-063). A following subscription
+  (ADR-109) is checked with them: sold by its version, within the bound, in its price. Its first
+  paid cycle puts them on the plan, audited with the packs before.
+- **A subscription that follows none is for the plan as it is:** a new guard refuses one whose
+  version or add-ons are not the plan state's. HyFib always records them so (ADR-063, ADR-102); the
+  guard keeps a web server of the previous release, which does not know the packs, from recording a
+  subscription without them for a company that has some during a deploy. Its payments would never
+  have applied to the plan (`mismatch`).
+- **Deploying:** `app.choose_add_ons` with three quantities stays for web servers of the previous
+  release and leaves the packs as they are; a four-quantity function replaces it in this release and
+  a later migration drops the old one. A staff change from a server of the previous release leaves
+  the packs as they are, and is refused when it moves the company to a version that sells none
+  while it has some.
+- **Where it shows:** the platform plan form and page, the price list (ADR-107), the Billing plan
+  card (packs and the limit with them), Billing → Add-ons, Billing → Change plan, the payment card,
+  receipts, the staff plan email (ADR-100) and the company export.
+
+Not built: packs bought once instead of every billing interval, packs per API key (a key's own
+limit stays its own, ADR-097), packs that take effect at once for a paying company (they come with
+the next paid period, ADR-109), and AI credits (Phase 6).

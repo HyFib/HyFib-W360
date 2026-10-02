@@ -137,6 +137,9 @@ interface Terms {
   automationRunsMonthly?: string;
   runPackSize?: string;
   runPackPrice?: string;
+  apiRequestsMonthly?: string;
+  apiRequestPackSize?: string;
+  apiRequestPackPrice?: string;
 }
 /** A published monthly version; offered to companies unless `offer` is false. */
 async function version(terms: Terms = {}, offer = true): Promise<string> {
@@ -156,6 +159,9 @@ async function version(terms: Terms = {}, offer = true): Promise<string> {
     automationRunsMonthly: terms.automationRunsMonthly ?? '',
     runPackSize: terms.runPackSize ?? '',
     runPackPrice: terms.runPackPrice ?? '',
+    apiRequestsMonthly: terms.apiRequestsMonthly ?? '',
+    apiRequestPackSize: terms.apiRequestPackSize ?? '',
+    apiRequestPackPrice: terms.apiRequestPackPrice ?? '',
     modules: [],
   });
   await admin().publishPlan(owner, id);
@@ -220,12 +226,19 @@ async function paying(): Promise<{ c: Company; current: Sub }> {
 /** Changes the plan and authorises the new subscription in Checkout. */
 async function changedTo(
   c: Company,
-  input: { planId: string; extraSeats?: string; extraNumbers?: string; runPacks?: string },
+  input: {
+    planId: string;
+    extraSeats?: string;
+    extraNumbers?: string;
+    runPacks?: string;
+    apiRequestPacks?: string;
+  },
 ): Promise<Sub> {
   const checkout = await service().scheduleChange(c.ctx, {
     extraSeats: '0',
     extraNumbers: '0',
     runPacks: '0',
+    apiRequestPacks: '0',
     ...input,
   });
   const { response } = standIn.authorizeSubscription(checkout.providerSubscriptionId);
@@ -510,6 +523,7 @@ describe('changing the plan from the end of the paid period', () => {
       extraSeats: '1',
       extraNumbers: '',
       runPacks: '0',
+      apiRequestPacks: '0',
     });
     // The current subscription ends with its cycle, at Razorpay first.
     expect(standIn.state.subscriptions.get(current.providerSubscriptionId)?.cancelAtCycleEnd).toBe(
@@ -557,6 +571,7 @@ describe('changing the plan from the end of the paid period', () => {
       extraSeats: '1',
       extraNumbers: '0',
       runPacks: '0',
+      apiRequestPacks: '0',
     });
     expect(again.subscriptionId).toBe(checkout.subscriptionId);
 
@@ -667,6 +682,79 @@ describe('changing the plan from the end of the paid period', () => {
     expect((await subscriptionRow(current.subscriptionId)).status).toBe('cancelled');
   });
 
+  it('carries API request packs to the new subscription, priced with its add-ons, and puts them on the plan with its first paid cycle (ADR-110)', async () => {
+    const { c, current } = await paying();
+    // Api: ₹1,999 with 1,000 requests a month and packs of 500 more at ₹300.
+    const apiId = await version({
+      name: 'Api',
+      apiRequestsMonthly: '1000',
+      apiRequestPackSize: '500',
+      apiRequestPackPrice: '300',
+    });
+    const option = await changes().option(c.ctx, apiId);
+    expect(option?.options.find((o) => o.kind === 'apiRequestPacks')).toEqual({
+      kind: 'apiRequestPacks',
+      quantity: 0,
+      min: 0,
+      max: 10_000,
+      unitPriceMinor: 30_000,
+      unitSize: 500,
+      included: 1000,
+      used: null,
+    });
+    // A version that sells none refuses them before anything is cancelled.
+    const proId = await version();
+    await refused(
+      service().scheduleChange(c.ctx, {
+        planId: proId,
+        extraSeats: '0',
+        extraNumbers: '0',
+        runPacks: '0',
+        apiRequestPacks: '1',
+      }),
+      'precondition_failed',
+      /does not sell API request packs/,
+    );
+    expect((await subscriptionRow(current.subscriptionId)).cancel_at_period_end).toBe(false);
+
+    // ₹1,999 + 2 × ₹300 = ₹2,599, plus 18% (₹467.82).
+    const next = await changedTo(c, { planId: apiId, apiRequestPacks: '2' });
+    const authorised = (await billingEmails(c.tenantId)).find((e) =>
+      e.subject.startsWith('Your HyFib plan changes on'),
+    );
+    expect(authorised?.lines[0]).toContain('your plan is the Api plan with 2 API request packs.');
+    expect(await subscriptionRow(next.subscriptionId)).toMatchObject({
+      api_request_packs: 2,
+      subtotal_minor: '259900',
+      amount_minor: '306682',
+    });
+    expect(
+      (await audits(c.tenantId, 'billing.plan_change_started')).at(-1)?.metadata,
+    ).toMatchObject({ planId: apiId, apiRequestPacks: 2, amountMinor: 306_682 });
+    const endedAt = await periodEnded(c, current, next, 1);
+    standIn.endSubscriptionCycle(current.providerSubscriptionId);
+    standIn.chargeSubscription(next.providerSubscriptionId);
+    await sweepPlanStates(sweepDeps(), 1000);
+    expect(await planState(c.tenantId)).toMatchObject({
+      status: 'active',
+      plan_id: apiId,
+      extra_seats: 0,
+      api_request_packs: 2,
+      subscription_id: next.subscriptionId,
+      period_start: endedAt,
+    });
+    // 1,000 + 2 × 500 requests a month.
+    const [limits] = await adminQuery<{ api_requests: number }>(
+      'SELECT api_requests FROM app.tenant_entitlements($1)',
+      [c.tenantId],
+    );
+    expect(limits!.api_requests).toBe(2000);
+    expect((await audits(c.tenantId, 'plan.subscription_period')).at(-1)?.metadata).toMatchObject({
+      previous_api_request_packs: 0,
+      api_request_packs: 2,
+    });
+  });
+
   it('replaces a scheduled change with a new one, and lets a cancelled change leave the plan to end with the period', async () => {
     const { c, current } = await paying();
     const proId = await version();
@@ -725,6 +813,7 @@ describe('changing the plan from the end of the paid period', () => {
           extraSeats: '0',
           extraNumbers: '0',
           runPacks: '0',
+          apiRequestPacks: '0',
           ...input,
         }),
         'precondition_failed',
@@ -779,6 +868,7 @@ describe('changing the plan from the end of the paid period', () => {
         extraSeats: '0',
         extraNumbers: '0',
         runPacks: '0',
+        apiRequestPacks: '0',
       }),
       'precondition_failed',
       /no period paid by subscription/,
@@ -850,6 +940,61 @@ describe('changing the plan from the end of the paid period', () => {
       },
       /does not sell these add-ons/,
     );
+    // API request packs (ADR-110): only from a version that sells them, within the limit's bound,
+    // and priced with the rest.
+    await refusedInsert({ apiRequestPacks: 1 }, /does not sell these add-ons/);
+    const api = await version({
+      name: 'Api',
+      apiRequestsMonthly: '1000000000',
+      apiRequestPackSize: '100000000',
+      apiRequestPackPrice: '10',
+    });
+    await refusedInsert({ planId: api, apiRequestPacks: 1 }, /costs what its plan charges/);
+    // 1,000,000,000 requests and 11 packs of 100,000,000 would pass 2,000,000,000.
+    await refusedInsert(
+      {
+        planId: api,
+        apiRequestPacks: 11,
+        subtotalMinor: 210_900,
+        taxMinor: 37_962,
+        amountMinor: 248_862,
+      },
+      /does not sell these add-ons/,
+    );
+    // The most packs of either kind are refused in the guard's own words: its sums never pass the
+    // integer range.
+    await refusedInsert({ planId: api, apiRequestPacks: 10_000 }, /does not sell these add-ons/);
+    const runs = await version({
+      name: 'Runs',
+      automationRunsMonthly: '100000000',
+      runPackSize: '10000000',
+      runPackPrice: '1',
+    });
+    await refusedInsert({ planId: runs, runPacks: 10_000 }, /does not sell these add-ons/);
+    // The table holds a subscription's packs to 10,000 whatever its version sells: 10,001 packs of
+    // 500 at ₹1 pass the guard (₹1,999 + ₹10,001, plus 18%).
+    const small = await version({
+      name: 'Small packs',
+      apiRequestsMonthly: '1000',
+      apiRequestPackSize: '500',
+      apiRequestPackPrice: '1',
+    });
+    let refusal: unknown = await insert({
+      planId: small,
+      apiRequestPacks: 10_001,
+      subtotalMinor: 1_200_000,
+      taxMinor: 216_000,
+      amountMinor: 1_416_000,
+    }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    const messages: string[] = [];
+    for (let depth = 0; depth < 5 && refusal instanceof Error; depth += 1) {
+      messages.push(refusal.message);
+      refusal = refusal.cause;
+    }
+    expect(messages.join(' | ')).toMatch(/plan_subscriptions_api_request_packs_check/);
     // Each part of the price is checked on its own: the subtotal, the tax, the rate, the interval.
     await refusedInsert(
       { subtotalMinor: 199_800, amountMinor: 235_782 },
@@ -1055,6 +1200,7 @@ describe('changing the plan from the end of the paid period', () => {
       extraSeats: '0',
       extraNumbers: '0',
       runPacks: '0',
+      apiRequestPacks: '0',
     });
     await periodEnded(left.c, left.current, checkout, 1);
     standIn.endSubscriptionCycle(left.current.providerSubscriptionId);

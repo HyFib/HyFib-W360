@@ -202,6 +202,16 @@ export function PlanCard({
                 </dd>
               </div>
             ) : null}
+            {plan.apiRequestPackSize !== null && plan.apiRequestPackPriceMinor !== null ? (
+              <div className="grid gap-1">
+                <dt className="text-muted-foreground">API request packs</dt>
+                <dd>
+                  {overview.addOns.apiRequestPacks} ·{' '}
+                  {plan.apiRequestPackSize.toLocaleString('en-IN')} requests for{' '}
+                  {inr(plan.apiRequestPackPriceMinor)}
+                </dd>
+              </div>
+            ) : null}
             {plan.status === 'retired' ? (
               <div className="grid gap-1 sm:col-span-3">
                 <dt className="sr-only">Availability</dt>

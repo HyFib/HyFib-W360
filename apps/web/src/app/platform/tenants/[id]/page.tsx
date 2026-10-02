@@ -110,6 +110,7 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
     sellsSeats: p.seatPriceMinor !== null,
     sellsNumbers: p.numberPriceMinor !== null,
     sellsRunPacks: p.runPackSize !== null,
+    sellsApiRequestPacks: p.apiRequestPackSize !== null,
   });
   const options: AssignablePlanOption[] = published.map(option);
   if (planView.plan && !options.some((o) => o.id === planView.plan?.id))
@@ -400,6 +401,7 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
                   extraSeats: state.extraSeats,
                   extraNumbers: state.extraNumbers,
                   runPacks: state.runPacks,
+                  apiRequestPacks: state.apiRequestPacks,
                 }}
                 options={options}
               />

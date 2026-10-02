@@ -28,6 +28,7 @@ export interface PlanChangeFacts {
   extraSeats: number;
   extraNumbers: number;
   runPacks: number;
+  apiRequestPacks: number;
   changedAt: Date;
   /** The reason staff gave, which the company's audit log shows too. */
   reason: string | null;
@@ -81,6 +82,9 @@ export function planChangeNotice(facts: PlanChangeFacts): { subject: string; lin
       : null,
     facts.runPacks > 0
       ? counted(facts.runPacks, 'automation run pack', 'automation run packs')
+      : null,
+    facts.apiRequestPacks > 0
+      ? counted(facts.apiRequestPacks, 'API request pack', 'API request packs')
       : null,
   ].filter((item): item is string => item !== null);
   const reason = facts.reason?.trim();
@@ -158,6 +162,7 @@ export async function notifyStaffPlanChanges(
             extraSeats: tenantPlans.extraSeats,
             extraNumbers: tenantPlans.extraNumbers,
             runPacks: tenantPlans.runPacks,
+            apiRequestPacks: tenantPlans.apiRequestPacks,
             changedAt: tenantPlans.changedAt,
             reason: tenantPlans.note,
           })

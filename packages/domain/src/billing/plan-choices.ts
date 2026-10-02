@@ -36,6 +36,7 @@ import {
   planShortfallText,
   planShortfalls,
   versionHoldingLimits,
+  type PlanAddOnQuantities,
   type PlanHoldings,
   type PlanPaymentQuote,
   type PlanPaymentQuoteResult,
@@ -122,6 +123,8 @@ export interface PlanChoice {
   numberPriceMinor: number | null;
   runPackSize: number | null;
   runPackPriceMinor: number | null;
+  apiRequestPackSize: number | null;
+  apiRequestPackPriceMinor: number | null;
   /** What the company would pay each interval with its add-ons and the tax; null: no tax set. */
   quote: PlanPaymentQuoteResult | null;
   /** Limits that hold less than the company has now (it cannot choose the version then). */
@@ -137,7 +140,7 @@ export interface PlanChoices {
   trialEndsAt: Date | null;
   /** The version the company is on, offered or not. */
   currentPlan: { id: string; name: string } | null;
-  addOns: { extraSeats: number; extraNumbers: number; runPacks: number };
+  addOns: PlanAddOnQuantities;
   holdings: PlanHoldings;
   /** Offered versions, cheapest first. */
   choices: PlanChoice[];
@@ -228,6 +231,7 @@ export function createPlanChoicesService(deps: PlanChoicesServiceDeps) {
             extraSeats: state.extraSeats,
             extraNumbers: state.extraNumbers,
             runPacks: state.runPacks,
+            apiRequestPacks: state.apiRequestPacks,
           };
           return {
             unavailable,
@@ -255,6 +259,8 @@ export function createPlanChoicesService(deps: PlanChoicesServiceDeps) {
               numberPriceMinor: p.numberPriceMinor,
               runPackSize: p.runPackSize,
               runPackPriceMinor: p.runPackPriceMinor,
+              apiRequestPackSize: p.apiRequestPackSize,
+              apiRequestPackPriceMinor: p.apiRequestPackPriceMinor,
               quote: taxBp === null ? null : planPaymentQuote(p, addOns, taxBp),
               shortfalls: planShortfalls(versionHoldingLimits(p, addOns), holdings),
               current: p.id === state.planId,

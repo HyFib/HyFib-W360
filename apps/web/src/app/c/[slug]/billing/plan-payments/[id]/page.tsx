@@ -63,6 +63,9 @@ function addOns(receipt: PlanPaymentReceipt): string[] {
     receipt.runPacks > 0
       ? count(receipt.runPacks, 'automation run pack', 'automation run packs')
       : null,
+    receipt.apiRequestPacks > 0
+      ? count(receipt.apiRequestPacks, 'API request pack', 'API request packs')
+      : null,
   ].filter((a): a is string => a !== null);
 }
 

@@ -17,6 +17,7 @@ const base: PlanChangeFacts = {
   extraSeats: 0,
   extraNumbers: 0,
   runPacks: 0,
+  apiRequestPacks: 0,
   changedAt: new Date('2026-09-30T20:00:00Z'),
   reason: 'Invoice INV-1001 paid by bank transfer',
   timeZone: 'Asia/Kolkata',
@@ -76,6 +77,12 @@ describe('the email about a plan HyFib staff set (ADR-100)', () => {
     );
     expect(planChangeNotice({ ...base, extraNumbers: 3, runPacks: 1 }).lines[2]).toBe(
       'It includes 3 extra WhatsApp numbers and 1 automation run pack on top of the plan.',
+    );
+    expect(planChangeNotice({ ...base, runPacks: 1, apiRequestPacks: 2 }).lines[2]).toBe(
+      'It includes 1 automation run pack and 2 API request packs on top of the plan.',
+    );
+    expect(planChangeNotice({ ...base, apiRequestPacks: 1 }).lines[2]).toBe(
+      'It includes 1 API request pack on top of the plan.',
     );
   });
 

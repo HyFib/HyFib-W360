@@ -47,6 +47,7 @@ import {
   PLAN_MODULE_KEYS,
   PLAN_PAYMENT_MIN_MINOR,
   PLAN_TAX_MAX_BP,
+  packsMax,
   usagePeriod,
 } from '../plans/model';
 import { parseInput } from '../validation';
@@ -184,6 +185,14 @@ const planFieldsSchema = z
       PLAN_BOUNDS.apiRequests,
       'API requests are a whole number up to 1,000,000,000',
     ),
+    apiRequestPackSize: optionalWhole(
+      1,
+      PLAN_BOUNDS.apiRequestPackSize,
+      'An API request pack is a whole number of requests up to 100,000,000',
+    ),
+    apiRequestPackPrice: optionalRupees(
+      'Enter the price of an API request pack in rupees, or leave it empty',
+    ),
     // Every API scope, including scopes added later, or the scopes chosen (ADR-092).
     apiScopeChoice: z
       .enum(['all', 'chosen'], { error: 'Choose which API scopes the plan includes' })
@@ -216,6 +225,16 @@ const planFieldsSchema = z
       issue('runPackSize', 'Give both the size and the price of a run pack, or neither');
     if (d.runPackSize !== null && d.automationRunsMonthly === null)
       issue('runPackSize', 'Run packs need a monthly automation run limit');
+    if ((d.apiRequestPackSize === null) !== (d.apiRequestPackPrice === null))
+      issue(
+        'apiRequestPackSize',
+        'Give both the size and the price of an API request pack, or neither',
+      );
+    if (
+      d.apiRequestPackSize !== null &&
+      !(d.apiRequestsMonthly !== null && d.apiRequestsMonthly > 0)
+    )
+      issue('apiRequestPackSize', 'API request packs need a monthly API request limit above 0');
     if (d.apiScopeChoice === 'chosen' && d.apiRequestsMonthly !== 0 && d.apiScopes.length === 0)
       issue('apiScopes', 'Choose at least one API scope, or include every scope');
   });
@@ -301,6 +320,10 @@ const tenantPlanSchema = z
     extraSeats: quantity(PLAN_BOUNDS.addOnUnits, 'Extra seats are a whole number up to 10,000'),
     extraNumbers: quantity(PLAN_BOUNDS.numbers, 'Extra numbers are a whole number up to 100'),
     runPacks: quantity(PLAN_BOUNDS.addOnUnits, 'Run packs are a whole number up to 10,000'),
+    apiRequestPacks: quantity(
+      PLAN_BOUNDS.addOnUnits,
+      'API request packs are a whole number up to 10,000',
+    ),
   })
   .and(reasonSchema);
 
@@ -326,6 +349,8 @@ function planValues(d: PlanFields) {
     apiRequestsMonthly: d.apiRequestsMonthly,
     // A plan without the API has no scopes to choose.
     apiScopes: d.apiRequestsMonthly === 0 || d.apiScopeChoice === 'all' ? null : d.apiScopes,
+    apiRequestPackSize: d.apiRequestPackSize,
+    apiRequestPackPriceMinor: d.apiRequestPackPrice,
     modules: d.modules,
   };
 }
@@ -697,6 +722,9 @@ export function createPlanAdminService(deps: {
             numbersIncluded: plans.numbersIncluded,
             numbersMax: plans.numbersMax,
             runPackSize: plans.runPackSize,
+            automationRunsMonthly: plans.automationRunsMonthly,
+            apiRequestPackSize: plans.apiRequestPackSize,
+            apiRequestsMonthly: plans.apiRequestsMonthly,
           })
           .from(plans)
           .where(eq(plans.status, 'published'))
@@ -776,6 +804,8 @@ export function createPlanAdminService(deps: {
           runPackPriceMinor: source.runPackPriceMinor,
           apiRequestsMonthly: source.apiRequestsMonthly,
           apiScopes: source.apiScopes,
+          apiRequestPackSize: source.apiRequestPackSize,
+          apiRequestPackPriceMinor: source.apiRequestPackPriceMinor,
           modules: source.modules,
           createdByUserId: actor.userId,
         });
@@ -1019,6 +1049,9 @@ export function createPlanAdminService(deps: {
                 numbersIncluded: plans.numbersIncluded,
                 numbersMax: plans.numbersMax,
                 runPackSize: plans.runPackSize,
+                automationRunsMonthly: plans.automationRunsMonthly,
+                apiRequestPackSize: plans.apiRequestPackSize,
+                apiRequestsMonthly: plans.apiRequestsMonthly,
               })
               .from(plans)
               .where(eq(plans.id, state.planId))
@@ -1299,8 +1332,9 @@ export function createPlanAdminService(deps: {
               extraSeats: data.extraSeats,
               extraNumbers: data.extraNumbers,
               runPacks: data.runPacks,
+              apiRequestPacks: data.apiRequestPacks,
             }
-          : { extraSeats: 0, extraNumbers: 0, runPacks: 0 };
+          : { extraSeats: 0, extraNumbers: 0, runPacks: 0, apiRequestPacks: 0 };
         if (plan) {
           if (addOns.extraSeats > 0 && plan.seatPriceMinor === null)
             throw invalid('This plan does not sell extra seats.');
@@ -1313,6 +1347,26 @@ export function createPlanAdminService(deps: {
             throw invalid(`This plan allows at most ${numbersMax} WhatsApp numbers.`);
           if (addOns.runPacks > 0 && plan.runPackSize === null)
             throw invalid('This plan does not sell automation run packs.');
+          if (
+            addOns.runPacks > 0 &&
+            plan.runPackSize !== null &&
+            plan.automationRunsMonthly !== null &&
+            addOns.runPacks > packsMax(plan.automationRunsMonthly, plan.runPackSize)
+          )
+            throw invalid(
+              `This plan sells at most ${packsMax(plan.automationRunsMonthly, plan.runPackSize).toLocaleString('en-IN')} automation run packs.`,
+            );
+          if (addOns.apiRequestPacks > 0 && plan.apiRequestPackSize === null)
+            throw invalid('This plan does not sell API request packs.');
+          if (
+            addOns.apiRequestPacks > 0 &&
+            plan.apiRequestPackSize !== null &&
+            plan.apiRequestsMonthly !== null &&
+            addOns.apiRequestPacks > packsMax(plan.apiRequestsMonthly, plan.apiRequestPackSize)
+          )
+            throw invalid(
+              `This plan sells at most ${packsMax(plan.apiRequestsMonthly, plan.apiRequestPackSize).toLocaleString('en-IN')} API request packs.`,
+            );
         }
 
         // Monthly usage periods restart with a new trial or a new paid period, and continue
@@ -1339,7 +1393,8 @@ export function createPlanAdminService(deps: {
           current.periodEnd?.getTime() === periodEnd?.getTime() &&
           current.extraSeats === addOns.extraSeats &&
           current.extraNumbers === addOns.extraNumbers &&
-          current.runPacks === addOns.runPacks;
+          current.runPacks === addOns.runPacks &&
+          current.apiRequestPacks === addOns.apiRequestPacks;
         if (same) return;
 
         await tx

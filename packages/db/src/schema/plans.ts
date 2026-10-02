@@ -42,6 +42,12 @@ export const plans = opsSchema.table('plans', {
   apiRequestsMonthly: integer('api_requests_monthly'),
   /** The public API scopes the plan includes; null: every scope, including later ones (ADR-092). */
   apiScopes: text('api_scopes').array().$type<ApiScope[]>(),
+  /**
+   * Extra API requests a month in one pack, with its price per billing interval; both null when the
+   * version sells none, which it can only with a monthly limit above 0 (ADR-110, migration 0088).
+   */
+  apiRequestPackSize: integer('api_request_pack_size'),
+  apiRequestPackPriceMinor: bigint('api_request_pack_price_minor', { mode: 'number' }),
   status: text('status', { enum: PLAN_STATUSES }).notNull().default('draft'),
   createdByUserId: text('created_by_user_id').notNull(),
   createdAt: tz('created_at').notNull().defaultNow(),
@@ -90,6 +96,8 @@ export const tenantPlans = appSchema.table('tenant_plans', {
   extraSeats: integer('extra_seats').notNull().default(0),
   extraNumbers: integer('extra_numbers').notNull().default(0),
   runPacks: integer('run_packs').notNull().default(0),
+  /** Packs of extra API requests a month (ADR-110, migration 0088). */
+  apiRequestPacks: integer('api_request_packs').notNull().default(0),
   usageAnchor: tz('usage_anchor').notNull().defaultNow(),
   note: text('note'),
   changedByUserId: text('changed_by_user_id'),
@@ -143,6 +151,8 @@ export const planSubscriptions = appSchema.table('plan_subscriptions', {
   extraSeats: integer('extra_seats').notNull(),
   extraNumbers: integer('extra_numbers').notNull(),
   runPacks: integer('run_packs').notNull(),
+  /** Packs of extra API requests it pays for (ADR-110, migration 0088). */
+  apiRequestPacks: integer('api_request_packs').notNull().default(0),
   subtotalMinor: bigint('subtotal_minor', { mode: 'number' }).notNull(),
   taxBp: integer('tax_bp').notNull(),
   taxMinor: bigint('tax_minor', { mode: 'number' }).notNull(),

@@ -48,9 +48,10 @@ function intro(data: PlanAddOns, timeZone: string): string {
 }
 
 /**
- * The add-ons of the company's plan version (ADR-106): extra seats, extra WhatsApp numbers and
- * automation run packs. Owners and billing managers choose them here while the company is on a
- * trial or its plan has ended, then pay for them with the plan under Billing.
+ * The add-ons of the company's plan version (ADR-106): extra seats, extra WhatsApp numbers,
+ * automation run packs and API request packs (ADR-110). Owners and billing managers choose them
+ * here while the company is on a trial or its plan has ended, then pay for them with the plan under
+ * Billing.
  */
 export default async function AddOnsPage({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
@@ -101,7 +102,7 @@ export default async function AddOnsPage({ params }: { params: Promise<{ slug: s
             title="No add-ons to choose"
             description={
               plan
-                ? `${plan.name} sells no extra seats, WhatsApp numbers or automation runs. Choose another plan under Billing, or ask HyFib.`
+                ? `${plan.name} sells no extra seats, WhatsApp numbers, automation runs or API requests. Choose another plan under Billing, or ask HyFib.`
                 : 'Your company has no plan with add-ons.'
             }
           />

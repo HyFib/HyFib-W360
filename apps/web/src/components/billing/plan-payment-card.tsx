@@ -311,6 +311,14 @@ export function PlanPaymentCard({
                     <TD className="text-right tabular-nums">{inr(offer.quote.runPacksMinor)}</TD>
                   </TR>
                 ) : null}
+                {offer.quote.apiRequestPacksMinor > 0 ? (
+                  <TR>
+                    <TD>API request packs</TD>
+                    <TD className="text-right tabular-nums">
+                      {inr(offer.quote.apiRequestPacksMinor)}
+                    </TD>
+                  </TR>
+                ) : null}
                 <TR>
                   <TD>Tax ({offer.quote.taxBp / 100}%)</TD>
                   <TD className="text-right tabular-nums">{inr(offer.quote.taxMinor)}</TD>

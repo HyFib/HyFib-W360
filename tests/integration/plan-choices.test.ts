@@ -433,7 +433,12 @@ describe('choosing a plan', () => {
     expect(offer.unavailable).toBeNull();
     expect(offer.status).toBe('trialing');
     expect(offer.currentPlan).toEqual({ id: c.starterId, name: 'Starter' });
-    expect(offer.addOns).toEqual({ extraSeats: 1, extraNumbers: 0, runPacks: 0 });
+    expect(offer.addOns).toEqual({
+      extraSeats: 1,
+      extraNumbers: 0,
+      runPacks: 0,
+      apiRequestPacks: 0,
+    });
     // The owner and the billing member hold two seats.
     expect(offer.holdings).toEqual({ seats: 2, numbers: 0, teams: 0, liveAutomations: 0 });
     const choice = offer.choices.find((p) => p.id === growth)!;

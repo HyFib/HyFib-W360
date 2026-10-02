@@ -61,7 +61,11 @@ function price(choice: PlanChoice, addOns: PlanChoices['addOns']): string {
   const base = `${inr(choice.priceMinor)} ${interval} before tax`;
   if (!choice.quote) return base;
   if (!choice.quote.ok) return base;
-  const hasAddOns = addOns.extraSeats > 0 || addOns.extraNumbers > 0 || addOns.runPacks > 0;
+  const hasAddOns =
+    addOns.extraSeats > 0 ||
+    addOns.extraNumbers > 0 ||
+    addOns.runPacks > 0 ||
+    addOns.apiRequestPacks > 0;
   return `${base}. You would pay ${inr(choice.quote.quote.totalMinor)} ${interval}, with ${choice.quote.quote.taxBp / 100}% tax${hasAddOns ? ' and your add-ons' : ''}.`;
 }
 

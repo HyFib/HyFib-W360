@@ -878,6 +878,27 @@ Phase 5 rules (paying companies change their plan from the next period, P5-01, A
   ons the version does not sell or beyond its maximums, and a total one plan payment cannot cover.
   Staff cancels and company deletion cancel every subscription that may still charge.
 
+Phase 5 rules (packs of extra API requests, P5-01/P5-08, ADR-110):
+
+- A version sells API request packs only with a monthly API request limit above 0, with both a size
+  and a price; check constraints hold this for every writer (a NULL limit included), and the plan
+  guard keeps a published version's packs. The platform role may update the two columns of a draft
+  only (column grant), and `api_request_packs` of a plan state, which the plan state's guard keeps
+  to versions that sell packs.
+- No limit with packs passes 2,000,000,000: the plan state's guard and the guard of a following
+  subscription refuse more packs of either kind, summing in 64 bits, so nobody (staff, a company's
+  function, a following subscription's paid cycle) can store a plan state whose entitlements leave
+  the integer range. The sweep's lookups compare in 64 bits, so one plan state cannot stop them for
+  every company.
+- Companies set their packs only through `app.choose_add_ons` (four quantities; SECURITY DEFINER,
+  pinned `search_path`, `w360_app` alone, the company and member from the session's scope), under
+  ADR-106's conditions and locks. The three-quantity function kept for a deploy leaves the packs
+  unchanged.
+- A subscription that follows none is refused unless its version and add-ons are the company's plan
+  state's (`app.guard_plan_subscription_start`, invoker rights, executable by nobody), so a payment
+  is never taken for add-ons the company does not have, nor a company left with add-ons it did not
+  pay for, whichever server recorded the subscription.
+
 Phase 5 rules (daily settlement reconciliation, P5-05, ADR-059):
 
 - The settlement report is used only to look HyFib's own records up by provider id; a company is

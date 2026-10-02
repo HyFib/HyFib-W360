@@ -65,6 +65,8 @@ const plan: PriceListPlan = {
   numbersMax: null,
   runPackSize: 500,
   runPackPriceMinor: 25_000,
+  apiRequestPackSize: null,
+  apiRequestPackPriceMinor: null,
 };
 
 describe('priceListLines', () => {
@@ -111,5 +113,22 @@ describe('priceListLines', () => {
       'Extra WhatsApp numbers: ₹500.00 each per year, up to 3 numbers in all',
     ]);
     expect(priceListLines({ ...plan, apiRequestsMonthly: 0 }).included).toContain('No public API');
+  });
+
+  it('states the API request packs a version sells, with or without automations (ADR-110)', () => {
+    const withPacks = {
+      ...plan,
+      apiRequestsMonthly: 10_000,
+      apiRequestPackSize: 5000,
+      apiRequestPackPriceMinor: 40_000,
+    };
+    expect(priceListLines(withPacks).addOns.at(-1)).toBe(
+      'API request packs: 5,000 more public API requests a month, ₹400.00 each per month',
+    );
+    expect(priceListLines({ ...withPacks, modules: [] }).addOns).toEqual([
+      'Extra seats: ₹100.00 each per month, up to 10 seats in all',
+      'Extra WhatsApp numbers: ₹500.00 each per month',
+      'API request packs: 5,000 more public API requests a month, ₹400.00 each per month',
+    ]);
   });
 });

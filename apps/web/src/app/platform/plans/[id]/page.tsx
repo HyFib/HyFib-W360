@@ -64,6 +64,8 @@ export default async function PlanPage({ params }: { params: Promise<{ id: strin
     runPackSize: count(plan.runPackSize),
     runPackPrice: rupees(plan.runPackPriceMinor),
     apiRequestsMonthly: count(plan.apiRequestsMonthly),
+    apiRequestPackSize: count(plan.apiRequestPackSize),
+    apiRequestPackPrice: rupees(plan.apiRequestPackPriceMinor),
     apiScopeChoice: plan.apiScopes === null ? 'all' : 'chosen',
     apiScopes: plan.apiScopes ?? [],
     modules: plan.modules,
@@ -98,6 +100,12 @@ export default async function PlanPage({ params }: { params: Promise<{ id: strin
     [
       'API requests a month',
       plan.apiRequestsMonthly === 0 ? 'Not included' : limit(plan.apiRequestsMonthly),
+    ],
+    [
+      'API request packs',
+      plan.apiRequestPackSize === null || plan.apiRequestPackPriceMinor === null
+        ? 'Not sold'
+        : `${plan.apiRequestPackSize.toLocaleString('en-IN')} requests for ${inr(plan.apiRequestPackPriceMinor)}`,
     ],
     [
       'API scopes',

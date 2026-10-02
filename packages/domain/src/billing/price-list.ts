@@ -40,12 +40,18 @@ export const PRICE_LIST_GAP_TEXT: Record<PriceListGap, string> = {
     'No version is offered to companies that one plan payment can cover with the tax.',
 };
 
-const NO_ADD_ONS = { extraSeats: 0, extraNumbers: 0, runPacks: 0 };
+const NO_ADD_ONS = { extraSeats: 0, extraNumbers: 0, runPacks: 0, apiRequestPacks: 0 };
 
 /** What one interval of the version costs with the tax, if one plan payment can cover it. */
 function totalWithTax(priceMinor: number, taxBp: number): number | null {
   const quote = planPaymentQuote(
-    { priceMinor, seatPriceMinor: null, numberPriceMinor: null, runPackPriceMinor: null },
+    {
+      priceMinor,
+      seatPriceMinor: null,
+      numberPriceMinor: null,
+      runPackPriceMinor: null,
+      apiRequestPackPriceMinor: null,
+    },
     NO_ADD_ONS,
     taxBp,
   );
@@ -101,6 +107,8 @@ export interface PriceListPlan {
   numbersMax: number | null;
   runPackSize: number | null;
   runPackPriceMinor: number | null;
+  apiRequestPackSize: number | null;
+  apiRequestPackPriceMinor: number | null;
 }
 
 export interface PriceList {
@@ -156,6 +164,10 @@ export function priceListLines(plan: PriceListPlan): { included: string[]; addOn
   if (automations && plan.runPackSize !== null && plan.runPackPriceMinor !== null)
     addOns.push(
       `Automation run packs: ${amount(plan.runPackSize, 'more automation run', 'more automation runs')} a month, ${inr(plan.runPackPriceMinor)} each ${interval}`,
+    );
+  if (plan.apiRequestPackSize !== null && plan.apiRequestPackPriceMinor !== null)
+    addOns.push(
+      `API request packs: ${amount(plan.apiRequestPackSize, 'more public API request', 'more public API requests')} a month, ${inr(plan.apiRequestPackPriceMinor)} each ${interval}`,
     );
   return { included, addOns };
 }
@@ -214,6 +226,8 @@ export function createPriceListService(deps: {
               numbersMax: plans.numbersMax,
               runPackSize: plans.runPackSize,
               runPackPriceMinor: plans.runPackPriceMinor,
+              apiRequestPackSize: plans.apiRequestPackSize,
+              apiRequestPackPriceMinor: plans.apiRequestPackPriceMinor,
             })
             .from(plans)
             .where(and(eq(plans.status, 'published'), isNotNull(plans.offeredAt)))
@@ -254,6 +268,8 @@ export function createPriceListService(deps: {
               numbersMax: p.numbersMax,
               runPackSize: p.runPackSize,
               runPackPriceMinor: p.runPackPriceMinor,
+              apiRequestPackSize: p.apiRequestPackSize,
+              apiRequestPackPriceMinor: p.apiRequestPackPriceMinor,
             });
           }
           return { taxBp, trialDays: settings.trialDays, plans: list };

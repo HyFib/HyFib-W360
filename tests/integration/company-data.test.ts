@@ -486,6 +486,12 @@ async function addPlanSubscription(c: Company) {
   });
   if (!sub.ok) throw new Error('subscription');
   rzp.authorizeSubscription(sub.data.id);
+  // A subscription pays for the plan the company is on (0088's guard), so the company is put on it.
+  await fx.query(
+    `UPDATE app.tenant_plans SET plan_id = $1, status = 'trialing',
+       trial_ends_at = now() + interval '14 days' WHERE tenant_id = $2`,
+    [planId, c.tenant.id],
+  );
   await fx.query(
     `INSERT INTO app.plan_subscriptions (id, tenant_id, plan_id, status, interval_months, extra_seats,
        extra_numbers, run_packs, subtotal_minor, tax_bp, tax_minor, amount_minor, total_count,

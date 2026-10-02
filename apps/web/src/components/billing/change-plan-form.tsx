@@ -1,6 +1,6 @@
 'use client';
 import { useState } from 'react';
-import type { PlanAddOnKind, PlanAddOnOption } from '@w360/domain';
+import type { PlanAddOnKind, PlanAddOnOption, PlanPrices } from '@w360/domain';
 import { displayMoney } from '@w360/core/money';
 import {
   PLAN_ADD_ON_LABELS,
@@ -21,11 +21,13 @@ const counted = (n: number, one: string, many: string) =>
   `${n.toLocaleString('en-IN')} ${n === 1 ? one : many}`;
 
 /** The form field each add-on is sent as. */
-const FIELD: Record<PlanAddOnKind, 'extraSeats' | 'extraNumbers' | 'runPacks'> = {
-  seats: 'extraSeats',
-  numbers: 'extraNumbers',
-  runPacks: 'runPacks',
-};
+const FIELD: Record<PlanAddOnKind, 'extraSeats' | 'extraNumbers' | 'runPacks' | 'apiRequestPacks'> =
+  {
+    seats: 'extraSeats',
+    numbers: 'extraNumbers',
+    runPacks: 'runPacks',
+    apiRequestPacks: 'apiRequestPacks',
+  };
 
 /** A quantity as typed: digits only, empty for none; null for anything else. */
 function quantityOf(text: string): number | null {
@@ -47,6 +49,8 @@ function addOnHint(option: PlanAddOnOption, planName: string, interval: string):
       return `${price}. ${planName} includes ${counted(option.included, 'WhatsApp number', 'WhatsApp numbers')}, and your company uses ${(option.used ?? 0).toLocaleString('en-IN')}. ${most}`;
     case 'runPacks':
       return `${counted(option.unitSize, 'automation run', 'automation runs')} a month in each pack, ${price}, on top of the ${option.included.toLocaleString('en-IN')} ${planName} includes. ${most}`;
+    case 'apiRequestPacks':
+      return `${counted(option.unitSize, 'public API request', 'public API requests')} a month in each pack, ${price}, on top of the ${option.included.toLocaleString('en-IN')} ${planName} includes. ${most}`;
   }
 }
 
@@ -70,12 +74,7 @@ export function ChangePlanForm({
   slug: string;
   planId: string;
   planName: string;
-  prices: {
-    priceMinor: number;
-    seatPriceMinor: number | null;
-    numberPriceMinor: number | null;
-    runPackPriceMinor: number | null;
-  };
+  prices: PlanPrices;
   intervalMonths: number;
   taxBp: number;
   /** The add-ons the plan sells, with the quantities the form starts from. */
@@ -90,6 +89,7 @@ export function ChangePlanForm({
     seats: String(options.find((o) => o.kind === 'seats')?.quantity ?? 0),
     numbers: String(options.find((o) => o.kind === 'numbers')?.quantity ?? 0),
     runPacks: String(options.find((o) => o.kind === 'runPacks')?.quantity ?? 0),
+    apiRequestPacks: String(options.find((o) => o.kind === 'apiRequestPacks')?.quantity ?? 0),
   }));
   const [error, setError] = useState<ActionFailureState | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -99,10 +99,11 @@ export function ChangePlanForm({
   const extraSeats = quantityOf(values.seats);
   const extraNumbers = quantityOf(values.numbers);
   const runPacks = quantityOf(values.runPacks);
+  const apiRequestPacks = quantityOf(values.apiRequestPacks);
   const quote =
-    extraSeats === null || extraNumbers === null || runPacks === null
+    extraSeats === null || extraNumbers === null || runPacks === null || apiRequestPacks === null
       ? null
-      : planPaymentQuote(prices, { extraSeats, extraNumbers, runPacks }, taxBp);
+      : planPaymentQuote(prices, { extraSeats, extraNumbers, runPacks, apiRequestPacks }, taxBp);
   const total = quote?.ok ? inr(quote.quote.totalMinor) : null;
 
   async function change() {
@@ -116,6 +117,7 @@ export function ChangePlanForm({
         extraSeats: values.seats,
         extraNumbers: values.numbers,
         runPacks: values.runPacks,
+        apiRequestPacks: values.apiRequestPacks,
       });
       if (!started.ok) {
         setError(started);

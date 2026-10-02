@@ -30,7 +30,6 @@ import { recordAudit, recordSystemAudit, type RequestMeta } from '../audit';
 import { assertCan, type TenantContext } from '../authz/context';
 import { assertRecentSignIn } from '../authz/step-up';
 import {
-  PLAN_ADD_ON_LABELS,
   PLAN_PAYMENT_START_LEAD_MS,
   planPaymentQuote,
   planPaymentStart,
@@ -39,6 +38,7 @@ import {
   versionHoldingLimits,
   PLAN_PAYMENT_UNAVAILABLE_TEXT,
   type PlanAddOnKind,
+  type PlanAddOnQuantities,
   type PlanPaymentQuote,
   type PlanPaymentUnavailable,
 } from '../plans/model';
@@ -100,6 +100,7 @@ export interface PlanSubscriptionSummary {
   extraSeats: number;
   extraNumbers: number;
   runPacks: number;
+  apiRequestPacks: number;
   intervalMonths: number;
   subtotalMinor: number;
   taxBp: number;
@@ -182,6 +183,7 @@ export interface PlanPaymentReceipt {
   extraSeats: number;
   extraNumbers: number;
   runPacks: number;
+  apiRequestPacks: number;
   periodStart: Date;
   periodEnd: Date;
   paidAt: Date;
@@ -239,6 +241,7 @@ function summary(row: SubscriptionRow, now: Date): PlanSubscriptionSummary {
     extraSeats: row.extraSeats,
     extraNumbers: row.extraNumbers,
     runPacks: row.runPacks,
+    apiRequestPacks: row.apiRequestPacks,
     intervalMonths: row.intervalMonths,
     subtotalMinor: row.subtotalMinor,
     taxBp: row.taxBp,
@@ -289,6 +292,7 @@ async function offerIn(
           seatPriceMinor: plans.seatPriceMinor,
           numberPriceMinor: plans.numberPriceMinor,
           runPackPriceMinor: plans.runPackPriceMinor,
+          apiRequestPackPriceMinor: plans.apiRequestPackPriceMinor,
         })
         .from(plans)
         .where(eq(plans.id, state.planId))
@@ -351,8 +355,16 @@ async function planNameOf(tx: Tx, planId: string): Promise<string> {
   return plan?.name ?? 'your';
 }
 
+/** Each add-on in a sentence, after a quantity or "does not sell". */
+const ADD_ON_NOUNS: Record<PlanAddOnKind, string> = {
+  seats: 'extra seats',
+  numbers: 'extra WhatsApp numbers',
+  runPacks: 'automation run packs',
+  apiRequestPacks: 'API request packs',
+};
+
 /** The add-ons of a subscription in words, after its plan's name ('' for none). */
-function addOnsText(row: { extraSeats: number; extraNumbers: number; runPacks: number }): string {
+function addOnsText(row: PlanAddOnQuantities): string {
   const parts = [
     row.extraSeats > 0 ? `${row.extraSeats} extra ${row.extraSeats === 1 ? 'seat' : 'seats'}` : '',
     row.extraNumbers > 0
@@ -360,6 +372,9 @@ function addOnsText(row: { extraSeats: number; extraNumbers: number; runPacks: n
       : '',
     row.runPacks > 0
       ? `${row.runPacks} automation run ${row.runPacks === 1 ? 'pack' : 'packs'}`
+      : '',
+    row.apiRequestPacks > 0
+      ? `${row.apiRequestPacks} API request ${row.apiRequestPacks === 1 ? 'pack' : 'packs'}`
       : '',
   ].filter(Boolean);
   if (parts.length === 0) return '';
@@ -1298,6 +1313,7 @@ export function createPlanSubscriptionService(deps: PlanSubscriptionServiceDeps)
               extraSeats: planSubscriptions.extraSeats,
               extraNumbers: planSubscriptions.extraNumbers,
               runPacks: planSubscriptions.runPacks,
+              apiRequestPacks: planSubscriptions.apiRequestPacks,
               planName: plans.name,
               planCode: plans.code,
               planVersion: plans.version,
@@ -1342,6 +1358,7 @@ export function createPlanSubscriptionService(deps: PlanSubscriptionServiceDeps)
             extraSeats: found.extraSeats,
             extraNumbers: found.extraNumbers,
             runPacks: found.runPacks,
+            apiRequestPacks: found.apiRequestPacks,
             periodStart: found.periodStart,
             periodEnd: found.periodEnd,
             paidAt: found.paidAt,
@@ -1427,6 +1444,7 @@ export function createPlanSubscriptionService(deps: PlanSubscriptionServiceDeps)
               extraSeats: state.extraSeats,
               extraNumbers: state.extraNumbers,
               runPacks: state.runPacks,
+              apiRequestPacks: state.apiRequestPacks,
               subtotalMinor: offer.quote.subtotalMinor,
               taxBp: offer.quote.taxBp,
               taxMinor: offer.quote.taxMinor,
@@ -1618,10 +1636,11 @@ export function createPlanSubscriptionService(deps: PlanSubscriptionServiceDeps)
             seats: wanted.extraSeats,
             numbers: wanted.extraNumbers,
             runPacks: wanted.runPacks,
+            apiRequestPacks: wanted.apiRequestPacks,
           };
-          for (const kind of ['seats', 'numbers', 'runPacks'] as const) {
+          for (const kind of ['seats', 'numbers', 'runPacks', 'apiRequestPacks'] as const) {
             const option = sold.find((o) => o.kind === kind);
-            const noun = PLAN_ADD_ON_LABELS[kind].toLowerCase().replace('whatsapp', 'WhatsApp');
+            const noun = ADD_ON_NOUNS[kind];
             if (want[kind] > 0 && !option) {
               throw refuse(`The ${version.name} plan does not sell ${noun}.`);
             }
@@ -1652,7 +1671,8 @@ export function createPlanSubscriptionService(deps: PlanSubscriptionServiceDeps)
             version.id === state.planId &&
             wanted.extraSeats === state.extraSeats &&
             wanted.extraNumbers === state.extraNumbers &&
-            wanted.runPacks === state.runPacks
+            wanted.runPacks === state.runPacks &&
+            wanted.apiRequestPacks === state.apiRequestPacks
           ) {
             throw refuse('That is the plan you pay for now.');
           }
@@ -1691,6 +1711,7 @@ export function createPlanSubscriptionService(deps: PlanSubscriptionServiceDeps)
               earlier.extraSeats === wanted.extraSeats &&
               earlier.extraNumbers === wanted.extraNumbers &&
               earlier.runPacks === wanted.runPacks &&
+              earlier.apiRequestPacks === wanted.apiRequestPacks &&
               earlier.amountMinor === quote.quote.totalMinor;
             return same
               ? { kind: 'reopen' as const, row: earlier, planName: version.name }
@@ -1709,6 +1730,7 @@ export function createPlanSubscriptionService(deps: PlanSubscriptionServiceDeps)
               extraSeats: wanted.extraSeats,
               extraNumbers: wanted.extraNumbers,
               runPacks: wanted.runPacks,
+              apiRequestPacks: wanted.apiRequestPacks,
               subtotalMinor: quote.quote.subtotalMinor,
               taxBp: quote.quote.taxBp,
               taxMinor: quote.quote.taxMinor,
@@ -1734,6 +1756,7 @@ export function createPlanSubscriptionService(deps: PlanSubscriptionServiceDeps)
                 extraSeats: wanted.extraSeats,
                 extraNumbers: wanted.extraNumbers,
                 runPacks: wanted.runPacks,
+                apiRequestPacks: wanted.apiRequestPacks,
                 amountMinor: quote.quote.totalMinor,
                 taxBp: quote.quote.taxBp,
                 intervalMonths: version.intervalMonths,

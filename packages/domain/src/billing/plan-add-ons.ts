@@ -20,20 +20,22 @@ import { assertRecentSignIn } from '../authz/step-up';
 import { lockAllLimits, numbersInUse, seatsInUse } from '../plans/entitlements';
 import {
   PLAN_BOUNDS,
+  packsMax,
   planPaymentQuote,
   planShortfallText,
   type PlanAddOnKind,
   type PlanPaymentQuote,
   type PlanPaymentQuoteResult,
+  type PlanPrices,
 } from '../plans/model';
 import { parseInput } from '../validation';
 import { planChangeUnavailable, type PlanChoiceUnavailable } from './plan-choices';
 
 /**
- * A company choosing its own add-ons (ADR-106): the extra seats, extra WhatsApp numbers and
- * automation run packs of the plan version it is on, under the conditions of choosing a plan
- * (ADR-105), which `app.choose_add_ons` checks again in SQL. The company then pays for them with
- * the plan as before (ADR-063).
+ * A company choosing its own add-ons (ADR-106): the extra seats, extra WhatsApp numbers, automation
+ * run packs and API request packs (ADR-110) of the plan version it is on, under the conditions of
+ * choosing a plan (ADR-105), which `app.choose_add_ons` checks again in SQL. The company then pays
+ * for them with the plan as before (ADR-063).
  */
 
 /** Why the company cannot choose its add-ons now. */
@@ -70,11 +72,13 @@ export interface PlanAddOnOption {
   max: number;
   /** The price of one each interval, in paise. */
   unitPriceMinor: number;
-  /** Automation runs a month in one pack; 1 for seats and numbers. */
+  /** Automation runs or API requests a month in one pack; 1 for seats and numbers. */
   unitSize: number;
-  /** What the version includes: seats, WhatsApp numbers, or automation runs a month. */
+  /**
+   * What the version includes: seats, WhatsApp numbers, or automation runs or API requests a month.
+   */
   included: number;
-  /** In use now: seats (members and waiting invitations) or WhatsApp numbers; null for run packs. */
+  /** In use now: seats (members and waiting invitations) or WhatsApp numbers; null for packs. */
   used: number | null;
 }
 
@@ -84,15 +88,7 @@ export interface PlanAddOns {
   status: TenantPlanStatus;
   trialEndsAt: Date | null;
   /** The version the company is on, with the prices a quote needs; null: complimentary access. */
-  plan: {
-    id: string;
-    name: string;
-    intervalMonths: number;
-    priceMinor: number;
-    seatPriceMinor: number | null;
-    numberPriceMinor: number | null;
-    runPackPriceMinor: number | null;
-  } | null;
+  plan: ({ id: string; name: string; intervalMonths: number } & PlanPrices) | null;
   /** The add-ons the version sells, in display order. */
   options: PlanAddOnOption[];
   /** The tax on plan prices, in basis points; null: not set. */
@@ -124,6 +120,10 @@ const chooseSchema = z.object({
   extraSeats: count(PLAN_BOUNDS.addOnUnits, 'Extra seats are a whole number up to 10,000.'),
   extraNumbers: count(PLAN_BOUNDS.numbers, 'Extra WhatsApp numbers are a whole number up to 100.'),
   runPacks: count(PLAN_BOUNDS.addOnUnits, 'Run packs are a whole number up to 10,000.'),
+  apiRequestPacks: count(
+    PLAN_BOUNDS.addOnUnits,
+    'API request packs are a whole number up to 10,000.',
+  ),
 });
 
 export function createPlanAddOnsService(deps: PlanAddOnsServiceDeps) {
@@ -216,10 +216,26 @@ export function createPlanAddOnsService(deps: PlanAddOnsServiceDeps) {
                 kind: 'runPacks',
                 quantity: state.runPacks,
                 min: 0,
-                max: PLAN_BOUNDS.addOnUnits,
+                max: packsMax(version.automationRunsMonthly, version.runPackSize),
                 unitPriceMinor: version.runPackPriceMinor,
                 unitSize: version.runPackSize,
                 included: version.automationRunsMonthly,
+                used: null,
+              });
+            }
+            if (
+              version.apiRequestPackSize !== null &&
+              version.apiRequestPackPriceMinor !== null &&
+              version.apiRequestsMonthly !== null
+            ) {
+              options.push({
+                kind: 'apiRequestPacks',
+                quantity: state.apiRequestPacks,
+                min: 0,
+                max: packsMax(version.apiRequestsMonthly, version.apiRequestPackSize),
+                unitPriceMinor: version.apiRequestPackPriceMinor,
+                unitSize: version.apiRequestPackSize,
+                included: version.apiRequestsMonthly,
                 used: null,
               });
             }
@@ -238,6 +254,7 @@ export function createPlanAddOnsService(deps: PlanAddOnsServiceDeps) {
                   seatPriceMinor: version.seatPriceMinor,
                   numberPriceMinor: version.numberPriceMinor,
                   runPackPriceMinor: version.runPackPriceMinor,
+                  apiRequestPackPriceMinor: version.apiRequestPackPriceMinor,
                 }
               : null,
             options,
@@ -273,8 +290,9 @@ export function createPlanAddOnsService(deps: PlanAddOnsServiceDeps) {
           previous_extra_seats: number;
           previous_extra_numbers: number;
           previous_run_packs: number;
+          previous_api_request_packs: number;
         }>(
-          sql`select * from app.choose_add_ons(${wanted.extraSeats}::integer, ${wanted.extraNumbers}::integer, ${wanted.runPacks}::integer)`,
+          sql`select * from app.choose_add_ons(${wanted.extraSeats}::integer, ${wanted.extraNumbers}::integer, ${wanted.runPacks}::integer, ${wanted.apiRequestPacks}::integer)`,
         );
         const outcome = chosen.rows[0];
         if (!outcome) throw new Error('app.choose_add_ons returned nothing');
@@ -335,10 +353,12 @@ export function createPlanAddOnsService(deps: PlanAddOnsServiceDeps) {
                 extraSeats: outcome.previous_extra_seats,
                 extraNumbers: outcome.previous_extra_numbers,
                 runPacks: outcome.previous_run_packs,
+                apiRequestPacks: outcome.previous_api_request_packs,
               },
               extraSeats: state.extraSeats,
               extraNumbers: state.extraNumbers,
               runPacks: state.runPacks,
+              apiRequestPacks: state.apiRequestPacks,
             },
           },
           meta,

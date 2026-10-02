@@ -218,7 +218,7 @@ export async function choosePlanAction(
 /** Sets the add-ons of the company's plan version, to pay for them with it (ADR-106). */
 export async function chooseAddOnsAction(
   slug: string,
-  input: { extraSeats: string; extraNumbers: string; runPacks: string },
+  input: { extraSeats: string; extraNumbers: string; runPacks: string; apiRequestPacks: string },
 ): Promise<ActionResult<{ changed: boolean; totalMinor: number | null }>> {
   return runAction(async () => {
     const ctx = await tenantForAction(slug);
@@ -229,6 +229,7 @@ export async function chooseAddOnsAction(
         extraSeats: String(input.extraSeats ?? ''),
         extraNumbers: String(input.extraNumbers ?? ''),
         runPacks: String(input.runPacks ?? ''),
+        apiRequestPacks: String(input.apiRequestPacks ?? ''),
       },
       await requestMeta(),
     );
@@ -254,7 +255,13 @@ export async function startPlanSubscriptionAction(
  */
 export async function schedulePlanChangeAction(
   slug: string,
-  input: { planId: string; extraSeats: string; extraNumbers: string; runPacks: string },
+  input: {
+    planId: string;
+    extraSeats: string;
+    extraNumbers: string;
+    runPacks: string;
+    apiRequestPacks: string;
+  },
 ): Promise<ActionResult<SubscriptionCheckoutStart>> {
   return runAction(async () => {
     const ctx = await tenantForAction(slug);
@@ -266,6 +273,7 @@ export async function schedulePlanChangeAction(
         extraSeats: String(input.extraSeats ?? ''),
         extraNumbers: String(input.extraNumbers ?? ''),
         runPacks: String(input.runPacks ?? ''),
+        apiRequestPacks: String(input.apiRequestPacks ?? ''),
       },
       await requestMeta(),
     );

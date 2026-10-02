@@ -1,5 +1,127 @@
 # Progress
 
+## 2026-10-02 — Phase 5: packs of extra API requests (P5-01, P5-08, ADR-110)
+
+Status: **Implemented and locally verified against the Razorpay stand-in (test data only).** A plan
+limits a company's public API requests per monthly usage period (ADR-061); at the limit every
+request is refused with 429 `quota_exceeded` until the next period, and the company's only way out
+was another plan. Automation runs had packs that raise their limit (ADR-051); API requests had none
+(BACKLOG P5-08, ARCHITECTURE "Not built yet").
+
+### Completed
+
+- **Design (ADR-110):** a version with a monthly API request limit above 0 sells packs of extra
+  requests a month as it sells run packs: a pack size (1 to 100,000,000) and a price per billing
+  interval, both or neither. The company's limit is the version's requests plus packs × size,
+  wherever the limit is read. No limit with packs may pass 2,000,000,000, for run packs as for API
+  request packs: the database returns limits as 32-bit integers.
+- **Migration 0088:** `ops.plans.api_request_pack_size` and `api_request_pack_price_minor` (range
+  checks, a pair check, and a check that packs come only with a limit above 0, a NULL limit
+  included); the plan guard keeps them on published versions; `app.tenant_plans.api_request_packs`
+  (0 to 10,000, none without a plan) and `app.plan_subscriptions.api_request_packs`; the plan
+  state's guard refuses packs a version does not sell and any limit with packs past the bound, in
+  64-bit sums; the follow guard (ADR-109) checks a following subscription's packs and prices them; a
+  new start guard refuses a subscription that follows none unless its version and add-ons are the
+  plan state's; `app.apply_plan_subscription_period` applies, compares and audits the packs; a
+  four-quantity `app.choose_add_ons` (the three-quantity one stays for the previous release's web
+  servers); `app.tenant_entitlements` adds the packs; the sweep's three lookups add every limit in
+  64 bits.
+- **Domain:** the plan form's fields and rules; staff set packs with the plan (with how many a
+  version sells, `packsMax`); Billing → Add-ons and Change plan offer them with their bounds; the
+  quote, the subscription, the payment card, receipts, the staff plan email (ADR-100), the price
+  list (ADR-107) and the company export carry them; a change of plan keeps the company's requests
+  a month in packs of the new version.
+- **Web:** the platform plan form and page; the company's platform page; the Billing plan card (the
+  packs, and the limit with them); Billing → Add-ons and Change plan; the payment card; receipts.
+- **Tests:**
+  - Unit: how many packs a version sells (10,000, fewer near the bound); the quote with packs; a
+    change of plan keeping the requests a month (and none from a version without the API); the
+    staff email and the price list with packs.
+  - Integration (`api-request-packs.test.ts`, 5, against the Razorpay stand-in): what a version
+    sells, refused by the form and by the table whatever writes it, a NULL limit included, copied to
+    a new version and kept once published; the limit with the packs staff set for every request
+    (seven of nine concurrent requests admitted at 3 + 2 × 2), the plan card and the platform page,
+    the plan overview, fewer packs at once, complimentary access clearing them, the audit; what a
+    version sells and the bound, run packs included, in the service and in the plan state's guard
+    (10,000 packs of either kind refused in the guard's own words, so its sums never pass the
+    integer range); the packs in the 80% warning and the used-up notice, a plan state past the bound
+    (written past the guard) failing its own entitlements while the lookups go on for every company,
+    and the sweep notifying once; the company choosing packs under Add-ons with their price, the
+    quote and the audit, the three-quantity function leaving them, the four-quantity one refusing
+    unsold packs, paying with them, and the start guard refusing a subscription without the packs
+    the company has or for another version. In `plan-changes.test.ts`, a change carrying packs to
+    the new subscription, priced with its add-ons, named in the email once authorised and put on the
+    plan by its first paid cycle, the follow guard's checks of packs (10,000 of either kind
+    included) and the subscription table's own bound; in `plan-subscriptions.test.ts`, a paid cycle
+    for other packs than the plan's never applied.
+  - e2e (`api-request-packs.spec.ts`, chromium and mobile-chromium): the plan form refusing packs
+    without a limit, then publishing a version with packs; staff setting one; Billing showing the
+    pack and the limit with it; Add-ons with the pack's terms and the total as the quantity changes;
+    the limit rising at once and the payment offer charging the packs.
+- **Docs:** ADR-110; SECURITY; THREAT-MODEL T123; RUNBOOKS (API request packs, migration 0088 with a
+  check to run first); ARCHITECTURE; DATA-RETENTION; RELEASE-CHECKLIST; BACKLOG P5-01, P5-07, P5-08;
+  FEATURE-MATRIX H-049 (and W-001, W-014, H-039, H-040, W-136).
+- **Found while building:**
+  - A limit with run packs was computed in 32 bits: 10,000 packs of up to 10,000,000 runs on top of
+    up to 100,000,000 pass that range. Such a company got "integer out of range" from every
+    entitlement check, and the minute sweep's lookups, which compute every company's limit in one
+    query, failed for every company. Limits with packs are now bounded and summed in 64 bits.
+  - W-014 in the feature matrix still said buying run packs in HyFib was not built, although
+    companies choose them under Billing → Add-ons and pay for them with their plan since ADR-106;
+    corrected.
+  - The mutation baseline caught a test of this slice leaving a company with packs its version does
+    not sell: every later update of that plan state is refused (the guard checks the whole row), so
+    the notice sweep of a later test file failed for that company. The test takes them away again.
+- **Mutation checks:** 72 regressions tried one at a time, 71 caught (4 through the e2e test).
+  - 36 in migration 0088, all caught: the version's checks (the pair, packs with a limit, a NULL
+    limit, the size bound) and the plan guard; the plan state's guard (packs not sold, both
+    bounds, the bound off by one, the sums in 32 bits) and its check of packs without a plan;
+    the subscription's check; the follow guard (packs unchecked, unpriced, the bound loosened, the
+    sums in 32 bits); the start guard (off, without the packs, without the version); the paid cycle
+    (a cycle for other packs than the plan's, applying them, the audit); the four-quantity function (not setting
+    the packs, a change of packs alone, the packs before); the entitlements; each sweep lookup
+    without the packs or in 32 bits; the platform role's two column grants.
+  - 32 in the services, 31 caught: the form's rules and values; a new version's packs; staff packs
+    (set at all, how many of either kind, not sold, a change of packs alone); Add-ons (how many of
+    either kind, passing the packs, the pack price for the page's total, the audit); the
+    subscription (recording the packs, their price, the email's words, the change's check of what
+    is sold); Change plan (how many, keeping the capacity, rounding, the starting quantity); how many
+    a version sells (rounding, 10,000); the quote; unsold packs kept by another version; the staff
+    email; the price list; the export of both tables; the plan overview.
+  - 4 in the pages, all caught through the e2e test: the plan card's packs, the payment offer's
+    packs, the packs the Add-ons form sends, the plan form's pack size. Two were first written as
+    constant conditions, which TypeScript's narrowing refused in the build, so they were written
+    again as conditions that are false only when run.
+  - The first run left 6 alive. The tests now catch 5: run packs that pass the 32-bit range (the
+    guard's sums made in 32 bits went unnoticed below it), the subscription table's own bound, the
+    pack price the Add-ons page totals with, the packs in the email once a change is authorised, and
+    the plan overview's packs. The sixth removed a condition that turned out redundant (a version
+    without the API sells no packs, so a change from it keeps no requests either way); the condition
+    is gone. Three regressions were added for the other 32-bit sums (the plan state's API bound, the
+    follow guard's two bounds), all caught.
+
+### Test commands and results (local, 2026-10-02)
+
+| Command                                                                                                                                                                                                                                                           | Result                                                              |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                                                                                                              | clean                                                               |
+| `pnpm test`                                                                                                                                                                                                                                                       | 484 passed                                                          |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                                                                                                                                               | 688 passed on each                                                  |
+| `pnpm build`, then `api-request-packs.spec.ts`, `plan-add-ons.spec.ts`, `plan-change.spec.ts`, `plan-choice.spec.ts`, `plan-subscription.spec.ts`, `plans.spec.ts` and `price-list.spec.ts` on chromium and mobile-chromium, on a fresh database migrated to 0088 | 12 passed, 2 failed (`api-request-packs.spec.ts`, its own selector) |
+| `api-request-packs.spec.ts` again on both, after fixing its selector (no app change)                                                                                                                                                                              | 2 passed                                                            |
+| After the tests and the code change the mutation checks led to: rebuilt, then `api-request-packs.spec.ts`, `plan-add-ons.spec.ts` and `plan-change.spec.ts` on both                                                                                               | 6 passed                                                            |
+| Mutation checks                                                                                                                                                                                                                                                   | 72 regressions, 71 caught (listed above)                            |
+| gitleaks 8.30.1 on the commit                                                                                                                                                                                                                                     | no leaks                                                            |
+
+### Known gaps
+
+- Packs bought once instead of every billing interval, packs per API key (a key's own limit stays
+  its own, ADR-097), packs that take effect at once for a paying company (they come with the next
+  paid period, ADR-109) and AI credits (Phase 6) are not built.
+- Paying for packs is checked against the Razorpay stand-in only; the test-mode checks are on the
+  release checklist.
+- Firefox and WebKit are not installed locally; CI runs them.
+
 ## 2026-10-02 — Phase 5: paying companies change their plan or add-ons from the next period (P5-01, P5-07, ADR-109)
 
 Status: **Implemented and locally verified against the Razorpay stand-in (test data only).** Since

@@ -6,6 +6,7 @@ import {
   PLAN_BOUNDS,
   PLAN_MODULE_KEYS,
   moduleOfPermission,
+  packsMax,
   planGivesAccess,
   planPaymentQuote,
   planPaymentStart,
@@ -99,22 +100,52 @@ describe('plan modules', () => {
 });
 
 describe('addOnsForPlan', () => {
-  const kept = { extraSeats: '4', extraNumbers: '2', runPacks: '3' };
+  const kept = { extraSeats: '4', extraNumbers: '2', runPacks: '3', apiRequestPacks: '5' };
   it('keeps only the add-ons the chosen plan sells', () => {
-    const plan = { sellsSeats: true, sellsNumbers: false, sellsRunPacks: true };
+    const plan = {
+      sellsSeats: true,
+      sellsNumbers: false,
+      sellsRunPacks: true,
+      sellsApiRequestPacks: false,
+    };
     expect(addOnsForPlan(plan, kept)).toEqual({
       extraSeats: '4',
       extraNumbers: '0',
       runPacks: '3',
+      apiRequestPacks: '0',
     });
     expect(
-      addOnsForPlan({ sellsSeats: false, sellsNumbers: false, sellsRunPacks: false }, kept),
-    ).toEqual({ extraSeats: '0', extraNumbers: '0', runPacks: '0' });
+      addOnsForPlan(
+        {
+          sellsSeats: false,
+          sellsNumbers: false,
+          sellsRunPacks: false,
+          sellsApiRequestPacks: true,
+        },
+        kept,
+      ),
+    ).toEqual({ extraSeats: '0', extraNumbers: '0', runPacks: '0', apiRequestPacks: '5' });
     expect(addOnsForPlan(undefined, kept)).toEqual({
       extraSeats: '0',
       extraNumbers: '0',
       runPacks: '0',
+      apiRequestPacks: '0',
     });
+  });
+});
+
+describe('packsMax (ADR-110)', () => {
+  it('sells up to 10,000 packs, fewer where the limit with them would pass 2,000,000,000', () => {
+    expect(PLAN_BOUNDS.limitWithPacks).toBe(2_000_000_000);
+    expect(packsMax(1000, 500)).toBe(10_000);
+    // 100,000,000 runs and packs of 10,000,000: 190 packs reach 2,000,000,000 exactly.
+    expect(packsMax(100_000_000, 10_000_000)).toBe(190);
+    expect(100_000_000 + 190 * 10_000_000).toBe(PLAN_BOUNDS.limitWithPacks);
+    // 1,000,000,000 requests and packs of 100,000,000: 10 packs.
+    expect(packsMax(1_000_000_000, 100_000_000)).toBe(10);
+    // One request short of the bound already: none, never a negative count.
+    expect(packsMax(1_999_999_999, 2)).toBe(0);
+    expect(packsMax(1_999_999_999, 1)).toBe(1);
   });
 });
 
@@ -139,25 +170,46 @@ describe('planPaymentQuote', () => {
     seatPriceMinor: 10_000,
     numberPriceMinor: 50_000,
     runPackPriceMinor: 25_000,
+    apiRequestPackPriceMinor: 40_000,
   };
-  const none = { extraSeats: 0, extraNumbers: 0, runPacks: 0 };
+  const none = { extraSeats: 0, extraNumbers: 0, runPacks: 0, apiRequestPacks: 0 };
 
   it('adds the add-ons at the version’s prices and the tax, rounded half up to the paisa', () => {
-    expect(planPaymentQuote(prices, { extraSeats: 2, extraNumbers: 1, runPacks: 3 }, 1800)).toEqual(
-      {
-        ok: true,
-        quote: {
-          planMinor: 99_900,
-          seatsMinor: 20_000,
-          numbersMinor: 50_000,
-          runPacksMinor: 75_000,
-          subtotalMinor: 244_900,
-          taxBp: 1800,
-          taxMinor: 44_082,
-          totalMinor: 288_982,
-        },
+    expect(
+      planPaymentQuote(
+        prices,
+        { extraSeats: 2, extraNumbers: 1, runPacks: 3, apiRequestPacks: 0 },
+        1800,
+      ),
+    ).toEqual({
+      ok: true,
+      quote: {
+        planMinor: 99_900,
+        seatsMinor: 20_000,
+        numbersMinor: 50_000,
+        runPacksMinor: 75_000,
+        apiRequestPacksMinor: 0,
+        subtotalMinor: 244_900,
+        taxBp: 1800,
+        taxMinor: 44_082,
+        totalMinor: 288_982,
       },
-    );
+    });
+    // API request packs (ADR-110): 2 × ₹400 on top, taxed with the rest.
+    expect(planPaymentQuote(prices, { ...none, apiRequestPacks: 2 }, 1800)).toEqual({
+      ok: true,
+      quote: {
+        planMinor: 99_900,
+        seatsMinor: 0,
+        numbersMinor: 0,
+        runPacksMinor: 0,
+        apiRequestPacksMinor: 80_000,
+        subtotalMinor: 179_900,
+        taxBp: 1800,
+        taxMinor: 32_382,
+        totalMinor: 212_282,
+      },
+    });
     // 12.5% of ₹999.00 is ₹124.875: half a paisa rounds up.
     expect(planPaymentQuote(prices, none, 1250)).toMatchObject({
       quote: { taxMinor: 12_488, totalMinor: 112_388 },
@@ -182,6 +234,7 @@ describe('planPaymentQuote', () => {
         seatPriceMinor: null,
         numberPriceMinor: null,
         runPackPriceMinor: null,
+        apiRequestPackPriceMinor: null,
       },
       none,
       1799,
@@ -193,7 +246,7 @@ describe('planPaymentQuote', () => {
     expect(
       planPaymentQuote(
         { ...prices, priceMinor: PLAN_BOUNDS.priceMinor, seatPriceMinor: PLAN_BOUNDS.priceMinor },
-        { extraSeats: 10_000, extraNumbers: 0, runPacks: 0 },
+        { extraSeats: 10_000, extraNumbers: 0, runPacks: 0, apiRequestPacks: 0 },
         5000,
       ),
     ).toEqual({ ok: false, reason: 'too_large' });
@@ -215,6 +268,13 @@ describe('planPaymentQuote', () => {
       reason: 'add_on_not_sold',
     });
     expect(planPaymentQuote(unsold, none, 1800)).toMatchObject({ ok: true });
+    expect(
+      planPaymentQuote(
+        { ...prices, apiRequestPackPriceMinor: null },
+        { ...none, apiRequestPacks: 1 },
+        1800,
+      ),
+    ).toEqual({ ok: false, reason: 'add_on_not_sold' });
     expect(planPaymentQuote({ ...prices, priceMinor: 0 }, none, 1800)).toEqual({
       ok: false,
       reason: 'too_small',

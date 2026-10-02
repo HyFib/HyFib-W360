@@ -98,7 +98,7 @@ test('a company on a trial chooses its add-ons, cannot keep fewer seats than it 
     await expect(page.getByText(`${team} plan`)).toBeVisible();
     await expect(
       page.getByText(
-        ': choose extra seats, WhatsApp numbers or automation run packs for your plan, and pay for them with it.',
+        ': choose extra seats, WhatsApp numbers, automation run packs or API request packs for your plan, and pay for them with it.',
       ),
     ).toBeVisible();
     await page.getByRole('link', { name: 'Add-ons', exact: true }).click();

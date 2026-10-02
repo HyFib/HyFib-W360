@@ -23,7 +23,7 @@ import {
   teamsInUse,
   waitingInvitationCount,
 } from './entitlements';
-import { PLAN_MODULE_KEYS, usagePeriod, type PlanLimits } from './model';
+import { PLAN_MODULE_KEYS, usagePeriod, type PlanAddOnQuantities, type PlanLimits } from './model';
 
 /** What the company uses against its plan's limits (null limit: no limit). */
 export interface PlanUsage {
@@ -63,8 +63,10 @@ export interface CompanyPlanOverview {
     numberPriceMinor: number | null;
     runPackSize: number | null;
     runPackPriceMinor: number | null;
+    apiRequestPackSize: number | null;
+    apiRequestPackPriceMinor: number | null;
   } | null;
-  addOns: { extraSeats: number; extraNumbers: number; runPacks: number };
+  addOns: PlanAddOnQuantities;
   modules: PlanModule[];
   usage: PlanUsage;
 }
@@ -139,6 +141,8 @@ export function createPlansService(deps: PlansServiceDeps) {
                   numberPriceMinor: plans.numberPriceMinor,
                   runPackSize: plans.runPackSize,
                   runPackPriceMinor: plans.runPackPriceMinor,
+                  apiRequestPackSize: plans.apiRequestPackSize,
+                  apiRequestPackPriceMinor: plans.apiRequestPackPriceMinor,
                   modules: plans.modules,
                 })
                 .from(plans)
@@ -170,6 +174,7 @@ export function createPlansService(deps: PlansServiceDeps) {
               extraSeats: state.extraSeats,
               extraNumbers: state.extraNumbers,
               runPacks: state.runPacks,
+              apiRequestPacks: state.apiRequestPacks,
             },
             modules: PLAN_MODULE_KEYS.filter((m) => modules.includes(m)),
             usage,

@@ -44,6 +44,8 @@ export interface PlanFormValues {
   runPackSize: string;
   runPackPrice: string;
   apiRequestsMonthly: string;
+  apiRequestPackSize: string;
+  apiRequestPackPrice: string;
   /** Every API scope, including later ones, or only `apiScopes` (ADR-092). */
   apiScopeChoice: 'all' | 'chosen';
   apiScopes: string[];
@@ -70,6 +72,8 @@ export const EMPTY_PLAN_FORM: PlanFormValues = {
   runPackSize: '',
   runPackPrice: '',
   apiRequestsMonthly: '',
+  apiRequestPackSize: '',
+  apiRequestPackPrice: '',
   apiScopeChoice: 'all',
   apiScopes: [],
   modules: [],
@@ -250,6 +254,11 @@ export function PlanForm({
             inputMode: 'numeric',
             description: '0 leaves the public API out of the plan.',
           })}
+          {text('apiRequestPackSize', 'API request pack (requests)', {
+            inputMode: 'numeric',
+            description: 'Needs a monthly API request limit above 0. Empty: not sold.',
+          })}
+          {text('apiRequestPackPrice', 'API request pack (₹)', { inputMode: 'decimal' })}
         </div>
       </fieldset>
       <fieldset className="grid gap-2">
@@ -690,6 +699,7 @@ export interface AssignablePlanOption {
   sellsSeats: boolean;
   sellsNumbers: boolean;
   sellsRunPacks: boolean;
+  sellsApiRequestPacks: boolean;
 }
 
 /** Calendar arithmetic on YYYY-MM-DD, independent of the browser's time zone. */
@@ -731,6 +741,7 @@ export function TenantPlanForm({
     extraSeats: number;
     extraNumbers: number;
     runPacks: number;
+    apiRequestPacks: number;
   };
   options: AssignablePlanOption[];
 }) {
@@ -755,6 +766,7 @@ export function TenantPlanForm({
     extraSeats: String(current.extraSeats),
     extraNumbers: String(current.extraNumbers),
     runPacks: String(current.runPacks),
+    apiRequestPacks: String(current.apiRequestPacks),
   });
   const [reason, setReason] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -879,7 +891,9 @@ export function TenantPlanForm({
           </Field>
         </div>
       ) : null}
-      {needsPlan && plan && (plan.sellsSeats || plan.sellsNumbers || plan.sellsRunPacks) ? (
+      {needsPlan &&
+      plan &&
+      (plan.sellsSeats || plan.sellsNumbers || plan.sellsRunPacks || plan.sellsApiRequestPacks) ? (
         <div className="grid gap-4 sm:grid-cols-3">
           {plan.sellsSeats ? (
             <Field id="tenant-plan-seats" label="Extra seats">
@@ -913,6 +927,18 @@ export function TenantPlanForm({
                   inputMode="numeric"
                   value={addOns.runPacks}
                   onChange={(e) => setAddOns({ ...addOns, runPacks: e.target.value })}
+                />
+              )}
+            </Field>
+          ) : null}
+          {plan.sellsApiRequestPacks ? (
+            <Field id="tenant-plan-api-packs" label="API request packs">
+              {(aria) => (
+                <Input
+                  {...aria}
+                  inputMode="numeric"
+                  value={addOns.apiRequestPacks}
+                  onChange={(e) => setAddOns({ ...addOns, apiRequestPacks: e.target.value })}
                 />
               )}
             </Field>

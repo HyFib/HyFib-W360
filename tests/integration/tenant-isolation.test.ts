@@ -131,8 +131,9 @@ describe('database roles', () => {
     // Plans (0023): the sweep functions for the worker (with the API request notice of 0035, the
     // warnings of 0036, the subscription functions of 0037, the rate change notices of 0038, the
     // notices of staff changes and cancellations of 0077 and 0078, the refunds of plan payments of
-    // 0080, and the company's own choice of a plan of 0082 and of add-ons of 0084), the usage counts
-    // for platform staff, the entitlements for both, and the plan-state triggers for nobody.
+    // 0080, and the company's own choice of a plan of 0082 and of add-ons of 0084, with API request
+    // packs since 0088), the usage counts for platform staff, the entitlements for both, and the
+    // plan-state triggers for nobody.
     for (const fn of [
       'ops.plan_transitions_due(integer)',
       'ops.usage_limits_reached(integer)',
@@ -151,6 +152,7 @@ describe('database roles', () => {
       'app.record_plan_payment_refund(text,text,bigint,uuid)',
       'app.choose_plan(uuid)',
       'app.choose_add_ons(integer,integer,integer)',
+      'app.choose_add_ons(integer,integer,integer,integer)',
     ]) {
       expect(await can('w360_app', fn), fn).toBe(true);
       expect(await can('w360_auth', fn), fn).toBe(false);
@@ -306,11 +308,13 @@ describe('database roles', () => {
         expect(await can(role, fn), `${role} ${fn}`).toBe(false);
       }
     }
-    // The plan-state triggers, and the guard of a subscription that follows another (0087).
+    // The plan-state triggers, and the guards of a subscription that follows another (0087) and of
+    // one that follows none (0088).
     for (const fn of [
       'app.sync_tenant_plan_access()',
       'app.init_tenant_plan()',
       'app.guard_plan_subscription_follow()',
+      'app.guard_plan_subscription_start()',
     ]) {
       for (const role of ['w360_app', 'w360_auth', 'w360_platform']) {
         expect(await can(role, fn), `${role} ${fn}`).toBe(false);

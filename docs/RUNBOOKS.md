@@ -1082,6 +1082,29 @@ tenant_id = …` shows them.
 - **"No add-ons to choose":** the version sells none of them (choose another plan), or the company
   has complimentary access.
 
+**API request packs (ADR-110).** A version with a monthly API request limit above 0 may sell packs
+of extra requests a month (the platform plan form's "API request pack (requests)" and "(₹)", both or
+neither). Staff set a company's packs with its plan on the company's platform page, and companies
+choose them under Billing → Add-ons and Billing → Change plan like the other add-ons. The company's
+limit is the version's plus packs × size, for every request, the 80% warning, the used-up email,
+the plan card, Settings → API keys and the platform page; fewer packs lower it at once, and the
+month's requests already counted stay counted. `SELECT api_requests FROM
+app.tenant_entitlements(…)` shows the limit with them, and `SELECT api_request_packs FROM
+app.tenant_plans WHERE tenant_id = …` the packs.
+
+- **"API request packs need a monthly API request limit above 0":** a version without a limit or
+  without the API (0) has nothing to add to. Set a limit, or leave the packs empty.
+- **"This plan sells at most N API request packs" (or automation run packs):** no limit with packs
+  may pass 2,000,000,000 (the database returns limits as 32-bit integers); the forms show how many a
+  version sells. A version with a smaller pack size, or a larger plan, sells more.
+- **"This plan does not sell API request packs":** the version (or the one chosen) sells none. Set
+  the packs to 0 first, or choose a version that sells them.
+- **"A subscription pays for the plan and add-ons the company has now. Reload the page and try
+  again.":** a subscription was about to be recorded for another version or add-ons than the
+  company's plan state, which happens only from a page or server older than the plan state (during a
+  deploy, a server of the previous release does not know the packs). Reloading and paying again
+  records the right one.
+
 **Changing the plan a subscription pays for (ADR-109).** Under Billing → Change plan, owners and
 billing managers with a sign-in within 15 minutes choose the version (an offered one, or their own
 while published) and add-ons they pay for from the end of the paid period. HyFib cancels the current
@@ -1607,6 +1630,24 @@ already stored: a short `ACCESS EXCLUSIVE` lock on the keys table), creates `app
 row security and its grants, and registers deletion step 855 with the definer's grants and
 policies. A failure usually means a lock wait on `app.api_keys` timed out (run the migrations again
 when requests are quieter) or the bootstrap roles are missing.
+
+**Migration 0088 failed.** It runs in one transaction, so a failure applies nothing. It adds
+`ops.plans.api_request_pack_size` and `api_request_pack_price_minor` (with checks),
+`app.tenant_plans.api_request_packs` and `app.plan_subscriptions.api_request_packs` (with defaults,
+so no table is rewritten; short locks), replaces the plan guard, the plan state's guard, the follow
+guard and `app.tenant_entitlements`, adds the start guard trigger and a four-quantity
+`app.choose_add_ons`, and recreates `app.apply_plan_subscription_period`,
+`ops.usage_limits_reached`, `ops.api_quota_reached` and `ops.usage_warnings_due` (dropped as
+`w360_definer`, recreated by the migration role, granted to `w360_app` and handed back). A failure
+usually means the bootstrap roles are missing (`w360_owner` must be a member of `w360_definer`).
+Images built before it keep working: the three-quantity `app.choose_add_ons` stays, and the start
+guard refuses an old image's subscription only for a company that has API request packs (which
+only a new image can have set), so its payments never fail to match the plan. Run it before the new
+images. Before running it, `SELECT tp.tenant_id FROM app.tenant_plans tp JOIN ops.plans p ON p.id =
+tp.plan_id WHERE tp.run_packs > 0 AND p.automation_runs_monthly::bigint + tp.run_packs::bigint *
+p.run_pack_size > 2000000000` should return no rows: such a company's entitlement checks already
+fail with "integer out of range", and after the migration every change of its plan state, the
+sweep's included, is refused until staff lower its run packs from the company's platform page.
 
 **Migration 0087 failed.** It runs in one transaction, so a failure applies nothing. It adds
 `app.plan_subscriptions.follows_subscription_id` (nullable, with a composite foreign key and a

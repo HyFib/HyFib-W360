@@ -259,10 +259,16 @@ async function stillWaiting(promise: Promise<unknown>, ms = 400): Promise<boolea
   return outcome === marker;
 }
 
-const quantities = (extraSeats: number, extraNumbers: number, runPacks: number) => ({
+const quantities = (
+  extraSeats: number,
+  extraNumbers: number,
+  runPacks: number,
+  apiRequestPacks = 0,
+) => ({
   extraSeats: String(extraSeats),
   extraNumbers: String(extraNumbers),
   runPacks: String(runPacks),
+  apiRequestPacks: String(apiRequestPacks),
 });
 
 beforeAll(async () => {
@@ -313,6 +319,7 @@ describe('choosing add-ons', () => {
       seatPriceMinor: 10_000,
       numberPriceMinor: 50_000,
       runPackPriceMinor: 25_000,
+      apiRequestPackPriceMinor: null,
     });
     // The owner and the billing member hold two of the three seats included.
     expect(view.options).toEqual([
@@ -382,10 +389,11 @@ describe('choosing add-ons', () => {
         metadata: {
           planId: c.planId,
           planStatus: 'trialing',
-          previous: { extraSeats: 1, extraNumbers: 0, runPacks: 0 },
+          previous: { extraSeats: 1, extraNumbers: 0, runPacks: 0, apiRequestPacks: 0 },
           extraSeats: 4,
           extraNumbers: 2,
           runPacks: 3,
+          apiRequestPacks: 0,
         },
       },
     ]);
@@ -456,20 +464,29 @@ describe('choosing add-ons', () => {
       'step_up_required',
     );
     for (const wrong of [
-      { extraSeats: '-1', extraNumbers: '0', runPacks: '0' },
-      { extraSeats: '1.5', extraNumbers: '0', runPacks: '0' },
-      { extraSeats: '1e3', extraNumbers: '0', runPacks: '0' },
-      { extraSeats: 'two', extraNumbers: '0', runPacks: '0' },
-      { extraSeats: '10001', extraNumbers: '0', runPacks: '0' },
-      { extraSeats: '0', extraNumbers: '101', runPacks: '0' },
-      { extraSeats: '0', extraNumbers: '0', runPacks: '10001' },
+      { extraSeats: '-1', extraNumbers: '0', runPacks: '0', apiRequestPacks: '0' },
+      { extraSeats: '1.5', extraNumbers: '0', runPacks: '0', apiRequestPacks: '0' },
+      { extraSeats: '1e3', extraNumbers: '0', runPacks: '0', apiRequestPacks: '0' },
+      { extraSeats: 'two', extraNumbers: '0', runPacks: '0', apiRequestPacks: '0' },
+      { extraSeats: '10001', extraNumbers: '0', runPacks: '0', apiRequestPacks: '0' },
+      { extraSeats: '0', extraNumbers: '101', runPacks: '0', apiRequestPacks: '0' },
+      { extraSeats: '0', extraNumbers: '0', runPacks: '10001', apiRequestPacks: '0' },
+      { extraSeats: '0', extraNumbers: '0', runPacks: '0', apiRequestPacks: '10001' },
+      { extraSeats: '0', extraNumbers: '0', runPacks: '0', apiRequestPacks: '-1' },
+      // Every quantity is sent: a missing one is refused rather than taken as none.
+      { extraSeats: '0', extraNumbers: '0', runPacks: '0' },
     ]) {
       await refused(addOns().choose(c.ctx, wrong), 'validation_failed');
     }
     expect((await stateOf(c.tenantId)).extra_seats).toBe(1);
     // An empty field means none.
     expect(
-      await addOns().choose(c.ctx, { extraSeats: '2', extraNumbers: '', runPacks: ' ' }),
+      await addOns().choose(c.ctx, {
+        extraSeats: '2',
+        extraNumbers: '',
+        runPacks: ' ',
+        apiRequestPacks: '',
+      }),
     ).toMatchObject({ changed: true });
     expect(await stateOf(c.tenantId)).toMatchObject({
       extra_seats: 2,

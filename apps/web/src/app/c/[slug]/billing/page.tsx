@@ -201,8 +201,8 @@ export default async function BillingPage({ params }: { params: Promise<{ slug: 
             >
               Add-ons
             </Link>
-            : choose extra seats, WhatsApp numbers or automation run packs for your plan, and pay
-            for them with it.
+            : choose extra seats, WhatsApp numbers, automation run packs or API request packs for
+            your plan, and pay for them with it.
           </p>
         ) : null}
         {changes.unavailable === null && changes.periodEnd ? (

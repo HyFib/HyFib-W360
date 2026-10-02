@@ -1071,8 +1071,9 @@ true`); the same key with another request (method, path and body hashed) answers
   memory); rotation with an overlap; revocation.
 - **Not built yet:** media and call-to-action messages, taking reactions back, assigning many
   conversations or starting many runs in one call, bulk sends, media downloads, statuses changed
-  since a time, networks for the whole company, limits and availability per endpoint, OAuth apps
-  and packs of extra API requests (BACKLOG P5-08). Outgoing webhooks are section 6O.
+  since a time, networks for the whole company, limits and availability per endpoint and OAuth
+  apps (BACKLOG P5-08). Packs of extra API requests are plan add-ons (ADR-110, section 7). Outgoing
+  webhooks are section 6O.
 
 ## 6O. Outgoing webhooks **[built — verified with local test receivers only; no customer endpoints yet]**
 
@@ -1501,6 +1502,19 @@ WHERE used < limit`), per monthly period from `usage_anchor`; the sweep announce
   one, with ADR-101's notice sent once. Billing shows the next subscription and its status,
   `/c/<slug>/billing/change` lists the versions and `/c/<slug>/billing/change/<planId>` holds the
   form (`ChangePlanForm`: live total, a confirmation that names what cannot be undone, Checkout).
+- **API request packs (0088, ADR-110) [built]:** a version with a monthly API request limit above 0
+  may sell packs (`api_request_pack_size`, `api_request_pack_price_minor`, both or neither, checked
+  by constraints and kept by the plan guard once published). `tenant_plans.api_request_packs` and
+  `plan_subscriptions.api_request_packs` (0 to 10,000) carry them like run packs: staff set them with
+  the plan (`setTenantPlan`), companies through `app.choose_add_ons(seats, numbers, run packs, API
+packs)` and Change plan, subscriptions record and price them (`planPaymentQuote`'s
+  `apiRequestPacksMinor`), and `app.apply_plan_subscription_period` applies them. The company's
+  limit is the version's plus packs × size in `app.tenant_entitlements`, `ops.api_quota_reached`
+  and `ops.usage_warnings_due`. No limit with packs passes 2,000,000,000 (`PLAN_BOUNDS.limitWithPacks`,
+  `packsMax` in the forms, the plan state's and the follow-on's guards, for run packs too); the
+  sweep lookups sum in 64 bits. `app.guard_plan_subscription_start` (BEFORE INSERT, invoker rights)
+  refuses a subscription that follows none unless its version and add-ons are the plan state's. The
+  three-quantity `app.choose_add_ons` stays for the previous release during a deploy.
 - **Ledger (0004_billing):** one INR wallet per company with five accounts (`wallet_available`,
   `wallet_held`, `payment_clearing`, `service_revenue`, `dispute_losses`). `ledger_transactions` and
   `ledger_entries` are append-only (trigger), balances are maintained by trigger from the entries,
