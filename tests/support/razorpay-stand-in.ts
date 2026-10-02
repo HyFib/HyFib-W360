@@ -990,6 +990,9 @@ export async function startRazorpayStandIn(options: {
   const server: Server = createServer((req, res) => {
     void (async () => {
       const url = new URL(req.url ?? '/', 'http://stand-in');
+      // TEST-ONLY controls answer on a connection of their own: a runner request sent on a kept-alive
+      // socket just as the server closes it after its idle timeout hangs up (once in CI).
+      if (url.pathname.startsWith('/__stand-in/')) res.setHeader('connection', 'close');
       const body = (await readBody(req)) as Record<string, unknown> | undefined;
       state.calls.push({
         method: req.method ?? 'GET',

@@ -19,9 +19,21 @@ test.skip(
 test.skip(!platformConfigured, 'needs DATABASE_URL_MIGRATE and E2E_DATABASE_URL_AUTH');
 test.use({ actionTimeout: 30_000 });
 
-/** A day in YYYY-MM-DD, `days` from now (UTC). */
-const dayFromNow = (days: number) =>
-  new Date(Date.now() + days * 86_400_000).toISOString().slice(0, 10);
+/**
+ * India's calendar day `offset` days from today, in YYYY-MM-DD: the company's days are India's
+ * (Asia/Kolkata), which run ahead of UTC's from 18:30 UTC.
+ */
+function indiaDay(offset: number): string {
+  const today = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date());
+  const day = new Date(`${today}T00:00:00Z`);
+  day.setUTCDate(day.getUTCDate() + offset);
+  return day.toISOString().slice(0, 10);
+}
 
 test('a paying company changes its plan and add-ons from the end of the paid period, authorising the new subscription in Checkout', async ({
   page,
@@ -79,7 +91,8 @@ test('a paying company changes its plan and add-ons from the end of the paid per
     await expect(page.getByRole('button', { name: 'Stop offering' })).toBeVisible();
 
     // The company is on a trial of Base with two extra seats, ending within two days: paying is
-    // charged at once (ADR-102).
+    // charged at once (ADR-102). It ends at the start of the day after tomorrow in the company's
+    // time zone, 24 to 48 hours from now whatever the hour.
     await page.goto(`/platform?q=${slug}`);
     await page.getByRole('link', { name: companyName }).click();
     await expect(page).toHaveURL(/\/platform\/tenants\/[0-9a-f-]+$/);
@@ -88,7 +101,7 @@ test('a paying company changes its plan and add-ons from the end of the paid per
     await page
       .getByLabel('Plan', { exact: true })
       .selectOption({ label: `${base} (base-${suffix} v1)` });
-    await page.getByLabel('Trial ends on').fill(dayFromNow(1));
+    await page.getByLabel('Trial ends on').fill(indiaDay(2));
     await page.getByLabel('Extra seats').fill('2');
     await page
       .getByLabel('Reason (emailed to the billing managers, and shown in the company’s audit log)')

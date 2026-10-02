@@ -274,6 +274,9 @@ export async function startWooStandIn(
   const server: Server = createServer((req, res) => {
     void (async () => {
       const url = new URL(req.url ?? '/', 'http://stand-in');
+      // TEST-ONLY controls answer on a connection of their own: a runner request sent on a kept-alive
+      // socket just as the server closes it after its idle timeout hangs up (once in CI).
+      if (url.pathname.startsWith('/__stand-in/')) res.setHeader('connection', 'close');
       const raw = await readBody(req);
       if (url.pathname.startsWith('/__stand-in/')) {
         const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};

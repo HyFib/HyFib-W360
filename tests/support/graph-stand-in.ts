@@ -402,6 +402,9 @@ export async function startGraphStandIn(options: {
   const server: Server = createServer((req, res) => {
     void (async () => {
       const url = new URL(req.url ?? '/', 'http://stand-in');
+      // TEST-ONLY controls answer on a connection of their own: a runner request sent on a kept-alive
+      // socket just as the server closes it after its idle timeout hangs up (once in CI).
+      if (url.pathname.startsWith('/__stand-in/')) res.setHeader('connection', 'close');
       const body = await readBody(req);
       const authorization = req.headers.authorization ?? null;
       if (req.method === 'GET' && url.pathname === '/__stand-in/requests') {
