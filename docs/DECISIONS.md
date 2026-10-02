@@ -1248,7 +1248,9 @@ are purged 30 days after the job failed. Recording a batch is retried three time
 There is no redrive button. Every queue's work is a durable row that the minute sweeps re-signal,
 so a redrive repeats what the sweep does, and `billing.auto-recharge` deliberately has no retries
 (an attempt is reconciled before anything is charged again). The runbook's `boss.redrive` stays
-available to engineers who fixed a cause.
+available to engineers who fixed a cause. (Since ADR-108 platform administrators retry a dead
+letter's job from the console: the sweeps do not re-signal the work of every queue, and
+`boss.redrive` finds nothing once the worker has recorded the dead letter.)
 
 **Two repairs**, open to both platform roles and written to the platform audit log (actor, reason,
 result) in the same transaction:
@@ -3762,3 +3764,71 @@ Decision:
 Not built: links from the sign-in and sign-up pages (they render without the database), versions
 listed without being offered or offered without being listed, prices in other currencies,
 comparisons by feature, caching, and the price list through the public API.
+
+## ADR-108 Retrying dead-lettered jobs from the operations console (2026-10-02)
+
+Context: ADR-054 left out a redrive button because every queue's work is a durable row that the
+minute sweeps signal again. An audit of the 25 queues that dead-letter found that this holds for 19
+of them, but not for these:
+
+- `channel.onboard`: a number whose setup job died stays in setup indefinitely (only the company's
+  "Retry setup" restarts it).
+- `commerce.account`: a payment account check stays open, so payment links are refused, and the
+  console does not show it.
+- `template.delete`: the template stays "pending deletion" until the account's next template sync,
+  up to 6 hours later, puts Meta's status back, silently undoing the deletion.
+- `template.submit`: never sent again; the sync marks it "submit failed" and the company submits
+  it again.
+- `webhook.process` and `billing.event-process`: once the receipt has used its 12 attempts, which
+  the receipt retry on the Integrations page already repairs.
+
+The runbook's fallback did not work either: `boss.redrive('dead-letter', …)` moves only copies not
+yet started, and the worker completes every copy once it has recorded the dead letter. The failed
+job itself stays in its queue, failed, until the queue's retention deletes it (1 to 7 days).
+
+Decision:
+
+- **Retry from the Queues tab:** a platform administrator (either role, as for the receipt retry)
+  sends a dead letter's job back to its queue once, with a reason of 10 to 2,000 characters,
+  through `ops.platform_retry_dead_letter` (migration 0086; SECURITY DEFINER, executable by
+  `w360_platform` only). In one transaction the function:
+  - makes pg-boss 12's own retry (`retryJobs`): state back to `retry`, one more attempt allowed,
+    no completion time;
+  - marks the dead letter (`retried_at` and `retried_by_user_id`, paired by a check);
+  - writes `platform.dead_letter_retried` to the platform audit log.
+
+  A worker takes the job as it was, with its signed envelope, and authorizes it again. If it fails
+  again, pg-boss dead-letters it again and it is listed as a new dead letter, which can be retried
+  in its turn.
+
+- **Refused** (in the function, and not offered by the console):
+  - a dead letter already retried;
+  - one whose envelope did not verify (the worker would refuse the job again) or without its job;
+  - one of a company being deleted or gone;
+  - a job pg-boss no longer keeps as failed: deleted after its queue's retention, or already sent
+    back;
+  - a job of a queue that never retries its jobs: `billing.auto-recharge`, whose sweep repeats an
+    attempt only after looking it up at Razorpay. No producer sets a job's retry limit, so a limit
+    of 0 is the queue's;
+  - a job of the receipt queues (`webhook.process`, `billing.event-process`): the receipt retry
+    resets the receipt's attempts and refuses a receipt whose body was erased;
+  - a job whose work already waits in its exclusive queue (pg-boss's unique index), which will do
+    that work.
+- **What the console shows:** Retry and until when pg-boss keeps the failed job (the failure time
+  plus the queue's retention) for a dead letter that none of the refusals applies to, by this
+  release's queue catalog (a queue it does not declare is not offered); otherwise why not. A
+  retried dead letter shows who retried it and when.
+- **Least privilege on pg-boss:** the migration runner grants `w360_definer` usage of the `pgboss`
+  schema, SELECT on `pgboss.job`'s id, name, state and retry limit and UPDATE on its state, retry
+  limit and completion time: never a job's data or output, and never inserting or deleting jobs.
+  It grants them on every migration run, after pg-boss installs or upgrades its schema, which
+  happens after the SQL migrations.
+- **No retried job deleted unstarted:** a retried job is due at once. pg-boss deletes a waiting job
+  14 days after it was first due (its default retention, which the runner does not change), and a
+  retry is offered only while the failed job is kept, at most 7 days for a queue that dead-letters
+  (a unit test pins it).
+
+Not built: sweeps that signal the stranded work of `channel.onboard`, `commerce.account` and
+`template.delete` again (they would make most retries unneeded), retrying several dead letters at
+once, whether a retried attempt succeeded (a new failure is listed as a new dead letter), and
+retries through the public API.

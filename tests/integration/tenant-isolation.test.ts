@@ -311,14 +311,16 @@ describe('database roles', () => {
         expect(await can(role, fn), `${role} ${fn}`).toBe(false);
       }
     }
-    // Platform operations (0026): the read functions and the receipt retry for platform staff only;
-    // the dead-letter purge for the worker; the URL host helper for the definer functions.
+    // Platform operations (0026): the read functions, the receipt retry and the dead letter retry
+    // (0086) for platform staff only; the dead-letter purge for the worker; the URL host helper for
+    // the definer functions.
     for (const fn of [
       'ops.platform_ops_health(uuid)',
       'ops.platform_ops_activity(timestamp with time zone,uuid)',
       'ops.platform_ops_signup_sessions(timestamp with time zone,integer)',
       'ops.platform_ops_integration_failures(integer)',
       'ops.platform_retry_webhook_receipt(uuid,text,text)',
+      'ops.platform_retry_dead_letter(uuid,text,text)',
     ]) {
       expect(await can('w360_platform', fn), fn).toBe(true);
       expect(await can('w360_app', fn), fn).toBe(false);

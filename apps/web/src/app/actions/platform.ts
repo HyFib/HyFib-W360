@@ -307,6 +307,18 @@ export async function retryWebhookReceiptAction(
   });
 }
 
+/** Sends a dead letter's job back to its queue for one more attempt (audited, ADR-108). */
+export async function retryDeadLetterAction(
+  input: unknown,
+): Promise<ActionResult<{ queue: string }>> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    const result = await runtime.platformOps.retryDeadLetter(actor, input);
+    refresh();
+    return result;
+  });
+}
+
 /** Records how a quarantined webhook event was resolved (audited). */
 export async function resolveQuarantineAction(input: unknown): Promise<ActionResult> {
   return runAction(async () => {

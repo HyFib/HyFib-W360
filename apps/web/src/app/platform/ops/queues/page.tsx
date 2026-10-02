@@ -1,5 +1,5 @@
 import type { Metadata } from 'next';
-import { waitLabel, type QueueWait } from '@w360/domain';
+import { DEAD_LETTER_RETRY_BLOCK_TEXT, waitLabel, type QueueWait } from '@w360/domain';
 import {
   Alert,
   Badge,
@@ -17,6 +17,7 @@ import {
   Table,
 } from '@w360/ui';
 import { CompanyLink, Utc } from '@/components/platform/ops';
+import { RetryDeadLetterForm } from '@/components/platform/ops-forms';
 import { getRuntime } from '@/server/runtime';
 import { requirePlatformActor } from '@/server/session';
 
@@ -141,9 +142,14 @@ export default async function OpsQueuesPage() {
           <CardTitle>Recent dead letters</CardTitle>
           <CardDescription>
             Jobs that failed all their retries. The company and reference show only when the
-            job&apos;s signature verified; errors show only their name and code. The full job stays
-            in pg-boss for 30 days (RUNBOOKS §3). Platform administrators are emailed about each,
-            with counts by queue, at most every 15 minutes (ADR-091).
+            job&apos;s signature verified; errors show only their name and code. pg-boss keeps the
+            failed job for its queue&apos;s retention (1 to 7 days) and its copy in the dead-letter
+            queue for 30 days (RUNBOOKS §3). Platform administrators are emailed about each, with
+            counts by queue, at most every 15 minutes (ADR-091). Once the cause is fixed, the minute
+            sweeps signal most queues&apos; work again by themselves, but not that of
+            channel.onboard, commerce.account, template.delete and template.submit: Retry sends a
+            job back to its queue once, for one more attempt, with your reason in the platform audit
+            log (ADR-108, RUNBOOKS §10P). If it fails again, it is listed again.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -159,6 +165,9 @@ export default async function OpsQueuesPage() {
                   <TH>Reference</TH>
                   <TH>Error</TH>
                   <TH>Retries</TH>
+                  <TH>
+                    <span className="sr-only">Retry</span>
+                  </TH>
                 </TR>
               </THead>
               <TBody>
@@ -195,6 +204,25 @@ export default async function OpsQueuesPage() {
                       ) : null}
                     </TD>
                     <TD className="tabular-nums">{d.retries ?? '—'}</TD>
+                    <TD className="text-xs text-muted-foreground">
+                      {d.retriedAt ? (
+                        <>
+                          Retried <Utc at={d.retriedAt} />
+                          {d.retriedByName ? ` by ${d.retriedByName}` : null}
+                        </>
+                      ) : d.retryable ? (
+                        <div className="grid gap-1">
+                          <RetryDeadLetterForm deadLetterId={d.id} />
+                          {d.retryableUntil ? (
+                            <span>
+                              Until <Utc at={d.retryableUntil} />
+                            </span>
+                          ) : null}
+                        </div>
+                      ) : d.retryBlock ? (
+                        DEAD_LETTER_RETRY_BLOCK_TEXT[d.retryBlock]
+                      ) : null}
+                    </TD>
                   </TR>
                 ))}
               </TBody>

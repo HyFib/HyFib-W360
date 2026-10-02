@@ -114,6 +114,9 @@ export const deadLetters = opsSchema.table('dead_letters', {
   recordedAt: tz('recorded_at').notNull().defaultNow(),
   /** When platform staff were emailed about it (ADR-091). */
   alertedAt: tz('alerted_at'),
+  /** When a platform administrator sent the job back to its queue, and who (ADR-108). */
+  retriedAt: tz('retried_at'),
+  retriedByUserId: text('retried_by_user_id'),
 });
 
 /**

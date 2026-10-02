@@ -520,9 +520,15 @@ verification, app review, Embedded Signup configuration).
   verified]** (ADR-096: the worker's minute sweep records each queue's ready jobs and the oldest
   one's wait, shown on the Queues tab with the queue's limit; every platform administrator is
   emailed once each time a queue's oldest job waits past its limit, at most every 15 minutes, and
-  the console says when the worker stopped checking). Remaining: other alerts (companies' failing
-  integrations) and channels, trends, Meta's quality webhook, API request counts, exports, redrive
-  from the console, acknowledging issues, paging and rollups for many companies.
+  the console says when the worker stopped checking). **[Dead letter retries built, locally
+  verified]** (ADR-108: a platform administrator sends a dead letter's failed job back to its queue
+  once, with a reason, in the platform audit log; refused for unverified jobs, companies being
+  deleted, jobs pg-boss no longer keeps, queues that never retry or whose receipts have their own
+  retry, and work already waiting; needed for `channel.onboard`, `commerce.account`,
+  `template.delete` and `template.submit`, whose work no sweep signals again). Remaining: other
+  alerts (companies' failing integrations) and channels, trends, Meta's quality webhook, API request
+  counts, exports, sweeps for the work of `channel.onboard`, `commerce.account` and
+  `template.delete`, acknowledging issues, paging and rollups for many companies.
 - **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**
   (ADR-055): Settings → Company data for owners. A streamed, gzip-compressed JSON Lines export of
   every company table from one read-only transaction (each table and column exported or excluded

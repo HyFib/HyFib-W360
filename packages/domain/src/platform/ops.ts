@@ -19,6 +19,7 @@ import {
   securityEvents,
   sql,
   tenants,
+  users,
   webhookQuarantine,
   webhookReceipts,
   type Tx,
@@ -27,6 +28,7 @@ import type { PlatformDatabase } from '@w360/db/platform';
 import { MAX_RECEIPT_ATTEMPTS } from '../messaging/receipts';
 import type { QueueInspector, QueueSnapshot } from '../jobs/queue';
 import { QUEUE_CHECK_FRESH_MINUTES } from './queue-waits';
+import { deadLetterRetryBlock, deadLetterRetryableUntil } from './dead-letter-retries';
 import { parseInput } from '../validation';
 import {
   OPS_SIGNAL_RULES,
@@ -247,6 +249,11 @@ async function securityEventCounts(tx: Tx, now: Date): Promise<EventCount[]> {
 
 const retrySchema = z.object({
   receiptId: z.uuid(),
+  reason: z.string().trim().min(10, 'Give a reason of at least 10 characters').max(2000),
+});
+
+const deadLetterRetrySchema = z.object({
+  deadLetterId: z.uuid(),
   reason: z.string().trim().min(10, 'Give a reason of at least 10 characters').max(2000),
 });
 
@@ -613,9 +620,13 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
             firstQueuedAt: deadLetters.firstQueuedAt,
             failedAt: deadLetters.failedAt,
             alertedAt: deadLetters.alertedAt,
+            tenantStatus: tenants.status,
+            retriedAt: deadLetters.retriedAt,
+            retriedByName: users.name,
           })
           .from(deadLetters)
           .leftJoin(tenants, eq(tenants.id, deadLetters.tenantId))
+          .leftJoin(users, eq(users.id, deadLetters.retriedByUserId))
           .orderBy(desc(deadLetters.failedAt))
           .limit(100);
         const known = new Set(ALL_QUEUES.map((q) => q.name));
@@ -645,7 +656,15 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
         const check = queueCheck(waits, now);
         return {
           queues: rows,
-          deadLetters: recent,
+          deadLetters: recent.map((d) => {
+            const retryBlock = deadLetterRetryBlock(d, now);
+            return {
+              ...d,
+              retryableUntil: deadLetterRetryableUntil(d.sourceQueue, d.failedAt),
+              retryBlock,
+              retryable: retryBlock === null,
+            };
+          }),
           waitsCheckedAt: check.checkedAt,
           waitsFresh: check.fresh,
           lastQueueAlertAt: alerts?.lastSentAt ?? null,
@@ -722,6 +741,21 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
           sql`select ops.platform_retry_webhook_receipt(${data.receiptId}::uuid, ${data.reason}, ${actor.correlationId}) as previous`,
         );
         return { previousStatus: String(result.rows[0]?.previous) };
+      });
+    },
+
+    /**
+     * Sends a dead letter's job back to its queue for one more attempt, as pg-boss's own retry does
+     * (ADR-108). The definer function checks the administrator, the dead letter, the company and
+     * pg-boss's job again, and marks and audits the retry in the same transaction.
+     */
+    async retryDeadLetter(actor: PlatformActor, input: unknown): Promise<{ queue: string }> {
+      const data = parseInput(deadLetterRetrySchema, input);
+      return platformDb.run(actor.userId, async (tx) => {
+        const result = await tx.execute<{ queue: string }>(
+          sql`select ops.platform_retry_dead_letter(${data.deadLetterId}::uuid, ${data.reason}, ${actor.correlationId}) as queue`,
+        );
+        return { queue: String(result.rows[0]?.queue) };
       });
     },
 

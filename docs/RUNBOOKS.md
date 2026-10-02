@@ -52,9 +52,12 @@ sweep is not running: nobody is emailed about late queues until it does, so star
 3. If a poison job fails repeatedly, it moves to `dead-letter` after its retry limit, and the
    worker records it in `ops.dead_letters` (Operations → Queues: queue, kind, company when its
    signature verified, retries, error name and code, never the message). The worker log's
-   `job attempt failed` entries carry the error for each attempt; the job itself (ids only, with its
-   output) stays in pg-boss for 30 days. Fix the cause; the minute sweeps re-signal durable rows, so
-   re-driving is rarely needed (`boss.redrive('dead-letter', …)` as the owner when it is).
+   `job attempt failed` entries carry the error for each attempt; the failed job itself (ids only,
+   with its output) stays in its queue for the queue's retention (1 to 7 days) and its copy in
+   `dead-letter` for 30 days. Fix the cause. Most queues' work is a row the minute sweeps signal
+   again, but not that of `channel.onboard`, `commerce.account`, `template.delete` and
+   `template.submit`: retry those dead letters from Operations → Queues (section 10P, ADR-108).
+   `boss.redrive('dead-letter', …)` does not help: the worker has already completed the copies.
 4. Index bloat warnings (`index_bloat`) → run `getReindexCommands()` output as the owner role during
    low traffic (runtime roles cannot reindex).
 
@@ -1859,6 +1862,30 @@ means no check for 5 minutes: the minute messaging sweep is not running or fails
 is not consuming (`dead letters recorded` and `job attempt failed` in its log). Rows are deleted 30
 days after the job failed.
 
+**Retrying a dead letter (ADR-108).** Once the cause is fixed, Retry (with a reason of at least 10
+characters) sends the failed job back to its queue once, for one more attempt, exactly as pg-boss's
+own retry does, and writes `platform.dead_letter_retried` to the platform audit log. The row then
+shows who retried it and when; if the job fails again it is listed again, as a new dead letter.
+Which ones need it:
+
+- `channel.onboard`: the number stays in setup until its job runs again (the company's "Retry
+  setup" does the same). Stuck setups are on the Onboarding tab after 30 minutes.
+- `commerce.account`: the payment account check stays open and the company's payment links are
+  refused until it runs again (the company can also save its keys again).
+- `template.delete`: retry before the account's next template sync (within 6 hours), which
+  otherwise puts Meta's status back and drops the deletion.
+- `template.submit`: after 10 minutes the template sync marks the template "submit failed" and the
+  company submits it again; a retry after that does nothing.
+- Every other queue's work is signalled again by the minute sweeps once the cause is fixed: a
+  retry repeats it, or is refused because the sweep's job for the same work is already waiting.
+
+The row says why it offers no Retry: already retried; the signature did not verify (the worker would
+refuse the job again); the queue is not declared by this release; the queue never retries its jobs
+(`billing.auto-recharge`: its sweep repeats an attempt only after looking it up at Razorpay);
+pg-boss no longer keeps the failed job (its queue's retention has passed; the time is shown under
+Retry); a receipt queue (`webhook.process`, `billing.event-process`: retry the receipt on the
+Integrations page instead); or the company is being deleted or is gone.
+
 **Repairs.** Retry and Resolve (section 4) both need a reason of at least 10 characters and appear
 in the platform audit log as `platform.webhook_receipt_retried` and
 `platform.webhook_quarantine_resolved`. A receipt whose body was erased (after 7 days) cannot be
@@ -1878,8 +1905,8 @@ is marked until there is one. An item listed without "Staff emailed" for more th
 the alert did not run: it runs last in the minute messaging sweep, so look in the worker's logs for
 failures of `ops.messaging-sweep`. On the email: open the tab it links, find the cause (the worker's
 logs, the provider's status page), fix it, then retry receipts within 7 days of receipt and resolve
-quarantine entries (section 4). Dead letters need no action once the cause is fixed: the minute
-sweeps signal their work again.
+quarantine entries (section 4). Most dead letters need no action once the cause is fixed, because
+the minute sweeps signal their work again; retry those of the queues listed above (ADR-108).
 
 **Migration 0068 failed.** It adds nullable columns and partial indexes to `ops.dead_letters`,
 `ops.webhook_receipts` and `ops.webhook_quarantine`, marks existing dead letters and erased receipts
@@ -1887,6 +1914,13 @@ as told, and replaces `ops.platform_retry_webhook_receipt` (dropped as `w360_def
 as in 0011), in one transaction. A failure rolls it all back: fix the cause (usually the bootstrap
 roles) and run the migrations again. Workers of the previous release keep working; web servers of
 the previous release show receipts as before.
+
+**Migration 0086 failed.** It adds `retried_at` and `retried_by_user_id` to `ops.dead_letters` (with
+the check pairing them) and creates `ops.platform_retry_dead_letter`, in one transaction; a failure
+rolls it all back (usually the bootstrap roles: fix them and run the migrations again). The
+migration runner grants the definer what it needs of `pgboss.job` after pg-boss's own install, on
+every run: if Retry fails with "permission denied for table job", run the migrations again. Web
+servers of the previous release show dead letters without Retry.
 
 **Migration 0072 failed.** It creates `ops.queue_waits`, adds `queues` to the kinds of
 `ops.platform_alerts` (replacing its check `platform_alerts_kind_check`) and creates

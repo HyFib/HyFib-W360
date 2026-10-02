@@ -136,7 +136,8 @@ so grants issued after the transfer would silently grant nothing (migration 0002
   RLS scope.
 - A work job that fails its last retry moves to the `dead-letter` queue (the sweeps, which run
   again within a minute, have none); the worker records it in `ops.dead_letters` without its error
-  message (§6P).
+  message (§6P), and platform administrators can send the failed job back to its queue once
+  (ADR-108).
 - Workers stop gracefully on SIGTERM (stop fetching, wait up to 30 s, close pools).
 
 ## 5. Email **[built]**
@@ -1206,6 +1207,19 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   with no attempts; the minute sweep processes it again, idempotently), and resolving a quarantine
   entry with a written resolution. Both need a reason and write `ops.platform_audit_events` in the
   same transaction.
+- **Dead letter retries** (ADR-108, migration 0086, `platform/dead-letter-retries.ts`): a platform
+  administrator sends a dead letter's failed job back to its queue once, with a reason, through
+  `ops.platform_retry_dead_letter`, which makes pg-boss's own retry (state back to `retry`, one
+  more attempt allowed, no completion time), marks the dead letter (`retried_at`,
+  `retried_by_user_id`) and writes the platform audit log in one transaction. It refuses a dead
+  letter already retried, unverified or without its job, of a company being deleted or gone, a job
+  pg-boss no longer keeps as failed, a job of a queue that never retries (`billing.auto-recharge`)
+  or of a receipt queue (the receipt retry repairs those), and a job whose work already waits in
+  its exclusive queue. The migration runner grants the definer role SELECT on `pgboss.job`'s id,
+  name, state and retry limit and UPDATE on its state, retry limit and completion time, after
+  pg-boss's install. `deadLetterRetryBlock` is the console's copy of those rules, by this release's
+  queue catalog, with the time the queue's retention ends. Retries matter for `channel.onboard`,
+  `commerce.account`, `template.delete` and `template.submit`, whose work no sweep signals again.
 - **Failure alerts** (ADR-091, migration 0068, `platform/failure-alerts.ts`): the minute messaging
   sweep emails every platform administrator about each dead letter, each receipt that used all its
   attempts and each unresolved quarantine entry, once (`alerted_at` marks set by
@@ -1227,8 +1241,9 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   actor. The functions read every company on each view, which suits the test envelope; paging and
   precomputed rollups come with growth.
 - **Not built yet:** other alerts (a company's failing integrations) and other channels, trends,
-  quality updates from Meta's quality webhook, API request counts, exports, redrive from the
-  console, and acknowledging issues.
+  quality updates from Meta's quality webhook, API request counts, exports, sweeps for the work of
+  `channel.onboard`, `commerce.account` and `template.delete`, retrying several dead letters at
+  once, and acknowledging issues.
 
 ## 6Q. Company export and deletion **[built — providers verified against the local Graph, Shopify and Razorpay stand-ins only]**
 

@@ -1,5 +1,103 @@
 # Progress
 
+## 2026-10-02 — Phase 5: retrying dead-lettered jobs from the operations console (P5-10, ADR-108)
+
+Status: **Implemented and locally verified (test data only).** ADR-054 left out a redrive button
+because the minute sweeps signal every queue's work again, and the runbook's fallback was
+`boss.redrive('dead-letter', …)`. An audit of the 25 queues that dead-letter showed the sweeps do
+not signal the work of `channel.onboard`, `commerce.account`, `template.delete` and
+`template.submit` again, and that `boss.redrive` finds nothing once the worker has recorded a dead
+letter.
+
+### Completed
+
+- **Design (ADR-108):** a platform administrator sends a dead letter's failed job back to its queue
+  once, with a reason, as pg-boss's own retry does (one more attempt), marked on the dead letter and
+  written to the platform audit log in one transaction. Refused for a dead letter already retried,
+  an unverified envelope or a missing job, a company being deleted or gone, a job pg-boss no longer
+  keeps as failed, a queue that never retries (`billing.auto-recharge`), the receipt queues (the
+  receipt retry repairs those) and work already waiting in its exclusive queue. ADR-054 and the
+  runbook are corrected.
+- **Migration 0086:** `ops.dead_letters.retried_at` and `retried_by_user_id` (paired by a check;
+  only the definer writes them) and `ops.platform_retry_dead_letter` (SECURITY DEFINER, executable
+  by `w360_platform` only). The migration runner grants `w360_definer` SELECT on `pgboss.job`'s id,
+  name, state and retry limit and UPDATE on its state, retry limit and completion time, after
+  pg-boss's install, on every run.
+- **Domain:** `platform/dead-letter-retries.ts` (`deadLetterRetryBlock`, the console's copy of the
+  rules by this release's queue catalog, with the reasons in words; `deadLetterRetryableUntil`);
+  `retryDeadLetter` in the ops service; the dead letter listing says who retried each and when,
+  until when it can be retried and why not.
+- **Web:** Operations → Queues: a Retry form with a reason on each dead letter that can be retried,
+  the time pg-boss keeps it until, "Retried … by …" once retried, and why not otherwise; the card
+  says what pg-boss keeps for how long.
+- **Tests:**
+  - Unit: 7 (the retry window by queue, each reason a retry is not offered and its words,
+    every dead-lettering queue keeping failed jobs at most a week).
+  - Integration (`dead-letter-retries.test.ts`, 6): a real pg-boss job sent back for one more
+    attempt, once, with the reason audited, taken again by a worker with its envelope and listed
+    again when it fails; the listing's reasons; each refusal changing nothing (unverified, without
+    its job, a company pending deletion, deleted or gone, a job deleted or already sent back, a
+    queue that never retries, a receipt queue, work already waiting in an exclusive queue, which
+    goes back once that job is done); a platform administrator and a reason needed, the runtime role
+    refused, the platform role unable to mark a dead letter, the check pairing who and when; the
+    definer's column grants on pg-boss jobs. The isolation suite lists the new function for the
+    platform role only.
+  - e2e (`dead-letter-retry.spec.ts`, chromium and mobile-chromium): a platform owner retries a
+    failed job from the Queues tab with a reason; the row then says who retried it, pg-boss holds
+    the job waiting with one more attempt, and the platform audit log has it.
+- **Docs:** ADR-108 (and ADR-054 amended); SECURITY; THREAT-MODEL T121; RUNBOOKS (section 3, the
+  console's dead letters and retries, migration 0086); ARCHITECTURE; DATA-RETENTION; BACKLOG P5-10;
+  FEATURE-MATRIX H-034.
+- **Found while building:**
+  - ADR-054's claim that the sweeps signal every queue's work again did not hold for four queues,
+    and the runbook's `boss.redrive` fallback could not work since the worker consumes the
+    dead-letter queue.
+  - A dead letter's failed job keeps the retry limit pg-boss gave it; no producer sets one, so a
+    limit of 0 is the queue's, which the function uses to refuse `billing.auto-recharge`.
+  - Failure alerts are platform-wide (ADR-091): a full integration run showed the new file's dead
+    letters crowding another file's alert line, which names six queues at most. The file now marks
+    its own dead letters as told when it ends.
+  - Outgoing webhooks: a delivery whose payload cannot be built (any error but "event gone") rolls
+    back its company's whole delivery batch and is signalled again every minute. Outside this slice;
+    suggested as a separate task.
+- **Mutation checks:** 45 regressions tried one at a time, 44 caught (4 through the e2e test).
+  - 23 in the migration: the check pairing who and when; the definer unable to mark, or the platform
+    role able to; each refusal removed (not an administrator, no reason, already retried,
+    unverified, a company being deleted or gone, a job no longer failed, a queue that never retries,
+    a receipt queue, work already waiting); no extra attempt, the completion time kept, the job left
+    failed; the mark or the audit left out, the reason audited untrimmed; the runtime role allowed,
+    the platform role not; the revocation from PUBLIC removed; the function left to the migration
+    role.
+  - 4 in the runner's grants: none, the job's data readable, more columns writable, deleting jobs.
+  - 3 in the service and listing: a short reason passed on, who retried not listed, the listing
+    without the rule.
+  - 11 in the rule (unit tests): each reason a retry is not offered removed or loosened, the
+    retention counted in minutes, a Razorpay receipt job offered.
+  - 4 through the e2e test: no Retry offered, no mark of who retried, the form retrying another
+    dead letter, the page not refreshed.
+  - The survivor removes the migration's revocation from PUBLIC, which 0002's default privileges
+    already enforce. A first run left 3 more alive, all weak tests (a short reason refused only by a
+    later check, the audit's trimming untested on a direct call, update probes that read the columns
+    they wrote); the tests now check each, and catch them.
+
+### Test commands and results (local, 2026-10-02)
+
+| Command                                                                                                                                                           | Result                                   |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                              | clean                                    |
+| `pnpm test`                                                                                                                                                       | 474 passed                               |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                                               | 665 passed on each                       |
+| `pnpm build` and `pnpm test:e2e` for `dead-letter-retry.spec.ts` and `platform-ops.spec.ts` on chromium and mobile-chromium, on a fresh database migrated to 0086 | 4 passed (1.6 min)                       |
+| Mutation checks                                                                                                                                                   | 45 regressions, 44 caught (listed above) |
+| gitleaks 8.30.1 on the commit                                                                                                                                     | no leaks                                 |
+
+### Known gaps
+
+- Sweeps for the stranded work of `channel.onboard`, `commerce.account` and `template.delete`,
+  retrying several dead letters at once, whether a retried attempt succeeded (a new failure shows as
+  a new dead letter) and retries through the public API are not built.
+- Firefox and WebKit are not installed locally; CI runs them.
+
 ## 2026-10-02 — Phase 5: a price list for visitors (P5-01, P5-07, ADR-107)
 
 Status: **Implemented and locally verified (test data only).** Since ADR-105 platform owners offer
