@@ -88,6 +88,8 @@ export interface StandInState {
   templateCreateQueue: TemplateCreateBehaviour[];
   /** When true, listing with fields beyond the defaults fails with code 100. */
   rejectExtraTemplateFields: boolean;
+  /** When set, template deletions fail with this Graph error and the template stays listed. */
+  templateDeleteError: { status: number; code: number; message: string } | null;
   /** Recipient -> WhatsApp id returned in send responses (defaults to the recipient). */
   waIdFor: Map<string, string>;
   templateCounter: number;
@@ -376,6 +378,7 @@ export async function startGraphStandIn(options: {
     templates: new Map(),
     templateCreateQueue: [],
     rejectExtraTemplateFields: false,
+    templateDeleteError: null,
     waIdFor: new Map(),
     templateCounter: 0,
     flows: new Map(),
@@ -607,6 +610,10 @@ export async function startGraphStandIn(options: {
           });
         }
         if (req.method === 'DELETE') {
+          if (state.templateDeleteError) {
+            const e = state.templateDeleteError;
+            return graphError(res, e.status, e.code, e.message);
+          }
           const name = url.searchParams.get('name');
           const hsmId = url.searchParams.get('hsm_id');
           const index = list.findIndex((t) => t.name === name && (!hsmId || t.id === hsmId));

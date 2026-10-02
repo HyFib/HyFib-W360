@@ -4038,3 +4038,79 @@ Decision:
 Not built: packs bought once instead of every billing interval, packs per API key (a key's own
 limit stays its own, ADR-097), packs that take effect at once for a paying company (they come with
 the next paid period, ADR-109), and AI credits (Phase 6).
+
+## ADR-111 Work that runs out of retries ends where the company can see it (2026-10-02)
+
+Context: ADR-108 found three queues whose work is never done after their job dead-letters unless
+someone acts: `channel.onboard` (the number stays in setup), `commerce.account` (the keys stay
+"checking", so payment links are refused) and `template.delete` (the template stays "pending
+deletion" until the account's next template sync puts Meta's status back, silently undoing the
+deletion). ADR-108 added a manual retry from the operations console and left out sweeps that signal
+this work again.
+
+Signalling it again from a sweep, as the other queues' work is signalled, was rejected:
+
+- These jobs dead-letter only after their own backoff has failed against Meta or Razorpay for
+  minutes to hours. Repeating them on a timer either loops while the provider is down (a dead letter
+  and an alert on every turn) or needs attempt bookkeeping on every row.
+- Number setup registers the number with Meta, and registration attempts count towards a limit
+  (error 133016 blocks registration for 72 hours), so automatic repeats can turn a recoverable
+  failure into a block.
+- The company can start each of them again itself: Delete again, Save the keys again, Retry setup,
+  each audited.
+
+Decision:
+
+- **Longer automatic retries where a repeat is harmless.** `template.delete` (a delete by the
+  template's id and name) retries 10 times instead of 5, at most an hour apart (4 to 5 hours in
+  all, against 15 to 30 minutes before); `commerce.account` (a read of one payment link list) 8
+  times instead of 3, at most 30 minutes apart (1.5 to 2 hours, against 3.5 to 7 minutes).
+  `channel.onboard` keeps its 8 retries (2 to 3 hours), as its registration counts towards Meta's
+  limit. pg-boss waits 30 s × 2^n × (1 to 2, at random) before the retry that follows n others,
+  at most the queue's maximum. The migration runner applies new retry settings to existing queues;
+  jobs already queued keep theirs.
+- **Settled when the job has run out of retries.** The minute messaging sweep finds dead letters of
+  these three queues whose envelope verified and names the job's own queue, that no one retried and
+  that are not settled yet, of companies not being deleted, whose work no job is doing again
+  (`ops.dead_letters_to_settle`), and settles each one's work in its company's scope, the company
+  id coming from the dead letter as the worker recorded it from the verified envelope:
+  - a template still pending deletion goes back to the status Meta last reported (the sync requested
+    here refreshes it), with a `delete_failed` status event saying Meta could not be reached and the
+    template can be deleted again, an event for the status it went back to (both reach the
+    company's webhook endpoints as `template.status_changed`, as after a deletion Meta refuses and
+    the sync that follows it), a `template.delete_failed` audit entry and a template sync request;
+    one Meta itself last reported as being deleted is left to the sync;
+  - keys still being checked become `failed`, with a message that Razorpay could not be reached and
+    saving them again checks them;
+  - a number still in setup becomes `failed`, with the step it stopped at and the Retry setup
+    button, a `channel.setup_failed` audit entry and a live update.
+
+  A setup retried, a deletion asked for again or keys saved again after the job died queue a job
+  under a singleton key the sweep can find (the number's id; the template's id and `:delete`; the
+  account's id, `:` and the save time); while such a job waits or runs, the dead letter is left
+  alone (`ops.dead_letter_work_live`, reading pg-boss's job table through a column the migration
+  runner now grants the definer: the singleton key). The dead job's first queueing is not compared
+  with the work's rows: pg-boss's time reaches the worker in milliseconds, the rows' times are in
+  microseconds.
+
+  The work and the dead letter's mark (`ops.settle_dead_letter`: settled time, and whether anything
+  was left to end) are one transaction, so a settled dead letter always has its work ended; a sweep
+  that dies in between leaves both for the next one.
+
+- **A settled dead letter is not retried.** `ops.platform_retry_dead_letter` refuses it and the
+  console says its work was ended for the company, which can start it again; a retried dead letter
+  is not settled (its job is doing the work, and dead-letters again if it fails). The two marks
+  exclude each other (a check). As the sweep runs every minute, the work of these three queues is
+  in practice started again by the company, not from the console (ADR-108's retry stays for the
+  other queues, such as `template.submit`).
+- **The template sync no longer undoes a deletion in progress.** A template pending deletion that
+  Meta still lists keeps `pending_deletion` while its last deletion event is the request itself,
+  made in the last 8 hours (the 10 retries plus a margin). A deletion Meta refused (its
+  `delete_failed` event) or an older one, whose job ended before this release, takes Meta's status
+  as before, with a reason on the sync's status event saying the deletion did not go through.
+- **Not changed:** `template.submit` (the sync marks an unconfirmed submission "submit failed" and the
+  company submits it again, ADR-108), the receipt queues (the receipt retry), and the dead letters
+  and alerts themselves (platform staff still see that Meta or Razorpay could not be reached).
+
+Not built: settling the work of other queues that already signal it again, a company notice beyond
+the state each page shows (no email), and automatic retries of number setup.

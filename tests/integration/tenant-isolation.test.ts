@@ -337,6 +337,20 @@ describe('database roles', () => {
     }
     expect(await can('w360_app', 'ops.purge_dead_letters(integer)')).toBe(true);
     expect(await can('w360_platform', 'ops.purge_dead_letters(integer)')).toBe(false);
+    // Settling work whose job ran out of retries (0089): the sweep's lookup and the mark for the
+    // worker only; whether a job is waiting or running again for the definer functions only.
+    for (const fn of [
+      'ops.dead_letters_to_settle(integer)',
+      'ops.settle_dead_letter(uuid,boolean)',
+    ]) {
+      expect(await can('w360_app', fn), fn).toBe(true);
+      expect(await can('w360_auth', fn), fn).toBe(false);
+      expect(await can('w360_platform', fn), fn).toBe(false);
+    }
+    expect(await can('w360_definer', 'ops.dead_letter_work_live(text,text)')).toBe(true);
+    for (const role of ['w360_app', 'w360_auth', 'w360_platform']) {
+      expect(await can(role, 'ops.dead_letter_work_live(text,text)'), role).toBe(false);
+    }
     expect(await can('w360_definer', 'ops.url_host(text)')).toBe(true);
     for (const role of ['w360_app', 'w360_auth', 'w360_platform']) {
       expect(await can(role, 'ops.url_host(text)'), role).toBe(false);

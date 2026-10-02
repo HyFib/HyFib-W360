@@ -22,6 +22,7 @@ import {
   recoverExpiredSend,
   remindExpiringApiKeys,
   routeDueConversations,
+  settleStrandedWork,
 } from '@w360/domain';
 import type { WorkerRuntime } from '../runtime';
 import { sweepAutomationRuns } from './automations';
@@ -153,8 +154,9 @@ export function channelOnboardHandler(rt: WorkerRuntime) {
  * intents whose worker died (before dispatch: re-queued; after dispatch: unknown outcome, never an
  * automatic resend), signal automation runs and task reminders that are due or lost their
  * signal, route waiting conversations of round-robin teams, remind companies of API keys that
- * expire soon, delete rate limit buckets that are full again, alert platform staff to work that
- * failed for good, and check how long jobs wait in each queue.
+ * expire soon, delete rate limit buckets that are full again, end work whose job ran out of
+ * retries where its company sees it, alert platform staff to work that failed for good, and check
+ * how long jobs wait in each queue.
  */
 export function messagingSweepHandler(rt: WorkerRuntime) {
   return async (): Promise<void> => {
@@ -252,6 +254,19 @@ export function messagingSweepHandler(rt: WorkerRuntime) {
     // Token buckets that are full again limit nothing (ADR-068).
     const buckets = await purgeRateLimitBuckets(rt.db);
     if (buckets > 0) rt.logger.info({ buckets }, 'full rate limit buckets deleted');
+    // Number setup, key checks and template deletions whose job ran out of retries (ADR-111).
+    const stranded = await settleStrandedWork({ db: rt.db, clock: rt.clock });
+    for (const failure of stranded.failed) {
+      rt.logger.warn(
+        { deadLetterId: failure.deadLetterId, err: toError(failure.error).message },
+        'ending stranded work failed; will retry',
+      );
+    }
+    if (stranded.ended + stranded.nothingLeft > 0)
+      rt.logger.info(
+        { ended: stranded.ended, nothingLeft: stranded.nothingLeft },
+        'stranded work settled',
+      );
     const deadLettersPurged = await purgeDeadLetters(rt.db);
     if (deadLettersPurged > 0) rt.logger.info({ deadLettersPurged }, 'old dead letters deleted');
     const webhooks = await sweepWebhooks(rt);

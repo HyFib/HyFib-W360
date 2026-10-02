@@ -117,6 +117,12 @@ export const deadLetters = opsSchema.table('dead_letters', {
   /** When a platform administrator sent the job back to its queue, and who (ADR-108). */
   retriedAt: tz('retried_at'),
   retriedByUserId: text('retried_by_user_id'),
+  /**
+   * When the sweep settled its work for the company, and whether anything was left to end
+   * (ADR-111); only for the stranded-work queues, never with a retry.
+   */
+  settledAt: tz('settled_at'),
+  settledEnded: boolean('settled_ended'),
 });
 
 /**

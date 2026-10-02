@@ -146,10 +146,13 @@ export default async function OpsQueuesPage() {
             failed job for its queue&apos;s retention (1 to 7 days) and its copy in the dead-letter
             queue for 30 days (RUNBOOKS §3). Platform administrators are emailed about each, with
             counts by queue, at most every 15 minutes (ADR-091). Once the cause is fixed, the minute
-            sweeps signal most queues&apos; work again by themselves, but not that of
-            channel.onboard, commerce.account, template.delete and template.submit: Retry sends a
-            job back to its queue once, for one more attempt, with your reason in the platform audit
-            log (ADR-108, RUNBOOKS §10P). If it fails again, it is listed again.
+            sweeps signal most queues&apos; work again by themselves. The work of channel.onboard,
+            commerce.account and template.delete is ended for its company instead, within a minute:
+            the number&apos;s setup or the keys&apos; check fails and a deletion is undone, and the
+            company starts it again (ADR-111). Until then, and for other queues such as
+            template.submit, Retry sends a job back to its queue once, for one more attempt, with
+            your reason in the platform audit log (ADR-108, RUNBOOKS §10P). If it fails again, it is
+            listed again.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -209,6 +212,16 @@ export default async function OpsQueuesPage() {
                         <>
                           Retried <Utc at={d.retriedAt} />
                           {d.retriedByName ? ` by ${d.retriedByName}` : null}
+                        </>
+                      ) : d.settledAt ? (
+                        <>
+                          {d.settledEnded ? 'Work ended for its company ' : 'Nothing left to end '}
+                          <Utc at={d.settledAt} />
+                          <div>
+                            {d.settledEnded
+                              ? 'The company can start it again.'
+                              : 'The work had finished or was started again.'}
+                          </div>
                         </>
                       ) : d.retryable ? (
                         <div className="grid gap-1">

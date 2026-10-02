@@ -537,11 +537,14 @@ verification, app review, Embedded Signup configuration).
   verified]** (ADR-108: a platform administrator sends a dead letter's failed job back to its queue
   once, with a reason, in the platform audit log; refused for unverified jobs, companies being
   deleted, jobs pg-boss no longer keeps, queues that never retry or whose receipts have their own
-  retry, and work already waiting; needed for `channel.onboard`, `commerce.account`,
-  `template.delete` and `template.submit`, whose work no sweep signals again). Remaining: other
-  alerts (companies' failing integrations) and channels, trends, Meta's quality webhook, API request
-  counts, exports, sweeps for the work of `channel.onboard`, `commerce.account` and
-  `template.delete`, acknowledging issues, paging and rollups for many companies.
+  retry, and work already waiting; needed for `template.submit`, whose work no sweep signals
+  again). **[Stranded work settled, locally verified]** (ADR-111: the minute sweep ends the work of
+  `channel.onboard`, `commerce.account` and `template.delete` dead letters in the company's scope,
+  unless a job for the same work waits or runs again: the number's setup fails with its step, the
+  keys' check fails, a deletion goes back to Meta's last status; the template sync keeps a deletion
+  while its job tries; deletions and key checks retry longer). Remaining: other alerts (companies'
+  failing integrations) and channels, trends, Meta's quality webhook, API request counts, exports,
+  acknowledging issues, paging and rollups for many companies.
 - **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**
   (ADR-055): Settings → Company data for owners. A streamed, gzip-compressed JSON Lines export of
   every company table from one read-only transaction (each table and column exported or excluded

@@ -983,7 +983,22 @@ message text, contact details, payloads, email addresses, secrets or full URLs:
   again with its own signed envelope, which the worker verifies and authorizes again; the retry
   changes no company data. The migration runner grants the definer, on `pgboss.job`, SELECT on id,
   name, state and retry limit and UPDATE on state, retry limit and completion time only: it can
-  read no job's data or output, and insert or delete none (tested).
+  read no job's data or output, and insert or delete none (tested). It also refuses a dead letter
+  whose work was settled (ADR-111).
+- Settling stranded work (ADR-111): the minute sweep ends the work of `channel.onboard`,
+  `commerce.account` and `template.delete` dead letters in the company's own scope. The company
+  comes from the dead letter, which the worker recorded only from a verified envelope, through
+  `ops.dead_letters_to_settle` (SECURITY DEFINER, executable only by `w360_app`; companies being
+  deleted are left out). `ops.settle_dead_letter` (SECURITY DEFINER, `w360_app` only) marks a dead
+  letter only in its own company's scope (`W3403` without a company scope or an answer, `W3404` for
+  another company's), only a verified one of those queues whose envelope names its own queue
+  (`W3412`), and returns false when the dead letter was retried or settled, or a job for its work
+  waits or runs: the sweep then rolls back the work it ended in that transaction. The work it ends
+  is the company's own row, through RLS, guarded by its state. Checks keep a settled time paired
+  with its answer, limit it to those queues and keep it apart from a retry. `ops.dead_letter_work_live`
+  is executable by the definer only, which reads `pgboss.job.singleton_key` for it (the runner's
+  grant; still no job data or output). Neither the worker nor platform staff can mark a dead letter
+  directly (tested).
 - Failure alerts (ADR-091): the worker emails every platform administrator counts of dead letters by
   queue, used-up receipts by provider and quarantine entries by provider and reason, never a
   company, receipt, reference or error. `ops.failure_alerts_due`, `ops.mark_failure_alert` and

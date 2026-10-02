@@ -11,6 +11,8 @@ export interface DeadLetterRetryFacts {
   verified: boolean;
   sourceJobId: string | null;
   retriedAt: Date | null;
+  /** When the sweep ended its work for its company (ADR-111). */
+  settledAt: Date | null;
   tenantId: string | null;
   /** The job's company's status; null when the company is gone (or the job has none). */
   tenantStatus: string | null;
@@ -18,10 +20,18 @@ export interface DeadLetterRetryFacts {
 
 /** Why the console does not offer to retry a dead letter's job. */
 export type DeadLetterRetryBlock =
-  'retried' | 'unverified' | 'undeclared' | 'no_retries' | 'receipt' | 'expired' | 'company';
+  | 'retried'
+  | 'settled'
+  | 'unverified'
+  | 'undeclared'
+  | 'no_retries'
+  | 'receipt'
+  | 'expired'
+  | 'company';
 
 export const DEAD_LETTER_RETRY_BLOCK_TEXT: Record<DeadLetterRetryBlock, string> = {
   retried: 'Already retried',
+  settled: 'Its work was ended for its company, which can start it again',
   unverified: 'Its signature did not verify, so the worker would refuse it again',
   undeclared: 'Its queue is not declared by this release',
   no_retries: 'Its queue never retries its jobs',
@@ -57,6 +67,7 @@ export function deadLetterRetryBlock(
   now: Date,
 ): DeadLetterRetryBlock | null {
   if (facts.retriedAt !== null) return 'retried';
+  if (facts.settledAt !== null) return 'settled';
   if (!facts.verified || facts.sourceJobId === null) return 'unverified';
   const definition = ALL_QUEUES.find((q) => q.name === facts.sourceQueue);
   if (!definition) return 'undeclared';

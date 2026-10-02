@@ -10,13 +10,17 @@ import {
 const FAILED = new Date('2026-10-01T10:00:00Z');
 const HOUR_MS = 3_600_000;
 
-/** A dead letter the console offers to retry: verified, with its job, not retried, its company active. */
+/**
+ * A dead letter the console offers to retry: verified, with its job, neither retried nor settled,
+ * its company active.
+ */
 const letter: DeadLetterRetryFacts = {
   sourceQueue: QUEUES.emailSend.name,
   failedAt: FAILED,
   verified: true,
   sourceJobId: '0190a5b2-0000-7000-8000-000000000001',
   retriedAt: null,
+  settledAt: null,
   tenantId: '0190a5b2-0000-7000-8000-000000000002',
   tenantStatus: 'active',
 };
@@ -76,6 +80,20 @@ describe('retrying a dead letter (ADR-108)', () => {
     ).toBe('retried');
   });
 
+  it('offers no retry of a job whose work the sweep ended for its company (ADR-111)', () => {
+    const now = new Date(FAILED.getTime() + HOUR_MS);
+    const deletion = { ...letter, sourceQueue: QUEUES.templateDelete.name };
+    expect(deadLetterRetryBlock(deletion, now)).toBeNull();
+    expect(deadLetterRetryBlock({ ...deletion, settledAt: now }, now)).toBe('settled');
+    // Settled comes before the other blocks: the console says the company can start it again.
+    expect(
+      deadLetterRetryBlock({ ...deletion, settledAt: now, tenantStatus: 'pending_deletion' }, now),
+    ).toBe('settled');
+    expect(DEAD_LETTER_RETRY_BLOCK_TEXT.settled).toBe(
+      'Its work was ended for its company, which can start it again',
+    );
+  });
+
   it("offers no retry of a job whose company is being deleted or is gone, and retries a suspended company's or a platform job", () => {
     const now = new Date(FAILED.getTime() + HOUR_MS);
     for (const status of ['active', 'suspended']) {
@@ -92,7 +110,16 @@ describe('retrying a dead letter (ADR-108)', () => {
   it('says why in words', () => {
     expect(DEAD_LETTER_RETRY_BLOCK_TEXT.expired).toBe('pg-boss no longer keeps the failed job');
     expect(Object.keys(DEAD_LETTER_RETRY_BLOCK_TEXT).sort()).toEqual(
-      ['company', 'expired', 'no_retries', 'receipt', 'retried', 'undeclared', 'unverified'].sort(),
+      [
+        'company',
+        'expired',
+        'no_retries',
+        'receipt',
+        'retried',
+        'settled',
+        'undeclared',
+        'unverified',
+      ].sort(),
     );
   });
 

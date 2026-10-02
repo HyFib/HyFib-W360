@@ -623,6 +623,8 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
             tenantStatus: tenants.status,
             retriedAt: deadLetters.retriedAt,
             retriedByName: users.name,
+            settledAt: deadLetters.settledAt,
+            settledEnded: deadLetters.settledEnded,
           })
           .from(deadLetters)
           .leftJoin(tenants, eq(tenants.id, deadLetters.tenantId))

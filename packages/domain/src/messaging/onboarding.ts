@@ -794,3 +794,42 @@ export async function processChannelOnboarding(
   }
   return 'skipped';
 }
+
+/**
+ * Sweep: ends a number's setup whose job ran out of retries (ADR-111). A number still in setup
+ * fails with the step it stopped at, so the company can retry the setup (a failed number takes no
+ * slot of the plan meanwhile). Setup is never repeated automatically: Meta counts registration
+ * attempts towards a limit. False when nothing was left to end.
+ */
+export async function settleChannelOnboarding(
+  tx: Tx,
+  tenantId: string,
+  channelAccountId: string,
+): Promise<boolean> {
+  const [row] = await tx
+    .select({ status: channelAccounts.status, step: channelAccounts.onboardingStep })
+    .from(channelAccounts)
+    .where(and(eq(channelAccounts.tenantId, tenantId), eq(channelAccounts.id, channelAccountId)))
+    .for('update');
+  if (!row || row.status !== 'onboarding') return false;
+  const step = row.step ?? 'subscribe_app';
+  await tx
+    .update(channelAccounts)
+    .set({
+      status: 'failed',
+      onboardingError: `Setup stopped at ${step}: Meta could not be reached after repeated attempts. Retry setup.`,
+    })
+    .where(and(eq(channelAccounts.tenantId, tenantId), eq(channelAccounts.id, channelAccountId)));
+  await recordSystemAudit(tx, tenantId, {
+    action: 'channel.setup_failed',
+    subjectType: 'channel',
+    subjectId: channelAccountId,
+    result: 'failure',
+    metadata: { step, code: null, kind: 'retries_exhausted' },
+  });
+  await emitTenantEvent(tx, tenantId, {
+    type: 'channel.updated',
+    payload: { channelAccountId },
+  });
+  return true;
+}

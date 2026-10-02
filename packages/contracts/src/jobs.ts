@@ -192,13 +192,17 @@ export const QUEUES = {
     deadLetter: 'dead-letter',
     deleteAfterHours: 168,
   },
+  /**
+   * Deletes a template at Meta. A repeat is harmless, so it retries for 4 to 5 hours; a deletion
+   * still pending after that is settled by the minute sweep (ADR-111).
+   */
   templateDelete: {
     name: 'template.delete',
     policy: 'exclusive',
-    retryLimit: 5,
+    retryLimit: 10,
     retryDelaySeconds: 30,
     retryBackoff: true,
-    retryDelayMaxSeconds: 900,
+    retryDelayMaxSeconds: 3600,
     expireInSeconds: 120,
     deadLetter: 'dead-letter',
     deleteAfterHours: 168,
@@ -328,14 +332,17 @@ export const QUEUES = {
     deadLetter: 'dead-letter',
     deleteAfterHours: 168,
   },
-  /** Checks a company's Razorpay keys against Razorpay. */
+  /**
+   * Checks a company's Razorpay keys against Razorpay. A read, so it retries for 1.5 to 2 hours;
+   * keys still being checked after that are settled by the minute sweep (ADR-111).
+   */
   commerceAccount: {
     name: 'commerce.account',
     policy: 'exclusive',
-    retryLimit: 3,
+    retryLimit: 8,
     retryDelaySeconds: 30,
     retryBackoff: true,
-    retryDelayMaxSeconds: 300,
+    retryDelayMaxSeconds: 1800,
     expireInSeconds: 60,
     deadLetter: 'dead-letter',
     deleteAfterHours: 72,

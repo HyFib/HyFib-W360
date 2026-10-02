@@ -55,8 +55,9 @@ sweep is not running: nobody is emailed about late queues until it does, so star
    `job attempt failed` entries carry the error for each attempt; the failed job itself (ids only,
    with its output) stays in its queue for the queue's retention (1 to 7 days) and its copy in
    `dead-letter` for 30 days. Fix the cause. Most queues' work is a row the minute sweeps signal
-   again, but not that of `channel.onboard`, `commerce.account`, `template.delete` and
-   `template.submit`: retry those dead letters from Operations → Queues (section 10P, ADR-108).
+   again. The minute sweep ends the work of `channel.onboard`, `commerce.account` and
+   `template.delete` for its company instead (ADR-111), and the company starts it again;
+   `template.submit` dead letters can be retried from Operations → Queues (section 10P, ADR-108).
    `boss.redrive('dead-letter', …)` does not help: the worker has already completed the copies.
 4. Index bloat warnings (`index_bloat`) → run `getReindexCommands()` output as the owner role during
    low traffic (runtime roles cannot reindex).
@@ -1983,12 +1984,16 @@ own retry does, and writes `platform.dead_letter_retried` to the platform audit 
 shows who retried it and when; if the job fails again it is listed again, as a new dead letter.
 Which ones need it:
 
-- `channel.onboard`: the number stays in setup until its job runs again (the company's "Retry
-  setup" does the same). Stuck setups are on the Onboarding tab after 30 minutes.
-- `commerce.account`: the payment account check stays open and the company's payment links are
-  refused until it runs again (the company can also save its keys again).
-- `template.delete`: retry before the account's next template sync (within 6 hours), which
-  otherwise puts Meta's status back and drops the deletion.
+- `channel.onboard`, `commerce.account` and `template.delete`: none. Within a minute the sweep ends
+  their work for the company (ADR-111): the number's setup fails with the step it stopped at (the
+  company's "Retry setup" starts it again; Meta counts registration attempts, so it is never
+  repeated automatically), the keys' check fails with a message that Razorpay could not be reached
+  (saving the keys again checks them), and a deletion goes back to Meta's last status with
+  "Deletion failed" in the template's history (Delete starts it again). The row then says "Work
+  ended for its company", or "Nothing left to end" when the work had finished or been started
+  again, and offers no Retry. These jobs retry for 2 to 3 hours (setup), 1.5 to 2 hours (keys) and
+  4 to 5 hours (deletions) before they dead-letter, and the template sync keeps a deletion for 8
+  hours while its job tries.
 - `template.submit`: after 10 minutes the template sync marks the template "submit failed" and the
   company submits it again; a retry after that does nothing.
 - Every other queue's work is signalled again by the minute sweeps once the cause is fixed: a
@@ -1999,7 +2004,15 @@ refuse the job again); the queue is not declared by this release; the queue neve
 (`billing.auto-recharge`: its sweep repeats an attempt only after looking it up at Razorpay);
 pg-boss no longer keeps the failed job (its queue's retention has passed; the time is shown under
 Retry); a receipt queue (`webhook.process`, `billing.event-process`: retry the receipt on the
-Integrations page instead); or the company is being deleted or is gone.
+Integrations page instead); the company is being deleted or is gone; or its work was ended for the
+company (ADR-111).
+
+**A dead letter of those three queues stays unsettled.** The sweep leaves one alone while its
+company is being deleted, while a job for the same work waits or runs (the company started it again,
+or a retry), and when its envelope did not verify. Otherwise look for `ending stranded work failed;
+will retry` in the worker's log: the error names the cause, and the next minute's sweep tries again.
+A setup, keys check or deletion that a company reports stuck with no dead letter is still being
+retried by its job.
 
 **Repairs.** Retry and Resolve (section 4) both need a reason of at least 10 characters and appear
 in the platform audit log as `platform.webhook_receipt_retried` and
@@ -2021,7 +2034,8 @@ the alert did not run: it runs last in the minute messaging sweep, so look in th
 failures of `ops.messaging-sweep`. On the email: open the tab it links, find the cause (the worker's
 logs, the provider's status page), fix it, then retry receipts within 7 days of receipt and resolve
 quarantine entries (section 4). Most dead letters need no action once the cause is fixed, because
-the minute sweeps signal their work again; retry those of the queues listed above (ADR-108).
+the minute sweeps signal their work again or end it for its company (ADR-111); retry those of
+`template.submit` if needed (ADR-108).
 
 **Migration 0068 failed.** It adds nullable columns and partial indexes to `ops.dead_letters`,
 `ops.webhook_receipts` and `ops.webhook_quarantine`, marks existing dead letters and erased receipts
@@ -2036,6 +2050,17 @@ rolls it all back (usually the bootstrap roles: fix them and run the migrations 
 migration runner grants the definer what it needs of `pgboss.job` after pg-boss's own install, on
 every run: if Retry fails with "permission denied for table job", run the migrations again. Web
 servers of the previous release show dead letters without Retry.
+
+**Migration 0089 failed.** It adds `settled_at` and `settled_ended` to `ops.dead_letters` (three
+checks and a partial index), creates `ops.dead_letter_work_live`, `ops.dead_letters_to_settle` and
+`ops.settle_dead_letter`, and replaces `ops.platform_retry_dead_letter` (dropped as `w360_definer`
+and recreated, as in 0086), in one transaction; a failure rolls it all back (usually the bootstrap
+roles: fix them and run the migrations again). The migration runner grants the definer
+`pgboss.job.singleton_key` after pg-boss's install, on every run: if the sweep logs "permission
+denied for table job", run the migrations again. Workers of the previous release settle nothing;
+web servers of the previous release offer Retry on a settled dead letter, which the function
+refuses. The new retry settings of `template.delete` and `commerce.account` apply to jobs queued
+after the runner updated the queues.
 
 **Migration 0072 failed.** It creates `ops.queue_waits`, adds `queues` to the kinds of
 `ops.platform_alerts` (replacing its check `platform_alerts_kind_check`) and creates

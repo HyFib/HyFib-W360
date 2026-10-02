@@ -250,10 +250,12 @@ async function grantJobSchema(client: pg.PoolClient, appRole: string): Promise<v
   await client.query(`GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA ${PGBOSS_SCHEMA} TO ${role}`);
   // ops.platform_retry_dead_letter (0086, ADR-108) makes pg-boss's own retry of a failed job: it
   // reads the job by queue, id and state and writes the state, the retry limit and the completion
-  // time, nothing else. Granted here because pg-boss installs its schema after the SQL migrations.
+  // time, nothing else. ops.dead_letter_work_live (0089, ADR-111) reads whether a job under a
+  // singleton key is waiting or running. Granted here because pg-boss installs its schema after the
+  // SQL migrations.
   await client.query(`GRANT USAGE ON SCHEMA ${PGBOSS_SCHEMA} TO w360_definer`);
   await client.query(
-    `GRANT SELECT (id, name, state, retry_limit), UPDATE (state, retry_limit, completed_on) ON ${PGBOSS_SCHEMA}.job TO w360_definer`,
+    `GRANT SELECT (id, name, state, retry_limit, singleton_key), UPDATE (state, retry_limit, completed_on) ON ${PGBOSS_SCHEMA}.job TO w360_definer`,
   );
 }
 

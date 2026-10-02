@@ -497,7 +497,7 @@ describe('retrying a dead letter (ADR-108)', () => {
     await boss.complete(queue, direct.jobId);
   });
 
-  it("gives the definer only the job columns pg-boss's retry reads and writes", async () => {
+  it("gives the definer only the job columns pg-boss's retry reads and writes, and the singleton key the stranded-work sweep reads (ADR-111)", async () => {
     const asDefiner = async (statement: string) => {
       const client = await dbs.adminPool.connect();
       try {
@@ -509,7 +509,7 @@ describe('retrying a dead letter (ADR-108)', () => {
         client.release();
       }
     };
-    await asDefiner(`SELECT id, name, state, retry_limit FROM pgboss.job LIMIT 1`);
+    await asDefiner(`SELECT id, name, state, retry_limit, singleton_key FROM pgboss.job LIMIT 1`);
     await asDefiner(
       `UPDATE pgboss.job SET state = 'retry', retry_limit = retry_limit + 1, completed_on = NULL
         WHERE name = 'it.none' AND id = gen_random_uuid() AND state = 'failed'`,
@@ -519,6 +519,7 @@ describe('retrying a dead letter (ADR-108)', () => {
       `SELECT output FROM pgboss.job LIMIT 1`,
       `SELECT completed_on FROM pgboss.job LIMIT 1`,
       `UPDATE pgboss.job SET data = NULL WHERE false`,
+      `UPDATE pgboss.job SET singleton_key = NULL WHERE false`,
       `UPDATE pgboss.job SET start_after = now() WHERE false`,
       `DELETE FROM pgboss.job WHERE false`,
       `INSERT INTO pgboss.job (name) VALUES ('x')`,

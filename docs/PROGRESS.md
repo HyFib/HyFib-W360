@@ -1,5 +1,110 @@
 # Progress
 
+## 2026-10-02 — Phase 5: work that runs out of retries ends where the company can see it (P5-10, ADR-111)
+
+Status: **Implemented and locally verified against the Graph and Razorpay stand-ins (test data
+only).** ADR-108 found three queues whose work stays in progress for good when their job
+dead-letters: number setup (`channel.onboard`: the number stays in setup), the check of a company's
+Razorpay keys (`commerce.account`: the keys stay "checking", so payment requests are refused) and
+template deletions (`template.delete`: the template stays "pending deletion" until the next template
+sync silently undoes the deletion). ADR-108 retried them by hand and left out sweeps for them
+(BACKLOG P5-10).
+
+### Completed
+
+- **Design (ADR-111):** the work is not signalled again by a sweep (these jobs fail only after
+  hours of backoff, repeats would loop while a provider is down, and Meta counts registration
+  attempts, error 133016). The minute sweep settles it instead, in the company's scope, once the
+  job has run out of retries, unless a job for the same work waits or runs again; the company starts
+  the work again itself. Deletions and key checks, whose repeats are harmless, retry longer.
+- **Migration 0089:** `ops.dead_letters.settled_at` and `settled_ended` (checks pairing them,
+  limiting them to verified dead letters of the three queues and keeping them apart from a retry;
+  a partial index for the lookup); `ops.dead_letter_work_live` (a waiting or running job under the
+  work's singleton key; the definer only); `ops.dead_letters_to_settle` and `ops.settle_dead_letter`
+  (SECURITY DEFINER, `w360_app` only); `ops.platform_retry_dead_letter` recreated to refuse a settled
+  dead letter. The migration runner grants the definer `pgboss.job.singleton_key` as well.
+- **Domain and worker:** `jobs/stranded-work.ts` (the lookup, one dead letter settled in its
+  company's scope with its mark in the same transaction, rolled back when the mark refuses, and the
+  sweep's batch); `settleTemplateDeletion` (Meta's last status back, a `delete_failed` event and one
+  for that status, an audit entry, a sync request; a template Meta reports as being deleted is left
+  to the sync), `settlePaymentAccountCheck` (keys still being checked fail) and
+  `settleChannelOnboarding` (a number still in setup fails with its step, an audit entry, a live
+  update); the template sync keeps a deletion while its last deletion event is the request itself,
+  made in the last 8 hours; the template history lists same-time events by id; `template.delete`
+  retries 10 times at most an hour apart and `commerce.account` 8 times at most 30 minutes apart;
+  the minute messaging sweep runs the batch and logs failures.
+- **Web:** the Queues tab says "Work ended for its company" or "Nothing left to end" for a settled
+  dead letter instead of offering Retry; the template history labels "Deletion failed".
+- **Tests:**
+  - Unit: a settled dead letter offers no retry, before any other reason, in its own words.
+  - Integration (`stranded-work.test.ts`, 8, against real pg-boss and the Graph stand-in): a
+    template deletion ended once, back to the status Meta reported while it was tried, with
+    "Deletion failed" and that status at the same time and listed in that order on its page, the
+    audit entry and the sync request, the dead letter marked, never settled again, and the company
+    deleting it again; a deletion left alone while a job for it waits or runs, even after the
+    lookup, kept by the sync at 7 hours and not at 9, then nothing left; a template Meta reports as
+    being deleted left to the sync, and one Meta reports deleted applied at once; a deletion Meta
+    refused not kept; keys saved again waited for, then the check ended once in a sweep that finds
+    nothing left for the newer dead letter and one naming no account; a number's setup left alone
+    while a retried setup waits, then failed with its step, an audit entry and a live update, and
+    retried by the company; which dead letters are listed and marked (unverified, another queue,
+    another kind, a company being deleted, another company's scope, no scope, no answer, a
+    reference naming no record), the table's checks and the marks no role but the definer writes;
+    the console refusing a settled dead letter and showing why, and a retried one never settled,
+    even after its job fails again. The isolation suite covers the three functions' grants, and
+    `dead-letter-retries.test.ts` the definer's grant of the singleton key.
+  - e2e (`dead-letter-retry.spec.ts`, chromium and mobile-chromium): the running worker's minute
+    sweep settles a company's template deletion dead letter whose template is gone, and the Queues
+    tab says "Nothing left to end" for it and "Work ended for its company" for an ended one,
+    offering no retry.
+  - The "Deletion failed" label in a template's history (also used for deletions Meta refuses) has
+    no test of its own.
+- **Docs:** ADR-111; SECURITY; THREAT-MODEL T124; RUNBOOKS (section 3, which dead letters need a
+  retry, an unsettled dead letter, migration 0089); ARCHITECTURE; DATA-RETENTION; BACKLOG P5-10;
+  FEATURE-MATRIX H-034.
+- **Found while building:**
+  - A first draft compared the dead job's first queueing time with the keys' row: pg-boss's time
+    reaches the worker through a JavaScript date, in milliseconds, while the row's time is in
+    microseconds, so the save that queued the check would have looked newer than its own job. The
+    live-job check covers saves made since instead.
+  - A template sync keeping every pending deletion for hours would also have kept one Meta refused
+    outright, which the sync restored at once before; the keep needs the request to be the last
+    deletion event.
+- **Mutation checks:**
+  - 20 in migration 0089, all caught: the live check (key checks of keys saved again, running jobs,
+    the deletion and setup keys); the lookup (companies being deleted, the kind, settled or retried
+    dead letters, live jobs, oldest first); the mark (live jobs, a console retry, the company
+    scope, the kind, its answer, no answer); the console retry of a settled dead letter; the three
+    checks.
+  - 24 in the services and the sweep, all caught after the tests were strengthened: the template
+    settle (a deletion Meta reports, the status it restores, the sync request, a deletion that is
+    over, its two events, the audit), the sync's keep (a deletion Meta reports done or refused,
+    forever, at 10 and 6 hours, the reason), the history's order, the keys and setup settles (their
+    guards, the check time, the live update, the audit), the sweep (committing work a job is doing,
+    odd references, its counts, ending the wrong work) and the console's reason.
+  - 4 through the e2e test, all caught: the worker's sweep settling nothing, the Queues tab without
+    the settled marker, the marker saying the opposite, the console reading no settled time.
+  - The first run of 42 missed one: the sweep's counts swapped, because the batch it was tested with
+    ended one dead letter and found nothing left for one. The batch now has two of one kind. The
+    template mutations were run again after the template settle gained its second event, with two
+    more for that event and the history's order, all caught.
+
+### Test commands and results (local, 2026-10-02)
+
+| Command                                                                                                                                                                                                        | Result                                                                                    |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                                                           | clean                                                                                     |
+| `pnpm test`                                                                                                                                                                                                    | 485 passed                                                                                |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                                                                                            | 696 passed on each                                                                        |
+| `pnpm build`, then `dead-letter-retry.spec.ts`, `platform-ops.spec.ts`, `templates.spec.ts`, `commerce.spec.ts` and `onboarding.spec.ts` on chromium and mobile-chromium, on a fresh database migrated to 0089 | 16 passed                                                                                 |
+| Mutation checks                                                                                                                                                                                                | 48 regressions, all caught (4 through the e2e test; the first run missed 1, listed above) |
+| gitleaks 8.30.1 on the commit                                                                                                                                                                                  | no leaks                                                                                  |
+
+### Known gaps
+
+- Settling the work of queues whose work the sweeps already signal again, a company email about
+  ended work (each page shows it), and automatic repeats of number setup are not built.
+
 ## 2026-10-02 — Phase 5: packs of extra API requests (P5-01, P5-08, ADR-110)
 
 Status: **Implemented and locally verified against the Razorpay stand-in (test data only).** A plan

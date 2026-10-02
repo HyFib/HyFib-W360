@@ -137,7 +137,8 @@ so grants issued after the transfer would silently grant nothing (migration 0002
 - A work job that fails its last retry moves to the `dead-letter` queue (the sweeps, which run
   again within a minute, have none); the worker records it in `ops.dead_letters` without its error
   message (§6P), and platform administrators can send the failed job back to its queue once
-  (ADR-108).
+  (ADR-108). The minute sweep ends, in the company's scope, the work of the three queues whose work
+  no sweep signals again (ADR-111).
 - Workers stop gracefully on SIGTERM (stop fetching, wait up to 30 s, close pools).
 
 ## 5. Email **[built]**
@@ -1226,8 +1227,29 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   its exclusive queue. The migration runner grants the definer role SELECT on `pgboss.job`'s id,
   name, state and retry limit and UPDATE on its state, retry limit and completion time, after
   pg-boss's install. `deadLetterRetryBlock` is the console's copy of those rules, by this release's
-  queue catalog, with the time the queue's retention ends. Retries matter for `channel.onboard`,
-  `commerce.account`, `template.delete` and `template.submit`, whose work no sweep signals again.
+  queue catalog, with the time the queue's retention ends. Retries matter for `template.submit`,
+  whose work no sweep signals again, and for the three queues below until their work is settled.
+- **Stranded work** (ADR-111, migration 0089, `jobs/stranded-work.ts`): `channel.onboard`,
+  `commerce.account` and `template.delete` leave their work in progress when their job
+  dead-letters. The minute messaging sweep lists, through `ops.dead_letters_to_settle` (SECURITY
+  DEFINER, the worker role only), the verified dead letters of those queues whose envelope names
+  its own queue, neither retried nor settled, of companies not being deleted, whose work no job is
+  doing again (`ops.dead_letter_work_live`: a waiting or running job under the work's singleton
+  key; the definer reads `pgboss.job.singleton_key` for it). For each, in the company's scope
+  (`authorizedTenantScope`, the company coming from the dead letter as the worker recorded it from
+  the verified envelope) and one transaction, it ends the work and marks the dead letter through
+  `ops.settle_dead_letter`, which checks the scope, the queue and the kind, and returns false when
+  the dead letter was retried or settled meanwhile or a job for its work waits or runs again; the
+  sweep then rolls back, so work a job is doing is never ended under it. The work: a template
+  still pending deletion goes back to Meta's last status (a `delete_failed` event and one for that
+  status, audit, sync request; one Meta itself reports as being deleted is left to the sync; the
+  template's history lists same-time events newest first by id), keys still being checked
+  fail, and a number still in setup fails with the step it stopped at (audit, live update). A
+  settled dead letter keeps `settled_at` and `settled_ended` (whether anything was left to end) and
+  is never retried from the console (a check keeps the two marks apart). The template sync keeps
+  `pending_deletion` while the template's last deletion event is the request itself, made in the
+  last 8 hours; `template.delete` and `commerce.account` retry longer than before (10 and 8 times,
+  at most an hour and 30 minutes apart).
 - **Failure alerts** (ADR-091, migration 0068, `platform/failure-alerts.ts`): the minute messaging
   sweep emails every platform administrator about each dead letter, each receipt that used all its
   attempts and each unresolved quarantine entry, once (`alerted_at` marks set by
