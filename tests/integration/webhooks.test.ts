@@ -38,17 +38,19 @@ import {
   verifyWebhookSignature,
   WEBHOOK_LIMITS,
   webhookSecretAad,
+  type WebhookDeliveryLogger,
   type WebhookEventType,
 } from '@w360/domain';
-import { acceptInvitation, createUser, invite } from './helpers';
+import { acceptInvitation, createUser, failOnLog, invite } from './helpers';
 import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './whatsapp-fixture';
 
 /**
  * Outgoing webhooks (P5-09, ADR-053) against real PostgreSQL, the egress client and a local
  * receiver (reached through the loopback allowance that exists for tests only): endpoints and their
  * secrets, capture by the database triggers for every event type, signed at-least-once delivery,
- * the retry schedule, interrupted attempts, automatic disabling with its notice, replays and test
- * events, secret rotation, the address guard, dispatch and retention, and isolation.
+ * the retry schedule, interrupted attempts, deliveries that cannot be prepared, automatic
+ * disabling with its notice, replays and test events, secret rotation, the address guard, dispatch
+ * and retention, and isolation.
  */
 let fx: WhatsAppFixture;
 let receiver: Server;
@@ -111,7 +113,11 @@ const egress = (resolveTo: ResolvedAddress[] = [{ address: '127.0.0.1', family: 
     { resolve: async () => resolveTo },
   );
 
-function deliveryDeps(clock: Clock = systemClock, client: EgressClient = egress()) {
+function deliveryDeps(
+  clock: Clock = systemClock,
+  client: EgressClient = egress(),
+  logger: WebhookDeliveryLogger = failOnLog,
+) {
   const jobs = fx.jobs();
   return {
     db: fx.dbs.app,
@@ -122,11 +128,20 @@ function deliveryDeps(clock: Clock = systemClock, client: EgressClient = egress(
     jobs,
     signer: fx.signer,
     notices: { outbox: { keyring: fx.keyring, jobs, signer: fx.signer }, appBaseUrl: APP_BASE_URL },
+    logger,
   };
 }
 
-const deliverDue = (c: Company, clock?: Clock, client?: EgressClient) =>
-  processWebhookDeliveries(deliveryDeps(clock, client), authorizedTenantScope(c.tenant.id, null));
+const deliverDue = (
+  c: Company,
+  clock?: Clock,
+  client?: EgressClient,
+  logger?: WebhookDeliveryLogger,
+) =>
+  processWebhookDeliveries(
+    deliveryDeps(clock, client, logger),
+    authorizedTenantScope(c.tenant.id, null),
+  );
 
 const webhooks = (allowLoopbackForTests = true, clock: Clock = systemClock) =>
   createWebhooksService({
@@ -845,6 +860,193 @@ describe('outcomes that lost their delivery', () => {
     const live = await webhooks().sendTest(on.owner, { endpointId: on.id });
     expect(await deliverDue(c)).toMatchObject({ attempted: 1, succeeded: 1, failed: 12 });
     expect(await deliveriesOf(on.id)).toMatchObject([{ id: live.deliveryId, state: 'succeeded' }]);
+  });
+});
+
+describe('deliveries that cannot be prepared', () => {
+  /** A consent.changed event and its delivery written straight to the tables, due a minute ago. */
+  async function consentEventDirectly(c: Company, endpointId: string, source: string) {
+    const eventId = uuidv7();
+    const deliveryId = uuidv7();
+    await fx.dbs.app.run(authorizedTenantScope(c.tenant.id, null), async (tx) => {
+      await tx.insert(webhookEvents).values({
+        id: eventId,
+        tenantId: c.tenant.id,
+        type: 'consent.changed',
+        contactId: uuidv7(),
+        detail: { purpose: 'marketing', action: 'opt_out', source },
+      });
+      await tx.insert(webhookDeliveries).values({
+        id: deliveryId,
+        tenantId: c.tenant.id,
+        endpointId,
+        eventId,
+        nextAttemptAt: new Date(Date.now() - 60_000),
+      });
+    });
+    return { eventId, deliveryId };
+  }
+
+  /** A delivery job's logger that keeps what it is given. */
+  function capturedLog() {
+    const lines: { fields: Record<string, unknown>; message: string }[] = [];
+    const logger: WebhookDeliveryLogger = {
+      error: (fields, message) => void lines.push({ fields, message }),
+    };
+    return { lines, logger };
+  }
+
+  it('fail alone without an attempt: the batch is delivered, later runs go on, a replay sends it once fixed, and the log quotes nothing', async () => {
+    const c = await fx.company();
+    const e = await addEndpoint(c, 'ok', ['consent.changed']);
+    // First in the batch: an event whose time has no ISO form, standing in for any row the builder
+    // cannot handle. Its payload would carry `source`.
+    const content = 'Priya Sharma +919812345678';
+    const bad = await consentEventDirectly(c, e.id, content);
+    await fx.query(`UPDATE app.webhook_events SET occurred_at = 'infinity' WHERE id = $1`, [
+      bad.eventId,
+    ]);
+    const good = await webhooks().sendTest(e.owner, { endpointId: e.id });
+
+    const log = capturedLog();
+    expect(await deliverDue(c, systemClock, egress(), log.logger)).toMatchObject({
+      attempted: 1,
+      succeeded: 1,
+      retrying: 0,
+      failed: 1,
+    });
+    const rows = new Map((await deliveriesOf(e.id)).map((d) => [d.id, d]));
+    expect(rows.get(bad.deliveryId)).toMatchObject({
+      state: 'failed',
+      attempts: 0,
+      last_attempt_at: null,
+      lease_until: null,
+      last_error: 'payload_failed',
+    });
+    expect(rows.get(good.deliveryId)).toMatchObject({ state: 'succeeded', attempts: 1 });
+    const requests = requestsTo(e.path);
+    expect(requests.map((r) => r.headers['w360-delivery-id'])).toEqual([good.deliveryId]);
+    expect(signedWith(requests[0]!, e.secret)).toBe(true);
+    // One line with ids and the error's class: not the payload, the event or the error's message.
+    expect(log.lines).toEqual([
+      {
+        message: 'webhook delivery could not be prepared; failed as payload_failed',
+        fields: {
+          tenantId: c.tenant.id,
+          deliveryId: bad.deliveryId,
+          endpointId: e.id,
+          eventType: 'consent.changed',
+          stage: 'payload',
+          errorClass: 'RangeError',
+          errorCode: null,
+        },
+      },
+    ]);
+    expect(JSON.stringify(log.lines)).not.toMatch(/Priya|9812345678|opt_out|Invalid time value/);
+    expect((await endpointRow(e.id)).last_failure_at).toBeNull();
+
+    // Nothing is due, so the sweep does not wake the company for it; a later run delivers new
+    // events and leaves it alone (`failOnLog` throws at a delivery that cannot be prepared).
+    expect(await findWebhookDispatchDue(fx.dbs.app, 10_000)).not.toContain(c.tenant.id);
+    const next = await webhooks().sendTest(e.owner, { endpointId: e.id });
+    expect(await deliverDue(c, later(86_400_000))).toMatchObject({
+      attempted: 1,
+      succeeded: 1,
+      failed: 0,
+    });
+    expect(requestsTo(e.path).map((r) => r.headers['w360-delivery-id'])).toEqual([
+      good.deliveryId,
+      next.deliveryId,
+    ]);
+
+    // Once the cause is fixed, replaying failed deliveries sends it (unlike `event_gone`).
+    await fx.query('UPDATE app.webhook_events SET occurred_at = now() WHERE id = $1', [
+      bad.eventId,
+    ]);
+    expect(await webhooks().replayFailed(e.owner, { endpointId: e.id, period: '1h' })).toEqual({
+      queued: 1,
+      more: false,
+    });
+    expect(await deliverDue(c)).toMatchObject({ attempted: 1, succeeded: 1, failed: 0 });
+    const replayed = requestsTo(e.path).at(-1)!;
+    expect(replayed.headers['w360-event-id']).toBe(bad.eventId);
+    expect(consentChangedPayloadSchema.parse(JSON.parse(replayed.body)).data.source).toBe(content);
+  });
+
+  it('a secret the keyring cannot open fails each delivery to its endpoint alone', async () => {
+    const c = await fx.company();
+    const broken = await addEndpoint(c, 'ok', ['consent.changed']);
+    const fine = await addEndpoint(c, 'ok', ['consent.changed']);
+    // The secret's version no longer matches what its ciphertext is bound to (as after a botched
+    // restore), so opening it fails authentication.
+    await fx.query('UPDATE app.webhook_endpoints SET secret_version = 2 WHERE id = $1', [
+      broken.id,
+    ]);
+    const first = await webhooks().sendTest(broken.owner, { endpointId: broken.id });
+    const second = await webhooks().sendTest(broken.owner, { endpointId: broken.id });
+    const ok = await webhooks().sendTest(fine.owner, { endpointId: fine.id });
+
+    const log = capturedLog();
+    expect(await deliverDue(c, systemClock, egress(), log.logger)).toMatchObject({
+      attempted: 1,
+      succeeded: 1,
+      failed: 2,
+    });
+    expect(await deliveriesOf(broken.id)).toMatchObject([
+      { id: first.deliveryId, state: 'failed', attempts: 0, last_error: 'payload_failed' },
+      { id: second.deliveryId, state: 'failed', attempts: 0, last_error: 'payload_failed' },
+    ]);
+    expect(requestsTo(broken.path)).toHaveLength(0);
+    expect(await deliveriesOf(fine.id)).toMatchObject([{ id: ok.deliveryId, state: 'succeeded' }]);
+    expect(log.lines.map((line) => line.fields)).toEqual(
+      [first, second].map((d) => ({
+        tenantId: c.tenant.id,
+        deliveryId: d.deliveryId,
+        endpointId: broken.id,
+        eventType: 'ping',
+        stage: 'signature',
+        errorClass: 'Error',
+        errorCode: null,
+      })),
+    );
+    expect(JSON.stringify(log.lines)).not.toMatch(/authenticate|whsec_/);
+  });
+
+  it('a database error while building fails only its delivery: the claim goes on after its savepoint', async () => {
+    const c = await fx.company();
+    const e = await addEndpoint(c, 'ok', ['consent.changed']);
+    const consent = await consentEventDirectly(c, e.id, 'agent');
+    const ping = await webhooks().sendTest(e.owner, { endpointId: e.id });
+    // The consent payload reads the contact. With contacts locked, that read waits past the lock
+    // timeout (5 seconds) and fails inside the claim's transaction.
+    const log = capturedLog();
+    const holder = await fx.dbs.adminPool.connect();
+    let run: unknown;
+    try {
+      await holder.query('BEGIN');
+      await holder.query('LOCK TABLE app.contacts IN ACCESS EXCLUSIVE MODE');
+      run = await deliverDue(c, systemClock, egress(), log.logger);
+    } finally {
+      await holder.query('ROLLBACK');
+      holder.release();
+    }
+    expect(run).toMatchObject({ attempted: 1, succeeded: 1, failed: 1 });
+    expect(await deliveriesOf(e.id)).toMatchObject([
+      { id: consent.deliveryId, state: 'failed', attempts: 0, last_error: 'payload_failed' },
+      { id: ping.deliveryId, state: 'succeeded', attempts: 1 },
+    ]);
+    // The class and the SQLSTATE (lock_not_available), not the failed query or its parameters.
+    expect(log.lines.map((line) => line.fields)).toEqual([
+      {
+        tenantId: c.tenant.id,
+        deliveryId: consent.deliveryId,
+        endpointId: e.id,
+        eventType: 'consent.changed',
+        stage: 'payload',
+        errorClass: 'DrizzleQueryError',
+        errorCode: '55P03',
+      },
+    ]);
   });
 });
 

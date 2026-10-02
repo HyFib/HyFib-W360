@@ -1,5 +1,86 @@
 # Progress
 
+## 2026-10-02 — Phase 5: webhook deliveries that cannot be prepared (P5-09, ADR-053)
+
+Status: **Implemented and locally verified (unit and integration tests against real PostgreSQL;
+the e2e suite was not run, see below).** A delivery whose payload or signature could not be built
+was rethrown from the claim loop of `webhook.deliver`, rolling back its whole batch: none of the
+batch was claimed, the failing delivery used no attempt (so the cap of eight never ended it), and
+the minute sweep woke the job for the same deliveries every minute until the job was dead-lettered,
+then again. One such delivery held up every delivery of its company and filled the dead letters
+with the same failure. Found while auditing which queues' work the minute sweeps signal again
+after a dead letter (dead-letter retries, ADR-108).
+
+### Completed
+
+- **Design (ADR-053, dated note):** such a delivery fails at once as `payload_failed`, as
+  `event_gone` does, instead of counting an attempt: no request is made, attempts and
+  `W360-Delivery-Attempt` count requests (ADR-083), and the endpoint's health is left alone. A retry
+  would fail the same way; a replay (one delivery, or ADR-095's replay of failed deliveries, which
+  leaves out only `event_gone`) sends it once HyFib has fixed the cause. Accepted: a database error
+  that a retry would have passed (a lock or statement timeout) also ends its delivery.
+- **Domain (`webhooks/delivery.ts`):** each payload is built in a savepoint, so a database error
+  leaves the claim usable, then signed; any error but `WebhookEventGoneError` ends the delivery as
+  `payload_failed` and the rest of the batch is claimed and sent. Once the claim commits, the job
+  logs each such delivery through its new `logger` dependency: company, delivery, endpoint, event
+  type, `stage` (`payload` or `signature`), the error's class and code.
+- **Core:** `errorClassAndCode` (`errors.ts`): an error's class and the first code along its causes
+  (an application code, a Node.js code or a SQLSTATE), never its message, stack or details; drizzle's
+  `DrizzleQueryError` repeats the failed query's parameters in its message and keeps the SQLSTATE
+  on its cause.
+- **Labels and API:** `webhookErrorLabel` names `payload_failed` "HyFib could not build or sign the
+  request", and a code that ended a delivery without an attempt now outranks the status an earlier
+  attempt left: a delivery ended as `event_gone`, `endpoint_disabled` or `interrupted` after an
+  HTTP failure showed that failure's "HTTP 5xx" in Settings → Webhooks. The API returns the code as
+  before; the OpenAPI descriptions of a delivery's `status` and `lastError` name it.
+- **Worker:** the delivery job gets the worker's logger.
+- **Tests:**
+  - Unit (3 new): `errorClassAndCode` (class, and code through causes; codes that could quote data
+    and thrown values that are not errors left out); the label and the precedence of an ending code
+    over an earlier attempt's status.
+  - Integration (`webhooks.test.ts`, 3 new):
+    - an event the builder cannot describe (`occurred_at` set to infinity, which has no ISO form;
+      no test hook in app code), first in a batch with a test event: it fails as `payload_failed`
+      with no attempt, the test event is delivered and signed, the endpoint's health is untouched,
+      one log line has the ids and `RangeError` and nothing of the payload, the event or the
+      error's message, the sweep's lookup no longer finds the company, a later run delivers new
+      events without trying it again, and once the row is fixed a replay of failed deliveries
+      sends it;
+    - an endpoint whose secret the keyring cannot open (its version changed under its
+      ciphertext): each of its deliveries fails alone (`stage: signature`) and another endpoint's
+      delivery goes out;
+    - a database error while building (contacts locked past the 5-second lock timeout): the
+      consent delivery fails with `DrizzleQueryError` and `55P03` logged, and the test event in the
+      same claim is delivered.
+  - Integration elsewhere: the three webhook suites' delivery jobs log through `failOnLog`
+    (`helpers.ts`), which fails a test if any delivery could not be prepared.
+- **Docs:** ADR-053 (dated note); ARCHITECTURE (delivery, replays of failed deliveries); RUNBOOKS
+  10O (`payload_failed`: causes, the log line, unreadable secrets, replays); SECURITY (the log
+  line); THREAT-MODEL T74. No status changes, so the feature matrix and backlog are unchanged.
+- **Found while finishing:**
+  - Rotating a secret the keyring cannot open does not help for 24 hours: the previous secret keeps
+    signing, so opening it keeps failing. The runbook says to restore the key, or to delete the
+    endpoint and add it again.
+  - `scripts/feature-matrix/build.py` writes compact tables, so running it alone rewrote 221 lines
+    of the matrix; `prettier --write docs/FEATURE-MATRIX.md` restores the committed layout (no
+    change here).
+- **Mutation checks:** 13 regressions tried one at a time, 13 caught.
+  - 8 in the delivery job: rethrowing as before; no savepoint (ending the delivery then fails with
+    `25P02` and the claim rolls back); the error's message logged; ending as `event_gone`; signing
+    outside the `try`; nothing logged; `stage` never set to `signature`; the delivery left pending.
+  - 3 in `errorClassAndCode`: the error's `name` as its class (`Error` for drizzle's); causes not
+    followed; any string taken as a code.
+  - 2 in the label: the status first again; no label for `payload_failed`.
+
+### Test commands and results (local, 2026-10-02, fresh database)
+
+- `pnpm lint`, `pnpm format:check`, `pnpm typecheck`: pass.
+- `pnpm test`: 53 files, 458 tests pass.
+- `pnpm test:integration` (PostgreSQL 18): 38 files, 641 tests pass.
+- `pnpm test:e2e`: not run. The settings page is unchanged apart from the label of a delivery with
+  both an ending code and an earlier status, which is unit tested; the webhook spec also needs a
+  built app, web, worker, Mailpit and `E2E_HTTP_HOST` resolving to 127.0.0.1.
+
 ## 2026-10-01 — Phase 5: refund requests of plan payments (P5-07, ADR-104)
 
 Status: **Implemented and locally verified against the Razorpay stand-in (test data only).** Since

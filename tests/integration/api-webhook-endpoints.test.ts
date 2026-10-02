@@ -18,7 +18,7 @@ import {
   type ApiKeysService,
   type ApiScope,
 } from '@w360/domain';
-import { acceptInvitation, createUser, invite } from './helpers';
+import { acceptInvitation, createUser, failOnLog, invite } from './helpers';
 import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './whatsapp-fixture';
 
 /**
@@ -110,6 +110,7 @@ async function deliverDue(c: Company) {
         outbox: { keyring: fx.keyring, jobs, signer: fx.signer },
         appBaseUrl: APP_BASE_URL,
       },
+      logger: failOnLog,
     },
     authorizedTenantScope(c.tenant.id, null),
   );

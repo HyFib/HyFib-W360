@@ -312,7 +312,7 @@ export const apiWebhookDeliverySchema = z.object({
   status: z
     .enum(WEBHOOK_DELIVERY_STATES)
     .describe(
-      'pending: waiting for its next attempt; delivering: an attempt is under way; succeeded: the endpoint answered 2xx; failed: every attempt failed, the endpoint was turned off, or the event is gone.',
+      'pending: waiting for its next attempt; delivering: an attempt is under way; succeeded: the endpoint answered 2xx; failed: every attempt failed, the endpoint was turned off, the event is gone, or HyFib could not build or sign the request.',
     ),
   attempts: z.number().int(),
   nextAttemptAt: z.iso
@@ -325,7 +325,7 @@ export const apiWebhookDeliverySchema = z.object({
     .string()
     .nullable()
     .describe(
-      'Why the last attempt failed, as a code (for example `invalid_status`, `timeout`, `endpoint_disabled` or `event_gone`).',
+      'Why the last attempt failed, or why the delivery ended without one, as a code (for example `invalid_status`, `timeout`, `endpoint_disabled`, `event_gone`, or `payload_failed`: HyFib could not build or sign the request, which a replay sends once HyFib has fixed the cause).',
     ),
   lastDurationMs: z.number().int().nullable(),
   deliveredAt: z.iso.datetime().nullable(),
