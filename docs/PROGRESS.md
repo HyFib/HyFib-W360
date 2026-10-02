@@ -38,7 +38,7 @@ after a dead letter (dead-letter retries, ADR-108).
   - Unit (3 new): `errorClassAndCode` (class, and code through causes; codes that could quote data
     and thrown values that are not errors left out); the label and the precedence of an ending code
     over an earlier attempt's status.
-  - Integration (`webhooks.test.ts`, 3 new):
+  - Integration (`webhooks.test.ts`, 4 new):
     - an event the builder cannot describe (`occurred_at` set to infinity, which has no ISO form;
       no test hook in app code), first in a batch with a test event: it fails as `payload_failed`
       with no attempt, the test event is delivered and signed, the endpoint's health is untouched,
@@ -51,12 +51,20 @@ after a dead letter (dead-letter retries, ADR-108).
       delivery goes out;
     - a database error while building (contacts locked past the 5-second lock timeout): the
       consent delivery fails with `DrizzleQueryError` and `55P03` logged, and the test event in the
-      same claim is delivered.
+      same claim is delivered;
+    - 205 due deliveries that cannot be built: the first run ends 200 with no attempt and queues
+      its successor, whose run ends the other 5.
   - Integration elsewhere: the three webhook suites' delivery jobs log through `failOnLog`
     (`helpers.ts`), which fails a test if any delivery could not be prepared.
-- **Docs:** ADR-053 (dated note); ARCHITECTURE (delivery, replays of failed deliveries); RUNBOOKS
-  10O (`payload_failed`: causes, the log line, unreadable secrets, replays); SECURITY (the log
-  line); THREAT-MODEL T74. No status changes, so the feature matrix and backlog are unchanged.
+- **Review fix (Codex on PR #20):** the job's budget of 200 counted attempts only, so deliveries
+  ended at their claim never spent it: one job ended a whole backlog that could not be built, never
+  handing over while such deliveries kept arriving, and a slow failure (a lock timeout) took seconds
+  each. Deliveries ended at their claim, whatever the reason, now count toward the budget, though
+  not as attempts (`attempted` still counts requests).
+- **Docs:** ADR-053 (dated note); ARCHITECTURE (delivery, the job budget, replays of failed
+  deliveries); RUNBOOKS 10O (`payload_failed`: causes, backlogs, the log line, unreadable secrets,
+  replays); SECURITY (the log line); THREAT-MODEL T74. No status changes, so the feature matrix and
+  backlog are unchanged.
 - **Found while finishing:**
   - Rotating a secret the keyring cannot open does not help for 24 hours: the previous secret keeps
     signing, so opening it keeps failing. The runbook says to restore the key, or to delete the
@@ -64,10 +72,11 @@ after a dead letter (dead-letter retries, ADR-108).
   - `scripts/feature-matrix/build.py` writes compact tables, so running it alone rewrote 221 lines
     of the matrix; `prettier --write docs/FEATURE-MATRIX.md` restores the committed layout (no
     change here).
-- **Mutation checks:** 13 regressions tried one at a time, 13 caught.
-  - 8 in the delivery job: rethrowing as before; no savepoint (ending the delivery then fails with
+- **Mutation checks:** 14 regressions tried one at a time, 14 caught.
+  - 9 in the delivery job: rethrowing as before; no savepoint (ending the delivery then fails with
     `25P02` and the claim rolls back); the error's message logged; ending as `event_gone`; signing
-    outside the `try`; nothing logged; `stage` never set to `signature`; the delivery left pending.
+    outside the `try`; nothing logged; `stage` never set to `signature`; the delivery left pending;
+    the budget counting attempts only (one job ended all 205 and handed nothing over).
   - 3 in `errorClassAndCode`: the error's `name` as its class (`Error` for drizzle's); causes not
     followed; any string taken as a code.
   - 2 in the label: the status first again; no label for `payload_failed`.
@@ -76,7 +85,7 @@ after a dead letter (dead-letter retries, ADR-108).
 
 - `pnpm lint`, `pnpm format:check`, `pnpm typecheck`: pass.
 - `pnpm test`: 53 files, 458 tests pass.
-- `pnpm test:integration` (PostgreSQL 18): 38 files, 641 tests pass.
+- `pnpm test:integration` (PostgreSQL 18): 38 files, 642 tests pass.
 - `pnpm test:e2e`: not run. The settings page is unchanged apart from the label of a delivery with
   both an ending code and an earlier status, which is unit tested; the webhook spec also needs a
   built app, web, worker, Mailpit and `E2E_HTTP_HOST` resolving to 127.0.0.1.

@@ -1565,11 +1565,12 @@ restricted companies are not delivered to until they are active again. A deliver
 longer than 45 seconds belongs to a lost worker; the next run attempts it again (the receiver may see
 it twice and deduplicates on the event id).
 
-**A delivery failed as `payload_failed` ("HyFib could not build or sign the request").** HyFib
-could not build the event's payload or sign it: a bug in a payload builder, an event it cannot
-describe, a database error while building (a lock or statement timeout included), or an endpoint
-secret the keyring cannot open. No request was made: the delivery used no attempt, the endpoint's
-health is unchanged and the company's other deliveries went on. The worker logs
+**A delivery failed as `payload_failed` ("HyFib could not build or sign the request").** HyFib could
+not build the event's payload or sign it: a bug in a payload builder, an event it cannot describe, a
+database error while building (a lock or statement timeout included), or an endpoint secret the
+keyring cannot open. No request was made: the delivery used no attempt, the endpoint's health is
+unchanged and the company's other deliveries went on. A backlog of them is ended 200 deliveries per
+job, each job queueing the next (`handedOver` in `webhooks delivered`). The worker logs
 `webhook delivery could not be prepared; failed as payload_failed` with `tenantId`, `deliveryId`,
 `endpointId`, `eventType`, `stage` (`payload` or `signature`), `errorClass` and `errorCode` (a
 SQLSTATE for a database error), never the payload or the error's message. One `eventType` failing
@@ -1580,11 +1581,10 @@ restored with the wrong version. Restore the key; if it cannot come back, the co
 endpoint and adds it again (rotating keeps the unreadable previous secret signing for 24 hours, so
 those deliveries keep failing). `errorCode` `55P03` or `57014` is a lock or statement timeout. Once
 the cause is fixed, the company replays: "Replay failed deliveries" on the endpoint's page, or
-`POST /webhook-endpoints/{id}/replay-failed`, includes
-`payload_failed` deliveries (unlike `event_gone`). Until 2026-10-02 such a delivery failed the whole
-`webhook.deliver` job instead: none of the company's deliveries went out, the minute sweep woke the
-job again every minute and the dead letters filled with the same failure. Deploying the change ends
-that by itself.
+`POST /webhook-endpoints/{id}/replay-failed`, includes `payload_failed` deliveries (unlike
+`event_gone`). Until 2026-10-02 such a delivery failed the whole `webhook.deliver` job instead: none
+of the company's deliveries went out, the minute sweep woke the job again every minute and the dead
+letters filled with the same failure. Deploying the change ends that by itself.
 
 **An endpoint was turned off automatically.** It failed every attempt for 72 hours; its waiting
 deliveries were marked failed (`endpoint_disabled`), owners and administrators got the

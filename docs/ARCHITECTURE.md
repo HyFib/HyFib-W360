@@ -1152,7 +1152,8 @@ LOCKED`; pending ones due now, then `delivering` ones whose lease expired), buil
   outcome whose attempt no longer owns the delivery (lease expired and re-claimed, or the endpoint
   deleted) is dropped. A 2xx answer succeeds; anything else is retried at 1 min, 5 min, 30 min, 2 h,
   6 h, 12 h and 24 h, and the eighth failure fails the delivery; an interrupted delivery with no
-  attempt left fails as `interrupted`. After 200 attempts a job queues its successor.
+  attempt left fails as `interrupted`. After 200 deliveries, attempted or ended at their claim, a
+  job queues its successor.
 - **Signing:** `W360-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256 of "<t>.<body>">`, one `v1` per
   secret (the previous secret also signs for 24 hours after a rotation), with `W360-Event-Id`,
   `W360-Event-Type`, `W360-Delivery-Id`, `W360-Delivery-Attempt` and `User-Agent:

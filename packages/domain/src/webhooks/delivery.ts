@@ -45,7 +45,10 @@ export const WEBHOOK_USER_AGENT = 'HyFib-W360-Webhooks/1';
 const LEASE_MARGIN_MS = 35_000;
 /** Deliveries claimed and sent together. */
 const BATCH_SIZE = 10;
-/** A job hands over to a successor after this many deliveries, so one company cannot hold a worker. */
+/**
+ * A job hands over to a successor after this many deliveries, attempted or ended at their claim, so
+ * one company cannot hold a worker.
+ */
 const JOB_DELIVERY_BUDGET = 200;
 
 export interface WebhookNoticeDeps {
@@ -176,9 +179,13 @@ export async function processWebhookDeliveries(
     failed: 0,
     handedOver: false,
   };
-  while (run.attempted < JOB_DELIVERY_BUDGET) {
+  // Deliveries ended at their claim count toward the budget, though not as attempts: a backlog that
+  // cannot be built (`payload_failed`) hands over like one that is attempted.
+  let ended = 0;
+  while (run.attempted + ended < JOB_DELIVERY_BUDGET) {
     const batch = await claimDeliveries(deps, scope, BATCH_SIZE);
     run.failed += batch.ended;
+    ended += batch.ended;
     // Logged once the claim that ended them committed: ids and the error's class and code only.
     for (const unprepared of batch.unprepared) {
       deps.logger.error(

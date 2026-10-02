@@ -1048,6 +1048,46 @@ describe('deliveries that cannot be prepared', () => {
       },
     ]);
   });
+
+  it('count toward the job budget, though not as attempts: a backlog of them hands over to a successor', async () => {
+    const c = await fx.company();
+    const e = await addEndpoint(c, 'ok', ['consent.changed']);
+    // 205 due test events that cannot be built: more than a job's 200 deliveries.
+    await fx.query(
+      `WITH events AS (
+         INSERT INTO app.webhook_events (id, tenant_id, type, occurred_at)
+         SELECT gen_random_uuid(), $1, 'ping', 'infinity' FROM generate_series(1, 205)
+         RETURNING id)
+       INSERT INTO app.webhook_deliveries (id, tenant_id, endpoint_id, event_id)
+       SELECT gen_random_uuid(), $1, $2, id FROM events`,
+      [c.tenant.id, e.id],
+    );
+    const log = capturedLog();
+    expect(await deliverDue(c, systemClock, egress(), log.logger)).toEqual({
+      attempted: 0,
+      succeeded: 0,
+      retrying: 0,
+      failed: 200,
+      handedOver: true,
+    });
+    expect(log.lines).toHaveLength(200);
+    const successors = await fx.query<{ data: { kind: string; tenantId: string } }>(
+      `SELECT data FROM pgboss.job WHERE name = 'webhook.deliver' AND singleton_key = $1`,
+      [c.tenant.id],
+    );
+    expect(successors.map((job) => job.data)).toMatchObject([
+      { kind: 'webhook.deliver', tenantId: c.tenant.id },
+    ]);
+    // The successor's run ends the rest.
+    expect(await deliverDue(c, systemClock, egress(), log.logger)).toEqual({
+      attempted: 0,
+      succeeded: 0,
+      retrying: 0,
+      failed: 5,
+      handedOver: false,
+    });
+    expect(await findWebhookDispatchDue(fx.dbs.app, 10_000)).not.toContain(c.tenant.id);
+  });
 });
 
 describe('endpoint health', () => {

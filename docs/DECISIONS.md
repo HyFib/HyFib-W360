@@ -1185,8 +1185,11 @@ key replays it, alone or with ADR-095's replay of failed deliveries, which leave
 or `signature`) and the error's class and code (a SQLSTATE for a database error); never the
 payload or the error's message, which can quote data. Settings → Webhooks shows "HyFib could not
 build or sign the request", and a code that ended a delivery without an attempt now shows instead
-of the status an earlier attempt left. Accepted: a database error that a retry would have passed (a
-lock or statement timeout) also ends its delivery, which then needs a replay.
+of the status an earlier attempt left. Deliveries ended at their claim, whatever the reason, now
+count toward the job's 200 with its attempts (though not as attempts), so a backlog that cannot be
+built hands over to a successor as an attempted one does, instead of holding a worker while such
+deliveries keep arriving. Accepted: a database error that a retry would have passed (a lock or
+statement timeout) also ends its delivery, which then needs a replay.
 
 **Signing.** Each endpoint has a secret (`whsec_` and 32 random bytes), shown once, stored encrypted
 with the keyring (it is needed to sign) and bound to the company, the endpoint and its version.
