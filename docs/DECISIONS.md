@@ -4209,3 +4209,66 @@ Decision:
 
 Not built: other comparisons (contains, greater or less than, not set), several values for one
 filter, orders other than newest first, contacts changed since a time, and searching by name.
+
+## ADR-114 Following contact changes through the public API (2026-10-02)
+
+Context: an integration that keeps its own copy of a company's contacts (a CRM, a warehouse) hears
+of changes through the contact webhooks (ADR-074, ADR-112), but a receiver that was down past the
+retries, an endpoint disabled after 72 hours of failures, or a new install has no way to catch up
+short of listing every contact again. `updatedSince` filters (ADR-072, ADR-088) give a time to ask
+from, but a change still being saved can carry an earlier time than one already read, so they ask
+integrations to overlap and deduplicate, and a contact's `updated_at` does not move for a tag or a
+consent state.
+
+Decision:
+
+- **Endpoint:** `GET /api/v1/contact-changes` (`listContactChanges`, scope `contacts.read`): every
+  contact whose API description changed (added; name, number, email, custom field values or source
+  changed; a tag added or removed; a consent state set or changed; erased), once, as it is now, in
+  the order the changes were saved. Each item is `{ id, erased, contact }`, `contact` being the
+  contact of `GET /contacts/{id}`, or null once erased. Pages hold up to `limit` (1 to 100, 50 by
+  default) and say `hasMore`; `nextCursor` is always given, so an integration keeps it and asks
+  again later. Without a cursor the feed starts from the first change, which lists every contact
+  the company has.
+- **A record per change, not a time:** migration 0091 adds `app.contact_changes`, one row per
+  contact and transaction, written by triggers on contacts, tags and consent states in the
+  transaction that makes the change, whoever makes it (members, imports, automations, Flows, keys,
+  erasure, a field's deletion removing its values). The row holds the transaction's id
+  (`pg_current_xact_id()`), not a time. Rows are only inserted and no other row is updated, so
+  changes of one contact never wait for each other on a shared row. A row's key to its contact takes
+  a key-share lock on the contact, which adding a tag or recording consent takes already and
+  changing the contact exceeds; only removing a tag did not take it. The automation runner changed
+  tags without the contact's lock, while members and keys (ADR-112) lock the contact before its
+  tags, so a run and a member removing the same tag could have deadlocked, and adding the same tag
+  at once already could. The runner now locks the contact for key share before it changes a tag, so
+  one waits for the other instead (tested both ways). The migration records every existing contact
+  once, after its triggers lock the three tables against writes until it commits, so no contact is
+  added unseen in between.
+- **Never past a change still being saved:** the feed reads only rows whose transaction id is
+  below the reading snapshot's xmin: every transaction below it has finished, so what a page reads
+  is final, and a change committed later always lies beyond the page's cursor, as the inbox's event
+  stream already reads `tenant_events` (0003). A transaction still running anywhere holds the feed
+  back until it ends; it never makes the feed skip. Each contact is read at its latest finished
+  change only, so a contact changed again moves to the end, and a contact appears again only when it
+  changed again.
+- **Sealed cursors:** a position is a transaction id and a row id, which would show how busy the
+  whole platform is (transaction ids are shared by every company). The cursor is sealed with the
+  keyring (AES-256-GCM) and bound to the company, so it reveals nothing and another company's
+  cursor, a changed one or one sealed with a key the platform no longer holds is refused (422, path
+  `cursor`, saying to start again without one). Retiring an encryption key ends the cursors sealed
+  with it, as it ends what else that key sealed.
+- **Compaction:** only a contact's latest change is ever read, so earlier rows of a contact are
+  dead weight. The worker's minute sweep calls `ops.compact_contact_changes`, which follows every
+  company's changes in the same order and under the same xmin rule, from where it last stopped (one
+  row in `ops.contact_change_compaction`), at most 5,000 a minute; each change deletes the earlier
+  changes of its contact. A reader that had not passed a deleted change reads its contact at the
+  change that replaced it, now or once that change is below the reader's xmin, so compaction never
+  changes what the feed reads. One compaction runs at a time.
+- **Kept and deleted:** rows hold no personal data (a contact id and a transaction id), so erasure
+  leaves them (the erasure itself is the contact's last change); they are deleted with the company
+  (ADR-055) and are not in the company export (the contacts are).
+
+Not built: a field's rename or a field's creation reported as changes (neither changes a value; a
+field's deletion does, and is recorded), which fields changed, changes of other records (members,
+conversations: the message feed and webhooks cover those), filters on the feed, and a time to start
+from.

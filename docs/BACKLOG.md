@@ -484,12 +484,17 @@ verification, app review, Embedded Signup configuration).
   type and a refusal saving nothing; the 50-tag limit now holds through `POST /contacts` too);
   **[finding contacts built, locally verified]** (ADR-113: `GET /contacts` by email, tag and up to 5
   custom field values, typed, all of which a contact must match; pages filtered by tag or field read
-  at most 2,000 contacts and never skip or repeat one).
+  at most 2,000 contacts and never skip or repeat one); **[following contact changes built, locally
+  verified]** (ADR-114: `GET /contact-changes` reads every contact once, as it is now, in the order
+  its changes were saved (name, number, email, field values, tags, consent, added, erased), from the
+  start or from a cursor sealed to the company; changes are recorded by triggers in the transactions
+  that make them and read only once every transaction begun before them has finished, so following
+  the cursor misses none; the minute sweep deletes the records later changes replaced).
   Remaining: media messages, call-to-action messages through the API, taking reactions back,
   assigning many conversations at once, media downloads, statuses changed since a time, starting or
   stopping runs for many contacts in one call, bulk sends in one call, defining contact fields,
-  changing numbers or many contacts in one call, other comparisons in contact searches and
-  contacts changed since a time, limits per endpoint,
+  changing numbers or many contacts in one call, other comparisons in contact searches, which fields
+  of a contact changed, limits per endpoint,
   availability per single endpoint (plans choose per scope since ADR-092). The one-argument key
   lookup kept for rolling deploys (0051) is dropped (0074). Replaying many deliveries in one call
   is built with P5-09 (ADR-095).

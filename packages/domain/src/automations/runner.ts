@@ -528,9 +528,13 @@ export async function queueBotTemplate(
 }
 
 /**
- * Applies a contact update; returns a note for the step log when it was skipped. The contact row is
- * not locked first: single statements change it (the step already holds the conversation lock,
- * and contact erasure takes conversation locks before the contact's, so the order is the same).
+ * Applies a contact update; returns a note for the step log when it was skipped. Single statements
+ * change the contact, after its row is locked for key share, the weakest lock: adding a tag takes
+ * it for the tag's key anyway, and recording the change (0091) takes it when a tag is removed.
+ * Members and keys hold the contact for update while they change its tags, so taking it before any
+ * tag means that when a run and a member change the same tag, one waits for the other instead of
+ * deadlocking (the step already holds the conversation lock, and contact erasure takes conversation
+ * locks before the contact's, so the order is the same).
  */
 async function applyContactEffect(
   tx: Tx,
@@ -540,7 +544,8 @@ async function applyContactEffect(
   const [contact] = await tx
     .select({ erasedAt: contacts.erasedAt })
     .from(contacts)
-    .where(and(eq(contacts.tenantId, run.tenantId), eq(contacts.id, run.contactId)));
+    .where(and(eq(contacts.tenantId, run.tenantId), eq(contacts.id, run.contactId)))
+    .for('key share');
   if (!contact || contact.erasedAt) return 'contact_erased';
   if (effect.kind === 'remove_tag') {
     await tx

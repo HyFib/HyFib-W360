@@ -879,6 +879,17 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   contact of its range (`API_CONTACT_SEARCH_WINDOW`) and reads only down to it, so its cursor goes on
   past the window when few contacts match, as the message feed's does; both reads share a repeatable
   read snapshot.
+- **Following contact changes (0091, ADR-114):** triggers on `contacts` (insert, and an update of
+  the columns the API describes), `contact_tags` (insert, delete) and `contact_consents` (set, status
+  changed) call `app.capture_contact_change`, which inserts one `app.contact_changes` row per contact
+  and transaction (`xact` = `pg_current_xact_id()`); its key to the contact takes the key-share
+  lock adding a tag takes, and the automation runner takes it before changing a tag (members and
+  keys take the contact before its tags). `apiContactChanges`
+  (`api/contact-changes.ts`) reads rows above the cursor and below `pg_snapshot_xmin`, each contact
+  at its latest such row, joined to the contact for its current state; the cursor is sealed with the
+  keyring and the company as associated data. `ops.compact_contact_changes` (minute sweep) walks the
+  rows in the same order from `ops.contact_change_compaction` and deletes the rows each change
+  replaced.
 - **Text replies (0042, ADR-070):** `POST /messages` with `type: "text"` (`apiSendMessage` picks
   `apiSendText`; no `type` is a template) needs `messages.reply`. It finds an existing, not erased
   contact by number and locks its conversation on the number (`from`, or the only active one); a

@@ -1,5 +1,6 @@
 import { randomInt } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
+import type pg from 'pg';
+import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest';
 import { PgBoss, type Job } from 'pg-boss';
 import { isAppError, sha256Hex, systemClock, uuidv7, type Clock } from '@w360/core';
 import { QUEUES } from '@w360/contracts';
@@ -1721,6 +1722,107 @@ async function startConsumer() {
     },
   };
 }
+
+describe('a run and a member changing the same tag at once (ADR-114)', () => {
+  /** A company whose automation, started by "tagme", changes one tag, and a run waiting to do it. */
+  async function taggingRun(action: { kind: 'add_tag' | 'remove_tag'; tag: string }) {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    await publish(owner, 'Tagger', keyword('tagme'), {
+      version: 1,
+      start: 'tag',
+      nodes: [{ id: 'tag', type: 'update_contact', action, next: null }],
+    });
+    const conversationId = await inbound(c, waId(), 'tagme please');
+    const run = await onlyRun(conversationId);
+    const [row] = await fx.query<{ contact_id: string }>(
+      'SELECT contact_id FROM app.conversations WHERE id = $1',
+      [conversationId],
+    );
+    return { c, runId: run.id, contactId: row!.contact_id };
+  }
+
+  /**
+   * Holds the contact for update, as the contacts page and the API do while they change its tags,
+   * until the run's step waits for it; then changes the tag itself and commits. Returns how the
+   * step ended.
+   */
+  async function whileMemberHolds(
+    c: Company,
+    runId: string,
+    contactId: string,
+    member: (holder: pg.PoolClient) => Promise<unknown>,
+  ) {
+    const holder: pg.PoolClient = await fx.dbs.adminPool.connect();
+    let step: Promise<unknown> | undefined;
+    try {
+      await holder.query('BEGIN');
+      await holder.query('SELECT 1 FROM app.contacts WHERE id = $1 FOR UPDATE', [contactId]);
+      const [lock] = (await holder.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows;
+      step = advance(c, runId).then(
+        () => 'done',
+        (error: unknown) => error,
+      );
+      await vi.waitFor(
+        async () => {
+          const [waiting] = await fx.query<{ n: number }>(
+            'SELECT count(*)::int AS n FROM pg_stat_activity a WHERE $1 = ANY (pg_blocking_pids(a.pid))',
+            [lock!.pid],
+          );
+          if (waiting!.n < 1) throw new Error('the step is not waiting yet');
+        },
+        { timeout: 4_000, interval: 20 },
+      );
+      await member(holder);
+      await holder.query('COMMIT');
+    } catch (error) {
+      await holder.query('ROLLBACK');
+      throw error;
+    } finally {
+      holder.release();
+    }
+    return step;
+  }
+
+  const tagsOf = async (contactId: string) =>
+    (
+      await fx.query<{ tag: string }>(
+        'SELECT tag FROM app.contact_tags WHERE contact_id = $1 ORDER BY tag',
+        [contactId],
+      )
+    ).map((r) => r.tag);
+
+  it('removes a tag a member is removing too, one after the other, without a deadlock', async () => {
+    const { c, runId, contactId } = await taggingRun({ kind: 'remove_tag', tag: 'vip' });
+    await fx.query(
+      `INSERT INTO app.contact_tags (id, tenant_id, contact_id, tag) VALUES ($1, $2, $3, 'vip')`,
+      [uuidv7(), c.tenant.id, contactId],
+    );
+    // Without the step's lock on the contact before the tag, the step would hold the tag's row
+    // while its change record waits for the contact, and the member would wait for the tag's row.
+    const step = await whileMemberHolds(c, runId, contactId, (holder) =>
+      holder.query(
+        `DELETE FROM app.contact_tags WHERE tenant_id = $1 AND contact_id = $2 AND tag = 'vip'`,
+        [c.tenant.id, contactId],
+      ),
+    );
+    expect(step).toBe('done');
+    expect(await tagsOf(contactId)).toEqual([]);
+  });
+
+  it('adds a tag a member is adding too, once, without a deadlock', async () => {
+    const { c, runId, contactId } = await taggingRun({ kind: 'add_tag', tag: 'hot lead' });
+    const step = await whileMemberHolds(c, runId, contactId, (holder) =>
+      holder.query(
+        `INSERT INTO app.contact_tags (id, tenant_id, contact_id, tag)
+         VALUES ($1, $2, $3, 'hot lead') ON CONFLICT DO NOTHING`,
+        [uuidv7(), c.tenant.id, contactId],
+      ),
+    );
+    expect(step).toBe('done');
+    expect(await tagsOf(contactId)).toEqual(['hot lead']);
+  });
+});
 
 /** Polls a condition (every 100 ms, up to 20 s); jobs run asynchronously in pg-boss. */
 async function waitFor(condition: () => Promise<boolean>) {

@@ -79,6 +79,13 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    - migrate data in batches (owner role, temporarily `NO FORCE ROW LEVEL SECURITY` inside the
      migration if a backfill must read all rows, then `FORCE` again);
    - contract in a later release after no running version reads the old shape.
+
+   Migration 0091 (ADR-114) records every existing contact once while its triggers hold write locks
+   on contacts, tags and consent states, so writes to them wait for it; on a large contacts table
+   run it at a quiet time. Until the new workers run, an automation and a member removing the same
+   tag at the same moment can deadlock, as adding one already could; PostgreSQL ends one of the two
+   with an error.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

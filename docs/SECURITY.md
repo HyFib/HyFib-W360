@@ -582,6 +582,15 @@ Phase 5 rules (Public API, P5-08):
   fields before use, and keys, tags and values are bound parameters, never part of the SQL text. A
   page filtered by tag or field reads at most 2,000 contacts, so a rare value cannot make one request
   read every contact a company has.
+- Following contact changes (ADR-114): `GET /contact-changes` reads the key's company's changes
+  only (`contacts.read`, RLS and an explicit company filter). Its cursor, a database transaction id
+  and a row id, is sealed with the keyring (AES-256-GCM) with the company in the associated data, so
+  it shows nothing of other companies' activity and opens for no other company; a changed or foreign
+  cursor is refused with 422. Change rows hold no personal data; an erased contact is read as
+  `erased` with no contact. The triggers that record changes run as whoever changes the contact
+  (column grants: the runtime and definer roles insert only `tenant_id` and `contact_id`); only the
+  compaction function, owned by the definer role and run by the worker, deletes rows across
+  companies, and only rows a later change of the same contact replaced.
 - Only the token's SHA-256 is stored; the runtime role cannot read it. The token is shown once in
   the browser and kept only in the page's memory; it is never logged, and audit entries carry the
   public prefix only.

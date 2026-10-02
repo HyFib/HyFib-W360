@@ -4,6 +4,7 @@ export * from './context';
 export * from './idempotency';
 export * from './contact-view';
 export * from './contacts';
+export * from './contact-changes';
 export * from './resources';
 export * from './openapi';
 export * from './errors';

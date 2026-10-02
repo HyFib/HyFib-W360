@@ -20,6 +20,8 @@ export const EXPORT_EXCLUDED_TABLES: Readonly<Record<string, string>> = {
   'app.channel_onboarding_sessions': 'Embedded Signup session bookkeeping.',
   'app.commerce_store_events': 'Deduplication records of store webhooks.',
   'app.commerce_store_fetches': 'Bookkeeping of reads from stores.',
+  'app.contact_changes':
+    'Positions of the API’s contact change feed (ADR-114): which contact changed in which transaction; the contacts themselves are exported.',
   'app.flow_key_uploads': 'Bookkeeping of Flow key uploads to Meta.',
   'app.flow_keys':
     'Flow encryption keys: the private key is never exported and the public key is at Meta.',

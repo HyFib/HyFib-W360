@@ -636,6 +636,48 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
         },
       },
+      '/contact-changes': {
+        get: {
+          operationId: 'listContactChanges',
+          summary: 'Contacts in the order they changed',
+          description: `${scopeNote('contacts.read')} Every contact whose name, number, email, custom field values, tags or consent changed, or that was added or erased, once, as it is now, in the order the changes were saved. Start without a cursor to read every contact the company has; keep \`nextCursor\` and ask again with it to read what changed since. No change is skipped: a change appears once every change saved before it has finished, and a contact changed again appears again. Read pages until \`hasMore\` is false, then ask again later with the last \`nextCursor\`. A cursor works only for the company that read it.`,
+          parameters: [
+            {
+              name: 'limit',
+              in: 'query',
+              schema: { type: 'integer', minimum: 1, maximum: API_LIMITS.pageSize, default: 50 },
+            },
+            {
+              name: 'cursor',
+              in: 'query',
+              schema: { type: 'string', maxLength: 400 },
+              description:
+                '`nextCursor` from the previous page; none to start from the first change.',
+            },
+          ],
+          responses: {
+            '200': {
+              description: 'A page of changed contacts.',
+              content: json({
+                type: 'object',
+                properties: {
+                  data: { type: 'array', items: ref('ContactChange') },
+                  nextCursor: {
+                    type: 'string',
+                    description: 'Where the next page starts; keep it to ask again later.',
+                  },
+                  hasMore: {
+                    type: 'boolean',
+                    description: 'Whether more changes can be read now.',
+                  },
+                },
+                required: ['data', 'nextCursor', 'hasMore'],
+              }),
+            },
+            ...errors(401, 403, 422, 429, 500),
+          },
+        },
+      },
       '/contacts/{id}/consent': {
         post: {
           operationId: 'recordConsent',
@@ -1297,6 +1339,18 @@ export function buildOpenApiDocument(serverUrl: string) {
         ContactCreate: jsonSchema(apiContactCreateSchema, 'input'),
         ContactUpdate: jsonSchema(apiContactUpdateSchema, 'input'),
         ContactField: jsonSchema(apiContactFieldSchema),
+        ContactChange: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', format: 'uuid', description: 'The contact’s id.' },
+            erased: { type: 'boolean' },
+            contact: {
+              oneOf: [ref('Contact'), { type: 'null' }],
+              description: 'The contact as it is now; null once it was erased.',
+            },
+          },
+          required: ['id', 'erased', 'contact'],
+        },
         Consent: jsonSchema(apiConsentSchema, 'input'),
         Template: jsonSchema(apiTemplateSchema),
         SendTemplate: jsonSchema(apiSendMessageSchema, 'input'),
@@ -1358,6 +1412,7 @@ export const API_ROUTES = [
   ['patch', '/contacts/{id}'],
   ['post', '/contacts/{id}/consent'],
   ['get', '/contact-fields'],
+  ['get', '/contact-changes'],
   ['post', '/messages'],
   ['get', '/messages'],
   ['get', '/messages/{id}'],

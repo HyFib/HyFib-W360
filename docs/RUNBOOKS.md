@@ -1636,6 +1636,18 @@ field for (`GET /api/v1/contact-fields`), a value of another type (numbers as me
 dates `YYYY-MM-DD`, `true` or `false`) or an empty one, `email` or `tag`. Text matches whatever its
 case but compares whole values, not parts of them.
 
+**The contact change feed shows nothing new for a while, or refuses a cursor (ADR-114).**
+`GET /api/v1/contact-changes` reads a change only once every transaction that began before it has
+finished, so a long transaction anywhere in the database (a large import, a session left idle in a
+transaction) holds the feed back until it ends; nothing is skipped. Find it with
+`SELECT pid, state, xact_start, backend_xid FROM pg_stat_activity WHERE backend_xid IS NOT NULL ORDER BY xact_start`
+and let it finish or end it. A 422 with path `cursor` means the cursor is not one this company's
+feed gave, was changed, or was sealed with an encryption key the platform no longer holds (retiring
+a key ends the cursors sealed with it): the integration starts again without a cursor, which lists
+every contact. The worker's minute sweep compacts the change rows (`replaced contact changes
+deleted` in its log); `ops.contact_change_compaction.compacted_at` shows when it last ran. If it
+stops, the feed still answers correctly, with more rows to pass.
+
 **The company is suspended or its plan ended.** Keys keep reading; creating and changing contacts,
 recording consent, sending, resolving conversations and adding notes to them, starting and stopping
 automations, and managing webhook endpoints (reading them and their deliveries included) answer 423

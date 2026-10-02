@@ -1,5 +1,88 @@
 # Progress
 
+## 2026-10-02 — Phase 5: following contact changes through the public API (P5-08, ADR-114)
+
+Status: **Implemented and locally verified (test data only).** Integrations that keep a copy of a
+company's contacts heard of changes through the contact webhooks, but a receiver that was down past
+the retries, a disabled endpoint or a new install could only list every contact again: no read told
+them what changed since, without overlaps or gaps.
+
+### Completed
+
+- **Design (ADR-114):** `GET /contact-changes` (`contacts.read`) reads every contact whose API
+  description changed, once, as it is now, in the order its changes were saved, from the start
+  (every contact) or from a cursor. Changes are rows written by triggers in the transactions that
+  make them and read only below the reading snapshot's xmin, so following the cursor misses no
+  change; the cursor is sealed with the keyring and bound to the company. The minute sweep deletes
+  the rows later changes replaced.
+- **Migration 0091:** `app.contact_changes` (RLS, column grants, composite key to the contact,
+  deleted with the company before its contacts), `app.capture_contact_change` (one row per contact
+  and transaction) and its triggers on contacts, tags and consent states, every existing contact
+  recorded once, `ops.compact_contact_changes` with its place in `ops.contact_change_compaction`.
+  Applied to a copy of the local e2e database: its 81 contacts in 62 companies recorded once each,
+  and a change made by the runtime role recorded once for three writes in one transaction.
+- **Also fixed: a run and a member changing the same tag at once deadlocked.** The automation runner
+  changed tags without the contact's lock, while members and keys take the contact before its tags,
+  so an automation adding a tag a member was adding at that moment deadlocked and PostgreSQL ended
+  one of them; with 0091's change records, removing the same tag would have too. The runner now
+  locks the contact for key share (the lock adding a tag takes anyway) before it changes a tag.
+- **Domain, web and worker:** `apiContactChanges`, the sealed cursor (`sealContactChangeCursor`,
+  `openContactChangeCursor`), `compactContactChanges` in the worker's minute sweep, the
+  `/api/v1/contact-changes` route, the OpenAPI entry and `ContactChange` schema, the export spec
+  (the rows are not exported; the contacts are).
+- **Tests:**
+  - Unit (`contact-changes.test.ts`, 6): cursors open where they were sealed and nowhere else
+    (another company, another key, any change, plain positions), hold digits only, show no position;
+    the query; the scope checked before anything is read; the OpenAPI entry.
+  - Integration (`api-contact-changes.test.ts`, 5): every contact once at its latest change, in
+    order, from the start and from cursors, one contact a page; what counts as a change (name,
+    number, email, field values and a field's deletion, tags added and removed, consent set and
+    changed, erasure, whoever makes it) and what does not (the same name, a column written with its
+    own value, the row's times, an opt-in that keeps the state), a request changing several things
+    recorded once; transactions held open (nothing read past them; afterwards both changes of the
+    earlier one, then the later one, none twice); compaction (the rows later changes replaced
+    deleted, the feed reading the same before and after, held back by an open transaction, its place
+    kept); cursors of another company, another key, changed or garbled refused, and a key without
+    `contacts.read`.
+  - Integration (`automations.test.ts`, 2): a run removing, then adding, a tag while a member holds
+    the contact and changes the same tag: the run waits for the member, where both deadlocked
+    without the runner's lock (checked by removing it).
+  - e2e (`api-contact-changes.spec.ts`): a key reads both contacts it added, then only the one a
+    member tagged in the app, then the one the member erased as erased with nothing about it, and a
+    cursor the feed did not give is refused.
+- **Docs:** ADR-114; SECURITY; THREAT-MODEL T127; RUNBOOKS (a feed held back by a long transaction, a
+  refused cursor, the compaction); ARCHITECTURE; DATA-RETENTION; BACKLOG P5-08; FEATURE-MATRIX W-134,
+  H-033.
+- **Mutation checks:** 35 regressions tried, all caught: the runner's lock on the contact, recording
+  (a change recorded again in one transaction, new contacts, a column written with its own value,
+  the name, number, email and field values, tags added and removed, consent set and changed, an
+  event that keeps the state, the definer role's insert), the feed (passing a change still being
+  saved, replaced changes read, a contact replaced by a change still being saved left out, the
+  cursor read again or compared by change id alone, the order, paging, an empty page starting again,
+  an erased contact carried, the scope, the limit), the cursors (opening for every company, a cursor
+  that does not open breaking the request, any position taken, the position readable), the
+  compaction (passing a change still being saved, deleting later changes, forgetting its place,
+  reading out of order) and the OpenAPI entry.
+
+### Test commands and results (local, 2026-10-02)
+
+| Command                                                                                                                                                 | Result                     |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                    | clean                      |
+| `pnpm test`                                                                                                                                             | 507 passed                 |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                                     | 715 passed on each         |
+| `pnpm build`, then `api-contact-changes.spec.ts` and `api-contact-fields.spec.ts` on chromium and mobile-chromium, on a fresh database migrated to 0091 | 4 passed                   |
+| Mutation checks                                                                                                                                         | 35 regressions, all caught |
+| gitleaks 8.30.1 on the commit                                                                                                                           | no leaks                   |
+
+### Known gaps
+
+- A field's rename or creation is not a change (no value changes; a field's deletion is recorded),
+  the feed does not say which fields changed, and has no filters or start time. The migration's
+  recording of existing contacts was checked on a copy of the local e2e database, not by a test
+  (test databases start empty). Not verified against a production-sized table: the migration locks
+  contacts, tags and consent states against writes while it records every contact.
+
 ## 2026-10-02 — Phase 5: finding contacts through the public API (P5-08, ADR-113)
 
 Status: **Implemented and locally verified (test data only).** Since ADR-112 integrations read and
