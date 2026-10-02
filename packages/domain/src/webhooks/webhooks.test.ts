@@ -679,8 +679,21 @@ describe('webhook labels and hosts', () => {
     expect(webhookErrorLabel('address_blocked', null)).toBe('The address is private or reserved');
     expect(webhookErrorLabel('endpoint_disabled', null)).toBe('The endpoint was turned off');
     expect(webhookErrorLabel('event_gone', null)).toBe('What the event is about no longer exists');
+    expect(webhookErrorLabel('payload_failed', null)).toBe(
+      'HyFib could not build or sign the request',
+    );
     expect(webhookErrorLabel(null, null)).toBeNull();
     expect(webhookErrorLabel('something_new', null)).toBe('something_new');
+  });
+
+  it('names why a delivery ended without an attempt over the status an earlier attempt left', () => {
+    // Attempt 1 got a 503; the delivery then ended at its next claim, which keeps that status.
+    expect(webhookErrorLabel('payload_failed', 503)).toBe(
+      'HyFib could not build or sign the request',
+    );
+    expect(webhookErrorLabel('event_gone', 500)).toBe('What the event is about no longer exists');
+    expect(webhookErrorLabel('endpoint_disabled', 500)).toBe('The endpoint was turned off');
+    expect(webhookErrorLabel('interrupted', 502)).toBe('The attempt was interrupted');
   });
 
   it('takes only the host of an endpoint URL', () => {

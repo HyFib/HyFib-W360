@@ -1,4 +1,4 @@
-import { toError, type Clock, type Keyring } from '@w360/core';
+import { errorClassAndCode, toError, type Clock, type Keyring } from '@w360/core';
 import { EgressError, type EgressClient } from '@w360/core/egress';
 import { QUEUES } from '@w360/contracts';
 import {
@@ -35,7 +35,8 @@ import { webhookSignatureHeader } from './signing';
  * from the company's current data and signed, the requests go out through the egress client with
  * no transaction open, and each outcome is recorded in its own transaction. A delivery whose lease
  * expired (the worker was lost during the request) is attempted again, so a receiver can get an
- * event twice and deduplicates on its id: delivery is at least once, never exactly once.
+ * event twice and deduplicates on its id: delivery is at least once, never exactly once. A delivery
+ * whose payload or signature cannot be built fails alone (`payload_failed`) and the batch goes on.
  */
 
 export const WEBHOOK_USER_AGENT = 'HyFib-W360-Webhooks/1';
@@ -44,7 +45,10 @@ export const WEBHOOK_USER_AGENT = 'HyFib-W360-Webhooks/1';
 const LEASE_MARGIN_MS = 35_000;
 /** Deliveries claimed and sent together. */
 const BATCH_SIZE = 10;
-/** A job hands over to a successor after this many deliveries, so one company cannot hold a worker. */
+/**
+ * A job hands over to a successor after this many deliveries, attempted or ended at their claim, so
+ * one company cannot hold a worker.
+ */
 const JOB_DELIVERY_BUDGET = 200;
 
 export interface WebhookNoticeDeps {
@@ -58,6 +62,11 @@ export interface WebhookDispatchDeps {
   signer: JobSigner;
 }
 
+/** The worker's logger, as far as the delivery job uses it. */
+export interface WebhookDeliveryLogger {
+  error(fields: Record<string, unknown>, message: string): void;
+}
+
 export interface WebhookDeliveryDeps extends WebhookDispatchDeps {
   clock: Clock;
   keyring: Keyring;
@@ -65,6 +74,8 @@ export interface WebhookDeliveryDeps extends WebhookDispatchDeps {
   /** The egress deadline; the lease covers it plus a margin. */
   timeoutMs: number;
   notices: WebhookNoticeDeps;
+  /** Hears of each delivery that could not be prepared, by ids and the error's class and code. */
+  logger: WebhookDeliveryLogger;
 }
 
 interface ClaimedDelivery {
@@ -74,6 +85,17 @@ interface ClaimedDelivery {
   url: string;
   headers: Record<string, string>;
   body: string;
+}
+
+/** A delivery that failed at its claim because it could not be prepared (`payload_failed`). */
+interface UnpreparedDelivery {
+  deliveryId: string;
+  endpointId: string;
+  eventType: string;
+  /** What failed: building the payload, or signing it with the endpoint's secrets. */
+  stage: 'payload' | 'signature';
+  errorClass: string;
+  errorCode: string | null;
 }
 
 interface AttemptOutcome {
@@ -157,9 +179,20 @@ export async function processWebhookDeliveries(
     failed: 0,
     handedOver: false,
   };
-  while (run.attempted < JOB_DELIVERY_BUDGET) {
+  // Deliveries ended at their claim count toward the budget, though not as attempts: a backlog that
+  // cannot be built (`payload_failed`) hands over like one that is attempted.
+  let ended = 0;
+  while (run.attempted + ended < JOB_DELIVERY_BUDGET) {
     const batch = await claimDeliveries(deps, scope, BATCH_SIZE);
     run.failed += batch.ended;
+    ended += batch.ended;
+    // Logged once the claim that ended them committed: ids and the error's class and code only.
+    for (const unprepared of batch.unprepared) {
+      deps.logger.error(
+        { tenantId: scope.tenantId, ...unprepared },
+        'webhook delivery could not be prepared; failed as payload_failed',
+      );
+    }
     if (batch.claimed.length === 0) {
       // Deliveries that ended without an attempt may have filled the batch: look again.
       if (batch.ended === 0) return run;
@@ -199,13 +232,14 @@ const DELIVERY_COLUMNS = {
 /**
  * Claims up to `limit` due deliveries (skipping rows another transaction holds) and prepares each
  * request. A delivery that cannot be attempted ends here: its endpoint was turned off, its message
- * no longer exists, or its last attempt was interrupted with no attempt left.
+ * no longer exists, its last attempt was interrupted with no attempt left, or its payload or
+ * signature could not be built (returned in `unprepared`, for the log).
  */
 async function claimDeliveries(
   deps: WebhookDeliveryDeps,
   scope: TenantScope,
   limit: number,
-): Promise<{ claimed: ClaimedDelivery[]; ended: number }> {
+): Promise<{ claimed: ClaimedDelivery[]; ended: number; unprepared: UnpreparedDelivery[] }> {
   const tenantId = scope.tenantId;
   return deps.db.run(scope, async (tx) => {
     const now = deps.clock.now();
@@ -240,7 +274,7 @@ async function claimDeliveries(
             .for('update', { skipLocked: true })
         : [];
     const due = [...pending, ...interrupted];
-    if (due.length === 0) return { claimed: [], ended: 0 };
+    if (due.length === 0) return { claimed: [], ended: 0, unprepared: [] };
 
     const endpoints = new Map(
       (
@@ -316,6 +350,7 @@ async function claimDeliveries(
     };
 
     const claimed: ClaimedDelivery[] = [];
+    const unprepared: UnpreparedDelivery[] = [];
     let ended = 0;
     const end = async (deliveryId: string, error: string) => {
       await tx
@@ -343,11 +378,30 @@ async function claimDeliveries(
         continue;
       }
       let body: string;
+      let signature: string;
+      let stage: UnpreparedDelivery['stage'] = 'payload';
       try {
-        body = JSON.stringify(await buildWebhookPayload(tx, event, endpoint.id));
+        // In a savepoint, so that a database error while building leaves the claim usable.
+        const payload = await tx.transaction((sp) => buildWebhookPayload(sp, event, endpoint.id));
+        body = JSON.stringify(payload);
+        stage = 'signature';
+        signature = webhookSignatureHeader(signingSecrets(endpoint), timestamp, body);
       } catch (error) {
-        if (!(error instanceof WebhookEventGoneError)) throw error;
-        await end(delivery.id, 'event_gone');
+        if (error instanceof WebhookEventGoneError) {
+          await end(delivery.id, 'event_gone');
+          continue;
+        }
+        // A bug, data the builder cannot describe, a secret the keyring cannot open or a database
+        // error. Thrown, it would roll back the batch, and the sweep would claim the same
+        // deliveries again every minute; ended without an attempt, it is replayed once fixed.
+        await end(delivery.id, 'payload_failed');
+        unprepared.push({
+          deliveryId: delivery.id,
+          endpointId: endpoint.id,
+          eventType: event.type,
+          stage,
+          ...errorClassAndCode(error),
+        });
         continue;
       }
       const attempt = delivery.attempts + 1;
@@ -366,7 +420,7 @@ async function claimDeliveries(
         headers: {
           'content-type': 'application/json',
           'user-agent': WEBHOOK_USER_AGENT,
-          'w360-signature': webhookSignatureHeader(signingSecrets(endpoint), timestamp, body),
+          'w360-signature': signature,
           'w360-event-id': event.id,
           'w360-event-type': event.type,
           'w360-delivery-id': delivery.id,
@@ -374,7 +428,7 @@ async function claimDeliveries(
         },
       });
     }
-    return { claimed, ended };
+    return { claimed, ended, unprepared };
   });
 }
 

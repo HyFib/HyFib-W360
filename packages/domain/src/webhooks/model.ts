@@ -153,12 +153,14 @@ export function webhookHost(url: string): string | null {
   return URL.canParse(url) ? new URL(url).hostname : null;
 }
 
-/** What a member sees for a delivery's last error code. */
+/**
+ * What a member sees for a delivery's last error code. An attempt leaves a status or a code, never
+ * both; a code that ended the delivery without an attempt (`endpoint_disabled`, `event_gone`,
+ * `interrupted`, `payload_failed`) says more than the status an earlier attempt left.
+ */
 export function webhookErrorLabel(code: string | null, status: number | null): string | null {
-  if (status !== null) return `HTTP ${status}`;
+  if (code === null) return status === null ? null : `HTTP ${status}`;
   switch (code) {
-    case null:
-      return null;
     case 'timeout':
       return 'No answer within 10 seconds';
     case 'dns_failed':
@@ -179,6 +181,8 @@ export function webhookErrorLabel(code: string | null, status: number | null): s
       return 'The endpoint was turned off';
     case 'event_gone':
       return 'What the event is about no longer exists';
+    case 'payload_failed':
+      return 'HyFib could not build or sign the request';
     default:
       return code;
   }

@@ -1553,7 +1553,8 @@ subscribed event happened since the endpoint was added (events are captured only
 endpoint subscribes; earlier ones are not sent). "Send test event" queues a `ping`; the result
 column names what went wrong: an HTTP status, `timeout` (no complete answer within 10 seconds),
 `dns_failed`, `address_blocked` (the name resolves to a private, loopback or reserved address, which
-is never called), `connect_failed`, `response_too_large` (more than 256 KB) or `invalid_status`.
+is never called), `connect_failed`, `response_too_large` (more than 256 KB) or `invalid_status`;
+"HyFib could not build or sign the request" (`payload_failed`) is HyFib's side, see below.
 Redirects are not followed: the endpoint must answer at the saved URL.
 
 **Deliveries wait and are not sent.** The worker is woken by the `w360_webhooks` notification and
@@ -1563,6 +1564,27 @@ by the minute sweep. Check the `webhook.deliver` queue (section 3) and the worke
 restricted companies are not delivered to until they are active again. A delivery in `delivering`
 longer than 45 seconds belongs to a lost worker; the next run attempts it again (the receiver may see
 it twice and deduplicates on the event id).
+
+**A delivery failed as `payload_failed` ("HyFib could not build or sign the request").** HyFib could
+not build the event's payload or sign it: a bug in a payload builder, an event it cannot describe, a
+database error while building (a lock or statement timeout included), or an endpoint secret the
+keyring cannot open. No request was made: the delivery used no attempt, the endpoint's health is
+unchanged and the company's other deliveries went on. A backlog of them is ended 200 deliveries per
+job, each job queueing the next (`handedOver` in `webhooks delivered`). The worker logs
+`webhook delivery could not be prepared; failed as payload_failed` with `tenantId`, `deliveryId`,
+`endpointId`, `eventType`, `stage` (`payload` or `signature`), `errorClass` and `errorCode` (a
+SQLSTATE for a database error), never the payload or the error's message. One `eventType` failing
+across deliveries is a builder bug: reproduce it from the event row (`app.webhook_events`, by the
+delivery's `event_id`) on a copy, not from the log. `stage` `signature` on every delivery of one
+endpoint means its secret cannot be opened: a key missing from `W360_ENCRYPTION_KEYS`, or a secret
+restored with the wrong version. Restore the key; if it cannot come back, the company deletes the
+endpoint and adds it again (rotating keeps the unreadable previous secret signing for 24 hours, so
+those deliveries keep failing). `errorCode` `55P03` or `57014` is a lock or statement timeout. Once
+the cause is fixed, the company replays: "Replay failed deliveries" on the endpoint's page, or
+`POST /webhook-endpoints/{id}/replay-failed`, includes `payload_failed` deliveries (unlike
+`event_gone`). Until 2026-10-02 such a delivery failed the whole `webhook.deliver` job instead: none
+of the company's deliveries went out, the minute sweep woke the job again every minute and the dead
+letters filled with the same failure. Deploying the change ends that by itself.
 
 **An endpoint was turned off automatically.** It failed every attempt for 72 hours; its waiting
 deliveries were marked failed (`endpoint_disabled`), owners and administrators got the
