@@ -890,6 +890,14 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   keyring and the company as associated data. `ops.compact_contact_changes` (minute sweep) walks the
   rows in the same order from `ops.contact_change_compaction` and deletes the rows each change
   replaced.
+- **Defining contact fields (0092, ADR-115):** `contacts/field-definitions.ts` adds, renames and
+  deletes a company's custom fields for both Settings (`contacts/service.ts`, by id) and the API
+  (`api/contact-fields.ts`, by key, scope `contact_fields.manage`); callers check who may and audit
+  as themselves. Additions take `pg_advisory_xact_lock(hashtextextended('contact-fields:<company>',
+0))` before counting, so the 50-field limit holds for additions at once; a rename changes only the
+  label (`contact_fields` grants `UPDATE (label)` only); a deletion removes the field row, then the
+  values (`attributes - key`), in the order a contact change locks them (ADR-112). 0092 widens the
+  scope checks of `app.api_keys` and `ops.plans`.
 - **Text replies (0042, ADR-070):** `POST /messages` with `type: "text"` (`apiSendMessage` picks
   `apiSendText`; no `type` is a template) needs `messages.reply`. It finds an existing, not erased
   contact by number and locks its conversation on the number (`from`, or the only active one); a

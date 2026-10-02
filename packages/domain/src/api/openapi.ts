@@ -34,7 +34,10 @@ import {
   pingPayloadSchema,
   templateStatusPayloadSchema,
 } from '../webhooks/payloads';
+import { CONTACT_FIELD_KEY_RE } from '../contacts/field-definitions';
+import { MAX_CONTACT_FIELDS } from '../contacts/fields';
 import { apiStartAutomationSchema } from './automations';
+import { apiContactFieldCreateSchema, apiContactFieldUpdateSchema } from './contact-fields';
 import { apiContactSchema } from './contact-view';
 import {
   API_CONTACT_SEARCH_WINDOW,
@@ -626,13 +629,56 @@ export function buildOpenApiDocument(serverUrl: string) {
         get: {
           operationId: 'listContactFields',
           summary: 'The company’s custom fields',
-          description: `${scopeNote('contacts.read')} The keys and types of the values \`fields\` holds, by label. Members add, rename and delete fields in the app.`,
+          description: `${scopeNote('contacts.read', 'contact_fields.manage')} The keys and types of the values \`fields\` holds, by label. Owners and administrators define fields in Settings, and keys with \`contact_fields.manage\` through this API.`,
           responses: {
             '200': {
-              description: 'The fields (at most 50).',
+              description: `The fields (at most ${MAX_CONTACT_FIELDS}).`,
               content: json(dataOf({ type: 'array', items: ref('ContactField') })),
             },
             ...errors(401, 403, 429, 500),
+          },
+        },
+        post: {
+          operationId: 'createContactField',
+          summary: 'Add a custom field',
+          description: `${scopeNote('contact_fields.manage')} A company has at most ${MAX_CONTACT_FIELDS} fields. The key is made from the label unless given; a key the company has is refused with 409 (path \`key\`). The key and the type never change. One field per \`Idempotency-Key\`: a retry answers with the field as first added.`,
+          parameters: [{ $ref: '#/components/parameters/IdempotencyKeyOptional' }],
+          requestBody: { required: true, content: json(ref('ContactFieldCreate')) },
+          responses: {
+            '201': { description: 'The field.', content: json(dataOf(ref('ContactField'))) },
+            ...errors(400, 401, 403, 409, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/contact-fields/{key}': {
+        patch: {
+          operationId: 'updateContactField',
+          summary: 'Rename a custom field',
+          description: `${scopeNote('contact_fields.manage')} Only the label changes: values stay under the key. The same label changes nothing, so a retry is safe without an \`Idempotency-Key\`.`,
+          parameters: [{ $ref: '#/components/parameters/FieldKey' }],
+          requestBody: { required: true, content: json(ref('ContactFieldUpdate')) },
+          responses: {
+            '200': { description: 'The field.', content: json(dataOf(ref('ContactField'))) },
+            ...errors(400, 401, 403, 404, 415, 422, 423, 429, 500),
+          },
+        },
+        delete: {
+          operationId: 'deleteContactField',
+          summary: 'Delete a custom field and its values',
+          description: `${scopeNote('contact_fields.manage')} Every contact's value for the field is deleted with it, as when a member deletes the field in Settings; segments and automations that use the key find no value. Each contact that had a value appears in GET /contact-changes; no webhook is sent.`,
+          parameters: [{ $ref: '#/components/parameters/FieldKey' }],
+          responses: {
+            '200': {
+              description: 'Deleted.',
+              content: json(
+                dataOf({
+                  type: 'object',
+                  properties: { key: { type: 'string' }, deleted: { const: true } },
+                  required: ['key', 'deleted'],
+                }),
+              ),
+            },
+            ...errors(401, 403, 404, 423, 429, 500),
           },
         },
       },
@@ -1285,6 +1331,13 @@ export function buildOpenApiDocument(serverUrl: string) {
       },
       parameters: {
         Id: { name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
+        FieldKey: {
+          name: 'key',
+          in: 'path',
+          required: true,
+          schema: { type: 'string', pattern: CONTACT_FIELD_KEY_RE.source },
+          description: 'The field’s key (GET /contact-fields).',
+        },
         IdempotencyKey: {
           name: 'Idempotency-Key',
           in: 'header',
@@ -1339,6 +1392,8 @@ export function buildOpenApiDocument(serverUrl: string) {
         ContactCreate: jsonSchema(apiContactCreateSchema, 'input'),
         ContactUpdate: jsonSchema(apiContactUpdateSchema, 'input'),
         ContactField: jsonSchema(apiContactFieldSchema),
+        ContactFieldCreate: jsonSchema(apiContactFieldCreateSchema, 'input'),
+        ContactFieldUpdate: jsonSchema(apiContactFieldUpdateSchema, 'input'),
         ContactChange: {
           type: 'object',
           properties: {
@@ -1412,6 +1467,9 @@ export const API_ROUTES = [
   ['patch', '/contacts/{id}'],
   ['post', '/contacts/{id}/consent'],
   ['get', '/contact-fields'],
+  ['post', '/contact-fields'],
+  ['patch', '/contact-fields/{key}'],
+  ['delete', '/contact-fields/{key}'],
   ['get', '/contact-changes'],
   ['post', '/messages'],
   ['get', '/messages'],

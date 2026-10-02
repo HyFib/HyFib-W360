@@ -12,6 +12,7 @@ export const API_SCOPE_KEYS = [
   'templates.read',
   'contacts.read',
   'contacts.write',
+  'contact_fields.manage',
   'messages.send',
   'messages.send_marketing',
   'messages.reply',
@@ -38,7 +39,7 @@ export const API_SCOPE_INFO: Record<
   'contacts.read': {
     label: 'Read contacts',
     description:
-      "Find contacts by phone number and read their details, custom fields and consent, and the company's custom fields.",
+      "Find contacts by number, email, tag or custom field, read their details, custom fields and consent and follow their changes, and list the company's custom fields.",
     permission: 'contacts.read',
     writes: false,
   },
@@ -47,6 +48,13 @@ export const API_SCOPE_INFO: Record<
     description:
       'Create contacts, change their name, email, custom fields and tags, and record opt-ins and opt-outs with their evidence.',
     permission: 'contacts.write',
+    writes: true,
+  },
+  'contact_fields.manage': {
+    label: 'Define contact fields',
+    description:
+      'Add custom contact fields, rename them, and delete them with their values on every contact, as owners and administrators do in Settings.',
+    permission: 'tenant.settings.manage',
     writes: true,
   },
   'messages.send': {

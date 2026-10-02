@@ -1648,10 +1648,20 @@ every contact. The worker's minute sweep compacts the change rows (`replaced con
 deleted` in its log); `ops.contact_change_compaction.compacted_at` shows when it last ran. If it
 stops, the feed still answers correctly, with more rows to pass.
 
+**A key cannot add, rename or delete a custom field (ADR-115).** The key needs the "Define contact
+fields" scope (`contact_fields.manage`), which only owners and administrators can grant, and a plan
+version that chose its scopes may leave it out (403 `not_in_plan`). A 409 naming `key` means the
+company has a field with that key (also when the key was made from the label: give `key`); a 422
+at the 51st field means the company has 50 (delete one in Settings or through the API first). A 404
+means the company has no field with that key (keys are lower-case; list them with
+`GET /contact-fields`). A field's key and type never change: add a new field and delete the old one.
+Who added, renamed or deleted a field is in the audit log (`contact_field.created`, `.renamed`,
+`.deleted`, actor `api_key` or `user`). Deleting a field deletes every contact's value for it.
+
 **The company is suspended or its plan ended.** Keys keep reading; creating and changing contacts,
-recording consent, sending, resolving conversations and adding notes to them, starting and stopping
-automations, and managing webhook endpoints (reading them and their deliveries included) answer 423
-until the company is active again.
+recording consent, defining contact fields, sending, resolving conversations and adding notes to
+them, starting and stopping automations, and managing webhook endpoints (reading them and their
+deliveries included) answer 423 until the company is active again.
 
 **Migration 0024 failed.** It runs in one transaction. It creates the two tables, the guard trigger,
 the two SECURITY DEFINER functions (granted to `w360_app` before their ownership moves to

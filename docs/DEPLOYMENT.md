@@ -85,6 +85,8 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    run it at a quiet time. Until the new workers run, an automation and a member removing the same
    tag at the same moment can deadlock, as adding one already could; PostgreSQL ends one of the two
    with an error.
+   Migration 0092 (ADR-115) only widens the scope checks of `app.api_keys` and `ops.plans`; it holds
+   an exclusive lock on each until it commits, which is brief, since both tables are small.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

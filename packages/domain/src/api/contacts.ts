@@ -26,7 +26,7 @@ import {
 import type { OutboundDeps } from '../messaging/outbound';
 import { parseInput } from '../validation';
 import { apiContactById, toApiContact, type ApiContact } from './contact-view';
-import { apiActor, assertScope, type ApiContext } from './context';
+import { apiActor, assertAnyScope, assertScope, type ApiContext } from './context';
 
 /**
  * Contact custom fields and contact changes through the public API (ADR-112): the company's field
@@ -253,12 +253,15 @@ export async function apiFieldFilters(
   });
 }
 
-/** The company's custom fields by label (at most 50, so in one page). */
+/**
+ * The company's custom fields by label (at most 50, so in one page), for keys that read contacts or
+ * define the fields (ADR-115).
+ */
 export async function apiListContactFields(
   deps: Pick<OutboundDeps, 'db'>,
   ctx: ApiContext,
 ): Promise<ApiContactField[]> {
-  assertScope(ctx, 'contacts.read');
+  assertAnyScope(ctx, ['contacts.read', 'contact_fields.manage']);
   const rows = await deps.db.run(
     ctx.scope,
     (tx) =>

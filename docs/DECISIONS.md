@@ -4272,3 +4272,46 @@ Not built: a field's rename or a field's creation reported as changes (neither c
 field's deletion does, and is recorded), which fields changed, changes of other records (members,
 conversations: the message feed and webhooks cover those), filters on the feed, and a time to start
 from.
+
+## ADR-115 Defining contact fields through the public API (2026-10-02)
+
+Context: since ADR-112 integrations read and set the values of a company's custom fields, but the
+fields themselves (up to 50, each a key, a label and a type) could only be added and deleted by
+owners and administrators in Settings. An integration that maps its own records' properties (a
+CRM's custom properties, a store's customer attributes) onto HyFib's had to ask a member to add each
+field by hand, with the same key, before it could write a value.
+
+Decision:
+
+- **Scope:** `contact_fields.manage` ("Define contact fields"), granted only by members holding
+  `tenant.settings.manage`, who define fields in Settings (owners and administrators). It writes, so
+  a suspended or restricted company refuses it, and a plan version that chose its scopes (ADR-092)
+  leaves it out until a new version includes it. `GET /contact-fields` answers keys with either
+  `contacts.read` or this scope.
+- **Endpoints:** `POST /contact-fields` (`createContactField`) adds a field from a label (1 to 80
+  characters), a type and, optionally, a key; without one the key is made from the label as Settings
+  makes it. A key the company has is refused with 409 naming `key`; the 51st field with 422. An
+  optional `Idempotency-Key` makes a retry answer with the field as first added. `PATCH
+/contact-fields/{key}` (`updateContactField`) changes the label only; the same label changes
+  nothing. `DELETE /contact-fields/{key}` (`deleteContactField`) deletes the field and every
+  contact's value for it, as Settings does. Fields are named by key, which the API already uses for
+  values; a key no field can have in the path is not found, as an id that is not a UUID is.
+- **Key and type never change:** values are stored under the key and were checked against the type
+  when written, so changing either would leave stored values meaning something else. An integration
+  that needs another type adds a new field.
+- **One set of rules:** members and keys go through the same functions
+  (`contacts/field-definitions.ts`) in their own transaction; each caller checks who may and audits
+  as itself. The 50-field limit was checked by counting and then inserting, so two additions at
+  once could both pass at 49; additions of one company now take turns under a transaction-level
+  advisory lock (as API keys and invitations do), and the count is taken under it. Renames, which
+  Settings' service could make without a trace, are audited as `contact_field.renamed` with the key.
+- **Deletion keeps ADR-112's lock order:** the field row is deleted first, then the values, so a
+  contact change naming the field (which locks the field rows before the contact) waits for the
+  deletion or the deletion for it, and its value is removed either way. The values' removal sends
+  no webhook (ADR-112) and records each contact that had one as changed (ADR-114).
+- **Migration 0092** widens the scope checks of API keys and plan versions to the new scope (11 at
+  most). Existing keys keep their scopes.
+
+Not built: changing a field's type, renaming fields in the app (Settings adds and deletes them;
+the service could always rename, and now audits it), choices for a field (a list of allowed values),
+field order, and events for field definitions.

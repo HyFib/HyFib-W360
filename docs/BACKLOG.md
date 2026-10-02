@@ -489,10 +489,15 @@ verification, app review, Embedded Signup configuration).
   its changes were saved (name, number, email, field values, tags, consent, added, erased), from the
   start or from a cursor sealed to the company; changes are recorded by triggers in the transactions
   that make them and read only once every transaction begun before them has finished, so following
-  the cursor misses none; the minute sweep deletes the records later changes replaced).
+  the cursor misses none; the minute sweep deletes the records later changes replaced);
+  **[defining contact fields built, locally verified]** (ADR-115: a key with
+  `contact_fields.manage`, granted only by owners and administrators, adds, renames and deletes the
+  company's custom fields by key, as Settings does, through the same functions; key and type never
+  change; additions take turns under a lock, so the 50-field limit holds for members and keys at
+  once; renames are audited, in Settings too).
   Remaining: media messages, call-to-action messages through the API, taking reactions back,
   assigning many conversations at once, media downloads, statuses changed since a time, starting or
-  stopping runs for many contacts in one call, bulk sends in one call, defining contact fields,
+  stopping runs for many contacts in one call, bulk sends in one call, changing a field's type,
   changing numbers or many contacts in one call, other comparisons in contact searches, which fields
   of a contact changed, limits per endpoint,
   availability per single endpoint (plans choose per scope since ADR-092). The one-argument key

@@ -1,5 +1,77 @@
 # Progress
 
+## 2026-10-02 — Phase 5: defining contact fields through the public API (P5-08, ADR-115)
+
+Status: **Implemented and locally verified (test data only).** Since ADR-112 integrations read and
+set custom field values, but only owners and administrators could add or delete the fields in
+Settings, so an integration mapping its own properties onto HyFib's needed a member to add each field
+by hand, with the same key.
+
+### Completed
+
+- **Design (ADR-115):** a key with `contact_fields.manage` ("Define contact fields"), which only
+  members holding `tenant.settings.manage` grant, adds a field (`POST /contact-fields`, key made from
+  the label unless given, once per optional `Idempotency-Key`), renames it (`PATCH
+/contact-fields/{key}`, the label only) and deletes it with every contact's value (`DELETE
+/contact-fields/{key}`). Key and type never change. `GET /contact-fields` answers either scope.
+- **Also fixed: the 50-field limit could be passed by additions at once.** It was checked by
+  counting, then inserting; additions of one company now take turns under a transaction lock and
+  count under it, for members and keys alike. Renames, which left no trace, are audited
+  (`contact_field.renamed`), in Settings' service too.
+- **Migration 0092:** the scope checks of API keys and plan versions take the new scope (11 at
+  most).
+- **Domain and web:** `contacts/field-definitions.ts` (`createContactField`, `renameContactField`,
+  `deleteContactField`) shared by Settings and the API; `api/contact-fields.ts`; the routes; the
+  OpenAPI operations and schemas; the scope in Settings → API keys and the platform plan form (both
+  list scopes from the model); the `contacts.read` description brought up to date (search and the
+  change feed).
+- **Tests:**
+  - Unit (`contact-fields.test.ts`, 6): the scope and its permission; the bodies; refusals before
+    anything is read (scope, company status, keys no field can have, other bodies); the list for
+    either scope; the OpenAPI entries. `api.test.ts`: the scope among the writing ones.
+  - Integration (`api-contact-field-definitions.test.ts`, 5): fields added from a label or with a
+    key, a key the company has refused naming `key`, one field per `Idempotency-Key`, audited as the
+    key, values taken at once; renames keeping key, type and values, the same label leaving no
+    trace, members' renames audited; a deletion removing every value, each contact that had one in
+    the change feed (ADR-114), audited; an addition waiting for one in progress and counting it, for
+    a member and for a key, at 50; keys without the scope, another company's fields, and members who
+    cannot define fields granting the scope.
+  - e2e (`api-contact-field-definitions.spec.ts`): a key adds a field members see in Settings, a
+    contact gets a value the contact page shows, the key renames it (the value stays under the new
+    label) and deletes it (the value goes, Settings shows no fields, a second deletion is not found).
+- **Docs:** ADR-115; SECURITY; THREAT-MODEL T128; RUNBOOKS (a key that cannot add, rename or delete a
+  field); ARCHITECTURE; DEPLOYMENT; BACKLOG P5-08; FEATURE-MATRIX W-134, H-033.
+- **Mutation checks:** 33 regressions tried, 32 caught:
+  - 10 in the shared definitions (additions not taking turns, the count taken before the lock, the
+    limit one too high, a key the company has not answered as a conflict, the conflict not naming
+    `key`, the key not made from the label, a rename to the same label written again, a deletion
+    leaving the values, removing every value or removing them before the field), 2 in Settings'
+    service (renames audited never, or when nothing changed), 11 in the API (each of the three scope
+    checks, additions not idempotent or audited as the system, a key's renames not audited,
+    deletions audited without the key, a key in the path taken as it is, an addition answered 200,
+    the list refused to definers or answered to any key), 5 in migration 0092 and the scope (keys or
+    plans unable to hold it, a key unable to hold every scope, granted by members who change
+    contacts, taken as read only), 3 in the OpenAPI document and routes, and 1 through the e2e test
+    (an addition needing an `Idempotency-Key`).
+  - Not caught, as it removes a defense something else repeats: the company condition in the field
+    lookup (forced row-level security limits every read and write to the company's fields).
+
+### Test commands and results (local, 2026-10-02)
+
+| Command                                                                                                                                                                                          | Result                                                                     |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                                             | clean                                                                      |
+| `pnpm test`                                                                                                                                                                                      | 513 passed                                                                 |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                                                                              | 720 passed on each                                                         |
+| `pnpm build`, then `api-contact-field-definitions.spec.ts`, `api-contact-fields.spec.ts` and `api-contact-changes.spec.ts` on chromium and mobile-chromium, on a fresh database migrated to 0092 | 6 passed                                                                   |
+| Mutation checks                                                                                                                                                                                  | 33 regressions, 32 caught (1 through the e2e test; the other listed above) |
+| gitleaks 8.30.1 on the commit                                                                                                                                                                    | no leaks                                                                   |
+
+### Known gaps
+
+- Changing a field's type, renaming fields in the app (Settings adds and deletes them), choices for a
+  field, field order and events for field definitions are not built (ADR-115).
+
 ## 2026-10-02 — Phase 5: following contact changes through the public API (P5-08, ADR-114)
 
 Status: **Implemented and locally verified (test data only).** Integrations that keep a copy of a

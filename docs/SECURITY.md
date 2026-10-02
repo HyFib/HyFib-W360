@@ -445,9 +445,10 @@ Phase 5 rules (Public API, P5-08):
   permission a member needs for the same work: `templates.read`, `contacts.read`, `contacts.write`,
   `inbox.reply` for `messages.send` (utility templates) and `messages.reply` (text replies, ADR-070),
   `campaigns.send` for `messages.send_marketing`, `inbox.read_all` for `conversations.read`
-  (ADR-072), `inbox.supervise` for `conversations.write` (ADR-075), and `automations.publish` for
-  `automations.start` (ADR-077). Nobody grants a key more than they hold, and rotating needs the
-  same. A key keeps the scopes it was created with.
+  (ADR-072), `inbox.supervise` for `conversations.write` (ADR-075), `automations.publish` for
+  `automations.start` (ADR-077), and `tenant.settings.manage` for `contact_fields.manage` (ADR-115).
+  Nobody grants a key more than they hold, and rotating needs the same. A key keeps the scopes it was
+  created with.
 - A request acts for the key's company only, as the key: its company comes from the key found by
   the token's hash, never from the path, body or headers, and data access runs in that company's
   scope (RLS). Audit rows name the key (`api_key`). Writing scopes are refused while the company is
@@ -591,6 +592,14 @@ Phase 5 rules (Public API, P5-08):
   (column grants: the runtime and definer roles insert only `tenant_id` and `contact_id`); only the
   compaction function, owned by the definer role and run by the worker, deletes rows across
   companies, and only rows a later change of the same contact replaced.
+- Defining contact fields (ADR-115): adding, renaming and deleting the company's custom fields needs
+  `contact_fields.manage`, which only members holding `tenant.settings.manage` (owners and
+  administrators, who define fields in Settings) grant, and an active company. Fields are named by
+  key in the key's company only; another company's key is not found. Keys and types never change,
+  so values already stored keep their meaning; a deletion removes every contact's value with the
+  field, as in Settings. Additions of one company take turns under a lock, so the 50-field limit
+  holds for members and keys at once. Every change is audited as the key or the member with the
+  field's key, never values; renames are audited now, in Settings too.
 - Only the token's SHA-256 is stored; the runtime role cannot read it. The token is shown once in
   the browser and kept only in the page's memory; it is never logged, and audit entries carry the
   public prefix only.

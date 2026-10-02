@@ -141,6 +141,7 @@ describe('API scopes', () => {
     const writes = API_SCOPE_KEYS.filter((s) => API_SCOPE_INFO[s].writes);
     expect(writes).toEqual([
       'contacts.write',
+      'contact_fields.manage',
       'messages.send',
       'messages.send_marketing',
       'messages.reply',
@@ -156,6 +157,8 @@ describe('API scopes', () => {
     expect(API_SCOPE_INFO['messages.send_marketing'].permission).toBe('campaigns.send');
     expect(API_SCOPE_INFO['messages.reply'].permission).toBe('inbox.reply');
     expect(API_SCOPE_INFO['contacts.write'].permission).toBe('contacts.write');
+    // Members define fields in Settings with tenant.settings.manage (ADR-115).
+    expect(API_SCOPE_INFO['contact_fields.manage'].permission).toBe('tenant.settings.manage');
     expect(API_SCOPE_INFO['conversations.read'].permission).toBe('inbox.read_all');
     expect(API_SCOPE_INFO['conversations.write'].permission).toBe('inbox.supervise');
     expect(API_SCOPE_INFO['automations.start'].permission).toBe('automations.publish');

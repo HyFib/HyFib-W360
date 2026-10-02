@@ -8,6 +8,7 @@ export const API_SCOPES = [
   'templates.read',
   'contacts.read',
   'contacts.write',
+  'contact_fields.manage',
   'messages.send',
   'messages.send_marketing',
   'messages.reply',
