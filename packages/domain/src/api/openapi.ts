@@ -36,7 +36,12 @@ import {
 } from '../webhooks/payloads';
 import { apiStartAutomationSchema } from './automations';
 import { apiContactSchema } from './contact-view';
-import { apiContactFieldSchema, apiContactUpdateSchema } from './contacts';
+import {
+  API_CONTACT_SEARCH_WINDOW,
+  MAX_FIELD_FILTERS,
+  apiContactFieldSchema,
+  apiContactUpdateSchema,
+} from './contacts';
 import {
   API_MESSAGE_FEED_WINDOW,
   apiAddNoteSchema,
@@ -505,7 +510,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         get: {
           operationId: 'listContacts',
           summary: 'Contacts, newest first',
-          description: scopeNote('contacts.read'),
+          description: `${scopeNote('contacts.read')} Filters combine: a contact matches all of them. Pages never skip or repeat a contact. A page filtered by \`tag\` or \`fields\` reads at most ${API_CONTACT_SEARCH_WINDOW.toLocaleString('en-US')} of the company's contacts, newest first: when the filters leave out most of them, a page can hold fewer contacts than \`limit\`, or none, and still give a \`nextCursor\`; follow it until it is \`null\`.`,
           parameters: [
             {
               name: 'limit',
@@ -523,6 +528,30 @@ export function buildOpenApiDocument(serverUrl: string) {
               in: 'query',
               schema: { type: 'string' },
               description: 'Only the contact with this number (with its country code).',
+            },
+            {
+              name: 'email',
+              in: 'query',
+              schema: { type: 'string', maxLength: 254 },
+              description: 'Only contacts with this email address, whatever its case.',
+            },
+            {
+              name: 'tag',
+              in: 'query',
+              schema: { type: 'string', maxLength: 40 },
+              description: 'Only contacts with this tag (tags are lower-cased).',
+            },
+            {
+              name: 'fields',
+              in: 'query',
+              style: 'deepObject',
+              explode: true,
+              schema: {
+                type: 'object',
+                additionalProperties: { type: 'string', maxLength: 500 },
+                maxProperties: MAX_FIELD_FILTERS,
+              },
+              description: `Only contacts whose custom field has this value, as \`fields[<key>]=<value>\` (keys from GET /contact-fields), at most ${MAX_FIELD_FILTERS}: text equal whatever its case, a number equal as a number, a date as YYYY-MM-DD, \`true\` or \`false\` for yes/no. An unknown key or a value of another type is refused, naming \`fields.<key>\`.`,
             },
           ],
           responses: {

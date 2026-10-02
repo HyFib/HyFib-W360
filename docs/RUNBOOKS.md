@@ -1628,6 +1628,14 @@ every contact and sends no event); a create (`POST /contacts`) fills only the fi
 contact has no value for, so a change of a value needs `PATCH /contacts/{id}`. Changes are audited
 as `contact.updated` by the key with the field keys, never the values.
 
+**A contact search through the API gives short or empty pages, or a 422 (ADR-113).** A page
+filtered by `tag` or `fields[<key>]` reads at most 2,000 contacts, newest first: when few contacts
+match, pages hold fewer than `limit`, or none, and still give `nextCursor`, which the integration
+follows until it is `null`. A 422 names the filter: `fields.<key>` for a key the company has no
+field for (`GET /api/v1/contact-fields`), a value of another type (numbers as members type them,
+dates `YYYY-MM-DD`, `true` or `false`) or an empty one, `email` or `tag`. Text matches whatever its
+case but compares whole values, not parts of them.
+
 **The company is suspended or its plan ended.** Keys keep reading; creating and changing contacts,
 recording consent, sending, resolving conversations and adding notes to them, starting and stopping
 automations, and managing webhook endpoints (reading them and their deliveries included) answer 423

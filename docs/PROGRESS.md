@@ -1,5 +1,64 @@
 # Progress
 
+## 2026-10-02 — Phase 5: finding contacts through the public API (P5-08, ADR-113)
+
+Status: **Implemented and locally verified (test data only).** Since ADR-112 integrations read and
+change contacts' custom fields, but `GET /contacts` found contacts only by number: matching records
+by email, syncing a tag's contacts or looking contacts up by a field value meant paging through
+every contact a company has.
+
+### Completed
+
+- **Design (ADR-113):** `GET /contacts` takes `email`, `tag` and up to 5 `fields[<key>]=<value>`
+  (OpenAPI `deepObject`), all of which a contact must match, with `phone`. Values are read with
+  their field's type and compared as segments compare "equals" (text whatever its case, numbers as
+  numbers, dates as written, `true` or `false`); unknown keys, values of another type, empty values
+  and bad email addresses or tags are refused naming the parameter. A page filtered by tag or field
+  reads at most 2,000 contacts, as the message feed does (ADR-088). No migration.
+- **Domain:** `contactListQuery` (the `fields[<key>]` parameters as one object),
+  `apiContactListFilters` (email and tag written as the app keeps them), `apiFieldFilters` (keys
+  checked against the company's fields, values read by `apiFieldFilterValue`, compared as bound
+  parameters), the windowed list in `apiListContacts` (a repeatable read snapshot), the OpenAPI
+  parameters and description.
+- **Tests:**
+  - Unit: the value rule for each type (and its refusals), the query parameters, at most 5 field
+    filters, the email and tag rules, refusals before anything is read, the OpenAPI entry.
+  - Integration (3 more in `api-contact-fields.test.ts`): filters by email, tag and each field type,
+    alone and together, never another company's or an erased contact, a text value in a number field
+    never compared as a number; every refusal with its path and message, another company's field
+    unknown, a writing key refused; 2,005 contacts read in windows (the first ending at its 2,000th
+    contact, an empty window still giving its cursor, a limit of one splitting windows, never
+    skipping or repeating a contact) and unfiltered pages unchanged.
+  - e2e (`api-contact-fields.spec.ts`): the key finds the contact by a number field and a tag, and an
+    unknown field is refused.
+- **Docs:** ADR-113 (ADR-112's list annotated); SECURITY; THREAT-MODEL T126; RUNBOOKS (short or empty
+  pages and refusals); ARCHITECTURE; BACKLOG P5-08; FEATURE-MATRIX W-134, H-033.
+- **Mutation checks:** 26 regressions tried, all caught: the value rule (yes/no read as members type
+  it, an empty value), the query and filters (a bracket with no key, the fields parameters, six
+  filters, empty and bad email addresses, the tag as written and a bad tag), the comparisons (text
+  in its case, numbers as text or cast whatever their type, yes and no swapped, unknown keys,
+  unchecked values), the list (the tag, the email's case, the field filters, reading past the
+  window, no cursor past an empty window, a window one longer or shorter or counted in the other
+  order, erased contacts) and the OpenAPI entry. The first run left 2 alive, now caught: numbers
+  compared as text (only a value stored with a trailing zero shows the difference, now tested) and
+  erased contacts in the unfiltered list (no test had checked it since ADR-052).
+
+### Test commands and results (local, 2026-10-02)
+
+| Command                                                                                                               | Result                                                            |
+| --------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                  | clean                                                             |
+| `pnpm test`                                                                                                           | 501 passed                                                        |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                   | 708 passed on each                                                |
+| `pnpm build`, then `api-contact-fields.spec.ts`, `api.spec.ts` and `contacts.spec.ts` on chromium and mobile-chromium | 16 passed                                                         |
+| Mutation checks                                                                                                       | 26 regressions, all caught (the first run missed 2, listed above) |
+| gitleaks 8.30.1 on the commit                                                                                         | no leaks found                                                    |
+
+### Known gaps
+
+- Other comparisons (contains, greater or less than, not set), several values for one filter,
+  other orders, contacts changed since a time and searching by name are not built.
+
 ## 2026-10-02 — Phase 5: contact custom fields and contact changes through the public API (P5-08, P5-09, ADR-112)
 
 Status: **Implemented and locally verified (test data only; webhooks delivered to local test

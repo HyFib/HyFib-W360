@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { apiFieldValue, coerceFieldValue } from './fields';
+import { apiFieldFilterValue, apiFieldValue, coerceFieldValue } from './fields';
 
 describe('custom field values through the public API (ADR-112)', () => {
   const text = { label: 'City', type: 'text' as const };
@@ -63,5 +63,41 @@ describe('custom field values through the public API (ADR-112)', () => {
       message: 'Orders must be a number.',
     });
     expect(coerceFieldValue(yesNo, 'Yes')).toEqual({ ok: true, value: true });
+  });
+});
+
+describe('custom field values a contact list is filtered by (ADR-113)', () => {
+  const text = { label: 'City', type: 'text' as const };
+  const number = { label: 'Orders', type: 'number' as const };
+  const date = { label: 'Birthday', type: 'date' as const };
+  const yesNo = { label: 'VIP', type: 'boolean' as const };
+  const value = (field: Parameters<typeof apiFieldFilterValue>[0], raw: string) => {
+    const result = apiFieldFilterValue(field, raw);
+    return result.ok ? result.value : `refused: ${result.message}`;
+  };
+
+  it('read each type from the query string as members type it', () => {
+    expect(value(text, '  Pune ')).toBe('Pune');
+    expect(value(text, 'true')).toBe('true');
+    expect(value(number, '3')).toBe(3);
+    expect(value(number, '-2.5')).toBe(-2.5);
+    expect(value(date, '1990-04-01')).toBe('1990-04-01');
+    expect(value(yesNo, 'true')).toBe(true);
+    expect(value(yesNo, 'false')).toBe(false);
+  });
+
+  it('refuse an empty value, another type or a bad value, naming the field', () => {
+    for (const field of [text, number, date]) {
+      expect(value(field, '  ')).toBe(`refused: Give a value of ${field.label} to find.`);
+    }
+    expect(value(text, 'x'.repeat(501))).toBe('refused: City is longer than 500 characters.');
+    expect(value(number, 'three')).toBe('refused: Orders must be a number.');
+    expect(value(number, '1e3')).toBe('refused: Orders must be a number.');
+    expect(value(date, '1990-02-30')).toBe(
+      'refused: Birthday must be a date written as YYYY-MM-DD.',
+    );
+    for (const raw of ['yes', 'TRUE', '1', '']) {
+      expect(value(yesNo, raw)).toBe('refused: VIP takes true or false.');
+    }
   });
 });

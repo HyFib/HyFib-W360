@@ -63,7 +63,16 @@ import {
 } from '../templates/definition';
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
 import { apiContactById, apiContactColumns, toApiContact, type ApiContact } from './contact-view';
-import { apiContactFieldsSchema, apiFieldChanges, apiTags } from './contacts';
+import {
+  API_CONTACT_SEARCH_WINDOW,
+  apiContactFieldFiltersSchema,
+  apiContactFieldsSchema,
+  apiContactListFilters,
+  apiFieldChanges,
+  apiFieldFilters,
+  apiTags,
+  contactListQuery,
+} from './contacts';
 import { apiActor, assertAnyScope, assertScope, type ApiContext } from './context';
 import {
   claimIdempotencyKey,
@@ -102,6 +111,9 @@ export const apiContactListQuerySchema = z
     limit: z.coerce.number().int().min(1).max(API_LIMITS.pageSize).default(50),
     cursor: z.string().max(200).optional().describe('`nextCursor` from the previous page.'),
     phone: z.string().max(40).optional().describe('Only the contact with this number.'),
+    email: z.string().max(254).optional().describe('Only contacts with this email address.'),
+    tag: z.string().max(40).optional().describe('Only contacts with this tag.'),
+    fields: apiContactFieldFiltersSchema.optional(),
   })
   .strict();
 
@@ -599,29 +611,61 @@ export async function apiListTemplates(
   );
 }
 
+/**
+ * The company's contacts newest first on exact keyset pages, found by number, email address, tag
+ * and custom field values (ADR-113), all of which a contact must match. A page filtered by tag or
+ * field reads at most API_CONTACT_SEARCH_WINDOW contacts: when the filters leave out most of them it
+ * shows fewer than the limit, or none, and its cursor continues after the last one it read. Both
+ * reads see one snapshot.
+ */
 export async function apiListContacts(
   deps: Pick<OutboundDeps, 'db'>,
   ctx: ApiContext,
   query: unknown,
 ): Promise<{ data: ApiContact[]; nextCursor: string | null }> {
   assertScope(ctx, 'contacts.read');
-  const q = parseInput(apiContactListQuerySchema, query);
+  const q = parseInput(apiContactListQuerySchema, contactListQuery(query));
   const cursor = decodeKeysetCursor(q.cursor);
   const phone = q.phone ? explicitPhone(q.phone) : null;
+  const { email, tag } = apiContactListFilters(q);
   return deps.db.run(
     ctx.scope,
     async (tx) => {
+      const filters = await apiFieldFilters(tx, ctx.tenant.id, q.fields ?? {});
+      if (tag) {
+        filters.push(sql`exists (select 1 from app.contact_tags t where t.tenant_id = ${contacts.tenantId}
+          and t.contact_id = ${contacts.id} and t.tag = ${tag})`);
+      }
+      const range = and(
+        eq(contacts.tenantId, ctx.tenant.id),
+        isNull(contacts.erasedAt),
+        phone ? eq(contacts.phoneE164, phone) : undefined,
+        email ? sql`lower(${contacts.email}) = lower(${email})` : undefined,
+        cursor
+          ? sql`(${contacts.createdAt}, ${contacts.id}) < (${cursor.at}::timestamptz, ${cursor.id}::uuid)`
+          : undefined,
+      );
+      // The last contact this page may read; none when fewer remain or nothing is filtered.
+      const [edge] =
+        filters.length > 0
+          ? await tx
+              .select({ at: exactTimestamp(contacts.createdAt), id: contacts.id })
+              .from(contacts)
+              .where(range)
+              .orderBy(desc(contacts.createdAt), desc(contacts.id))
+              .offset(API_CONTACT_SEARCH_WINDOW - 1)
+              .limit(1)
+          : [];
       const rows = await tx
         .select({ ...apiContactColumns, cursorAt: exactTimestamp(contacts.createdAt) })
         .from(contacts)
         .where(
           and(
-            eq(contacts.tenantId, ctx.tenant.id),
-            isNull(contacts.erasedAt),
-            phone ? eq(contacts.phoneE164, phone) : undefined,
-            cursor
-              ? sql`(${contacts.createdAt}, ${contacts.id}) < (${cursor.at}::timestamptz, ${cursor.id}::uuid)`
+            range,
+            edge
+              ? sql`(${contacts.createdAt}, ${contacts.id}) >= (${edge.at}::timestamptz, ${edge.id}::uuid)`
               : undefined,
+            ...filters,
           ),
         )
         .orderBy(desc(contacts.createdAt), desc(contacts.id))
@@ -631,10 +675,14 @@ export async function apiListContacts(
       return {
         data: page.map(toApiContact),
         nextCursor:
-          rows.length > q.limit && last ? encodeKeysetCursor(last.cursorAt, last.id) : null,
+          rows.length > q.limit && last
+            ? encodeKeysetCursor(last.cursorAt, last.id)
+            : edge
+              ? encodeKeysetCursor(edge.at, edge.id)
+              : null,
       };
     },
-    { accessMode: 'read only' },
+    { isolationLevel: 'repeatable read', accessMode: 'read only' },
   );
 }
 

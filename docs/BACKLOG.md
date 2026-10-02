@@ -481,12 +481,15 @@ verification, app review, Embedded Signup configuration).
   fields, typed; `GET /contact-fields` lists the fields; `POST /contacts` sets them on a new contact
   and fills an existing one's empty ones; `PATCH /contacts/{id}` changes the name, email, field
   values and tags of a contact under its row lock, each value checked strictly against its field's
-  type and a refusal saving nothing; the 50-tag limit now holds through `POST /contacts` too).
+  type and a refusal saving nothing; the 50-tag limit now holds through `POST /contacts` too);
+  **[finding contacts built, locally verified]** (ADR-113: `GET /contacts` by email, tag and up to 5
+  custom field values, typed, all of which a contact must match; pages filtered by tag or field read
+  at most 2,000 contacts and never skip or repeat one).
   Remaining: media messages, call-to-action messages through the API, taking reactions back,
   assigning many conversations at once, media downloads, statuses changed since a time, starting or
   stopping runs for many contacts in one call, bulk sends in one call, defining contact fields,
-  changing numbers or many contacts in one call, filtering contacts by a field value, limits per
-  endpoint,
+  changing numbers or many contacts in one call, other comparisons in contact searches and
+  contacts changed since a time, limits per endpoint,
   availability per single endpoint (plans choose per scope since ADR-092). The one-argument key
   lookup kept for rolling deploys (0051) is dropped (0074). Replaying many deliveries in one call
   is built with P5-09 (ADR-095).

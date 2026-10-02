@@ -4177,6 +4177,35 @@ Found while building: `POST /contacts` added up to 20 tags to an existing contac
 50-tag limit members and automations keep, so repeated calls could pass it. It is now refused,
 naming `tags`.
 
-Not built: defining fields through the API, filtering the contact list by a field value, changing
-numbers through the API, changing many contacts in one call, and an event that says which fields
-changed (the payload is the contact as it is when delivered, as before).
+Not built: defining fields through the API, filtering the contact list by a field value (since
+ADR-113), changing numbers through the API, changing many contacts in one call, and an event that
+says which fields changed (the payload is the contact as it is when delivered, as before).
+
+## ADR-113 Finding contacts through the public API (2026-10-02)
+
+Context: since ADR-112 integrations read and change contacts' custom fields, but `GET /contacts`
+found contacts only by number. An integration matching its records by email, syncing the contacts
+of a tag or looking contacts up by a field value (an order or customer number) had to page through
+every contact the company has. Members find contacts by these in the app (search and segments).
+
+Decision:
+
+- **Filters on `GET /contacts`:** `email` (whatever its case, checked as members' emails are),
+  `tag` (written as the app writes tags) and `fields[<key>]=<value>` (the OpenAPI `deepObject`
+  style), at most 5 fields. A contact must match every filter given, with `phone`. A field's value
+  is read with the field's type and compared as segments compare "equals": text whatever its case,
+  numbers as numbers (`3` finds 3 and `3.0` finds it too), dates as `YYYY-MM-DD`, and `true` or
+  `false` for yes/no. An unknown key, a value of another type, an empty value, or a bad email
+  address or tag is refused (422) naming the parameter (`fields.<key>`, `email`, `tag`).
+- **Windows, not scans:** a page filtered by tag or field reads at most 2,000 of the company's
+  contacts, newest first, as the message feed does (ADR-088). When the filters leave out most
+  contacts, a page holds fewer than `limit`, or none, and still gives `nextCursor`; pages never skip
+  or repeat a contact, and both reads of a page see one snapshot. A number or email address alone
+  reads no window: their indexes find the few contacts that match.
+- **No migration and no new index:** tags already have an index by company and tag, and field
+  values are compared in the rows a window reads; an index of values would serve one kind of
+  comparison and grow with every value saved.
+- **Scope:** `contacts.read`, which listing contacts already needs.
+
+Not built: other comparisons (contains, greater or less than, not set), several values for one
+filter, orders other than newest first, contacts changed since a time, and searching by name.

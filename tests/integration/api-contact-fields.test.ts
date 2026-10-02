@@ -7,6 +7,7 @@ import { isAppError, systemClock, uuidv7 } from '@w360/core';
 import { DEFAULT_EGRESS_POLICY, createEgressClient } from '@w360/core/egress';
 import { authorizedTenantScope, contacts, eq, sql } from '@w360/db';
 import {
+  API_CONTACT_SEARCH_WINDOW,
   apiCreateContact,
   apiGetContact,
   apiListContactFields,
@@ -31,7 +32,8 @@ import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './what
  * the fields it defines, values set on a new contact and filled on an existing one, changes to the
  * name, email, fields and tags with every refusal saving nothing, the field rows locked against a
  * deletion at the same time, and `contact.updated` for every change of a field's value, whoever
- * makes it, but not for a field renamed or deleted.
+ * makes it, but not for a field renamed or deleted. Also the contact list's filters by email, tag
+ * and custom field value, read in windows (ADR-113).
  */
 let fx: WhatsAppFixture;
 let receiver: Server;
@@ -603,5 +605,174 @@ describe('contact.updated for custom field values (ADR-112)', () => {
     expect(contactErasedPayloadSchema.safeParse(erased[0]).success).toBe(true);
     expect(erased[0]!.data.contact).toMatchObject({ id, erased: true });
     expect((erased[0]!.data.contact as { fields: unknown }).fields).toEqual({});
+  });
+});
+
+describe('finding contacts (ADR-113)', () => {
+  const names = (page: { data: { name: string | null }[] }) => page.data.map((c) => c.name);
+
+  it('finds contacts by email, tag and typed custom field values, all of which they must match', async () => {
+    const c = await fx.company();
+    await defineFields(c);
+    const owner = await fx.ctx(c, c.owner);
+    const service = contactsService();
+    const asha = await service.createContact(owner, {
+      displayName: 'Asha',
+      phone: nextPhone(),
+      email: 'Asha@Example.test',
+      attributes: { city: 'Pune', orders: '3', birthday: '1990-04-01', vip: 'yes' },
+    });
+    await service.addTags(owner, asha.id, ['vip']);
+    const bina = await service.createContact(owner, {
+      displayName: 'Bina',
+      phone: nextPhone(),
+      email: 'bina@example.test',
+      attributes: { city: 'pune', orders: '3.5', vip: 'no' },
+    });
+    await service.addTags(owner, bina.id, ['vip', 'new']);
+    await service.createContact(owner, {
+      displayName: 'Chitra',
+      phone: nextPhone(),
+      attributes: { city: 'Delhi', orders: '30' },
+    });
+    // Another company's contact has the same values, and an erased one had them.
+    const other = await fx.company();
+    await defineFields(other);
+    const theirs = await contactsService().createContact(await fx.ctx(other, other.owner), {
+      displayName: 'Theirs',
+      phone: nextPhone(),
+      email: 'asha@example.test',
+      attributes: { city: 'Pune', orders: '3' },
+    });
+    await contactsService().addTags(await fx.ctx(other, other.owner), theirs.id, ['vip']);
+    const gone = await service.createContact(owner, {
+      displayName: 'Gone',
+      phone: nextPhone(),
+      attributes: { city: 'Pune' },
+    });
+    await service.eraseContact(owner, { contactId: gone.id, suppress: false });
+    // A value of another type written behind the app is never compared as a number, and a number
+    // written with a trailing zero is still equal to its value.
+    const odd = await service.createContact(owner, { displayName: 'Odd', phone: nextPhone() });
+    await fx.query(`UPDATE app.contacts SET attributes = '{"orders": "n/a"}' WHERE id = $1`, [
+      odd.id,
+    ]);
+    const dee = await service.createContact(owner, { displayName: 'Dee', phone: nextPhone() });
+    await fx.query(`UPDATE app.contacts SET attributes = '{"orders": 3.50}' WHERE id = $1`, [
+      dee.id,
+    ]);
+
+    const { ctx } = await apiKey(c, ['contacts.read']);
+    const find = async (query: Record<string, string>) =>
+      names(await apiListContacts(deps(), ctx, query));
+    expect(await find({ email: 'asha@EXAMPLE.test' })).toEqual(['Asha']);
+    expect(await find({ tag: ' VIP ' })).toEqual(['Bina', 'Asha']);
+    expect(await find({ 'fields[city]': 'PUNE' })).toEqual(['Bina', 'Asha']);
+    expect(await find({ 'fields[orders]': '3' })).toEqual(['Asha']);
+    expect(await find({ 'fields[orders]': '3.0' })).toEqual(['Asha']);
+    expect(await find({ 'fields[orders]': '3.5' })).toEqual(['Dee', 'Bina']);
+    expect(await find({ 'fields[orders]': '30' })).toEqual(['Chitra']);
+    expect(await find({ 'fields[birthday]': '1990-04-01' })).toEqual(['Asha']);
+    expect(await find({ 'fields[vip]': 'true' })).toEqual(['Asha']);
+    expect(await find({ 'fields[vip]': 'false' })).toEqual(['Bina']);
+    expect(
+      await find({ tag: 'vip', 'fields[city]': 'pune', 'fields[vip]': 'false', limit: '5' }),
+    ).toEqual(['Bina']);
+    expect(await find({ tag: 'new', email: 'asha@example.test' })).toEqual([]);
+    expect(await find({ 'fields[city]': 'Mumbai' })).toEqual([]);
+    // A short list has no next page, and the list without filters leaves the erased contact out.
+    expect((await apiListContacts(deps(), ctx, { tag: 'vip' })).nextCursor).toBeNull();
+    expect((await apiListContacts(deps(), ctx, {})).data.map((r) => r.id)).not.toContain(gone.id);
+  });
+
+  it('refuses unknown fields and values of another type, naming the field', async () => {
+    const c = await fx.company();
+    await defineFields(c);
+    const other = await fx.company();
+    await contactsService().createField(await fx.ctx(other, other.owner), {
+      label: 'Region',
+      key: 'region',
+      type: 'text',
+    });
+    const { ctx } = await apiKey(c, ['contacts.read']);
+    for (const [query, path, message] of [
+      [
+        { 'fields[nope]': 'x' },
+        'fields.nope',
+        'The company has no custom field with the key nope (GET /contact-fields).',
+      ],
+      [
+        { 'fields[region]': 'North' },
+        'fields.region',
+        'The company has no custom field with the key region (GET /contact-fields).',
+      ],
+      [{ 'fields[orders]': 'three' }, 'fields.orders', 'Orders must be a number.'],
+      [{ 'fields[vip]': 'yes' }, 'fields.vip', 'VIP takes true or false.'],
+      [
+        { 'fields[birthday]': '1990-02-30' },
+        'fields.birthday',
+        'Birthday must be a date written as YYYY-MM-DD.',
+      ],
+      [{ 'fields[city]': ' ' }, 'fields.city', 'Give a value of City to find.'],
+      [{ email: 'not an address' }, 'email', 'Email address is not valid.'],
+      [{ tag: 'a,b' }, 'tag', 'Tags cannot contain commas or control characters.'],
+    ] as const) {
+      const r = await refusal(apiListContacts(deps(), ctx, query));
+      expect([r.code, r.paths, r.error.publicMessage]).toEqual([
+        'validation_failed',
+        [path],
+        message,
+      ]);
+    }
+    const { ctx: writer } = await apiKey(c, ['contacts.write']);
+    expect((await refusal(apiListContacts(deps(), writer, { tag: 'vip' }))).code).toBe('forbidden');
+  });
+
+  it('reads a filtered list in windows, so pages can be short or empty but never skip or repeat a contact', async () => {
+    const c = await fx.company();
+    await defineFields(c);
+    const total = API_CONTACT_SEARCH_WINDOW + 5;
+    // Contact n was created n seconds ago: Pune for the two newest, the two on each side of the
+    // first window's edge and the two oldest.
+    await fx.query(
+      `INSERT INTO app.contacts (id, tenant_id, display_name, attributes, source, created_at)
+       SELECT gen_random_uuid(), $1, 'Bulk ' || n,
+              CASE WHEN n IN (1, 2, $3, $3 + 1, $2 - 1, $2) THEN '{"city": "Pune"}'
+                   ELSE '{"city": "Delhi"}' END::jsonb,
+              'api', now() - make_interval(secs => n)
+         FROM generate_series(1, $2::int) AS n`,
+      [c.tenant.id, total, API_CONTACT_SEARCH_WINDOW],
+    );
+    const oldest = (
+      await fx.query<{ id: string }>(
+        `SELECT id FROM app.contacts WHERE tenant_id = $1 AND display_name = $2`,
+        [c.tenant.id, `Bulk ${total}`],
+      )
+    )[0]!.id;
+    await contactsService().addTags(await fx.ctx(c, c.owner), oldest, ['oldest']);
+    const { ctx } = await apiKey(c, ['contacts.read']);
+    const pages = async (query: Record<string, string>) => {
+      const seen: (string | null)[][] = [];
+      let cursor: string | undefined;
+      for (let i = 0; i < 10; i += 1) {
+        const page = await apiListContacts(deps(), ctx, cursor ? { ...query, cursor } : query);
+        seen.push(names(page));
+        if (!page.nextCursor) return seen;
+        cursor = page.nextCursor;
+      }
+      throw new Error('the pages did not end');
+    };
+    const edge = API_CONTACT_SEARCH_WINDOW;
+    const pune = ['Bulk 1', 'Bulk 2', `Bulk ${edge}`, `Bulk ${edge + 1}`, `Bulk ${total - 1}`];
+    pune.push(`Bulk ${total}`);
+    // The first window ends at its 2,000th contact; the next one goes on from just past it.
+    expect(await pages({ 'fields[city]': 'Pune' })).toEqual([pune.slice(0, 3), pune.slice(3)]);
+    // A limit of one splits windows too, never skipping or repeating.
+    expect((await pages({ 'fields[city]': 'Pune', limit: '1' })).flat()).toEqual(pune);
+    // A window can show nothing and still give the cursor past it.
+    expect(await pages({ tag: 'oldest' })).toEqual([[], [`Bulk ${total}`]]);
+    // Without a tag or field filter, a page is not windowed.
+    const unfiltered = await apiListContacts(deps(), ctx, { limit: '3' });
+    expect(names(unfiltered)).toEqual(['Bulk 1', 'Bulk 2', 'Bulk 3']);
   });
 });

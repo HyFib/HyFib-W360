@@ -145,6 +145,18 @@ test('a key sets and changes a contact’s custom fields, the contact page shows
     tags: ['vip'],
   });
 
+  // The key finds the contact by a field value and a tag (ADR-113).
+  const found = await request.get(
+    `/api/v1/contacts?${new URLSearchParams({ 'fields[orders]': '3', tag: 'VIP' }).toString()}`,
+    { headers: auth },
+  );
+  expect(found.status()).toBe(200);
+  expect(((await found.json()) as { data: ApiContactBody[] }).data.map((c) => c.id)).toEqual([
+    contact.id,
+  ]);
+  const unknown = await request.get('/api/v1/contacts?fields%5Bnope%5D=1', { headers: auth });
+  expect(unknown.status()).toBe(422);
+
   // The contact page shows the values; a member changes the city.
   await page.goto(`/c/${slug}/contacts/${contact.id}`);
   await expect(page.getByLabel('City', { exact: true })).toHaveValue('Pune');

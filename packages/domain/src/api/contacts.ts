@@ -8,13 +8,16 @@ import {
   contacts,
   eq,
   inArray,
+  sql,
   type ContactFieldType,
+  type SQL,
   type Tx,
 } from '@w360/db';
 import { recordSystemAudit } from '../audit';
 import {
   MAX_CONTACT_FIELDS,
   MAX_TAGS_PER_CONTACT,
+  apiFieldFilterValue,
   apiFieldValue,
   normalizeEmail,
   normalizeTag,
@@ -27,7 +30,8 @@ import { apiActor, assertScope, type ApiContext } from './context';
 
 /**
  * Contact custom fields and contact changes through the public API (ADR-112): the company's field
- * definitions, values checked strictly against their field's type, and `PATCH /contacts/{id}`.
+ * definitions, values checked strictly against their field's type, and `PATCH /contacts/{id}`; and
+ * the filters `GET /contacts` finds contacts with (ADR-113).
  */
 
 const FIELD_KEY = z.string().max(40);
@@ -148,6 +152,105 @@ export async function apiFieldChanges(
     changes[key] = checked.value;
   }
   return changes;
+}
+
+/** The most custom fields one contact list filters on (ADR-113). */
+export const MAX_FIELD_FILTERS = 5;
+
+/**
+ * The most contacts one page of a list filtered by tag or custom field reads (ADR-113), whatever it
+ * shows: filters that leave out most of a company's contacts give short pages, never a scan of every
+ * contact it has (as the message feed reads, ADR-088).
+ */
+export const API_CONTACT_SEARCH_WINDOW = 2000;
+
+/** The custom field values `GET /contacts` finds contacts by, from `fields[<key>]` parameters. */
+export const apiContactFieldFiltersSchema = z
+  .record(FIELD_KEY, z.string().max(500))
+  .refine(
+    (v) => Object.keys(v).length <= MAX_FIELD_FILTERS,
+    `Filter on at most ${MAX_FIELD_FILTERS} fields.`,
+  );
+
+/**
+ * Query parameters as the contact list's schema reads them: `fields[<key>]=<value>` (the OpenAPI
+ * `deepObject` style) become the `fields` object; anything else is left for the schema to check.
+ */
+export function contactListQuery(raw: unknown): unknown {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return raw;
+  const query: Record<string, unknown> = {};
+  const fields: Record<string, unknown> = {};
+  for (const [name, value] of Object.entries(raw)) {
+    const key = /^fields\[(.+)\]$/.exec(name)?.[1];
+    if (key === undefined) query[name] = value;
+    else fields[key] = value;
+  }
+  if (Object.keys(fields).length > 0) query.fields = fields;
+  return query;
+}
+
+/** The email address and tag a contact list is filtered by, written as the app keeps them. */
+export function apiContactListFilters(query: { email?: string; tag?: string }): {
+  email: string | null;
+  tag: string | null;
+} {
+  let email: string | null = null;
+  if (query.email !== undefined) {
+    const checked = normalizeEmail(query.email);
+    if (!checked.ok) throw invalidField('email', checked.message);
+    if (!checked.email) throw invalidField('email', 'Give an email address to find.');
+    email = checked.email;
+  }
+  let tag: string | null = null;
+  if (query.tag !== undefined) {
+    const checked = normalizeTag(query.tag);
+    if (!checked.ok) throw invalidField('tag', checked.message);
+    tag = checked.tag;
+  }
+  return { email, tag };
+}
+
+/**
+ * The condition one filtered field puts on contacts, as segments compare "equals": text equal
+ * whatever its case, numbers equal as numbers, dates as written, yes/no as true or false.
+ */
+function fieldEqualsSql(key: string, value: AttributeValue): SQL {
+  const json = sql`(${contacts.attributes} -> ${key}::text)`;
+  const text = sql`(${contacts.attributes} ->> ${key}::text)`;
+  if (typeof value === 'boolean') return sql`${json} = ${value ? 'true' : 'false'}::jsonb`;
+  if (typeof value === 'number') {
+    return sql`(case when jsonb_typeof(${json}) = 'number' then ${text}::numeric end) = ${String(value)}::numeric`;
+  }
+  return sql`lower(${text}) = lower(${value})`;
+}
+
+/**
+ * The conditions `fields[<key>]` filters put on contacts (ADR-113), each value read with its
+ * field's type. An unknown key or a value of another type is refused, naming `fields.<key>`.
+ */
+export async function apiFieldFilters(
+  tx: Tx,
+  tenantId: string,
+  input: Record<string, string>,
+): Promise<SQL[]> {
+  const keys = Object.keys(input);
+  if (keys.length === 0) return [];
+  const defined = await tx
+    .select({ key: contactFields.key, label: contactFields.label, type: contactFields.type })
+    .from(contactFields)
+    .where(and(eq(contactFields.tenantId, tenantId), inArray(contactFields.key, keys)));
+  return keys.map((key) => {
+    const field = defined.find((f) => f.key === key);
+    if (!field) {
+      throw invalidField(
+        `fields.${key}`,
+        `The company has no custom field with the key ${key} (GET /contact-fields).`,
+      );
+    }
+    const checked = apiFieldFilterValue(field, input[key] ?? '');
+    if (!checked.ok) throw invalidField(`fields.${key}`, checked.message);
+    return fieldEqualsSql(key, checked.value);
+  });
 }
 
 /** The company's custom fields by label (at most 50, so in one page). */

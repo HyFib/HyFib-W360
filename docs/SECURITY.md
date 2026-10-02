@@ -577,6 +577,11 @@ Phase 5 rules (Public API, P5-08):
   must have their field's type and a refusal saves nothing; tags keep the 50 a contact may have,
   which `POST /contacts` now checks too. The audit entry names what changed and which fields, never
   a value.
+- Finding contacts (ADR-113): `GET /contacts` filters by email, tag and custom field values in the
+  key's company only (erased contacts never match). Field keys are checked against the company's
+  fields before use, and keys, tags and values are bound parameters, never part of the SQL text. A
+  page filtered by tag or field reads at most 2,000 contacts, so a rare value cannot make one request
+  read every contact a company has.
 - Only the token's SHA-256 is stored; the runtime role cannot read it. The token is shown once in
   the browser and kept only in the page's memory; it is never logged, and audit entries carry the
   public prefix only.

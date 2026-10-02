@@ -126,6 +126,27 @@ export function apiFieldValue(
   }
 }
 
+/**
+ * Reads a custom field value given in a query string to find contacts (ADR-113): text as written
+ * (compared whatever its case), a number as members type it, a real date as `YYYY-MM-DD`, and `true`
+ * or `false` for yes/no. An empty value would find nothing, so it is refused.
+ */
+export function apiFieldFilterValue(
+  field: { label: string; type: ContactFieldType },
+  raw: string,
+): { ok: true; value: AttributeValue } | { ok: false; message: string } {
+  if (field.type === 'boolean') {
+    if (raw === 'true') return { ok: true, value: true };
+    if (raw === 'false') return { ok: true, value: false };
+    return { ok: false, message: `${field.label} takes true or false.` };
+  }
+  const checked = coerceFieldValue(field, raw);
+  if (!checked.ok) return checked;
+  if (checked.value === null)
+    return { ok: false, message: `Give a value of ${field.label} to find.` };
+  return { ok: true, value: checked.value };
+}
+
 /** Reads a marketing-consent cell from an import file. */
 export function parseConsentCell(raw: string): 'opt_in' | 'opt_out' | 'blank' | 'unrecognised' {
   const v = raw

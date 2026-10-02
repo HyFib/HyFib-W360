@@ -29,11 +29,14 @@ import {
 import { apiListMembers, apiListTeams, apiMemberListQuerySchema } from './members';
 import { apiContactSchema } from './contact-view';
 import {
+  API_CONTACT_SEARCH_WINDOW,
   apiContactFieldsSchema,
+  apiContactListFilters,
   apiContactUpdateSchema,
   apiListContactFields,
   apiTags,
   apiUpdateContact,
+  contactListQuery,
 } from './contacts';
 import {
   API_LIMITS,
@@ -63,6 +66,8 @@ import {
   type AnswerTarget,
 } from '../messaging/reply-context';
 import {
+  apiContactListQuerySchema,
+  apiListContacts,
   apiSendButtonsSchema,
   apiSendCatalogSchema,
   apiSendListSchema,
@@ -1901,6 +1906,110 @@ describe('contact custom fields and changes (ADR-112)', () => {
     expect(Object.keys(apiContactSchema.shape)).toContain('fields');
     expect(API_SCOPE_INFO['contacts.write'].label).toBe(
       'Create and change contacts and record consent',
+    );
+  });
+});
+
+describe('finding contacts (ADR-113)', () => {
+  const ctx = (scopes: string[]) =>
+    ({
+      tenant: { id: 't', status: 'active' },
+      key: { id: 'k', scopes: new Set(scopes) },
+      planScopes: null,
+    }) as unknown as ApiContext;
+  const refusal = (fn: () => unknown) => {
+    try {
+      fn();
+    } catch (error) {
+      if (isAppError(error)) return { code: error.code, issues: error.issues };
+      throw error;
+    }
+    throw new Error('expected a refusal');
+  };
+
+  it('read fields[<key>] parameters as the fields filter, leaving everything else as it is', () => {
+    expect(
+      contactListQuery({ limit: '10', 'fields[city]': 'Pune', 'fields[orders]': '3', tag: 'vip' }),
+    ).toEqual({ limit: '10', tag: 'vip', fields: { city: 'Pune', orders: '3' } });
+    expect(contactListQuery({ phone: '+919800000000' })).toEqual({ phone: '+919800000000' });
+    // A bracket with no key stays a parameter the schema refuses.
+    expect(contactListQuery({ 'fields[]': 'x' })).toEqual({ 'fields[]': 'x' });
+    for (const raw of [null, 'x', ['a']]) expect(contactListQuery(raw)).toBe(raw);
+  });
+
+  it('take at most 5 field filters of strings, besides number, email and tag', () => {
+    const parse = (query: Record<string, unknown>) =>
+      apiContactListQuerySchema.safeParse(contactListQuery(query)).success;
+    const five = Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`fields[f${i}]`, 'x']));
+    expect(parse({ ...five, email: 'a@example.test', tag: 'vip', phone: '+919800000000' })).toBe(
+      true,
+    );
+    expect(parse({ ...five, 'fields[f5]': 'x' })).toBe(false);
+    expect(parse({ [`fields[${'k'.repeat(41)}]`]: 'x' })).toBe(false);
+    expect(parse({ 'fields[city]': 'x'.repeat(501) })).toBe(false);
+    expect(parse({ fields: 'city' })).toBe(false);
+    expect(parse({ 'fields[]': 'x' })).toBe(false);
+    expect(parse({ sort: 'name' })).toBe(false);
+  });
+
+  it('write the email address and tag as the app keeps them, and refuse bad ones by name', () => {
+    expect(apiContactListFilters({ email: ' Asha@Example.test ', tag: ' VIP ' })).toEqual({
+      email: 'Asha@Example.test',
+      tag: 'vip',
+    });
+    expect(apiContactListFilters({})).toEqual({ email: null, tag: null });
+    expect(refusal(() => apiContactListFilters({ email: 'not an address' }))).toEqual({
+      code: 'validation_failed',
+      issues: [{ path: 'email', message: 'Email address is not valid.' }],
+    });
+    expect(refusal(() => apiContactListFilters({ email: ' ' }))).toEqual({
+      code: 'validation_failed',
+      issues: [{ path: 'email', message: 'Give an email address to find.' }],
+    });
+    expect(refusal(() => apiContactListFilters({ tag: 'a,b' }))).toEqual({
+      code: 'validation_failed',
+      issues: [{ path: 'tag', message: 'Tags cannot contain commas or control characters.' }],
+    });
+  });
+
+  it('are refused before anything is read without contacts.read or with a bad filter', async () => {
+    const code = (query: Record<string, string>, scopes = ['contacts.read']) =>
+      apiListContacts({} as never, ctx(scopes), query).then(
+        () => 'done',
+        (error: unknown) => (isAppError(error) ? error.code : String(error)),
+      );
+    expect(await code({}, ['contacts.write'])).toBe('forbidden');
+    expect(await code({ email: 'nope' })).toBe('validation_failed');
+    expect(await code({ tag: ',' })).toBe('validation_failed');
+    expect(await code({ 'fields[a]': '1', unknown: 'x' })).toBe('validation_failed');
+  });
+
+  it('are described: the filters, the window and the refusals', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const get = (
+      doc.paths as unknown as Record<
+        string,
+        Record<string, { description: string; parameters: Record<string, unknown>[] }>
+      >
+    )['/contacts']?.get;
+    expect(get?.parameters.map((p) => p.name)).toEqual([
+      'limit',
+      'cursor',
+      'phone',
+      'email',
+      'tag',
+      'fields',
+    ]);
+    expect(get?.parameters.find((p) => p.name === 'fields')).toMatchObject({
+      in: 'query',
+      style: 'deepObject',
+      explode: true,
+      schema: { type: 'object', maxProperties: 5 },
+    });
+    expect(get?.description).toContain('a contact matches all of them');
+    expect(get?.description).toContain(API_CONTACT_SEARCH_WINDOW.toLocaleString('en-US'));
+    expect(String(get?.parameters.find((p) => p.name === 'fields')?.description)).toContain(
+      '`fields.<key>`',
     );
   });
 });

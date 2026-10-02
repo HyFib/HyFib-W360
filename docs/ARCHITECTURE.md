@@ -871,6 +871,14 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `FOR UPDATE`; only what differs is written and audited as `contact.updated` (keys and counts, no
   values). A refused value names `fields.<key>` in `issues` and nothing is saved. Both writes keep
   the app's 50-tag limit.
+- **Finding contacts (ADR-113):** `GET /contacts` also takes `email` (compared through the
+  `lower(email)` index), `tag` and up to 5 `fields[<key>]` (`contactListQuery` turns the
+  `deepObject` parameters into one object for the schema). `apiFieldFilters` checks each key against
+  the company's fields and reads each value with its field's type (`apiFieldFilterValue`), then
+  compares as segments' "equals" does. A page filtered by tag or field first finds the 2,000th
+  contact of its range (`API_CONTACT_SEARCH_WINDOW`) and reads only down to it, so its cursor goes on
+  past the window when few contacts match, as the message feed's does; both reads share a repeatable
+  read snapshot.
 - **Text replies (0042, ADR-070):** `POST /messages` with `type: "text"` (`apiSendMessage` picks
   `apiSendText`; no `type` is a template) needs `messages.reply`. It finds an existing, not erased
   contact by number and locks its conversation on the number (`from`, or the only active one); a
