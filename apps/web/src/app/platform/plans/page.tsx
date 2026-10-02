@@ -142,6 +142,7 @@ export default async function PlansPage() {
                         {p.id === defaultTrialPlanId ? (
                           <Badge tone="info">default trial</Badge>
                         ) : null}
+                        {p.offeredAt ? <Badge tone="info">offered to companies</Badge> : null}
                       </div>
                     </TD>
                   </TR>

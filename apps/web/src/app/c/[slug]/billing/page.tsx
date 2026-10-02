@@ -97,13 +97,17 @@ export default async function BillingPage({ params }: { params: Promise<{ slug: 
   const { slug } = await params;
   const ctx = await requireTenant(slug);
   assertCan(ctx, 'billing.read');
-  const { billing, plans, planPayments, refundRequests, clock } = await getRuntime();
-  const [overview, plan, planPayment, asked] = await Promise.all([
+  const { billing, plans, planPayments, refundRequests, planChoices, clock } = await getRuntime();
+  const [overview, plan, planPayment, asked, choices] = await Promise.all([
     billing.overview(ctx),
     plans.overview(ctx),
     planPayments.overview(ctx),
     refundRequests.list(ctx),
+    planChoices.choices(ctx),
   ]);
+  // Plans HyFib offers that the company could choose instead of its own (ADR-105).
+  const otherChoices =
+    choices.unavailable === null ? choices.choices.filter((c) => !c.current).length : 0;
   const canManage = can(ctx, 'billing.manage');
   // Adding a card and turning automatic top-ups on need a recent sign-in (ADR-056).
   const recent = hasRecentSignIn(ctx, clock.now());
@@ -157,6 +161,18 @@ export default async function BillingPage({ params }: { params: Promise<{ slug: 
                   : null
           }
         />
+        {otherChoices > 0 ? (
+          <p className="text-sm text-muted-foreground">
+            <Link
+              href={`/c/${ctx.tenant.slug}/billing/plans`}
+              className="text-primary underline-offset-4 hover:underline"
+            >
+              Choose a plan
+            </Link>
+            : HyFib offers {otherChoices === 1 ? 'another plan' : `${otherChoices} other plans`} you
+            can choose and pay for instead.
+          </p>
+        ) : null}
         <PlanPaymentCard
           slug={ctx.tenant.slug}
           payment={planPayment}

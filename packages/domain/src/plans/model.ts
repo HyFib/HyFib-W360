@@ -281,3 +281,74 @@ export function usagePeriod(anchor: Date, now: Date): { start: Date; end: Date }
   while (addMonthsUtc(anchor, months + 1) <= now) months += 1;
   return { start: addMonthsUtc(anchor, months), end: addMonthsUtc(anchor, months + 1) };
 }
+
+/** What a company holds now that a plan version's limits must fit (ADR-105). */
+export interface PlanHoldings {
+  /** Active members and invitations still waiting (both hold a seat). */
+  seats: number;
+  numbers: number;
+  teams: number;
+  liveAutomations: number;
+}
+
+export type PlanShortfallKind = keyof PlanHoldings;
+
+/** A limit of a plan version that holds less than the company already has. */
+export interface PlanShortfall {
+  kind: PlanShortfallKind;
+  limit: number;
+  used: number;
+}
+
+/**
+ * The limits a plan version gives a company with its add-ons, as `app.tenant_entitlements` counts
+ * them: seats and WhatsApp numbers include the extras bought; null means no limit.
+ */
+export function versionHoldingLimits(
+  version: {
+    seatsIncluded: number;
+    numbersIncluded: number;
+    teamsMax: number | null;
+    liveAutomationsMax: number | null;
+  },
+  addOns: { extraSeats: number; extraNumbers: number },
+): Record<PlanShortfallKind, number | null> {
+  return {
+    seats: version.seatsIncluded + addOns.extraSeats,
+    numbers: version.numbersIncluded + addOns.extraNumbers,
+    teams: version.teamsMax,
+    liveAutomations: version.liveAutomationsMax,
+  };
+}
+
+/**
+ * The limits that hold less than the company has now, in display order (ADR-105). Holding exactly
+ * the limit fits: additions stop at a limit, but what is already there stays.
+ */
+export function planShortfalls(
+  limits: Record<PlanShortfallKind, number | null>,
+  holdings: PlanHoldings,
+): PlanShortfall[] {
+  const shortfalls: PlanShortfall[] = [];
+  for (const kind of ['seats', 'numbers', 'teams', 'liveAutomations'] as const) {
+    const limit = limits[kind];
+    if (limit !== null && holdings[kind] > limit) {
+      shortfalls.push({ kind, limit, used: holdings[kind] });
+    }
+  }
+  return shortfalls;
+}
+
+const SHORTFALL_NOUNS: Record<PlanShortfallKind, readonly [string, string]> = {
+  seats: ['seat', 'seats'],
+  numbers: ['WhatsApp number', 'WhatsApp numbers'],
+  teams: ['team', 'teams'],
+  liveAutomations: ['live automation', 'live automations'],
+};
+
+/** "3 seats, where your company uses 5 (members and invitations still waiting)". */
+export function planShortfallText(shortfall: PlanShortfall): string {
+  const [one, many] = SHORTFALL_NOUNS[shortfall.kind];
+  const text = `${shortfall.limit.toLocaleString('en-IN')} ${shortfall.limit === 1 ? one : many}, where your company uses ${shortfall.used.toLocaleString('en-IN')}`;
+  return shortfall.kind === 'seats' ? `${text} (members and invitations still waiting)` : text;
+}

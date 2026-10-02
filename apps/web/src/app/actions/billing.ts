@@ -201,6 +201,20 @@ export async function updateAutoRechargeAction(
   });
 }
 
+/** Puts the company on a plan version HyFib offers, to pay for it (ADR-105). */
+export async function choosePlanAction(
+  slug: string,
+  input: { planId: string },
+): Promise<ActionResult<{ changed: boolean; planName: string }>> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { planChoices } = await getRuntime();
+    const result = await planChoices.choose(ctx, { planId: input.planId }, await requestMeta());
+    refresh();
+    return { changed: result.changed, planName: result.planName };
+  });
+}
+
 /** Starts paying for the plan (ADR-063): the browser then opens Checkout for the subscription. */
 export async function startPlanSubscriptionAction(
   slug: string,

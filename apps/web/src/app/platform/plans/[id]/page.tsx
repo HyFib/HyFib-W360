@@ -7,11 +7,13 @@ import {
   PLAN_INTERVAL_LABELS,
   PLAN_MODULE_KEYS,
   PLAN_MODULE_LABELS,
+  PLAN_PAYMENT_MIN_MINOR,
 } from '@w360/domain';
 import { minorToInput } from '@w360/domain/crm-money';
 import { Badge, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
 import {
   PlanForm,
+  PlanOfferActions,
   PlanVersionActions,
   type PlanFormValues,
 } from '@/components/platform/plan-forms';
@@ -125,6 +127,7 @@ export default async function PlanPage({ params }: { params: Promise<{ id: strin
           {plan.name} <span className="text-muted-foreground">v{plan.version}</span>
           <Badge tone={TONE[plan.status]}>{plan.status}</Badge>
           {isDefaultTrial ? <Badge tone="info">default trial</Badge> : null}
+          {plan.offeredAt ? <Badge tone="info">offered to companies</Badge> : null}
         </h1>
         <p className="text-sm text-muted-foreground">
           Code {plan.code} · {companies} {companies === 1 ? 'company' : 'companies'} on this version
@@ -183,7 +186,14 @@ export default async function PlanPage({ params }: { params: Promise<{ id: strin
             <CardTitle>Actions</CardTitle>
             <CardDescription>Every change is recorded in the platform audit log.</CardDescription>
           </CardHeader>
-          <CardContent>
+          <CardContent className="grid gap-6">
+            {plan.status === 'published' ? (
+              <PlanOfferActions
+                id={plan.id}
+                offered={plan.offeredAt !== null}
+                payable={plan.priceMinor >= PLAN_PAYMENT_MIN_MINOR}
+              />
+            ) : null}
             <PlanVersionActions id={plan.id} status={plan.status} companies={companies} />
           </CardContent>
         </Card>

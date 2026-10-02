@@ -196,6 +196,11 @@ made. This checklist records the evidence required per gate; unchecked items blo
       staff refund above, which appears in the Razorpay Dashboard once; a request for more than is
       left after a Dashboard refund is refused on approval and stays open; agree who watches
       `/platform/refunds` → Plan payments and how quickly requests are decided
+- [ ] Companies choosing their plan (ADR-105) on the same staging deployment, after migration 0082
+      and before the new web image: a platform owner offers a published test-mode version; a
+      billing manager on a trial chooses it under Billing → Choose a plan, the plan card shows it
+      with the trial's end unchanged, and paying for it creates a Razorpay subscription for the
+      chosen version's amount; agree which versions are offered and who stops offering them
 - [ ] Tenant-isolation and security gates passing in CI on the release commit
 - [ ] Measured load behaviour against the test envelope (k6 results)
 - [ ] Backup restoration drill performed and timings recorded (RPO/RTO)

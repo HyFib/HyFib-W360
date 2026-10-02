@@ -9,12 +9,14 @@ import {
   cancelTenantSubscriptionAction,
   createPlanAction,
   createPlanVersionAction,
+  offerPlanAction,
   publishPlanAction,
   retirePlanAction,
   setDefaultTrialAction,
   setPlanTaxAction,
   setTenantPlanAction,
   updatePlanDraftAction,
+  withdrawPlanOfferAction,
 } from '@/app/actions/platform';
 import { ClientButton, ClientForm, useHydrated } from '@/components/client-form';
 import { FormError, FormSuccess } from '@/components/form-status';
@@ -413,6 +415,60 @@ export function PlanVersionActions({
             }
           />
         </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** Offering a published version to companies, which can then choose it to pay for (ADR-105). */
+export function PlanOfferActions({
+  id,
+  offered,
+  payable,
+}: {
+  id: string;
+  offered: boolean;
+  /** Priced at ₹1 or more, Razorpay's minimum payment. */
+  payable: boolean;
+}) {
+  const [error, setError] = useState<string | null>(null);
+  const fail = (r: { ok: boolean; message?: string }) => {
+    if (!r.ok) setError(r.message ?? 'Something went wrong.');
+  };
+  return (
+    <div className="grid gap-2">
+      <FormError message={error} />
+      <p className="text-sm text-muted-foreground">
+        {offered
+          ? 'Offered to companies: those without a paid period (on a trial, or whose plan or paid period has ended) can choose this version under Billing and pay for it.'
+          : payable
+            ? 'Not offered. Once offered, companies without a paid period (on a trial, or whose plan or paid period has ended) can choose it under Billing and pay for it.'
+            : 'Priced under ₹1, so it cannot be offered: companies could never pay for it.'}
+      </p>
+      {offered ? (
+        <ConfirmDialog
+          title="Stop offering this version?"
+          description="Companies can no longer choose it. Those already on it keep it."
+          confirmLabel="Stop offering"
+          onConfirm={() => void withdrawPlanOfferAction(id).then(fail)}
+          trigger={
+            <ClientButton variant="outline" className="justify-self-start">
+              Stop offering
+            </ClientButton>
+          }
+        />
+      ) : payable ? (
+        <ConfirmDialog
+          title="Offer this version to companies?"
+          description="Companies without a paid period (on a trial, or whose plan or paid period has ended) can then choose it and pay for it. During a trial, its limits and modules apply at once, until the trial ends."
+          confirmLabel="Offer"
+          onConfirm={() => void offerPlanAction(id).then(fail)}
+          trigger={
+            <ClientButton variant="outline" className="justify-self-start">
+              Offer to companies
+            </ClientButton>
+          }
+        />
       ) : null}
     </div>
   );

@@ -1015,6 +1015,36 @@ requested_at DESC`:
 - **"We asked too often":** 5 requests in 24 hours per company, of plan payments and service credit
   together (withdrawn requests count).
 
+**Offering plans that companies choose (ADR-105).** Platform owners offer a published version on
+its platform page → Actions → "Offer to companies", and stop offering it there ("Stop offering");
+retiring a version stops its offer too. Nothing is offered until a platform owner does, and a
+version priced under ₹1 cannot be offered. Companies without a paid period (on a trial, past due,
+ended or canceled; not complimentary access) see the offered versions under Billing → Choose a
+plan, each with what it would cost with their add-ons and the tax, and owners and billing managers
+with a sign-in within 15 minutes choose one, then pay for it as before. During a trial the chosen
+version's limits and modules apply at once, and the trial's end does not move. Nothing is emailed:
+the company's audit log shows `billing.plan_chosen`, and its platform page shows "Last change …:
+Chosen by the company.". A staff change not yet emailed when the company chose is not emailed.
+`SELECT p.code, p.version, p.status, p.offered_at FROM ops.plans p WHERE p.offered_at IS NOT NULL`
+lists what is offered.
+
+- **"You cannot choose a plan now":** the page says why. Razorpay subscriptions are off or the tax
+  on plan prices is not set (offering does nothing until both are); the company has complimentary
+  access or a paid period (staff change those plans; the company can choose once the period ends);
+  a payment is being started (its Checkout window closes within an hour); a subscription pays from
+  the trial's end (the company cancels it under Billing, and the trial goes on) or pays now
+  (changing a plan a subscription pays for is not built: staff cancel the subscription and change
+  the plan); or the company is suspended or being deleted.
+- **"… holds less than your company has now":** the version has fewer seats (members and
+  invitations still waiting, plus the company's extra seats), WhatsApp numbers, teams or live
+  automations than the company uses; the message names each one. The company frees some first
+  (revokes invitations, removes members, disconnects numbers, deletes teams or turns automations
+  off), or chooses a larger version. Monthly limits never refuse a choice.
+- **A version is listed without a button ("Your add-ons are not sold with this plan…"):** the
+  version does not sell the company's extra seats, numbers or run packs, or the total is more than a
+  plan payment can be. Staff change the company's plan and add-ons instead.
+- **A version is missing from the list:** it is not offered, was retired, or is a draft.
+
 **Cancelling a company's subscription.** Owners and billing managers cancel in Billing (an active
 one at the end of the paid period, otherwise at once). Platform owners cancel at once on the
 company's platform page with a reason (needed before changing the company's plan, which staff
@@ -1479,6 +1509,17 @@ already stored: a short `ACCESS EXCLUSIVE` lock on the keys table), creates `app
 row security and its grants, and registers deletion step 855 with the definer's grants and
 policies. A failure usually means a lock wait on `app.api_keys` timed out (run the migrations again
 when requests are quieter) or the bootstrap roles are missing.
+
+**Migration 0082 failed.** It runs in one transaction, so a failure applies nothing. It adds
+`ops.plans.offered_at` and `offered_by_user_id` (nullable, with two checks validated against the
+plans already stored: a short `ACCESS EXCLUSIVE` lock on the small plans table) and the platform
+role's update grant on them, replaces the plan guard `ops.guard_plan()`, and creates
+`app.choose_plan`, granted to `w360_app` before it is handed to `w360_definer`. A failure usually
+means a function of the same name was created by hand or the bootstrap roles are missing. Web
+images from before it never read the new columns and keep working, except that one cannot retire a
+version a new image offered (the check refuses a retired version with an offer: retire it from a new
+image, or stop offering it first). The new web image needs it: Billing and the platform plan pages
+read the offer (migrate first).
 
 **Migration 0081 failed.** It runs in one transaction, so a failure applies nothing. It creates
 `app.plan_payment_refund_requests` (empty, with row security, column grants, a restrictive policy

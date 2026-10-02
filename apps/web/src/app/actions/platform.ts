@@ -196,6 +196,26 @@ export async function publishPlanAction(id: string): Promise<ActionResult> {
   });
 }
 
+/** Offers a published plan version to companies, which can then choose it (ADR-105). */
+export async function offerPlanAction(id: string): Promise<ActionResult> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    await runtime.planAdmin.offerPlan(actor, String(id));
+    refresh();
+    return null;
+  });
+}
+
+/** Stops offering a plan version to companies; those on it keep it (ADR-105). */
+export async function withdrawPlanOfferAction(id: string): Promise<ActionResult> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    await runtime.planAdmin.withdrawPlanOffer(actor, String(id));
+    refresh();
+    return null;
+  });
+}
+
 export async function retirePlanAction(id: string, input: unknown): Promise<ActionResult> {
   return runAction(async () => {
     const { actor, runtime } = await actorForAction();

@@ -3622,3 +3622,52 @@ Decision:
 Not built: approving a different amount (decline with a note and refund from the company's page),
 several open requests per payment, reminders about waiting requests, in-app notices, and refund
 requests through the public API.
+
+## ADR-105 Companies choose the plan they pay for (2026-10-02)
+
+Context: a company could pay only for the plan version HyFib staff put it on (ADR-063), so a company
+on the default trial needed staff before it could pay for another plan. Changing a plan a
+subscription already pays for is a different problem: Razorpay lets a subscription paid by a
+domestic card update only its offer, at the end of a cycle, and one paid by UPI or eMandate not at
+all (R-069), so such a change would need a new subscription that starts when the paid period ends.
+
+Decision:
+
+- **Offered versions:** platform owners offer a published plan version to companies and can stop
+  offering it (`ops.plans.offered_at` and `offered_by_user_id`), both in the platform audit log.
+  Nothing is offered until they do. A version priced under ₹1 cannot be offered (it could never be
+  paid, R-064), retiring a version stops the offer in the same update, and the plan guard lets only
+  the offer change on a published version.
+- **Who and when:** owners and billing managers (`billing.manage`) with a sign-in within the last
+  15 minutes (ADR-056), while the company is active or restricted (not suspended and not being
+  deleted), has no subscription that may still be charged, is on a trial, past due, expired or
+  canceled (not complimentary access and not a paid period, whose change is not built), and paying
+  for plans is available (Razorpay subscriptions on and the tax on plan prices set).
+- **What changes:** only the plan version, through `app.choose_plan` (SECURITY DEFINER, the runtime
+  role only), which checks all of the above in SQL under its locks. The status, the trial's end,
+  the paid period and grace days, the add-ons and the monthly usage period stay as they are, so
+  switching never resets monthly counts; the add-ons must be sold by the chosen version (the plan
+  state's guard). The company then pays as before (ADR-063, ADR-102): the payment offer is for the
+  chosen version. A staff plan change not yet emailed (ADR-100) is not emailed once the company
+  chose after it.
+- **Limits:** the chosen version must hold what the company uses now: seats (members and waiting
+  invitations), WhatsApp numbers, teams and live automations. Otherwise the choice is refused,
+  naming each one over. They are counted in the choice's transaction after it takes the advisory
+  locks that additions take (ADR-051), so a choice and an addition cannot both pass. Monthly limits
+  (automation runs, API requests) refuse nothing: what the period used so far counts against the
+  chosen version's limit.
+- **Serialised with paying and staff changes:** `app.choose_plan` first takes the per-company
+  advisory lock that starting a subscription takes, so a start never records the version a choice
+  replaces, then the company row (shared, as a deletion request updates it) and the plan state, in
+  the order the plan sweep and staff changes lock them. The plan version itself is read without a
+  lock: a choice that races a withdrawal is as if made just before it.
+- **Trials:** during a trial the chosen version's limits and modules apply at once, until the
+  trial's end, which does not move. A company can therefore try any offered version within its
+  trial; platform owners decide which versions are offered.
+- **Recorded:** in the company audit log (`billing.plan_chosen`, with the versions before and
+  after), and in the plan state's note ("Chosen by the company.") with the member, which staff see
+  on the company's platform page. No email: the member who chose sees the result.
+
+Not built: changing a plan a subscription pays for (a new subscription from the period's end,
+R-069), choosing add-ons, a price list for visitors before sign-up, proration, and emails about a
+company's choice.

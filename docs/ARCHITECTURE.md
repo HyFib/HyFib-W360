@@ -1402,6 +1402,22 @@ WHERE used < limit`), per monthly period from `usage_anchor`; the sweep announce
   cover both kinds. `/platform/refunds?kind=plan` lists the requests
   (`ops.platform_plan_payment_refund_requests`) and every refund of a plan payment across companies
   (`ops.platform_plan_payment_refunds`), each newest first on exact keyset pages.
+- **Plan choices (0082, ADR-105) [built]:** platform owners offer published plan versions
+  (`ops.plans.offered_at`, `offered_by_user_id`; `offerPlan` and `withdrawPlanOffer` in the platform
+  plans service, in the platform audit log). The plan guard lets only the offer change on a
+  published version, and check constraints keep it to published versions priced at ₹1 or more, so
+  retiring must clear it. `createPlanChoicesService` lists the offered versions for `billing.read`,
+  each with its quote (`planPaymentQuote` with the company's add-ons and the tax), what it holds
+  against what the company uses (`versionHoldingLimits`, `planShortfalls`) and why the company
+  cannot choose now. `choose` (`billing.manage`, a recent sign-in) takes the four limit locks
+  (`lockAllLimits`) and calls `app.choose_plan` (SECURITY DEFINER, runtime role), which takes the
+  company and member from the session's scope, the subscription-start advisory lock, the company row
+  for share and the plan state for update, checks the status, a live subscription, the offer and
+  the tax, and changes only `plan_id`, the note, who and when, and the version. The service then
+  counts what the company uses against the new version's entitlements and rolls back on a
+  shortfall, and audits `billing.plan_chosen`. Billing links to `/c/<slug>/billing/plans` when
+  another offered version can be chosen; paying is unchanged (ADR-063): the payment offer and a
+  started subscription use the version the company is on.
 - **Ledger (0004_billing):** one INR wallet per company with five accounts (`wallet_available`,
   `wallet_held`, `payment_clearing`, `service_revenue`, `dispute_losses`). `ledger_transactions` and
   `ledger_entries` are append-only (trigger), balances are maintained by trigger from the entries,

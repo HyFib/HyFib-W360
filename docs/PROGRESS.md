@@ -1,5 +1,138 @@
 # Progress
 
+## 2026-10-02 — Phase 5: companies choose the plan they pay for (P5-01, P5-07, ADR-105)
+
+Status: **Implemented and locally verified against the Razorpay stand-in (test data only).** A
+company could pay only for the plan version HyFib staff put it on (ADR-063): a company on the
+default trial needed staff before it could pay for another plan.
+
+### Completed
+
+- **Design (ADR-105):** platform owners offer published plan versions to companies and can stop
+  offering them; nothing is offered until they do, and a version priced under ₹1 is never offered.
+  Owners and billing managers with a sign-in within 15 minutes choose an offered version while the
+  company is on a trial, past due, expired or canceled, is neither suspended nor being deleted, has
+  no subscription that may still be charged, and paying for plans is available (Razorpay
+  subscriptions on and the tax on plan prices set). Only the version changes (the trial's end, the
+  paid period, the add-ons and the usage period stay); the version must hold the seats, numbers,
+  teams and live automations the company uses; the company then pays for it as before. Changing a
+  plan a subscription pays for is not built (R-069).
+- **Migration 0082:** `ops.plans.offered_at` and `offered_by_user_id` (checks: published versions of
+  ₹1 or more only, paired with the user; the platform role's update grant on the two columns), the
+  plan guard rebuilt so that only the offer changes on a published version, and `app.choose_plan`
+  (SECURITY DEFINER, `w360_app` only): the company and member from the session's scope, the
+  subscription-start lock, the company row shared and the plan state for update, every condition
+  checked again, and only the version, note, member, time and version number written.
+- **Domain:** `plan-choices.ts` (the offered versions with each one's quote with the company's
+  add-ons and the tax, what it holds less of and why the company cannot choose now; the choice
+  under every limit's lock, refused when the chosen version holds less, audited as
+  `billing.plan_chosen`); `offerPlan` and `withdrawPlanOffer` (platform owners, platform audit log)
+  and retiring stops the offer; `lockAllLimits`; `versionHoldingLimits`, `planShortfalls` and
+  `planShortfallText`.
+- **Web:** Billing → Choose a plan (`/c/<slug>/billing/plans`): each offered version as a card with
+  its price and what the company would pay, what it includes, what it holds less of, and a choose
+  button with a confirmation that says what changes; why the company cannot choose now, the
+  sign-in prompt, or who can choose. Billing links to it when another offered version can be
+  chosen. The platform plan page offers a published version and stops offering it, and the plans
+  list marks offered versions.
+- **Tests:**
+  - Unit (3 new, `model.test.ts`): what a version holds counts the extra seats and numbers bought,
+    as the entitlements do; only the limits below what the company has are listed, in display
+    order, and holding exactly a limit fits; the wording, seats with the invitations that hold
+    them.
+  - Integration (`plan-choices.test.ts`, 9 new, against the Razorpay stand-in):
+    - offering: platform owners only (operators refused), drafts, retired and free versions never
+      offered, offering twice audited once, stopping audited, retiring stops the offer;
+    - the rules in SQL whatever the service does: only the offer changes on a published version,
+      the two checks, retiring with an offer refused, a retired version never published again and
+      the default trial never retired (the rebuilt guard);
+    - a billing manager on a trial: the offered versions with the quote (₹1,999 and an extra seat
+      at ₹100, plus 18% = ₹2,476.82), the fit and the current version; the choice changes only the
+      version, note, member, time and version number, is audited with the version before, and the
+      same version again changes nothing; paying is then offered for the chosen version from the
+      trial's end and the subscription records it; a payment being started, and every status in
+      which Razorpay may still charge, holds the choice in SQL;
+    - `billing.manage` and a sign-in within 15 minutes (administrators, agents, stale and unknown
+      sign-ins), bad input, and no choice without Razorpay subscriptions;
+    - refused in SQL: versions not offered, withdrawn or unknown, a version that does not sell the
+      company's extra seat (shown without a price, refused by the plan state's guard), no tax on
+      plan prices, no member in the company's scope, suspended, being deleted, a paid period and
+      complimentary access;
+    - limits: seats counted with a waiting invitation, teams, and holding exactly the limit fits;
+    - a restricted company chooses and stays restricted until it pays, charged at once;
+    - locks: the choice waits for the subscription-start lock, a seat addition's lock and a staff
+      change's company row, before it locks the plan state; a staff change committed while it
+      waits is not lost; two choices at once both apply, in turn;
+    - a staff notice not yet emailed is not emailed after the company chose; another company on the
+      same version is untouched; the company role cannot update its plan state.
+  - Integration elsewhere: `app.choose_plan` executable by `w360_app` alone (`tenant-isolation`).
+  - e2e (`plan-choice.spec.ts`, new): a platform owner sets the tax, publishes three versions and
+    offers two; the company is on a trial of the third with an extra seat and two waiting
+    invitations; Billing links to Choose a plan, which lists the two offered versions with their
+    prices, marks Solo as holding less (two seats where three are used) without a button, and
+    Growth at ₹2,476.82 a month; the owner chooses Growth and Billing shows it on the same trial
+    with its payment total; the audit log and the staff page show the choice; a platform owner
+    stops offering Growth and the company keeps it; the owner pays from the trial's end, and the
+    page then says why another plan cannot be chosen.
+- **Docs:** ADR-105; SECURITY (the plan choices row, the rules, platform owners offer versions);
+  THREAT-MODEL T118; RUNBOOKS (offering plans, why a company cannot choose, migration 0082);
+  ARCHITECTURE; DATA-RETENTION; RELEASE-CHECKLIST; BACKLOG P5-01 and P5-07; FEATURE-MATRIX H-045.
+- **Found while finishing:**
+  - The first e2e run read the company page's address right after clicking its link, before the
+    page changed, and later revisited `/platform` instead of the company page; the test now waits
+    for the address first. Everything before that step had passed on both browsers.
+  - The first mutation run left 7 regressions uncaught; the tests were strengthened and caught 5 of
+    them: the rebuilt guard's two rules (the platform service refuses both first, so only SQL shows
+    them), the lock order inside `app.choose_plan` (the audit row's foreign key waits for a staff
+    change's company row anyway, so the test now checks the plan state is still free while the
+    choice waits) and the plan state read under its lock (a staff change committed meanwhile is now
+    shown not to be lost), and another company on the same version (the definer's policy reads
+    every company, so only the function's own condition keeps the update to one company).
+- **Mutation checks:** 54 regressions tried one at a time, 52 caught (4 through the e2e test).
+  - 27 in the migration: drafts, retired versions or versions under ₹1 offered; an offer without
+    who made it; the plan guard letting a published version be renamed with its offer, the default
+    trial be retired or a retired version be published again; a plan chosen outside a member's
+    scope; the subscription-start lock, the company row's lock or the plan state's lock not taken;
+    a company being deleted, a suspended company, complimentary access or a paid period choosing; a
+    live subscription, one being started or an authorised one paying from the trial's end not
+    holding the choice; a version not offered chosen; a plan chosen without the tax on plan prices;
+    the same version recorded again; the note, the member or the version number not written; other
+    companies on the version changed too; the platform role able to choose; and the two not caught:
+    the function's own check that the version is published (a check constraint makes an offer imply
+    it) and the migration's revocation from PUBLIC (the default privileges of 0002 already withhold
+    it).
+  - 15 in the choosing service: administrators or a stale sign-in choosing; a plan chosen without
+    Razorpay subscriptions; the limits' locks not taken; no check of what the version holds; the
+    choice not audited, or audited without the version before; versions not offered listed; the
+    quote, or what a version holds, without the add-ons; a paid period, a company without Razorpay
+    subscriptions or a suspended company offered a choice; a payment being started not told; the
+    current version not marked.
+  - 2 in the model: a version holding exactly a limit refused; extra seats not counted in what a
+    version holds (each caught by the unit and the integration tests).
+  - 6 in the platform service: operators offering or stopping an offer; offering or stopping not in
+    the platform audit log; offering twice recorded twice; retiring keeping the offer.
+  - 4 through the e2e test: Billing not pointing to the offered plans; a version that holds less
+    choosable from the page; the offer button stopping the offer; the choose button sending the
+    version the company is on.
+
+### Test commands and results (local, 2026-10-02)
+
+| Command                                                                                                                                                                                 | Result                                   |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                                    | clean                                    |
+| `pnpm test`                                                                                                                                                                             | 458 passed                               |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                                                                     | 647 passed on each                       |
+| `pnpm build` and `pnpm test:e2e` for `plan-choice.spec.ts`, `plans.spec.ts` and `plan-subscription.spec.ts` on chromium and mobile-chromium, on a fresh local database migrated to 0082 | 6 passed (12.3 min)                      |
+| Mutation checks                                                                                                                                                                         | 54 regressions, 52 caught (listed above) |
+| gitleaks 8.30.1 on the commit                                                                                                                                                           | no leaks                                 |
+
+### Known gaps
+
+- Changing a plan a subscription pays for (a new subscription from the end of the paid period,
+  R-069), choosing add-ons, a price list for visitors before sign-up, proration and emails about a
+  company's choice are not built.
+- Razorpay test mode has not been run (RELEASE-CHECKLIST).
+
 ## 2026-10-01 — Phase 5: refund requests of plan payments (P5-07, ADR-104)
 
 Status: **Implemented and locally verified against the Razorpay stand-in (test data only).** Since

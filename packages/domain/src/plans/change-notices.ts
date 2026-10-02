@@ -106,7 +106,10 @@ export interface PlanChangeNoticeDeps {
 
 export interface PlanChangeNoticeResult {
   notified: number;
-  /** Changes replaced by a later one (the plan sweep's or a subscription's) before they were told. */
+  /**
+   * Changes replaced by a later one (the plan sweep's, a subscription's or the company's own choice,
+   * ADR-105) before they were told.
+   */
   superseded: number;
   /** Companies whose notice failed; it rolled back and is due again on the next sweep. */
   failed: { tenantId: string; error: unknown }[];
@@ -116,8 +119,8 @@ export interface PlanChangeNoticeResult {
  * The minute sweep's emails about plans HyFib staff set (ADR-100): the platform role cannot queue
  * email, so the worker tells each company's billing managers, taking the notice in the company's
  * own scope in the transaction that queues the emails. A plan changed again since (by the plan
- * sweep or a subscription, whose own emails tell the company) is not told. A company that fails is
- * reported and tried again the next minute.
+ * sweep or a subscription, whose own emails tell the company, or by the company's own choice) is
+ * not told. A company that fails is reported and tried again the next minute.
  */
 export async function notifyStaffPlanChanges(
   deps: PlanChangeNoticeDeps,

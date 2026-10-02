@@ -9,8 +9,11 @@ import {
   planGivesAccess,
   planPaymentQuote,
   planPaymentStart,
+  planShortfallText,
+  planShortfalls,
   PLAN_PAYMENT_TRIAL_LEAD_MS,
   usagePeriod,
+  versionHoldingLimits,
   warningThreshold,
 } from './model';
 
@@ -248,5 +251,54 @@ describe('planPaymentStart (ADR-102)', () => {
     for (const status of ['active', 'past_due', 'expired', 'canceled', 'complimentary'] as const) {
       expect(planPaymentStart({ status, trialEndsAt: later }, now)).toBeNull();
     }
+  });
+});
+
+describe('what a chosen plan version must hold (ADR-105)', () => {
+  const version = { seatsIncluded: 3, numbersIncluded: 1, teamsMax: 2, liveAutomationsMax: null };
+
+  it('counts the extra seats and numbers bought, as the entitlements do; no limit stays none', () => {
+    expect(versionHoldingLimits(version, { extraSeats: 2, extraNumbers: 1 })).toEqual({
+      seats: 5,
+      numbers: 2,
+      teams: 2,
+      liveAutomations: null,
+    });
+  });
+
+  it('lists only the limits below what the company has, in display order; holding exactly the limit fits', () => {
+    const limits = versionHoldingLimits(version, { extraSeats: 0, extraNumbers: 0 });
+    expect(
+      planShortfalls(limits, { seats: 3, numbers: 1, teams: 2, liveAutomations: 500 }),
+    ).toEqual([]);
+    expect(planShortfalls(limits, { seats: 4, numbers: 2, teams: 3, liveAutomations: 9 })).toEqual([
+      { kind: 'seats', limit: 3, used: 4 },
+      { kind: 'numbers', limit: 1, used: 2 },
+      { kind: 'teams', limit: 2, used: 3 },
+    ]);
+    expect(
+      planShortfalls(
+        { seats: 1, numbers: 1, teams: 0, liveAutomations: 0 },
+        { seats: 1, numbers: 1, teams: 1, liveAutomations: 1 },
+      ),
+    ).toEqual([
+      { kind: 'teams', limit: 0, used: 1 },
+      { kind: 'liveAutomations', limit: 0, used: 1 },
+    ]);
+  });
+
+  it('says what is over in words, seats with the invitations that hold them', () => {
+    expect(planShortfallText({ kind: 'seats', limit: 1, used: 3 })).toBe(
+      '1 seat, where your company uses 3 (members and invitations still waiting)',
+    );
+    expect(planShortfallText({ kind: 'numbers', limit: 2, used: 3 })).toBe(
+      '2 WhatsApp numbers, where your company uses 3',
+    );
+    expect(planShortfallText({ kind: 'teams', limit: 0, used: 1 })).toBe(
+      '0 teams, where your company uses 1',
+    );
+    expect(planShortfallText({ kind: 'liveAutomations', limit: 1000, used: 1200 })).toBe(
+      '1,000 live automations, where your company uses 1,200',
+    );
   });
 });

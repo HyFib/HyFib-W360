@@ -49,6 +49,9 @@ export const plans = opsSchema.table('plans', {
   publishedAt: tz('published_at'),
   retiredByUserId: text('retired_by_user_id'),
   retiredAt: tz('retired_at'),
+  /** Offered to companies, which can choose it (a published version only, ADR-105). */
+  offeredAt: tz('offered_at'),
+  offeredByUserId: text('offered_by_user_id'),
 });
 
 /** The default trial for new companies and the tax on plan prices (a single row). */

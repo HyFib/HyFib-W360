@@ -45,6 +45,7 @@ import {
   ASSIGNABLE_PLAN_STATES,
   PLAN_BOUNDS,
   PLAN_MODULE_KEYS,
+  PLAN_PAYMENT_MIN_MINOR,
   PLAN_TAX_MAX_BP,
   usagePeriod,
 } from '../plans/model';
@@ -423,6 +424,7 @@ export function createPlanAdminService(deps: {
             numbersIncluded: plans.numbersIncluded,
             modules: plans.modules,
             createdAt: plans.createdAt,
+            offeredAt: plans.offeredAt,
             companies: sql<number>`(select count(*)::int from app.tenant_plans tp where tp.plan_id = ${outerColumn(plans.id)})`,
           })
           .from(plans)
@@ -773,6 +775,64 @@ export function createPlanAdminService(deps: {
     },
 
     /**
+     * Offers a published version to companies, which can then choose it to pay for (ADR-105). A
+     * version priced under ₹1 is refused: it could never be paid.
+     */
+    async offerPlan(actor: PlatformActor, id: string): Promise<void> {
+      assertOwner(actor);
+      idOrNotFound(id, 'Plan');
+      await platformDb.run(actor.userId, async (tx) => {
+        const [plan] = await tx
+          .select({
+            status: plans.status,
+            priceMinor: plans.priceMinor,
+            offeredAt: plans.offeredAt,
+          })
+          .from(plans)
+          .where(eq(plans.id, id))
+          .for('update');
+        if (!plan) throw notFound('Plan');
+        if (plan.status !== 'published')
+          throw new AppError('precondition_failed', 'Only a published version can be offered.');
+        if (plan.priceMinor < PLAN_PAYMENT_MIN_MINOR)
+          throw new AppError(
+            'precondition_failed',
+            'A version priced under ₹1 cannot be offered: companies could never pay for it.',
+          );
+        if (plan.offeredAt) return;
+        await tx
+          .update(plans)
+          .set({ offeredAt: clock.now(), offeredByUserId: actor.userId })
+          .where(eq(plans.id, id));
+        await tx
+          .insert(platformAuditEvents)
+          .values(audit(actor, 'platform.plan_offered', { planId: id }));
+      });
+    },
+
+    /** Stops offering a version: companies already on it keep it (ADR-105). */
+    async withdrawPlanOffer(actor: PlatformActor, id: string): Promise<void> {
+      assertOwner(actor);
+      idOrNotFound(id, 'Plan');
+      await platformDb.run(actor.userId, async (tx) => {
+        const [plan] = await tx
+          .select({ offeredAt: plans.offeredAt })
+          .from(plans)
+          .where(eq(plans.id, id))
+          .for('update');
+        if (!plan) throw notFound('Plan');
+        if (!plan.offeredAt) return;
+        await tx
+          .update(plans)
+          .set({ offeredAt: null, offeredByUserId: null })
+          .where(eq(plans.id, id));
+        await tx
+          .insert(platformAuditEvents)
+          .values(audit(actor, 'platform.plan_offer_withdrawn', { planId: id }));
+      });
+    },
+
+    /**
      * No longer offered: companies already on the version keep it, but it cannot be assigned again.
      * Retiring a draft discards it.
      */
@@ -799,7 +859,14 @@ export function createPlanAdminService(deps: {
           );
         await tx
           .update(plans)
-          .set({ status: 'retired', retiredByUserId: actor.userId, retiredAt: clock.now() })
+          .set({
+            status: 'retired',
+            retiredByUserId: actor.userId,
+            retiredAt: clock.now(),
+            // A retired version is no longer offered to companies (ADR-105).
+            offeredAt: null,
+            offeredByUserId: null,
+          })
           .where(eq(plans.id, id));
         await tx
           .insert(platformAuditEvents)

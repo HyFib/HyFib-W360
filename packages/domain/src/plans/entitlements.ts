@@ -98,6 +98,16 @@ async function lockLimit(tx: Tx, tenantId: string, kind: LimitKind): Promise<voi
   );
 }
 
+/**
+ * Takes every limit's lock, in one fixed order, before the limits themselves change (ADR-105): an
+ * addition that has not counted yet waits for the change, and one that has is counted by it.
+ */
+export async function lockAllLimits(tx: Tx, tenantId: string): Promise<void> {
+  for (const kind of ['seats', 'numbers', 'teams', 'automations'] as const) {
+    await lockLimit(tx, tenantId, kind);
+  }
+}
+
 const full = (what: string, limit: number) =>
   new AppError(
     'precondition_failed',
