@@ -511,7 +511,7 @@ verification, app review, Embedded Signup configuration).
   choosing conversations to change by a filter, media downloads, starting or
   stopping runs for many contacts in one call, bulk sends in one call, changing a field's type,
   changing numbers or many contacts in one call, contact searches by name or by conversation and
-  campaign conditions, which fields of a contact changed, limits per endpoint,
+  campaign conditions, which fields of a contact changed in the contact feed (webhooks name them since ADR-121), limits per endpoint,
   availability per single endpoint (plans choose per scope since ADR-092). The one-argument key
   lookup kept for rolling deploys (0051) is dropped (0074). Replaying many deliveries in one call
   is built with P5-09 (ADR-095).
@@ -555,12 +555,15 @@ verification, app review, Embedded Signup configuration).
   audited or exported; names HyFib or the transport sets refused). **[Message status filters built,
   locally verified]** (ADR-119: an endpoint takes only the `message.status` statuses it chooses, in
   Settings or through the API, or every status as before; applied where events are captured, so a
-  status no endpoint takes is not recorded). Remaining: filters for other event types and on a
-  message's fields (such as by automation, campaign or template), other authentication (OAuth
-  client credentials, headers computed per delivery), mutual TLS, fixed egress addresses, which custom fields
-  changed (the contact is sent as it is, ADR-112), delivery counts in campaign events, events for store orders, Payment Links and each step of a
-  run, `createdAt` finer than the millisecond, replays across endpoints or by event type, load
-  tests.
+  status no endpoint takes is not recorded). **[What a contact change changed built, locally
+  verified]** (ADR-121: `contact.updated` names what its transaction changed, `name`, `phone`,
+  `email`, `tags` and `fields.<key>`, never a value; null for events captured before). Remaining:
+  filters for other event types and on a message's fields (such as by automation, campaign or
+  template), `contact.updated` only for chosen parts, which tags were added or removed, other
+  authentication (OAuth client credentials, headers computed per delivery), mutual TLS, fixed
+  egress addresses, delivery counts in campaign events, events for store orders, Payment Links and
+  each step of a run, `createdAt` finer than the millisecond, replays across endpoints or by event
+  type, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,

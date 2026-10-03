@@ -2049,13 +2049,30 @@ of one of the company's custom fields changes, whoever changes it: an automation
 saves an answer sends one per contact, as an import does, and a name and a field changed together
 send one. Deleting or renaming a field sends nothing, so a receiver keeps a deleted field's values
 until it reads the contact again (`GET /api/v1/contact-fields` lists the fields there are). A
-receiver that asks which field changed: the payload is the contact as it is when delivered, with
-its `fields`, to compare with its own copy.
+receiver that asks which field changed: since ADR-121 the event's `changes` names it (below).
 
 **Migration 0090 failed.** It runs in one transaction, so a failure applies nothing: it creates
 `app.webhook_capture_contact_fields()` and the trigger `contacts_webhook_fields` on `app.contacts`.
 A failure usually means the bootstrap roles (fix them and run the migrations again) or a function or
 trigger of that name created by hand. Until it is applied, custom field changes send no event.
+
+**What a `contact.updated` changed (ADR-121).** Since migration 0096 the event's `changes` lists
+what its transaction changed: `name`, `phone`, `email`, `tags` and `fields.<key>`, sorted. Names
+only, never values: the contact in the same body is as it is when delivered, so a value can already
+differ from the one the change saved. `changes` is null for events captured before the migration,
+which replays of older deliveries still send; a receiver treats null as "anything may have
+changed". A name changed and changed back in one transaction is still named. To see what an event
+holds: `SELECT type, contact_changes, captured_xact FROM app.webhook_events WHERE tenant_id = $1 AND
+id = $2`. An event's list cannot be changed after its transaction commits, by design.
+
+**Migration 0096 or 0097 failed.** 0096 runs in one transaction, so a failure applies nothing: it
+adds `contact_changes` with its check (`NOT VALID`), the definer function
+`app.add_contact_webhook_changes`, the four-argument `app.capture_contact_webhook_event` (dropping
+the three-argument one) and the three trigger functions. A failure usually means the bootstrap
+roles (`w360_definer` must exist to own the function) or a function of that name created by hand.
+0097 validates the check without blocking captures; it fails only if a stored event has a list,
+which nothing wrote before 0096: look for rows with `contact_changes IS NOT NULL` before running it
+again.
 
 ## 10P. Platform operations console
 

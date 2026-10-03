@@ -1174,9 +1174,14 @@ true`); the same key with another request (method, path and body hashed) answers
   active endpoint takes either, once per contact and top-level transaction (`captured_xact`, found
   by a partial index built concurrently), and `contact.erased` first deletes what its own
   transaction captured for the contact, so an erasure (which removes the tags first) sends only
-  that. Their payloads are built when delivered: conversation events as the message events are,
-  contact events with the API's contact (`api/contact-view.ts`, shared with the public API) and
-  `erased`, an erased contact keeping its id, source and creation time only.
+  that. Since 0096 (ADR-121) each trigger also says what changed (`name`, `phone`, `email`, `tags`,
+  `fields.<key>`), kept in `contact_changes` on the `contact.updated` event; a later change in the
+  same transaction adds to it through `app.add_contact_webhook_changes`, a definer function that
+  updates only an event its caller's transaction captured. Their payloads are built when
+  delivered: conversation events as the message events are, contact events with the API's contact
+  (`api/contact-view.ts`, shared with the public API) and `erased`, an erased contact keeping its
+  id, source and creation time only, and `contact.updated` with `changes` (null for events captured
+  before 0096).
 - **Automation run events** (migrations 0055–0056, ADR-078): triggers on `app.automation_runs`
   capture `automation.run_started` when a live run is inserted and `automation.run_ended` when one
   moves from running or waiting to an ended status, through `app.capture_webhook_event` (the run and

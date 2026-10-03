@@ -4559,3 +4559,49 @@ Decision:
 
 Not built: choosing conversations by a filter (all of a member's, all of a team's), changes that
 partly succeed, notes for many conversations, and the inbox doing the same for members.
+
+## ADR-121 Saying what changed in `contact.updated` (2026-10-03)
+
+Context: `contact.updated` (ADR-074, ADR-112) is captured once per contact and transaction and sent
+with the contact as it is when delivered. A receiver could not tell a new email from a new tag
+without keeping a copy to compare, so one that acts only on a changed email (to update a mailing
+list) or a changed tag (to start a flow in its own system) had to store every contact or fetch it
+again. P5-09's Remaining listed which custom fields changed.
+
+Decision:
+
+- **`changes` on `contact.updated`:** the parts of the contact its change changed, in the API
+  contact's names: `name`, `phone`, `email`, `tags` (a tag added or removed) and `fields.<key>` for
+  each custom field whose value changed, sorted, once each. Names only: values stay out of events
+  (ADR-053), and the contact carries them as they are when delivered. Null for an event captured
+  before HyFib recorded what changed (migration 0096), which a replay within the 30 days kept can
+  send. `contact.created` and `contact.erased` carry no `changes`.
+- **One event naming everything the transaction changed:** still one event per contact and
+  transaction. A key's `PATCH` or an import changes the name, email and field values in one
+  statement and the tags in others: the first capture writes the event and each later one adds what
+  it changed. A savepoint that rolls back takes back what it added. A change undone in the same
+  transaction (a name changed and changed back) still captures the event, as before, and is named.
+- **The same triggers say what changed:** 0047's trigger compares the old and new name, number and
+  email; the tag trigger names `tags`; 0090's names each of the company's fields whose value differs.
+  A field's rename or deletion still sends nothing, and an erasure still sends only
+  `contact.erased`.
+- **Events stay history:** a later change adds to the event through
+  `app.add_contact_webhook_changes`, a definer function that updates only an event the calling
+  transaction captured (its `captured_xact`), which no delivery can have read yet. The runtime role
+  still only inserts and reads events; the definer role gains the update of this one column, which
+  erasure (running as it) needs when it removes several tags before marking the contact. The
+  capture function now takes what changed, and refuses `contact.updated` without it and the other
+  types with it.
+- **Migration 0096:** `contact_changes text[]` on `app.webhook_events` with a check (null, or a
+  non-empty list of the parts above, on `contact.updated` only), added NOT VALID and validated by
+  0097, which does not hold the lock every capture needs; `app.capture_contact_webhook_event`
+  replaced by a version that takes what changed (the old one dropped: only triggers called it); the
+  three trigger functions replaced with the same signatures, so their triggers and grants stay.
+  Existing events keep null.
+
+Not built: what changed in `GET /contact-changes` (an item there stands for every change since the
+reader's cursor and compaction merges a contact's changes, ADR-114, so it could name only parts a
+reader may already have read; a reader keeping a copy compares), which tags were added or removed,
+the values before a change (personal data stays out of events), consent and source (consent has its
+own event; the source is not part of `contact.updated`), and endpoints taking `contact.updated` only
+for chosen parts.

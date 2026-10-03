@@ -246,9 +246,20 @@ export const contactCreatedPayloadSchema = envelope(
   'contact.created',
   z.object({ contact: webhookContactSchema }),
 );
+/** A part of the contact a change can change, in the API contact's names (ADR-121). */
+export const CONTACT_CHANGE_PART_RE = /^(name|phone|email|tags|fields\.[a-z][a-z0-9_]{0,39})$/;
+
 export const contactUpdatedPayloadSchema = envelope(
   'contact.updated',
-  z.object({ contact: webhookContactSchema }),
+  z.object({
+    contact: webhookContactSchema,
+    changes: z
+      .array(z.string().regex(CONTACT_CHANGE_PART_RE))
+      .nullable()
+      .describe(
+        'What the change changed, sorted, once each: `name`, `phone`, `email`, `tags` (a tag added or removed), and `fields.<key>` for each custom field whose value changed (GET /contact-fields). Names only: the contact carries the values as they are now. Null for an event captured before HyFib recorded what changed.',
+      ),
+  }),
 );
 export const contactErasedPayloadSchema = envelope(
   'contact.erased',
@@ -442,6 +453,8 @@ export interface StoredWebhookEvent {
   templateId: string | null;
   status: string | null;
   detail: Record<string, unknown>;
+  /** What a contact.updated event's transaction changed (ADR-121); null for other events. */
+  contactChanges: string[] | null;
   occurredAt: Date;
 }
 
@@ -847,7 +860,10 @@ export async function buildWebhookPayload(
     case 'contact.erased': {
       const contact = await webhookContactOf(tx, tenantId, event.contactId);
       if (!contact) throw new WebhookEventGoneError();
-      return { ...base, data: { contact } };
+      // What changed as captured (ADR-121); the contact as it is now.
+      return event.type === 'contact.updated'
+        ? { ...base, data: { contact, changes: event.contactChanges } }
+        : { ...base, data: { contact } };
     }
     case 'automation.run_started':
     case 'automation.run_ended': {

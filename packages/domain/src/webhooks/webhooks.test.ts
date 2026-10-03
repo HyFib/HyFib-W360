@@ -32,6 +32,7 @@ import {
   contactCreatedPayloadSchema,
   contactErasedPayloadSchema,
   contactUpdatedPayloadSchema,
+  CONTACT_CHANGE_PART_RE,
   conversationAssignmentPayloadSchema,
   conversationStatusPayloadSchema,
   conversationTeamPayloadSchema,
@@ -381,22 +382,24 @@ describe('webhook payload schemas', () => {
       consent: { marketing: null, utility: null },
       erased: true,
     };
+    // An update also names what it changed (ADR-121), even once the contact is erased: names only.
+    const changes = { 'contact.updated': ['email', 'fields.city', 'tags'] };
     for (const [schema, type] of [
       [contactCreatedPayloadSchema, 'contact.created'],
       [contactUpdatedPayloadSchema, 'contact.updated'],
       [contactErasedPayloadSchema, 'contact.erased'],
     ] as const) {
+      const data = (shown: unknown) =>
+        type === 'contact.updated'
+          ? { contact: shown, changes: changes[type] }
+          : { contact: shown };
       for (const shown of [person, erased]) {
-        expect(schema.safeParse({ ...base, type, data: { contact: shown } }).success, type).toBe(
-          true,
-        );
+        expect(schema.safeParse({ ...base, type, data: data(shown) }).success, type).toBe(true);
       }
       // Custom field values are strings, numbers or booleans (ADR-112).
       for (const fields of [{ city: null }, { city: ['a'] }, { city: { name: 'a' } }]) {
         const shown = { ...person, fields };
-        expect(schema.safeParse({ ...base, type, data: { contact: shown } }).success, type).toBe(
-          false,
-        );
+        expect(schema.safeParse({ ...base, type, data: data(shown) }).success, type).toBe(false);
       }
     }
     // A contact reads as the API's contact, and whether it was erased.
@@ -422,6 +425,49 @@ describe('webhook payload schemas', () => {
         },
       }).success,
     ).toBe(false);
+  });
+
+  it('say what a contact.updated changed: known parts and field keys, or null for an older event (ADR-121)', () => {
+    const person = {
+      id: contact.id,
+      name: 'Priya',
+      phone: '+919876543210',
+      email: null,
+      tags: [],
+      fields: {},
+      consent: { marketing: null, utility: null },
+      source: 'manual',
+      createdAt: base.createdAt,
+      erased: false,
+    };
+    const parse = (data: Record<string, unknown>) =>
+      contactUpdatedPayloadSchema.safeParse({ ...base, type: 'contact.updated', data }).success;
+    for (const changes of [
+      ['name'],
+      ['email', 'fields.city', 'name', 'phone', 'tags'],
+      ['fields.a', `fields.a${'b'.repeat(39)}`],
+      null,
+    ]) {
+      expect(parse({ contact: person, changes }), JSON.stringify(changes)).toBe(true);
+    }
+    // Always given; parts in the API contact's names, field keys as the fields' keys are written.
+    expect(parse({ contact: person })).toBe(false);
+    for (const part of [
+      'Name',
+      'nickname',
+      'consent',
+      'source',
+      'fields',
+      'fields.',
+      'fields.City',
+      'fields.1st',
+      'fields.a-b',
+      `fields.a${'b'.repeat(40)}`,
+      ' name',
+    ]) {
+      expect(parse({ contact: person, changes: [part] }), part).toBe(false);
+    }
+    expect(parse({ contact: person, changes: 'name' })).toBe(false);
   });
 
   it('describe the automation run events (ADR-078)', () => {
@@ -798,6 +844,26 @@ describe('the OpenAPI document', () => {
       ]);
       expect(hook.post.security).toEqual([]);
     }
+  });
+
+  it('says what a contact.updated changed: always given, a list of parts or null (ADR-121)', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = doc.components.schemas as Record<string, unknown>;
+    const updated = schemas.WebhookContactUpdated as {
+      properties: {
+        data: {
+          required?: string[];
+          properties: { changes?: { anyOf?: { items?: { pattern?: string } }[] } };
+        };
+      };
+    };
+    const data = updated.properties.data;
+    expect(data.required).toEqual(['contact', 'changes']);
+    const list = data.properties.changes?.anyOf?.find((s) => s.items);
+    expect(list?.items?.pattern).toBe(CONTACT_CHANGE_PART_RE.source);
+    expect(data.properties.changes?.anyOf).toContainEqual({ type: 'null' });
+    const webhooks = doc.webhooks as Record<string, { post?: { description?: string } }>;
+    expect(webhooks['contact.updated']?.post?.description).toContain('The event says which.');
   });
 });
 

@@ -12,6 +12,7 @@ import {
   sql,
   webhookDeliveries,
   webhookEvents,
+  type Tx,
 } from '@w360/db';
 import {
   advanceAutomationRun,
@@ -158,6 +159,7 @@ interface EventRow extends Record<string, unknown> {
   detail: Record<string, unknown>;
   conversation_id: string | null;
   contact_id: string | null;
+  contact_changes: string[] | null;
   deliveries: number;
 }
 
@@ -167,7 +169,7 @@ const eventsOf = (
   prefix: 'conversation.' | 'contact.' | 'automation.' | 'order.' | 'campaign.',
 ) =>
   fx.query<EventRow>(
-    `SELECT e.id, e.type, e.status, e.detail, e.conversation_id, e.contact_id,
+    `SELECT e.id, e.type, e.status, e.detail, e.conversation_id, e.contact_id, e.contact_changes,
             (SELECT count(*)::int FROM app.webhook_deliveries d
               WHERE d.tenant_id = e.tenant_id AND d.event_id = e.id) AS deliveries
        FROM app.webhook_events e
@@ -220,6 +222,10 @@ async function assign(c: Company, conversationId: string, membershipId: string |
     expectedVersion: await versionOf(conversationId),
   });
 }
+
+/** A text[] literal for a statement, null elements included (drizzle spreads JS arrays). */
+const textArray = (values: readonly (string | null)[] | null) =>
+  values === null ? null : `{${values.map((v) => (v === null ? 'NULL' : `"${v}"`)).join(',')}}`;
 
 async function expectRefusedBy(promise: Promise<unknown>, pattern: RegExp) {
   try {
@@ -537,6 +543,8 @@ describe('contact events', () => {
         },
       },
     });
+    // Only updates say what changed (ADR-121).
+    expect(body!.data).not.toHaveProperty('changes');
   });
 
   it('sends one contact.updated per save of the name, number, email, tags or custom field values, and nothing for an unchanged save or a field renamed or deleted', async () => {
@@ -545,6 +553,8 @@ describe('contact events', () => {
     const owner = await fx.ctx(c, c.owner);
     const service = contactsService();
     const city = await service.createField(owner, { label: 'City', key: 'city', type: 'text' });
+    // A field whose value never changes, so it is never named.
+    await service.createField(owner, { label: 'Plan', key: 'plan', type: 'text' });
     const { id: contactId } = await service.createContact(owner, {
       displayName: 'Bina',
       phone: '+919811100012',
@@ -595,12 +605,26 @@ describe('contact events', () => {
       ['contact.created', 0],
       ...Array.from({ length: 7 }, () => ['contact.updated', 1]),
     ]);
+    // Each update names what its save changed, sorted (ADR-121); a name saved unchanged is not
+    // named, and the created event names nothing.
+    expect(events.map((e) => e.contact_changes)).toEqual([
+      null,
+      ['name'],
+      ['email'],
+      ['phone'],
+      ['email', 'name', 'phone'],
+      ['tags'],
+      ['tags'],
+      ['fields.city'],
+    ]);
 
     await deliverDue(c);
     const bodies = bodiesAt(endpoint.path);
     expect(bodies).toHaveLength(7);
+    const changesOf = new Map(events.map((e) => [e.id, e.contact_changes]));
     for (const body of bodies) {
       expect(contactUpdatedPayloadSchema.safeParse(body).success).toBe(true);
+      expect(body.data.changes).toEqual(changesOf.get(body.id));
       // Built when delivered: every body shows the contact as it is now.
       expect(body.data.contact).toMatchObject({
         name: 'Bina Rao',
@@ -669,6 +693,9 @@ describe('contact events', () => {
       '+919811100022': ['contact.created'],
       '+919811100023': ['contact.created'],
     });
+    // Its name and email in one statement, its tags in others: one event naming all three.
+    const updated = (await eventsOf(c, 'contact.')).filter((e) => e.type === 'contact.updated');
+    expect(updated.map((e) => e.contact_changes)).toEqual([['email', 'name', 'tags']]);
   });
 
   it('erasing sends only contact.erased, without personal data, even for a contact changed in the same transaction', async () => {
@@ -705,6 +732,8 @@ describe('contact events', () => {
       'contact.erased',
     ]);
     expect(contactErasedPayloadSchema.safeParse(bodies[2]).success).toBe(true);
+    // What the update changed is kept, names only; the created and erased events name nothing.
+    expect(bodies.map((b) => b.data.changes)).toEqual([undefined, ['name'], undefined]);
     for (const body of bodies) {
       expect(body.data.contact).toMatchObject({
         id: contactId,
@@ -745,36 +774,52 @@ describe('contact events', () => {
     const scope = authorizedTenantScope(c.tenant.id, c.owner.id);
     const rename = (name: string) =>
       sql`update app.contacts set display_name = ${name} where id = ${contactId}::uuid`;
-    await fx.dbs.app.run(scope, async (tx) => {
-      // A change in a savepoint that rolls back: its event goes with it.
-      await tx
+    const addTag = (tag: string) =>
+      sql`insert into app.contact_tags (id, tenant_id, contact_id, tag)
+        values (gen_random_uuid(), ${c.tenant.id}::uuid, ${contactId}::uuid, ${tag})`;
+    const rolledBack = (tx: Tx, statement: ReturnType<typeof sql>) =>
+      tx
         .transaction(async (sp) => {
-          await sp.execute(rename('Rolled back'));
+          await sp.execute(statement);
           throw new Error('roll the savepoint back');
         })
         .catch((error: unknown) => {
           if (!(error instanceof Error) || error.message !== 'roll the savepoint back') throw error;
         });
-      // The next change captures the event; the ones after it, in savepoints or not, add none.
+    await fx.dbs.app.run(scope, async (tx) => {
+      // A change in a savepoint that rolls back: its event goes with it.
+      await rolledBack(tx, rename('Rolled back'));
+      // The next change captures the event; the ones after it, in savepoints or not, add none,
+      // and add what they changed to it (ADR-121), unless their savepoint rolls back.
       await tx.execute(rename('Gita'));
       await tx.transaction(async (sp) => {
         await sp.execute(sql`update app.contacts set email = 'gita@example.test'
           where id = ${contactId}::uuid`);
       });
-      await tx.execute(sql`insert into app.contact_tags (id, tenant_id, contact_id, tag)
-        values (gen_random_uuid(), ${c.tenant.id}::uuid, ${contactId}::uuid, 'gold')`);
+      await rolledBack(tx, addTag('silver'));
+      await tx.execute(sql`update app.contacts set phone_e164 = '+919811100052'
+        where id = ${contactId}::uuid`);
     });
     const [row] = await fx.dbs.app.run(scope, (tx) =>
       tx.select({ name: contacts.displayName }).from(contacts).where(eq(contacts.id, contactId)),
     );
     expect(row?.name).toBe('Gita');
-    expect((await eventsOf(c, 'contact.')).map((e) => [e.type, e.deliveries])).toEqual([
-      ['contact.created', 0],
-      ['contact.updated', 1],
+    expect(
+      (await eventsOf(c, 'contact.')).map((e) => [e.type, e.deliveries, e.contact_changes]),
+    ).toEqual([
+      ['contact.created', 0, null],
+      ['contact.updated', 1, ['email', 'name', 'phone']],
+    ]);
+    // A tag in a transaction of its own is its own change.
+    await fx.dbs.app.run(scope, (tx) => tx.execute(addTag('gold')));
+    expect((await eventsOf(c, 'contact.')).map((e) => e.contact_changes)).toEqual([
+      null,
+      ['email', 'name', 'phone'],
+      ['tags'],
     ]);
   });
 
-  it('the capture function takes contact events only, and the company role cannot use it to delete events', async () => {
+  it('the capture function takes contact events only, what changed for updates only, and the company role cannot use it to delete events', async () => {
     const c = await fx.company();
     await addEndpoint(c, ['contact.created', 'contact.erased']);
     const owner = await fx.ctx(c, c.owner);
@@ -782,15 +827,126 @@ describe('contact events', () => {
       phone: '+919811100061',
     });
     const scope = authorizedTenantScope(c.tenant.id, c.owner.id);
-    const capture = (type: string) =>
+    const capture = (type: string, changes: string[] | null) =>
       fx.dbs.app.run(scope, (tx) =>
         tx.execute(
-          sql`select app.capture_contact_webhook_event(${c.tenant.id}::uuid, ${contactId}::uuid, ${type})`,
+          sql`select app.capture_contact_webhook_event(${c.tenant.id}::uuid, ${contactId}::uuid,
+            ${type}, ${textArray(changes)}::text[])`,
         ),
       );
-    await expectRefusedBy(capture('message.status'), /not a contact event/);
-    await expectRefusedBy(capture('contact.erased'), /permission denied for table webhook_events/);
+    await expectRefusedBy(capture('message.status', null), /not a contact event/);
+    await expectRefusedBy(capture('message.status', ['name']), /not a contact event/);
+    const onlyUpdates = /only contact\.updated names what changed, and it always does/;
+    await expectRefusedBy(capture('contact.updated', null), onlyUpdates);
+    await expectRefusedBy(capture('contact.updated', []), onlyUpdates);
+    await expectRefusedBy(capture('contact.created', ['name']), onlyUpdates);
+    await expectRefusedBy(capture('contact.erased', ['name']), onlyUpdates);
+    await expectRefusedBy(
+      capture('contact.erased', null),
+      /permission denied for table webhook_events/,
+    );
     expect((await eventsOf(c, 'contact.')).map((e) => e.type)).toEqual(['contact.created']);
+  });
+
+  it('only the transaction that captured an update adds to what it changed, and nothing else changes stored events (ADR-121)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    await addEndpoint(c, ['contact.updated']);
+    await addEndpoint(other, ['contact.updated']);
+    const owner = await fx.ctx(c, c.owner);
+    const service = contactsService();
+    const { id: contactId } = await service.createContact(owner, { phone: '+919811100071' });
+    await service.updateContact(owner, contactId, { displayName: 'Hari' });
+    const otherOwner = await fx.ctx(other, other.owner);
+    const { id: otherContact } = await service.createContact(otherOwner, {
+      phone: '+919811100072',
+    });
+    await service.updateContact(otherOwner, otherContact, { displayName: 'Indu' });
+    const [event] = (await eventsOf(c, 'contact.')).filter((e) => e.type === 'contact.updated');
+    const [otherEvent] = (await eventsOf(other, 'contact.')).filter(
+      (e) => e.type === 'contact.updated',
+    );
+    expect([event?.contact_changes, otherEvent?.contact_changes]).toEqual([['name'], ['name']]);
+
+    // Its own events of a later transaction, or another company's, stay as captured.
+    const scope = authorizedTenantScope(c.tenant.id, c.owner.id);
+    for (const [tenant, id] of [
+      [c.tenant.id, event!.id],
+      [other.tenant.id, otherEvent!.id],
+    ] as const) {
+      await fx.dbs.app.run(scope, (tx) =>
+        tx.execute(sql`select app.add_contact_webhook_changes(${tenant}::uuid, ${id}::uuid,
+          array['email'])`),
+      );
+    }
+    // The company role reads and adds events, and changes none of them.
+    await expectRefusedBy(
+      fx.dbs.app.run(scope, (tx) =>
+        tx.execute(sql`update app.webhook_events set contact_changes = array['email']
+          where id = ${event!.id}::uuid`),
+      ),
+      /permission denied for table webhook_events/,
+    );
+    expect((await eventsOf(c, 'contact.')).map((e) => e.contact_changes)).toEqual([null, ['name']]);
+    expect((await eventsOf(other, 'contact.')).map((e) => e.contact_changes)).toEqual([
+      null,
+      ['name'],
+    ]);
+
+    // Even the event its own transaction captured is changed only when named with its company.
+    const otherScope = authorizedTenantScope(other.tenant.id, other.owner.id);
+    const inOneTransaction = await fx.dbs.app.run(otherScope, async (tx) => {
+      await tx.execute(sql`update app.contacts set display_name = 'Indu Rao'
+        where id = ${otherContact}::uuid`);
+      const captured = await tx.execute<{ id: string }>(sql`select id from app.webhook_events
+        where contact_id = ${otherContact}::uuid and captured_xact = pg_current_xact_id()`);
+      const id = captured.rows[0]!.id;
+      await tx.execute(sql`select app.add_contact_webhook_changes(${c.tenant.id}::uuid, ${id}::uuid,
+        array['email'])`);
+      const stored = await tx.execute<{ contact_changes: string[] }>(sql`select contact_changes
+        from app.webhook_events where id = ${id}::uuid`);
+      return stored.rows.map((r) => r.contact_changes);
+    });
+    expect(inOneTransaction).toEqual([['name']]);
+  });
+
+  it('stores only the parts a contact has, on updates only (ADR-121)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { id: contactId } = await contactsService().createContact(owner, {
+      phone: '+919811100081',
+    });
+    const scope = authorizedTenantScope(c.tenant.id, c.owner.id);
+    const store = (type: string, changes: (string | null)[] | null) =>
+      fx.dbs.app.run(scope, (tx) =>
+        tx.execute(sql`insert into app.webhook_events (id, tenant_id, type, contact_id, contact_changes)
+          values (gen_random_uuid(), ${c.tenant.id}::uuid, ${type}, ${contactId}::uuid,
+            ${textArray(changes)}::text[])`),
+      );
+    await store('contact.updated', ['email', 'fields.city', 'name', 'phone', 'tags']);
+    await store('contact.updated', null);
+    await store('contact.created', null);
+    const check = /webhook_events_contact_changes_check/;
+    for (const changes of [
+      [],
+      ['nickname'],
+      ['fields.City'],
+      ['fields.'],
+      ['name', 'fields'],
+      ['name', null],
+    ]) {
+      await expectRefusedBy(store('contact.updated', changes), check);
+    }
+    await expectRefusedBy(store('contact.created', ['name']), check);
+    await expectRefusedBy(store('contact.erased', ['name']), check);
+    await expectRefusedBy(
+      fx.dbs.app.run(scope, (tx) =>
+        tx.execute(sql`insert into app.webhook_events (id, tenant_id, type, contact_id, contact_changes)
+          values (gen_random_uuid(), ${c.tenant.id}::uuid, 'contact.updated', ${contactId}::uuid,
+            array[array['name'], array['email']])`),
+      ),
+      check,
+    );
   });
 });
 

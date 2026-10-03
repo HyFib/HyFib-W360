@@ -82,6 +82,8 @@ export const webhookEvents = appSchema.table('webhook_events', {
   templateId: uuid('template_id'),
   status: text('status'),
   detail: jsonb('detail').notNull().$type<Record<string, unknown>>(),
+  /** What a contact.updated event's transaction changed (ADR-121); null for other events. */
+  contactChanges: text('contact_changes').array(),
   occurredAt: tz('occurred_at').notNull().defaultNow(),
   createdAt: tz('created_at').notNull().defaultNow(),
 });

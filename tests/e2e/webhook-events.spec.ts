@@ -68,7 +68,7 @@ function signatureValid(headers: IncomingHttpHeaders, body: string, secret: stri
     });
 }
 
-test('conversation and contact events reach an endpoint: a customer writes, a member resolves, tags and erases', async ({
+test('conversation and contact events reach an endpoint: a customer writes, a member resolves, tags, renames and erases', async ({
   page,
   request,
 }) => {
@@ -147,15 +147,29 @@ test('conversation and contact events reach an endpoint: a customer writes, a me
   await expect(async () => expect(forUs()).toHaveLength(3)).toPass({ timeout: 30_000 });
   expect(forUs()[2]!.json).toMatchObject({
     type: 'contact.updated',
-    data: { contact: { id: contactId, tags: ['repeat', 'vip'], erased: false } },
+    data: { contact: { id: contactId, tags: ['repeat', 'vip'], erased: false }, changes: ['tags'] },
   });
+
+  // A member changes the name and the email in one save: one change, naming both (ADR-121).
+  await page.getByLabel('Name', { exact: true }).fill('Priya Sharma');
+  await page.getByLabel('Email (optional)').fill('priya@example.test');
+  await page.getByRole('button', { name: 'Save contact' }).click();
+  await expect(async () => expect(forUs()).toHaveLength(4)).toPass({ timeout: 30_000 });
+  expect(forUs()[3]!.json).toMatchObject({
+    type: 'contact.updated',
+    data: {
+      contact: { id: contactId, name: 'Priya Sharma', email: 'priya@example.test' },
+      changes: ['email', 'name'],
+    },
+  });
+  await expect(page.getByRole('heading', { name: 'Priya Sharma', level: 1 })).toBeVisible();
 
   // Erasing sends one event, without personal data (the tags it removes send nothing).
   await page.getByRole('button', { name: 'Erase contact' }).click();
   await page.getByRole('alertdialog').getByRole('button', { name: 'Erase contact' }).click();
   await expect(page).toHaveURL(new RegExp(`/c/${slug}/contacts$`));
-  await expect(async () => expect(forUs()).toHaveLength(4)).toPass({ timeout: 30_000 });
-  const erased = forUs()[3]!;
+  await expect(async () => expect(forUs()).toHaveLength(5)).toPass({ timeout: 30_000 });
+  const erased = forUs()[4]!;
   expect(signatureValid(erased.headers, erased.body, secret)).toBe(true);
   expect(erased.json).toMatchObject({
     type: 'contact.erased',
@@ -165,9 +179,10 @@ test('conversation and contact events reach an endpoint: a customer writes, a me
   });
   expect(erased.body).not.toContain(waId);
   expect(erased.body).not.toContain('Priya');
+  expect(erased.body).not.toContain('priya@');
   // Nothing else arrives for these changes.
   await page.goto(`/c/${slug}/settings/webhooks`);
-  expect(forUs()).toHaveLength(4);
+  expect(forUs()).toHaveLength(5);
 });
 
 test('conversation team and assignment events name the team and the member: a member moves and assigns a conversation, and deleting the team sends its change', async ({

@@ -713,7 +713,14 @@ Phase 5 rules (outgoing webhooks, P5-09):
   contact and transaction keeps imports and tag changes from multiplying deliveries. Since ADR-112
   a change of a custom field's value captures `contact.updated` too (a trigger compares the company's
   field keys only, as the role that made the change), and the payload carries the values; a field's
-  deletion sends nothing for each contact it removes the value from.
+  deletion sends nothing for each contact it removes the value from. Since ADR-121 the event names
+  what its transaction changed (`name`, `phone`, `email`, `tags`, `fields.<key>`), never a value,
+  so events still hold no personal data. Stored events stay history: a later change in the same
+  transaction adds to the event through `app.add_contact_webhook_changes`, a definer function that
+  updates only an event the calling transaction captured (which no delivery can have read); the
+  company role still has no update on webhook events (tested, as is another company's event and an
+  event of an earlier transaction staying as captured), and a database check keeps the list to known
+  parts on `contact.updated` only.
 - Automation run events (ADR-078) follow the same rules. They are captured for live runs only (a
   member's test run sends nothing), by triggers running as the role that changes the run (the
   runtime role, or `w360_definer` when erasure stops a run), so each event stays in the run's

@@ -1,5 +1,80 @@
 # Progress
 
+## 2026-10-03 — Phase 5: saying what changed in `contact.updated` (P5-09, ADR-121)
+
+Status: **Implemented and locally verified (local test receivers only).** `contact.updated` was sent
+with the contact as it is when delivered, so a receiver could not tell a new email from a new tag
+without keeping a copy of every contact to compare.
+
+### Completed
+
+- **Design (ADR-121):** `contact.updated` carries `changes`, what its transaction changed in the API
+  contact's names (`name`, `phone`, `email`, `tags`, `fields.<key>`), sorted, once each; names only,
+  never values. Null for events captured before migration 0096; `contact.created` and
+  `contact.erased` carry none. Still one event per contact and transaction: later changes in the
+  transaction add what they changed, and a rolled-back savepoint takes back what it added.
+- **Migrations 0096 and 0097:** `contact_changes text[]` on `app.webhook_events` with a check (null,
+  or a non-empty list of known parts and field keys, on `contact.updated` only) added `NOT VALID`
+  and validated by 0097; `app.add_contact_webhook_changes`, a definer function that adds to an event
+  only if the calling transaction captured it; `app.capture_contact_webhook_event` with what changed
+  (refusing `contact.updated` without it and the other types with it; the three-argument version
+  dropped); the triggers of 0047 and 0090 naming what changed. The runtime role still has no update
+  on events; the definer role gains the update of this column.
+- **Domain:** the stored event carries `contactChanges` and delivery reads it; the `contact.updated`
+  payload has `changes` (`CONTACT_CHANGE_PART_RE`); Settings and the OpenAPI document say the event
+  names what changed.
+- **Tests:**
+  - Unit (`webhooks.test.ts`, 2 and 1 changed): the parts and field keys taken, null, refusals
+    (unknown parts, bad keys, missing, not a list); the OpenAPI schema (always given, a list with the
+    pattern or null) and the event's sentence.
+  - Integration (`webhook-events.test.ts`, 2 and 6 changed; `tenant-isolation.test.ts`, 1 changed):
+    each update naming what its save changed (name, email, number, all three at once, a tag added and
+    removed, a field's value, a field never changed not named), the bodies carrying each event's
+    list and created and erased bodies none; an import changing name, email and tags in several
+    statements naming all three; across savepoints, a rolled-back savepoint taking back what it
+    added; the capture function's rule on what changed; adding only to an event of the calling
+    transaction, named with its company (an earlier one, another company's, and its own named with
+    another company stay as captured) and the company role refused an update; each clause of the
+    database check; the functions' grants.
+  - e2e (`webhook-events.spec.ts`): a member's tags arrive as `["tags"]`, then a save of the name and
+    email as one event naming `["email", "name"]`; the erasure (two tags removed first) still sends
+    only `contact.erased`, without the new name or email.
+- **Docs:** ADR-121; SECURITY; THREAT-MODEL T134; RUNBOOKS (what an event names, and 0096/0097
+  failing); ARCHITECTURE; DEPLOYMENT (0096, 0097, and the rolling-deploy note ADR-120 lacked);
+  DATA-RETENTION; BACKLOG P5-08, P5-09; FEATURE-MATRIX W-138, H-014.
+- **Mutation checks:** 37 regressions tried, 37 caught:
+  - 10 in the triggers (the name, number or email never named, the email compared with itself, a
+    tag added or removed named as the name, field keys without `fields.`, every field named,
+    created and erased contacts named as changed), 6 in the capture (later changes adding nothing,
+    the list stored unsorted, the rule on what changed not checked, only an update without changes
+    refused, an empty list taken, both guards against adding to a created event removed), 7 in
+    adding and the grants (an earlier transaction's event changed, the company condition left out,
+    the list unsorted and repeated, adding running as the caller, the definer role without the
+    column's update, the runtime role unable to add or to capture), 6 in the database check (other
+    types, several dimensions, null parts, any field key, an empty list, any part), 7 in the
+    payloads and the schema (updates sent without what changed, every contact event saying it,
+    delivery not reading it, the schema taking any part, refusing null or letting it out, Settings
+    and the OpenAPI document not saying it) and 1 through the e2e test (updates sent without what
+    changed).
+  - One first result was corrected: leaving the company condition out of adding survived until a
+    test named the event its own transaction captured with another company; rerun: caught.
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                                                                                                      | Result                                                                                                                                                      |
+| -------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                         | clean                                                                                                                                                       |
+| `pnpm test`                                                                                                                                  | 540 passed                                                                                                                                                  |
+| `pnpm test:integration` on PostgreSQL 18.6 and 17.11                                                                                         | 744 passed on each                                                                                                                                          |
+| `pnpm build`, then `webhook-events.spec.ts` and `api-contact-fields.spec.ts` on chromium and mobile-chromium, on a database migrated to 0097 | 12 passed                                                                                                                                                   |
+| Mutation checks                                                                                                                              | 37 regressions tried, 37 caught (1 through the e2e test); one first result corrected once a test named an event with another company in its own transaction |
+| gitleaks 8.30.1 on the commit                                                                                                                | no leaks                                                                                                                                                    |
+
+### Known gaps
+
+- What changed in `GET /contact-changes`, which tags were added or removed, the values before a
+  change, and endpoints taking `contact.updated` only for chosen parts are not built (ADR-121).
+
 ## 2026-10-03 — Phase 5: changing many conversations in one call through the public API (P5-08, ADR-120)
 
 Status: **Implemented and locally verified (test data only).** Since ADR-093 a key changed one

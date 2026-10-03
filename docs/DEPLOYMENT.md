@@ -106,6 +106,15 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    until the web rollout ends, an old server's change that drops `message.status` from an endpoint
    with statuses fails on the check (it works once the rollout ends), and its other changes keep
    them.
+   ADR-120 adds no migration; until the web rollout ends, a server from before it answers
+   `POST /api/v1/conversations/update-many` with 405 (the path reads as a conversation id there,
+   which takes no POST).
+   Migration 0096 (ADR-121) adds a nullable column to `app.webhook_events` with a check added
+   `NOT VALID` (no rewrite and no table read, so captures wait for its lock only briefly) and
+   replaces the contact capture and trigger functions, which record what changed from then on;
+   0097 validates the check while captures go on. Workers from before it deliver `contact.updated`
+   without `changes` until the worker rollout ends; rolling workers back to an image from before it
+   does the same, and the recorded lists stay for later deliveries and replays.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
