@@ -83,6 +83,38 @@ export function serializeError(value: unknown): unknown {
   return serialized;
 }
 
+/** A level another library logs at, by pino's name for it. */
+export type LibraryLogLevel = 'debug' | 'info' | 'warn' | 'error';
+
+const isErrorLike = (value: unknown) => value instanceof Error || isDatabaseDriverError(value);
+
+/** The first error among a library's log arguments, or under an argument's `error` or `err`. */
+function libraryError(args: readonly unknown[]): unknown {
+  for (const arg of args) {
+    if (isErrorLike(arg)) return arg;
+    if (typeof arg !== 'object' || arg === null) continue;
+    const { error, err } = arg as { error?: unknown; err?: unknown };
+    if (isErrorLike(error)) return error;
+    if (isErrorLike(err)) return err;
+  }
+  return undefined;
+}
+
+/**
+ * Writes a line another library logs through its logger hook (Better Auth's): its message, with
+ * the first error among its arguments as `err`, so that a failed query is written without the data
+ * it quotes (ADR-129). Its other arguments (a query's conditions, a provider's answer) are left out.
+ */
+export function logLibraryLine(
+  logger: Logger,
+  level: LibraryLogLevel,
+  message: string,
+  args: readonly unknown[],
+): void {
+  const err = libraryError(args);
+  logger[level](err === undefined ? {} : { err }, message);
+}
+
 export function createLogger(
   options: { name: string; level?: string; pretty?: boolean } & Partial<LoggerOptions>,
   destination?: DestinationStream,

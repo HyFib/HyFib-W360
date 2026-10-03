@@ -1,7 +1,7 @@
 import { stdSerializers } from 'pino';
 import { describe, expect, it } from 'vitest';
 import { AppError } from './errors';
-import { createLogger, serializeError } from './logger';
+import { createLogger, logLibraryLine, serializeError } from './logger';
 
 /** Shaped like pg-protocol's DatabaseError: named "error", with PostgreSQL's fields as properties. */
 class PgDatabaseError extends Error {
@@ -130,5 +130,32 @@ describe('createLogger', () => {
     }
     expect(lines).toHaveLength(2);
     expect(overridden).toHaveLength(1);
+  });
+});
+
+describe('logLibraryLine', () => {
+  it("writes a library's message with its first error, without the data either holds", () => {
+    const lines = logged((logger) => {
+      logLibraryLine(logger, 'error', 'Failed to read session from database', [failedInsert()]);
+      logLibraryLine(logger, 'error', 'Error parsing JSON', [{ error: failedInsert() }]);
+      logLibraryLine(logger, 'warn', 'Failed to query fallback join for model user:', [
+        { where: [{ field: 'email', value: 'priya@example.com' }], limit: 1 },
+        new RangeError('Invalid time value'),
+      ]);
+      logLibraryLine(logger, 'info', 'Sessions pruned', [{ count: 3, user: 'Priya' }]);
+    });
+    expect(lines.map((line) => [line.level, line.msg])).toEqual([
+      ['error', 'Failed to read session from database'],
+      ['error', 'Error parsing JSON'],
+      ['warn', 'Failed to query fallback join for model user:'],
+      ['info', 'Sessions pruned'],
+    ]);
+    expect(lines.map((line) => (line.err as { type?: string } | undefined)?.type)).toEqual([
+      'DatabaseQueryError',
+      'DatabaseQueryError',
+      'RangeError',
+      undefined,
+    ]);
+    expect(JSON.stringify(lines)).not.toMatch(/Priya|priya@example\.com|9876543210|insert into/);
   });
 });

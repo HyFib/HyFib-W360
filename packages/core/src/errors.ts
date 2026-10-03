@@ -318,3 +318,25 @@ export function withoutDriverErrors(error: unknown): unknown {
   });
   return replaced ? error : safe;
 }
+
+/**
+ * `api` with every method's failure rethrown through `withoutDriverErrors` (ADR-129), for a library
+ * that queries the database on its own connection (Better Auth): its errors would otherwise reach
+ * the caller, and Next.js's output, with the failed query's parameters. Methods are awaited, so
+ * each returns a promise; other properties are read as they are.
+ */
+export function withoutDriverErrorsFrom<T extends object>(api: T): T {
+  return new Proxy(api, {
+    get(target, property, receiver) {
+      const value: unknown = Reflect.get(target, property, receiver);
+      if (typeof value !== 'function') return value;
+      return async (...args: unknown[]): Promise<unknown> => {
+        try {
+          return (await Reflect.apply(value, target, args)) as unknown;
+        } catch (error) {
+          throw withoutDriverErrors(error);
+        }
+      };
+    },
+  });
+}

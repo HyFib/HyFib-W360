@@ -4994,6 +4994,16 @@ Decision:
   A caller's own `err` serializer cannot replace it. Any other error is logged as pino logs it. The
   pg-boss error handlers log the queue and worker beside the error (`pgBossErrorContext`), as the
   copy pino logged whole held them before.
+- **And Better Auth.** Better Auth queries the database on its own pool, so its failed queries
+  never pass through `db.run`, and its default logger printed them whole to the web's output: a
+  sign-up whose user insert failed printed the name and email, and a failed session or
+  verification lookup would print the token. Its log lines now go through the web's logger
+  (`logLibraryLine`): the line's message, with the first error among its arguments as `err`,
+  written as above; its other arguments (a query's conditions, a provider's answer) are left out.
+  Its API error hook logs a failed query as its `DatabaseQueryError` (any other error by its
+  message, as before), and the calls pages, routes and actions make (`auth.api`, such as reading
+  the session) rethrow a failure without the driver's error (`withoutDriverErrorsFrom`), so
+  Next.js's output never holds it.
 - **What follows:** the error logs above, Next.js's own output for a failing page, failed jobs'
   outputs (so dead letters name `DatabaseQueryError` and its SQLSTATE, not `Error` without a code)
   and receipts' `last_error` hold the sanitised error. Members' contact search with a NUL character
@@ -5007,4 +5017,5 @@ class and code); migrations' console output (operators run them, and it keeps Po
 message); a job whose handler fails on pg-boss's own query (a job sent outside a transaction) keeps
 PostgreSQL's error in its failed job's output (those queries hold job envelopes: ids and a
 signature); an error kept under another property than `cause` (or `errors`) is logged as pino
-logs it.
+logs it; Better Auth's lookup of a session's or user's related rows, when its query fails, prints
+that error to the console itself (its parameters are ids).

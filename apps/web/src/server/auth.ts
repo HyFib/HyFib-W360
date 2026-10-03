@@ -5,7 +5,14 @@ import { nextCookies } from 'better-auth/next-js';
 import { twoFactor } from 'better-auth/plugins/two-factor';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import type pg from 'pg';
-import type { Logger, WebConfig } from '@w360/core';
+import {
+  isDatabaseQueryError,
+  logLibraryLine,
+  withoutDriverErrors,
+  withoutDriverErrorsFrom,
+  type Logger,
+  type WebConfig,
+} from '@w360/core';
 import { betterAuthSchema, systemScope, type Database } from '@w360/db';
 import {
   enqueueEmail,
@@ -18,6 +25,8 @@ import {
  * Identity: email/password with mandatory email verification, TOTP two-factor with backup codes,
  * database-backed sessions (revocation takes effect immediately; no stateless cookie cache),
  * database-backed rate limits shared by all replicas, and built-in sign-up enumeration protection.
+ * Better Auth queries the database on its own pool, so its failed queries never pass through
+ * `db.run`: its log lines, API errors and server-side calls drop the driver's error (ADR-129).
  */
 export function createAuth(deps: {
   config: WebConfig;
@@ -45,7 +54,7 @@ export function createAuth(deps: {
     );
   };
 
-  return betterAuth({
+  const auth = betterAuth({
     appName: 'HyFib W360',
     baseURL: config.APP_BASE_URL,
     secret: config.BETTER_AUTH_SECRET,
@@ -135,10 +144,26 @@ export function createAuth(deps: {
           : {}),
       },
     },
+    // Better Auth's own lines through ours: an error among a line's arguments (a failed query's
+    // repeats its parameters: emails, names, session and verification tokens) is written without
+    // the data it quotes, and the line's other arguments are left out.
+    logger: {
+      log: (level, message, ...args: unknown[]) =>
+        logLibraryLine(logger, level, `better-auth: ${message}`, args),
+    },
     onAPIError: {
       onError: (error) => {
+        // A failed query is logged as its DatabaseQueryError; any other error by its message, as
+        // before (an API error also holds the response's headers).
+        const safe = withoutDriverErrors(error);
         logger.warn(
-          { err: error instanceof Error ? error.message : String(error) },
+          {
+            err: isDatabaseQueryError(safe)
+              ? safe
+              : error instanceof Error
+                ? error.message
+                : String(error),
+          },
           'auth api error',
         );
       },
@@ -152,6 +177,8 @@ export function createAuth(deps: {
       nextCookies(),
     ],
   });
+  // Pages, routes and actions call these; an error they throw reaches Next.js's output.
+  return { ...auth, api: withoutDriverErrorsFrom(auth.api) };
 }
 
 export type Auth = ReturnType<typeof createAuth>;

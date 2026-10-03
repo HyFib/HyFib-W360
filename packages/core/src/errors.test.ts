@@ -8,6 +8,7 @@ import {
   isDatabaseQueryError,
   toDatabaseQueryError,
   withoutDriverErrors,
+  withoutDriverErrorsFrom,
 } from './errors';
 
 describe('errorClassAndCode', () => {
@@ -317,5 +318,30 @@ describe('database driver errors', () => {
     const looped = new Error('looped') as Error & { cause?: unknown };
     looped.cause = looped;
     expect(withoutDriverErrors(looped)).toBe(looped);
+  });
+});
+
+describe('withoutDriverErrorsFrom', () => {
+  it("rethrows a library method's failure without the driver's error, and passes the rest", async () => {
+    const refused = new AppError('forbidden', 'Not yours.');
+    const api = {
+      label: 'auth',
+      getSession: async (token: string) => {
+        await Promise.resolve();
+        if (token === 'down') return contactLookup();
+        if (token === 'refused') throw refused;
+        return { token, userId: 'u1' };
+      },
+    };
+    const safe = withoutDriverErrorsFrom(api);
+    await expect(safe.getSession('t1')).resolves.toEqual({ token: 't1', userId: 'u1' });
+    expect(safe.label).toBe('auth');
+
+    const failure: unknown = await safe.getSession('down').catch((error: unknown) => error);
+    expect(isDatabaseQueryError(failure)).toBe(true);
+    expect((failure as DatabaseQueryError).code).toBe('22P02');
+    expect(String((failure as Error).stack)).not.toMatch(QUOTED);
+    // Any other failure is thrown as it was.
+    await expect(safe.getSession('refused')).rejects.toBe(refused);
   });
 });

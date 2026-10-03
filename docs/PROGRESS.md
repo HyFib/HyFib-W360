@@ -8,7 +8,8 @@ its parameters, and PostgreSQL's error repeats values in its message (data excep
 detail (a unique violation's key, a check's whole row). The logger wrote all of it, so the API's,
 server actions' and worker's error logs, the webhook routes, Next.js's output, failed jobs' outputs
 and a receipt's `last_error` could hold contacts' names, numbers, emails and message text (SEC-11,
-found with ADR-124).
+found with ADR-124). Better Auth, which queries on its own pool, printed its failed queries whole to
+the web's output (names, emails, and for a failed lookup a session or verification token).
 
 ### Completed
 
@@ -32,6 +33,11 @@ found with ADR-124).
 - **Worker and web:** the pg-boss error handlers log the queue and worker beside the error
   (`pgBossErrorContext`, `jobs/queue.ts`), since the copied error is now logged without its other
   properties.
+- **Better Auth (web, `server/auth.ts`):** its log lines go through the web's logger
+  (`logLibraryLine`, `@w360/core`): the message, with the first error among the line's arguments as
+  `err`, and no other argument; its API error hook logs a failed query as its `DatabaseQueryError`
+  (other errors by their message, as before); `auth.api`, which pages, routes and actions call,
+  rethrows a failure without the driver's error (`withoutDriverErrorsFrom`).
 - **Tests:**
   - Unit (`errors.test.ts`, 7 new; `logger.test.ts`, 6 new; `queue.test.ts`, 1 new): the facts and
     names kept and anything else dropped; PostgreSQL's message kept for a unique violation and one of
@@ -54,11 +60,21 @@ found with ADR-124).
     inbound WhatsApp message holding one, whose receipt fails with `last_error` "Database query failed
     (SQLSTATE 22P05)" instead of the insert with its text and number. The existing suites, which read
     PostgreSQL's messages through `db.run` (guards, our functions' sentences), pass unchanged.
+  - Better Auth: unit tests for `logLibraryLine` (a line's error written as its
+    `DatabaseQueryError`, under `error` too, its other arguments left out) and
+    `withoutDriverErrorsFrom` (a method's driver error rethrown sanitised, other failures and
+    results unchanged); checked by hand against the local stack (test data): a sign-up whose name
+    holds a NUL character makes the user insert fail, and Better Auth's console line held the insert
+    with the name and email before; now one log line, "better-auth: Failed to create user", holds
+    "Database query failed (SQLSTATE 22021)" and neither.
 - **Docs:** ADR-129 (and ADR-124's note); SECURITY (an "Error logs" control); THREAT-MODEL T142 and
   the `L` status in the legend; RUNBOOKS (triage: a failed query in the logs); ARCHITECTURE
   (observability); DEPLOYMENT (PostgreSQL's own log keeps no parameters); BACKLOG SEC-11 settled.
   No feature matrix row covers logging.
-- **Mutation checks:** 32 regressions tried, all caught, 2 only once tests were added for them:
+- **Mutation checks:** 32 regressions tried, all caught, 2 only once tests were added for them, and
+  6 more on the Better Auth helpers (all of a line's arguments logged, an error argument or one
+  under `error` not found, the error logged outside the `err` serializer, a method's driver error
+  rethrown as it is, other properties wrapped as methods), all caught:
   - caught: 3 in recognising a driver error (drizzle's or PostgreSQL's not recognised, a
     `DatabaseQueryError` taken for one), 4 in what is kept (a SQLSTATE, a name, a severity or the
     class of what stopped a query kept whatever it holds), 5 in PostgreSQL's message (kept for data
@@ -79,14 +95,16 @@ found with ADR-124).
 
 ### Test commands and results (local, 2026-10-03)
 
-| Command                                                                                                                                       | Result                                                                   |
-| --------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                          | clean                                                                    |
-| `pnpm test`                                                                                                                                   | 575 passed                                                               |
-| `pnpm test:integration` on PostgreSQL 18.6 and 17.11                                                                                          | 771 passed on each                                                       |
-| `pnpm build`, then `contacts.spec.ts`, `campaigns.spec.ts` and `api-keys.spec.ts` on chromium and mobile-chromium (database migrated to 0100) | 14 passed                                                                |
-| Mutation checks                                                                                                                               | 32 regressions tried, all caught (2 only once tests were added for them) |
-| gitleaks 8.30.1 on the commit                                                                                                                 | no leaks found                                                           |
+| Command                                                                                                                                       | Result                                                                                                          |
+| --------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                          | clean                                                                                                           |
+| `pnpm test`                                                                                                                                   | 577 passed (575 before the Better Auth part)                                                                    |
+| `pnpm test:integration` on PostgreSQL 18.6 and 17.11                                                                                          | 771 passed on each (before the Better Auth part, which changes only the web's auth wiring and adds two helpers) |
+| `pnpm build`, then `contacts.spec.ts`, `campaigns.spec.ts` and `api-keys.spec.ts` on chromium and mobile-chromium (database migrated to 0100) | 14 passed                                                                                                       |
+| `pnpm build` with the Better Auth part, then `onboarding.spec.ts`, `two-factor.spec.ts` and `step-up.spec.ts` on chromium and mobile-chromium | 12 passed                                                                                                       |
+| A sign-up whose name holds a NUL character, against the local stack before and after the Better Auth part                                     | before: the insert with the name and email in the output; after: the SQLSTATE only                              |
+| Mutation checks                                                                                                                               | 38 regressions tried, all caught (2 only once tests were added for them)                                        |
+| gitleaks 8.30.1 on the commits                                                                                                                | no leaks found                                                                                                  |
 
 ### Known gaps
 
@@ -94,7 +112,8 @@ found with ADR-124).
   and code); migrations' console output keeps PostgreSQL's message; a job whose handler fails on
   pg-boss's own query keeps PostgreSQL's error in its failed job's output (job envelopes: ids and a
   signature); an error kept under another property than `cause` or `errors` is logged as pino logs
-  it.
+  it; Better Auth's lookup of a session's or user's related rows prints its failed query to the
+  console itself (its parameters are ids).
 - Members' forms and searches and provider payloads are still not checked for the NUL character
   (ADR-124): they fail as internal errors, now without the text.
 
