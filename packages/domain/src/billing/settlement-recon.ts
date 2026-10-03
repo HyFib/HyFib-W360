@@ -1,4 +1,4 @@
-import { isAppError } from '@w360/core';
+import { isAppError, jsonbText } from '@w360/core';
 import {
   sql,
   systemScope,
@@ -578,7 +578,7 @@ async function recordItems(
     db.run(systemScope, (tx) =>
       tx.execute(
         sql`select ops.settlement_recon_record_items(${runId}::uuid, ${attempt}::int,
-              ${JSON.stringify(records)}::jsonb)`,
+              ${jsonbText(records)}::jsonb)`,
       ),
     ),
   );

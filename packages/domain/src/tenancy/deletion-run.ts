@@ -22,7 +22,7 @@ import {
   type TenantScope,
   type Tx,
 } from '@w360/db';
-import { isAppError } from '@w360/core';
+import { clipText, isAppError, jsonbText } from '@w360/core';
 import { cancelPendingAutoRecharge } from '../billing/attempts';
 import { cancelPlanSubscriptionForDeletion } from '../billing/plan-subscriptions';
 import type { RazorpayClient } from '../billing/razorpay';
@@ -143,8 +143,8 @@ async function cleanUpProviders(
     { accessMode: 'read only' },
   );
   for (const account of accounts) {
-    const label = `WhatsApp account ${account.name ?? account.wabaId} (${account.wabaId})`.slice(
-      0,
+    const label = clipText(
+      `WhatsApp account ${account.name ?? account.wabaId} (${account.wabaId})`,
       160,
     );
     if (!account.credential) {
@@ -406,7 +406,7 @@ export async function runTenantDeletion(
   let cleanup = started.providerCleanup;
   if (!started.providerCleanupDone) {
     cleanup = await cleanUpProviders(deps, scope);
-    const items = JSON.stringify(cleanup);
+    const items = jsonbText(cleanup);
     await deps.db.run(systemScope, (tx) =>
       tx.execute(
         sql`select ops.record_tenant_deletion_cleanup(${tenantId}::uuid, ${items}::jsonb)`,

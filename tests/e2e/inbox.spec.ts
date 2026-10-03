@@ -3,6 +3,7 @@ import {
   E2E_CHANNEL_TOKEN,
   connectTestChannel,
   inboundMessage,
+  inboundMessages,
   messagingConfigured,
   randomWaId,
   sendSignedWebhook,
@@ -68,6 +69,61 @@ test('an inbound WhatsApp message appears live, the agent replies and delivery u
     statusUpdate(wabaId, phoneNumberId, sent!.wamid!, 'delivered', waId),
   );
   await expect(page.getByText('Delivered')).toBeVisible({ timeout: 20_000 });
+});
+
+test('a long message cut mid-emoji and a large contact card arrive in one webhook (ADR-131)', async ({
+  page,
+  request,
+}) => {
+  const email = uniqueEmail('inbox-large');
+  const slug = `large-${Date.now().toString(36)}`;
+  await signUpAndVerify(page, { name: 'Lata Large', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('Large Messages Co');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+  const { wabaId, phoneNumberId } = await connectTestChannel({ ownerEmail: email, slug });
+
+  // Before ADR-131 the text's clip left half of the emoji, which jsonb refused, and the whole
+  // receipt failed with the contact card in it. A message larger than any may be is kept without
+  // its content.
+  const waId = randomWaId();
+  const wide = '𝒳'.repeat(2048); // 4,096 code units, 8 KB as UTF-8
+  await sendSignedWebhook(
+    request,
+    inboundMessages(wabaId, phoneNumberId, waId, [
+      { type: 'text', text: { body: `${'x'.repeat(4095)}😀 and the rest of a long message` } },
+      {
+        type: 'contacts',
+        contacts: Array.from({ length: 25 }, (_, i) => ({
+          name: { formatted_name: `Shared contact ${i}` },
+          addresses: [{ street: 'y'.repeat(4_000), city: 'Pune' }],
+        })),
+      },
+      {
+        type: 'system',
+        system: {
+          type: wide,
+          body: wide,
+          user_id: wide,
+          parent_user_id: wide,
+          previous_user_id: wide,
+          previous_parent_user_id: wide,
+          wa_id: wide,
+          new_wa_id: wide,
+        },
+      },
+    ]),
+  );
+  await page.getByRole('link', { name: 'Inbox' }).click();
+  const conversation = page.getByRole('link', { name: /Priya Customer/ });
+  await expect(conversation).toBeVisible({ timeout: 20_000 });
+  await conversation.click();
+  const thread = page.getByRole('list', { name: /^Messages with/ });
+  await expect(thread.getByText('x'.repeat(4095), { exact: true })).toBeVisible();
+  await expect(thread.getByText('Shared a contact card')).toBeVisible();
+  await expect(thread.getByText(/^\d+ contacts were too large to keep$/)).toBeVisible();
+  await expect(thread.getByText('This message was too large to keep.')).toBeVisible();
 });
 
 test('webhooks with a bad signature are refused and store nothing', async ({ request }) => {

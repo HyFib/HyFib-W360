@@ -4,12 +4,12 @@ import {
   customType,
   doublePrecision,
   integer,
-  jsonb,
   smallint,
   text,
   timestamp,
   uuid,
 } from 'drizzle-orm/pg-core';
+import { jsonb } from './columns';
 import { appSchema } from './tenancy';
 import { opsSchema } from './ops';
 

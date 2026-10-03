@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { AppError, notFound, uuidv7 } from '@w360/core';
+import { AppError, jsonbText, notFound, uuidv7 } from '@w360/core';
 import { QUEUES } from '@w360/contracts';
 import {
   and,
@@ -735,7 +735,7 @@ export async function apiCreateContact(
             displayName: sql`coalesce(${contacts.displayName}, ${data.name || null})`,
             email: sql`coalesce(${contacts.email}, ${email.email})`,
             // The contact's own values win over the request's.
-            attributes: sql`${JSON.stringify(values)}::jsonb || ${contacts.attributes}`,
+            attributes: sql`${jsonbText(values)}::jsonb || ${contacts.attributes}`,
           })
           .where(and(eq(contacts.tenantId, ctx.tenant.id), eq(contacts.id, id)));
         if (tags.length > 0) {

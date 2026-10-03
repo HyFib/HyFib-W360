@@ -92,7 +92,8 @@ session-level value. Scopes are branded TypeScript types created only by authori
    companies both get 404.
 3. The domain service asserts a permission, validates input with zod (`parseInput`, which also
    refuses the NUL character PostgreSQL text cannot hold, naming the field, ADR-130), and runs
-   `db.run(ctx.scope)`.
+   `db.run(ctx.scope)`. jsonb columns use `@w360/db`'s `jsonb` type, which writes half of an emoji
+   as U+FFFD, as text columns store it (ADR-131).
    Audit rows are written in the same transaction. Actions that hand out credentials, move money,
    take or destroy the whole company's data, or weaken account security also assert a recent
    sign-in (`assertRecentSignIn`: the session started within 15 minutes, carried in the context as

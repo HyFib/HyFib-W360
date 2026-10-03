@@ -1,4 +1,4 @@
-import { parseExternalJson, uuidv7 } from '@w360/core';
+import { clipText, jsonbSize, jsonbText, parseExternalJson, uuidv7 } from '@w360/core';
 import {
   and,
   contactFields,
@@ -26,6 +26,12 @@ import { FLOW_TOKEN_RE } from './model';
 /** HyFib's limit on the answers kept from one completion (the message row holds 64 KB at most). */
 export const MAX_ANSWERS_BYTES = 48 * 1024;
 
+/**
+ * The same limit on the answers once stored as jsonb (ADR-131), which can take more than their JSON
+ * text (numbers most): under what the message's content and the response row may hold.
+ */
+export const MAX_ANSWERS_JSONB_BYTES = 55 * 1024;
+
 export interface FlowCompletion {
   token: string | null;
   /** The answers without the token, or null when they could not be read or were too large. */
@@ -41,7 +47,7 @@ const isObject = (value: unknown): value is Record<string, unknown> =>
 export function parseFlowCompletion(interactive: unknown): FlowCompletion | null {
   if (!isObject(interactive) || interactive.type !== 'nfm_reply') return null;
   const nfm = isObject(interactive.nfm_reply) ? interactive.nfm_reply : {};
-  const body = typeof nfm.body === 'string' ? nfm.body.slice(0, 1024) : '';
+  const body = typeof nfm.body === 'string' ? clipText(nfm.body, 1024) : '';
   const raw = nfm.response_json;
   if (typeof raw !== 'string') return { token: null, answers: null, tooLarge: false, body };
   if (Buffer.byteLength(raw, 'utf8') > MAX_ANSWERS_BYTES) {
@@ -54,13 +60,11 @@ export function parseFlowCompletion(interactive: unknown): FlowCompletion | null
     return { token: null, answers: null, tooLarge: false, body };
   }
   if (!isObject(parsed)) return { token: null, answers: null, tooLarge: false, body };
-  const { flow_token: token, ...answers } = parsed;
-  return {
-    token: typeof token === 'string' && FLOW_TOKEN_RE.test(token) ? token : null,
-    answers,
-    tooLarge: false,
-    body,
-  };
+  const { flow_token: rawToken, ...answers } = parsed;
+  const token = typeof rawToken === 'string' && FLOW_TOKEN_RE.test(rawToken) ? rawToken : null;
+  if (jsonbSize(answers) > MAX_ANSWERS_JSONB_BYTES)
+    return { token, answers: null, tooLarge: true, body };
+  return { token, answers, tooLarge: false, body };
 }
 
 /** One answer as a single line of text, or null for lists and objects (which are not mapped). */
@@ -203,7 +207,7 @@ export async function recordFlowCompletion(
       }
     }
     if (contact && !contact.erasedAt && applied.some((a) => a.outcome === 'applied')) {
-      let attributes = sql`${contacts.attributes} || ${JSON.stringify(attrSet)}::jsonb`;
+      let attributes = sql`${contacts.attributes} || ${jsonbText(attrSet)}::jsonb`;
       for (const key of attrRemove) attributes = sql`(${attributes}) - ${key}::text`;
       await tx
         .update(contacts)

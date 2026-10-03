@@ -122,6 +122,25 @@ export function inboundMessage(
   });
 }
 
+/** Several messages from one customer in one webhook, each `{ type, [type]: fields }`. */
+export function inboundMessages(
+  wabaId: string,
+  phoneNumberId: string,
+  waId: string,
+  messages: Record<string, unknown>[],
+) {
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  return envelope(wabaId, phoneNumberId, {
+    contacts: [{ profile: { name: 'Priya Customer' }, wa_id: waId }],
+    messages: messages.map((m) => ({
+      from: waId,
+      id: `wamid.e2e.${randomUUID()}`,
+      timestamp,
+      ...m,
+    })),
+  });
+}
+
 /** A message sent from a click-to-WhatsApp ad: the webhook carries the ad as `referral` (M-130). */
 export function adInboundMessage(
   wabaId: string,

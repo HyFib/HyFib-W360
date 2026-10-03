@@ -70,6 +70,15 @@ describe('parseOrder', () => {
     });
   });
 
+  it('clips the note to 1,000 characters without splitting an emoji (ADR-131)', () => {
+    const order = parseOrder({
+      catalog_id: '5550004',
+      text: `${'n'.repeat(999)}😀 more`,
+      product_items: [item('sku-1', 1, 10)],
+    });
+    expect(order?.note).toBe('n'.repeat(999));
+  });
+
   it('leaves out unreadable items and counts them', () => {
     const order = parseOrder({
       catalog_id: '1',

@@ -3,12 +3,12 @@ import {
   boolean,
   customType,
   integer,
-  jsonb,
   smallint,
   text,
   timestamp,
   uuid,
 } from 'drizzle-orm/pg-core';
+import { jsonb } from './columns';
 import { sql } from 'drizzle-orm';
 import { appSchema } from './tenancy';
 

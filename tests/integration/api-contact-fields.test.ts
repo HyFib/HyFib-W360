@@ -245,6 +245,33 @@ describe('contact custom fields through the public API (ADR-112)', () => {
     });
   });
 
+  it('keeps a field value holding half an emoji, with U+FFFD in its place (ADR-131)', async () => {
+    // A JSON escape of half an emoji reaches the value as that half, which jsonb refused (22P02):
+    // the request failed as an internal error.
+    const c = await fx.company();
+    await defineFields(c);
+    const { ctx } = await apiKey(c, ['contacts.read', 'contacts.write']);
+    const created = await apiCreateContact(
+      deps(),
+      ctx,
+      { phone: nextPhone(), fields: { city: 'Pune\ud83d' } },
+      null,
+    );
+    expect(created.status).toBe(201);
+    expect((created.body.data as { fields: unknown }).fields).toEqual({ city: 'Pune\ufffd' });
+    // A value filled in for an existing contact is written the same way.
+    const phone = nextPhone();
+    await apiCreateContact(deps(), ctx, { phone }, null);
+    const filled = await apiCreateContact(
+      deps(),
+      ctx,
+      { phone, fields: { city: 'Delhi\ude00' } },
+      null,
+    );
+    expect(filled.status).toBe(200);
+    expect((filled.body.data as { fields: unknown }).fields).toEqual({ city: 'Delhi\ufffd' });
+  });
+
   it('adds tags to an existing contact up to the 50 members keep, and no more', async () => {
     const c = await fx.company();
     const { ctx } = await apiKey(c, ['contacts.write']);

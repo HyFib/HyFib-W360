@@ -5064,7 +5064,8 @@ Decision:
 - **What follows:** members are told which field to fix; inbound messages, statuses, store data and
   saved answers holding the character are kept. The ADR-129 tests that used the character to make
   the database fail now use a contact card larger than a message's content may be (64 KB), which
-  PostgreSQL refuses, to fail a receipt.
+  PostgreSQL refuses, to fail a receipt (since ADR-131 no inbound content fails a receipt, and the
+  test runs a failing statement in the receipt's transaction).
 
 Not built: a check of pages' URL segments and query strings as such (they reach services as ids,
 slugs, cursors and filters, checked by format or through `parseInput`; one that is not would still
@@ -5072,4 +5073,66 @@ fail in the database, without the text since ADR-129); media bytes (kept in obje
 headers (HTTP forbids the character) need none, and invalid UTF-8 never reaches a query (Node
 decodes it to U+FFFD). An inbound message whose content is larger than 64 KB (a contact card or a
 reply with an oversized field, far beyond what WhatsApp sends) still fails its receipt, as that test
-shows.
+shows (settled by ADR-131, which bounds inbound content).
+
+## ADR-131 Inbound text the database cannot store: split emoji and oversized messages (2026-10-03)
+
+Context: drizzle writes a jsonb value as `JSON.stringify` writes it, and `JSON.stringify` writes a
+lone UTF-16 surrogate (half of an emoji, or of another character beyond U+FFFF) as the escape
+`\ud83d`, which PostgreSQL's jsonb refuses (22P02, "Unicode low surrogate must follow a high
+surrogate"); a text column stores it as U+FFFD, as Node encodes it. The app cuts such halves
+itself: an inbound message's text was clipped to 4,096 UTF-16 code units, so a WhatsApp message
+longer than that whose 4,096th unit was the first half of an emoji failed its insert, and with it
+the whole webhook receipt (every message and status in it, `failed` after the retries, with an
+operations alert). A Flow's body and an order's note were clipped the same way, and an outside
+JSON escape of a lone surrogate, or a lone surrogate an API request sent, failed wherever it was
+stored as jsonb (a contact's custom fields, for one). Separately, a message's stored content may be
+at most 64 KB (`messages_content_check`), and some of it was kept as Meta sent it: a contact card's
+contacts (the first 20, whole), an interactive reply's object, an unsupported message's errors and
+values that are not text under the keys read from other messages. So a contact card with large
+contacts failed its receipt the same way (SEC-12, found with ADR-130). A Flow's answers, capped at
+48 KB of JSON text, could also exceed the 64 KB their own column allows once stored as jsonb, and a
+status's errors and pricing were stored as Meta sent them, under checks of 4 KB and 2 KB, so a
+status with long error details failed its receipt too.
+
+Decision:
+
+- **jsonb is written as JSON PostgreSQL stores.** `jsonbText` (`@w360/core`) writes a value as
+  `JSON.stringify` does, with each lone surrogate's escape replaced by `�` (U+FFFD, as text
+  columns store it), reading an escaped backslash as a pair. `JSON.stringify` writes a surrogate
+  pair as the character itself, so an escape it leaves is always a half. Every jsonb column is
+  declared with `@w360/db`'s `jsonb` type, which writes through it and reads as drizzle's does,
+  and the six queries that build jsonb from JSON text use it too.
+- **Inbound text is clipped without splitting a character.** `clipText` (`@w360/core`) stops before
+  a surrogate pair it would split. An inbound message's text, caption and other values, a Flow's
+  body, an order's note, a conversation's preview, a contact's profile name and a company deletion's
+  label for a WhatsApp account use it. Clips elsewhere may still split a pair (an automation step's
+  field value, clipped to 500 characters by the interpreter the browser also runs, for one), which
+  is stored as U+FFFD in text and jsonb alike.
+- **Inbound content is bounded by construction (SEC-12).** Values read from a message keep text
+  (clipped), finite numbers and true or false, nothing else; an interactive reply keeps its id,
+  title and description; an unsupported message keeps at most 5 errors' code, title, message and
+  details. A contact card keeps its first contacts, at most 20, while its content fits a 60 KB
+  budget, and records how many it left out (`omittedContacts`). The budget is measured by
+  `jsonbSize` (`@w360/core`), an upper bound of what jsonb takes (its header, an entry per value,
+  text as UTF-8, numbers at their widest and the padding each may need), checked against
+  PostgreSQL's `pg_column_size`. A Flow's answers whose jsonb would exceed 55 KB are too large, as
+  answers over 48 KB of JSON text were. Content that would still exceed it is kept as
+  `{"tooLarge": true}`, with "[message too large to keep]" as the conversation's preview.
+- **A status's errors and pricing are kept within their columns.** As Meta sent them when they fit
+  a budget under each column (3.5 KB and 1.5 KB, measured by `jsonbSize`); otherwise each error's
+  code, title, message and details, clipped, while they fit (the first error's code and title
+  always do), and the pricing's billable flag, pricing model, category and type (reports read the
+  category and the flag).
+- **Members see what was left out:** the inbox says how many contacts a card left out, and "This
+  message was too large to keep." for content kept as too large.
+
+What follows: a long message with emoji, a large contact card, a status with long error details and
+a Flow's answers no longer fail a receipt, and a lone surrogate an API request or a provider sends
+is kept as U+FFFD instead of failing. ADR-129's test of a receipt failing in the database now runs a
+failing statement (a real PostgreSQL error quoting a name and a number) in the receipt's
+transaction, as no inbound content can fail it any more.
+
+Not built: the API and webhooks do not say that a message's content was too large (its text is
+null) or how many contacts a card left out; contact cards' contacts are still not shown in the
+inbox; clips outside the inbound path may still split a pair (stored as U+FFFD).

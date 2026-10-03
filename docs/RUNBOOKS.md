@@ -1692,6 +1692,15 @@ refusal names the line). Text from WhatsApp, Razorpay, the stores and companies'
 the replacement character "�" where the character was; nothing else in the message, product or
 answer is changed.
 
+**A message shows "This message was too large to keep." or "N contacts were too large to keep", or
+text ends with "�" (ADR-131).** A message's content may take at most 64 KB: a contact card keeps
+the contacts that fit and counts the rest, and content larger than that (far beyond what WhatsApp
+sends) is kept without it; ask the customer to send it again in parts. "�" stands for half of an
+emoji or another character that a clip or a provider cut: inbound text is clipped without
+splitting one, so it appears only in text clipped elsewhere or sent that way. A status's errors and
+pricing larger than their columns hold (4 KB and 2 KB) are kept shortened. The receipt is processed
+either way; none of these ever fails one.
+
 **A key's campaign results differ from the campaign page, or a campaign read through the API answers
 403 or 404 (ADR-125).** `GET /api/v1/campaigns/{id}` counts the results when it is read, as the
 campaign page does on each view: both move as delivery statuses, replies and opt-outs arrive, so

@@ -1,4 +1,5 @@
-import { integer, jsonb, smallint, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { integer, smallint, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { jsonb } from './columns';
 import { appSchema } from './tenancy';
 
 const tz = (name: string) => timestamp(name, { withTimezone: true, mode: 'date' });

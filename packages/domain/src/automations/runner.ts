@@ -1,4 +1,4 @@
-import { uuidv7, type Clock, type Keyring } from '@w360/core';
+import { jsonbText, uuidv7, type Clock, type Keyring } from '@w360/core';
 import { QUEUES } from '@w360/contracts';
 import {
   and,
@@ -584,7 +584,7 @@ async function applyContactEffect(
       attributes:
         coerced.value === null
           ? sql`${contacts.attributes} - ${field.key}::text`
-          : sql`${contacts.attributes} || jsonb_build_object(${field.key}::text, ${JSON.stringify(coerced.value)}::jsonb)`,
+          : sql`${contacts.attributes} || jsonb_build_object(${field.key}::text, ${jsonbText(coerced.value)}::jsonb)`,
     })
     .where(
       and(

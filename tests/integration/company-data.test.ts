@@ -1616,6 +1616,25 @@ describe('running a deletion', () => {
     );
   });
 
+  it("clips a long account name's clean-up label without splitting an emoji (ADR-131)", async () => {
+    const c = await fx.company();
+    // "WhatsApp account " and 142 letters fill 159 of the label's 160 code units, so its clip
+    // falls between the two halves of the emoji, which jsonb could not store.
+    await fx.query('UPDATE app.whatsapp_accounts SET name = $1 WHERE tenant_id = $2', [
+      `${'n'.repeat(142)}😀 shop`,
+      c.tenant.id,
+    ]);
+    await deletions().request(await fx.ctx(c, c.owner), { confirm: c.tenant.slug });
+    await makeDue(c.tenant.id);
+    const result = await runTenantDeletion(runDeps({ razorpay: null }), c.tenant.id);
+    expect(result.outcome).toBe('finished');
+    if (result.outcome !== 'finished') return;
+    expect(result.cleanup).toEqual([
+      { kind: 'whatsapp_account', label: `WhatsApp account ${'n'.repeat(142)}`, outcome: 'done' },
+    ]);
+    expect(await deletionRow(c.tenant.id)).toMatchObject({ provider_cleanup: result.cleanup });
+  });
+
   it('refuses outcomes that are not the known providers, outcomes and codes', async () => {
     const c = await fx.company();
     await deletions().request(await fx.ctx(c, c.owner), { confirm: c.tenant.slug });

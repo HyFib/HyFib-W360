@@ -1,5 +1,88 @@
 # Progress
 
+## 2026-10-03 — Phase 5: split emoji and oversized inbound messages (ADR-131)
+
+Status: **Implemented and locally verified (test data and the provider stand-ins only).**
+PostgreSQL's jsonb refuses half of an emoji (a lone UTF-16 surrogate), which drizzle wrote as
+`JSON.stringify` does, as an escape. An inbound WhatsApp message longer than 4,096 code units whose
+clip fell inside an emoji failed its whole webhook receipt (22P02), with every other message and
+status in it, and so did a contact card larger than the 64 KB a message's content may take (23514,
+SEC-12) and a status whose errors were larger than the 4 KB their column allows. Half an emoji sent
+as an escape, or in an API request, failed wherever it was stored as jsonb.
+
+### Completed
+
+- **Design (ADR-131):** jsonb is written as JSON PostgreSQL stores, with half an emoji as U+FFFD
+  as text columns store it; inbound clips keep emoji whole; inbound content is bounded by
+  construction.
+- **Core** (`text.ts`): `jsonbText` writes a value as `JSON.stringify` does, with each lone
+  surrogate's escape as `�` (an escaped backslash read as a pair); `clipText` stops before a
+  surrogate pair it would split; `jsonbSize` is an upper bound of the bytes jsonb takes (header,
+  entries, text as UTF-8, numbers at their widest, alignment), walked without recursion.
+- **Database:** `@w360/db`'s `jsonb` column type (`columns.ts`) writes through `jsonbText`, and
+  every schema file declares its jsonb columns with it.
+- **Domain:** the six queries that build jsonb from JSON text use `jsonbText` (API field values, a
+  Flow's applied answers, an automation's field value, settlement records, queue waits and a
+  deletion's clean-up list). Inbound content keeps text (clipped), finite numbers and true or false
+  from a message's values; a reply keeps its id, title and description; an unsupported message
+  keeps at most 5 errors; a contact card keeps its first contacts, at most 20, while they fit a
+  60 KB budget, and counts the rest (`omittedContacts`); content still larger is kept as
+  `{ tooLarge: true }` with "[message too large to keep]" as the preview. A Flow's answers over
+  55 KB as jsonb are too large. A Flow's body, an order's note, a conversation's preview, profile
+  names and a deletion's label for a WhatsApp account are clipped with `clipText`. A status's
+  errors and pricing are kept as WhatsApp sent them when they fit a budget under their columns (3.5
+  and 1.5 KB), otherwise bounded: each error's code, title, message and details, clipped, while
+  they fit, and the pricing's billable flag, pricing model, category and type.
+- **Web:** the inbox says how many contacts a card left out, and "This message was too large to
+  keep." for content kept as too large.
+- **Tests:**
+  - Unit (`text.test.ts`, 6 new; `inbound-content.test.ts`, 10 new; `model.test.ts`, 1 new): halves
+    written as U+FFFD, escaped backslashes and pairs left as they are; clips before a pair;
+    `jsonbSize` of scalars, containers and 50,000 nested arrays; a message's text with an emoji at
+    the cut, picked values, replies and errors; contact cards of 25 large contacts, of 30 small ones
+    and of one over the budget; content kept as too large; a Flow's answers too large with the token
+    kept; a Flow's body and an order's note clipped before an emoji; a status's errors and pricing
+    kept as sent when they fit, and bounded when they do not.
+  - Integration (real PostgreSQL): a long message with an emoji at the cut; a preview and profile
+    names; a 25-contact card and a 120 KB one; a Flow's answer and an API field value holding half
+    an emoji; an automation's field value cut mid-emoji by the step's 500 characters; a deletion's
+    label for an account with a long name; a failed status with 6 KB of error details and 3 KB of
+    pricing; half an emoji written to a jsonb column directly;
+    `jsonbSize` at least `pg_column_size` over 300 generated values. ADR-129's receipt test now runs
+    a failing statement in the receipt's transaction, as no inbound content fails one any more.
+  - E2E (`inbox.spec.ts`, 1 new): one webhook with a long message cut mid-emoji, a large contact
+    card and a system message too large to keep, each shown in the inbox.
+- **Docs:** ADR-131 (and notes on ADR-130); SECURITY ("Text input" control); THREAT-MODEL T144;
+  ARCHITECTURE (request flow); RUNBOOKS (a message too large to keep, or "�"); BACKLOG SEC-12
+  settled.
+- **Mutation checks:** 36 deliberate regressions tried, 33 caught. The 3 that survived undo
+  `jsonbText` at the raw writes of settlement records, queue waits and a deletion's clean-up list,
+  which no input reaches with half an emoji: Razorpay's fields are checked as ASCII, queue names are
+  the app's own and labels are clipped whole. The harness now reads vitest's exit code: its first
+  run read the output's last lines, where a failure's details can follow the summary, and reported
+  one caught regression as surviving.
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                                                                                                                                                                                                                                                                                          | Result                                                                                                                                                                                                                                                                                                    |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                                                                                                                                                                             | clean                                                                                                                                                                                                                                                                                                     |
+| `pnpm test`                                                                                                                                                                                                                                                                                                                      | 606 passed                                                                                                                                                                                                                                                                                                |
+| `pnpm test:integration` on PostgreSQL 18.6 and 17.11                                                                                                                                                                                                                                                                             | 783 passed on each                                                                                                                                                                                                                                                                                        |
+| `pnpm build`, then `inbox.spec.ts`, `flows.spec.ts`, `contacts.spec.ts`, `automations.spec.ts`, `stores.spec.ts`, `commerce.spec.ts`, `company-data.spec.ts`, `api-contact-fields.spec.ts`, `webhook-events.spec.ts`, `campaigns.spec.ts`, `platform-ops.spec.ts` and `settlement-recon.spec.ts` on chromium and mobile-chromium | 51 passed, 1 failed: Chromium's campaign test waited 30 s for a template sync queued behind 128 that the worker signalled in its first minute for earlier runs' companies in the local e2e database (all done, none failed); it passed on mobile-chromium in the same run and on Chromium run again alone |
+| The long message's test with the old clip and the old jsonb write; the contact card's test keeping the first 20 contacts whole; the status's test storing errors and pricing as sent                                                                                                                                             | each failed its receipt: SQLSTATE 22P02, 23514 (`messages_content_check`) and 23514 (`message_status_events_errors_check`)                                                                                                                                                                                |
+| Mutation checks                                                                                                                                                                                                                                                                                                                  | 36 regressions tried, 33 caught (3 unreachable raw writes survived)                                                                                                                                                                                                                                       |
+| gitleaks 8.30.1 on the commit                                                                                                                                                                                                                                                                                                    | no leaks found                                                                                                                                                                                                                                                                                            |
+
+### Known gaps
+
+- The API and webhooks do not say that a message's content was too large (its text is null) or how
+  many contacts a card left out; contact cards' contacts are not shown in the inbox.
+- Clips outside the inbound path may still split a pair, stored as U+FFFD (an automation step's
+  field value, clipped by the interpreter the browser also runs).
+- Pages' URL segments and query strings are not checked as such (services check ids, slugs,
+  cursors and filters by format or through `parseInput`).
+
 ## 2026-10-03 — Phase 5: text the database cannot store, in forms and provider payloads (ADR-130)
 
 Status: **Implemented and locally verified (test data and the provider stand-ins only).**

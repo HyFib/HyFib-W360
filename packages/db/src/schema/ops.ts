@@ -4,12 +4,12 @@ import {
   boolean,
   inet,
   integer,
-  jsonb,
   pgSchema,
   text,
   timestamp,
   uuid,
 } from 'drizzle-orm/pg-core';
+import { jsonb } from './columns';
 
 export const opsSchema = pgSchema('ops');
 

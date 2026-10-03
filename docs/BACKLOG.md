@@ -677,8 +677,12 @@ review; production rollout per RELEASE-CHECKLIST.
   error's message.~~ Settled by ADR-129: `db.run` and the platform database's `run` replace a
   driver's error with a `DatabaseQueryError` (SQLSTATE, the names PostgreSQL gave, its message only
   where that quotes no values, and the frames), and every logger's `err` serializer does the same.
-- **SEC-12** Bound inbound message content. A message's stored content may be at most 64 KB, and
+- **SEC-12** ~~Bound inbound message content. A message's stored content may be at most 64 KB, and
   a contact card or an interactive reply with an oversized field is stored whole, so one such
   message fails its webhook receipt with every message and status delivered beside it (WhatsApp's
   own limits keep real messages far below it). Found with ADR-130, whose test of a receipt failing
-  in the database uses one.
+  in the database uses one.~~ Settled by ADR-131: inbound content is bounded by construction under
+  the 64 KB a message holds (a contact card keeps the contacts that fit and counts the rest;
+  anything larger is kept as too large), a status's errors and pricing are kept within their
+  columns, and jsonb is written as JSON PostgreSQL stores (half of an emoji as U+FFFD), which also
+  kept long messages with emoji from failing their receipts.

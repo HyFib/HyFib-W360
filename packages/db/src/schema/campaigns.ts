@@ -1,7 +1,6 @@
 import {
   bigint,
   integer,
-  jsonb,
   primaryKey,
   smallint,
   text,
@@ -9,6 +8,7 @@ import {
   timestamp,
   uuid,
 } from 'drizzle-orm/pg-core';
+import { jsonb } from './columns';
 import { appSchema } from './tenancy';
 import { opsSchema } from './ops';
 

@@ -1,14 +1,6 @@
 import { sql } from 'drizzle-orm';
-import {
-  boolean,
-  inet,
-  integer,
-  jsonb,
-  pgSchema,
-  text,
-  timestamp,
-  uuid,
-} from 'drizzle-orm/pg-core';
+import { boolean, inet, integer, pgSchema, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { jsonb } from './columns';
 
 export const appSchema = pgSchema('app');
 

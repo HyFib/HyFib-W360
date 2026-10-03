@@ -444,6 +444,56 @@ describe('automation HTTP step', () => {
     ]);
   });
 
+  it("saves an answer cut mid-emoji by a field's 500 characters to a contact field, with U+FFFD in its place (ADR-131)", async () => {
+    // The step clips the value to a field's 500 characters, here between the two halves of an
+    // emoji; jsonb refused the half left (22P02) where the field was set.
+    const s = await setup();
+    await createContactsService({ db: fx.dbs.app, clock: systemClock }).createField(s.owner, {
+      label: 'City',
+      key: 'city',
+      type: 'text',
+    });
+    await publish(s.owner, {
+      version: 1,
+      start: 'ask',
+      nodes: [
+        {
+          id: 'ask',
+          type: 'ask_text',
+          text: 'Which city?',
+          saveAs: 'city',
+          format: 'any',
+          retryText: null,
+          retries: 0,
+          invalidNext: null,
+          timeoutMinutes: 30,
+          timeoutNext: null,
+          next: 'set',
+        },
+        {
+          id: 'set',
+          type: 'update_contact',
+          action: { kind: 'set_field', field: 'city', value: '{{answer.city}}' },
+          next: 'done',
+        },
+        { id: 'done', type: 'send_text', text: 'Thanks.', next: null },
+      ],
+    });
+    const from = waId();
+    const conv = await inbound(s.c, from, 'order please');
+    const run = await onlyRun(conv);
+    expect(await drive(s.c, conv, run.id)).toBe('waiting');
+    await inbound(s.c, from, `${'x'.repeat(499)}😀`);
+    expect(await drive(s.c, conv, run.id)).toBe('ended');
+    const [contact] = await fx.query<{ attributes: Record<string, unknown> }>(
+      `SELECT c.attributes FROM app.contacts c
+         JOIN app.conversations cv ON cv.tenant_id = c.tenant_id AND cv.contact_id = c.id
+        WHERE cv.id = $1`,
+      [conv],
+    );
+    expect(contact?.attributes).toEqual({ city: `${'x'.repeat(499)}\ufffd` });
+  });
+
   it('takes the failure branch on an error status, a removed domain or a missing secret', async () => {
     const s = await setup();
     await publish(s.owner, orderGraph('/down'));

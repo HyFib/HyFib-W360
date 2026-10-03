@@ -1,13 +1,5 @@
-import {
-  bigint,
-  boolean,
-  integer,
-  jsonb,
-  smallint,
-  text,
-  timestamp,
-  uuid,
-} from 'drizzle-orm/pg-core';
+import { bigint, boolean, integer, smallint, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { jsonb } from './columns';
 import { appSchema } from './tenancy';
 
 /**
