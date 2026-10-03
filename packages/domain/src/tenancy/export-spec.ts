@@ -1529,6 +1529,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'event_types',
       'secret_version',
       'previous_secret_expires_at',
+      'header_names',
       'state',
       'disabled_reason',
       'disabled_at',
@@ -1543,6 +1544,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
     omitted: {
       secret_ciphertext: 'The signing secret.',
       previous_secret_ciphertext: 'The previous signing secret.',
+      headers_ciphertext: 'The endpoint’s own headers, whose values are secrets (ADR-118).',
     },
   },
   {

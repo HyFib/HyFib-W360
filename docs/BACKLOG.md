@@ -547,8 +547,12 @@ verification, app review, Embedded Signup configuration).
   events left out; audited once per call). **[Custom field changes built, locally verified]**
   (ADR-112: `contact.updated` also for a change of a custom field's value, whoever makes it, once per
   contact and transaction; the contact carries its `fields`; a field's deletion or rename sends
-  nothing). Remaining: filters beyond the event type (such as by
-  automation or status), custom headers, mutual TLS, fixed egress addresses, which custom fields
+  nothing). **[Endpoint headers built, locally verified]** (ADR-118: up to 5 headers an endpoint's
+  receiver asks for, such as an `Authorization` header it issued, given in Settings or through the
+  API, sent with every attempt, test event and replay; values sealed and never shown, logged,
+  audited or exported; names HyFib or the transport sets refused). Remaining: filters beyond the
+  event type (such as by automation or status), other authentication (OAuth client credentials,
+  headers computed per delivery), mutual TLS, fixed egress addresses, which custom fields
   changed (the contact is sent as it is, ADR-112), delivery counts in campaign events, events for store orders, Payment Links and each step of a
   run, `createdAt` finer than the millisecond, replays across endpoints or by event type, load
   tests.

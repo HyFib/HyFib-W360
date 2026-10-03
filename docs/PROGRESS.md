@@ -1,5 +1,92 @@
 # Progress
 
+## 2026-10-03 — Phase 5: custom headers on webhook endpoints (P5-09, ADR-118)
+
+Status: **Implemented and locally verified (local test receivers only).** Receivers that accept
+only requests carrying a credential they issued (an `Authorization` or API key header: automation
+platforms' catch hooks, API gateways, services behind an authenticating proxy) could not be
+delivered to without a relay of the company's own.
+
+### Completed
+
+- **Design (ADR-118):** up to 5 headers per endpoint, given in Settings → Webhooks or through the
+  API (`headers` on `POST` and `PATCH /webhook-endpoints`: a list given replaces them, `[]` removes
+  them, left out they stay), sent with every attempt, test event and replay before HyFib's own
+  headers. Names are letters, digits and `-` (at most 60), once whatever their case; values are 1 to
+  1,000 printable ASCII characters. Names HyFib or the transport sets, `Proxy-*` and `W360-*` are
+  refused. Values are sealed with the keyring, bound to the company and the endpoint, and never shown
+  again; names are shown and audited.
+- **Migration 0094:** `header_names` and `headers_ciphertext` on `app.webhook_endpoints`, a check
+  that both are empty or both set with at most 5 names, update grants for the runtime role.
+- **Domain:** `webhookHeadersSchema`, `reservedWebhookHeader`, `sealWebhookHeaders` and
+  `openWebhookHeaders` (`webhooks/service.ts`); the settings service and the API seal headers when
+  given and audit their names; the claim opens them once per endpoint and batch (`webhooks/
+delivery.ts`), and headers that do not open end the delivery as `payload_failed`, stage `headers`;
+  the export carries the names and leaves the sealed values out. `payload_failed` now reads "HyFib
+  could not prepare the request" in Settings and the OpenAPI document.
+- **Web:** the add and edit forms take headers (names, and values in password fields kept only in
+  the page's memory until saved); the edit form keeps the headers unless "Replace the headers" is
+  ticked; the endpoints list shows "Headers sent: … (values hidden)". OpenAPI: `headers` in the
+  endpoint (names only), the create and update bodies (with values) and the webhooks introduction.
+- **Tests:**
+  - Unit (`webhooks.test.ts`, 4; `api.test.ts`, 1 changed): the rules (names, the names HyFib sets in
+    any case, values, the 5 limit, a header given twice, other keys), sealing bound to the company
+    and the endpoint, opening refusing what the seal never writes; the OpenAPI schemas (values given,
+    names answered).
+  - Integration (`webhooks.test.ts`, 4; `api-webhook-endpoints.test.ts`, 1; `company-data.test.ts`,
+    1 changed): headers on the first attempt, a retry after a change of address that keeps them and
+    a replay, beside HyFib's signed headers; names only in the list and the audit; replacing and
+    removing them; refusals changing nothing; the database check; headers sealed for another
+    endpoint failing that endpoint's deliveries alone (stage `headers`, nothing logged) while two
+    other endpoints of the batch get their own headers, and a replay delivering once they are given
+    again; through the API: set, kept by a change without them, replaced, removed, delivered,
+    answered, kept for replays and audited by name only, refusals naming the field's path; the
+    sealed values a secret column of the export.
+  - e2e (`webhooks.spec.ts`): headers set in Settings arrive with a signed test event and are shown
+    by name only (the page never holds the value); on the endpoint's page a header HyFib sets is
+    refused and replacing gives new ones; a key sets a header on its endpoint, sees only its name,
+    has a header HyFib sets refused with the field's path and removes it.
+- **Docs:** ADR-118; SECURITY; THREAT-MODEL T131; RUNBOOKS (a receiver refusing for a missing or
+  wrong header; `payload_failed` with stage `headers`); ARCHITECTURE; DEPLOYMENT (0094);
+  DATA-RETENTION; BACKLOG P5-09; FEATURE-MATRIX W-138, W-139, H-014.
+- **Mutation checks:** 52 regressions tried, 51 caught:
+  - 9 on names (not checked, up to 100 characters, names HyFib sets allowed, `Proxy-*`, `W360-*`,
+    compared by case, `Host`, `User-Agent`, `Content-Length`), 5 on values (line breaks, tabs, not
+    trimmed, empty, up to 4,096 characters), 3 on the list (more than 5, a header given twice in
+    another case, other keys), 6 on sealing and opening (the endpoint or the company left out of
+    the binding, values kept with the names, no headers sealed as an empty list, opened headers not
+    checked again or of another shape), 6 in the settings service (adding ignoring headers, values
+    in the audit when adding or changing, a change dropping or ignoring them, the list without
+    names), 6 in delivery (not sent, opened for the wrong endpoint, cached across endpoints, not
+    read with the endpoint, opened outside the claim's guard, the stage not named), 7 in the API
+    (adding ignoring headers, values audited when adding or changing, a change dropping them, a
+    change of headers alone doing nothing or refused, no names answered), 2 in OpenAPI (no headers,
+    values answered), 3 in the database (no check, 10 headers allowed, no update grant), 1 in the
+    export (the sealed values exported) and 3 through the e2e test (adding in Settings without the
+    headers, replacing keeping the old ones, the list without the names).
+  - Not caught, as it removes a defense something else repeats: sending the endpoint's headers after
+    HyFib's (names HyFib sets are refused when saved and again when opened).
+  - Two first results were corrected: one edit broke the file's syntax and proved nothing (rerun with
+    a valid edit: caught), and one survived until a unit test gave a sealed pair a third value
+    (rerun: caught).
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                                                                                            | Result                                                                                                                                                                 |
+| ---------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                               | clean                                                                                                                                                                  |
+| `pnpm test`                                                                                                                        | 534 passed                                                                                                                                                             |
+| `pnpm test:integration` on PostgreSQL 18.6 and 17.11                                                                               | 735 passed on each                                                                                                                                                     |
+| `pnpm build`, then `webhooks.spec.ts` and `webhook-events.spec.ts` on chromium and mobile-chromium, on a database migrated to 0094 | 20 passed                                                                                                                                                              |
+| Mutation checks                                                                                                                    | 52 regressions tried, 51 caught (3 through the e2e test); the other sends the endpoint's headers after HyFib's, which the checks of names on saving and opening repeat |
+| gitleaks 8.30.1 on the commit                                                                                                      | no leaks                                                                                                                                                               |
+
+### Known gaps
+
+- Other authentication schemes (OAuth client credentials, mutual TLS), headers computed per delivery,
+  headers per event type, values outside printable ASCII and showing a value again are not built
+  (ADR-118).
+
 ## 2026-10-03 — Phase 5: searching contacts with segment conditions through the public API (P5-08, ADR-117)
 
 Status: **Implemented and locally verified (test data only).** Since ADR-113 keys found contacts

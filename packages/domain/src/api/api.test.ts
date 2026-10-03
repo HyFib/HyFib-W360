@@ -1248,8 +1248,28 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       properties: Record<string, unknown>;
       additionalProperties: unknown;
     };
-    expect(Object.keys(update.properties).sort()).toEqual(['description', 'enabled', 'events']);
+    expect(Object.keys(update.properties).sort()).toEqual([
+      'description',
+      'enabled',
+      'events',
+      'headers',
+    ]);
     expect(update.additionalProperties).toBe(false);
+    // Headers are given with their values, at most 5, and answered by name only (ADR-118).
+    type HeaderList = {
+      maxItems?: number;
+      items?: { properties?: Record<string, unknown>; required?: string[] };
+    };
+    const given = (schemas.CreateWebhookEndpoint as { properties: { headers?: HeaderList } })
+      .properties.headers;
+    expect(given?.maxItems).toBe(5);
+    expect([...(given?.items?.required ?? [])].sort()).toEqual(['name', 'value']);
+    const answered = schemas.WebhookEndpoint as {
+      properties: { headers?: HeaderList };
+      required?: string[];
+    };
+    expect(Object.keys(answered.properties.headers?.items?.properties ?? {})).toEqual(['name']);
+    expect(answered.required).toContain('headers');
   });
 });
 

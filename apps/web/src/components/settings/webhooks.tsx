@@ -94,6 +94,78 @@ function EventChoices({
   );
 }
 
+interface HeaderRow {
+  name: string;
+  value: string;
+}
+
+/**
+ * The headers an endpoint sends (ADR-118), as entered here: values never come back from the
+ * server, so a change gives every header again.
+ */
+function HeaderRows({
+  prefix,
+  rows,
+  onChange,
+}: {
+  prefix: string;
+  rows: HeaderRow[];
+  onChange: (next: HeaderRow[]) => void;
+}) {
+  const set = (index: number, row: Partial<HeaderRow>) =>
+    onChange(rows.map((r, i) => (i === index ? { ...r, ...row } : r)));
+  return (
+    <div className="grid gap-3">
+      {rows.map((row, i) => (
+        <div key={i} className="grid items-end gap-2 sm:grid-cols-[1fr_2fr_auto]">
+          <Field id={`${prefix}-header-${i}-name`} label={`Header ${i + 1} name`}>
+            {(aria) => (
+              <Input
+                {...aria}
+                maxLength={60}
+                autoComplete="off"
+                placeholder="Authorization"
+                value={row.name}
+                onChange={(e) => set(i, { name: e.target.value })}
+              />
+            )}
+          </Field>
+          <Field id={`${prefix}-header-${i}-value`} label={`Header ${i + 1} value`}>
+            {(aria) => (
+              <Input
+                {...aria}
+                type="password"
+                maxLength={WEBHOOK_LIMITS.headerValueLength}
+                autoComplete="new-password"
+                value={row.value}
+                onChange={(e) => set(i, { value: e.target.value })}
+              />
+            )}
+          </Field>
+          <ClientButton
+            size="sm"
+            variant="outline"
+            onClick={() => onChange(rows.filter((_, j) => j !== i))}
+          >
+            Remove<span className="sr-only"> header {i + 1}</span>
+          </ClientButton>
+        </div>
+      ))}
+      {rows.length < WEBHOOK_LIMITS.headers ? (
+        <div>
+          <ClientButton
+            size="sm"
+            variant="outline"
+            onClick={() => onChange([...rows, { name: '', value: '' }])}
+          >
+            Add a header
+          </ClientButton>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 /**
  * Adds an endpoint, or edits one (`endpoint` given). A new endpoint's secret is shown here once,
  * and stays on screen after the list updates.
@@ -109,6 +181,7 @@ export function WebhookEndpointForm({
     url: string;
     description: string | null;
     eventTypes: WebhookEventType[];
+    headerNames: string[];
   };
   atLimit?: boolean;
 }) {
@@ -116,6 +189,9 @@ export function WebhookEndpointForm({
   const [url, setUrl] = useState(endpoint?.url ?? '');
   const [description, setDescription] = useState(endpoint?.description ?? '');
   const [eventTypes, setEventTypes] = useState<WebhookEventType[]>(endpoint?.eventTypes ?? []);
+  const [headers, setHeaders] = useState<HeaderRow[]>([]);
+  // Changing an endpoint keeps its headers unless they are given again.
+  const [replaceHeaders, setReplaceHeaders] = useState(false);
   const [error, setError] = useState<ActionFailureState | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -146,20 +222,27 @@ export function WebhookEndpointForm({
           if (!r.ok) setError(r);
         };
         if (endpoint) {
-          void updateWebhookEndpointAction(slug, { ...input, endpointId: endpoint.id }).then(
-            (r) => {
-              done(r);
-              if (r.ok) setSaved('Endpoint saved.');
-            },
-          );
+          void updateWebhookEndpointAction(slug, {
+            ...input,
+            endpointId: endpoint.id,
+            ...(replaceHeaders ? { headers } : {}),
+          }).then((r) => {
+            done(r);
+            if (r.ok) {
+              setSaved('Endpoint saved.');
+              setHeaders([]);
+              setReplaceHeaders(false);
+            }
+          });
         } else {
-          void createWebhookEndpointAction(slug, input).then((r) => {
+          void createWebhookEndpointAction(slug, { ...input, headers }).then((r) => {
             done(r);
             if (r.ok) {
               setSecret(r.data.secret);
               setUrl('');
               setDescription('');
               setEventTypes([]);
+              setHeaders([]);
             }
           });
         }
@@ -204,6 +287,41 @@ export function WebhookEndpointForm({
         </Field>
       </div>
       <EventChoices prefix={prefix} chosen={eventTypes} onChange={setEventTypes} />
+      <fieldset className="grid gap-2">
+        <legend className="mb-1 text-sm font-medium">Headers</legend>
+        <p className="text-xs text-muted-foreground">
+          Optional: up to {WEBHOOK_LIMITS.headers} headers your receiver asks for, such as an
+          Authorization header it issued, sent with every delivery. Values are stored encrypted and
+          never shown again.
+        </p>
+        {endpoint ? (
+          <>
+            <p className="text-sm">
+              {endpoint.headerNames.length > 0
+                ? `Sent now: ${endpoint.headerNames.join(', ')}.`
+                : 'No headers are sent now.'}
+            </p>
+            <div className="flex items-center gap-2">
+              <Checkbox
+                id={`${prefix}-replace-headers`}
+                checked={replaceHeaders}
+                onChange={(e) => {
+                  setReplaceHeaders(e.target.checked);
+                  setHeaders([]);
+                }}
+              />
+              <Label htmlFor={`${prefix}-replace-headers`} className="font-normal">
+                Replace the headers (give each one again; none removes them)
+              </Label>
+            </div>
+            {replaceHeaders ? (
+              <HeaderRows prefix={prefix} rows={headers} onChange={setHeaders} />
+            ) : null}
+          </>
+        ) : (
+          <HeaderRows prefix={prefix} rows={headers} onChange={setHeaders} />
+        )}
+      </fieldset>
       <div>
         <Button type="submit" disabled={busy || !url.trim() || eventTypes.length === 0}>
           {endpoint ? (busy ? 'Saving…' : 'Save endpoint') : busy ? 'Adding…' : 'Add endpoint'}

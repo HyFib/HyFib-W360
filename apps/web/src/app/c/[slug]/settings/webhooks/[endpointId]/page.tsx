@@ -172,6 +172,7 @@ export default async function WebhookEndpointPage({
               url: endpoint.url,
               description: endpoint.description,
               eventTypes: endpoint.eventTypes,
+              headerNames: endpoint.headerNames,
             }}
           />
         </CardContent>

@@ -4435,3 +4435,49 @@ Decision:
 Not built: the `last_message` and `campaign` conditions, searching by name, groups of conditions
 (all of some and any of others), orders other than newest first, counting the matches, and saved
 segments through the API.
+
+## ADR-118 Custom headers on webhook endpoints (2026-10-03)
+
+Context: receivers verify HyFib's deliveries with the `W360-Signature` HMAC (ADR-053), but many
+accept only requests that carry a credential they issued: an `Authorization: Bearer …` or an API
+key header (automation platforms' catch hooks, API gateways, a company's own services behind an
+authenticating proxy). A company could not deliver to them without running a relay of its own
+(P5-09's Remaining: custom headers).
+
+Decision:
+
+- **Up to 5 headers per endpoint**, given when an endpoint is added or changed: in Settings →
+  Webhooks, and through the API as `headers: [{ name, value }]` on `POST /webhook-endpoints` and
+  `PATCH /webhook-endpoints/{id}` (for the endpoints keys added, ADR-081). Values are never shown
+  again, so a list given replaces all of the endpoint's headers (each is given again), `[]` removes
+  them, and a change that leaves them out keeps them. Settings show "Headers sent: …" with the
+  names; the API answers `headers: [{ name }]`.
+- **Names and values:** a name is 1 to 60 letters, digits and `-`, starting with a letter or digit,
+  and appears once whatever its case. A value is 1 to 1,000 printable ASCII characters, trimmed: no
+  line breaks or tabs, so a value cannot add a header. Names HyFib sets or that describe the body
+  or the connection are refused whatever their case: `Content-Type`, `Content-Encoding`,
+  `User-Agent`, `Host`, `Content-Length`, `Transfer-Encoding`, `Connection`, `Keep-Alive`,
+  `Upgrade`, `TE`, `Trailer`, `Expect`, `Accept-Encoding`, `Proxy-*` and HyFib's `W360-*`. These
+  rules are stricter than the egress guard's, which still applies. Refusals name the header's part
+  (`headers.0.name`).
+- **Values are secrets:** names and values are sealed together with the keyring as one ciphertext,
+  bound to the company and the endpoint (`webhook-headers:<company>:<endpoint>`); only the names are
+  kept in clear, to be shown. Values are never logged, put in audit entries (`headers` lists the
+  names when they are given), exported (the company data export carries the names), kept in an API
+  key's idempotency record or sent to the browser after they are saved.
+- **Sent with every delivery:** the claim opens an endpoint's headers once per batch and sends them
+  with every attempt, retry, test event and replay, before HyFib's own headers; opening checks the
+  names again, so none can replace the signature, the event's ids, the content type or the user
+  agent. A change applies from the next attempt, even of a delivery already waiting, as a changed
+  address does. Headers that do not open (a key the platform no longer holds, a ciphertext restored
+  onto another endpoint) end the delivery without an attempt as `payload_failed`, logged with stage
+  `headers` and nothing of them, as a secret that cannot be opened does; the company's other
+  deliveries go on, and once the headers are given again a replay delivers it.
+- **Migration 0094:** `header_names text[] NOT NULL DEFAULT '{}'` and `headers_ciphertext text` on
+  `app.webhook_endpoints`, a check that both are empty or both set and that there are at most 5
+  names, and update grants on both columns for the runtime role (it inserts them with its table
+  grant). Existing endpoints have no headers; nothing is backfilled.
+
+Not built: other authentication schemes (OAuth client credentials, mutual TLS), headers computed
+per delivery (a signed token), headers per event type, values outside printable ASCII, and showing
+a value again.

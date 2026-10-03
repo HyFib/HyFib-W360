@@ -96,6 +96,11 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                     </div>
                     <p className="font-mono text-xs break-all">{e.url}</p>
                     {e.description ? <p className="text-sm">{e.description}</p> : null}
+                    {e.headerNames.length > 0 ? (
+                      <p className="text-xs text-muted-foreground">
+                        Headers sent: {e.headerNames.join(', ')} (values hidden)
+                      </p>
+                    ) : null}
                     <p className="flex flex-wrap gap-1">
                       {e.eventTypes.map((t) => (
                         <Badge key={t} tone="neutral">

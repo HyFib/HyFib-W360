@@ -93,6 +93,12 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    Migration 0093 (ADR-116) records every existing message once while its triggers hold a write lock
    on `app.messages`, so new and changed messages wait for it (measured locally: about 2.4 seconds
    for 400,000 messages); on a large messages table run it at a quiet time.
+   Migration 0094 (ADR-118) adds two columns to `app.webhook_endpoints` (a constant default, so no
+   rewrite) and a check it validates by reading the table, which is small (at most 10 endpoints per
+   company); deliveries claimed meanwhile wait for its lock briefly. Workers roll out before web
+   servers, so no worker without ADR-118 sees an endpoint's headers; rolling workers back to an
+   image from before it sends deliveries without them, which their receivers may refuse (the
+   deliveries are retried).
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

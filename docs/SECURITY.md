@@ -672,6 +672,20 @@ Phase 5 rules (outgoing webhooks, P5-09):
   message repeats its parameters). Tested.
 - Secrets (`whsec_` + 32 random bytes) are shown once, kept only in the page's memory, and stored
   encrypted with the AAD `webhook-secret:<company>:<endpoint>:<version>`.
+- An endpoint's own headers (ADR-118), up to 5, are given when it is added or changed, in Settings
+  or by a key that manages it. Their values are secrets: they reach the server once, are sealed with
+  the keyring as one ciphertext with the AAD `webhook-headers:<company>:<endpoint>`, and are never
+  shown again, logged, put in audit entries (which name the headers), exported (the company data
+  export carries the names) or kept in an API key's idempotency record; Settings and the API show
+  names only, and a change gives every header again. Names HyFib sets or that describe the body or
+  the connection (`Content-Type`, `Content-Encoding`, `User-Agent`, `Host`, `Content-Length`,
+  `Transfer-Encoding`, `Connection`, `Keep-Alive`, `Upgrade`, `TE`, `Trailer`, `Expect`,
+  `Accept-Encoding`), `Proxy-*` and `W360-*` are refused whatever their case, when saved and again
+  when opened, and HyFib's own headers are set after the endpoint's, so none can replace the
+  signature or the event's ids. Values are printable ASCII without line breaks, so a header cannot
+  inject another. Only the worker opens them, for the endpoint they are bound to; headers that do
+  not open fail that delivery alone as `payload_failed` (stage `headers`), logged without them.
+  Tested.
 - Conversation and contact events (ADR-074) follow the same rules. Conversation events name the
   member and the team by id only (ADR-094), the ids the API gives `conversations.read` keys
   (ADR-093): names are read through `GET /members` and `GET /teams` with such a key, and no email or

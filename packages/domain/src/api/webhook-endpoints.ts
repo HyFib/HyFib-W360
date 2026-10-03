@@ -34,9 +34,11 @@ import {
   replayFailedWebhookDeliveries,
   replayWebhookDelivery,
   rotateWebhookEndpointSecret,
+  sealWebhookHeaders,
   setWebhookEndpointEnabled,
   webhookDeliveryColumns,
   webhookEventTypesSchema,
+  webhookHeadersSchema,
   type WebhookDeliveryView,
 } from '../webhooks/service';
 import { apiActor, assertScope, type ApiContext } from './context';
@@ -58,6 +60,10 @@ const descriptionField = z
   .trim()
   .max(WEBHOOK_LIMITS.descriptionLength, 'Keep the description under 200 characters');
 
+const headersField = webhookHeadersSchema.describe(
+  `Up to ${WEBHOOK_LIMITS.headers} headers the receiver asks for, sent with every delivery (for example an Authorization header it issued). Values are secrets: they are stored encrypted and never shown again. Not allowed: Content-Type, Content-Encoding, User-Agent, the transport's headers (Host, Content-Length, Transfer-Encoding, Connection, Keep-Alive, Upgrade, TE, Trailer, Expect, Accept-Encoding), Proxy-* and HyFib's W360-*.`,
+);
+
 export const apiCreateWebhookEndpointSchema = z
   .object({
     url: z
@@ -70,6 +76,7 @@ export const apiCreateWebhookEndpointSchema = z
       ),
     events: webhookEventTypesSchema.describe('The events the endpoint receives.'),
     description: descriptionField.optional().describe('A note for members, up to 200 characters.'),
+    headers: headersField.optional(),
   })
   .strict();
 
@@ -85,12 +92,20 @@ export const apiUpdateWebhookEndpointSchema = z
       .describe(
         'false turns the endpoint off (its waiting deliveries fail); true turns it on again.',
       ),
+    headers: headersField
+      .optional()
+      .describe(
+        'Replaces the endpoint’s headers with these (all of them: values are never shown, so give each again); an empty list removes them. Left out, the headers stay.',
+      ),
   })
   .strict()
   .refine(
     (data) =>
-      data.events !== undefined || data.description !== undefined || data.enabled !== undefined,
-    'Give the events, the description or whether the endpoint is enabled',
+      data.events !== undefined ||
+      data.description !== undefined ||
+      data.enabled !== undefined ||
+      data.headers !== undefined,
+    'Give the events, the description, the headers or whether the endpoint is enabled',
   );
 
 export interface ApiWebhookEndpoint {
@@ -107,6 +122,8 @@ export interface ApiWebhookEndpoint {
   secretVersion: number;
   /** Until when the previous secret also signs, after a rotation. */
   previousSecretExpiresAt: string | null;
+  /** The endpoint's own headers, by name only (ADR-118): values are never shown. */
+  headers: { name: string }[];
   /** The key that added the endpoint. */
   apiKeyId: string;
   createdAt: string;
@@ -187,6 +204,7 @@ const columns = {
   lastFailureAt: webhookEndpoints.lastFailureAt,
   secretVersion: webhookEndpoints.secretVersion,
   previousSecretExpiresAt: webhookEndpoints.previousSecretExpiresAt,
+  headerNames: webhookEndpoints.headerNames,
   apiKeyId: webhookEndpoints.createdByApiKeyId,
   createdAt: webhookEndpoints.createdAt,
   updatedAt: webhookEndpoints.updatedAt,
@@ -205,6 +223,7 @@ type EndpointRow = Pick<
   | 'lastFailureAt'
   | 'secretVersion'
   | 'previousSecretExpiresAt'
+  | 'headerNames'
   | 'createdAt'
   | 'updatedAt'
 > & { apiKeyId: string | null };
@@ -228,6 +247,7 @@ function toApiEndpoint(row: EndpointRow, now: Date): ApiWebhookEndpoint {
       row.previousSecretExpiresAt && row.previousSecretExpiresAt > now
         ? row.previousSecretExpiresAt.toISOString()
         : null,
+    headers: row.headerNames.map((name) => ({ name })),
     apiKeyId: row.apiKeyId,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -419,15 +439,18 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
           idempotency,
           now,
           async () => {
+            const headers = data.headers ?? [];
             const { id, secret } = await insertWebhookEndpoint(tx, deps.keyring, ctx.tenant.id, {
               url,
               description: data.description || null,
               eventTypes: data.events,
+              headers,
               creator: { apiKeyId: ctx.key.id },
             });
             await audit(tx, ctx, 'webhook.endpoint_created', id, {
               host,
               eventTypes: data.events,
+              ...(headers.length > 0 ? { headers: headers.map((h) => h.name) } : {}),
             });
             await announce(tx, ctx, { host, events: data.events, at: now });
             const endpoint = await readEndpoint(tx, ctx, id, now);
@@ -452,12 +475,19 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
           keysOnly: true,
         });
         const host = webhookHost(endpoint.url);
-        if (data.events !== undefined || data.description !== undefined) {
+        if (
+          data.events !== undefined ||
+          data.description !== undefined ||
+          data.headers !== undefined
+        ) {
           const [changed] = await tx
             .update(webhookEndpoints)
             .set({
               ...(data.events !== undefined ? { eventTypes: data.events } : {}),
               ...(data.description !== undefined ? { description: data.description || null } : {}),
+              ...(data.headers !== undefined
+                ? sealWebhookHeaders(deps.keyring, ctx.tenant.id, id, data.headers)
+                : {}),
               updatedAt: now,
             })
             .where(and(eq(webhookEndpoints.tenantId, ctx.tenant.id), eq(webhookEndpoints.id, id)))
@@ -466,6 +496,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
           await audit(tx, ctx, 'webhook.endpoint_updated', id, {
             host,
             eventTypes: changed.eventTypes,
+            ...(data.headers !== undefined ? { headers: data.headers.map((h) => h.name) } : {}),
           });
         }
         if (data.enabled !== undefined) {

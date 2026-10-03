@@ -212,6 +212,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       lastFailureAt: null,
       secretVersion: 1,
       previousSecretExpiresAt: null,
+      headers: [],
       apiKeyId: key.id,
       createdAt: expect.any(String),
       updatedAt: expect.any(String),
@@ -408,6 +409,153 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     );
     // Only the endpoint's addition was announced.
     expect((await companyNotices(c.tenant.id)).length).toBe(1);
+  });
+
+  it('set, replace and remove the headers sent with each delivery, shown and audited by name only (ADR-118)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const key = await apiKey(c, ['webhooks.manage']);
+    const path = `/ok/${randomBytes(6).toString('hex')}`;
+    const token = randomBytes(16).toString('hex');
+    const body = {
+      url: receiverUrl(path),
+      events: ['contact.created'],
+      headers: [
+        { name: 'Authorization', value: `Bearer ${token}` },
+        { name: 'X-Tenant', value: 'acme' },
+      ],
+    };
+    const created = await addThroughApi(key.ctx, 'headers-1', body);
+    expect(created.status).toBe(201);
+    const { secret, ...endpoint } = created.body.data;
+    expect(endpoint.headers).toEqual([{ name: 'Authorization' }, { name: 'X-Tenant' }]);
+    expect((await addThroughApi(key.ctx, 'headers-1', body)).body.data.headers).toEqual(
+      endpoint.headers,
+    );
+    expect(await api().get(key.ctx, endpoint.id)).toEqual(endpoint);
+    const audits = async () =>
+      fx.query<{ action: string; metadata: Record<string, unknown> }>(
+        `SELECT action, metadata FROM app.audit_events
+          WHERE tenant_id = $1 AND subject_id = $2 ORDER BY occurred_at, id`,
+        [c.tenant.id, endpoint.id],
+      );
+    expect(await audits()).toEqual([
+      {
+        action: 'webhook.endpoint_created',
+        metadata: {
+          host: HOST,
+          eventTypes: ['contact.created'],
+          headers: ['Authorization', 'X-Tenant'],
+          source: 'api',
+        },
+      },
+    ]);
+    // Neither the answers, the kept replay, the audit nor the owners' notice holds a value.
+    const kept = await fx.query(
+      `SELECT response FROM app.api_idempotency_keys WHERE tenant_id = $1 AND api_key_id = $2`,
+      [c.tenant.id, key.id],
+    );
+    expect(
+      JSON.stringify([
+        created.body,
+        kept,
+        await api().list(key.ctx),
+        await audits(),
+        await companyNotices(c.tenant.id),
+      ]),
+    ).not.toMatch(new RegExp(`${token}|acme`));
+
+    // Delivered with them, beside HyFib's signature.
+    const delivered = async () => {
+      await settings().sendTest(owner, { endpointId: endpoint.id });
+      await deliverDue(c);
+      const request = received.filter((r) => r.path === path).at(-1)!;
+      expect(signedWith(request, secret!)).toBe(true);
+      return request.headers;
+    };
+    expect(await delivered()).toMatchObject({
+      authorization: `Bearer ${token}`,
+      'x-tenant': 'acme',
+    });
+
+    // A change that leaves them out keeps them; given, they replace all of them; [] removes them.
+    expect(await api().update(key.ctx, endpoint.id, { description: 'CRM' })).toMatchObject({
+      description: 'CRM',
+      headers: [{ name: 'Authorization' }, { name: 'X-Tenant' }],
+    });
+    expect(
+      await api().update(key.ctx, endpoint.id, {
+        headers: [{ name: 'X-Signature-Key', value: 'second' }],
+      }),
+    ).toMatchObject({ description: 'CRM', headers: [{ name: 'X-Signature-Key' }] });
+    const replaced = await delivered();
+    expect(replaced['x-signature-key']).toBe('second');
+    expect(replaced.authorization).toBeUndefined();
+    expect(replaced['x-tenant']).toBeUndefined();
+    expect(await api().update(key.ctx, endpoint.id, { headers: [] })).toMatchObject({
+      headers: [],
+    });
+    const [row] = await fx.query<{ header_names: string[]; headers_ciphertext: string | null }>(
+      `SELECT header_names, headers_ciphertext FROM app.webhook_endpoints WHERE id = $1`,
+      [endpoint.id],
+    );
+    expect(row).toEqual({ header_names: [], headers_ciphertext: null });
+    expect((await delivered())['x-signature-key']).toBeUndefined();
+    expect((await audits()).slice(1)).toEqual([
+      {
+        action: 'webhook.endpoint_updated',
+        metadata: { host: HOST, eventTypes: ['contact.created'], source: 'api' },
+      },
+      {
+        action: 'webhook.endpoint_updated',
+        metadata: {
+          host: HOST,
+          eventTypes: ['contact.created'],
+          headers: ['X-Signature-Key'],
+          source: 'api',
+        },
+      },
+      {
+        action: 'webhook.endpoint_updated',
+        metadata: { host: HOST, eventTypes: ['contact.created'], headers: [], source: 'api' },
+      },
+    ]);
+
+    // Headers HyFib sets, and bad ones, are refused with the field's path, changing nothing.
+    const issue = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    for (const [headers, path, message] of [
+      [[{ name: 'W360-Signature', value: 'x' }], 'headers.0.name', /HyFib sets this header/],
+      [[{ name: 'X-Key', value: 'line\nbreak' }], 'headers.0.value', /printable ASCII/],
+      [
+        [
+          { name: 'X-Key', value: 'a' },
+          { name: 'X-KEY', value: 'b' },
+        ],
+        'headers',
+        /Give each header once/,
+      ],
+      [[{ name: 'X-Key' }], 'headers.0.value', /./],
+    ] as const) {
+      for (const refused of [
+        issue(api().update(key.ctx, endpoint.id, { headers })),
+        issue(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events: ['contact.created'], headers },
+            idem(`bad-${randomBytes(4).toString('hex')}`, 'x'),
+          ),
+        ),
+      ]) {
+        const found = await refused;
+        expect(found?.path).toBe(path);
+        expect(found?.message).toMatch(message);
+      }
+    }
+    expect((await api().list(key.ctx)).data).toHaveLength(1);
+    expect((await api().get(key.ctx, endpoint.id)).headers).toEqual([]);
   });
 
   it('refuse keys without the scope, suspended and restricted companies, bad input, addresses the egress guard refuses and an eleventh endpoint, changing nothing', async () => {

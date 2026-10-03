@@ -114,6 +114,9 @@ export const WEBHOOK_LIMITS = {
   retentionDays: 30,
   /** Failed deliveries replayed in one call at most (ADR-095); another call queues the next ones. */
   replayBatch: 500,
+  /** An endpoint's own headers (ADR-118): how many, and how long a value can be. */
+  headers: 5,
+  headerValueLength: 1000,
 } as const;
 
 /**
@@ -182,7 +185,7 @@ export function webhookErrorLabel(code: string | null, status: number | null): s
     case 'event_gone':
       return 'What the event is about no longer exists';
     case 'payload_failed':
-      return 'HyFib could not build or sign the request';
+      return 'HyFib could not prepare the request';
     default:
       return code;
   }

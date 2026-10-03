@@ -12,7 +12,12 @@ import { tenantForAction } from '@/server/tenant-action';
  */
 export async function createWebhookEndpointAction(
   slug: string,
-  input: { url: string; description: string; eventTypes: string[] },
+  input: {
+    url: string;
+    description: string;
+    eventTypes: string[];
+    headers: { name: string; value: string }[];
+  },
 ): Promise<ActionResult<{ endpointId: string; secret: string }>> {
   return runAction(async () => {
     const ctx = await tenantForAction(slug);
@@ -25,7 +30,14 @@ export async function createWebhookEndpointAction(
 
 export async function updateWebhookEndpointAction(
   slug: string,
-  input: { endpointId: string; url: string; description: string; eventTypes: string[] },
+  input: {
+    endpointId: string;
+    url: string;
+    description: string;
+    eventTypes: string[];
+    /** Given, the endpoint's headers become these; left out, they stay. */
+    headers?: { name: string; value: string }[];
+  },
 ): Promise<ActionResult> {
   return runAction(async () => {
     const ctx = await tenantForAction(slug);

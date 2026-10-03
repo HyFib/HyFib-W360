@@ -409,3 +409,125 @@ test('an API key sends its endpoint a test event, follows the delivery, replays 
   await expect(history.last().getByText('Replay', { exact: true })).toHaveCount(0);
   await expectNoHorizontalOverflow(page);
 });
+
+test('an endpoint sends its own headers with every delivery: set in settings and shown by name only, replaced on its page, and given and removed by an API key (ADR-118)', async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(180_000);
+  const email = uniqueEmail('hdrhooks');
+  const slug = `hdrhooks-${Date.now().toString(36)}`;
+  const path = `/hooks/${slug}/headers`;
+  const forUs = () => received.filter((r) => r.path === path);
+  const token = `Bearer e2e-${randomUUID()}`;
+  await signUpAndVerify(page, { name: 'Hema Headers', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('Header Works');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+
+  // Settings → Webhooks: an endpoint with two headers its receiver asks for.
+  await page.goto(`/c/${slug}/settings/webhooks`);
+  await page.getByLabel('Endpoint URL').fill(`http://${HOST}:${port}${path}`);
+  await page.getByRole('checkbox', { name: /Consent changed/ }).check();
+  await page.getByRole('button', { name: 'Add a header' }).click();
+  await page.getByLabel('Header 1 name').fill('Authorization');
+  await page.getByLabel('Header 1 value').fill(token);
+  await page.getByRole('button', { name: 'Add a header' }).click();
+  await page.getByLabel('Header 2 name').fill('X-Api-Key');
+  await page.getByLabel('Header 2 value').fill('key-e2e-1');
+  await expectNoHorizontalOverflow(page);
+  await page.getByRole('button', { name: 'Add endpoint' }).click();
+  const secretField = page.getByLabel('Signing secret');
+  await expect(secretField).toBeVisible();
+  const secret = await secretField.inputValue();
+  await page.getByRole('button', { name: 'I have stored the secret' }).click();
+
+  // Their names are shown; their values never reach the browser again.
+  await page.reload();
+  await expect(
+    page.getByText('Headers sent: Authorization, X-Api-Key (values hidden)'),
+  ).toBeVisible();
+  expect(await page.content()).not.toContain(token.slice(7));
+
+  // A test event carries them beside HyFib's own headers.
+  await page.getByRole('button', { name: `Send test event to ${HOST}` }).click();
+  await expect(async () => expect(forUs()).toHaveLength(1)).toPass({ timeout: 30_000 });
+  expect(forUs()[0]!.headers).toMatchObject({
+    authorization: token,
+    'x-api-key': 'key-e2e-1',
+    'user-agent': 'HyFib-W360-Webhooks/1',
+  });
+  expect(signatureValid(forUs()[0]!.headers, forUs()[0]!.body, secret)).toBe(true);
+
+  // On the endpoint's page: a header HyFib sets is refused; replacing gives each header again.
+  await page.getByRole('link', { name: `Deliveries and settings for ${HOST}` }).click();
+  await expect(page.getByText('Sent now: Authorization, X-Api-Key.')).toBeVisible();
+  expect(await page.content()).not.toContain(token.slice(7));
+  await page.getByRole('checkbox', { name: /Replace the headers/ }).check();
+  await page.getByRole('button', { name: 'Add a header' }).click();
+  await page.getByLabel('Header 1 name').fill('W360-Signature');
+  await page.getByLabel('Header 1 value').fill('t=1,v1=forged');
+  await page.getByRole('button', { name: 'Save endpoint' }).click();
+  await expect(page.getByText('HyFib sets this header itself.')).toBeVisible();
+  await page.getByLabel('Header 1 name').fill('Authorization');
+  await page.getByLabel('Header 1 value').fill('Bearer replaced-e2e');
+  await expectNoHorizontalOverflow(page);
+  await page.getByRole('button', { name: 'Save endpoint' }).click();
+  await expect(page.getByText('Endpoint saved.')).toBeVisible();
+  await page.reload();
+  await expect(page.getByText('Sent now: Authorization.')).toBeVisible();
+  await page.goto(`/c/${slug}/settings/webhooks`);
+  await page.getByRole('button', { name: `Send test event to ${HOST}` }).click();
+  await expect(async () => expect(forUs()).toHaveLength(2)).toPass({ timeout: 30_000 });
+  expect(forUs()[1]!.headers.authorization).toBe('Bearer replaced-e2e');
+  expect(forUs()[1]!.headers['x-api-key']).toBeUndefined();
+
+  // An API key gives its own endpoint a header, sees only its name, and removes it.
+  await page.goto(`/c/${slug}/settings/api-keys`);
+  await page.getByLabel('Name', { exact: true }).fill('Gateway connector');
+  await page.getByRole('checkbox', { name: /Manage webhook endpoints/ }).check();
+  await page.getByRole('button', { name: 'Create API key' }).click();
+  const apiToken = await page.getByLabel('API key', { exact: true }).inputValue();
+  await page.getByRole('button', { name: 'I have stored the key' }).click();
+  const auth = { Authorization: `Bearer ${apiToken}` };
+  const apiPath = `/hooks/${slug}/api-headers`;
+  const viaApi = () => received.filter((r) => r.path === apiPath);
+  const created = await request.post('/api/v1/webhook-endpoints', {
+    headers: { ...auth, 'Idempotency-Key': randomUUID() },
+    data: {
+      url: `http://${HOST}:${port}${apiPath}`,
+      events: ['message.received'],
+      headers: [{ name: 'X-Gateway-Token', value: 'gateway-e2e-1' }],
+    },
+  });
+  expect(created.status()).toBe(201);
+  const endpoint = ((await created.json()) as { data: { id: string; headers: { name: string }[] } })
+    .data;
+  expect(endpoint.headers).toEqual([{ name: 'X-Gateway-Token' }]);
+  expect(JSON.stringify(endpoint)).not.toContain('gateway-e2e-1');
+  const sendTest = () =>
+    request.post(`/api/v1/webhook-endpoints/${endpoint.id}/test`, {
+      headers: { ...auth, 'Idempotency-Key': randomUUID() },
+    });
+  expect((await sendTest()).status()).toBe(201);
+  await expect(async () => expect(viaApi()).toHaveLength(1)).toPass({ timeout: 30_000 });
+  expect(viaApi()[0]!.headers['x-gateway-token']).toBe('gateway-e2e-1');
+
+  const refused = await request.patch(`/api/v1/webhook-endpoints/${endpoint.id}`, {
+    headers: auth,
+    data: { headers: [{ name: 'Content-Type', value: 'text/plain' }] },
+  });
+  expect(refused.status()).toBe(422);
+  expect(((await refused.json()) as { error: { issues: unknown } }).error.issues).toEqual([
+    { path: 'headers.0.name', message: 'HyFib sets this header itself.' },
+  ]);
+  const removed = await request.patch(`/api/v1/webhook-endpoints/${endpoint.id}`, {
+    headers: auth,
+    data: { headers: [] },
+  });
+  expect(((await removed.json()) as { data: { headers: unknown } }).data.headers).toEqual([]);
+  expect((await sendTest()).status()).toBe(201);
+  await expect(async () => expect(viaApi()).toHaveLength(2)).toPass({ timeout: 30_000 });
+  expect(viaApi()[1]!.headers['x-gateway-token']).toBeUndefined();
+});

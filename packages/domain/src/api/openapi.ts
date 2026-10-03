@@ -307,6 +307,11 @@ export const apiWebhookEndpointSchema = z.object({
     .datetime()
     .nullable()
     .describe('Until when the previous secret also signs, after a rotation.'),
+  headers: z
+    .array(z.object({ name: z.string() }))
+    .describe(
+      'The headers sent with every delivery, by name: their values are secrets and never shown.',
+    ),
   apiKeyId: z.uuid().describe('The API key that added the endpoint.'),
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime(),
@@ -322,7 +327,7 @@ export const apiWebhookDeliverySchema = z.object({
   status: z
     .enum(WEBHOOK_DELIVERY_STATES)
     .describe(
-      'pending: waiting for its next attempt; delivering: an attempt is under way; succeeded: the endpoint answered 2xx; failed: every attempt failed, the endpoint was turned off, the event is gone, or HyFib could not build or sign the request.',
+      'pending: waiting for its next attempt; delivering: an attempt is under way; succeeded: the endpoint answered 2xx; failed: every attempt failed, the endpoint was turned off, the event is gone, or HyFib could not prepare the request (build or sign it, or open the endpoint’s headers).',
     ),
   attempts: z.number().int(),
   nextAttemptAt: z.iso
@@ -335,7 +340,7 @@ export const apiWebhookDeliverySchema = z.object({
     .string()
     .nullable()
     .describe(
-      'Why the last attempt failed, or why the delivery ended without one, as a code (for example `invalid_status`, `timeout`, `endpoint_disabled`, `event_gone`, or `payload_failed`: HyFib could not build or sign the request, which a replay sends once HyFib has fixed the cause).',
+      'Why the last attempt failed, or why the delivery ended without one, as a code (for example `invalid_status`, `timeout`, `endpoint_disabled`, `event_gone`, or `payload_failed`: HyFib could not prepare the request (build or sign it, or open the endpoint’s headers), which a replay sends once the cause is fixed).',
     ),
   lastDurationMs: z.number().int().nullable(),
   deliveredAt: z.iso.datetime().nullable(),
@@ -490,7 +495,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         '',
         `POST /messages needs an \`Idempotency-Key\` header: a retry with the same key and body returns the first response (header \`Idempotent-Replayed: true\`) and never sends twice; responses are kept ${API_LIMITS.idempotencyHours} hours. Delivery itself follows WhatsApp: read the status with GET /messages/{id}.`,
         '',
-        `Webhooks: endpoints added in Settings → Webhooks receive the events below as signed JSON POSTs. \`W360-Signature: t=<unix time>,v1=<hex HMAC-SHA256 of "<t>.<raw body>" with the endpoint secret>\` (two \`v1\` values for ${WEBHOOK_LIMITS.previousSecretHours} hours after the secret is rotated); reject a time more than 5 minutes from yours. Answer with a 2xx status within 10 seconds; anything else is retried (${retrySchedule}; ${WEBHOOK_LIMITS.attempts} attempts). Delivery is at least once and unordered: deduplicate on the event id. An endpoint failing for ${WEBHOOK_LIMITS.disableAfterHours} hours is turned off.`,
+        `Webhooks: endpoints added in Settings → Webhooks receive the events below as signed JSON POSTs. \`W360-Signature: t=<unix time>,v1=<hex HMAC-SHA256 of "<t>.<raw body>" with the endpoint secret>\` (two \`v1\` values for ${WEBHOOK_LIMITS.previousSecretHours} hours after the secret is rotated); reject a time more than 5 minutes from yours. Answer with a 2xx status within 10 seconds; anything else is retried (${retrySchedule}; ${WEBHOOK_LIMITS.attempts} attempts). Delivery is at least once and unordered: deduplicate on the event id. An endpoint failing for ${WEBHOOK_LIMITS.disableAfterHours} hours is turned off. An endpoint can also send up to ${WEBHOOK_LIMITS.headers} headers of its own with every delivery, such as an \`Authorization\` header its receiver issued; they never replace HyFib's.`,
       ].join('\n'),
     },
     servers: [{ url: serverUrl }],
@@ -1089,8 +1094,8 @@ export function buildOpenApiDocument(serverUrl: string) {
         },
         patch: {
           operationId: 'updateWebhookEndpoint',
-          summary: 'Change the events, description or state of an endpoint',
-          description: `${scopeNote('webhooks.manage')} The address cannot change: add a new endpoint and delete this one. Turning an endpoint off fails the deliveries waiting for it; turning it on again starts its health afresh.`,
+          summary: 'Change the events, description, headers or state of an endpoint',
+          description: `${scopeNote('webhooks.manage')} The address cannot change: add a new endpoint and delete this one. Turning an endpoint off fails the deliveries waiting for it; turning it on again starts its health afresh. Headers given replace all of the endpoint's headers.`,
           parameters: [{ $ref: '#/components/parameters/Id' }],
           requestBody: { required: true, content: json(ref('UpdateWebhookEndpoint')) },
           responses: {

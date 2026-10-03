@@ -1202,8 +1202,9 @@ LOCKED`; pending ones due now, then `delivering` ones whose lease expired), buil
   from the company's current data (`webhooks/payloads.ts`; an erased contact has no number or name,
   a message, conversation, contact, run or order that is gone ends the delivery as `event_gone`),
   signs it, sets the lease (the 10 s egress deadline plus 35 s) and commits. A delivery whose payload
-  or signature cannot be built (a bug, data the builder cannot describe, a secret the keyring cannot
-  open, or a database error while building, each build running in a savepoint) ends at once as
+  or signature cannot be built (a bug, data the builder cannot describe, a secret or the endpoint's
+  own headers the keyring cannot open, or a database error while building, each build running in a
+  savepoint) ends at once as
   `payload_failed` without an attempt, and the rest of the batch goes on; the worker logs its
   company, delivery, endpoint, event type, what failed and the error's class and code, never the
   payload or the error's message. The POSTs go through the egress client (DNS pinned, private,
@@ -1220,6 +1221,13 @@ LOCKED`; pending ones due now, then `delivering` ones whose lease expired), buil
   `W360-Event-Type`, `W360-Delivery-Id`, `W360-Delivery-Attempt` and `User-Agent:
 HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with the AAD
   `webhook-secret:<company>:<endpoint>:<version>`.
+- **Endpoint headers** (migration 0094, ADR-118): up to 5 headers an endpoint's receiver asks for,
+  their names in `header_names` and names and values sealed together in `headers_ciphertext` (AAD
+  `webhook-headers:<company>:<endpoint>`; a check keeps both empty or both set). Settings, the API,
+  audit entries and the export carry names only. The claim opens them once per endpoint and batch
+  and sends them before HyFib's own headers, which names HyFib or the transport sets can never
+  replace (refused when saved and when opened); headers that do not open end the delivery as
+  `payload_failed`, stage `headers`.
 - **Health:** a success clears the failing state; a failure when the endpoint has been failing for
   72 hours without a success turns it off (`failing`), fails its waiting deliveries as
   `endpoint_disabled`, records a system audit entry and emails the company's active owners and
@@ -1229,9 +1237,11 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   only in the page's memory); sending a test event (`ping`); rotating the secret; turning off and
   on; deleting. Each endpoint's page lists its latest 100 deliveries (or only failed ones) with
   attempts, result and timings, replays finished ones (a new delivery of the same event, audited)
-  and edits the URL, description and events. The OpenAPI document describes every event under
+  and edits the URL, description, events and headers (names shown, values never; replacing gives
+  each again). The OpenAPI document describes every event under
   `webhooks`. Audit entries name the endpoint's host, never its full URL or secret.
-- **Not built yet:** filters beyond the event type, ordering, custom headers, mutual TLS, fixed
+- **Not built yet:** filters beyond the event type, ordering, other authentication (OAuth client
+  credentials, headers computed per delivery), mutual TLS, fixed
   egress addresses for receivers' allowlists, endpoints per number, events for conversations
   started, notes or merges, and an event naming the contact fields that changed.
 

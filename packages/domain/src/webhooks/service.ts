@@ -29,6 +29,129 @@ import { WEBHOOK_EVENT_KEYS, WEBHOOK_LIMITS, WEBHOOK_REPLAY_PERIODS, webhookHost
 export const webhookSecretAad = (tenantId: string, endpointId: string, version: number) =>
   `webhook-secret:${tenantId}:${endpointId}:${version}`;
 
+/** Binds an endpoint's own headers to its company and the endpoint (ADR-118). */
+export const webhookHeadersAad = (tenantId: string, endpointId: string) =>
+  `webhook-headers:${tenantId}:${endpointId}`;
+
+/** A header an endpoint's receiver asks for (ADR-118); the value is a secret. */
+export interface WebhookHeader {
+  name: string;
+  value: string;
+}
+
+const HEADER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,59}$/;
+// Printable ASCII; an empty value is refused by its own message.
+const HEADER_VALUE_RE = /^[\x20-\x7e]*$/;
+/**
+ * Headers HyFib sets on a delivery or that describe its body or connection; with `proxy-*` and
+ * HyFib's own `w360-*`. An endpoint's headers never replace these.
+ */
+const RESERVED_WEBHOOK_HEADERS: ReadonlySet<string> = new Set([
+  'content-type',
+  'content-encoding',
+  'user-agent',
+  'host',
+  'content-length',
+  'transfer-encoding',
+  'connection',
+  'keep-alive',
+  'upgrade',
+  'te',
+  'trailer',
+  'expect',
+  'accept-encoding',
+]);
+
+/** Whether a header name is one an endpoint cannot set. */
+export function reservedWebhookHeader(name: string): boolean {
+  const lower = name.toLowerCase();
+  return (
+    RESERVED_WEBHOOK_HEADERS.has(lower) || lower.startsWith('proxy-') || lower.startsWith('w360-')
+  );
+}
+
+/** The headers an endpoint sends with each delivery: replaces the list it had (ADR-118). */
+export const webhookHeadersSchema = z
+  .array(
+    z
+      .object({
+        name: z
+          .string()
+          .trim()
+          .regex(HEADER_NAME_RE, 'Header names use letters, digits and - (at most 60).')
+          .refine((name) => !reservedWebhookHeader(name), 'HyFib sets this header itself.'),
+        value: z
+          .string()
+          .trim()
+          .min(1, 'Enter the header’s value.')
+          .max(
+            WEBHOOK_LIMITS.headerValueLength,
+            `Header values are limited to ${WEBHOOK_LIMITS.headerValueLength} characters.`,
+          )
+          .regex(
+            HEADER_VALUE_RE,
+            'Header values use printable ASCII characters, without line breaks.',
+          ),
+      })
+      .strict(),
+  )
+  .max(WEBHOOK_LIMITS.headers, `An endpoint can have at most ${WEBHOOK_LIMITS.headers} headers.`)
+  .refine(
+    (headers) => new Set(headers.map((h) => h.name.toLowerCase())).size === headers.length,
+    'Give each header once.',
+  );
+
+/**
+ * The columns that keep an endpoint's headers: the names as written, and names and values sealed
+ * with the keyring, bound to the company and the endpoint. No headers keep nothing sealed.
+ */
+export function sealWebhookHeaders(
+  keyring: Keyring,
+  tenantId: string,
+  endpointId: string,
+  headers: readonly WebhookHeader[],
+): { headerNames: string[]; headersCiphertext: string | null } {
+  if (headers.length === 0) return { headerNames: [], headersCiphertext: null };
+  return {
+    headerNames: headers.map((h) => h.name),
+    headersCiphertext: keyring.encrypt(
+      JSON.stringify(headers.map((h) => [h.name, h.value])),
+      webhookHeadersAad(tenantId, endpointId),
+    ),
+  };
+}
+
+/**
+ * An endpoint's headers, opened for a delivery. Throws when the keyring cannot open them (a key
+ * the platform no longer holds) or they are not what `sealWebhookHeaders` keeps.
+ */
+export function openWebhookHeaders(
+  keyring: Keyring,
+  tenantId: string,
+  endpointId: string,
+  ciphertext: string | null,
+): Record<string, string> {
+  if (ciphertext === null) return {};
+  const pairs: unknown = JSON.parse(
+    keyring.decryptString(ciphertext, webhookHeadersAad(tenantId, endpointId)),
+  );
+  const headers: Record<string, string> = {};
+  if (!Array.isArray(pairs)) throw new Error('Sealed webhook headers are not a list');
+  for (const pair of pairs) {
+    if (
+      !Array.isArray(pair) ||
+      pair.length !== 2 ||
+      typeof pair[0] !== 'string' ||
+      typeof pair[1] !== 'string' ||
+      reservedWebhookHeader(pair[0])
+    ) {
+      throw new Error('Sealed webhook headers hold something other than headers');
+    }
+    headers[pair[0]] = pair[1];
+  }
+  return headers;
+}
+
 /** A new signing secret: `whsec_` and 32 random bytes. */
 export function generateWebhookSecret(): string {
   return `whsec_${randomBytes(32).toString('base64url')}`;
@@ -52,6 +175,8 @@ const endpointSchema = z.object({
     .optional()
     .default(''),
   eventTypes: webhookEventTypesSchema,
+  /** Given, the endpoint's headers become these; left out, a change keeps them. */
+  headers: webhookHeadersSchema.optional(),
 });
 const endpointIdSchema = z.object({ endpointId: z.uuid() });
 const updateSchema = endpointSchema.extend({ endpointId: z.uuid() });
@@ -78,6 +203,8 @@ export interface WebhookEndpointView {
   secretVersion: number;
   /** Until when the previous secret also signs; null when it no longer does. */
   previousSecretExpiresAt: Date | null;
+  /** The names of the endpoint's own headers (ADR-118); their values are never shown. */
+  headerNames: string[];
   createdAt: Date;
   /** The member who added the endpoint in settings (null once their account is gone). */
   createdBy: string | null;
@@ -183,6 +310,7 @@ export async function insertWebhookEndpoint(
     url: string;
     description: string | null;
     eventTypes: WebhookEventType[];
+    headers: readonly WebhookHeader[];
     creator: WebhookEndpointCreator;
   },
 ): Promise<{ id: string; secret: string }> {
@@ -206,6 +334,7 @@ export async function insertWebhookEndpoint(
     description: input.description,
     eventTypes: input.eventTypes,
     secretCiphertext: keyring.encrypt(secret, webhookSecretAad(tenantId, id, 1)),
+    ...sealWebhookHeaders(keyring, tenantId, id, input.headers),
     createdByUserId: 'userId' in input.creator ? input.creator.userId : null,
     createdByApiKeyId: 'apiKeyId' in input.creator ? input.creator.apiKeyId : null,
   });
@@ -490,6 +619,7 @@ export function createWebhooksService(deps: {
               lastFailureAt: webhookEndpoints.lastFailureAt,
               secretVersion: webhookEndpoints.secretVersion,
               previousSecretExpiresAt: webhookEndpoints.previousSecretExpiresAt,
+              headerNames: webhookEndpoints.headerNames,
               createdAt: webhookEndpoints.createdAt,
               createdBy: users.name,
               keyName: apiKeys.name,
@@ -549,10 +679,12 @@ export function createWebhooksService(deps: {
       const data = parseInput(endpointSchema, input);
       const { url, host } = checkedWebhookUrl(data.url, deps.egressPolicy);
       return db.run(ctx.scope, async (tx) => {
+        const headers = data.headers ?? [];
         const { id, secret } = await insertWebhookEndpoint(tx, keyring, ctx.tenant.id, {
           url,
           description: data.description || null,
           eventTypes: data.eventTypes,
+          headers,
           creator: { userId: ctx.user.id },
         });
         await recordAudit(
@@ -562,7 +694,11 @@ export function createWebhooksService(deps: {
             action: 'webhook.endpoint_created',
             subjectType: 'webhook_endpoint',
             subjectId: id,
-            metadata: { host, eventTypes: data.eventTypes },
+            metadata: {
+              host,
+              eventTypes: data.eventTypes,
+              ...(headers.length > 0 ? { headers: headers.map((h) => h.name) } : {}),
+            },
           },
           meta,
         );
@@ -583,6 +719,9 @@ export function createWebhooksService(deps: {
             url,
             description: data.description || null,
             eventTypes: data.eventTypes,
+            ...(data.headers
+              ? sealWebhookHeaders(keyring, ctx.tenant.id, data.endpointId, data.headers)
+              : {}),
             updatedAt: clock.now(),
           })
           .where(
@@ -598,7 +737,11 @@ export function createWebhooksService(deps: {
             action: 'webhook.endpoint_updated',
             subjectType: 'webhook_endpoint',
             subjectId: data.endpointId,
-            metadata: { host, eventTypes: data.eventTypes },
+            metadata: {
+              host,
+              eventTypes: data.eventTypes,
+              ...(data.headers ? { headers: data.headers.map((h) => h.name) } : {}),
+            },
           },
           meta,
         );

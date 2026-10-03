@@ -1,5 +1,6 @@
-import { createHmac } from 'node:crypto';
+import { createHmac, randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
+import { Keyring } from '@w360/core';
 import {
   AUTOMATION_END_REASONS,
   CAMPAIGN_COMPLETION_REASONS,
@@ -42,6 +43,13 @@ import {
   templateStatusPayloadSchema,
 } from './payloads';
 import { webhookSignature, webhookSignatureHeader, verifyWebhookSignature } from './signing';
+import {
+  openWebhookHeaders,
+  reservedWebhookHeader,
+  sealWebhookHeaders,
+  webhookHeadersAad,
+  webhookHeadersSchema,
+} from './service';
 
 const SECRET = 'whsec_test-secret-one';
 const OTHER = 'whsec_test-secret-two';
@@ -688,18 +696,14 @@ describe('webhook labels and hosts', () => {
     expect(webhookErrorLabel('address_blocked', null)).toBe('The address is private or reserved');
     expect(webhookErrorLabel('endpoint_disabled', null)).toBe('The endpoint was turned off');
     expect(webhookErrorLabel('event_gone', null)).toBe('What the event is about no longer exists');
-    expect(webhookErrorLabel('payload_failed', null)).toBe(
-      'HyFib could not build or sign the request',
-    );
+    expect(webhookErrorLabel('payload_failed', null)).toBe('HyFib could not prepare the request');
     expect(webhookErrorLabel(null, null)).toBeNull();
     expect(webhookErrorLabel('something_new', null)).toBe('something_new');
   });
 
   it('names why a delivery ended without an attempt over the status an earlier attempt left', () => {
     // Attempt 1 got a 503; the delivery then ended at its next claim, which keeps that status.
-    expect(webhookErrorLabel('payload_failed', 503)).toBe(
-      'HyFib could not build or sign the request',
-    );
+    expect(webhookErrorLabel('payload_failed', 503)).toBe('HyFib could not prepare the request');
     expect(webhookErrorLabel('event_gone', 500)).toBe('What the event is about no longer exists');
     expect(webhookErrorLabel('endpoint_disabled', 500)).toBe('The endpoint was turned off');
     expect(webhookErrorLabel('interrupted', 502)).toBe('The attempt was interrupted');
@@ -789,6 +793,145 @@ describe('the OpenAPI document', () => {
         'W360-Delivery-Attempt',
       ]);
       expect(hook.post.security).toEqual([]);
+    }
+  });
+});
+
+describe('endpoint headers (ADR-118)', () => {
+  const problems = (headers: unknown) => {
+    const result = webhookHeadersSchema.safeParse(headers);
+    return result.success ? [] : result.error.issues.map((issue) => issue.message);
+  };
+  const one = (name: string, value = 'v') => problems([{ name, value }]);
+
+  it('take up to 5 headers with token names and printable ASCII values, trimmed', () => {
+    expect(
+      webhookHeadersSchema.parse([
+        { name: ' Authorization ', value: '  Bearer abc.def  ' },
+        { name: 'X-Api-Key', value: 'k=1; "quoted" ~!' },
+      ]),
+    ).toEqual([
+      { name: 'Authorization', value: 'Bearer abc.def' },
+      { name: 'X-Api-Key', value: 'k=1; "quoted" ~!' },
+    ]);
+    expect(webhookHeadersSchema.parse([])).toEqual([]);
+    expect(one('a'.repeat(60), 'x'.repeat(WEBHOOK_LIMITS.headerValueLength))).toEqual([]);
+    expect(
+      problems(
+        Array.from({ length: WEBHOOK_LIMITS.headers }, (_, i) => ({ name: `X-H${i}`, value: 'v' })),
+      ),
+    ).toEqual([]);
+  });
+
+  it('refuse the headers HyFib or the transport sets, whatever their case, and Proxy-* and W360-*', () => {
+    for (const name of [
+      'Content-Type',
+      'content-encoding',
+      'USER-AGENT',
+      'Host',
+      'Content-Length',
+      'Transfer-Encoding',
+      'Connection',
+      'Keep-Alive',
+      'Upgrade',
+      'TE',
+      'Trailer',
+      'Expect',
+      'Accept-Encoding',
+      'Proxy-Authorization',
+      'proxy-anything',
+      'W360-Signature',
+      'w360-event-id',
+    ]) {
+      expect(one(name), name).toEqual(['HyFib sets this header itself.']);
+      expect(reservedWebhookHeader(name), name).toBe(true);
+    }
+    for (const name of [
+      'Authorization',
+      'X-Api-Key',
+      'Accept',
+      'Cookie',
+      'W360',
+      'Proxy',
+      'X-W360-Id',
+    ]) {
+      expect(one(name), name).toEqual([]);
+      expect(reservedWebhookHeader(name), name).toBe(false);
+    }
+  });
+
+  it('refuse bad names and values, more than 5 headers, a header given twice and other keys', () => {
+    for (const name of ['X_Key', 'X Key', '-X', '', 'a'.repeat(61), 'Clé', 'X:Y']) {
+      expect(one(name), name).toEqual(['Header names use letters, digits and - (at most 60).']);
+    }
+    expect(one('Authorization', '')).toEqual(['Enter the header’s value.']);
+    expect(one('Authorization', '   ')).toEqual(['Enter the header’s value.']);
+    expect(one('Authorization', 'x'.repeat(WEBHOOK_LIMITS.headerValueLength + 1))).toEqual([
+      `Header values are limited to ${WEBHOOK_LIMITS.headerValueLength} characters.`,
+    ]);
+    // No line breaks (a header injected after them), tabs or characters outside printable ASCII.
+    for (const value of ['a\r\nX-Injected: 1', 'a\nb', 'a\tb', 'café', 'a\u0000b']) {
+      expect(one('Authorization', value), JSON.stringify(value)).toEqual([
+        'Header values use printable ASCII characters, without line breaks.',
+      ]);
+    }
+    expect(
+      problems(
+        Array.from({ length: WEBHOOK_LIMITS.headers + 1 }, (_, i) => ({
+          name: `X-H${i}`,
+          value: 'v',
+        })),
+      ),
+    ).toEqual([`An endpoint can have at most ${WEBHOOK_LIMITS.headers} headers.`]);
+    expect(
+      problems([
+        { name: 'X-Key', value: 'a' },
+        { name: 'x-key', value: 'b' },
+      ]),
+    ).toEqual(['Give each header once.']);
+    expect(problems([{ name: 'X-Key', value: 'a', secret: true }])).toHaveLength(1);
+    expect(problems({ 'X-Key': 'a' })).toHaveLength(1);
+  });
+
+  it('are sealed bound to the company and the endpoint, and opened only there', () => {
+    const ring = new Keyring({ primaryKeyId: 'k1', keys: { k1: randomBytes(32) } });
+    const tenant = '0192a1b2-0000-7000-8000-00000000000a';
+    const endpoint = '0192a1b2-0000-7000-8000-00000000000b';
+    const other = '0192a1b2-0000-7000-8000-00000000000c';
+    const sealed = sealWebhookHeaders(ring, tenant, endpoint, [
+      { name: 'Authorization', value: 'Bearer abc' },
+      { name: 'X-Api-Key', value: 'k-1' },
+    ]);
+    expect(sealed.headerNames).toEqual(['Authorization', 'X-Api-Key']);
+    expect(sealed.headersCiphertext).not.toMatch(/Bearer|abc|k-1/);
+    expect(openWebhookHeaders(ring, tenant, endpoint, sealed.headersCiphertext)).toEqual({
+      Authorization: 'Bearer abc',
+      'X-Api-Key': 'k-1',
+    });
+    expect(() => openWebhookHeaders(ring, other, endpoint, sealed.headersCiphertext)).toThrow();
+    expect(() => openWebhookHeaders(ring, tenant, other, sealed.headersCiphertext)).toThrow();
+    // No headers seal nothing, and nothing sealed opens as no headers.
+    expect(sealWebhookHeaders(ring, tenant, endpoint, [])).toEqual({
+      headerNames: [],
+      headersCiphertext: null,
+    });
+    expect(openWebhookHeaders(ring, tenant, endpoint, null)).toEqual({});
+    // What the seal never writes is refused when opened: a name HyFib sets, or not a list of pairs.
+    const aad = webhookHeadersAad(tenant, endpoint);
+    for (const content of [
+      [['W360-Signature', 't=1,v1=00']],
+      [['content-type', 'text/plain']],
+      { Authorization: 'Bearer abc' },
+      [['Authorization']],
+      [['Authorization', 'Bearer abc', 'X-Extra']],
+      [[1, 'x']],
+      [['Authorization', 2]],
+    ]) {
+      expect(
+        () =>
+          openWebhookHeaders(ring, tenant, endpoint, ring.encrypt(JSON.stringify(content), aad)),
+        JSON.stringify(content),
+      ).toThrow(/^Sealed webhook headers/);
     }
   });
 });

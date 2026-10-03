@@ -37,6 +37,8 @@ import {
   templateStatusPayloadSchema,
   verifyWebhookSignature,
   WEBHOOK_LIMITS,
+  WEBHOOK_USER_AGENT,
+  webhookHeadersAad,
   webhookSecretAad,
   type WebhookDeliveryLogger,
   type WebhookEventType,
@@ -400,6 +402,217 @@ describe('webhook endpoints', () => {
       }
     }
     expect(await webhooks().list(owner)).toHaveLength(10);
+  });
+});
+
+describe('endpoint headers (ADR-118)', () => {
+  async function headerColumns(endpointId: string) {
+    const [row] = await fx.query<{ header_names: string[]; headers_ciphertext: string | null }>(
+      'SELECT header_names, headers_ciphertext FROM app.webhook_endpoints WHERE id = $1',
+      [endpointId],
+    );
+    if (!row) throw new Error('endpoint missing');
+    return row;
+  }
+
+  const auditsOf = async (c: Company, action: string) =>
+    (
+      await fx.query<{ metadata: Record<string, unknown> }>(
+        'SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = $2 ORDER BY occurred_at, id',
+        [c.tenant.id, action],
+      )
+    ).map((row) => row.metadata);
+
+  /** The request HyFib made for a delivery, with HyFib's own headers checked. */
+  function requestFor(path: string, deliveryId: string, secret: string) {
+    const matching = requestsTo(path).filter((r) => r.headers['w360-delivery-id'] === deliveryId);
+    const request = matching.at(-1);
+    if (!request) throw new Error(`no request for ${deliveryId}`);
+    expect(request.headers['content-type']).toBe('application/json');
+    expect(request.headers['user-agent']).toBe(WEBHOOK_USER_AGENT);
+    expect(signedWith(request, secret)).toBe(true);
+    return request;
+  }
+
+  it('are sent with every attempt, test event and replay beside HyFib’s own, kept sealed, and shown and audited by name only', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const token = randomBytes(16).toString('hex');
+    const apiKey = randomBytes(12).toString('hex');
+    const failing = `/fail/${randomBytes(6).toString('hex')}`;
+    const created = await webhooks().create(owner, {
+      url: `http://${HOST}:${port}${failing}`,
+      eventTypes: ['consent.changed'],
+      headers: [
+        { name: 'Authorization', value: `Bearer ${token}` },
+        { name: 'X-Api-Key', value: ` ${apiKey} ` },
+      ],
+    });
+
+    // The names as written; the values only sealed, bound to the company and the endpoint.
+    const columns = await headerColumns(created.id);
+    expect(columns.header_names).toEqual(['Authorization', 'X-Api-Key']);
+    expect(columns.headers_ciphertext).not.toMatch(new RegExp(`${token}|${apiKey}`));
+    expect(
+      JSON.parse(
+        fx.keyring.decryptString(
+          columns.headers_ciphertext!,
+          webhookHeadersAad(c.tenant.id, created.id),
+        ),
+      ),
+    ).toEqual([
+      ['Authorization', `Bearer ${token}`],
+      ['X-Api-Key', apiKey],
+    ]);
+    const [listed] = await webhooks().list(owner);
+    expect(listed?.headerNames).toEqual(['Authorization', 'X-Api-Key']);
+    expect(JSON.stringify(await webhooks().list(owner))).not.toMatch(
+      new RegExp(`${token}|${apiKey}`),
+    );
+    expect(await auditsOf(c, 'webhook.endpoint_created')).toEqual([
+      { host: HOST, eventTypes: ['consent.changed'], headers: ['Authorization', 'X-Api-Key'] },
+    ]);
+
+    // The first attempt of a test event, and its retry after the address changed (a change that
+    // does not give headers keeps them), carry them.
+    const test = await webhooks().sendTest(owner, { endpointId: created.id });
+    expect(await deliverDue(c)).toMatchObject({ attempted: 1, retrying: 1 });
+    const first = requestFor(failing, test.deliveryId, created.secret);
+    expect(first.headers.authorization).toBe(`Bearer ${token}`);
+    expect(first.headers['x-api-key']).toBe(apiKey);
+    const ok = `/ok/${randomBytes(6).toString('hex')}`;
+    await webhooks().update(owner, {
+      endpointId: created.id,
+      url: `http://${HOST}:${port}${ok}`,
+      description: '',
+      eventTypes: ['consent.changed'],
+    });
+    expect((await headerColumns(created.id)).header_names).toEqual(['Authorization', 'X-Api-Key']);
+    expect(await deliverDue(c, later(61_000))).toMatchObject({ attempted: 1, succeeded: 1 });
+    const retry = requestFor(ok, test.deliveryId, created.secret);
+    expect(retry.headers['w360-delivery-attempt']).toBe('2');
+    expect(retry.headers.authorization).toBe(`Bearer ${token}`);
+    expect(retry.headers['x-api-key']).toBe(apiKey);
+
+    // A replay carries them too.
+    const replay = await webhooks().replay(owner, { deliveryId: test.deliveryId });
+    expect(await deliverDue(c)).toMatchObject({ attempted: 1, succeeded: 1 });
+    expect(requestFor(ok, replay.deliveryId, created.secret).headers.authorization).toBe(
+      `Bearer ${token}`,
+    );
+    expect((await auditsOf(c, 'webhook.endpoint_updated')).at(-1)).toEqual({
+      host: HOST,
+      eventTypes: ['consent.changed'],
+    });
+
+    // Given again, they replace all of them; an empty list removes them.
+    await webhooks().update(owner, {
+      endpointId: created.id,
+      url: `http://${HOST}:${port}${ok}`,
+      description: '',
+      eventTypes: ['consent.changed'],
+      headers: [{ name: 'authorization', value: 'Bearer second' }],
+    });
+    expect((await webhooks().list(owner))[0]?.headerNames).toEqual(['authorization']);
+    expect((await auditsOf(c, 'webhook.endpoint_updated')).at(-1)).toEqual({
+      host: HOST,
+      eventTypes: ['consent.changed'],
+      headers: ['authorization'],
+    });
+    const replaced = await webhooks().sendTest(owner, { endpointId: created.id });
+    expect(await deliverDue(c)).toMatchObject({ attempted: 1, succeeded: 1 });
+    const afterReplace = requestFor(ok, replaced.deliveryId, created.secret);
+    expect(afterReplace.headers.authorization).toBe('Bearer second');
+    expect(afterReplace.headers['x-api-key']).toBeUndefined();
+
+    await webhooks().update(owner, {
+      endpointId: created.id,
+      url: `http://${HOST}:${port}${ok}`,
+      description: '',
+      eventTypes: ['consent.changed'],
+      headers: [],
+    });
+    expect(await headerColumns(created.id)).toEqual({ header_names: [], headers_ciphertext: null });
+    expect((await auditsOf(c, 'webhook.endpoint_updated')).at(-1)).toEqual({
+      host: HOST,
+      eventTypes: ['consent.changed'],
+      headers: [],
+    });
+    const removed = await webhooks().sendTest(owner, { endpointId: created.id });
+    expect(await deliverDue(c)).toMatchObject({ attempted: 1, succeeded: 1 });
+    expect(
+      requestFor(ok, removed.deliveryId, created.secret).headers.authorization,
+    ).toBeUndefined();
+  });
+
+  it('are refused when HyFib sets them, misnamed, empty, not printable ASCII, given twice or more than 5, changing nothing', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const url = 'https://hooks.example.com/in';
+    const refused = (headers: unknown, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes: ['consent.changed'], headers }),
+        'validation_failed',
+        message,
+      );
+    await refused([{ name: 'Content-Type', value: 'text/plain' }], /HyFib sets this header/);
+    await refused([{ name: 'w360-signature', value: 't=1,v1=00' }], /HyFib sets this header/);
+    await refused([{ name: 'Proxy-Authorization', value: 'Basic x' }], /HyFib sets this header/);
+    await refused([{ name: 'X_Key', value: 'v' }], /letters, digits and -/);
+    await refused([{ name: 'X-Key', value: ' ' }], /Enter the header’s value/);
+    await refused([{ name: 'X-Key', value: 'a\r\nX-Injected: 1' }], /printable ASCII/);
+    await refused([{ name: 'X-Key', value: 'x'.repeat(1_001) }], /limited to 1000 characters/);
+    await refused(
+      [
+        { name: 'X-Key', value: 'a' },
+        { name: 'x-key', value: 'b' },
+      ],
+      /Give each header once/,
+    );
+    await refused(
+      Array.from({ length: 6 }, (_, i) => ({ name: `X-H${i}`, value: 'v' })),
+      /at most 5 headers/,
+    );
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['consent.changed'],
+      headers: [{ name: 'Authorization', value: 'Bearer kept' }],
+    });
+    const before = await headerColumns(created.id);
+    await expectAppError(
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: 'changed',
+        eventTypes: ['consent.changed'],
+        headers: [{ name: 'User-Agent', value: 'mine' }],
+      }),
+      'validation_failed',
+      /HyFib sets this header/,
+    );
+    expect(await headerColumns(created.id)).toEqual(before);
+    expect((await webhooks().list(owner))[0]?.description).toBeNull();
+  });
+
+  it('are kept by the database as names and sealed values together, at most 5', async () => {
+    const c = await fx.company();
+    const e = await addEndpoint(c, 'ok', ['consent.changed']);
+    await expect(
+      fx.query(`UPDATE app.webhook_endpoints SET header_names = '{Authorization}' WHERE id = $1`, [
+        e.id,
+      ]),
+    ).rejects.toThrow(/webhook_endpoints_headers/);
+    await expect(
+      fx.query(`UPDATE app.webhook_endpoints SET headers_ciphertext = 'x' WHERE id = $1`, [e.id]),
+    ).rejects.toThrow(/webhook_endpoints_headers/);
+    await expect(
+      fx.query(
+        `UPDATE app.webhook_endpoints SET header_names = '{a,b,c,d,e,f}', headers_ciphertext = 'x' WHERE id = $1`,
+        [e.id],
+      ),
+    ).rejects.toThrow(/webhook_endpoints_headers/);
   });
 });
 
@@ -1010,6 +1223,79 @@ describe('deliveries that cannot be prepared', () => {
       })),
     );
     expect(JSON.stringify(log.lines)).not.toMatch(/authenticate|whsec_/);
+  });
+
+  it('headers the keyring cannot open fail each delivery to their endpoint alone, until given again (ADR-118)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const add = async (value: string) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes: ['consent.changed'],
+        headers: [{ name: 'Authorization', value }],
+      });
+      return { ...created, path };
+    };
+    const broken = await add('Bearer broken-value');
+    const fine = await add('Bearer fine-value');
+    const other = await add('Bearer other-value');
+    // The broken endpoint holds the other endpoint's sealed headers (as after a botched restore):
+    // bound to that endpoint, they do not open for this one.
+    await fx.query(
+      `UPDATE app.webhook_endpoints b SET headers_ciphertext = f.headers_ciphertext
+         FROM app.webhook_endpoints f WHERE b.id = $1 AND f.id = $2`,
+      [broken.id, fine.id],
+    );
+    const first = await webhooks().sendTest(owner, { endpointId: broken.id });
+    const second = await webhooks().sendTest(owner, { endpointId: broken.id });
+    await webhooks().sendTest(owner, { endpointId: fine.id });
+    await webhooks().sendTest(owner, { endpointId: other.id });
+
+    const log = capturedLog();
+    expect(await deliverDue(c, systemClock, egress(), log.logger)).toMatchObject({
+      attempted: 2,
+      succeeded: 2,
+      failed: 2,
+    });
+    expect(await deliveriesOf(broken.id)).toMatchObject([
+      { id: first.deliveryId, state: 'failed', attempts: 0, last_error: 'payload_failed' },
+      { id: second.deliveryId, state: 'failed', attempts: 0, last_error: 'payload_failed' },
+    ]);
+    expect(requestsTo(broken.path)).toHaveLength(0);
+    // Each endpoint of the batch is sent its own headers.
+    expect(requestsTo(fine.path).map((r) => r.headers.authorization)).toEqual([
+      'Bearer fine-value',
+    ]);
+    expect(requestsTo(other.path).map((r) => r.headers.authorization)).toEqual([
+      'Bearer other-value',
+    ]);
+    expect(log.lines.map((line) => line.fields)).toEqual(
+      [first, second].map((d) => ({
+        tenantId: c.tenant.id,
+        deliveryId: d.deliveryId,
+        endpointId: broken.id,
+        eventType: 'ping',
+        stage: 'headers',
+        errorClass: 'Error',
+        errorCode: null,
+      })),
+    );
+    expect(JSON.stringify(log.lines)).not.toMatch(/authenticate|Bearer|broken-value|fine-value/);
+
+    // Given again, the headers are sealed for this endpoint, and a replay delivers.
+    await webhooks().update(owner, {
+      endpointId: broken.id,
+      url: `http://${HOST}:${port}${broken.path}`,
+      description: '',
+      eventTypes: ['consent.changed'],
+      headers: [{ name: 'Authorization', value: 'Bearer given-again' }],
+    });
+    const replay = await webhooks().replay(owner, { deliveryId: first.deliveryId });
+    expect(await deliverDue(c)).toMatchObject({ attempted: 1, succeeded: 1, failed: 0 });
+    expect(
+      requestsTo(broken.path).map((r) => [r.headers['w360-delivery-id'], r.headers.authorization]),
+    ).toEqual([[replay.deliveryId, 'Bearer given-again']]);
   });
 
   it('a database error while building fails only its delivery: the claim goes on after its savepoint', async () => {

@@ -40,6 +40,10 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
   secretVersion: integer('secret_version').notNull().default(1),
   previousSecretCiphertext: text('previous_secret_ciphertext'),
   previousSecretExpiresAt: tz('previous_secret_expires_at'),
+  /** The names of the endpoint's own headers, as written (ADR-118); their values are only sealed. */
+  headerNames: text('header_names').array().notNull().default([]),
+  /** The headers, names and values, encrypted by the keyring; null without headers. */
+  headersCiphertext: text('headers_ciphertext'),
   state: text('state', { enum: ['active', 'disabled'] })
     .notNull()
     .default('active'),
