@@ -6,6 +6,7 @@ import { AppError, isAppError, sha256Hex } from '@w360/core';
 import { API_SCOPES } from '@w360/db';
 import { PERMISSIONS, ROLE_PERMISSIONS } from '../authz/permissions';
 import { apiErrorResponse, apiRequestError } from './errors';
+import { NUL_CHARACTER_MESSAGE, assertNoNulCharacter, nulCharacterPath } from './request-text';
 import { allowedNetworksSchema, bearerToken, generateApiToken, networkEntryProblem } from './keys';
 import {
   apiAddressRefusal,
@@ -2196,6 +2197,9 @@ describe('finding contacts (ADR-113)', () => {
     expect(parse({ ...five, email: 'a@example.test', tag: 'vip', phone: '+919800000000' })).toBe(
       true,
     );
+    // A name holds at most 200 characters, so a longer text finds nothing (ADR-124).
+    expect(parse({ name: 'x'.repeat(200) })).toBe(true);
+    expect(parse({ name: 'x'.repeat(201) })).toBe(false);
     expect(parse({ ...five, 'fields[f5]': 'x' })).toBe(false);
     expect(parse({ [`fields[${'k'.repeat(41)}]`]: 'x' })).toBe(false);
     expect(parse({ 'fields[city]': 'x'.repeat(501) })).toBe(false);
@@ -2208,8 +2212,9 @@ describe('finding contacts (ADR-113)', () => {
     expect(apiContactListFilters({ email: ' Asha@Example.test ', tag: ' VIP ' })).toEqual({
       email: 'Asha@Example.test',
       tag: 'vip',
+      name: null,
     });
-    expect(apiContactListFilters({})).toEqual({ email: null, tag: null });
+    expect(apiContactListFilters({})).toEqual({ email: null, tag: null, name: null });
     expect(refusal(() => apiContactListFilters({ email: 'not an address' }))).toEqual({
       code: 'validation_failed',
       issues: [{ path: 'email', message: 'Email address is not valid.' }],
@@ -2233,6 +2238,7 @@ describe('finding contacts (ADR-113)', () => {
     expect(await code({}, ['contacts.write'])).toBe('forbidden');
     expect(await code({ email: 'nope' })).toBe('validation_failed');
     expect(await code({ tag: ',' })).toBe('validation_failed');
+    expect(await code({ name: '  ' })).toBe('validation_failed');
     expect(await code({ 'fields[a]': '1', unknown: 'x' })).toBe('validation_failed');
   });
 
@@ -2249,6 +2255,7 @@ describe('finding contacts (ADR-113)', () => {
       'cursor',
       'phone',
       'email',
+      'name',
       'tag',
       'fields',
     ]);
@@ -2263,5 +2270,103 @@ describe('finding contacts (ADR-113)', () => {
     expect(String(get?.parameters.find((p) => p.name === 'fields')?.description)).toContain(
       '`fields.<key>`',
     );
+  });
+});
+
+describe('finding contacts by name, and text with the NUL character (ADR-124)', () => {
+  const refusal = (fn: () => unknown) => {
+    try {
+      fn();
+    } catch (error) {
+      if (isAppError(error))
+        return { code: error.code, status: error.httpStatus, issues: error.issues };
+      throw error;
+    }
+    throw new Error('expected a refusal');
+  };
+
+  it('read part of a name as written, without the spaces at its ends, and refuse an empty one', () => {
+    expect(apiContactListFilters({ name: '  Asha Rao ' }).name).toBe('Asha Rao');
+    // Wildcards stay characters here; the query escapes them.
+    expect(apiContactListFilters({ name: '100%_x' }).name).toBe('100%_x');
+    for (const name of ['', ' ', '\t\n']) {
+      expect(refusal(() => apiContactListFilters({ name }))).toEqual({
+        code: 'validation_failed',
+        status: 422,
+        issues: [{ path: 'name', message: 'Give part of a name to find.' }],
+      });
+    }
+  });
+
+  it('are described: the name filter, its window and the rule on the NUL character', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const get = (
+      doc.paths as unknown as Record<
+        string,
+        Record<string, { description: string; parameters: Record<string, unknown>[] }>
+      >
+    )['/contacts']?.get;
+    const name = get?.parameters.find((p) => p.name === 'name');
+    expect(name).toMatchObject({
+      in: 'query',
+      schema: { type: 'string', minLength: 1, maxLength: 200 },
+    });
+    expect(String(name?.description)).toContain('letters whatever their case');
+    expect(String(name?.description)).toContain('`%` and `_` are characters, not patterns');
+    expect(get?.description).toContain(
+      'A page filtered by `name`, `tag` or `fields` reads at most',
+    );
+    expect(doc.info.description).toContain(
+      'Text cannot hold the NUL character (U+0000): a request with it anywhere in its query string or body is refused with 422, naming where it is.',
+    );
+  });
+
+  it('find the NUL character wherever a request holds it, and name where, in order', () => {
+    expect(nulCharacterPath({}, undefined)).toBeNull();
+    expect(nulCharacterPath({ limit: '10', name: 'Asha' }, { name: 'Asha' })).toBeNull();
+    // A parameter by its name as sent, the name itself holding it written out.
+    expect(nulCharacterPath({ limit: '10', name: 'a\u0000' }, undefined)).toBe('name');
+    expect(nulCharacterPath({ 'fields[city]': '\u0000' }, undefined)).toBe('fields[city]');
+    expect(nulCharacterPath({ 'a\u0000b': 'x' }, undefined)).toBe('a\\u0000b');
+    // The body by the path validation issues use; the query is read first.
+    expect(nulCharacterPath({}, { phone: '+919800000000', name: 'A\u0000' })).toBe('name');
+    expect(
+      nulCharacterPath({}, { contacts: [{ name: 'ok' }, { fields: { city: 'x\u0000' } }] }),
+    ).toBe('contacts.1.fields.city');
+    expect(nulCharacterPath({}, { fields: { 'ci\u0000ty': 'Pune' } })).toBe('fields.ci\\u0000ty');
+    expect(nulCharacterPath({}, 'a\u0000')).toBe('');
+    expect(nulCharacterPath({}, { a: ['x', 'y\u0000'], b: 'z\u0000' })).toBe('a.1');
+    expect(nulCharacterPath({ q: '\u0000' }, { name: '\u0000' })).toBe('q');
+    // Other control characters, the escape written out as text and other values are kept.
+    expect(
+      nulCharacterPath(
+        { q: 'a\u0001\u001f' },
+        { text: 'a\u0001\u007f b', note: '\\u0000', n: 0, ok: false, gone: null },
+      ),
+    ).toBeNull();
+    // No nesting a body can have exhausts the stack.
+    let deep: unknown = 'x\u0000';
+    for (let i = 0; i < 50_000; i += 1) deep = [deep];
+    expect(nulCharacterPath({}, deep)?.split('.')).toHaveLength(50_000);
+  });
+
+  it('refuse a request holding it with 422, naming where, as the API answers', () => {
+    expect(() => assertNoNulCharacter({ name: 'Asha' }, { name: 'ok' })).not.toThrow();
+    let thrown: unknown;
+    try {
+      assertNoNulCharacter({}, { contacts: [{}, { name: 'B\u0000' }] });
+    } catch (error) {
+      thrown = error;
+    }
+    const answer = apiErrorResponse(thrown, 'req');
+    expect([answer.status, answer.internal, answer.body.error]).toEqual([
+      422,
+      false,
+      {
+        code: 'validation_failed',
+        message: NUL_CHARACTER_MESSAGE,
+        issues: [{ path: 'contacts.1.name', message: NUL_CHARACTER_MESSAGE }],
+      },
+    ]);
   });
 });

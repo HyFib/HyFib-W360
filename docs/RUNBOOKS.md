@@ -1659,6 +1659,23 @@ field for (`GET /api/v1/contact-fields`), a value of another type (numbers as me
 dates `YYYY-MM-DD`, `true` or `false`) or an empty one, `email` or `tag`. Text matches whatever its
 case but compares whole values, not parts of them.
 
+**A search by name through the API finds fewer contacts than expected, or a 422 (ADR-124).** `name`
+finds contacts whose name contains the text, whatever its case, as members' Contacts search finds a
+name: try the same text there. Accents count (`Elodie` does not find `Élodie`), and so does the form
+of a name typed with combining accents; letters' case is folded by the database's locale
+(`SHOW lc_ctype;`): with `C` only ASCII letters fold, so `ÉLODIE` does not find `Élodie` (DEPLOYMENT
+asks for a UTF-8 locale). The filter reads names only, not emails or numbers (`email` and `phone`
+find those). A page filtered by name reads at most 2,000 contacts: short or empty pages still give
+`nextCursor`, followed until it is `null`. A 422 names `name` for an empty value or one longer than
+200 characters.
+
+**An API request is refused with "Text cannot hold the NUL character (U+0000)" (ADR-124).** The
+integration sent the character U+0000 in a query parameter or a JSON string, which PostgreSQL text
+cannot store; the refusal's `issues` names the parameter as sent or the body's path (such as
+`contacts.1.name`). The integration removes the character (often left by a C string or a binary
+field) before sending. Before ADR-124 such a request failed with 500 and an `api request failed` log
+line naming the database's encoding error (`invalid byte sequence for encoding "UTF8": 0x00`).
+
 **A search with `POST /api/v1/contacts/search` gives short or empty pages, or a 422 (ADR-117).**
 Its pages read at most 2,000 contacts, as filtered lists do (entry above): the integration sends the
 same conditions with each `nextCursor` until it is `null`. A 422 names the condition's part:

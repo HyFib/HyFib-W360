@@ -507,7 +507,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         'Authenticate with `Authorization: Bearer <API key>`; keys are created in Settings → API keys and belong to the company. A key, and the company for all its keys, can be limited to the addresses its systems call from: a request from any other address is refused with 403 (reason `ip_not_allowed`).',
         `Scopes: ${API_SCOPE_KEYS.map((s) => `\`${s}\` (${API_SCOPE_INFO[s].label.toLowerCase()})`).join(', ')}. A company's plan may include only some of them: a request that needs a scope the plan leaves out is refused with 403 (reason \`not_in_plan\`), whatever scopes its key has.`,
         '',
-        `Limits: ${API_LIMITS.keyRate.refillPerSecond} requests a second per key (bursts of ${API_LIMITS.keyRate.capacity}) and ${API_LIMITS.companyRate.refillPerSecond} per company; JSON bodies up to ${API_LIMITS.bodyBytes / 1024} KB.`,
+        `Limits: ${API_LIMITS.keyRate.refillPerSecond} requests a second per key (bursts of ${API_LIMITS.keyRate.capacity}) and ${API_LIMITS.companyRate.refillPerSecond} per company; JSON bodies up to ${API_LIMITS.bodyBytes / 1024} KB. Text cannot hold the NUL character (U+0000): a request with it anywhere in its query string or body is refused with 422, naming where it is.`,
         '',
         `POST /messages needs an \`Idempotency-Key\` header: a retry with the same key and body returns the first response (header \`Idempotent-Replayed: true\`) and never sends twice; responses are kept ${API_LIMITS.idempotencyHours} hours. Delivery itself follows WhatsApp: read the status with GET /messages/{id}.`,
         '',
@@ -535,7 +535,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         get: {
           operationId: 'listContacts',
           summary: 'Contacts, newest first',
-          description: `${scopeNote('contacts.read')} Filters combine: a contact matches all of them. Pages never skip or repeat a contact. A page filtered by \`tag\` or \`fields\` reads at most ${API_CONTACT_SEARCH_WINDOW.toLocaleString('en-US')} of the company's contacts, newest first: when the filters leave out most of them, a page can hold fewer contacts than \`limit\`, or none, and still give a \`nextCursor\`; follow it until it is \`null\`.`,
+          description: `${scopeNote('contacts.read')} Filters combine: a contact matches all of them. Pages never skip or repeat a contact. A page filtered by \`name\`, \`tag\` or \`fields\` reads at most ${API_CONTACT_SEARCH_WINDOW.toLocaleString('en-US')} of the company's contacts, newest first: when the filters leave out most of them, a page can hold fewer contacts than \`limit\`, or none, and still give a \`nextCursor\`; follow it until it is \`null\`.`,
           parameters: [
             {
               name: 'limit',
@@ -559,6 +559,13 @@ export function buildOpenApiDocument(serverUrl: string) {
               in: 'query',
               schema: { type: 'string', maxLength: 254 },
               description: 'Only contacts with this email address, whatever its case.',
+            },
+            {
+              name: 'name',
+              in: 'query',
+              schema: { type: 'string', minLength: 1, maxLength: 200 },
+              description:
+                'Only contacts whose name contains this text, as members’ search finds them: letters whatever their case (as the database’s locale folds them), the text as written (`%` and `_` are characters, not patterns), without the spaces at its ends. Contacts without a name never match.',
             },
             {
               name: 'tag',

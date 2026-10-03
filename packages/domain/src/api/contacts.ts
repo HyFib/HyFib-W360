@@ -208,9 +208,9 @@ function checkFieldChanges(
 export const MAX_FIELD_FILTERS = 5;
 
 /**
- * The most contacts one page of a list filtered by tag or custom field reads (ADR-113), whatever it
- * shows: filters that leave out most of a company's contacts give short pages, never a scan of every
- * contact it has (as the message feed reads, ADR-088).
+ * The most contacts one page of a list filtered by name, tag or custom field reads (ADR-113,
+ * ADR-124), whatever it shows: filters that leave out most of a company's contacts give short pages,
+ * never a scan of every contact it has (as the message feed reads, ADR-088).
  */
 export const API_CONTACT_SEARCH_WINDOW = 2000;
 
@@ -304,10 +304,14 @@ export function contactListQuery(raw: unknown): unknown {
   return query;
 }
 
-/** The email address and tag a contact list is filtered by, written as the app keeps them. */
-export function apiContactListFilters(query: { email?: string; tag?: string }): {
+/**
+ * The email address and tag a contact list is filtered by, written as the app keeps them, and the
+ * part of a name it looks for (ADR-124) without the spaces at its ends, as names are saved.
+ */
+export function apiContactListFilters(query: { email?: string; tag?: string; name?: string }): {
   email: string | null;
   tag: string | null;
+  name: string | null;
 } {
   let email: string | null = null;
   if (query.email !== undefined) {
@@ -322,7 +326,12 @@ export function apiContactListFilters(query: { email?: string; tag?: string }): 
     if (!checked.ok) throw invalidField('tag', checked.message);
     tag = checked.tag;
   }
-  return { email, tag };
+  let name: string | null = null;
+  if (query.name !== undefined) {
+    name = query.name.trim();
+    if (!name) throw invalidField('name', 'Give part of a name to find.');
+  }
+  return { email, tag, name };
 }
 
 /**

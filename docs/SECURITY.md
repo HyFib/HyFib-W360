@@ -603,6 +603,18 @@ Phase 5 rules (Public API, P5-08):
   fields before use, and keys, tags and values are bound parameters, never part of the SQL text. A
   page filtered by tag or field reads at most 2,000 contacts, so a rare value cannot make one request
   read every contact a company has.
+- Finding contacts by name (ADR-124): `name` on `GET /contacts` reads the key's company's live
+  contacts only (`contacts.read`, the company's scope), as the other filters do. The text is a bound
+  parameter with `%`, `_` and `\` escaped, so it is never SQL and never a pattern, and a page
+  filtered by it reads at most 2,000 contacts, so a text no name holds cannot make one request read
+  every contact a company has. Names come in the query string, which the app's request log leaves
+  out (it records the path); access logs at the edge are deployment's to strip or keep short
+  (DEPLOYMENT).
+- Text holding the NUL character (ADR-124): every API request's query parameters and JSON body are
+  checked before its handler runs, and one holding U+0000, which PostgreSQL text cannot store, is
+  refused with 422 naming where, instead of failing in a query as an internal error that a client
+  could repeat to fill error logs and alerts. The body is walked without recursion, so no nesting
+  exhausts the stack.
 - Following contact changes (ADR-114): `GET /contact-changes` reads the key's company's changes
   only (`contacts.read`, RLS and an explicit company filter). Its cursor, a database transaction id
   and a row id, is sealed with the keyring (AES-256-GCM) with the company in the associated data, so

@@ -4676,3 +4676,47 @@ Decision:
 
 Not built: field keys chosen one by one, filters for `contact.created` or `contact.erased`, and
 filters on a contact's values (a tag, a field's value).
+
+## ADR-124 Finding contacts by name through the public API (2026-10-03)
+
+Context: `GET /contacts` finds contacts by number, email address, tag and custom field values
+(ADR-113), and `POST /contacts/search` with segments' conditions (ADR-117), but neither finds them
+by name: both list it as not built. An integration that knows a person only by name (a support tool
+looking up "Asha Rao", a CRM matching a contact before it has the number) had to read every contact
+the company has. Members find contacts by typing part of a name in Contacts' search.
+
+Decision:
+
+- **A `name` filter on `GET /contacts`:** contacts whose name contains the given text, compared as
+  members' search compares names (the same `ilike`): letters whatever their case, the text as
+  written (`%` and `_` are characters, not patterns), without the spaces at its ends (names are
+  saved without them). 1 to 200 characters, the longest name a contact holds; an empty value is
+  refused with 422 naming `name`, and so is a longer one. It combines with the other filters (a
+  contact must match all of them); contacts without a name never match, and erased contacts are
+  left out as always. Members' search also reads digits as a number and matches emails; the filter
+  reads names only (`phone` and `email` find those exactly).
+- **Letters' case as the database's locale folds it:** `ilike` lowers letters by the database's
+  `LC_CTYPE`. With a UTF-8 locale such as `en_US.UTF-8` (the test and CI databases) accented
+  letters fold too (`ÉLODIE` finds `Élodie`); with the `C` locale only ASCII letters do. Letters
+  whose other case is longer (`ß` and `SS`) do not match each other, and accents count (`Elodie`
+  does not find `Élodie`). DEPLOYMENT asks for a UTF-8 locale when the database is created.
+- **Windows, not scans:** a page filtered by name reads at most 2,000 of the company's contacts,
+  newest first, as one filtered by tag or field does (ADR-113): no index serves "contains" (one
+  would need the `pg_trgm` extension, a decision of its own), so the filter alone would otherwise
+  read every contact a company has for one short page. Pages can be short or empty and still give
+  `nextCursor`; they never skip or repeat a contact.
+- **No migration and no index;** scope `contacts.read`, as listing contacts needs.
+- **Also fixed: text holding the NUL character.** PostgreSQL text cannot hold U+0000, and a request
+  with it in a query parameter or a JSON string reached the database and failed there as an
+  internal error (500, logged as a failure) in any endpoint, from a contact's name to a reply's text
+  or a field filter. The API now refuses such a request with 422 `validation_failed` naming where
+  the character is (the parameter as sent, or the body's path such as `contacts.1.name`) before
+  anything reads it. The body is walked without recursion, so no nesting a 64 KB body allows can
+  exhaust the stack. Other control characters are kept, as before.
+
+Not built: a name condition in `POST /contacts/search` (its conditions are segments' conditions,
+which have no name; adding one changes segments too), matching names whatever their accents or
+Unicode form (a name saved with combining accents is found only by text written the same way),
+fuzzy or phonetic matching, finding contacts by part of an email, an index for names, and the same
+check in members' forms and searches and in provider payloads, which still fail as before when they
+hold the character.

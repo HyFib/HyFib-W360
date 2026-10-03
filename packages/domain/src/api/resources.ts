@@ -59,7 +59,7 @@ import {
   sendSpecFor,
   TEMPLATE_LIMITS,
 } from '../templates/definition';
-import { decodeKeysetCursor, parseInput } from '../validation';
+import { decodeKeysetCursor, likePattern, parseInput } from '../validation';
 import { apiContactById, toApiContact, type ApiContact } from './contact-view';
 import {
   apiContactFieldFiltersSchema,
@@ -110,6 +110,7 @@ export const apiContactListQuerySchema = z
     cursor: z.string().max(200).optional().describe('`nextCursor` from the previous page.'),
     phone: z.string().max(40).optional().describe('Only the contact with this number.'),
     email: z.string().max(254).optional().describe('Only contacts with this email address.'),
+    name: z.string().max(200).optional().describe('Only contacts whose name contains this text.'),
     tag: z.string().max(40).optional().describe('Only contacts with this tag.'),
     fields: apiContactFieldFiltersSchema.optional(),
   })
@@ -611,10 +612,10 @@ export async function apiListTemplates(
 
 /**
  * The company's contacts newest first on exact keyset pages, found by number, email address, tag
- * and custom field values (ADR-113), all of which a contact must match. A page filtered by tag or
- * field reads at most API_CONTACT_SEARCH_WINDOW contacts: when the filters leave out most of them it
- * shows fewer than the limit, or none, and its cursor continues after the last one it read. Both
- * reads see one snapshot.
+ * and custom field values (ADR-113) and part of the name (ADR-124), all of which a contact must
+ * match. A page filtered by name, tag or field reads at most API_CONTACT_SEARCH_WINDOW contacts:
+ * when the filters leave out most of them it shows fewer than the limit, or none, and its cursor
+ * continues after the last one it read. Both reads see one snapshot.
  */
 export async function apiListContacts(
   deps: Pick<OutboundDeps, 'db'>,
@@ -625,7 +626,7 @@ export async function apiListContacts(
   const q = parseInput(apiContactListQuerySchema, contactListQuery(query));
   const cursor = decodeKeysetCursor(q.cursor);
   const phone = q.phone ? explicitPhone(q.phone) : null;
-  const { email, tag } = apiContactListFilters(q);
+  const { email, tag, name } = apiContactListFilters(q);
   return deps.db.run(
     ctx.scope,
     async (tx) => {
@@ -634,6 +635,8 @@ export async function apiListContacts(
         filters.push(sql`exists (select 1 from app.contact_tags t where t.tenant_id = ${contacts.tenantId}
           and t.contact_id = ${contacts.id} and t.tag = ${tag})`);
       }
+      // As members' search compares names: letters whatever their case, the text as written.
+      if (name) filters.push(sql`${contacts.displayName} ilike ${likePattern(name)}`);
       return apiContactPage(tx, ctx.tenant.id, {
         cursor,
         limit: q.limit,

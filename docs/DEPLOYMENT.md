@@ -60,7 +60,9 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
 
 ## First-time database setup
 
-1. Create the database (provider console) and an administrative login.
+1. Create the database (provider console) and an administrative login. Use a UTF-8 locale such as
+   `en_US.UTF-8` (not `C`): searches for contacts by name, members' and the API's (ADR-124), fold
+   letters' case by the database's locale, and with `C` only ASCII letters fold.
 2. Run `infra/db/bootstrap-roles.sql` once with passwords from the secret manager (PostgreSQL 16+
    required for `GRANT … WITH INHERIT FALSE, SET TRUE`).
 3. Store the four role connection strings in the secret manager: migrate (owner), app, auth,
@@ -123,6 +125,9 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    before it neither show nor change the column: until the web rollout ends, an old server's
    change that drops `contact.updated` from an endpoint with parts fails on the check (it works once
    the rollout ends), and its other changes keep them.
+   ADR-124 adds no migration; until the web rollout ends, a server from before it refuses
+   `GET /api/v1/contacts?name=` with 422 (a parameter it does not know) and still answers a
+   request holding the NUL character with 500.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
@@ -200,6 +205,16 @@ authenticated by Meta's signature and the flow's encryption key, not by a sessio
   (they send every request); the app does not limit the route.
 - **Logs.** The app logs an outcome code and ids per request. Access logs must not record request
   bodies (they are encrypted, but keep them out of logs anyway).
+
+## Public API
+
+`/api/v1/*` (ADR-052) authenticates with company API keys. The app's request log holds the method,
+path, status, company and key of each request, never its query string or body.
+
+- **Access logs.** Query strings can hold personal data: `GET /api/v1/contacts` finds contacts by
+  number, email address and part of a name (ADR-113, ADR-124). Load-balancer or CDN access logs must
+  leave out the query strings of `/api/v1/*`, or be kept short-lived and named in the privacy
+  notice.
 
 ## Razorpay
 

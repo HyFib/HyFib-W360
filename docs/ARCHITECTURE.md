@@ -844,7 +844,10 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   company's bucket); over the limit answers 429 with `Retry-After`. Buckets that are full again are
   deleted by the minute messaging sweep (`ops.purge_rate_limit_buckets`, 0041, ADR-068). Then the
   request is counted against the plan's monthly API requests (below). JSON
-  bodies need `Content-Type: application/json` and at most 64 KB. Writing scopes
+  bodies need `Content-Type: application/json` and at most 64 KB. A query parameter or JSON string
+  holding the NUL character (U+0000), which PostgreSQL text cannot store, is refused with 422 naming
+  where before the handler runs (`assertNoNulCharacter`, `api/request-text.ts`, ADR-124; the body
+  is walked without recursion). Writing scopes
   are refused while the company is suspended or restricted (reading continues). Errors are
   `{"error": {"code", "message", "reason"?, "issues"?}, "requestId"}` with the status of the
   application error; other failures are a generic 500 logged with the request id. Tokens are never
@@ -879,6 +882,10 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   contact of its range (`API_CONTACT_SEARCH_WINDOW`) and reads only down to it, so its cursor goes on
   past the window when few contacts match, as the message feed's does; both reads share a repeatable
   read snapshot.
+- **Finding contacts by name (ADR-124):** `name` on `GET /contacts` (`apiContactListFilters` trims
+  it and refuses it empty) adds `display_name ilike likePattern(name)` to the windowed filters, the
+  comparison members' search makes (`contacts/service.ts`), so a page filtered by name reads at most
+  `API_CONTACT_SEARCH_WINDOW` contacts, as one filtered by tag or field does.
 - **Searching contacts (ADR-117):** `POST /contacts/search` (`api/contact-search.ts`) parses
   segments' conditions less `last_message` and `campaign`, checks them against the company's fields
   with segments' rules (`fieldConditionProblem` and `comparisonTakesValue` in

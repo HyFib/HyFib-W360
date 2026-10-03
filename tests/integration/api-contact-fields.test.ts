@@ -35,7 +35,7 @@ import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './what
  * name, email, fields and tags with every refusal saving nothing, the field rows locked against a
  * deletion at the same time, and `contact.updated` for every change of a field's value, whoever
  * makes it, but not for a field renamed or deleted. Also the contact list's filters by email, tag
- * and custom field value, read in windows (ADR-113).
+ * and custom field value, read in windows (ADR-113), and by part of the name (ADR-124).
  */
 let fx: WhatsAppFixture;
 let receiver: Server;
@@ -1027,5 +1027,114 @@ describe('finding contacts (ADR-113)', () => {
     // Without a tag or field filter, a page is not windowed.
     const unfiltered = await apiListContacts(deps(), ctx, { limit: '3' });
     expect(names(unfiltered)).toEqual(['Bulk 1', 'Bulk 2', 'Bulk 3']);
+  });
+});
+
+describe('finding contacts by name (ADR-124)', () => {
+  const names = (page: { data: { name: string | null }[] }) => page.data.map((c) => c.name);
+
+  it('finds contacts by part of their name whatever its case, as members find them, with the other filters', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const service = contactsService();
+    const asha = await service.createContact(owner, {
+      displayName: 'Asha Rao',
+      phone: nextPhone(),
+      email: 'asha@example.test',
+    });
+    await service.addTags(owner, asha.id, ['vip']);
+    await service.createContact(owner, { displayName: 'ASHA K', phone: nextPhone() });
+    await service.createContact(owner, { displayName: 'Élodie Martin', phone: nextPhone() });
+    await service.createContact(owner, { displayName: 'Ravi 100% Real', phone: nextPhone() });
+    await service.createContact(owner, { displayName: 'Bina_Shah', phone: nextPhone() });
+    // A contact without a name, an erased one and another company's never match.
+    await service.createContact(owner, { phone: nextPhone(), email: 'noname@example.test' });
+    const gone = await service.createContact(owner, {
+      displayName: 'Asha Gone',
+      phone: nextPhone(),
+    });
+    await service.eraseContact(owner, { contactId: gone.id, suppress: false });
+    const other = await fx.company();
+    await contactsService().createContact(await fx.ctx(other, other.owner), {
+      displayName: 'Asha Other',
+      phone: nextPhone(),
+    });
+
+    const { ctx } = await apiKey(c, ['contacts.read']);
+    const find = async (query: Record<string, string>) =>
+      names(await apiListContacts(deps(), ctx, query));
+    expect(await find({ name: 'asha' })).toEqual(['ASHA K', 'Asha Rao']);
+    expect(await find({ name: '  RAO ' })).toEqual(['Asha Rao']);
+    expect(await find({ name: 'a r' })).toEqual(['Asha Rao']);
+    // Accented letters fold too with the UTF-8 locale of these databases.
+    expect(await find({ name: 'ÉLODIE' })).toEqual(['Élodie Martin']);
+    // The text as written: % and _ are characters, not patterns.
+    expect(await find({ name: '100%' })).toEqual(['Ravi 100% Real']);
+    expect(await find({ name: '%' })).toEqual(['Ravi 100% Real']);
+    expect(await find({ name: '_' })).toEqual(['Bina_Shah']);
+    expect(await find({ name: 'asha', tag: 'vip' })).toEqual(['Asha Rao']);
+    expect(await find({ name: 'asha', email: 'ASHA@example.test' })).toEqual(['Asha Rao']);
+    expect(await find({ name: 'K', tag: 'vip' })).toEqual([]);
+    expect(await find({ name: 'Other' })).toEqual([]);
+    expect(await find({ name: 'Gone' })).toEqual([]);
+    // Names only: members' search also reads emails and numbers, the filter does not.
+    expect(await find({ name: 'example' })).toEqual([]);
+    expect(await find({ name: '98111' })).toEqual([]);
+    expect((await apiListContacts(deps(), ctx, { name: 'asha' })).nextCursor).toBeNull();
+    // A key finds the contacts members find by the same text (no email holds it).
+    for (const q of ['asha', 'RAO', 'ÉLODIE', '100%', '%', '_', 'a r']) {
+      const members = (await service.listContacts(owner, { q })).items.map((i) => i.displayName);
+      expect([q, await find({ name: q })]).toEqual([q, members]);
+    }
+  });
+
+  it('refuses an empty name or one longer than a name can be, naming it', async () => {
+    const c = await fx.company();
+    const { ctx } = await apiKey(c, ['contacts.read']);
+    const empty = await refusal(apiListContacts(deps(), ctx, { name: '   ' }));
+    expect([empty.code, empty.paths, empty.error.publicMessage]).toEqual([
+      'validation_failed',
+      ['name'],
+      'Give part of a name to find.',
+    ]);
+    const long = await refusal(apiListContacts(deps(), ctx, { name: 'x'.repeat(201) }));
+    expect([long.code, long.paths]).toEqual(['validation_failed', ['name']]);
+    const { ctx: writer } = await apiKey(c, ['contacts.write']);
+    expect((await refusal(apiListContacts(deps(), writer, { name: 'asha' }))).code).toBe(
+      'forbidden',
+    );
+  });
+
+  it('reads a list filtered by name in windows, so pages can be short but never skip or repeat a contact', async () => {
+    const c = await fx.company();
+    const total = API_CONTACT_SEARCH_WINDOW + 5;
+    const edge = API_CONTACT_SEARCH_WINDOW;
+    // Contact n was created n seconds ago: "Pin n" for the newest, the two on each side of the first
+    // window's edge and the oldest; "Bulk n" for the rest.
+    await fx.query(
+      `INSERT INTO app.contacts (id, tenant_id, display_name, source, created_at)
+       SELECT gen_random_uuid(), $1,
+              CASE WHEN n IN (1, $3, $3 + 1, $2) THEN 'Pin ' ELSE 'Bulk ' END || n,
+              'api', now() - make_interval(secs => n)
+         FROM generate_series(1, $2::int) AS n`,
+      [c.tenant.id, total, edge],
+    );
+    const { ctx } = await apiKey(c, ['contacts.read']);
+    const pages = async (query: Record<string, string>) => {
+      const seen: (string | null)[][] = [];
+      let cursor: string | undefined;
+      for (let i = 0; i < 10; i += 1) {
+        const page = await apiListContacts(deps(), ctx, cursor ? { ...query, cursor } : query);
+        seen.push(names(page));
+        if (!page.nextCursor) return seen;
+        cursor = page.nextCursor;
+      }
+      throw new Error('the pages did not end');
+    };
+    const pins = ['Pin 1', `Pin ${edge}`, `Pin ${edge + 1}`, `Pin ${total}`];
+    expect(await pages({ name: 'PIN' })).toEqual([pins.slice(0, 2), pins.slice(2)]);
+    expect((await pages({ name: 'pin', limit: '1' })).flat()).toEqual(pins);
+    // A window can show nothing and still give the cursor past it.
+    expect(await pages({ name: `Pin ${total}` })).toEqual([[], [`Pin ${total}`]]);
   });
 });

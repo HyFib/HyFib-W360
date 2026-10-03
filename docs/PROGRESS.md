@@ -1,5 +1,81 @@
 # Progress
 
+## 2026-10-03 — Phase 5: finding contacts by name through the public API (P5-08, ADR-124)
+
+Status: **Implemented and locally verified (test data only).** `GET /contacts` found contacts by
+number, email, tag and custom field values (ADR-113) and `POST /contacts/search` by segments'
+conditions (ADR-117), but neither by name: an integration that knew a person only by name read
+every contact the company had. While building it, a request holding the NUL character was found to
+fail in the database as an internal error, in any endpoint.
+
+### Completed
+
+- **Design (ADR-124):** `name` on `GET /contacts` finds contacts whose name contains the text,
+  compared as members' search compares names (`ilike`): letters whatever their case (as the
+  database's locale folds them), the text as written (`%` and `_` are characters), without the
+  spaces at its ends; 1 to 200 characters, refused empty or longer with 422 naming `name`; combined
+  with the other filters; names only. A page filtered by name reads at most 2,000 contacts, as one
+  filtered by tag or field does. No migration and no index; scope `contacts.read`.
+- **Also fixed:** PostgreSQL text cannot hold U+0000, and a query parameter or JSON string holding it
+  failed in the database (500, logged as a failure). Every API request's query parameters and JSON
+  body are now checked before the handler runs, and such a request is refused with 422 naming where
+  (the parameter as sent, or the body's path such as `contacts.1.name`); the body is walked without
+  recursion. Without the check the e2e test's query got 500.
+- **Domain:** `apiContactListQuerySchema` takes `name`; `apiContactListFilters` trims it and refuses
+  it empty; `apiListContacts` adds `display_name ilike likePattern(name)` to the windowed filters.
+  `api/request-text.ts`: `nulCharacterPath` and `assertNoNulCharacter`. OpenAPI: the `name`
+  parameter, the window naming it, and the rule on the NUL character under Limits.
+- **Web:** `handleApiRequest` (`apps/web/src/server/api.ts`) calls `assertNoNulCharacter` with the
+  query and the parsed body before the handler.
+- **Tests:**
+  - Unit (`api.test.ts`, 4 and 4 changed): the name read as written without the spaces at its ends
+    and refused empty or longer than a name; the OpenAPI entries; the NUL character found in
+    parameters (by name, a name holding it written out), the body's values, keys, arrays and nested
+    values in order, the query first, other control characters kept, and through 50,000 levels of
+    nesting; the refusal as the API answers it (422, the path, the message).
+  - Integration (`api-contact-fields.test.ts`, 3): part of a name whatever its case, accented
+    letters, `%` and `_` as characters, names only (not emails or numbers), with a tag and an email,
+    never another company's, an erased or a nameless contact, and what members' search finds for the
+    same texts; an empty, a too long and an unscoped request refused; pages across a window's edge
+    with a limit of 1 and an empty first window.
+  - e2e (`api-contact-search.spec.ts`): a key finds contacts by part of a name, an accented one and
+    one with `%`; members' Contacts search shows the same contacts for the same text; an empty name
+    is refused, and the NUL character in a query, a contact's name and a search condition is refused
+    naming `name`, `name` and `conditions.0.tag`, with nothing saved.
+- **Docs:** ADR-124; SECURITY; THREAT-MODEL T137; RUNBOOKS (a name search finding fewer contacts, a
+  request refused for the NUL character); ARCHITECTURE; DEPLOYMENT (a UTF-8 locale for the
+  database, the rollout, and a Public API section: access logs leaving out API query strings);
+  BACKLOG P5-08; FEATURE-MATRIX W-134, H-033.
+- **Mutation checks:** 30 regressions tried, 30 caught:
+  - 8 in the filter's query (dropped, read without a window, compared with case, read as a pattern,
+    as a whole name, from the start only, with emails, on emails), 5 in reading it (the spaces kept,
+    an empty or longer text taken, the parameter unknown, never read), 12 in the NUL check
+    (parameters not checked or named by their value, keys, arrays and nested values not read, the
+    body read last to first, paths joined with slashes, the character not written out, its escape
+    taken for it, never refusing, a 400, no place named), 4 in OpenAPI and 1 through the e2e test
+    (the API not checking).
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                                                                                                                     | Result                                                   |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                        | clean                                                    |
+| `pnpm test`                                                                                                                                                 | 548 passed                                               |
+| `pnpm test:integration` on PostgreSQL 18.6 and 17.11                                                                                                        | 756 passed on each                                       |
+| `pnpm build`, then `api-contact-search.spec.ts`, `api-contact-fields.spec.ts` and `api.spec.ts` on chromium and mobile-chromium (database migrated to 0098) | 22 passed                                                |
+| Mutation checks                                                                                                                                             | 30 regressions tried, 30 caught (1 through the e2e test) |
+| gitleaks 8.30.1 on the commit                                                                                                                               | no leaks                                                 |
+
+### Known gaps
+
+- A name condition in `POST /contacts/search`, matching names whatever their accents or Unicode
+  form, fuzzy matching and an index for names are not built (ADR-124).
+- Members' forms and searches and provider payloads are not checked for the NUL character: members'
+  contact search with it still fails in the database (a probe through the contacts service), so the
+  Contacts page fails as an internal error.
+- Recorded as SEC-11 (BACKLOG): a query failing with an error the app does not map is logged whole,
+  and the driver's message repeats the query's parameters (names, emails, message text).
+
 ## 2026-10-03 — Phase 5: choosing the contact changes a webhook endpoint receives (P5-09, ADR-123)
 
 Status: **Implemented and locally verified (local test receivers only).** Since ADR-121 a

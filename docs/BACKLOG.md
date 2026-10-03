@@ -511,14 +511,18 @@ verification, app review, Embedded Signup configuration).
   `POST /contacts/update-many` changes the name, email, custom field values and tags of up to 100
   contacts, each as `PATCH` changes one, all of them or none, the fields locked first and the
   contacts in id order).
+  **[Finding contacts by name built, locally verified]** (ADR-124: `name` on `GET /contacts` finds
+  contacts whose name contains a text whatever its case, as members' search does, the text taken as
+  written, on the windowed pages of the other filters; a request whose query string or body holds
+  the NUL character is refused with 422 naming where, instead of failing in the database).
   Remaining: media messages, call-to-action messages through the API, taking reactions back,
   choosing conversations to change by a filter, media downloads, starting or stopping runs for many
   contacts in one call, bulk sends in one call, changing a field's type, changing numbers, choosing
-  contacts to change by a filter, contact searches by name or by conversation and campaign
-  conditions, which fields of a contact changed in the contact feed (webhooks name them since
-  ADR-121), limits per endpoint, availability per single endpoint (plans choose per scope since
-  ADR-092). The one-argument key lookup kept for rolling deploys (0051) is dropped (0074). Replaying
-  many deliveries in one call is built with P5-09 (ADR-095).
+  contacts to change by a filter, contact searches by conversation and campaign conditions, a name
+  condition in `POST /contacts/search`, which fields of a contact changed in the contact feed
+  (webhooks name them since ADR-121), limits per endpoint, availability per single endpoint (plans
+  choose per scope since ADR-092). The one-argument key lookup kept for rolling deploys (0051) is
+  dropped (0074). Replaying many deliveries in one call is built with P5-09 (ADR-095).
 - **P5-09 Outgoing webhooks** **[built, locally verified; delivered to local test receivers only]**
   (ADR-053): up to 10 endpoints per company (`developer.manage`) for `message.received`,
   `message.status`, `consent.changed` and `template.status_changed`, captured by database triggers
@@ -647,3 +651,10 @@ review; production rollout per RELEASE-CHECKLIST.
 - **SEC-10** Keyring re-encryption job: re-encrypt every keyring ciphertext (provider tokens, HTTP
   secrets, flow private keys, stored webhook bodies) under the primary key so an old key can be
   removed (`Keyring.needsRotation` exists; the job does not).
+- **SEC-11** Keep failed queries' parameters out of error logs. A query that fails with an error the
+  app does not map is logged whole by the API's and server actions' error logs, the worker's job log
+  and several webhook routes, and the driver's message repeats the query's parameters (names,
+  emails, message text), against the logger's rule; `errorClassAndCode` (class and SQLSTATE only)
+  exists and webhook delivery uses it. Found with ADR-124, whose check now keeps the NUL character
+  from reaching queries; a probe of members' contact search with it showed the search text in the
+  error's message.
