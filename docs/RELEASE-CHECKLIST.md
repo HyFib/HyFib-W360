@@ -231,6 +231,10 @@ made. This checklist records the evidence required per gate; unchecked items blo
       admitted, and paying creates a Razorpay subscription for the amount with the packs; before the
       migration, confirm no company's automation run limit with its run packs passes 2,000,000,000
       (RUNBOOKS, "API request packs"); agree each version's pack size and price
+- [ ] A job signing key rotation (ADR-135) rehearsed on the same staging deployment, with a CRM
+      reminder and a campaign scheduled days ahead: the three deploys of RUNBOOKS §13, Operations →
+      Keys falling to no job signed with the previous key, then the reminder and the campaign
+      running on time with the new key only, and no `job.invalid_signature` security event
 - [ ] Tenant-isolation and security gates passing in CI on the release commit
 - [ ] Measured load behaviour against the test envelope (k6 results)
 - [ ] Backup restoration drill performed and timings recorded (RPO/RTO)
@@ -245,7 +249,6 @@ made. This checklist records the evidence required per gate; unchecked items blo
 - Provider documentation could not be fetched directly; research is search-derived (ADR-016).
 - Auto-recharge timing on Indian card mandates (≈36–72 h) constrains product behaviour.
 - Plaintext session tokens at rest in `auth.sessions` (restricted to `w360_auth`).
-- Job-signing key rotation requires a dual-key window (backlog SEC-4).
 
 ## Rollout and rollback
 

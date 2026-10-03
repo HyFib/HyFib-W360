@@ -2310,6 +2310,25 @@ that does not open with its key once (`a sealed value does not open with its key
 and company, never the value) and leaves it as it is; after 1,000 it stops re-encrypting until it
 restarts and logs an error naming `W360_ENCRYPTION_KEYS`: check that the old key's bytes are right.
 
+**Job signing keys (ADR-135)** are on the same tab: the signing key's id, the next or previous key's
+during a rotation, and how many jobs that can still run (waiting, running, failed) name each key.
+While a previous key is configured the worker signs the jobs it signed, and those signed before key
+ids, again with the signing key, up to 500 a minute, and logs `queued jobs signed again with the job
+signing key`; once none is left the page says the previous key can be removed (section 13). A
+running job is signed again once it waits for its retry. The worker logs a queued job that does not
+verify with any key once (`a queued job does not verify with any job signing key`, with its queue
+and id, never its data) and leaves it as it is: its consumer refuses it (`job.invalid_signature`)
+whatever the configuration, so it stays counted under the key it names; cancel it in pg-boss if it
+should not wait for that. After 1,000 such jobs a worker stops signing jobs again until it restarts
+and logs an error naming `W360_JOB_SIGNING_KEY_PREVIOUS`: check that the previous key's value is
+right. "Jobs that will be refused" name a key that is not configured.
+
+**Migration 0102 failed.** It only creates `ops.job_signing_key_counts`, in one transaction; a
+failure rolls it back (usually the bootstrap roles: fix them and run the migrations again). The
+migration runner then grants the definer the data of pg-boss's jobs. Workers of the previous release
+sign no job again and accept no next or previous key; web servers of the previous release show no
+job signing keys.
+
 **Migration 0101 failed.** It replaces `app.touch_updated_at` (the shared trigger function, which
 then keeps a row's time while `w360.resealing` is on), grants the definer the sealed columns and a
 read policy on HTTP secrets, and creates `ops.sealed_value_keys`, `ops.sealed_values_to_reseal`,
@@ -2463,6 +2482,25 @@ See `docs/SECURITY.md#secret-and-key-rotation` for every secret. The encryption 
    deploy.
 4. A value that does not open with its key stays sealed with it (section 10P, Keys); removing the
    key changes nothing for it, since nothing could open it before.
+
+The job signing key (`W360_JOB_SIGNING_KEY`, ADR-135), one rotation at a time, once every web server
+and worker runs a release with ADR-135:
+
+1. Generate the new key (`openssl rand -hex 32`), set it as `W360_JOB_SIGNING_KEY_NEXT` and deploy
+   web and worker. Every instance accepts jobs signed with it; nothing signs with it yet. Operations
+   → Keys shows it as the next key.
+2. Once every instance runs with it, set `W360_JOB_SIGNING_KEY` to the new key and
+   `W360_JOB_SIGNING_KEY_PREVIOUS` to the old one, unset `W360_JOB_SIGNING_KEY_NEXT`, and deploy.
+   New jobs are signed with the new key, jobs the old key signed still run, and the worker's minute
+   sweep signs the waiting, retrying and failed ones again with the new key, up to 500 a minute.
+   During each rollout every instance accepts what any other signs.
+3. Once every instance runs with the new key and Operations → Keys shows no job that can still run
+   signed with the previous key (or with no key id), unset `W360_JOB_SIGNING_KEY_PREVIOUS` and
+   deploy. A job left there that does not verify is refused whatever the configuration (section 10P,
+   Keys).
+4. If the old key leaked, do step 1, then in step 2 sign with the new key without setting a previous
+   one: jobs the old key signed are refused (each recorded as `job.invalid_signature`, critical),
+   and the sweeps signal their work again from its durable rows.
 
 ## 14. Queue policy changes
 

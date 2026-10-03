@@ -132,6 +132,12 @@ test('staff read the operations console and repair a quarantined webhook event',
     byKind.getByRole('row').filter({ hasText: 'Provider webhook bodies' }),
   ).toBeVisible();
   await expect(page.getByText('Values that cannot be opened')).toHaveCount(0);
+  // Job signing (ADR-135): one signing key here, so no rotation and no job that will be refused.
+  await expect(page.getByRole('heading', { name: 'Job signing keys' })).toBeVisible();
+  await expect(page.getByText(/no rotation is in progress/)).toBeVisible();
+  const signing = page.getByRole('table', { name: 'Job signing keys' });
+  await expect(signing.getByRole('row').filter({ hasText: 'Signs new jobs' })).toHaveCount(1);
+  await expect(page.getByText('Jobs that will be refused')).toHaveCount(0);
   await expectNoHorizontalOverflow(page);
 
   // Both repairs are in the platform audit log; the company page shows its health.

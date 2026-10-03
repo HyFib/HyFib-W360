@@ -5259,3 +5259,57 @@ key until integrations have read a page since the rotation.
 
 Not built: re-encrypting on demand from the console, alerts when values do not open (the worker
 logs them), and rotating the job signing key (SEC-4) or Better Auth's secret.
+
+## ADR-135 Rotating the job signing key without draining the queues (SEC-4) (2026-10-03)
+
+Context: every job carries an envelope signed with `W360_JOB_SIGNING_KEY` when it is queued
+(ADR-008, ARCHITECTURE §4), and a worker refuses a job whose signature does not verify
+(recorded as `job.invalid_signature`, critical). The key could only be replaced by draining every
+queue first (SECURITY's rotation table, SEC-4): a web server or worker still on the old key refuses
+what the new key signed and the reverse, and a CRM reminder, a scheduled campaign, an automation's
+wait or a store message can stay queued for months, signed with the old key.
+
+Decision:
+
+- **Two optional keys, one rotation at a time.** `W360_JOB_SIGNING_KEY_NEXT` is accepted before any
+  instance signs with it; `W360_JOB_SIGNING_KEY_PREVIOUS` is the key being retired, still accepted.
+  Configuration refuses both at once, either equal to the signing key, either shorter than 32
+  characters, and (in production) a development placeholder. Rotating takes three deploys: add the
+  new key as NEXT everywhere; then sign with it and make the old key PREVIOUS; then remove PREVIOUS
+  once no job that can still run was signed with it. During each deploy's rollout every instance,
+  old or new, accepts what any other signs.
+- **An envelope names its key** (`kid`: 16 hexadecimal characters of an HMAC of the key, which does
+  not reveal it). The name is outside the signature, so web servers and workers of the previous
+  release, which drop fields they do not know, still verify this release's envelopes. It is not
+  trusted: verification tries every configured key, and a verified envelope is returned naming the
+  key that verified it. Envelopes signed before key ids carry none.
+- **The minute sweep signs queued jobs again while a previous key is configured.** It looks up, at
+  most 500 a minute, jobs waiting, retrying or failed (pg-boss keeps a failed job, which the console
+  can retry, ADR-108) whose envelope names the previous key or no key, verifies each, and writes the
+  same contents and time signed with the signing key, with a compare and set on the job's state and
+  signature, so a job a worker fetched, or whose data changed, meanwhile is left as it is. A job
+  that does not verify is never signed: it is left as it is, logged once by queue and id (never its
+  data), and its consumer refuses it as before; after 1,000 a worker stops and logs an error naming
+  `W360_JOB_SIGNING_KEY_PREVIOUS`. Running and finished jobs are left alone (a running job that
+  fails is signed again once it waits for its retry). After a lookup finds nothing the next waits
+  an hour: only an instance still on the previous configuration signs with the previous key. The
+  runtime role writes pg-boss's jobs itself, as pg-boss does; the lookup scans pg-boss's job table,
+  only while a previous key is configured.
+- **Operations → Keys** shows the job signing key ids and, for each key a job's envelope names, how
+  many jobs that can still run (waiting, running, failed) name it: `ops.job_signing_key_counts`
+  (security definer, platform administrators only, key ids, states and counts) reads pg-boss's job
+  data, which the migration runner now lets the definer read. The page says when the previous key
+  signs nothing left and can be removed, and counts jobs naming a key that is not configured (their
+  consumer will refuse them).
+
+What follows: rotating the job signing key is three configuration changes and a wait (runbook §13);
+no queue is drained and no job is refused. A job that does not verify stays counted under the key
+it names (the worker logs it): its consumer refuses it whatever the configuration. If the old key
+leaked, waiting while it is accepted keeps it usable to whoever holds it and can write to pg-boss's
+jobs, and the sweep would sign what they forged again: then do the first deploy, and in the second
+sign with the new key without a previous one, accepting that jobs the old key signed are refused
+(each recorded as `job.invalid_signature`) and that the sweeps signal their work again from the
+durable rows it belongs to (ARCHITECTURE §4).
+
+Not built: rotating on demand from the console, alerts for jobs that do not verify (the worker logs
+them), rotating Better Auth's secret.

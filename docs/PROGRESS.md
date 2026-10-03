@@ -1,5 +1,91 @@
 # Progress
 
+## 2026-10-03 — Phase 5: rotating the job signing key without draining the queues (SEC-4, ADR-135)
+
+Status: **Implemented and locally verified (test data and the provider stand-ins only).** The job
+signing key could only be replaced by draining every queue first: an instance on the old key
+refused what the new key signed, and reminders, scheduled campaigns and automation waits stay
+queued for months signed with the key of their day (SEC-4).
+
+### Completed
+
+- **Design (ADR-135):** a rotation takes three deploys, one rotation at a time: the next key is
+  accepted before any instance signs with it, then the previous key is accepted while the worker
+  signs the queued jobs it signed again with the signing key, then it is removed once Operations →
+  Keys shows no job that can still run signed with it.
+- **Configuration:** `W360_JOB_SIGNING_KEY_NEXT` and `W360_JOB_SIGNING_KEY_PREVIOUS` (optional, at
+  least 32 characters, never both, never equal to the signing key, no development placeholder in
+  production).
+- **Contracts and domain:** envelopes name their key (`kid`, derived from the key, outside the
+  signature so that the previous release still verifies them); `JobSigner` takes the rotation's
+  other key, tries every configured key whatever an envelope names, returns the key that verified
+  it, and signs a verified envelope again with the same contents and time (`resign`);
+  `resignQueuedJobs` (the sweep's part: waiting, retrying and failed jobs naming the previous key or
+  none, up to 500 a minute, a compare and set on each job's state and signature, jobs that do not
+  verify reported once and left as they are, an hour's wait after a lookup that found nothing, stop
+  after 1,000); `jobSigningOverview` and the operations service's `jobSigning`.
+- **Database** (migration 0102): `ops.job_signing_key_counts` (key ids, states and counts of jobs
+  that can still run, for platform administrators); the migration runner grants the definer the
+  data of pg-boss's jobs for it.
+- **Worker:** the messaging sweep calls it every minute and logs counts, queues and job ids only.
+- **Web:** Operations → Keys gains a job signing card (key ids and roles, jobs waiting, running and
+  failed for each key, whether the previous key can be removed, jobs that will be refused).
+- **Tests:**
+  - Unit (14 new): the key id is derived and outside the signature (an envelope from before key ids
+    verifies); the named key is not trusted; the three steps accept and sign with the right keys;
+    a verified envelope signed again keeps its contents and time, nothing forged or tampered is;
+    refused rotations (both keys, the signing key again, a short key); no lookup without a previous
+    key, within the idle hour or once stopped; the console's keys, roles and counts; reading counts;
+    configuration (one rotation at a time, keys that differ, at least 32 characters, placeholders in
+    production).
+  - Integration (real PostgreSQL and pg-boss; 3 new): waiting, scheduled (90 days ahead), key-less,
+    retrying, failed and dead-lettered jobs the previous key signed are signed again with the same
+    contents, time, state, start and retries, and a worker with only the new key authorizes them;
+    forged, tampered, running, finished and already current jobs are untouched, a forged job is
+    reported once, the idle hour holds, and a running job that fails is signed again after it; the
+    console's counts before and after; a job a worker fetched, or whose data changed, between the
+    lookup and the write is left as it is; counts for platform administrators only, finished jobs
+    and data that is no envelope not counted, the function a definer with a pinned search path run
+    by the platform role only, and the definer reading but not writing a job's data.
+  - E2E: the operations console's test checks the job signing card (one key: no rotation, the
+    signing key's row, no job that will be refused).
+- **Docs:** ADR-135; SECURITY (rotation table, known gaps); RUNBOOKS (§13 job signing key, Keys tab,
+  migration 0102); THREAT-MODEL T147; BACKLOG SEC-4 settled; RELEASE-CHECKLIST (a rehearsal on
+  staging); ARCHITECTURE (envelope, minute sweep); `.env.example`.
+- **Mutation checks:** 48 deliberate regressions tried, 48 caught.
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                                                                                 | Result                                                                                                                                                       |
+| ----------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`                                                                      | clean                                                                                                                                                        |
+| `pnpm test` (unit)                                                                                                      | 634 passed (70 files; 14 new)                                                                                                                                |
+| `pnpm test:integration` on PostgreSQL 18.6                                                                              | 797 passed (54 files; 3 new)                                                                                                                                 |
+| `pnpm test:integration` on PostgreSQL 17.11                                                                             | 797 passed (54 files)                                                                                                                                        |
+| `pnpm db:migrate` on a database at 0101                                                                                 | 0102 applied; the definer then reads `pgboss.job.data`                                                                                                       |
+| `pnpm build`                                                                                                            | passed                                                                                                                                                       |
+| e2e: platform-ops, dead-letter-retry, crm, campaigns, automations, inbox, stores, templates (chromium, mobile-chromium) | 30 passed                                                                                                                                                    |
+| By hand: built worker in step 2 (a new key signing, the e2e key previous) on the e2e database                           | its first sweep signed 10 queued jobs again (8 left by the e2e run, a reminder due in 5 minutes, one due in 40 days); none named the old key after; no error |
+| By hand: built worker in step 3 (the new key only)                                                                      | the reminder signed again ran on time; one queued with the old key after step 2 was refused (one `job.invalid_signature`, none before)                       |
+| By hand: built web server in step 2, Operations → Keys                                                                  | "Signing jobs again" with one job under the previous key, then "Signed again" after a step-2 worker's sweep                                                  |
+| Mutation checks                                                                                                         | 48 tried, 48 caught                                                                                                                                          |
+| gitleaks 8.30.1 on the staged changes                                                                                   | no leaks found                                                                                                                                               |
+
+The first integration run failed one existing assertion on both versions: ADR-108's test of the
+definer's job columns, which listed its grant before `data` was added for the counts. The test now
+lists `data` among the columns the definer reads (and still not among those it writes); the rerun
+above is clean.
+
+### Known gaps
+
+- Rotation cannot be started from the console; jobs that do not verify are logged by the worker,
+  not alerted.
+- If the old key leaked, the runbook skips the previous key, so jobs it signed are refused and their
+  work is signalled again from its durable rows (ADR-135).
+- Better Auth's secret still rotates as SECURITY describes (everyone signs in again).
+- The worker's call of the sweep and the three deploys are checked by hand only (CI and the e2e
+  environment configure one key): see the results.
+
 ## 2026-10-03 — Phase 5: re-encrypting stored secrets under the primary key (SEC-10, ADR-134)
 
 Status: **Implemented and locally verified (test data and the provider stand-ins only).** Making a

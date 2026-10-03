@@ -26,6 +26,11 @@ import {
 } from '@w360/db';
 import type { PlatformDatabase } from '@w360/db/platform';
 import { keyringOverview, parseSealedValueCounts, type KeyringOverview } from '../keyring/reseal';
+import {
+  jobSigningOverview,
+  parseJobSigningKeyCounts,
+  type JobSigningOverview,
+} from '../jobs/resign';
 import { MAX_RECEIPT_ATTEMPTS } from '../messaging/receipts';
 import type { QueueInspector, QueueSnapshot } from '../jobs/queue';
 import { QUEUE_CHECK_FRESH_MINUTES } from './queue-waits';
@@ -59,6 +64,12 @@ export interface PlatformOpsDeps {
   clock: Clock;
   /** The configured encryption key ids (ADR-134); never the keys. */
   keyring: { readonly currentKeyId: string; readonly keyIds: readonly string[] };
+  /** The configured job signing key ids (ADR-135); never the keys. */
+  jobSigning: {
+    readonly keyId: string;
+    readonly nextKeyId: string | null;
+    readonly previousKeyId: string | null;
+  };
 }
 
 const DAY_MS = 86_400_000;
@@ -603,6 +614,20 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
         ),
       );
       return keyringOverview(deps.keyring, parseSealedValueCounts(counts.rows));
+    },
+
+    /**
+     * Job signing (ADR-135): the configured key ids and how many jobs that can still run name each
+     * (`ops.job_signing_key_counts`, counts only), so staff see when a previous key signs nothing
+     * left and can be removed.
+     */
+    async jobSigning(actor: PlatformActor): Promise<JobSigningOverview> {
+      const counts = await platformDb.run(actor.userId, (tx) =>
+        tx.execute<{ key_id: string | null; state: string; jobs: string }>(
+          sql`select key_id, state, jobs from ops.job_signing_key_counts()`,
+        ),
+      );
+      return jobSigningOverview(deps.jobSigning, parseJobSigningKeyCounts(counts.rows));
     },
 
     /**

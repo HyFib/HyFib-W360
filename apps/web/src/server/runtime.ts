@@ -280,7 +280,11 @@ async function init(): Promise<Runtime> {
   await boss.start();
 
   const jobs = new PgBossJobQueue(boss);
-  const signer = new JobSigner(config.W360_JOB_SIGNING_KEY);
+  // During a job signing key rotation, the next or previous key is accepted too (ADR-135).
+  const signer = new JobSigner(config.W360_JOB_SIGNING_KEY, {
+    next: config.W360_JOB_SIGNING_KEY_NEXT,
+    previous: config.W360_JOB_SIGNING_KEY_PREVIOUS,
+  });
   const outbox = { keyring, jobs, signer };
   const auth = createAuth({ config, authPool, db, outbox, logger });
 
@@ -306,6 +310,7 @@ async function init(): Promise<Runtime> {
     queues: pgBossQueueInspector(boss),
     clock: systemClock,
     keyring,
+    jobSigning: signer,
   });
   const platformBilling = createPlatformBillingService({ platformDb });
   const platformReconciliation = createPlatformReconciliationService({ platformDb });

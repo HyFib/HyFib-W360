@@ -134,7 +134,9 @@ so grants issued after the transfer would silently grant nothing (migration 0002
 - Jobs are **signals for durable rows** (outbox rows, webhook receipts, send intents). Sweepers
   re-signal rows whose job was lost, so correctness never depends on one enqueue.
 - Enqueue can join the business transaction (`PgBossJobQueue.enqueue(tx, …)`).
-- Every job carries a signed envelope `{kind, tenantId, actorUserId, ref, issuedAt, sig}`. Workers
+- Every job carries a signed envelope `{kind, tenantId, actorUserId, ref, issuedAt, kid, sig}`;
+  `kid` names the signing key outside the signature, and verification tries every configured key
+  (the signing key, and during a rotation the next or the previous one, ADR-135). Workers
   call `authorizeJob`: verify HMAC, check company status (defer outbound work while suspended),
   check the actor's membership is still active, then load the referenced row under that company's
   RLS scope.
@@ -143,7 +145,8 @@ so grants issued after the transfer would silently grant nothing (migration 0002
   message (§6P), and platform administrators can send the failed job back to its queue once
   (ADR-108). The minute sweep ends, in the company's scope, the work of the three queues whose work
   no sweep signals again (ADR-111), and while a key other than the primary is configured it seals
-  stored secrets that key sealed again with the primary key (ADR-134).
+  stored secrets that key sealed again with the primary key (ADR-134); while a previous job
+  signing key is configured it signs the queued jobs that key signed again (ADR-135).
 - Workers stop gracefully on SIGTERM (stop fetching, wait up to 30 s, close pools).
 
 ## 5. Email **[built]**

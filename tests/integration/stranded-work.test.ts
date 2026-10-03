@@ -102,6 +102,7 @@ const ops = () =>
     queues: pgBossQueueInspector(fx.boss),
     clock: systemClock,
     keyring: fx.keyring,
+    jobSigning: fx.signer,
   });
 
 async function expectCode(promise: Promise<unknown>, code: string, message?: RegExp) {

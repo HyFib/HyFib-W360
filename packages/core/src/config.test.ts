@@ -215,3 +215,59 @@ describe('egress for local test targets', () => {
     }
   });
 });
+
+describe('job signing key rotation (ADR-135)', () => {
+  const local = { ...base, APP_ENV: 'local', APP_BASE_URL: 'http://localhost:3000' };
+  const production = {
+    ...base,
+    APP_ENV: 'production',
+    NODE_ENV: 'production',
+    APP_BASE_URL: 'https://w360.example.net',
+  };
+
+  it('accepts a next key or a previous key, one rotation at a time', () => {
+    expect(
+      loadWorkerConfig({ ...local, W360_JOB_SIGNING_KEY_NEXT: 'n'.repeat(64) })
+        .W360_JOB_SIGNING_KEY_NEXT,
+    ).toBe('n'.repeat(64));
+    expect(
+      loadWebConfig({ ...local, W360_JOB_SIGNING_KEY_PREVIOUS: 'p'.repeat(64) })
+        .W360_JOB_SIGNING_KEY_PREVIOUS,
+    ).toBe('p'.repeat(64));
+    expect(
+      loadWebConfig({ ...local, W360_JOB_SIGNING_KEY_NEXT: '' }).W360_JOB_SIGNING_KEY_NEXT,
+    ).toBeUndefined();
+    for (const load of [loadWebConfig, loadWorkerConfig]) {
+      expect(() =>
+        load({
+          ...local,
+          W360_JOB_SIGNING_KEY_NEXT: 'n'.repeat(64),
+          W360_JOB_SIGNING_KEY_PREVIOUS: 'p'.repeat(64),
+        }),
+      ).toThrow(/cannot both be set/);
+    }
+  });
+
+  it('refuses the signing key again, a short key and, in production, a placeholder', () => {
+    for (const load of [loadWebConfig, loadWorkerConfig]) {
+      expect(() =>
+        load({ ...local, W360_JOB_SIGNING_KEY_PREVIOUS: base.W360_JOB_SIGNING_KEY }),
+      ).toThrow(/W360_JOB_SIGNING_KEY_PREVIOUS must differ from W360_JOB_SIGNING_KEY/);
+      expect(() =>
+        load({ ...local, W360_JOB_SIGNING_KEY_NEXT: base.W360_JOB_SIGNING_KEY }),
+      ).toThrow(/W360_JOB_SIGNING_KEY_NEXT must differ from W360_JOB_SIGNING_KEY/);
+      expect(() => load({ ...local, W360_JOB_SIGNING_KEY_NEXT: 'n'.repeat(31) })).toThrow(
+        /W360_JOB_SIGNING_KEY_NEXT: must be at least 32 characters/,
+      );
+      expect(() =>
+        load({ ...production, W360_JOB_SIGNING_KEY_PREVIOUS: `changeme-${'p'.repeat(40)}` }),
+      ).toThrow(/W360_JOB_SIGNING_KEY_PREVIOUS looks like a development placeholder/);
+      expect(() =>
+        load({ ...production, W360_JOB_SIGNING_KEY_NEXT: `dev-only-${'n'.repeat(40)}` }),
+      ).toThrow(/W360_JOB_SIGNING_KEY_NEXT looks like a development placeholder/);
+      expect(load({ ...production, W360_JOB_SIGNING_KEY_NEXT: 'n'.repeat(64) }).APP_ENV).toBe(
+        'production',
+      );
+    }
+  });
+});

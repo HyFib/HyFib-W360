@@ -423,6 +423,14 @@ export const jobEnvelopeSchema = z.object({
   actorUserId: z.string().min(1).max(200).nullable(),
   ref: z.string().min(1).max(200),
   issuedAt: z.number().int().positive(),
+  /**
+   * The id of the key that signed the envelope (ADR-135), outside the signature so that releases
+   * before it, which drop unknown fields, still verify it. Absent from envelopes signed before.
+   */
+  kid: z
+    .string()
+    .regex(/^[0-9a-f]{16}$/)
+    .optional(),
   sig: z.string().regex(/^[0-9a-f]{64}$/),
 });
 

@@ -662,7 +662,11 @@ review; production rollout per RELEASE-CHECKLIST.
   automation HTTP step, the Flows data endpoint (P4-03) and outgoing webhooks (P5-09); imports
   must use it too. Remaining: a network
   egress policy as a second layer in deployment._
-- **SEC-4** Dual-key job signing for rotation without draining.
+- **SEC-4** ~~Dual-key job signing for rotation without draining.~~ Settled by ADR-135: a next key
+  is accepted before any instance signs with it, then the previous key is accepted while the
+  worker's minute sweep signs the queued jobs it signed again with the new one, so the job signing
+  key rotates in three deploys without draining a queue; Operations → Keys shows what each key still
+  signs.
 - **SEC-5** Hash-chained audit checkpoints exported to WORM storage.
 - **SEC-6** Media scanning pipeline (malware) before exposure.
 - **SEC-7** OpenTelemetry tracing/metrics, alert rules (queue lag, dead letters, error rates, auth

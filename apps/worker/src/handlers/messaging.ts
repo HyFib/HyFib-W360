@@ -13,6 +13,7 @@ import {
   findStaleReceipts,
   findStaleSendIntents,
   newResealState,
+  newResignState,
   noticeApiKeyUsageDue,
   processChannelOnboarding,
   processMetaWebhookReceipt,
@@ -25,6 +26,8 @@ import {
   remindExpiringApiKeys,
   resealStoredValues,
   RESEAL_SKIP_LIMIT,
+  resignQueuedJobs,
+  RESIGN_SKIP_LIMIT,
   routeDueConversations,
   settleStrandedWork,
 } from '@w360/domain';
@@ -160,12 +163,14 @@ export function channelOnboardHandler(rt: WorkerRuntime) {
  * signal, route waiting conversations of round-robin teams, remind companies of API keys that
  * expire soon, delete rate limit buckets that are full again, end work whose job ran out of
  * retries where its company sees it, re-encrypt stored secrets under the primary key while another
- * key is configured, alert platform staff to work that failed for good, and check how long jobs
- * wait in each queue.
+ * key is configured, sign queued jobs again while a previous job signing key is configured, alert
+ * platform staff to work that failed for good, and check how long jobs wait in each queue.
  */
 export function messagingSweepHandler(rt: WorkerRuntime) {
   // Values this worker could not open and when it next looks for values to re-encrypt (ADR-134).
   const reseal = newResealState();
+  // Jobs this worker could not verify and when it next looks for jobs to sign again (ADR-135).
+  const resign = newResignState();
   return async (): Promise<void> => {
     const receipts = await findStaleReceipts(rt);
     for (const id of receipts) {
@@ -312,6 +317,30 @@ export function messagingSweepHandler(rt: WorkerRuntime) {
       rt.logger.info(
         { resealed: resealed.resealed, changed: resealed.changed },
         'sealed values re-encrypted under the primary key',
+      );
+    }
+    // Queued jobs the previous job signing key signed, signed again with the signing key, so that
+    // the previous key can be removed (ADR-135). Queues and job ids only, never a job's data.
+    const resigned = await resignQueuedJobs(
+      { db: rt.db, signer: rt.signer, clock: rt.clock },
+      resign,
+    );
+    for (const job of resigned.unverifiable) {
+      rt.logger.warn(
+        { queue: job.queue, jobId: job.id },
+        'a queued job does not verify with any job signing key; it is left as it is',
+      );
+    }
+    if (resigned.stopped && resigned.unverifiable.length > 0) {
+      rt.logger.error(
+        { limit: RESIGN_SKIP_LIMIT },
+        'too many queued jobs do not verify; signing jobs again stops until the worker restarts (check W360_JOB_SIGNING_KEY_PREVIOUS)',
+      );
+    }
+    if (resigned.resigned + resigned.changed > 0) {
+      rt.logger.info(
+        { resigned: resigned.resigned, changed: resigned.changed },
+        'queued jobs signed again with the job signing key',
       );
     }
     const webhooks = await sweepWebhooks(rt);
