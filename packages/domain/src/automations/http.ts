@@ -54,7 +54,7 @@ const LEASE_MARGIN_MS = 30_000;
 const requestAad = (tenantId: string, callId: string) => `automation-http:${tenantId}:${callId}`;
 const secretAad = (tenantId: string, secretId: string) => `http-secret:${tenantId}:${secretId}`;
 
-export { secretAad as httpSecretAad };
+export { secretAad as httpSecretAad, requestAad as httpRequestAad };
 
 export interface HttpQueueDeps {
   jobs: JobQueue;

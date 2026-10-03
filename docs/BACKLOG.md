@@ -672,9 +672,12 @@ review; production rollout per RELEASE-CHECKLIST.
   new sign-in within the last 15 minutes, which reuses the sign-in's rate limits, two-factor attempt
   limit and lockout instead of a second verification path.
 - **SEC-9** Per-user login history view.
-- **SEC-10** Keyring re-encryption job: re-encrypt every keyring ciphertext (provider tokens, HTTP
-  secrets, flow private keys, stored webhook bodies) under the primary key so an old key can be
-  removed (`Keyring.needsRotation` exists; the job does not).
+- **SEC-10** ~~Keyring re-encryption job: re-encrypt every keyring ciphertext (provider tokens,
+  HTTP secrets, flow private keys, stored webhook bodies) under the primary key so an old key can be
+  removed (`Keyring.needsRotation` exists; the job does not).~~ Settled by ADR-134: while a key
+  other than the primary is configured, the minute sweep seals every stored value (15 kinds) that
+  key sealed again with the primary key, in its company's scope, with a compare and set and without
+  moving a row's time; Operations → Keys shows what each key still seals.
 - **SEC-11** ~~Keep failed queries' parameters out of error logs. A query that fails with an error
   the app does not map is logged whole by the API's and server actions' error logs, the worker's job
   log and several webhook routes, and the driver's message repeats the query's parameters (names,

@@ -25,6 +25,7 @@ import {
   type Tx,
 } from '@w360/db';
 import type { PlatformDatabase } from '@w360/db/platform';
+import { keyringOverview, parseSealedValueCounts, type KeyringOverview } from '../keyring/reseal';
 import { MAX_RECEIPT_ATTEMPTS } from '../messaging/receipts';
 import type { QueueInspector, QueueSnapshot } from '../jobs/queue';
 import { QUEUE_CHECK_FRESH_MINUTES } from './queue-waits';
@@ -56,6 +57,8 @@ export interface PlatformOpsDeps {
   platformDb: PlatformDatabase;
   queues: QueueInspector;
   clock: Clock;
+  /** The configured encryption key ids (ADR-134); never the keys. */
+  keyring: { readonly currentKeyId: string; readonly keyIds: readonly string[] };
 }
 
 const DAY_MS = 86_400_000;
@@ -586,6 +589,20 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
             .filter((e) => e.failed > 0 || e.stuck > 0),
         };
       });
+    },
+
+    /**
+     * The encryption keyring (ADR-134): the configured key ids and how many stored values of each
+     * kind each key sealed (`ops.sealed_value_counts`, counts only), so staff see when a key other
+     * than the primary seals nothing and can be removed.
+     */
+    async keyring(actor: PlatformActor): Promise<KeyringOverview> {
+      const counts = await platformDb.run(actor.userId, (tx) =>
+        tx.execute<{ kind: string; key_id: string | null; sealed: string }>(
+          sql`select kind, key_id, sealed from ops.sealed_value_counts()`,
+        ),
+      );
+      return keyringOverview(deps.keyring, parseSealedValueCounts(counts.rows));
     },
 
     /**

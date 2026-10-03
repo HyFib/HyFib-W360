@@ -101,6 +101,7 @@ const ops = () =>
     platformDb: fx.dbs.platform,
     queues: pgBossQueueInspector(fx.boss),
     clock: systemClock,
+    keyring: fx.keyring,
   });
 
 async function expectCode(promise: Promise<unknown>, code: string, message?: RegExp) {

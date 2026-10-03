@@ -5206,3 +5206,56 @@ longer see "�" at the end of clipped text outside error messages.
 Not built: clips by grapheme: a clip may still separate an emoji's parts that are characters of
 their own (a family joined by zero-width joiners, a flag's two regional indicators, a skin tone),
 which shows a different emoji, never half of one.
+
+## ADR-134 Re-encrypting stored secrets under the primary key (SEC-10) (2026-10-03)
+
+Context: every secret HyFib stores is sealed with the keyring (AES-256-GCM, its key id in the
+value, bound to its row by associated data): companies' WhatsApp tokens and number registration
+PINs, HTTP secrets and the requests automations queue, companies' Razorpay key and webhook secrets,
+Flow private keys, stores' credentials, webhook secrets and access codes, webhook endpoints'
+secrets (and the previous one, for a day after a rotation) and headers, and in the operations
+schema providers' webhook bodies (kept 7 days) and queued emails. Making a new key primary seals
+new values with it, but nothing sealed the stored ones again, so an old key could never be removed
+from `W360_ENCRYPTION_KEYS` without breaking companies' connections (SECURITY's rotation table,
+SEC-10). Change-feed cursors handed to API keys are sealed the same way but not stored.
+
+Decision:
+
+- **One registry of what is sealed** (`keyring/reseal.ts`): each kind's table, column and
+  associated data, built by the functions its service seals with, so the two cannot drift; a unit
+  test checks that migration 0101 lists the same 15 kinds.
+- **The minute sweep re-encrypts while a key other than the primary is configured.**
+  `ops.sealed_values_to_reseal` (security definer, ids and companies only) finds values sealed with
+  such a key, reading only the first 40 characters of each (a key id has at most 32, and a webhook
+  body can be large), at most 500 a minute. Each is re-encrypted in its company's scope (operations
+  rows in the system scope): read, opened with its associated data, sealed with the primary key and
+  written only if it is still the value read (compare and set), so a value a member or a job
+  replaced meanwhile is left as it is. A re-encryption changes no row's time: the shared touch
+  trigger keeps `updated_at` while `w360.resealing` is on for the transaction (the runtime role
+  may already write `updated_at` wherever that trigger runs). A store's webhook secret, which the
+  runtime role cannot write, is swapped by `app.reseal_store_webhook_secret` (compare and set,
+  within the company in scope, only for another sealed value). An automation's request is
+  re-encrypted only while its call is queued or in flight (a finished call clears it), and a
+  webhook endpoint's previous secret with the version it was sealed under.
+- **Only an older server seals with another key**, so after a lookup finds nothing the next waits
+  an hour.
+- **A value that does not open** (its associated data does not match, or it is corrupt) was
+  unreadable already: it is logged once by each worker with its kind, id and company and the
+  error's message (never the value), and left out of that worker's lookups until it restarts.
+  After 1,000 of them a worker stops re-encrypting and logs an error that names
+  `W360_ENCRYPTION_KEYS`: a wrong old key is the likely cause.
+- **Operations → Keys** shows the configured key ids (primary first), how many stored values each
+  key seals, by kind, and values sealed with a key that is not configured or not sealed with the
+  keyring at all. `ops.sealed_value_counts` returns counts only, to platform administrators only.
+  A key can be removed once nothing stored is sealed with it.
+- **The definer reads the sealed columns** (column grants, and a read policy on HTTP secrets) only
+  to take their key ids; it never returns a value. The keys themselves stay in the secret manager.
+
+What follows: rotating the encryption key is a configuration change and a wait: add a key, make it
+primary, wait until Operations → Keys shows the old key seals nothing, then remove it (runbook
+§13).
+A change-feed cursor sealed with a removed key is refused as invalid, so the runbook keeps the old
+key until integrations have read a page since the rotation.
+
+Not built: re-encrypting on demand from the console, alerts when values do not open (the worker
+logs them), and rotating the job signing key (SEC-4) or Better Auth's secret.

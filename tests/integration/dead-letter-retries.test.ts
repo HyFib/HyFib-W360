@@ -49,6 +49,7 @@ const ops = () =>
     platformDb: dbs.platform,
     queues: pgBossQueueInspector(boss),
     clock: { now: () => new Date() },
+    keyring: { currentKeyId: 'k1', keyIds: ['k1'] },
   });
 
 async function admin<T extends Record<string, unknown>>(text: string, params: unknown[] = []) {

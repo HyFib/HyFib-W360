@@ -35,6 +35,12 @@ describe('Keyring', () => {
     expect(rotated.needsRotation(rotated.encrypt('v', 'aad'))).toBe(false);
   });
 
+  it('names its key ids, the primary first, for re-encryption (ADR-134)', () => {
+    expect(new Keyring({ primaryKeyId: 'k1', keys: { k1 } }).keyIds).toEqual(['k1']);
+    expect(new Keyring({ primaryKeyId: 'k2', keys: { k1, k2 } }).keyIds).toEqual(['k2', 'k1']);
+    expect(new Keyring({ primaryKeyId: 'k1', keys: { k1, k2 } }).keyIds).toEqual(['k1', 'k2']);
+  });
+
   it('parses environment specs and validates key length', () => {
     const ring = Keyring.fromEnv(`k1:${k1.toString('base64')}, k2:${k2.toString('base64')}`, 'k2');
     expect(ring.currentKeyId).toBe('k2');

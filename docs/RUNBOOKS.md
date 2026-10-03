@@ -2299,6 +2299,25 @@ quarantine entries (section 4). Most dead letters need no action once the cause 
 the minute sweeps signal their work again or end it for its company (ADR-111); retry those of
 `template.submit` if needed (ADR-108).
 
+**Keys (ADR-134).** The configured encryption key ids, the primary first, and how many stored values
+each key seals, by kind (counts only). While another key is configured the worker seals the values
+it sealed again with the primary key, up to 500 a minute, and logs `sealed values re-encrypted under
+the primary key`; the count of the old key falls to zero, and the page then says it can be removed
+(section 13). "Values that cannot be opened" are sealed with a key that is not configured, or not
+sealed with the keyring at all: nothing can open them, so the company reconnects what they belong to
+(a WhatsApp account, a store, Razorpay keys) or saves the secret again. The worker logs each value
+that does not open with its key once (`a sealed value does not open with its key`, with its kind, id
+and company, never the value) and leaves it as it is; after 1,000 it stops re-encrypting until it
+restarts and logs an error naming `W360_ENCRYPTION_KEYS`: check that the old key's bytes are right.
+
+**Migration 0101 failed.** It replaces `app.touch_updated_at` (the shared trigger function, which
+then keeps a row's time while `w360.resealing` is on), grants the definer the sealed columns and a
+read policy on HTTP secrets, and creates `ops.sealed_value_keys`, `ops.sealed_values_to_reseal`,
+`ops.sealed_value_counts` and `app.reseal_store_webhook_secret` with a policy on
+`app.commerce_stores`, in one transaction; a failure rolls it all back (usually the bootstrap roles:
+fix them and run the migrations again). Workers of the previous release re-encrypt nothing; web
+servers of the previous release have no Keys tab.
+
 **Migration 0068 failed.** It adds nullable columns and partial indexes to `ops.dead_letters`,
 `ops.webhook_receipts` and `ops.webhook_quarantine`, marks existing dead letters and erased receipts
 as told, and replaces `ops.platform_retry_webhook_receipt` (dropped as `w360_definer` and recreated,
@@ -2428,7 +2447,22 @@ they sign in. It is not an error and cannot be switched off for a company.
 
 ## 13. Key rotation
 
-See `docs/SECURITY.md#secret-and-key-rotation`.
+See `docs/SECURITY.md#secret-and-key-rotation` for every secret. The encryption key
+(`W360_ENCRYPTION_KEYS`, ADR-134):
+
+1. Add the new key next to the old one (`old:…,new:…`), make it primary
+   (`W360_ENCRYPTION_PRIMARY_KEY_ID=new`) and deploy web and worker. New values are sealed with the
+   new key from then on, and both keys open what is stored.
+2. The worker's minute sweep seals what the old key sealed again with the new one, up to 500 values
+   a minute, in each company's scope; a row's time does not change. Operations → Keys (section 10P)
+   shows how many values each key still seals.
+3. Once the old key seals nothing and every web and worker instance runs the new configuration, wait
+   until integrations reading change feeds have fetched a page since the rotation: each page hands
+   out a cursor sealed with the primary key, and a cursor sealed with a removed key is refused as
+   invalid (the integration must start again from the first change). Then remove the old key and
+   deploy.
+4. A value that does not open with its key stays sealed with it (section 10P, Keys); removing the
+   key changes nothing for it, since nothing could open it before.
 
 ## 14. Queue policy changes
 

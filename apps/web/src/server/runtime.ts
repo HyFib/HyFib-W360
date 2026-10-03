@@ -305,6 +305,7 @@ async function init(): Promise<Runtime> {
     platformDb,
     queues: pgBossQueueInspector(boss),
     clock: systemClock,
+    keyring,
   });
   const platformBilling = createPlatformBillingService({ platformDb });
   const platformReconciliation = createPlatformReconciliationService({ platformDb });

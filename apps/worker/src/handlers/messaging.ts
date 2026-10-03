@@ -12,6 +12,7 @@ import {
   compactContactChanges,
   findStaleReceipts,
   findStaleSendIntents,
+  newResealState,
   noticeApiKeyUsageDue,
   processChannelOnboarding,
   processMetaWebhookReceipt,
@@ -22,6 +23,8 @@ import {
   queueWaitLimits,
   recoverExpiredSend,
   remindExpiringApiKeys,
+  resealStoredValues,
+  RESEAL_SKIP_LIMIT,
   routeDueConversations,
   settleStrandedWork,
 } from '@w360/domain';
@@ -156,10 +159,13 @@ export function channelOnboardHandler(rt: WorkerRuntime) {
  * automatic resend), signal automation runs and task reminders that are due or lost their
  * signal, route waiting conversations of round-robin teams, remind companies of API keys that
  * expire soon, delete rate limit buckets that are full again, end work whose job ran out of
- * retries where its company sees it, alert platform staff to work that failed for good, and check
- * how long jobs wait in each queue.
+ * retries where its company sees it, re-encrypt stored secrets under the primary key while another
+ * key is configured, alert platform staff to work that failed for good, and check how long jobs
+ * wait in each queue.
  */
 export function messagingSweepHandler(rt: WorkerRuntime) {
+  // Values this worker could not open and when it next looks for values to re-encrypt (ADR-134).
+  const reseal = newResealState();
   return async (): Promise<void> => {
     const receipts = await findStaleReceipts(rt);
     for (const id of receipts) {
@@ -273,6 +279,41 @@ export function messagingSweepHandler(rt: WorkerRuntime) {
       );
     const deadLettersPurged = await purgeDeadLetters(rt.db);
     if (deadLettersPurged > 0) rt.logger.info({ deadLettersPurged }, 'old dead letters deleted');
+    // Stored secrets sealed with a configured key other than the primary, sealed again with the
+    // primary key, so the other key can be removed (ADR-134). Kinds and ids only, never a value.
+    const resealed = await resealStoredValues(
+      { db: rt.db, keyring: rt.keyring, clock: rt.clock },
+      reseal,
+    );
+    for (const value of resealed.unopenable) {
+      rt.logger.warn(
+        { kind: value.kind, id: value.id, tenantId: value.tenantId, reason: value.reason },
+        'a sealed value does not open with its key; it is left as it is',
+      );
+    }
+    if (resealed.stopped && resealed.unopenable.length > 0) {
+      rt.logger.error(
+        { limit: RESEAL_SKIP_LIMIT },
+        'too many sealed values do not open; re-encryption stops until the worker restarts (check W360_ENCRYPTION_KEYS)',
+      );
+    }
+    for (const failure of resealed.failed) {
+      rt.logger.warn(
+        {
+          kind: failure.kind,
+          id: failure.id,
+          tenantId: failure.tenantId,
+          err: toError(failure.error).message,
+        },
+        're-encrypting a sealed value failed; will retry',
+      );
+    }
+    if (resealed.resealed + resealed.changed > 0) {
+      rt.logger.info(
+        { resealed: resealed.resealed, changed: resealed.changed },
+        'sealed values re-encrypted under the primary key',
+      );
+    }
     const webhooks = await sweepWebhooks(rt);
     if (webhooks.woken + webhooks.purged > 0) rt.logger.info(webhooks, 'webhook sweep');
     if (receipts.length > 0 || intents.length > 0) {

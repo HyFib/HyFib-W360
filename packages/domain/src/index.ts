@@ -110,6 +110,7 @@ export * from './commerce';
 export * from './stores';
 export * from './jobs/dead-letters';
 export * from './jobs/stranded-work';
+export * from './keyring/reseal';
 export * from './platform/ops-model';
 export * from './platform/ops';
 export * from './platform/failure-alerts';

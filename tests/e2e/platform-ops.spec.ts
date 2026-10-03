@@ -119,6 +119,21 @@ test('staff read the operations console and repair a quarantined webhook event',
   await expect(page.getByText('By company (7 days)')).toBeVisible();
   await expectNoHorizontalOverflow(page);
 
+  // Keys: the encryption keyring's key ids and how many stored values each sealed, never a key or a
+  // value (ADR-134). One key is configured here, so there is nothing to re-encrypt.
+  await sections.getByRole('link', { name: 'Keys' }).click();
+  await expect(page.getByRole('heading', { name: 'Encryption keys' })).toBeVisible();
+  await expect(page.getByText(/there is nothing to re-encrypt/)).toBeVisible();
+  const keys = page.getByRole('table', { name: 'Encryption keys' });
+  await expect(keys.getByRole('row').filter({ hasText: 'Primary' })).toHaveCount(1);
+  // The webhook event above was stored sealed for its 7 days.
+  const byKind = page.getByRole('table', { name: 'Sealed values by kind' });
+  await expect(
+    byKind.getByRole('row').filter({ hasText: 'Provider webhook bodies' }),
+  ).toBeVisible();
+  await expect(page.getByText('Values that cannot be opened')).toHaveCount(0);
+  await expectNoHorizontalOverflow(page);
+
   // Both repairs are in the platform audit log; the company page shows its health.
   await page.goto('/platform');
   await expect(page.getByText('platform.webhook_receipt_retried').first()).toBeVisible();

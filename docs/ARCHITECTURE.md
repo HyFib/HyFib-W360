@@ -142,7 +142,8 @@ so grants issued after the transfer would silently grant nothing (migration 0002
   again within a minute, have none); the worker records it in `ops.dead_letters` without its error
   message (§6P), and platform administrators can send the failed job back to its queue once
   (ADR-108). The minute sweep ends, in the company's scope, the work of the three queues whose work
-  no sweep signals again (ADR-111).
+  no sweep signals again (ADR-111), and while a key other than the primary is configured it seals
+  stored secrets that key sealed again with the primary key (ADR-134).
 - Workers stop gracefully on SIGTERM (stop fetching, wait up to 30 s, close pools).
 
 ## 5. Email **[built]**

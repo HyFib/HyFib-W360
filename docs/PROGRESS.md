@@ -1,5 +1,83 @@
 # Progress
 
+## 2026-10-03 — Phase 5: re-encrypting stored secrets under the primary key (SEC-10, ADR-134)
+
+Status: **Implemented and locally verified (test data and the provider stand-ins only).** Making a
+new encryption key primary sealed new values with it, but nothing sealed the stored ones again, so
+an old key could never leave `W360_ENCRYPTION_KEYS` without breaking companies' WhatsApp tokens,
+stores, Razorpay keys, webhook endpoints, Flows and HTTP steps (SEC-10).
+
+### Completed
+
+- **Design (ADR-134):** while a key other than the primary is configured, the minute sweep seals
+  the values such a key sealed again with the primary key, in each company's scope, with a compare
+  and set, without moving a row's time; Operations → Keys counts what each key seals.
+- **Database** (migration 0101): the touch trigger keeps `updated_at` while `w360.resealing` is on;
+  `ops.sealed_values_to_reseal` (ids and companies of values sealed with given keys, up to 1,000,
+  for the runtime role) and `ops.sealed_value_counts` (counts by kind and key, for platform
+  administrators) over `ops.sealed_value_keys` (15 kinds, the first 40 characters of each value);
+  `app.reseal_store_webhook_secret` (compare and set in the company in scope); the definer's reads
+  of the sealed columns and of HTTP secrets.
+- **Core:** `Keyring.keyIds` (ids only, the primary first).
+- **Domain** (`keyring/reseal.ts`): the registry of sealed values with the associated data their
+  services use; `resealValue` (one value, compare and set, the plaintext buffer zeroed after);
+  `resealStoredValues` (the sweep's part: up to 500 a minute, an hour's wait after a lookup that
+  found nothing, values that do not open reported once and left out, stop after 1,000);
+  `keyringOverview` and the operations service's `keyring`.
+- **Worker:** the messaging sweep calls it every minute and logs counts, kinds and ids only.
+- **Web:** Operations → Keys (configured key ids, values by key and by kind, values that cannot be
+  opened).
+- **Tests:**
+  - Unit (6 new, 1 new in core): the migration and the registry list the same kinds; counts of
+    unknown kinds are dropped; the console's keys (primary first, configured keys sealing nothing,
+    keys not configured, values in another format) and kinds; no lookup with one key, within the
+    idle hour or after too many values did not open; `keyIds` puts the primary first.
+  - Integration (real PostgreSQL; 7 new): every one of the 15 kinds re-encrypted and opened by a
+    keyring without the old key, with no row's time moved, the console's counts before and after,
+    and an automation's HTTP call (with its secret) and a provider's webhook then handled by the
+    services with the new key only; a value a member replaced while the re-encryption waited for
+    its row is left as it is; nothing of another company is read or written, and a value already
+    under the primary key is left as it is; a store's webhook secret changes only through its
+    function (not by the runtime role, not without a company, not for another company, not
+    without the current value, not into something unsealed or itself); a value that does not open
+    is reported once without its plaintext and stops a worker after 1,000; nothing happens with
+    one key, and a lookup that found nothing waits an hour; counts for platform administrators
+    only, a value sealed with a key no longer configured counted and never looked up, and which
+    roles may run the four functions.
+  - E2E: the operations console's test opens Keys (one key here: nothing to re-encrypt, the
+    primary key's row, provider webhook bodies counted, nothing that cannot be opened).
+- **Docs:** ADR-134; SECURITY (rotation table, controls); RUNBOOKS (§13 key rotation, Keys tab);
+  THREAT-MODEL T146 and T45/T47/T52; BACKLOG SEC-10 settled; ARCHITECTURE (minute sweep).
+- **Mutation checks:** 26 deliberate regressions tried, 26 caught. Three more survive by design and
+  stay: the company in a value's read and write and in the store secret swap (row security and the
+  swap's policy scope both as well), and an automation request's state in its read (the lookup
+  returns only unfinished calls, whose request a finished call clears). A fourth, the webhook
+  secret's version in the compare and set, could not fail (every sealing has a fresh IV) and was
+  removed.
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                                                                                                                                                                                      | Result                                                                                           |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                                                                         | clean                                                                                            |
+| `pnpm test`                                                                                                                                                                                                                  | 620 passed                                                                                       |
+| `pnpm test:integration` on PostgreSQL 18.6 and 17.11                                                                                                                                                                         | 794 passed on each                                                                               |
+| `pnpm build`, then `platform-ops.spec.ts`, `dead-letter-retry.spec.ts`, `stores.spec.ts`, `commerce.spec.ts`, `webhooks.spec.ts`, `automations.spec.ts`, `flows.spec.ts` and `inbox.spec.ts` on chromium and mobile-chromium | 42 passed                                                                                        |
+| The built worker, by hand, against the database those tests filled, with a second key made primary                                                                                                                           | one minute sweep re-encrypted all 112 values of 10 kinds; none left under the old key; no errors |
+| Mutation checks                                                                                                                                                                                                              | 26 regressions tried, 26 caught                                                                  |
+| gitleaks 8.30.1 on the commit                                                                                                                                                                                                | no leaks found                                                                                   |
+
+### Known gaps
+
+- Re-encryption cannot be started from the console; values that do not open are logged by the
+  worker, not alerted.
+- The job signing key (SEC-4) and Better Auth's secret still rotate as SECURITY describes.
+- A change-feed cursor sealed with a removed key is refused; the runbook keeps the old key until
+  integrations have read a page since the rotation.
+- The worker's call of the sweep is checked by hand only (CI and the e2e environment configure one
+  key; see the results), and against tables of e2e size: at 500 values a minute, the 7 days of
+  provider webhook bodies of a busy platform take a while.
+
 ## 2026-10-03 — Phase 5: clips that keep characters whole (ADR-133)
 
 Status: **Implemented and locally verified (test data and the provider stand-ins only).** ADR-131
