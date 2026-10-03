@@ -667,7 +667,13 @@ function Timeline({ ctx, view }: { ctx: TenantContext; view: View }) {
                 </span>
                 <span className="font-medium">{EVENT_LABELS[e.type] ?? e.type}</span>
                 <span className="text-muted-foreground">
-                  {e.actorName ? `by ${e.actorName}` : 'by HyFib'}
+                  {e.actorName
+                    ? `by ${e.actorName}`
+                    : typeof e.detail.apiKeyId === 'string'
+                      ? e.apiKeyName
+                        ? `through the API, key “${e.apiKeyName}”`
+                        : 'through the API'
+                      : 'by HyFib'}
                   {reasonText ? ` — ${reasonText}` : ''}
                   {note ? ` — “${note}”` : ''}
                 </span>

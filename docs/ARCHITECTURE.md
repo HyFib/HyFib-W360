@@ -898,6 +898,14 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   recipients with their contacts and messages in id order on keyset pages, erased contacts left out.
   `outcome` picks one condition of `RECIPIENT_OUTCOME_SQL` (`campaigns/outcomes.ts`), the conditions
   `campaignAnalytics` counts with, so a list and its count share one definition.
+- **Pausing and cancelling campaigns (0100, ADR-128):** `apiPauseCampaign` and `apiCancelCampaign`
+  (`api/campaigns.ts`, `campaigns.stop`, writing) lock the campaign row (`lockCampaign`), check the
+  statuses each allows and call `pauseLockedCampaign` or `cancelLockedCampaign`
+  (`campaigns/service.ts`), which members' pause and cancel call too, with the key as the one who
+  stopped it: the pause reason `api`, the event's detail naming the key (`apiKeyId`, no member) and
+  `canceled_by_user_id` null. The audit row is the key's (`recordSystemAudit` with `apiActor`), and
+  `campaign.status_changed` comes from the status trigger (0065). Members' campaign history joins
+  the key's name on the event's `apiKeyId`.
 - **Searching contacts (ADR-117):** `POST /contacts/search` (`api/contact-search.ts`) parses
   segments' conditions (`last_message` with `conversations.read` and `campaign` with
   `campaigns.read` since ADR-126, a named campaign checked to be the company's), checks them against

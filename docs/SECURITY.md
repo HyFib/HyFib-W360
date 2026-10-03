@@ -447,9 +447,9 @@ Phase 5 rules (Public API, P5-08):
   ADR-070), `campaigns.send` for `messages.send_marketing`, `inbox.read_all` for
   `conversations.read` (ADR-072), `inbox.supervise` for `conversations.write` (ADR-075),
   `automations.publish` for `automations.start` (ADR-077), `tenant.settings.manage` for
-  `contact_fields.manage` (ADR-115), and `campaigns.read` for the scope of the same name (ADR-125).
-  Nobody grants a key more than they hold, and rotating needs the same. A key keeps the scopes it
-  was created with.
+  `contact_fields.manage` (ADR-115), `campaigns.read` for the scope of the same name (ADR-125), and
+  `campaigns.send` for `campaigns.stop` (ADR-128). Nobody grants a key more than they hold, and
+  rotating needs the same. A key keeps the scopes it was created with.
 - A request acts for the key's company only, as the key: its company comes from the key found by
   the token's hash, never from the path, body or headers, and data access runs in that company's
   scope (RLS). Audit rows name the key (`api_key`). Writing scopes are refused while the company is
@@ -643,6 +643,18 @@ Phase 5 rules (Public API, P5-08):
   left out, as the API leaves erased contacts out everywhere (the results still count them), and no
   costs, members or other contact details are returned. A page reads one campaign's recipients
   (50,000 at most) and stops when it is full; rate limits and monthly requests bound repeats.
+- Pausing and cancelling campaigns (ADR-128): `POST /campaigns/{id}/pause` and `/cancel` need
+  `campaigns.stop`, a writing scope granted only by members holding `campaigns.send` (the permission
+  members pause and cancel with) and refused while the company is suspended or restricted. They only
+  stop sending: a pause releases the sends no worker claimed, a cancel also cancels waiting
+  recipients; neither sends a message, spends or resumes anything (resuming needs a member, under
+  whose authority the campaign then sends). The campaign is locked in the key's company (RLS and an
+  explicit filter): another company's campaign answers 404 as an unknown one does, and an id that is
+  not a UUID is refused before any query. The audit row names the key (`api_key`) with the request's
+  id, members' campaign history names the key, and `campaign.status_changed` reports the change. A
+  leaked key with the scope can stop the company's campaigns until it is revoked (members resume a
+  paused one; a cancelled one stays cancelled), so only integrations that must stop campaigns should
+  get it.
 - Following contact changes (ADR-114): `GET /contact-changes` reads the key's company's changes
   only (`contacts.read`, RLS and an explicit company filter). Its cursor, a database transaction id
   and a row id, is sealed with the keyring (AES-256-GCM) with the company in the associated data, so

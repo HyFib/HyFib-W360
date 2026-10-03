@@ -436,7 +436,7 @@ const errors = (...statuses: number[]) =>
             401: 'No valid API key: missing, unknown, revoked or expired.',
             403: "The key lacks the scope this needs, the company's plan does not include the API, the scope this needs, automations when starting one or Commerce when sending products (reason not_in_plan), or the key, or its company for all its keys, does not accept requests from the client's address (reason ip_not_allowed).",
             404: 'Not found in the company.',
-            409: 'The request conflicts with the current state. Starting an automation: another automation handles the conversation (reason automation_busy), a member is assigned to it (conversation_assigned), or it had as many runs in the last hour as allowed (automation_limit).',
+            409: 'The request conflicts with the current state. Starting an automation: another automation handles the conversation (reason automation_busy), a member is assigned to it (conversation_assigned), or it had as many runs in the last hour as allowed (automation_limit). Pausing or cancelling a campaign: its status does not allow it, and the message names the status.',
             412: "A condition for sending or saving is not met (consent, suppression, state). With reason window_closed, the number has not written to the WhatsApp number in the last 24 hours, so only templates can be sent to it. Starting an automation: it is not published, archived or not started through the API (automation_unavailable), paused (automation_paused), its number is not active (channel_unavailable), or the plan's automation runs for the month are used up (automation_quota).",
             415: 'The body must be JSON (Content-Type: application/json).',
             422: 'The request body or parameters are invalid.',
@@ -509,7 +509,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       title: 'HyFib W360 API',
       version: '1.0.0',
       description: [
-        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations, their messages (one conversation or all of them) and their notes, resolve, reopen and assign conversations or move them between teams, manage contacts and consent, read campaigns, their results and their recipients, and read message status for your company.',
+        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations, their messages (one conversation or all of them) and their notes, resolve, reopen and assign conversations or move them between teams, manage contacts and consent, read campaigns, their results and their recipients, pause and cancel campaigns, and read message status for your company.',
         '',
         'Authenticate with `Authorization: Bearer <API key>`; keys are created in Settings → API keys and belong to the company. A key, and the company for all its keys, can be limited to the addresses its systems call from: a request from any other address is refused with 403 (reason `ip_not_allowed`).',
         `Scopes: ${API_SCOPE_KEYS.map((s) => `\`${s}\` (${API_SCOPE_INFO[s].label.toLowerCase()})`).join(', ')}. A company's plan may include only some of them: a request that needs a scope the plan leaves out is refused with 403 (reason \`not_in_plan\`), whatever scopes its key has.`,
@@ -1113,6 +1113,42 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
         },
       },
+      '/campaigns/{id}/pause': {
+        post: {
+          operationId: 'pauseCampaign',
+          summary: 'Pause a campaign',
+          description: [
+            `${scopeNote('campaigns.stop')} Pauses a scheduled or running campaign as a member pauses it, and its \`pauseReason\` is \`api\`: messages it queued that are not yet on their way to WhatsApp are not sent, and their recipients wait again. A message already on its way cannot be recalled and ends as it ends. Members resume the campaign in the app; a key cannot.`,
+            'A paused campaign is answered as it is, whatever paused it, so a retry is harmless. A draft, a campaign waiting for approval, a completed and a cancelled one are refused with 409, naming the status. No `Idempotency-Key` is needed. `campaign.status_changed` webhooks report the change.',
+          ].join('\n\n'),
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': {
+              description: 'The campaign, as it is now.',
+              content: json(dataOf(ref('Campaign'))),
+            },
+            ...errors(401, 403, 404, 409, 423, 429, 500),
+          },
+        },
+      },
+      '/campaigns/{id}/cancel': {
+        post: {
+          operationId: 'cancelCampaign',
+          summary: 'Cancel a campaign',
+          description: [
+            `${scopeNote('campaigns.stop')} Cancels a campaign waiting for approval, scheduled, running or paused, as a member cancels it: recipients still waiting, and messages it queued that are not yet on their way to WhatsApp, are cancelled (GET /campaigns/{id}/recipients lists them as \`canceled\`, with the message error \`campaign_canceled\` for the messages). A message already on its way cannot be recalled and ends as it ends. A cancelled campaign is never resumed.`,
+            'A cancelled or completed campaign is answered as it is, so a retry is harmless. A draft is refused with 409: it sends nothing until a member submits it, and members edit or cancel drafts in the app. No `Idempotency-Key` is needed. `campaign.status_changed` webhooks report the change.',
+          ].join('\n\n'),
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': {
+              description: 'The campaign, as it is now.',
+              content: json(dataOf(ref('Campaign'))),
+            },
+            ...errors(401, 403, 404, 409, 423, 429, 500),
+          },
+        },
+      },
       '/automations': {
         get: {
           operationId: 'listAutomations',
@@ -1704,6 +1740,8 @@ export const API_ROUTES = [
   ['get', '/campaigns'],
   ['get', '/campaigns/{id}'],
   ['get', '/campaigns/{id}/recipients'],
+  ['post', '/campaigns/{id}/pause'],
+  ['post', '/campaigns/{id}/cancel'],
   ['get', '/automations'],
   ['post', '/automations/{id}/runs'],
   ['get', '/automation-runs/{id}'],

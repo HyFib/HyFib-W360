@@ -46,6 +46,7 @@ export type CampaignStatus = (typeof CAMPAIGN_STATUSES)[number];
 
 export const CAMPAIGN_PAUSE_REASONS = [
   'manual',
+  'api',
   'budget_reached',
   'message_cap_reached',
   'template_not_approved',

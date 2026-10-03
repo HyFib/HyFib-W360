@@ -11,9 +11,11 @@ import {
   apiCampaignListQuerySchema,
   apiCampaignRecipientQuerySchema,
   apiCampaignResultsSchema,
+  apiCancelCampaign,
   apiGetCampaign,
   apiListCampaignRecipients,
   apiListCampaigns,
+  apiPauseCampaign,
 } from './campaigns';
 import { RECIPIENT_OUTCOMES } from '../campaigns/outcomes';
 import { allowedNetworksSchema, bearerToken, generateApiToken, networkEntryProblem } from './keys';
@@ -160,6 +162,7 @@ describe('API scopes', () => {
       'messages.send_marketing',
       'messages.reply',
       'conversations.write',
+      'campaigns.stop',
       'automations.start',
       'webhooks.manage',
     ]);
@@ -173,6 +176,8 @@ describe('API scopes', () => {
     expect(API_SCOPE_INFO['contacts.write'].permission).toBe('contacts.write');
     // Members define fields in Settings with tenant.settings.manage (ADR-115).
     expect(API_SCOPE_INFO['contact_fields.manage'].permission).toBe('tenant.settings.manage');
+    // Members pause and cancel campaigns with campaigns.send (ADR-128).
+    expect(API_SCOPE_INFO['campaigns.stop'].permission).toBe('campaigns.send');
     expect(API_SCOPE_INFO['conversations.read'].permission).toBe('inbox.read_all');
     expect(API_SCOPE_INFO['conversations.write'].permission).toBe('inbox.supervise');
     expect(API_SCOPE_INFO['automations.start'].permission).toBe('automations.publish');
@@ -2615,5 +2620,112 @@ describe('listing a campaign’s recipients (ADR-127)', () => {
       expect(JSON.stringify(schemas.CampaignRecipient)).not.toContain(`"${hidden}"`);
     }
     expect(API_ROUTES).toEqual(expect.arrayContaining([['get', '/campaigns/{id}/recipients']]));
+  });
+});
+
+describe('pausing and cancelling campaigns (ADR-128)', () => {
+  const ctx = (scopes: string[], status = 'active', planScopes: string[] | null = null) =>
+    ({
+      tenant: { id: 't', status },
+      key: { id: 'k', scopes: new Set(scopes) },
+      planScopes: planScopes ? new Set(planScopes) : null,
+    }) as unknown as ApiContext;
+  const code = (promise: Promise<unknown>) =>
+    promise.then(
+      () => 'done',
+      (error: unknown) => (isAppError(error) ? error.code : String(error)),
+    );
+  const id = '0190a000-0000-7000-8000-000000000001';
+
+  it('have their own writing scope, which members who pause and cancel campaigns grant', () => {
+    expect(API_SCOPE_INFO['campaigns.stop']).toMatchObject({
+      label: 'Pause and cancel campaigns',
+      permission: 'campaigns.send',
+      writes: true,
+    });
+    expect(API_SCOPE_INFO['campaigns.stop'].description).toContain(
+      "Resuming, approving, scheduling and editing stay in the app, under a member's authority.",
+    );
+    // Reading them stays its own scope: stopping does not read results or recipients.
+    expect(API_SCOPE_INFO['campaigns.read'].writes).toBe(false);
+  });
+
+  it('are refused before anything is read: without the scope, outside the plan, while the company is not active, and a bad id is not found', async () => {
+    for (const stop of [apiPauseCampaign, apiCancelCampaign]) {
+      expect(await code(stop({} as never, ctx(['campaigns.read']), id))).toBe('forbidden');
+      await expect(stop({} as never, ctx(['campaigns.read']), id)).rejects.toThrow(
+        'This API key does not have the campaigns.stop scope.',
+      );
+      await expect(
+        stop({} as never, ctx(['campaigns.stop'], 'active', ['campaigns.read']), id),
+      ).rejects.toMatchObject({ code: 'forbidden', details: { apiReason: 'not_in_plan' } });
+      for (const status of ['suspended', 'restricted']) {
+        expect(await code(stop({} as never, ctx(['campaigns.stop'], status), id))).toBe(
+          'tenant_suspended',
+        );
+      }
+      expect(await code(stop({} as never, ctx(['campaigns.stop']), 'not-an-id'))).toBe('not_found');
+    }
+  });
+
+  it('are described: the scope, what each changes and refuses, and the campaign as the answer', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    type Operation = {
+      operationId: string;
+      description: string;
+      parameters: Record<string, unknown>[];
+      requestBody?: unknown;
+      responses: Record<string, unknown>;
+    };
+    const paths = doc.paths as unknown as Record<string, Record<string, Operation>>;
+    const pause = paths['/campaigns/{id}/pause']?.post;
+    const cancel = paths['/campaigns/{id}/cancel']?.post;
+    expect(pause?.operationId).toBe('pauseCampaign');
+    expect(cancel?.operationId).toBe('cancelCampaign');
+    for (const op of [pause, cancel]) {
+      expect(op?.description).toContain('Scope: `campaigns.stop`.');
+      expect(op?.description).toContain('so a retry is harmless');
+      expect(op?.description).toContain('No `Idempotency-Key` is needed.');
+      expect(op?.description).toContain('`campaign.status_changed` webhooks report the change.');
+      expect(op?.parameters.map((p) => p.$ref)).toEqual(['#/components/parameters/Id']);
+      // No body: the call names the campaign and nothing else.
+      expect(op?.requestBody).toBeUndefined();
+      expect(JSON.stringify(op?.responses['200'])).toContain('#/components/schemas/Campaign"');
+      expect(Object.keys(op?.responses ?? {})).toEqual(
+        expect.arrayContaining(['403', '404', '409', '423']),
+      );
+    }
+    expect(pause?.description).toContain('its `pauseReason` is `api`');
+    expect(pause?.description).toContain('Members resume the campaign in the app; a key cannot.');
+    expect(pause?.description).toContain(
+      'A draft, a campaign waiting for approval, a completed and a cancelled one are refused with 409',
+    );
+    expect(cancel?.description).toContain('A draft is refused with 409');
+    expect(cancel?.description).toContain('A cancelled campaign is never resumed.');
+    const responses = paths['/campaigns/{id}/pause']?.post?.responses as Record<
+      string,
+      { description: string }
+    >;
+    expect(responses['409']?.description).toContain(
+      'Pausing or cancelling a campaign: its status does not allow it, and the message names the status.',
+    );
+    expect(doc.info.description).toContain('pause and cancel campaigns');
+    const schemas = doc.components.schemas as unknown as Record<
+      string,
+      { properties: Record<string, { description?: string }> }
+    >;
+    expect(schemas.Campaign?.properties.pauseReason?.description).toContain(
+      'a member paused it (manual), an API key did (api)',
+    );
+    // campaign.status_changed says so too.
+    expect(JSON.stringify(schemas.WebhookCampaignStatusChanged)).toContain(
+      'a member paused it (manual), an API key did (api)',
+    );
+    expect(API_ROUTES).toEqual(
+      expect.arrayContaining([
+        ['post', '/campaigns/{id}/pause'],
+        ['post', '/campaigns/{id}/cancel'],
+      ]),
+    );
   });
 });

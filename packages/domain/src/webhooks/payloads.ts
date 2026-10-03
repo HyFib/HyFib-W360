@@ -402,7 +402,7 @@ const webhookCampaignSchema = z.object({
     .enum(CAMPAIGN_PAUSE_REASONS)
     .nullable()
     .describe(
-      'Why it paused, when the status is paused: a member paused it (manual), the spending or message cap was reached, the template is no longer approved, the number is not active, the member whose authority it runs under left or lost the permission, or no rate card is published for its spending cap. Null otherwise.',
+      'Why it paused, when the status is paused: a member paused it (manual), an API key did (api), the spending or message cap was reached, the template is no longer approved, the number is not active, the member whose authority it runs under left or lost the permission, or no rate card is published for its spending cap. Null otherwise.',
     ),
   completionReason: z
     .enum(CAMPAIGN_COMPLETION_REASONS)

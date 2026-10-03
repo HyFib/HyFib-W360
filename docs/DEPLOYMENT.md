@@ -139,6 +139,14 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    ADR-127 adds no migration; until the web rollout ends, a server from before it answers
    `GET /api/v1/campaigns/{id}/recipients` with 404, and Settings → API keys describes
    `campaigns.read` without recipients.
+   Migration 0100 (ADR-128) widens the same scope checks as 0099, with the same brief locks, and
+   replaces the campaigns' pause reason check (`api` added), validated under the table's lock
+   (campaigns are made by hand, so the table is small). Web servers from before it know neither:
+   until the web rollout ends, an old server answers Settings → API keys with an error for a company
+   with a key holding `campaigns.stop` (and the platform plan pages for a plan version including
+   it), answers `/api/v1/campaigns/{id}/pause` and `/cancel` with 404, and shows a campaign a key
+   paused with the reason as stored (`api`); rolling web servers back to an image from before it
+   does the same.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

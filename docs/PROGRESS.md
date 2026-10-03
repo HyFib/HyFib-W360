@@ -1,5 +1,99 @@
 # Progress
 
+## 2026-10-03 — Phase 5: pausing and cancelling campaigns through the public API (P5-08, ADR-128)
+
+Status: **Implemented and locally verified (test data and the Graph stand-in only).** Since ADR-125
+and ADR-127 a key read campaigns, their results and their recipients, but only members could stop
+one: an integration that saw a product sell out or complaints arrive had a member pause or cancel
+the campaign by hand.
+
+### Completed
+
+- **Design (ADR-128):** a new writing scope, `campaigns.stop` ("Pause and cancel campaigns"),
+  granted only by members holding `campaigns.send`. `POST /campaigns/{id}/pause` pauses a scheduled
+  or running campaign as members pause it, with a new pause reason, `api`; `POST
+/campaigns/{id}/cancel` cancels one waiting for approval, scheduled, running or paused. A paused
+  campaign (for pausing) and a cancelled or completed one (for cancelling) answer as they are; the
+  other statuses, drafts included, are refused with 409 naming the status. Both answer the campaign
+  as `GET /campaigns/{id}` describes it. Resuming, approving, scheduling and editing stay with
+  members. Migration 0100 adds the scope to the key and plan checks and `api` to the pause reasons.
+- **Domain:** members' pause and cancel now run shared functions once the campaign row is locked
+  (`pauseLockedCampaign`, `cancelLockedCampaign`, `campaigns/service.ts`), which take who stopped
+  the campaign (a member or a key); `apiPauseCampaign` and `apiCancelCampaign` (`api/campaigns.ts`)
+  check the scope, lock the row, check the status, call them and write the key's audit row;
+  members' campaign history reads the key's name from the event's `apiKeyId`; the `api` reason in
+  the API's and the webhook's `pauseReason` descriptions; OpenAPI: both paths, the 409 description
+  and the info text.
+- **Found while testing:** a campaign cancelled while paused answered its last `pauseReason` in the
+  API, though the field is described as given while the campaign is paused (and
+  `campaign.status_changed` already gave null). `GET /campaigns`, `GET /campaigns/{id}` and both new
+  calls now give it only for a paused campaign.
+- **Web:** `POST /api/v1/campaigns/{id}/pause` and `/cancel`; the campaign page says "Paused through
+  the API." and its history "through the API, key “name”"; Settings → API keys and the platform plan
+  form list the scope (from the scope list).
+- **Tests:**
+  - Unit (`api.test.ts`, 3 new, 2 changed): the scope (label, permission `campaigns.send`, a writing
+    scope) and its place among the writing scopes; refusals before anything is read without the
+    scope, outside the plan, while suspended or restricted, and a bad id; the OpenAPI entries (no
+    body, the campaign as the answer, 404, 409 and 423, the `api` reason in the campaign's and the
+    webhook's schemas).
+  - Integration (`api-campaigns.test.ts`, 3 new, with the Graph stand-in): a running campaign paused
+    through the API: its queued messages cancelled with `campaign_paused`, its recipients waiting
+    again, the reason `api`, the answer equal to `GET /campaigns/{id}`, the event naming the key and
+    no member, members' history naming the key, the key's audit row with the request's id,
+    `campaign.status_changed` captured with `api`, a retry changing nothing, and a member resuming
+    it to send again; pausing refused for a draft, a campaign waiting for approval, a cancelled and
+    a completed one; cancelling a campaign waiting for approval, a scheduled one paused first (its
+    `pauseReason` null once cancelled), a running one with queued messages (cancelled with
+    `campaign_canceled`, `canceled_by_user_id` null), and a completed or cancelled one answered as
+    it is; a draft refused; another company's campaign, an unknown and a bad id not found; a key
+    without the scope, and a suspended or restricted company, refused with nothing changed. Members'
+    campaign tests, campaign webhook events and API quotas pass unchanged on the shared functions.
+  - e2e (`campaigns.spec.ts`, extended): a key made in Settings with "Pause and cancel campaigns"
+    pauses a campaign scheduled for later (a reading key is refused), the page says "Paused through
+    the API." with the key in its history, a completed campaign's pause is refused with 409 naming
+    its status, and the cancel, repeated, answers `canceled` both times with both changes in the
+    history.
+- **Docs:** ADR-128 (and ADR-125's and ADR-127's notes); SECURITY (the scope's permission, a
+  bullet); THREAT-MODEL T141; RUNBOOKS (a campaign stopped through the API, 403, 404, 409, 423);
+  ARCHITECTURE; DEPLOYMENT (migration 0100 and the rollout); BACKLOG P5-08; FEATURE-MATRIX W-134,
+  H-033.
+- **Mutation checks:** 36 regressions tried, 35 caught, 1 equivalent:
+  - caught: 5 in who may stop a campaign (pausing asking for `campaigns.read`, cancelling asking
+    for no scope, the scope not writing, granted by `campaigns.read`, a bad id sent to the
+    database), 7 in what pausing does (a campaign waiting for approval paused, a paused campaign
+    paused again or refused, a key's pause said to be a member's and a member's said to be a
+    key's, released recipients not waiting again, the answer from before the pause), 9 in who did
+    it (the key's id left out of the event or stored as a member's, the pause audited as HyFib or
+    without the request's id, the cancel audited without its source or stamped with the key's id
+    as a member's, the history's key looked up by another field, the history naming HyFib for a
+    key, no label for a key's pause), 4 in what cancelling does (a draft, a completed and a
+    cancelled campaign cancelled, released sends' recipients not cancelled), 3 in the database
+    (keys or plans refusing the scope, campaigns refusing the reason `api`), 4 in OpenAPI (the
+    pause route left out of the route list, the cancel's 409, the `api` reason in the campaign's
+    and the webhook's schemas), 2 in the routes (the pause route cancelling, the cancel route
+    answering 201) and the pause reason given whatever the campaign's status; 4 were caught only
+    by the e2e test (the history naming HyFib, the missing label and both routes);
+  - equivalent: the company dropped from the campaign's lock, which RLS keeps to the key's company
+    anyway (another company's campaign still answers 404).
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                                                                                                        | Result                                                                      |
+| ---------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                           | clean                                                                       |
+| `pnpm test`                                                                                                                                    | 561 passed                                                                  |
+| `pnpm test:integration` on PostgreSQL 18.6 and 17.11                                                                                           | 765 passed on each                                                          |
+| `pnpm build`, then `campaigns.spec.ts`, `api-keys.spec.ts` and `api-quota.spec.ts` on chromium and mobile-chromium (database migrated to 0100) | 16 passed                                                                   |
+| Mutation checks                                                                                                                                | 36 regressions tried, 35 caught (4 only through the e2e test), 1 equivalent |
+| gitleaks 8.30.1 on the commit                                                                                                                  | no leaks found                                                              |
+
+### Known gaps
+
+- Resuming, approving, scheduling, creating and editing campaigns through the API, cancelling
+  drafts, stopping many campaigns in one call, a reason given with the call, and
+  `campaign.status_changed` naming who cancelled a campaign are not built (ADR-128).
+
 ## 2026-10-03 — Phase 5: a campaign's recipients through the public API (P5-08, ADR-127)
 
 Status: **Implemented and locally verified (test data and the Graph stand-in only).** Since ADR-125

@@ -3,10 +3,12 @@ import { isAppError, systemClock, uuidv7, type Clock } from '@w360/core';
 import { authorizedTenantScope, type TenantScope } from '@w360/db';
 import {
   RECIPIENT_OUTCOMES,
+  apiCancelCampaign,
   apiGetCampaign,
   apiListCampaignRecipients,
   apiListCampaigns,
   apiListMessages,
+  apiPauseCampaign,
   apiSearchContacts,
   authenticateApiToken,
   createApiKeysService,
@@ -15,6 +17,7 @@ import {
   createContactsService,
   createSegmentsService,
   createTemplatesService,
+  createWebhooksService,
   processSendIntent,
   processTemplateSubmit,
   runCampaignTick,
@@ -34,8 +37,9 @@ import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './what
  * the send pipeline, delivery statuses, a reply and a STOP, and a cancelled one's recipients; null
  * results for a draft; never another company's campaigns; refusals without the scope or with a bad
  * filter. Also finding contacts by what happened to a campaign's message to them, which needs
- * contacts.read and campaigns.read (ADR-126), and listing a campaign's recipients with what
- * happened to each, by the results' own outcomes, erased contacts left out (ADR-127).
+ * contacts.read and campaigns.read (ADR-126), listing a campaign's recipients with what
+ * happened to each, by the results' own outcomes, erased contacts left out (ADR-127), and pausing
+ * and cancelling campaigns as members do, the key named in the history and the audit (ADR-128).
  */
 let fx: WhatsAppFixture;
 
@@ -63,6 +67,7 @@ beforeEach(() => {
 
 const scopeOf = (c: Company): TenantScope => authorizedTenantScope(c.tenant.id, null);
 const deps = () => ({ db: fx.dbs.app });
+const writeDeps = () => ({ db: fx.dbs.app, clock: systemClock });
 
 const promo: TemplateDefinition = {
   category: 'MARKETING',
@@ -73,10 +78,14 @@ const promo: TemplateDefinition = {
 };
 
 /** A key of the company created by its owner, and the context a request with it gets. */
-async function apiKey(c: Company, scopes: ApiScope[]): Promise<ApiContext> {
+async function apiKey(
+  c: Company,
+  scopes: ApiScope[],
+  name = 'Campaign results',
+): Promise<ApiContext> {
   const keys = createApiKeysService({ db: fx.dbs.app, clock: systemClock });
   const created = await keys.create(await fx.ctx(c, c.owner), {
-    name: 'Campaign results',
+    name,
     scopes,
     expiresInDays: 0,
   });
@@ -801,5 +810,293 @@ describe('listing a campaign’s recipients (ADR-127)', () => {
       });
     }
     expect((await apiListCampaignRecipients(deps(), reader, festive, {})).data).toHaveLength(1);
+  });
+});
+
+describe('pausing and cancelling campaigns (ADR-128)', () => {
+  /** The code and message of a refusal. */
+  async function refused(promise: Promise<unknown>) {
+    try {
+      await promise;
+    } catch (error) {
+      if (!isAppError(error)) throw error;
+      return { code: error.code, message: error.publicMessage };
+    }
+    throw new Error('expected a refusal');
+  }
+  const statusOf = async (campaignId: string) =>
+    (
+      await fx.query<{ status: string; pause_reason: string | null }>(
+        `SELECT status, pause_reason FROM app.campaigns WHERE id = $1`,
+        [campaignId],
+      )
+    )[0];
+  const messagesOf = (campaignId: string) =>
+    fx.query<{ status: string; error_code: string | null; error_title: string | null }>(
+      `SELECT status, error_code, error_title FROM app.messages WHERE campaign_id = $1 ORDER BY id`,
+      [campaignId],
+    );
+  const recipientStates = async (campaignId: string) =>
+    (
+      await fx.query<{ state: string }>(
+        `SELECT state FROM app.campaign_recipients WHERE campaign_id = $1 AND state <> 'skipped'
+          ORDER BY id`,
+        [campaignId],
+      )
+    ).map((r) => r.state);
+  const auditOf = (campaignId: string, action: string) =>
+    fx.query<{
+      actor_type: string;
+      actor_id: string | null;
+      metadata: Record<string, unknown>;
+      correlation_id: string | null;
+    }>(
+      `SELECT actor_type, actor_id, metadata, correlation_id FROM app.audit_events
+        WHERE subject_id = $1 AND action = $2 ORDER BY occurred_at, id`,
+      [campaignId, action],
+    );
+
+  it('pauses a running campaign as a member does, names the key, and a member resumes it', async () => {
+    const s = await setup();
+    await s.contact('+919820005001', 'Asha');
+    await s.contact('+919820005002', 'Bina');
+    // An endpoint for campaign events, so their capture shows the reason.
+    await createWebhooksService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      keyring: fx.keyring,
+      egressPolicy: { allowLoopbackForTests: true },
+    }).create(s.owner, {
+      url: 'http://hooks.receiver.test:8080/campaigns',
+      eventTypes: ['campaign.status_changed'],
+      contactParts: null,
+    });
+    const flash = await s.draft('Flash sale');
+    await s.campaigns.submitCampaign(s.owner, flash, { expectedVersion: 1 }, {});
+    expect(await s.tick(flash)).toMatchObject({ outcome: 'progress' });
+    expect(await messagesOf(flash)).toEqual([
+      { status: 'queued', error_code: null, error_title: null },
+      { status: 'queued', error_code: null, error_title: null },
+    ]);
+
+    const stopper = await apiKey(s.c, ['campaigns.stop'], 'Stock watcher');
+    const paused = await apiPauseCampaign(writeDeps(), stopper, flash);
+    expect(paused).toMatchObject({
+      id: flash,
+      name: 'Flash sale',
+      status: 'paused',
+      pauseReason: 'api',
+      audienceCount: 2,
+      queuedCount: 0,
+    });
+    expect(paused).not.toHaveProperty('results');
+    // The answer is the campaign as GET /campaigns/{id} reads it.
+    const reader = await apiKey(s.c, ['campaigns.read']);
+    const { results: _results, ...read } = await apiGetCampaign(deps(), reader, flash);
+    expect(paused).toEqual(read);
+    // The queued messages were not sent, and their recipients wait for the resume.
+    const notSent = { status: 'canceled', error_code: 'campaign_paused' };
+    expect(await messagesOf(flash)).toEqual([
+      { ...notSent, error_title: 'Not sent: the campaign was paused.' },
+      { ...notSent, error_title: 'Not sent: the campaign was paused.' },
+    ]);
+    expect(await recipientStates(flash)).toEqual(['pending', 'pending']);
+    // Members' history names the key; the audit row is the key's, with the request's id.
+    const view = await s.campaigns.getCampaign(s.owner, flash);
+    expect(view.events[0]).toMatchObject({
+      type: 'paused',
+      actorName: null,
+      apiKeyName: 'Stock watcher',
+      detail: { reason: 'api', released: 2, apiKeyId: stopper.key.id },
+    });
+    expect(view.events.filter((e) => e.apiKeyName !== null)).toHaveLength(1);
+    // A key is no member: the event names no member.
+    expect(
+      await fx.query(
+        `SELECT actor_user_id FROM app.campaign_events WHERE campaign_id = $1 AND type = 'paused'`,
+        [flash],
+      ),
+    ).toEqual([{ actor_user_id: null }]);
+    expect(await auditOf(flash, 'campaign.paused')).toEqual([
+      {
+        actor_type: 'api_key',
+        actor_id: stopper.key.id,
+        metadata: { reason: 'api', released: 2, source: 'api' },
+        correlation_id: stopper.requestId,
+      },
+    ]);
+    // campaign.status_changed reports the pause with its reason.
+    const changes = await fx.query<{ status: string; previous: string; reason: string | null }>(
+      `SELECT status, detail->>'previousStatus' AS previous, detail->>'pauseReason' AS reason
+         FROM app.webhook_events
+        WHERE type = 'campaign.status_changed' AND detail->>'campaignId' = $1
+        ORDER BY occurred_at, id`,
+      [flash],
+    );
+    expect(changes.at(-1)).toEqual({ status: 'paused', previous: 'running', reason: 'api' });
+
+    // A retry is answered as it is, and changes nothing.
+    expect(await apiPauseCampaign(writeDeps(), stopper, flash)).toEqual(paused);
+    const pauses = (await s.campaigns.getCampaign(s.owner, flash)).events.filter(
+      (e) => e.type === 'paused',
+    );
+    expect(pauses).toHaveLength(1);
+    expect(await auditOf(flash, 'campaign.paused')).toHaveLength(1);
+
+    // A member resumes it as any paused campaign, and it queues its messages again.
+    await s.campaigns.resumeCampaign(s.owner, flash, {});
+    expect(await statusOf(flash)).toEqual({ status: 'running', pause_reason: null });
+    expect(await s.tick(flash)).toMatchObject({ outcome: 'progress' });
+    expect((await messagesOf(flash)).map((m) => m.status).sort()).toEqual([
+      'canceled',
+      'canceled',
+      'queued',
+      'queued',
+    ]);
+    expect(await recipientStates(flash)).toEqual(['queued', 'queued']);
+  });
+
+  it('pauses only scheduled and running campaigns, and cancels any that has not finished', async () => {
+    const s = await setup();
+    await s.contact('+919820006001', 'Asha');
+    await s.contact('+919820006002', 'Bina');
+    const stopper = await apiKey(s.c, ['campaigns.stop'], 'Stock watcher');
+    const pause = (id: string) => apiPauseCampaign(writeDeps(), stopper, id);
+    const cancel = (id: string) => apiCancelCampaign(writeDeps(), stopper, id);
+
+    // A draft sends nothing: both are refused, naming its status, and it stays a draft.
+    const { id: draft } = await s.campaigns.createDraft(s.owner, { name: 'Spring draft' }, {});
+    expect(await refused(pause(draft))).toEqual({
+      code: 'conflict',
+      message:
+        "Only a scheduled or running campaign can be paused. This campaign's status is draft.",
+    });
+    expect(await refused(cancel(draft))).toMatchObject({
+      code: 'conflict',
+      message: expect.stringContaining('members edit or cancel drafts in the app.'),
+    });
+    expect(await statusOf(draft)).toEqual({ status: 'draft', pause_reason: null });
+
+    // Waiting for approval: it is not paused, but it is cancelled with its recipients.
+    const approval = { cap: null, costCurrency: null };
+    await s.campaigns.updateSettings(s.owner, { approvalRequired: true, ...approval }, {});
+    const waiting = await s.draft('Needs approval');
+    await s.campaigns.submitCampaign(s.owner, waiting, { expectedVersion: 1 }, {});
+    await s.campaigns.updateSettings(s.owner, { approvalRequired: false, ...approval }, {});
+    expect(await refused(pause(waiting))).toMatchObject({
+      code: 'conflict',
+      message: expect.stringContaining("This campaign's status is pending_approval."),
+    });
+    expect(await cancel(waiting)).toMatchObject({ status: 'canceled', pauseReason: null });
+    expect(await recipientStates(waiting)).toEqual(['canceled', 'canceled']);
+
+    // Scheduled: paused before it starts (nothing queued to release), then cancelled while paused.
+    const scheduled = await s.draft('Weekend offer');
+    await s.campaigns.submitCampaign(s.owner, scheduled, { expectedVersion: 1 }, {});
+    expect(await statusOf(scheduled)).toEqual({ status: 'scheduled', pause_reason: null });
+    expect(await pause(scheduled)).toMatchObject({ status: 'paused', pauseReason: 'api' });
+    expect(await recipientStates(scheduled)).toEqual(['pending', 'pending']);
+    const canceled = await cancel(scheduled);
+    // The pause's reason is given while the campaign is paused only.
+    expect(canceled).toMatchObject({ status: 'canceled', pauseReason: null });
+    expect(canceled.canceledAt).not.toBeNull();
+    expect(await recipientStates(scheduled)).toEqual(['canceled', 'canceled']);
+    // Cancelled: answered as it is, and not paused.
+    expect(await cancel(scheduled)).toEqual(canceled);
+    expect(await refused(pause(scheduled))).toMatchObject({
+      code: 'conflict',
+      message: expect.stringContaining("This campaign's status is canceled."),
+    });
+    const history = (await s.campaigns.getCampaign(s.owner, scheduled)).events;
+    expect(history.filter((e) => e.type === 'canceled')).toHaveLength(1);
+
+    // Running, with messages queued and not sent: cancelled with them.
+    const running = await s.draft('Flash sale');
+    await s.campaigns.submitCampaign(s.owner, running, { expectedVersion: 1 }, {});
+    expect(await s.tick(running)).toMatchObject({ outcome: 'progress' });
+    expect(await cancel(running)).toMatchObject({ status: 'canceled', queuedCount: 0 });
+    expect((await messagesOf(running)).map((m) => [m.status, m.error_code])).toEqual([
+      ['canceled', 'campaign_canceled'],
+      ['canceled', 'campaign_canceled'],
+    ]);
+    expect(await recipientStates(running)).toEqual(['canceled', 'canceled']);
+    const [row] = await fx.query<{ canceled_by_user_id: string | null }>(
+      `SELECT canceled_by_user_id FROM app.campaigns WHERE id = $1`,
+      [running],
+    );
+    expect(row).toEqual({ canceled_by_user_id: null });
+    expect((await s.campaigns.getCampaign(s.owner, running)).events[0]).toMatchObject({
+      type: 'canceled',
+      actorName: null,
+      apiKeyName: 'Stock watcher',
+      detail: { canceledRecipients: 0, releasedSends: 2, apiKeyId: stopper.key.id },
+    });
+    expect(await auditOf(running, 'campaign.canceled')).toEqual([
+      {
+        actor_type: 'api_key',
+        actor_id: stopper.key.id,
+        metadata: { canceledRecipients: 0, releasedSends: 2, source: 'api' },
+        correlation_id: stopper.requestId,
+      },
+    ]);
+
+    // Completed: answered as it is, and not paused.
+    const done = await s.draft('Festive launch');
+    await s.run(done);
+    const reader = await apiKey(s.c, ['campaigns.read']);
+    const { results: _results, ...completed } = await apiGetCampaign(deps(), reader, done);
+    expect(completed.status).toBe('completed');
+    expect(await cancel(done)).toEqual(completed);
+    expect(await refused(pause(done))).toMatchObject({
+      code: 'conflict',
+      message: expect.stringContaining("This campaign's status is completed."),
+    });
+    expect(await auditOf(done, 'campaign.canceled')).toEqual([]);
+
+    // Another company's campaign and a bad id are not found, and nothing changes.
+    const other = await setup();
+    await other.contact('+919820006003', 'Other');
+    const theirs = await other.draft('Their campaign');
+    await other.campaigns.submitCampaign(other.owner, theirs, { expectedVersion: 1 }, {});
+    for (const id of [theirs, uuidv7(), 'not-an-id']) {
+      expect((await refused(pause(id))).code).toBe('not_found');
+      expect((await refused(cancel(id))).code).toBe('not_found');
+    }
+    expect(await statusOf(theirs)).toEqual({ status: 'scheduled', pause_reason: null });
+  });
+
+  it('refuses a key without the scope, and a company that cannot send, changing nothing', async () => {
+    const s = await setup();
+    await s.contact('+919820007001', 'Asha');
+    const flash = await s.draft('Flash sale');
+    await s.campaigns.submitCampaign(s.owner, flash, { expectedVersion: 1 }, {});
+    const reader = await apiKey(s.c, ['campaigns.read', 'contacts.read']);
+    expect((await refused(apiPauseCampaign(writeDeps(), reader, flash))).code).toBe('forbidden');
+    expect((await refused(apiCancelCampaign(writeDeps(), reader, flash))).code).toBe('forbidden');
+    // Suspended or restricted: the scope writes, so nothing is read or changed.
+    const keys = createApiKeysService({ db: fx.dbs.app, clock: systemClock });
+    const { token } = await keys.create(s.owner, {
+      name: 'Stock watcher',
+      scopes: ['campaigns.stop'],
+      expiresInDays: 0,
+    });
+    try {
+      for (const status of ['suspended', 'restricted'] as const) {
+        await fx.query(`UPDATE app.tenants SET status = $2 WHERE id = $1`, [s.c.tenant.id, status]);
+        const blocked = await authenticateApiToken(fx.dbs.app, token, uuidv7());
+        if (!blocked) throw new Error('the key no longer authenticates');
+        expect((await refused(apiPauseCampaign(writeDeps(), blocked, flash))).code).toBe(
+          'tenant_suspended',
+        );
+        expect((await refused(apiCancelCampaign(writeDeps(), blocked, flash))).code).toBe(
+          'tenant_suspended',
+        );
+      }
+    } finally {
+      await fx.query(`UPDATE app.tenants SET status = 'active' WHERE id = $1`, [s.c.tenant.id]);
+    }
+    expect(await statusOf(flash)).toEqual({ status: 'scheduled', pause_reason: null });
+    expect(await auditOf(flash, 'campaign.paused')).toEqual([]);
+    expect(await auditOf(flash, 'campaign.canceled')).toEqual([]);
   });
 });

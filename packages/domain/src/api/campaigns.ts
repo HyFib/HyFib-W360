@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { notFound } from '@w360/core';
+import { AppError, notFound } from '@w360/core';
 import {
   CAMPAIGN_COMPLETION_REASONS,
   CAMPAIGN_PAUSE_REASONS,
@@ -16,17 +16,24 @@ import {
   messageTemplates,
   sql,
   type MessageStatus,
+  type CampaignStatus,
   type RecipientState,
   type SkipReason,
   type SQL,
   type Tx,
 } from '@w360/db';
+import { recordSystemAudit } from '../audit';
 import { ATTRIBUTION_WINDOW_HOURS } from '../campaigns/attribution';
 import { RECIPIENT_OUTCOMES, RECIPIENT_OUTCOME_SQL } from '../campaigns/outcomes';
-import { campaignAnalytics } from '../campaigns/service';
+import {
+  campaignAnalytics,
+  cancelLockedCampaign,
+  lockCampaign,
+  pauseLockedCampaign,
+} from '../campaigns/service';
 import type { OutboundDeps } from '../messaging/outbound';
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
-import { assertScope, type ApiContext } from './context';
+import { apiActor, assertScope, type ApiContext } from './context';
 import { API_LIMITS } from './model';
 
 /**
@@ -34,7 +41,8 @@ import { API_LIMITS } from './model';
  * campaigns, newest first, as the campaign events describe them (ADR-087), and reads one with its
  * results as members' campaign page counts them (`campaignAnalytics`), when it is read. A key that
  * also reads contacts lists a campaign's recipients, each with what happened to it (ADR-127).
- * Never members or costs.
+ * Never members or costs. A key with `campaigns.stop` pauses and cancels campaigns as members do
+ * (ADR-128); everything else that changes a campaign stays with members.
  */
 
 export const apiCampaignListQuerySchema = z
@@ -53,7 +61,7 @@ export const apiCampaignSchema = z.object({
     .enum(CAMPAIGN_PAUSE_REASONS)
     .nullable()
     .describe(
-      'Why it paused, while it is paused: a member paused it (manual), the spending or message cap was reached, the template is no longer approved, the number is not active, the member whose authority it runs under left or lost the permission, or no rate card is published for its spending cap.',
+      'Why it paused, while it is paused: a member paused it (manual), an API key did (api), the spending or message cap was reached, the template is no longer approved, the number is not active, the member whose authority it runs under left or lost the permission, or no rate card is published for its spending cap. Null otherwise.',
     ),
   completionReason: z
     .enum(CAMPAIGN_COMPLETION_REASONS)
@@ -174,7 +182,8 @@ function toApiCampaign(row: CampaignRow): ApiCampaign {
     id: row.id,
     name: row.name,
     status: row.status,
-    pauseReason: row.pauseReason,
+    // Given while the campaign is paused, as described: a cancelled campaign keeps the column.
+    pauseReason: row.status === 'paused' ? row.pauseReason : null,
     completionReason: row.completionReason,
     templateId: row.templateId,
     templateName: row.templateName ?? null,
@@ -419,4 +428,108 @@ export async function apiListCampaignRecipients(
     },
     { accessMode: 'read only' },
   );
+}
+
+/** The campaign as `GET /campaigns/{id}` describes it, without its results. */
+async function readApiCampaign(tx: Tx, tenantId: string, campaignId: string): Promise<ApiCampaign> {
+  const [row] = await selectCampaigns(
+    tx,
+    and(eq(campaigns.tenantId, tenantId), eq(campaigns.id, campaignId)),
+  );
+  if (!row) throw new Error('The campaign was not found after changing it');
+  return toApiCampaign(row);
+}
+
+/** A refusal that names the campaign's status, as `status` gives it. */
+const statusRefusal = (message: string, status: CampaignStatus) =>
+  new AppError('conflict', `${message} This campaign's status is ${status}.`);
+
+/**
+ * Pauses one of the company's campaigns as members pause it (ADR-128), with the campaign row
+ * locked: a scheduled or running campaign pauses with the reason `api`, sends no worker claimed are
+ * released and their recipients wait again. A paused campaign is answered as it is, whatever paused
+ * it, so a retry changes nothing; any other status is refused with 409, naming it. Members resume it
+ * in the app.
+ */
+export async function apiPauseCampaign(
+  deps: Pick<OutboundDeps, 'db' | 'clock'>,
+  ctx: ApiContext,
+  campaignId: string,
+): Promise<ApiCampaign> {
+  assertScope(ctx, 'campaigns.stop');
+  if (!z.uuid().safeParse(campaignId).success) throw notFound('Campaign');
+  return deps.db.run(ctx.scope, async (tx) => {
+    const c = await lockCampaign(tx, ctx.tenant.id, campaignId);
+    if (c.status === 'scheduled' || c.status === 'running') {
+      const { released } = await pauseLockedCampaign(
+        tx,
+        ctx.tenant.id,
+        campaignId,
+        { apiKeyId: ctx.key.id },
+        deps.clock.now(),
+      );
+      await recordSystemAudit(
+        tx,
+        ctx.tenant.id,
+        {
+          action: 'campaign.paused',
+          subjectType: 'campaign',
+          subjectId: campaignId,
+          metadata: { reason: 'api', released, source: 'api' },
+          correlationId: ctx.requestId,
+        },
+        apiActor(ctx),
+      );
+    } else if (c.status !== 'paused') {
+      throw statusRefusal('Only a scheduled or running campaign can be paused.', c.status);
+    }
+    return readApiCampaign(tx, ctx.tenant.id, campaignId);
+  });
+}
+
+/**
+ * Cancels one of the company's campaigns as members cancel it (ADR-128), with the campaign row
+ * locked: one waiting for approval, scheduled, running or paused is cancelled, with its waiting
+ * recipients and the sends no worker claimed. A cancelled or completed campaign is answered as it
+ * is, so a retry changes nothing; a draft, which sends nothing until a member submits it, is
+ * refused with 409.
+ */
+export async function apiCancelCampaign(
+  deps: Pick<OutboundDeps, 'db' | 'clock'>,
+  ctx: ApiContext,
+  campaignId: string,
+): Promise<ApiCampaign> {
+  assertScope(ctx, 'campaigns.stop');
+  if (!z.uuid().safeParse(campaignId).success) throw notFound('Campaign');
+  return deps.db.run(ctx.scope, async (tx) => {
+    const c = await lockCampaign(tx, ctx.tenant.id, campaignId);
+    if (c.status === 'draft') {
+      throw statusRefusal(
+        'A draft sends nothing until a member submits it, so it is not cancelled through the API: members edit or cancel drafts in the app.',
+        c.status,
+      );
+    }
+    if (c.status !== 'canceled' && c.status !== 'completed') {
+      const counts = await cancelLockedCampaign(
+        tx,
+        ctx.tenant.id,
+        campaignId,
+        { apiKeyId: ctx.key.id },
+        deps.clock.now(),
+      );
+      await recordSystemAudit(
+        tx,
+        ctx.tenant.id,
+        {
+          action: 'campaign.canceled',
+          subjectType: 'campaign',
+          subjectId: campaignId,
+          metadata: { ...counts, source: 'api' },
+          correlationId: ctx.requestId,
+        },
+        apiActor(ctx),
+      );
+    }
+    return readApiCampaign(tx, ctx.tenant.id, campaignId);
+  });
 }

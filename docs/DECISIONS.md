@@ -4772,9 +4772,9 @@ Decision:
   at once, as 0092 did (one row per key and per plan version).
 
 Not built: changing campaigns through the API (creating, submitting, approving, pausing, resuming or
-cancelling them), each recipient's outcome (since ADR-127), costs, filters by template, number or
-time, results for a time range or grouped by day, and campaign results in `campaign.status_changed`
-(ADR-087 left them out: they change with every message status).
+cancelling them; pausing and cancelling since ADR-128), each recipient's outcome (since ADR-127),
+costs, filters by template, number or time, results for a time range or grouped by day, and campaign
+results in `campaign.status_changed` (ADR-087 left them out: they change with every message status).
 
 ## ADR-126 Conversation and campaign conditions in contact searches through the public API (2026-10-03)
 
@@ -4880,4 +4880,61 @@ Decision:
 
 Not built: recipients through webhooks, filters by contact, number or time, the conversation of the
 message, costs per recipient, members' groupings of failed and replied recipients, and changing
-campaigns through the API.
+campaigns through the API (pausing and cancelling since ADR-128).
+
+## ADR-128 Pausing and cancelling campaigns through the public API (2026-10-03)
+
+Context: since ADR-125 and ADR-127 a key reads campaigns, their results and their recipients, but
+only members stop one. An integration that sees a product sell out, a price change or complaints
+arriving while a campaign sends had a member pause or cancel it by hand.
+
+Decision:
+
+- **A new writing scope, `campaigns.stop`** ("Pause and cancel campaigns"), granted only by members
+  holding `campaigns.send` (owners, administrators and marketers by default), the permission members
+  pause and cancel campaigns with. Existing keys gain nothing; a plan version that chose its scopes
+  (ADR-092) leaves it out until a new version includes it, and one with every scope (`NULL`)
+  includes it. As a writing scope it is refused while the company is suspended or restricted (423,
+  ADR-052), as members' pausing and cancelling are (`campaigns.send` is not kept then), and nothing
+  is sent in those states anyway.
+- **Stopping only:** `POST /campaigns/{id}/pause` and `POST /campaigns/{id}/cancel`, without a body.
+  Resuming, approving, scheduling and editing stay with members: a resumed campaign sends under the
+  authority of the member who resumed it (`launched_by_user_id`, which the runner checks before each
+  batch), and a key is not a member.
+- **Pause:** a scheduled or running campaign pauses as members pause it, in one transaction with the
+  campaign row locked, as each runner tick locks it (a tick that finds it locked tries again
+  shortly): sends no worker has claimed are cancelled (`campaign_paused`) and their recipients wait
+  again (a send a worker already claimed cannot be recalled and ends as it ends), and the campaign
+  is paused with a new reason, `api`, so members ("Paused through the API."), the API and
+  `campaign.status_changed` tell it from a member's pause (`manual`). Members resume it as any
+  paused campaign. A paused campaign answers as it is, whatever paused it, so a retry changes
+  nothing; a draft, one waiting for approval, a completed or a cancelled one is refused with 409
+  `conflict`, the message naming its status as `status` gives it.
+- **Cancel:** a campaign waiting for approval, scheduled, running or paused is cancelled as members
+  cancel it: waiting recipients and sends no worker has claimed are cancelled, their messages with
+  `campaign_canceled` (ADR-127 lists both). A cancelled or completed campaign answers as it is; a
+  draft is refused with 409: it sends nothing until a member submits it, and members edit drafts, or
+  cancel them, in the app. A cancelled campaign is never resumed.
+- **One implementation:** members' pause and cancel and the API's call the same functions once the
+  campaign row is locked (`pauseLockedCampaign` and `cancelLockedCampaign`, `campaigns/service.ts`);
+  each caller checks the statuses it allows and writes its own audit row.
+- **The answer** is the campaign as `GET /campaigns/{id}` describes it, without `results`, so a
+  client sees the status it reached.
+- **`pauseReason` only while paused:** the answer, `GET /campaigns` and `GET /campaigns/{id}` give
+  `pauseReason` for a paused campaign only, as the field's description and `campaign.status_changed`
+  (ADR-087) always said. Found while testing: a campaign cancelled while paused answered its last
+  pause reason, since the API returned the column as stored (ADR-125).
+- **Who did it:** the campaign's event names no member and carries the key's id in its detail
+  (`apiKeyId`), as events name members by id; members' campaign history names the key ("through the
+  API, key “name”", or "through the API" if the key's row is gone), and `canceled_by_user_id` stays
+  null. The audit row's actor is the key (`api_key`, ADR-052), with the request's id and `source`
+  `api`; `campaign.status_changed` fires from the status trigger as for members (ADR-087), with
+  `pauseReason` `api` for a pause.
+- **No idempotency key:** both calls change a campaign's state and answer the state it is in, so
+  repeating one changes nothing.
+- **Migration 0100** replaces the key and plan scope checks with the 13 scopes (as 0099 did) and the
+  campaigns' pause reason check with `api` added; existing rows already satisfy them.
+
+Not built: resuming, approving, scheduling, creating or editing campaigns through the API,
+cancelling drafts, stopping many campaigns in one call, a reason or note given with the call, and
+`campaign.status_changed` naming who cancelled a campaign.

@@ -19,6 +19,7 @@ export const API_SCOPE_KEYS = [
   'conversations.read',
   'conversations.write',
   'campaigns.read',
+  'campaigns.stop',
   'automations.start',
   'webhooks.manage',
 ] as const satisfies readonly ApiScope[];
@@ -98,6 +99,13 @@ export const API_SCOPE_INFO: Record<
       "List the company's campaigns and read each one's progress and results: messages sent, delivered, read and failed, replies and opt-outs, and why recipients were skipped. A key that also reads contacts lists each campaign's recipients and what happened to each. Never members or costs.",
     permission: 'campaigns.read',
     writes: false,
+  },
+  'campaigns.stop': {
+    label: 'Pause and cancel campaigns',
+    description:
+      "Pause a scheduled or sending campaign and cancel one that has not finished, as members who send campaigns can. Resuming, approving, scheduling and editing stay in the app, under a member's authority.",
+    permission: 'campaigns.send',
+    writes: true,
   },
   'automations.start': {
     label: 'Start automations',

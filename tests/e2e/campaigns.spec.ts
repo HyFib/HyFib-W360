@@ -268,4 +268,71 @@ test('a campaign is drafted, reviewed, started by the worker and reported per re
     { headers: auth },
   );
   expect(unknownOutcome.status()).toBe(422);
+
+  // A key that pauses and cancels campaigns stops one scheduled for later (ADR-128): the page says
+  // it paused through the API, and its history names the key.
+  await page.goto(`/c/${slug}/campaigns`);
+  await page.getByRole('link', { name: 'New campaign' }).click();
+  await page.getByLabel('Campaign name').fill('Autumn preview');
+  await page.getByRole('button', { name: 'Create draft' }).click();
+  await expect(page.getByRole('heading', { name: 'Autumn preview', level: 1 })).toBeVisible();
+  await page.getByLabel('Send from').selectOption({ index: 1 });
+  await page.getByLabel('Template').selectOption({ label: 'spring_sale (en, marketing)' });
+  await page.getByLabel('Body variable {{1}}').selectOption('name');
+  await page.getByLabel('Tag', { exact: true }).fill('vip');
+  await page.getByLabel('When', { exact: true }).selectOption('later');
+  const later = new Date(Date.now() + 2 * 86_400_000).toISOString().slice(0, 10);
+  await page.getByLabel('Date and time').fill(`${later}T10:00`);
+  await page.getByRole('button', { name: 'Save draft' }).click();
+  await expect(page.getByText('Draft saved. The review below is updated.')).toBeVisible();
+  await page.getByRole('button', { name: 'Start campaign' }).click();
+  await page.getByRole('alertdialog').getByRole('button', { name: 'Start campaign' }).click();
+  await expect(page.getByText('Scheduled', { exact: true }).first()).toBeVisible();
+  const autumnId = new URL(page.url()).pathname.split('/').pop()!;
+
+  await page.goto(`/c/${slug}/settings/api-keys`);
+  await page.getByLabel('Name', { exact: true }).fill('Campaign control');
+  await page.getByRole('checkbox', { name: /Pause and cancel campaigns/ }).check();
+  await page.getByRole('button', { name: 'Create API key' }).click();
+  const stopField = page.getByLabel('API key', { exact: true });
+  await expect(stopField).toBeVisible();
+  const stopAuth = { Authorization: `Bearer ${await stopField.inputValue()}` };
+  await page.getByRole('button', { name: 'I have stored the key' }).click();
+  // The reading key does not stop campaigns.
+  const notAllowed = await request.post(`/api/v1/campaigns/${autumnId}/pause`, { headers: auth });
+  expect(notAllowed.status()).toBe(403);
+  const paused = await request.post(`/api/v1/campaigns/${autumnId}/pause`, { headers: stopAuth });
+  expect(paused.status()).toBe(200);
+  expect(((await paused.json()) as { data: unknown }).data).toMatchObject({
+    id: autumnId,
+    name: 'Autumn preview',
+    status: 'paused',
+    pauseReason: 'api',
+  });
+  const byKey = 'through the API, key “Campaign control”';
+  await page.goto(`/c/${slug}/campaigns/${autumnId}`);
+  await expect(page.getByText('Paused through the API.', { exact: true })).toBeVisible();
+  await expect(page.getByRole('listitem').filter({ hasText: byKey })).toHaveCount(1);
+  // A completed campaign is not paused, and the refusal names its status.
+  const refused = await request.post(`/api/v1/campaigns/${campaignId}/pause`, {
+    headers: stopAuth,
+  });
+  expect(refused.status()).toBe(409);
+  expect(((await refused.json()) as { error: unknown }).error).toMatchObject({
+    code: 'conflict',
+    message: expect.stringContaining("This campaign's status is completed."),
+  });
+  // Cancelled through the API, and a retry answers it as it is.
+  for (let i = 0; i < 2; i += 1) {
+    const canceled = await request.post(`/api/v1/campaigns/${autumnId}/cancel`, {
+      headers: stopAuth,
+    });
+    expect(canceled.status()).toBe(200);
+    expect(((await canceled.json()) as { data: unknown }).data).toMatchObject({
+      status: 'canceled',
+    });
+  }
+  await page.reload();
+  await expect(page.getByText('Cancelled', { exact: true }).first()).toBeVisible();
+  await expect(page.getByRole('listitem').filter({ hasText: byKey })).toHaveCount(2);
 });

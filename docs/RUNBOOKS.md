@@ -1712,6 +1712,19 @@ they were created with: create a key with both); `not_in_plan` means the plan le
 `outcome` the results do not count, a `cursor` that is not the previous page's `nextCursor`, or an
 unknown parameter.
 
+**A campaign was paused or cancelled through the API, or `POST /api/v1/campaigns/{id}/pause` or
+`/cancel` answers 403, 404, 409 or 423 (ADR-128).** The campaign's page says "Paused through the
+API." and its history names the key ("through the API, key “name”"); Settings → Audit log lists
+`campaign.paused` or `campaign.canceled` with the key as the actor and the request's id. A member
+resumes a paused campaign as any other (messages released by the pause are queued again); a
+cancelled campaign is not resumed: create a new one. 403 `forbidden` names the scope the key lacks,
+`campaigns.stop` (keys keep the scopes they were created with: create a key with it); `not_in_plan`
+means the plan leaves it out (ADR-092). 404 means the id is not one of the key's company's
+campaigns. 409 names the campaign's status: only scheduled and running campaigns pause, and drafts
+are not cancelled through the API. 423 means the company is suspended or its plan ended (nothing
+sends then anyway). To stop a key from stopping campaigns, revoke it and create one without the
+scope.
+
 **A search with `POST /api/v1/contacts/search` gives short or empty pages, or a 422 (ADR-117).**
 Its pages read at most 2,000 contacts, as filtered lists do (entry above): the integration sends the
 same conditions with each `nextCursor` until it is `null`. A 422 names the condition's part:

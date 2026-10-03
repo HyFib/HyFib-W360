@@ -13,6 +13,7 @@ export const CAMPAIGN_STATUS: Record<string, { label: string; tone: Tone }> = {
 
 export const PAUSE_REASONS: Record<string, string> = {
   manual: 'Paused by a member.',
+  api: 'Paused through the API.',
   budget_reached: 'The spending cap was reached. Raise it to continue.',
   message_cap_reached: 'The message cap was reached. Raise it to continue.',
   template_not_approved:
