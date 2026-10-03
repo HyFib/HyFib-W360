@@ -505,6 +505,88 @@ test('a key assigns a conversation to a member and moves it to a team, and the i
   expect(doc.paths['/teams'].get.operationId).toBe('listTeams');
 });
 
+test('a key assigns and resolves several conversations in one call, all of them or none, and the inbox shows them (ADR-120)', async ({
+  page,
+  request,
+}) => {
+  const email = uniqueEmail('apibulk');
+  const slug = `apibulk-${Date.now().toString(36)}`;
+  await signUpAndVerify(page, { name: 'Bina Bulk', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('Bulk Traders');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+  const { wabaId, phoneNumberId } = await connectTestChannel({ ownerEmail: email, slug });
+
+  await page.goto(`/c/${slug}/settings/api-keys`);
+  await page.getByLabel('Name', { exact: true }).fill('Helpdesk sync');
+  await page.getByRole('checkbox', { name: /Read conversations/ }).check();
+  await page.getByRole('checkbox', { name: /Resolve, reopen, assign and add notes/ }).check();
+  await page.getByRole('button', { name: 'Create API key' }).click();
+  const token = await page.getByLabel('API key', { exact: true }).inputValue();
+  await page.getByRole('button', { name: 'I have stored the key' }).click();
+  const auth = { Authorization: `Bearer ${token}` };
+
+  // Three customers write; nobody has their conversations yet.
+  for (const text of ['Where is my parcel?', 'Can I change my size?', 'Is the shop open?']) {
+    await sendSignedWebhook(request, inboundMessage(wabaId, phoneNumberId, randomWaId(), text));
+  }
+  await page.goto(`/c/${slug}/inbox`);
+  const items = page.getByRole('link', { name: /Priya Customer/ });
+  await expect(items).toHaveCount(3, { timeout: 20_000 });
+  const waiting = await (
+    await request.get('/api/v1/conversations?assigneeId=none&status=open', { headers: auth })
+  ).json();
+  const ids = (waiting.data as { id: string }[]).map((v) => v.id);
+  expect(ids).toHaveLength(3);
+  const memberId = (await (await request.get('/api/v1/members', { headers: auth })).json()).data[0]
+    .id as string;
+  const updateMany = (data: Record<string, unknown>) =>
+    request.post('/api/v1/conversations/update-many', { headers: auth, data });
+
+  // One id that is no conversation of the company refuses the whole call, naming it.
+  const refused = await updateMany({
+    conversationIds: [ids[0], ids[1], randomUUID()],
+    assigneeId: memberId,
+  });
+  expect(refused.status()).toBe(422);
+  expect((await refused.json()).error.issues).toEqual([
+    { path: 'conversationIds.2', message: expect.any(String) },
+  ]);
+  const stillWaiting = await (
+    await request.get('/api/v1/conversations?assigneeId=none&status=open', { headers: auth })
+  ).json();
+  expect(stillWaiting.data).toHaveLength(3);
+
+  // All three given to the owner at once, answered in the order given; the inbox shows them.
+  const reversed = [...ids].reverse();
+  const assigned = await updateMany({ conversationIds: reversed, assigneeId: memberId });
+  expect(assigned.status()).toBe(200);
+  expect(
+    ((await assigned.json()).data as { id: string; assigneeId: string | null }[]).map((v) => [
+      v.id,
+      v.assigneeId,
+    ]),
+  ).toEqual(reversed.map((id) => [id, memberId]));
+  await page.reload();
+  for (let i = 0; i < 3; i++) await expect(items.nth(i)).toContainText('Assigned to Bina Bulk');
+  await expectNoHorizontalOverflow(page);
+
+  // Then resolved together.
+  const resolved = await updateMany({ conversationIds: ids, status: 'resolved' });
+  expect(((await resolved.json()).data as { status: string }[]).map((v) => v.status)).toEqual([
+    'resolved',
+    'resolved',
+    'resolved',
+  ]);
+  const open = await (
+    await request.get('/api/v1/conversations?status=open', { headers: auth })
+  ).json();
+  expect(open.data).toEqual([]);
+  const doc = await (await request.get('/api/v1/openapi.json')).json();
+  expect(doc.paths['/conversations/update-many'].post.operationId).toBe('updateManyConversations');
+});
+
 test('a key sends reply buttons and a list to a customer who wrote: the inbox shows them, and a picked row comes back through the API', async ({
   page,
   request,

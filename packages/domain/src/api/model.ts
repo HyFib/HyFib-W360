@@ -138,6 +138,8 @@ export const API_LIMITS = {
   textLength: 4096,
   idempotencyKeyLength: 255,
   idempotencyHours: 24,
+  /** Conversations one call to POST /conversations/update-many changes (ADR-120). */
+  conversationsPerChange: 100,
   keyRate: { capacity: 50, refillPerSecond: 10 },
   companyRate: { capacity: 200, refillPerSecond: 30 },
   authFailureRate: { capacity: 20, refillPerSecond: 0.2 },

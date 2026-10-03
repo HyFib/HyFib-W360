@@ -497,6 +497,16 @@ Phase 5 rules (Public API, P5-08):
   the suspension. `conversations.read` lists those members with their names, teams and whether they
   take conversations, never emails or roles; the members who can grant it see the team in the app
   already. Every change is audited as the key; routing that follows is the system's.
+- Changing many conversations in one call (ADR-120, `POST /conversations/update-many`) needs the
+  same scope and changes each conversation through the same function, under the same locks, as a
+  single change; at most 100 per call, all or none. It locks the member first, then the
+  conversations in id order, then the team as conversations move into it, the order suspensions and
+  team deletions lock them, so concurrent calls take turns, and a call meeting a suspension or a
+  deletion waits and is refused, instead of deadlocking (tested). An id
+  that names none of the company's conversations (another company's or an erased contact's
+  included) refuses the whole call, naming its place in the list, and changes nothing (tested), so
+  a call never reveals or touches another company's conversations beyond saying an id is not one of
+  the company's. A call counts as one request against the key's limits.
 - Starting automations through the API (ADR-077) needs `automations.start`, which only members who
   publish automations (`automations.publish`: owners and administrators) can grant, as a started run
   messages contacts as a published version does; an automation whose version sends a marketing

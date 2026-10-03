@@ -1,5 +1,79 @@
 # Progress
 
+## 2026-10-03 — Phase 5: changing many conversations in one call through the public API (P5-08, ADR-120)
+
+Status: **Implemented and locally verified (test data only).** Since ADR-093 a key changed one
+conversation per request: a helpdesk handing a departing agent's conversations to someone else made
+a request for each, counted against its limits, and a failure halfway left half of them changed.
+
+### Completed
+
+- **Design (ADR-120):** `POST /conversations/update-many` takes 1 to 100 `conversationIds`, each
+  once, and any of `status`, `assigneeId` and `teamId`, with `PATCH`'s meaning; `conversations.write`;
+  all of them or none, in one transaction; answered in the order given; one request against the
+  limits; no `Idempotency-Key` (a repeat changes nothing more).
+- **Domain (`api/conversations.ts`):** the change `PATCH` makes is now `changeLockedConversation`,
+  used by `apiUpdateConversation` and `apiUpdateManyConversations`. The latter checks and locks the
+  member first (as a suspension does), then every conversation `FOR UPDATE` in id order, refuses an
+  id that is not one of the company's visible conversations with 422 naming
+  `conversationIds.<index>`, applies the change to each in the order given (which locks the team as
+  a conversation moves into it, after the conversations, as a team's deletion does) and reads them
+  back. `API_LIMITS.conversationsPerChange`
+  (100). OpenAPI: `updateManyConversations` and its body.
+- **Route:** `apps/web/src/app/api/v1/conversations/update-many/route.ts`.
+- **Tests:**
+  - Unit (`api.test.ts`, 2): the body (1 to 100 ids, each once, ids, at least one change, nothing
+    else) and the refusals before anything is read (scope, suspended or restricted companies); the
+    OpenAPI entry (all or none, one request, the body's limits, no 404).
+  - Integration (`api.test.ts`, 4, and ADR-093's refusal test checking that an erased contact's
+    conversation is left unchanged): three conversations assigned in the order given, each audited as
+    the key with the call's correlation id, resolved together, and a repeat changing nothing (no new
+    audit entry or version); two moved into a round-robin team given out in the order given; 100
+    resolved in one call; refusals (another company's, an erased contact's and an unknown
+    conversation by place, a member or team it may not take, a key of another company, a
+    conversation named twice, a key without the scope) changing nothing; two calls naming the same
+    conversations in opposite orders, while one is held, both finishing without a deadlock; a
+    suspension and a team's deletion held mid-way (the member locked, then its conversations; the
+    team's conversations, then the team), each finishing without waiting for the call, which waits
+    and is then refused.
+  - e2e (`api.spec.ts`): three customers write; a call naming an unknown id is refused naming its
+    place and changes nothing; the three are given to the owner in one call (the inbox shows them
+    assigned) and resolved in another.
+- **Docs:** ADR-120; SECURITY; THREAT-MODEL T133; RUNBOOKS (a refused call naming
+  `conversationIds.<n>`); ARCHITECTURE; BACKLOG P5-08; FEATURE-MATRIX W-134, H-033.
+- **Mutation checks:** 26 regressions tried, 25 caught:
+  - 7 on the body (more than 100, the limit raised, an empty list, a conversation named twice, ids
+    that are not ids, no change, other fields), 13 in the call (the scope, the member locked first,
+    the team locked before the conversations, the conversations locked in the order given or not
+    locked, an erased contact's conversation taken, an unknown one skipped, the refusal not naming
+    its place, changes in id order, answers in id order or read before the change, nothing changed),
+    3 in the shared change (a move into a team not routed, PATCH finding erased contacts'
+    conversations, audits without the request), 2 in OpenAPI (the operation, all or none) and 1
+    through the e2e test (the route answering 201).
+  - Not caught, as RLS repeats it: removing the company condition from the lock query.
+  - Three first results were corrected: the member and team locks survived until a test held a
+    suspension and a team's deletion mid-way (which also showed the team must be locked after the
+    conversations, as a team's deletion does, and the code now does so), and PATCH's visibility
+    check survived until ADR-093's test checked that an erased contact's conversation is left
+    unchanged; rerun: caught.
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                          | Result                                                                                                                                   |
+| ---------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`             | clean                                                                                                                                    |
+| `pnpm test`                                                      | 538 passed                                                                                                                               |
+| `pnpm test:integration` on PostgreSQL 18.6 and 17.11             | 742 passed on each                                                                                                                       |
+| `pnpm build`, then `api.spec.ts` on chromium and mobile-chromium | 14 passed                                                                                                                                |
+| Mutation checks                                                  | 26 regressions tried, 25 caught (1 through the e2e test); the other removes the company condition from the lock query, which RLS repeats |
+| gitleaks 8.30.1 on the commit                                    | no leaks                                                                                                                                 |
+
+### Known gaps
+
+- Choosing conversations by a filter (all of a member's or a team's), changes that partly succeed,
+  notes for many conversations and the same change for members in the inbox are not built
+  (ADR-120).
+
 ## 2026-10-03 — Phase 5: choosing the message statuses a webhook endpoint receives (P5-09, ADR-119)
 
 Status: **Implemented and locally verified (local test receivers only).** `message.status` is the

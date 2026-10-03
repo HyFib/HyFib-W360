@@ -25,6 +25,8 @@ import {
   apiNoteListQuerySchema,
   apiUpdateConversation,
   apiUpdateConversationSchema,
+  apiUpdateManyConversations,
+  apiUpdateManyConversationsSchema,
 } from './conversations';
 import { apiListMembers, apiListTeams, apiMemberListQuerySchema } from './members';
 import { apiContactSchema } from './contact-view';
@@ -360,6 +362,50 @@ describe('conversation changes (ADR-075, ADR-093)', () => {
     }
     for (const body of [{ status: 'pending' }, {}, { assigneeId: 'none' }]) {
       expect(await set(ctx(['conversations.write']), id, body)).toBe('validation_failed');
+    }
+  });
+
+  it('change 1 to 100 conversations at once, each named once, with the same fields (ADR-120)', async () => {
+    expect(API_LIMITS.conversationsPerChange).toBe(100);
+    const ids = (n: number) =>
+      Array.from({ length: n }, (_, i) => `0192f0c4-8e2b-7c1d-9a3e-${String(i).padStart(12, '0')}`);
+    for (const body of [
+      { conversationIds: [id], status: 'resolved' },
+      { conversationIds: [id, other], assigneeId: id },
+      { conversationIds: ids(API_LIMITS.conversationsPerChange), teamId: null },
+      { conversationIds: [other, id], status: 'open', assigneeId: null, teamId: other },
+    ]) {
+      expect(apiUpdateManyConversationsSchema.parse(body)).toEqual(body);
+    }
+    for (const bad of [
+      { conversationIds: [], status: 'resolved' },
+      { conversationIds: ids(API_LIMITS.conversationsPerChange + 1), status: 'resolved' },
+      { conversationIds: [id, id], status: 'resolved' },
+      { conversationIds: ['not-a-uuid'], status: 'resolved' },
+      { conversationIds: id, status: 'resolved' },
+      { conversationIds: [id] },
+      { status: 'resolved' },
+      { conversationIds: [id], status: 'pending' },
+      { conversationIds: [id], assigneeId: 'none' },
+      { conversationIds: [id], status: 'resolved', note: 'Closing' },
+    ]) {
+      expect(
+        apiUpdateManyConversationsSchema.safeParse(bad).success,
+        JSON.stringify(bad).slice(0, 80),
+      ).toBe(false);
+    }
+    const many = (c: ApiContext, body: unknown) =>
+      code(apiUpdateManyConversations({} as never, c, body));
+    const body = { conversationIds: [id, other], status: 'resolved' };
+    expect(await many(ctx(['conversations.read']), body)).toBe('forbidden');
+    for (const status of ['suspended', 'restricted']) {
+      expect(await many(ctx(['conversations.write'], status), body)).toBe('tenant_suspended');
+    }
+    for (const bad of [
+      { conversationIds: [id, id], status: 'resolved' },
+      { conversationIds: [id] },
+    ]) {
+      expect(await many(ctx(['conversations.write']), bad)).toBe('validation_failed');
     }
   });
 
@@ -1705,6 +1751,48 @@ describe('OpenAPI document', () => {
     expect(send.responses['412']?.description).toContain('window_closed');
     const read = paths['/messages/{id}']?.get as unknown as { description: string };
     for (const scope of API_SEND_SCOPES) expect(read.description).toContain(`\`${scope}\``);
+  });
+
+  it('changes many conversations in one call, all or none (ADR-120)', () => {
+    const post = paths['/conversations/update-many']?.post as unknown as {
+      operationId: string;
+      description: string;
+      parameters?: unknown[];
+      requestBody: { content: { 'application/json': { schema: unknown } } };
+      responses: Record<string, unknown>;
+    };
+    expect(post.operationId).toBe('updateManyConversations');
+    expect(post.description).toContain('`conversations.write`');
+    expect(post.description).toContain('All of them or none');
+    expect(post.description).toContain('counts as one request');
+    expect(post.parameters ?? []).toEqual([]);
+    expect(post.requestBody.content['application/json'].schema).toEqual({
+      $ref: '#/components/schemas/UpdateManyConversations',
+    });
+    expect(Object.keys(post.responses)).toEqual(expect.arrayContaining(['200', '422', '423']));
+    expect(Object.keys(post.responses)).not.toContain('404');
+    const schema = (
+      doc.components.schemas as Record<
+        string,
+        {
+          required?: string[];
+          additionalProperties?: unknown;
+          properties?: Record<string, { maxItems?: number; minItems?: number }>;
+        }
+      >
+    ).UpdateManyConversations;
+    expect(schema?.required).toEqual(['conversationIds']);
+    expect(schema?.additionalProperties).toBe(false);
+    expect(Object.keys(schema?.properties ?? {})).toEqual([
+      'conversationIds',
+      'status',
+      'assigneeId',
+      'teamId',
+    ]);
+    expect(schema?.properties?.conversationIds).toMatchObject({
+      minItems: 1,
+      maxItems: API_LIMITS.conversationsPerChange,
+    });
   });
 
   it('resolves, reopens, assigns or moves a conversation with any of the three fields (ADR-093)', () => {

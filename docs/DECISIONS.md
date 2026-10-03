@@ -4520,3 +4520,42 @@ Decision:
 
 Not built: filters for other event types (conversation statuses, automations, campaigns), filters
 on a message's fields (its template, number or sender), and retry settings per status.
+
+## ADR-120 Changing many conversations in one call through the public API (2026-10-03)
+
+Context: since ADR-093 a key with `conversations.write` changes one conversation per request
+(`PATCH /conversations/{id}` with `status`, `assigneeId` or `teamId`). A helpdesk that hands a
+departing agent's 80 conversations to someone else, or closes a batch after an outage, made 80
+requests, each counted against its rate and monthly limits (ADR-068, ADR-097), and a failure halfway
+left half of them changed. P5-08's Remaining listed assigning many conversations at once.
+
+Decision:
+
+- **`POST /conversations/update-many`** takes `conversationIds` (1 to 100, each once) and any of
+  `status`, `assigneeId` and `teamId`, at least one, each meaning what it means for `PATCH`. It needs
+  `conversations.write` and answers 200 with the conversations as they now are, in the order given.
+- **All of them or none, in one transaction, locking in the order the other writers do.** The member
+  (share) is checked and locked first, as a suspension locks the member before releasing its
+  conversations; then every conversation's row in id order (`FOR UPDATE`), so calls that change the
+  same conversations take turns instead of deadlocking, whatever order each lists them in; and the
+  team (key share) only as a conversation moves into it, as a team's deletion releases its
+  conversations before deleting the team. A call that meets a suspension or a deletion waits for
+  it and is then refused instead of deadlocking. (A team's deletion releases the team's
+  conversations in no set order, so a call naming two or more of them can still meet it in a
+  deadlock; PostgreSQL then fails one of the two, and a failed call answers 409 `conflict`, which
+  says to retry.) An id that names none of the company's
+  conversations (another company's, or an erased contact's, included) refuses the call with 422
+  naming its place in the list (`conversationIds.3`), as a member who cannot answer conversations
+  or another company's team refuses it (`assigneeId`, `teamId`); nothing is changed.
+- **Each conversation is changed exactly as `PATCH` changes one,** by the same function: the team,
+  then the member, then the status; an automation answering it stops when it is assigned or
+  resolved; it is routed after a move into a team when it has no member and is open; an audit entry
+  per change names the key, all with the request's correlation id; the inbox and the webhooks see
+  each change as they see a single one. The conversations are changed in the order given, which a
+  round-robin team follows when it gives them out. What a conversation already has changes nothing,
+  so a repeated call is harmless without an `Idempotency-Key`.
+- **A call counts as one request** against the rate and monthly limits; at most 100 conversations
+  keep the transaction and its locks short.
+
+Not built: choosing conversations by a filter (all of a member's, all of a team's), changes that
+partly succeed, notes for many conversations, and the inbox doing the same for members.

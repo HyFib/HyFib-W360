@@ -1430,6 +1430,15 @@ by the minute sweep. The audit log shows the key's changes
 (`conversation.assigned`, `conversation.team_changed`, source `api`) and routing's
 (`conversation.routed`).
 
+**A call to change many conversations is refused with 422 naming `conversationIds.<n>`.** The id at
+that place in the list (counting from 0) names none of the company's conversations: another
+company's, an erased contact's, or none at all (ADR-120). Nothing in the call was changed, the other
+conversations included: `POST /conversations/update-many` changes all of them or none. Remove or
+correct that id and send the call again; what a conversation already has changes nothing, so
+repeating a call is harmless. A call takes at most 100 conversations, each once (422 naming
+`conversationIds`), and counts as one request against the key's limits. Each conversation's change
+is audited as a single change is, all with the call's correlation id.
+
 **An API key expired without a reminder, or the reminder came twice.** Owners and administrators
 are emailed once, 7 days before a key expires (ADR-067): `app.api_keys.expiry_reminded_at` says when
 the reminder was queued, and Settings → API keys shows it. Keys that never expire, rotated keys (the

@@ -1063,6 +1063,14 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   inbox's `assign` and `setTeam` use too; a team move without a member ends with `routeConversation`.
   `GET /members` and `GET /teams` (`api/members.ts`, `conversations.read`) page the members routing
   would take (active, `INBOX_WORKER_ROLES`) and the teams, oldest first on exact keyset cursors.
+- **Many conversations at once (ADR-120):** `POST /conversations/update-many`
+  (`apiUpdateManyConversations`) takes 1 to 100 `conversationIds` and the same fields. In one
+  transaction it locks the member first (as a suspension does before releasing its conversations),
+  then every conversation `FOR UPDATE` in id order, refuses an id that is not one of the company's
+  visible conversations (naming `conversationIds.<index>`), and applies `changeLockedConversation`,
+  the function `PATCH` uses, to each in the order given, which locks the team as a conversation
+  moves into it (after the conversations, as a team's deletion does); it answers the conversations
+  in that order.
 - **Keyset cursors** (`encodeKeysetCursor`, `exactTimestamp`): a cursor carries the last row's
   timestamp as PostgreSQL keeps it, to the microsecond, and its id, and pages compare
   `(time, id) < (cursor time, cursor id)`; cursors made with milliseconds still read. Cursors built

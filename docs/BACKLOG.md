@@ -504,9 +504,11 @@ verification, app review, Embedded Signup configuration).
   locally verified]** (ADR-117: `POST /contacts/search` finds contacts with segments' conditions,
   compiled by segments' code: custom field comparisons, tags, consent, the creation day in the
   company's time zone, source and calling code, all or any of them, on the pages `GET /contacts`
-  reads; refusals name the condition's part).
+  reads; refusals name the condition's part). **[Changing many conversations in one call built,
+  locally verified]** (ADR-120: `POST /conversations/update-many` assigns, moves, resolves or reopens
+  up to 100 conversations, each as `PATCH` changes one, all of them or none, locked in id order).
   Remaining: media messages, call-to-action messages through the API, taking reactions back,
-  assigning many conversations at once, media downloads, starting or
+  choosing conversations to change by a filter, media downloads, starting or
   stopping runs for many contacts in one call, bulk sends in one call, changing a field's type,
   changing numbers or many contacts in one call, contact searches by name or by conversation and
   campaign conditions, which fields of a contact changed, limits per endpoint,

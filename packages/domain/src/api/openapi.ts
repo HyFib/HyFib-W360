@@ -51,6 +51,7 @@ import {
   API_MESSAGE_FEED_WINDOW,
   apiAddNoteSchema,
   apiUpdateConversationSchema,
+  apiUpdateManyConversationsSchema,
 } from './conversations';
 import { API_LIMITS, API_SCOPE_INFO, API_SCOPE_KEYS } from './model';
 import {
@@ -924,6 +925,28 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
         },
       },
+      '/conversations/update-many': {
+        post: {
+          operationId: 'updateManyConversations',
+          summary: 'Resolve, reopen, assign or move many conversations at once',
+          description: [
+            `${scopeNote('conversations.write')} Up to ${API_LIMITS.conversationsPerChange} conversations, each changed as PATCH /conversations/{id} changes one, with any of \`status\`, \`assigneeId\` and \`teamId\`. All of them or none: an id that names none of the company's conversations (an erased contact's included), a member who cannot answer conversations or a team of another company refuses the call (422, naming the field, as \`conversationIds.3\`), and nothing is changed.`,
+            'The conversations are changed in the order given (a team that assigns in turn gives them out in that order) and answered in it. A call counts as one request against the rate and monthly limits. What a conversation already has changes nothing, so a retry is safe without an `Idempotency-Key`.',
+          ].join('\n\n'),
+          requestBody: { required: true, content: json(ref('UpdateManyConversations')) },
+          responses: {
+            '200': {
+              description: 'The conversations, as they now are, in the order given.',
+              content: json({
+                type: 'object',
+                properties: { data: { type: 'array', items: ref('Conversation') } },
+                required: ['data'],
+              }),
+            },
+            ...errors(400, 401, 403, 415, 422, 423, 429, 500),
+          },
+        },
+      },
       '/conversations/{id}/notes': {
         post: {
           operationId: 'addConversationNote',
@@ -1508,6 +1531,7 @@ export function buildOpenApiDocument(serverUrl: string) {
           required: ['id', 'erased', 'message'],
         },
         UpdateConversation: jsonSchema(apiUpdateConversationSchema, 'input'),
+        UpdateManyConversations: jsonSchema(apiUpdateManyConversationsSchema, 'input'),
         Member: jsonSchema(apiMemberSchema),
         Team: jsonSchema(apiTeamSchema),
         AddConversationNote: jsonSchema(apiAddNoteSchema, 'input'),
@@ -1565,6 +1589,7 @@ export const API_ROUTES = [
   ['get', '/conversations'],
   ['get', '/conversations/{id}'],
   ['patch', '/conversations/{id}'],
+  ['post', '/conversations/update-many'],
   ['post', '/conversations/{id}/notes'],
   ['get', '/conversations/{id}/notes'],
   ['get', '/conversations/{id}/messages'],
