@@ -68,6 +68,10 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
 3. Store the four role connection strings in the secret manager: migrate (owner), app, auth,
    platform. Web receives app/auth/platform; worker receives app/platform; only the migration job
    receives the owner string.
+4. In the provider's database parameters, set `log_parameter_max_length` to 0 and keep
+   `log_parameter_max_length_on_error` at 0 (PostgreSQL's default), so the server's log does not
+   keep queries' parameters (names, numbers, message text) when it logs a slow or failed statement;
+   HyFib's own logs leave them out (ADR-129).
 
 ## Release procedure
 

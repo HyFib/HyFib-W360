@@ -4716,10 +4716,10 @@ Decision:
 
 Not built: a name condition in `POST /contacts/search` (its conditions are segments' conditions,
 which have no name; adding one changes segments too), matching names whatever their accents or
-Unicode form (a name saved with combining accents is found only by text written the same way),
-fuzzy or phonetic matching, finding contacts by part of an email, an index for names, and the same
-check in members' forms and searches and in provider payloads, which still fail as before when they
-hold the character.
+Unicode form (a name saved with combining accents is found only by text written the same way), fuzzy
+or phonetic matching, finding contacts by part of an email, an index for names, and the same check
+in members' forms and searches and in provider payloads, which still fail as before when they hold
+the character (since ADR-129 without the text in logs or a receipt's last error).
 
 ## ADR-125 Reading campaigns and their results through the public API (2026-10-03)
 
@@ -4938,3 +4938,73 @@ Decision:
 Not built: resuming, approving, scheduling, creating or editing campaigns through the API,
 cancelling drafts, stopping many campaigns in one call, a reason or note given with the call, and
 `campaign.status_changed` naming who cancelled a campaign.
+
+## ADR-129 Database errors without the data they quote (SEC-11) (2026-10-03)
+
+Context: an error the app does not map (anything but its functions' W34xx codes, unique violations,
+permission failures and serialization failures) left `db.run` as the driver raised it. Drizzle's
+error repeats the failed query with its parameters ("Failed query: … params: …"), and PostgreSQL's
+error, its cause, can repeat values in its message (`invalid input syntax for type uuid: "…"`), its
+detail (`Key (…)=(…) already exists.`, `Failing row contains (…)`), hint, context and internal
+query. The logger's default error serializer writes all of it, causes included, so the API's and
+server actions' error logs, the worker's job log and the webhook routes logged contacts' names,
+numbers, emails and message text whenever such a query failed; Next.js printed the same error for a
+failing page, pg-boss kept it in a failed job's output, and a webhook receipt kept its message as
+`last_error`, which the operations console shows platform staff. Mapped errors kept the driver's
+error as their cause, which the job log printed too. ADR-124 found it (SEC-11): members' contact
+search with a NUL character failed in the database, and the error's message quoted the search text.
+
+Decision:
+
+- **At the source.** `db.run` and the platform database's `run` replace a database driver's error
+  with a `DatabaseQueryError` (`@w360/core`) that quotes no data. Its message is PostgreSQL's own
+  when that SQLSTATE's messages name only objects or are our functions' sentences ("new row for
+  relation "contacts" violates check constraint "contacts_email_check"", "permission denied for
+  table api_keys"), so a log still says which guard refused. Data exceptions (SQLSTATE class 22:
+  "invalid input syntax for type uuid: "…"", "value "…" is out of range") quote the value that
+  failed and syntax errors (42601) the SQL text, so for those, and for any message longer than one
+  line of 300 characters, the message only names what is known ("Database query failed (SQLSTATE
+  22P02)", with the constraint, table and column when PostgreSQL gives them, or the class of the
+  error that stopped the query before it reached the database). Its properties are the SQLSTATE
+  (`code`), severity, schema, table, column, data type, constraint and routine, each kept only if it
+  reads as a code or a name. Its stack keeps the frames of the driver's error (where the query was
+  awaited) under its own first line: that error's first line, which repeats the message, is removed
+  exactly as V8 wrote it, so a parameter that looks like a frame stays out, and a stack that does
+  not start that way gives no frames. The query, its parameters, PostgreSQL's detail (where unique
+  and check violations repeat the key or the whole row), hint, context and internal query, and the
+  driver's error itself, are dropped. An error that wraps a driver error (an `AppError`, or another
+  error given it as its cause) keeps its own message and class, with the `DatabaseQueryError` as its
+  cause instead.
+- **Our functions' messages quote no personal data**, as every `RAISE` in the migrations does today
+  (fixed sentences; the few with values name a table, a ledger account, a ledger transaction and its
+  amounts, or an event type): a value a function wants to report belongs in `DETAIL`, which is
+  dropped. One check raises 22023 and so loses its sentence (`queue waits must be an array`).
+- **Mapping is unchanged.** W34xx codes, 23505, 42501, 40001 and 40P01 become the same `AppError`s,
+  with the `DatabaseQueryError` as their cause; the functions' W34xx messages stay the public message
+  (fixed sentences written to be shown, without personal data), and `isUniqueViolation` still reads
+  the SQLSTATE and the constraint.
+- **Recognised by shape, not by class:** PostgreSQL's error (a `severity` and a five-character
+  SQLSTATE `code`) and drizzle's failed query (a `query` text and a `params` list), at any depth of
+  the causes, so a second copy of either library, an error wrapping one, or the plain object pg-boss
+  copies one into is still recognised; a `DatabaseQueryError` (a brand, as `AppError` has) is not.
+- **And in the logger.** Every logger made by `createLogger` writes `err` through `serializeError`,
+  which does the same without changing the error it logs, so a driver error that never passed
+  through `db.run` (pg-boss's own queries, a driver error kept as another error's cause, or among an
+  `AggregateError`'s errors) is logged as its `DatabaseQueryError`, behind the errors that wrap it.
+  A caller's own `err` serializer cannot replace it. Any other error is logged as pino logs it. The
+  pg-boss error handlers log the queue and worker beside the error (`pgBossErrorContext`), as the
+  copy pino logged whole held them before.
+- **What follows:** the error logs above, Next.js's own output for a failing page, failed jobs'
+  outputs (so dead letters name `DatabaseQueryError` and its SQLSTATE, not `Error` without a code)
+  and receipts' `last_error` hold the sanitised error. Members' contact search with a NUL character
+  still fails (22021), and so does an inbound message holding one (22P05, the receipt `failed`), as
+  ADR-124 left them, now without the text.
+- **Finding a failed query** uses the SQLSTATE, constraint, table and column, the frames, and the
+  request or job that failed, never logged values (RUNBOOKS, triage).
+
+Not built: messages of other libraries' errors (logged as before; webhook delivery logs only their
+class and code); migrations' console output (operators run them, and it keeps PostgreSQL's
+message); a job whose handler fails on pg-boss's own query (a job sent outside a transaction) keeps
+PostgreSQL's error in its failed job's output (those queries hold job envelopes: ids and a
+signature); an error kept under another property than `cause` (or `errors`) is logged as pino
+logs it.

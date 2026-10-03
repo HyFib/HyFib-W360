@@ -1883,11 +1883,12 @@ payment_requested → succeeded`; before each provider call it is written as `un
 
 ## 8. Observability
 
-Structured JSON logs (pino) with redaction and correlation ids **[built]**; every failed job
-attempt logged by the worker with its queue and job ids **[built]**; audit and security events in
-the database **[built]**; queue counts and recorded dead letters in the platform operations
-console (§6P) **[built]**; OpenTelemetry traces/metrics with one hosted backend, queue lag and
-dead-letter alerts **[designed]**.
+Structured JSON logs (pino) with redaction and correlation ids **[built]**; failed queries logged
+without the data they quote (a `DatabaseQueryError` from `db.run` and the logger's `err` serializer,
+ADR-129) **[built]**; every failed job attempt logged by the worker with its queue and job ids
+**[built]**; audit and security events in the database **[built]**; queue counts and recorded dead
+letters in the platform operations console (§6P) **[built]**; OpenTelemetry traces/metrics with one
+hosted backend, queue lag and dead-letter alerts **[designed]**.
 
 ## 9. Topology
 

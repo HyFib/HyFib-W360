@@ -92,6 +92,20 @@ export class PgBossJobQueue implements JobQueue {
 }
 
 /**
+ * What to log beside an error pg-boss emits (ADR-129). pg-boss copies a worker's error into a plain
+ * object with its queue and worker id; a database error is logged without the copy's other
+ * properties, so the two are logged beside it.
+ */
+export function pgBossErrorContext(error: unknown): { queue?: string; worker?: string } {
+  if (typeof error !== 'object' || error === null) return {};
+  const { queue, worker } = error as { queue?: unknown; worker?: unknown };
+  return {
+    ...(typeof queue === 'string' ? { queue } : {}),
+    ...(typeof worker === 'string' ? { worker } : {}),
+  };
+}
+
+/**
  * Job counts for one queue as pg-boss keeps them: refreshed by the supervising worker about once a
  * minute, so they can lag the table slightly. `failed` counts failed jobs still retained.
  */

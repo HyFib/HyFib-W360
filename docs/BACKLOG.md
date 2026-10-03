@@ -668,10 +668,12 @@ review; production rollout per RELEASE-CHECKLIST.
 - **SEC-10** Keyring re-encryption job: re-encrypt every keyring ciphertext (provider tokens, HTTP
   secrets, flow private keys, stored webhook bodies) under the primary key so an old key can be
   removed (`Keyring.needsRotation` exists; the job does not).
-- **SEC-11** Keep failed queries' parameters out of error logs. A query that fails with an error the
-  app does not map is logged whole by the API's and server actions' error logs, the worker's job log
-  and several webhook routes, and the driver's message repeats the query's parameters (names,
+- **SEC-11** ~~Keep failed queries' parameters out of error logs. A query that fails with an error
+  the app does not map is logged whole by the API's and server actions' error logs, the worker's job
+  log and several webhook routes, and the driver's message repeats the query's parameters (names,
   emails, message text), against the logger's rule; `errorClassAndCode` (class and SQLSTATE only)
   exists and webhook delivery uses it. Found with ADR-124, whose check now keeps the NUL character
   from reaching queries; a probe of members' contact search with it showed the search text in the
-  error's message.
+  error's message.~~ Settled by ADR-129: `db.run` and the platform database's `run` replace a
+  driver's error with a `DatabaseQueryError` (SQLSTATE, the names PostgreSQL gave, its message only
+  where that quotes no values, and the frames), and every logger's `err` serializer does the same.

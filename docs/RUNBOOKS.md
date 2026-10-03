@@ -1,6 +1,6 @@
 # Runbooks
 
-Last updated 2026-09-28. Procedures marked **(phase N)** apply once that capability ships. Every
+Last updated 2026-10-03. Procedures marked **(phase N)** apply once that capability ships. Every
 action on customer data requires a support grant (`/platform`) with a reason; every platform action is
 audited. Never paste tokens, message content or card data into tickets or chat.
 
@@ -8,6 +8,15 @@ audited. Never paste tokens, message content or card data into tickets or chat.
 
 - Correlation ids: responses carry `x-request-id`; server-action errors show a reference to users.
   Search logs by `correlationId`.
+- A failed query is logged as a `DatabaseQueryError` (ADR-129): its message is PostgreSQL's own when
+  that names only objects (a constraint, table or column) or is one of our functions' sentences,
+  otherwise "Database query failed (SQLSTATE …)"; `code` is the SQLSTATE, `constraint`, `table` and
+  `column` name what failed and the stack's frames show where the query was awaited. The query's
+  parameters, PostgreSQL's detail (a unique violation's key, a check's whole row) and the value a
+  data exception (SQLSTATE 22…) quotes are never logged, nor kept in a receipt's `last_error` or a
+  failed job's output. Find the statement from the frames and the request (`requestId`,
+  `correlationId`) or job, then reproduce it with the company's data under a support grant; do not
+  turn on statement logging with parameters to find it (DEPLOYMENT, first-time database setup).
 - Health: web `/api/health/ready`, worker `:9464/ready`.
 - Queues (as owner or with a read-only diagnostic role):
   ```sql

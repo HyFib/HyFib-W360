@@ -22,6 +22,7 @@ import {
   GraphClient,
   JobSigner,
   PgBossJobQueue,
+  pgBossErrorContext,
   RazorpayClient,
   createApiKeysService,
   createWebhooksService,
@@ -273,7 +274,9 @@ async function init(): Promise<Runtime> {
     max: 2,
     application_name: 'w360-web-jobs',
   });
-  boss.on('error', (error: unknown) => logger.error({ err: error }, 'pg-boss error'));
+  boss.on('error', (error: unknown) =>
+    logger.error({ err: error, ...pgBossErrorContext(error) }, 'pg-boss error'),
+  );
   await boss.start();
 
   const jobs = new PgBossJobQueue(boss);

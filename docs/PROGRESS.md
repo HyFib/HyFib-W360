@@ -1,5 +1,103 @@
 # Progress
 
+## 2026-10-03 — Phase 5: database errors without the data they quote (SEC-11, ADR-129)
+
+Status: **Implemented and locally verified (test data only).** A query that failed with an error the
+app does not map left `db.run` as the driver raised it: drizzle's message repeats the query with
+its parameters, and PostgreSQL's error repeats values in its message (data exceptions) and its
+detail (a unique violation's key, a check's whole row). The logger wrote all of it, so the API's,
+server actions' and worker's error logs, the webhook routes, Next.js's output, failed jobs' outputs
+and a receipt's `last_error` could hold contacts' names, numbers, emails and message text (SEC-11,
+found with ADR-124).
+
+### Completed
+
+- **Design (ADR-129):** `db.run` and the platform database's `run` replace a driver's error with a
+  `DatabaseQueryError` (`@w360/core`): PostgreSQL's message where its SQLSTATE's messages quote no
+  values (not data exceptions, class 22, nor syntax errors, 42601; one line of at most 300
+  characters), otherwise "Database query failed (SQLSTATE …)" with the constraint, table and column;
+  the SQLSTATE and the names PostgreSQL gave as properties; the frames of the failed query under its
+  own first line. Never the query, its parameters, PostgreSQL's detail, hint, context or internal
+  query. Mapped errors (W34xx, 23505, 42501, 40001, 40P01) are mapped as before with it as their
+  cause, and an error wrapping a driver error keeps its own message with it as its cause. Every
+  logger's `err` serializer does the same, without changing the logged error, along the causes and
+  an `AggregateError`'s errors, and a caller's serializer cannot replace it. Driver errors are
+  recognised by shape (PostgreSQL's severity and SQLSTATE; drizzle's query and parameters), pg-boss's
+  plain-object copies included.
+- **Core:** `DatabaseQueryError`, `isDatabaseQueryError`, `isDatabaseDriverError`,
+  `toDatabaseQueryError` and `withoutDriverErrors` (`errors.ts`); `serializeError`, used by
+  `createLogger` for `err`, which also takes an optional destination stream (`logger.ts`).
+- **Database:** `mapDatabaseError` reads the W34xx public message first, then replaces the driver's
+  error and maps by the SQLSTATE (`packages/db/src/errors.ts`).
+- **Worker and web:** the pg-boss error handlers log the queue and worker beside the error
+  (`pgBossErrorContext`, `jobs/queue.ts`), since the copied error is now logged without its other
+  properties.
+- **Tests:**
+  - Unit (`errors.test.ts`, 7 new; `logger.test.ts`, 6 new; `queue.test.ts`, 1 new): the facts and
+    names kept and anything else dropped; PostgreSQL's message kept for a unique violation and one of
+    our sentences, dropped for data exceptions, syntax errors, several lines, 300+ characters or no
+    SQLSTATE; only frame lines under the error's own first line, a parameter forging a frame left
+    out, a stack whose first line no longer matches dropped; recognition by shape (drizzle's,
+    PostgreSQL's, pg-boss's copy) and what is not a driver error; the class that stopped a query
+    before PostgreSQL answered; wrapping errors keeping their message with the new cause, a frozen
+    wrapper giving way, a cause loop; the serializer for drizzle's error, a wrapping `AppError` (the
+    logged error unchanged), pg-boss's copy, an `AggregateError`, and any other error exactly as
+    pino serializes it; `createLogger` (a child logger, a caller's own `err` serializer);
+    `pgBossErrorContext`.
+  - Integration (`database-errors.test.ts`, 6 new, real PostgreSQL): an invalid uuid holding a name
+    and number (22P02: the driver's error quoted both; `db.run`'s error, its stack and the log line
+    quote neither, the frames point at the test, and the logger sanitises the driver's own error
+    too); a check violation (23514) keeping PostgreSQL's message, constraint, table and schema, never
+    the row; a unique violation mapped to `conflict` with the constraint, `isUniqueViolation` true
+    and a cause that quotes no number; a W34xx sentence of more than 300 characters kept as the
+    public message, its cause naming only the SQLSTATE; members' contact search with a NUL character (22021) and an
+    inbound WhatsApp message holding one, whose receipt fails with `last_error` "Database query failed
+    (SQLSTATE 22P05)" instead of the insert with its text and number. The existing suites, which read
+    PostgreSQL's messages through `db.run` (guards, our functions' sentences), pass unchanged.
+- **Docs:** ADR-129 (and ADR-124's note); SECURITY (an "Error logs" control); THREAT-MODEL T142 and
+  the `L` status in the legend; RUNBOOKS (triage: a failed query in the logs); ARCHITECTURE
+  (observability); DEPLOYMENT (PostgreSQL's own log keeps no parameters); BACKLOG SEC-11 settled.
+  No feature matrix row covers logging.
+- **Mutation checks:** 32 regressions tried, all caught, 2 only once tests were added for them:
+  - caught: 3 in recognising a driver error (drizzle's or PostgreSQL's not recognised, a
+    `DatabaseQueryError` taken for one), 4 in what is kept (a SQLSTATE, a name, a severity or the
+    class of what stopped a query kept whatever it holds), 5 in PostgreSQL's message (kept for data
+    exceptions, for syntax errors, without a SQLSTATE or at any length, or never kept), 4 in the
+    stack (frames taken from anywhere in it, frames passed in kept unchecked, the failed query's
+    frames dropped, a stack whose rest is not frames still used), 3 in the facts (read from the
+    first error only, what stopped a query not named, causes not followed), 2 in wrapping errors
+    (the driver's error kept, a frozen wrapper kept with it), 3 in `db.run` (the driver's error
+    returned, our function's sentence read after it is replaced, a unique violation's cause the
+    driver's error), 6 in the logger (errors written as pino does, a caller's serializer winning, a
+    driver error logged as it is, causes not followed, the logged error changed, an
+    `AggregateError`'s errors written as pino does) and 2 in pg-boss's context (the queue left out,
+    anything logged as the worker);
+  - caught only once a test was added: frames kept from a stack whose message was cut after V8 wrote
+    it (a unit test), and our function's sentence read for the public message after the driver's
+    error is replaced, which gives the same sentence for every function today (an integration test
+    raising a sentence of more than 300 characters through `db.run`).
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                                                                                                       | Result                                                                   |
+| --------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                          | clean                                                                    |
+| `pnpm test`                                                                                                                                   | 575 passed                                                               |
+| `pnpm test:integration` on PostgreSQL 18.6 and 17.11                                                                                          | 771 passed on each                                                       |
+| `pnpm build`, then `contacts.spec.ts`, `campaigns.spec.ts` and `api-keys.spec.ts` on chromium and mobile-chromium (database migrated to 0100) | 14 passed                                                                |
+| Mutation checks                                                                                                                               | 32 regressions tried, all caught (2 only once tests were added for them) |
+| gitleaks 8.30.1 on the commit                                                                                                                 | no leaks found                                                           |
+
+### Known gaps
+
+- Messages of other libraries' errors are logged as before (webhook delivery logs only their class
+  and code); migrations' console output keeps PostgreSQL's message; a job whose handler fails on
+  pg-boss's own query keeps PostgreSQL's error in its failed job's output (job envelopes: ids and a
+  signature); an error kept under another property than `cause` or `errors` is logged as pino logs
+  it.
+- Members' forms and searches and provider payloads are still not checked for the NUL character
+  (ADR-124): they fail as internal errors, now without the text.
+
 ## 2026-10-03 — Phase 5: pausing and cancelling campaigns through the public API (P5-08, ADR-128)
 
 Status: **Implemented and locally verified (test data and the Graph stand-in only).** Since ADR-125
