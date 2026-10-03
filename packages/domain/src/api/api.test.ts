@@ -38,6 +38,8 @@ import {
   apiListContactFields,
   apiTags,
   apiUpdateContact,
+  apiUpdateManyContacts,
+  apiUpdateManyContactsSchema,
   contactListQuery,
 } from './contacts';
 import {
@@ -1795,6 +1797,50 @@ describe('OpenAPI document', () => {
     });
   });
 
+  it('changes many contacts in one call, all or none (ADR-122)', () => {
+    const post = paths['/contacts/update-many']?.post as unknown as {
+      operationId: string;
+      description: string;
+      requestBody: { content: { 'application/json': { schema: unknown } } };
+      responses: Record<string, unknown>;
+    };
+    expect(post.operationId).toBe('updateManyContacts');
+    expect(post.description).toContain('`contacts.write`');
+    expect(post.description).toContain('All of them or none');
+    expect(post.description).toContain('`contacts.3.fields.plan`');
+    expect(post.description).toContain('counts as one request');
+    expect(post.requestBody.content['application/json'].schema).toEqual({
+      $ref: '#/components/schemas/UpdateManyContacts',
+    });
+    expect(Object.keys(post.responses)).toEqual(expect.arrayContaining(['200', '422', '423']));
+    expect(Object.keys(post.responses)).not.toContain('404');
+    type Items = {
+      minItems?: number;
+      maxItems?: number;
+      items?: { required?: string[]; additionalProperties?: unknown; properties?: object };
+    };
+    const schema = (
+      doc.components.schemas as Record<
+        string,
+        { required?: string[]; additionalProperties?: unknown; properties?: { contacts?: Items } }
+      >
+    ).UpdateManyContacts;
+    expect(schema?.required).toEqual(['contacts']);
+    expect(schema?.additionalProperties).toBe(false);
+    const items = schema?.properties?.contacts;
+    expect(items).toMatchObject({ minItems: 1, maxItems: API_LIMITS.contactsPerChange });
+    expect(items?.items?.required).toEqual(['id']);
+    expect(items?.items?.additionalProperties).toBe(false);
+    expect(Object.keys(items?.items?.properties ?? {})).toEqual([
+      'id',
+      'name',
+      'email',
+      'fields',
+      'addTags',
+      'removeTags',
+    ]);
+  });
+
   it('resolves, reopens, assigns or moves a conversation with any of the three fields (ADR-093)', () => {
     const patch = paths['/conversations/{id}']?.patch as unknown as {
       operationId: string;
@@ -1989,6 +2035,82 @@ describe('contact custom fields and changes (ADR-112)', () => {
     expect(await code(apiListContactFields({} as never, ctx(['contacts.write'])))).toBe(
       'forbidden',
     );
+  });
+
+  it('change 1 to 100 contacts at once, each named once with what PATCH takes (ADR-122)', async () => {
+    expect(API_LIMITS.contactsPerChange).toBe(100);
+    const ids = (n: number) =>
+      Array.from({ length: n }, (_, i) => `0192f0c4-8e2b-7c1d-9a3e-${String(i).padStart(12, '0')}`);
+    const other = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f02';
+    for (const body of [
+      { contacts: [{ id, name: 'Priya' }] },
+      {
+        contacts: [
+          { id, addTags: ['vip'] },
+          { id: other, fields: { city: null }, email: null },
+        ],
+      },
+      { contacts: ids(API_LIMITS.contactsPerChange).map((c) => ({ id: c, removeTags: ['new'] })) },
+    ]) {
+      expect(apiUpdateManyContactsSchema.parse(body)).toEqual(body);
+    }
+    for (const bad of [
+      { contacts: [] },
+      { contacts: ids(API_LIMITS.contactsPerChange + 1).map((c) => ({ id: c, name: 'x' })) },
+      {
+        contacts: [
+          { id, name: 'A' },
+          { id, name: 'B' },
+        ],
+      },
+      { contacts: [{ id: 'not-a-uuid', name: 'A' }] },
+      { contacts: [{ name: 'A' }] },
+      { contacts: [{ id }] },
+      { contacts: [{ id, phone: '+919876543210' }] },
+      { contacts: [{ id, name: 'A', phone: '+919876543210' }] },
+      { contacts: { id, name: 'A' } },
+      { contacts: [{ id, name: 'A' }], dryRun: true },
+      {},
+    ]) {
+      expect(
+        apiUpdateManyContactsSchema.safeParse(bad).success,
+        JSON.stringify(bad).slice(0, 80),
+      ).toBe(false);
+    }
+    // Refused before anything is read: without the scope, while the company is not active, and for
+    // a bad change, naming its place.
+    const many = (c: ApiContext, body: unknown) =>
+      apiUpdateManyContacts({} as never, c, body).catch((error: unknown) => error);
+    const body = { contacts: [{ id, name: 'Priya' }] };
+    expect(await code(apiUpdateManyContacts({} as never, ctx(['contacts.read']), body))).toBe(
+      'forbidden',
+    );
+    for (const status of ['suspended', 'restricted']) {
+      expect(
+        await code(apiUpdateManyContacts({} as never, ctx(['contacts.write'], status), body)),
+      ).toBe('tenant_suspended');
+    }
+    const issues = async (change: Record<string, unknown>) => {
+      const error = await many(ctx(['contacts.write']), {
+        contacts: [
+          { id, name: 'Priya' },
+          { id: other, ...change },
+        ],
+      });
+      return isAppError(error) ? error.issues : error;
+    };
+    expect(await issues({ email: 'not an address' })).toEqual([
+      { path: 'contacts.1.email', message: 'Email address is not valid.' },
+    ]);
+    expect(await issues({ addTags: ['a,b'] })).toEqual([
+      { path: 'contacts.1.addTags', message: expect.any(String) as unknown },
+    ]);
+    expect(await issues({ addTags: ['VIP'], removeTags: [' vip '] })).toEqual([
+      { path: 'contacts.1.removeTags', message: 'The tag vip cannot be both added and removed.' },
+    ]);
+    expect(await issues({})).toEqual([
+      { path: 'contacts.1', message: 'Give name, email, fields, addTags or removeTags.' },
+    ]);
   });
 
   it('are described: the fields in every contact, their definitions, and the change', () => {

@@ -1,5 +1,80 @@
 # Progress
 
+## 2026-10-03 — Phase 5: changing many contacts in one call through the public API (P5-08, ADR-122)
+
+Status: **Implemented and locally verified (test data only).** Since ADR-112 a key changed one
+contact per request: an integration tagging everyone who joined a webinar, or copying a field from
+its CRM to a few hundred contacts, made one request for each, counted against its limits, and a
+failure halfway left half of them changed.
+
+### Completed
+
+- **Design (ADR-122):** `POST /contacts/update-many` takes 1 to 100 `contacts`, each with its `id`
+  (each contact once) and what `PATCH /contacts/{id}` takes (`name`, `email`, `fields`, `addTags`,
+  `removeTags`, at least one); `contacts.write`; all of them or none, in one transaction, a refusal
+  naming its place (`contacts.<n>.…`); answered in the order given; one request against the limits;
+  no `Idempotency-Key` (a repeat changes nothing more).
+- **Domain (`api/contacts.ts`):** the change `PATCH` makes is now `changeLockedContact`, with
+  `prepareContactChange`, `lockFields` and `checkFieldChanges` naming each refusal's place, used by
+  `apiUpdateContact` and `apiUpdateManyContacts`. The latter locks every field any change names in
+  one statement (as a field's deletion takes them), checks each change against them, locks the
+  contacts `FOR UPDATE` in id order, refuses an unknown, another company's or an erased contact with
+  422 naming `contacts.<index>.id`, applies each change in the order given and reads them back.
+  `API_LIMITS.contactsPerChange` (100). OpenAPI: `updateManyContacts` and its body.
+- **Route:** `apps/web/src/app/api/v1/contacts/update-many/route.ts`.
+- **Tests:**
+  - Unit (`api.test.ts`, 2): the body (1 to 100 contacts, each once, ids, at least one change,
+    nothing else, numbers refused) and the refusals before anything is read (the scope, suspended or
+    restricted companies, a bad email, a bad tag and a tag both added and removed named by their
+    place); the OpenAPI entry (all or none, a place named, one request, the body's limits, no 404).
+  - Integration (`api-contact-fields.test.ts`, 5): three contacts changed in the order given (name,
+    email, fields, tags), each changed one audited as the key with the call's correlation id, a
+    contact that already had the value not audited, and a repeat changing nothing; refusals by place
+    (an unknown, another company's and an erased contact, an unknown field, a value of another type,
+    a 51st tag, a bad email) changing nothing, and a key without the scope; 100 contacts in one
+    call; two calls naming the same contacts in opposite orders while a holder locks the middle one,
+    each also setting another field of it, both finishing without a deadlock and both values kept; a
+    field's deletion held mid-way, which goes on while the call waits, the call then refusing
+    `contacts.1.fields.city` and changing nothing.
+  - e2e (`api-contact-fields.spec.ts`): a call with a value of another type is refused naming
+    `contacts.1.fields.plan` and changes nothing; a valid call changes two contacts, answered in the
+    order given, and their pages show the new name, tag and plan.
+- **Docs:** ADR-122; SECURITY; THREAT-MODEL T135; RUNBOOKS (a refused call naming
+  `contacts.<n>.…`); ARCHITECTURE; DEPLOYMENT (servers from before it answer 405); BACKLOG P5-08;
+  FEATURE-MATRIX W-134, H-033.
+- **Mutation checks:** 31 regressions tried, 29 caught:
+  - 9 on the body and the first checks (more than 100, none, a contact twice, other properties, no
+    change, a bad email, a bad tag and a tag added and removed named without their place, the
+    scope), 14 in the call (a field, an unknown field, a 51st tag and an unknown contact named
+    without their place, an erased contact changed, an unknown one skipped, the fields locked after
+    the contacts, the contacts not locked or locked one by one in the order given, changes in id
+    order, answers in the database order or read before the change, one item's change or the first
+    item's fields given to all), 3 in the shared change and PATCH (the email always written, audits
+    without the request, PATCH's places named with a prefix), 2 in OpenAPI (the operation, all or
+    none) and 1 through the e2e test (the route answering 201).
+  - Not caught, as the tests cannot tell them apart: the contacts locked without an order (one
+    statement locks every named contact in the order of its scan, which two calls naming the same
+    contacts share; the id order keeps that true whatever the plan), and PATCH finding an erased
+    contact (the read after the change finds none, so the call is still refused as not found and
+    the change rolled back).
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                                                                                                                      | Result                                                                                                                                                                                                                                                                                                                                                                      |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                         | clean                                                                                                                                                                                                                                                                                                                                                                       |
+| `pnpm test`                                                                                                                                                  | 542 passed                                                                                                                                                                                                                                                                                                                                                                  |
+| `pnpm test:integration` on PostgreSQL 18.6 and 17.11                                                                                                         | 749 passed on each                                                                                                                                                                                                                                                                                                                                                          |
+| `pnpm build`, then `api-contact-fields.spec.ts`, `api-contact-changes.spec.ts` and `api.spec.ts` on chromium and mobile-chromium (database migrated to 0097) | 20 passed                                                                                                                                                                                                                                                                                                                                                                   |
+| Mutation checks                                                                                                                                              | 31 regressions tried, 29 caught (1 through the e2e test); the other two change nothing the tests can see: the contacts locked without an order (one statement locks them in the order of its scan, which two calls naming the same contacts share) and PATCH finding an erased contact (the read after the change finds none, so the call is still refused and rolled back) |
+| gitleaks 8.30.1 on the commit                                                                                                                                | no leaks                                                                                                                                                                                                                                                                                                                                                                    |
+
+### Known gaps
+
+- Choosing contacts to change by a filter (all with a tag, a segment), changes that partly succeed,
+  adding contacts in the same call, changing numbers, and the same change for many contacts in the
+  inbox are not built (ADR-122).
+
 ## 2026-10-03 — Phase 5: saying what changed in `contact.updated` (P5-09, ADR-121)
 
 Status: **Implemented and locally verified (local test receivers only).** `contact.updated` was sent

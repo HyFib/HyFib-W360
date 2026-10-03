@@ -507,6 +507,16 @@ Phase 5 rules (Public API, P5-08):
   included) refuses the whole call, naming its place in the list, and changes nothing (tested), so
   a call never reveals or touches another company's conversations beyond saying an id is not one of
   the company's. A call counts as one request against the key's limits.
+- Changing many contacts in one call (ADR-122, `POST /contacts/update-many`) needs
+  `contacts.write` and changes each contact through the function `PATCH /contacts/{id}` uses, with
+  the same checks of every value against its field's type, the 50-tag limit and the audit as the
+  key; at most 100 per call, all or none, in the company's scope. It locks the fields any change
+  names first, in one statement, as a field's deletion takes them, then the contacts in id order,
+  so concurrent calls take turns and a call meeting a field's deletion waits and refuses the deleted
+  key without keeping a value of it (tested). An id of another company's contact or an erased one
+  refuses the whole call, naming its place in the list, and changes nothing (tested), so a call never
+  reveals or touches another company's contacts beyond saying an id is not one of the company's. A
+  call counts as one request against the key's limits.
 - Starting automations through the API (ADR-077) needs `automations.start`, which only members who
   publish automations (`automations.publish`: owners and administrators) can grant, as a started run
   messages contacts as a published version does; an automation whose version sends a marketing

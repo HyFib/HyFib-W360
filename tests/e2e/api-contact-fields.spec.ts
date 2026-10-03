@@ -54,6 +54,7 @@ function signatureValid(headers: IncomingHttpHeaders, body: string, secret: stri
 
 interface ApiContactBody {
   id: string;
+  name: string | null;
   tags: string[];
   fields: Record<string, string | number | boolean>;
 }
@@ -190,4 +191,95 @@ test('a key sets and changes a contact’s custom fields, the contact page shows
     city: 'Delhi',
     orders: 3,
   });
+});
+
+test('a key changes several contacts in one call, all of them or none, and the contact pages show it (ADR-122)', async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(180_000);
+  const email = uniqueEmail('apibulk');
+  const slug = `apibulk-${Date.now().toString(36)}`;
+  await signUpAndVerify(page, { name: 'Bela Bulk', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('Bulk Traders');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+
+  await page.goto(`/c/${slug}/settings/messaging`);
+  await page.getByLabel('New field').fill('Plan');
+  await page.getByRole('button', { name: 'Add field' }).click();
+  await expect(page.getByRole('cell', { name: 'plan', exact: true })).toBeVisible();
+
+  await page.goto(`/c/${slug}/settings/api-keys`);
+  await page.getByLabel('Name', { exact: true }).fill('Webinar sync');
+  await page.getByRole('checkbox', { name: /Read contacts/ }).check();
+  await page
+    .getByRole('checkbox', { name: /Create and change contacts and record consent/ })
+    .check();
+  await page.getByRole('button', { name: 'Create API key' }).click();
+  const tokenField = page.getByLabel('API key', { exact: true });
+  await expect(tokenField).toBeVisible();
+  const token = await tokenField.inputValue();
+  await page.getByRole('button', { name: 'I have stored the key' }).click();
+  const auth = { Authorization: `Bearer ${token}` };
+
+  const add = async (name: string, suffix: string) => {
+    const created = await request.post('/api/v1/contacts', {
+      headers: auth,
+      data: { phone: `+9196${String(Date.now()).slice(-7)}${suffix}`, name },
+    });
+    expect(created.status()).toBe(201);
+    return ((await created.json()) as { data: ApiContactBody }).data;
+  };
+  const asha = await add('Asha', '1');
+  const bina = await add('Bina', '2');
+
+  // One bad change refuses the call by its place, and neither contact changes.
+  const refused = await request.post('/api/v1/contacts/update-many', {
+    headers: auth,
+    data: {
+      contacts: [
+        { id: asha.id, name: 'Asha Rao' },
+        { id: bina.id, fields: { plan: 3 } },
+      ],
+    },
+  });
+  expect(refused.status()).toBe(422);
+  expect(((await refused.json()) as { error: { issues: unknown } }).error.issues).toEqual([
+    { path: 'contacts.1.fields.plan', message: 'Plan takes text.' },
+  ]);
+  const read = async (id: string) =>
+    (
+      (await (await request.get(`/api/v1/contacts/${id}`, { headers: auth })).json()) as {
+        data: ApiContactBody;
+      }
+    ).data;
+  expect((await read(asha.id)).name).toBe('Asha');
+
+  // Both changed in one call, answered in the order given.
+  const changed = await request.post('/api/v1/contacts/update-many', {
+    headers: auth,
+    data: {
+      contacts: [
+        { id: bina.id, fields: { plan: 'gold' }, addTags: ['Webinar'] },
+        { id: asha.id, name: 'Asha Rao', addTags: ['webinar'] },
+      ],
+    },
+  });
+  expect(changed.status()).toBe(200);
+  const data = ((await changed.json()) as { data: ApiContactBody[] }).data;
+  expect(data.map((c) => [c.id, c.name, c.tags, c.fields])).toEqual([
+    [bina.id, 'Bina', ['webinar'], { plan: 'gold' }],
+    [asha.id, 'Asha Rao', ['webinar'], {}],
+  ]);
+
+  // The contact pages show the changes.
+  await page.goto(`/c/${slug}/contacts/${asha.id}`);
+  await expect(page.getByRole('heading', { name: 'Asha Rao', level: 1 })).toBeVisible();
+  await expect(page.getByRole('list', { name: 'Tags' })).toContainText('webinar');
+  await page.goto(`/c/${slug}/contacts/${bina.id}`);
+  await expect(page.getByLabel('Plan', { exact: true })).toHaveValue('gold');
+  await expect(page.getByRole('list', { name: 'Tags' })).toContainText('webinar');
+  await expectNoHorizontalOverflow(page);
 });

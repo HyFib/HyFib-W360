@@ -1071,6 +1071,14 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   the function `PATCH` uses, to each in the order given, which locks the team as a conversation
   moves into it (after the conversations, as a team's deletion does); it answers the conversations
   in that order.
+- **Many contacts at once (ADR-122):** `POST /contacts/update-many` (`apiUpdateManyContacts`,
+  `api/contacts.ts`) takes 1 to 100 contacts, each with its id and `PATCH`'s fields. It checks each
+  change before the transaction (`prepareContactChange`: email, tags), then locks every field any
+  change names in one statement (`lockFields`, as a field's deletion takes them) and checks the
+  values against them (`checkFieldChanges`), locks the contacts `FOR UPDATE` in id order, refuses an
+  id that is not one of the company's live contacts (naming `contacts.<index>.id`), and applies
+  `changeLockedContact`, the function `PATCH` uses, to each in the order given; it answers the
+  contacts in that order.
 - **Keyset cursors** (`encodeKeysetCursor`, `exactTimestamp`): a cursor carries the last row's
   timestamp as PostgreSQL keeps it, to the microsecond, and its id, and pages compare
   `(time, id) < (cursor time, cursor id)`; cursors made with milliseconds still read. Cursors built

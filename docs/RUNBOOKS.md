@@ -1439,6 +1439,20 @@ repeating a call is harmless. A call takes at most 100 conversations, each once 
 `conversationIds`), and counts as one request against the key's limits. Each conversation's change
 is audited as a single change is, all with the call's correlation id.
 
+**A call to change many contacts is refused with 422 naming `contacts.<n>.…`.** The contact at that
+place in the list (counting from 0) could not be changed as asked (ADR-122): `contacts.<n>.id` names
+none of the company's live contacts (another company's, an erased one, or none at all);
+`contacts.<n>.fields.<key>` is a field the company does not have or a value of another type
+(`GET /api/v1/contact-fields` lists the fields and types); `contacts.<n>.email` is not an email;
+`contacts.<n>.addTags` would give the contact more than 50 tags; `contacts.<n>.removeTags` names a
+tag also being added. Nothing in the call was changed, the other contacts included:
+`POST /contacts/update-many` changes all of them or none. Correct that contact's change and send
+the call again; what a contact already has changes nothing, so repeating a call is harmless. A call
+takes at most 100 contacts, each once (422 naming `contacts`), and counts as one request. A 409
+`conflict` (retryable) means it met another transaction changing the same contacts in another order,
+such as a CSV import, and PostgreSQL ended it: send it again. Each contact's change is audited as a
+single change is, all with the call's correlation id.
+
 **An API key expired without a reminder, or the reminder came twice.** Owners and administrators
 are emailed once, 7 days before a key expires (ADR-067): `app.api_keys.expiry_reminded_at` says when
 the reminder was queued, and Settings → API keys shows it. Keys that never expire, rotated keys (the

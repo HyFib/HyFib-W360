@@ -46,6 +46,7 @@ import {
   MAX_FIELD_FILTERS,
   apiContactFieldSchema,
   apiContactUpdateSchema,
+  apiUpdateManyContactsSchema,
 } from './contacts';
 import {
   API_MESSAGE_FEED_WINDOW,
@@ -648,6 +649,28 @@ export function buildOpenApiDocument(serverUrl: string) {
               content: json(dataOf(ref('Contact'))),
             },
             ...errors(400, 401, 403, 404, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/contacts/update-many': {
+        post: {
+          operationId: 'updateManyContacts',
+          summary: 'Change many contacts’ names, emails, custom fields or tags at once',
+          description: [
+            `${scopeNote('contacts.write')} Up to ${API_LIMITS.contactsPerChange} contacts, each with its \`id\` and what PATCH /contacts/{id} takes, each changed as that changes one. All of them or none: a contact of another company or an erased one, a value of another type, an unknown field or a 51st tag refuses the call (422, naming the place, as \`contacts.3.fields.plan\`), and nothing is changed.`,
+            'The contacts are changed in the order given and answered in it. A call counts as one request against the rate and monthly limits, within the 64 KB a body may hold. What a contact already has changes nothing, so a retry is safe without an `Idempotency-Key`.',
+          ].join('\n\n'),
+          requestBody: { required: true, content: json(ref('UpdateManyContacts')) },
+          responses: {
+            '200': {
+              description: 'The contacts, as they now are, in the order given.',
+              content: json({
+                type: 'object',
+                properties: { data: { type: 'array', items: ref('Contact') } },
+                required: ['data'],
+              }),
+            },
+            ...errors(400, 401, 403, 415, 422, 423, 429, 500),
           },
         },
       },
@@ -1484,6 +1507,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         Contact: jsonSchema(apiContactSchema),
         ContactCreate: jsonSchema(apiContactCreateSchema, 'input'),
         ContactUpdate: jsonSchema(apiContactUpdateSchema, 'input'),
+        UpdateManyContacts: jsonSchema(apiUpdateManyContactsSchema, 'input'),
         ContactSearch: jsonSchema(apiContactSearchSchema, 'input'),
         ContactField: jsonSchema(apiContactFieldSchema),
         ContactFieldCreate: jsonSchema(apiContactFieldCreateSchema, 'input'),
@@ -1574,6 +1598,7 @@ export const API_ROUTES = [
   ['get', '/contacts'],
   ['post', '/contacts'],
   ['post', '/contacts/search'],
+  ['post', '/contacts/update-many'],
   ['get', '/contacts/{id}'],
   ['patch', '/contacts/{id}'],
   ['post', '/contacts/{id}/consent'],

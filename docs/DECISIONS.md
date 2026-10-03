@@ -4605,3 +4605,38 @@ reader may already have read; a reader keeping a copy compares), which tags were
 the values before a change (personal data stays out of events), consent and source (consent has its
 own event; the source is not part of `contact.updated`), and endpoints taking `contact.updated` only
 for chosen parts.
+
+## ADR-122 Changing many contacts in one call through the public API (2026-10-03)
+
+Context: since ADR-112 a key with `contacts.write` changes one contact per request
+(`PATCH /contacts/{id}`: the name, email, custom field values and tags). An integration that tags
+everyone who joined a webinar, or copies a field from its CRM to a few hundred contacts, made one
+request for each, counted against its rate and monthly limits (ADR-068, ADR-097), and a failure
+halfway left half of them changed. P5-08's Remaining listed changing many contacts in one call.
+
+Decision:
+
+- **Endpoint:** `POST /api/v1/contacts/update-many` (`updateManyContacts`, scope `contacts.write`)
+  takes `contacts`, 1 to 100 items, each with its `id` (each contact once) and what
+  `PATCH /contacts/{id}` takes (`name`, `email`, `fields`, `addTags`, `removeTags`, at least one).
+  It counts as one request against the rate and monthly limits, within the 64 KB a body may hold,
+  and answers the contacts as they now are, in the order given. No `Idempotency-Key`: what a
+  contact already has changes nothing, so a repeat changes nothing more.
+- **All of them or none, in one transaction:** a contact of another company or an erased one, a
+  value of another type, an unknown field, a bad email, a tag both added and removed or a 51st tag
+  refuses the call with 422 naming its place (`contacts.3.fields.plan`, `contacts.5.id`), and
+  nothing is changed.
+- **Each contact changed as `PATCH` changes one,** by the same function (`changeLockedContact`), in
+  the order given: only what differs is written, audited as `contact.updated` by the key (one entry
+  per changed contact, with the call's correlation id) and captured for webhooks as one
+  `contact.updated` per contact, which names what changed (ADR-121).
+- **Locks:** every field any change names is locked first, in one statement, as a field's deletion
+  takes them, so a call waits for a deletion without holding a contact and then refuses the deleted
+  key; then the contacts, `FOR UPDATE` in id order, so two calls naming the same contacts take
+  turns. A CSV import changes its contacts in one transaction in the file's order, so a call and an
+  import changing the same two contacts at the same moment can deadlock; PostgreSQL then ends one of
+  them, which the API answers with 409 `conflict` (retryable), as for any deadlock.
+
+Not built: choosing contacts to change by a filter (all with a tag, a segment), changes that partly
+succeed, adding contacts in the same call, changing numbers, and the same change for many contacts
+in the inbox (members change contacts one at a time, or by import).

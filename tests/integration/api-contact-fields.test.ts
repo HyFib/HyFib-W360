@@ -8,11 +8,13 @@ import { DEFAULT_EGRESS_POLICY, createEgressClient } from '@w360/core/egress';
 import { authorizedTenantScope, contacts, eq, sql } from '@w360/db';
 import {
   API_CONTACT_SEARCH_WINDOW,
+  API_LIMITS,
   apiCreateContact,
   apiGetContact,
   apiListContactFields,
   apiListContacts,
   apiUpdateContact,
+  apiUpdateManyContacts,
   authenticateApiToken,
   contactErasedPayloadSchema,
   contactUpdatedPayloadSchema,
@@ -120,6 +122,8 @@ const updateAudits = (contactId: string) =>
       WHERE action = 'contact.updated' AND subject_id = $1 ORDER BY occurred_at, id`,
     [contactId],
   );
+
+const API_LIMITS_CONTACTS = API_LIMITS.contactsPerChange;
 
 let phoneSeq = 0;
 const nextPhone = () => `+9198111${String(20000 + (phoneSeq += 1)).padStart(5, '0')}`;
@@ -484,6 +488,255 @@ describe('contact custom fields through the public API (ADR-112)', () => {
     // would deadlock with the deletion.
     expect(await outcome).toBe('fields.city');
     expect(await attributesOf(id)).toEqual({});
+  });
+});
+
+describe('changing many contacts in one call (ADR-122)', () => {
+  const tagsOf = async (contactId: string) =>
+    (
+      await fx.query<{ tag: string }>(
+        'SELECT tag FROM app.contact_tags WHERE contact_id = $1 ORDER BY tag',
+        [contactId],
+      )
+    ).map((r) => r.tag);
+  const rowOf = async (contactId: string) =>
+    (
+      await fx.query<{ name: string | null; email: string | null }>(
+        'SELECT display_name AS name, email FROM app.contacts WHERE id = $1',
+        [contactId],
+      )
+    )[0];
+  const auditsOf = (c: Company) =>
+    fx.query<{ subject_id: string; correlation_id: string | null; changed: string[] }>(
+      `SELECT subject_id, correlation_id, metadata -> 'changed' AS changed FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'contact.updated' ORDER BY occurred_at, id`,
+      [c.tenant.id],
+    );
+
+  it('changes each contact as PATCH changes one, in the order given, with an audit entry each; a repeat changes nothing more', async () => {
+    const c = await fx.company();
+    await defineFields(c);
+    const { ctx } = await apiKey(c, ['contacts.read', 'contacts.write']);
+    const owner = await fx.ctx(c, c.owner);
+    const service = contactsService();
+    const make = (displayName: string, tags: string[] = []) =>
+      service.createContact(owner, { displayName, phone: nextPhone(), tags });
+    const [asha, bina, dev] = [await make('Asha', ['new']), await make('Bina'), await make('Dev')];
+    const body = {
+      contacts: [
+        { id: bina.id, name: 'Bina Rao', email: 'bina@example.test', fields: { city: 'Pune' } },
+        { id: asha.id, addTags: ['VIP', 'gold'], removeTags: ['new'], fields: { orders: 3 } },
+        { id: dev.id, name: 'Dev' },
+      ],
+    };
+    const answered = await apiUpdateManyContacts(deps(), ctx, body);
+    expect(answered.map((a) => a.id)).toEqual([bina.id, asha.id, dev.id]);
+    expect(answered[0]).toMatchObject({
+      name: 'Bina Rao',
+      email: 'bina@example.test',
+      fields: { city: 'Pune' },
+      tags: [],
+    });
+    expect(answered[1]).toMatchObject({
+      name: 'Asha',
+      tags: ['gold', 'vip'],
+      fields: { orders: 3 },
+    });
+    expect(answered[2]).toMatchObject({ name: 'Dev', tags: [], fields: {} });
+    // One entry per contact that changed, in the order given, each with the call's correlation id;
+    // Dev already had that name.
+    const audits = await auditsOf(c);
+    expect(audits.map((a) => [a.subject_id, a.changed])).toEqual([
+      [bina.id, ['name', 'email', 'fields']],
+      [asha.id, ['fields', 'tags']],
+    ]);
+    expect(audits.map((a) => a.correlation_id)).toEqual([ctx.requestId, ctx.requestId]);
+    // Answered as they now are, and as GET reads them.
+    expect(await apiGetContact(deps(), ctx, bina.id)).toEqual(answered[0]);
+    // A repeat finds nothing to change.
+    expect(await apiUpdateManyContacts(deps(), ctx, body)).toEqual(answered);
+    expect(await auditsOf(c)).toHaveLength(2);
+  });
+
+  it('refuses the whole call for one bad contact, naming its place, and changes nothing', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    await defineFields(c);
+    const { ctx } = await apiKey(c, ['contacts.write']);
+    const owner = await fx.ctx(c, c.owner);
+    const service = contactsService();
+    const { id: kept } = await service.createContact(owner, {
+      displayName: 'Kept',
+      phone: nextPhone(),
+    });
+    const { id: erased } = await service.createContact(owner, { phone: nextPhone() });
+    await service.eraseContact(owner, { contactId: erased, suppress: false });
+    const { id: theirs } = await service.createContact(await fx.ctx(other, other.owner), {
+      phone: nextPhone(),
+    });
+    const { id: full } = await service.createContact(owner, { phone: nextPhone() });
+    await fx.query(
+      `INSERT INTO app.contact_tags (id, tenant_id, contact_id, tag)
+       SELECT gen_random_uuid(), $1, $2, 'tag-' || n FROM generate_series(1, 50) AS n`,
+      [c.tenant.id, full],
+    );
+    const cases: [Record<string, unknown>, string][] = [
+      [{ id: uuidv7(), name: 'Nobody' }, 'contacts.1.id'],
+      [{ id: theirs, name: 'Theirs' }, 'contacts.1.id'],
+      [{ id: erased, name: 'Erased' }, 'contacts.1.id'],
+      [{ id: full, fields: { nope: 'x' } }, 'contacts.1.fields.nope'],
+      [{ id: full, fields: { orders: 'three' } }, 'contacts.1.fields.orders'],
+      [{ id: full, addTags: ['one-more'] }, 'contacts.1.addTags'],
+      [{ id: full, email: 'not an address' }, 'contacts.1.email'],
+    ];
+    for (const [change, path] of cases) {
+      const refused = await refusal(
+        apiUpdateManyContacts(deps(), ctx, {
+          contacts: [{ id: kept, name: 'Changed', addTags: ['x'] }, change],
+        }),
+      );
+      expect([refused.code, refused.paths], path).toEqual(['validation_failed', [path]]);
+    }
+    expect(await rowOf(kept)).toEqual({ name: 'Kept', email: null });
+    expect(await tagsOf(kept)).toEqual([]);
+    expect(await tagsOf(full)).toHaveLength(50);
+    expect(await auditsOf(c)).toEqual([]);
+    // Without the write scope nothing is read.
+    const reader = await apiKey(c, ['contacts.read']);
+    expect(
+      (
+        await refusal(
+          apiUpdateManyContacts(deps(), reader.ctx, { contacts: [{ id: kept, name: 'X' }] }),
+        )
+      ).code,
+    ).toBe('forbidden');
+  });
+
+  it('changes 100 contacts in one call', async () => {
+    const c = await fx.company();
+    const { ctx } = await apiKey(c, ['contacts.write']);
+    const owner = await fx.ctx(c, c.owner);
+    const service = contactsService();
+    const ids: string[] = [];
+    for (let i = 0; i < API_LIMITS_CONTACTS; i += 1) {
+      ids.push((await service.createContact(owner, { phone: nextPhone() })).id);
+    }
+    const answered = await apiUpdateManyContacts(deps(), ctx, {
+      contacts: [...ids].reverse().map((id) => ({ id, addTags: ['webinar'] })),
+    });
+    expect(answered.map((a) => a.id)).toEqual([...ids].reverse());
+    expect(answered.every((a) => a.tags.includes('webinar'))).toBe(true);
+    expect(await auditsOf(c)).toHaveLength(API_LIMITS_CONTACTS);
+  });
+
+  it('takes turns with a call naming the same contacts in the other order, instead of deadlocking', async () => {
+    const c = await fx.company();
+    await defineFields(c);
+    const { ctx } = await apiKey(c, ['contacts.write']);
+    const owner = await fx.ctx(c, c.owner);
+    const service = contactsService();
+    const [first, middle, last] = [
+      (await service.createContact(owner, { phone: nextPhone() })).id,
+      (await service.createContact(owner, { phone: nextPhone() })).id,
+      (await service.createContact(owner, { phone: nextPhone() })).id,
+    ];
+    const holder = await fx.dbs.adminPool.connect();
+    let calls: Promise<unknown>[] | undefined;
+    try {
+      await holder.query('BEGIN');
+      await holder.query('SELECT id FROM app.contacts WHERE id = $1 FOR UPDATE', [middle]);
+      const [lock] = (await holder.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows;
+      calls = [
+        // Each also sets a field of the middle contact: both values are kept, as each call reads
+        // the contact only once it holds it.
+        apiUpdateManyContacts(deps(), ctx, {
+          contacts: [first, middle, last].map((id) => ({
+            id,
+            addTags: ['one'],
+            ...(id === middle ? { fields: { city: 'Pune' } } : {}),
+          })),
+        }),
+        apiUpdateManyContacts(deps(), ctx, {
+          contacts: [last, middle, first].map((id) => ({
+            id,
+            addTags: ['two'],
+            ...(id === middle ? { fields: { orders: 2 } } : {}),
+          })),
+        }),
+      ];
+      await vi.waitFor(
+        async () => {
+          const [waiting] = await fx.query<{ n: number }>(
+            `WITH RECURSIVE blocked (pid) AS (
+               SELECT a.pid FROM pg_stat_activity a WHERE $1 = ANY (pg_blocking_pids(a.pid))
+               UNION
+               SELECT a.pid FROM pg_stat_activity a
+                 JOIN blocked b ON b.pid = ANY (pg_blocking_pids(a.pid)))
+             SELECT count(*)::int AS n FROM blocked`,
+            [lock!.pid],
+          );
+          if (waiting!.n < 2) throw new Error('the calls are not waiting yet');
+        },
+        { timeout: 4_000, interval: 20 },
+      );
+    } finally {
+      await holder.query('COMMIT');
+      holder.release();
+    }
+    await Promise.all(calls ?? []);
+    for (const id of [first, middle, last]) expect(await tagsOf(id)).toEqual(['one', 'two']);
+    expect(await attributesOf(middle)).toEqual({ city: 'Pune', orders: 2 });
+  });
+
+  it('waits for a field being deleted, then refuses it, without holding a contact', async () => {
+    const c = await fx.company();
+    const fields = await defineFields(c);
+    const { ctx } = await apiKey(c, ['contacts.write']);
+    const owner = await fx.ctx(c, c.owner);
+    const service = contactsService();
+    const { id: a } = await service.createContact(owner, {
+      phone: nextPhone(),
+      attributes: { city: 'Chennai' },
+    });
+    const { id: b } = await service.createContact(owner, { phone: nextPhone() });
+    const holder = await fx.dbs.adminPool.connect();
+    let outcome: Promise<unknown> | undefined;
+    try {
+      await holder.query('BEGIN');
+      await holder.query('DELETE FROM app.contact_fields WHERE id = $1', [fields.city.id]);
+      const [lock] = (await holder.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows;
+      outcome = apiUpdateManyContacts(deps(), ctx, {
+        contacts: [
+          { id: b, fields: { orders: 1 } },
+          { id: a, fields: { city: 'Pune' } },
+        ],
+      }).then(
+        () => 'changed',
+        (error: unknown) => (isAppError(error) ? error.issues?.[0]?.path : error),
+      );
+      await vi.waitFor(
+        async () => {
+          const [waiting] = await fx.query<{ n: number }>(
+            'SELECT count(*)::int AS n FROM pg_stat_activity a WHERE $1 = ANY (pg_blocking_pids(a.pid))',
+            [lock!.pid],
+          );
+          if (waiting!.n < 1) throw new Error('the call is not waiting yet');
+        },
+        { timeout: 4_000, interval: 20 },
+      );
+      // The call waits on the fields without holding a contact, so the deletion goes on.
+      await holder.query(
+        `UPDATE app.contacts SET attributes = attributes - 'city'
+          WHERE tenant_id = $1 AND attributes ? 'city'`,
+        [c.tenant.id],
+      );
+    } finally {
+      await holder.query('COMMIT');
+      holder.release();
+    }
+    expect(await outcome).toBe('contacts.1.fields.city');
+    expect(await attributesOf(a)).toEqual({});
+    expect(await attributesOf(b)).toEqual({});
   });
 });
 

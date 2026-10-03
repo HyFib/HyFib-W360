@@ -30,6 +30,7 @@ import type { OutboundDeps } from '../messaging/outbound';
 import { encodeKeysetCursor, parseInput } from '../validation';
 import { apiContactById, apiContactColumns, toApiContact, type ApiContact } from './contact-view';
 import { apiActor, assertAnyScope, assertScope, type ApiContext } from './context';
+import { API_LIMITS } from './model';
 
 /**
  * Contact custom fields and contact changes through the public API (ADR-112): the company's field
@@ -52,46 +53,77 @@ export const apiContactFieldsSchema = z
   );
 
 /** What a key changes in a contact: at least one of these. */
+const contactChange = {
+  name: z
+    .string()
+    .trim()
+    .max(200)
+    .nullable()
+    .optional()
+    .describe('The contact’s name; null or an empty string clears it.'),
+  email: z
+    .string()
+    .trim()
+    .max(254)
+    .nullable()
+    .optional()
+    .describe('An email address; null or an empty string clears it.'),
+  fields: z
+    .record(FIELD_KEY, fieldValue.nullable())
+    .refine(fieldCount, FIELD_COUNT_MESSAGE)
+    .optional()
+    .describe(
+      'Custom field values to set by field key (GET /contact-fields), each of its field’s type: a string for text, a number, a date as YYYY-MM-DD, true or false for yes/no. Null or an empty string clears a value; fields left out keep theirs.',
+    ),
+  addTags: z
+    .array(z.string().max(40))
+    .max(20)
+    .optional()
+    .describe('Tags to add (lower-cased; commas are not allowed).'),
+  removeTags: z.array(z.string().max(40)).max(MAX_TAGS_PER_CONTACT).optional(),
+};
+type ContactChangeInput = z.infer<z.ZodObject<typeof contactChange>>;
+const someChange = [
+  (v: ContactChangeInput) =>
+    v.name !== undefined ||
+    v.email !== undefined ||
+    v.fields !== undefined ||
+    v.addTags !== undefined ||
+    v.removeTags !== undefined,
+  'Give name, email, fields, addTags or removeTags.',
+] as const;
+
 export const apiContactUpdateSchema = z
-  .object({
-    name: z
-      .string()
-      .trim()
-      .max(200)
-      .nullable()
-      .optional()
-      .describe('The contact’s name; null or an empty string clears it.'),
-    email: z
-      .string()
-      .trim()
-      .max(254)
-      .nullable()
-      .optional()
-      .describe('An email address; null or an empty string clears it.'),
-    fields: z
-      .record(FIELD_KEY, fieldValue.nullable())
-      .refine(fieldCount, FIELD_COUNT_MESSAGE)
-      .optional()
-      .describe(
-        'Custom field values to set by field key (GET /contact-fields), each of its field’s type: a string for text, a number, a date as YYYY-MM-DD, true or false for yes/no. Null or an empty string clears a value; fields left out keep theirs.',
-      ),
-    addTags: z
-      .array(z.string().max(40))
-      .max(20)
-      .optional()
-      .describe('Tags to add (lower-cased; commas are not allowed).'),
-    removeTags: z.array(z.string().max(40)).max(MAX_TAGS_PER_CONTACT).optional(),
-  })
+  .object(contactChange)
   .strict()
-  .refine(
-    (v) =>
-      v.name !== undefined ||
-      v.email !== undefined ||
-      v.fields !== undefined ||
-      v.addTags !== undefined ||
-      v.removeTags !== undefined,
-    'Give name, email, fields, addTags or removeTags.',
-  );
+  .refine(...someChange);
+
+/**
+ * `POST /contacts/update-many` (ADR-122): 1 to 100 contacts, each once, each with what
+ * `PATCH /contacts/{id}` takes.
+ */
+export const apiUpdateManyContactsSchema = z
+  .object({
+    contacts: z
+      .array(
+        z
+          .object({
+            id: z.uuid().describe('The contact to change.'),
+            ...contactChange,
+          })
+          .strict()
+          .refine(...someChange),
+      )
+      .min(1, 'Give at least one contact.')
+      .max(API_LIMITS.contactsPerChange, `Give at most ${API_LIMITS.contactsPerChange} contacts.`)
+      .refine((items) => new Set(items.map((c) => c.id)).size === items.length, {
+        message: 'Give each contact once.',
+      })
+      .describe(
+        `Up to ${API_LIMITS.contactsPerChange} contacts, each with its id and what PATCH /contacts/{id} takes.`,
+      ),
+  })
+  .strict();
 
 export interface ApiContactField {
   key: string;
@@ -135,24 +167,38 @@ export async function apiFieldChanges(
   tenantId: string,
   input: Record<string, unknown>,
 ): Promise<Record<string, AttributeValue | null>> {
-  const keys = Object.keys(input);
-  if (keys.length === 0) return {};
-  const defined = await tx
+  return checkFieldChanges(await lockFields(tx, tenantId, Object.keys(input)), input, '');
+}
+
+type FieldDefinition = { key: string; label: string; type: ContactFieldType };
+
+/** Locks the company's fields with these keys in one statement, as a deletion takes them. */
+async function lockFields(tx: Tx, tenantId: string, keys: string[]): Promise<FieldDefinition[]> {
+  if (keys.length === 0) return [];
+  return tx
     .select({ key: contactFields.key, label: contactFields.label, type: contactFields.type })
     .from(contactFields)
     .where(and(eq(contactFields.tenantId, tenantId), inArray(contactFields.key, keys)))
     .for('share');
+}
+
+/** Checks values against locked fields; a refusal names `<at>fields.<key>`. */
+function checkFieldChanges(
+  defined: readonly FieldDefinition[],
+  input: Record<string, unknown>,
+  at: string,
+): Record<string, AttributeValue | null> {
   const changes: Record<string, AttributeValue | null> = {};
-  for (const key of keys) {
+  for (const key of Object.keys(input)) {
     const field = defined.find((f) => f.key === key);
     if (!field) {
       throw invalidField(
-        `fields.${key}`,
+        `${at}fields.${key}`,
         `The company has no custom field with the key ${key} (GET /contact-fields).`,
       );
     }
     const checked = apiFieldValue(field, input[key]);
-    if (!checked.ok) throw invalidField(`fields.${key}`, checked.message);
+    if (!checked.ok) throw invalidField(`${at}fields.${key}`, checked.message);
     changes[key] = checked.value;
   }
   return changes;
@@ -349,6 +395,149 @@ export async function apiListContactFields(
   return rows.map((r) => ({ ...r, createdAt: r.createdAt.toISOString() }));
 }
 
+/** A change checked before its transaction: the email normalized and the tags as the app keeps them. */
+interface ContactChange {
+  name: string | null | undefined;
+  email: string | null | undefined;
+  fields: Record<string, unknown> | undefined;
+  addTags: string[];
+  removeTags: string[];
+}
+
+/** Checks what does not need the database; a refusal names `<at><field>`. */
+function prepareContactChange(data: ContactChangeInput, at: string): ContactChange {
+  let email: string | null | undefined;
+  if (data.email !== undefined) {
+    const normalized = normalizeEmail(data.email ?? '');
+    if (!normalized.ok) throw invalidField(`${at}email`, normalized.message);
+    email = normalized.email;
+  }
+  const addTags = apiTags(data.addTags ?? [], `${at}addTags`);
+  const removeTags = apiTags(data.removeTags ?? [], `${at}removeTags`);
+  const both = addTags.find((tag) => removeTags.includes(tag));
+  if (both) {
+    throw invalidField(`${at}removeTags`, `The tag ${both} cannot be both added and removed.`);
+  }
+  return { name: data.name, email, fields: data.fields, addTags, removeTags };
+}
+
+/** What `FOR UPDATE` reads of a contact before changing it. */
+const lockedContactColumns = {
+  id: contacts.id,
+  name: contacts.displayName,
+  email: contacts.email,
+  attributes: contacts.attributes,
+  erasedAt: contacts.erasedAt,
+};
+
+interface LockedContact {
+  id: string;
+  name: string | null;
+  email: string | null;
+  attributes: Record<string, AttributeValue>;
+}
+
+/**
+ * Applies a change to a contact the transaction has locked, as `PATCH /contacts/{id}` does: what
+ * the contact already has changes nothing (no write, no audit entry, no `contact.updated`).
+ */
+async function changeLockedContact(
+  tx: Tx,
+  ctx: ApiContext,
+  current: LockedContact,
+  change: ContactChange,
+  fieldChanges: Record<string, AttributeValue | null>,
+  at: string,
+): Promise<void> {
+  const contactId = current.id;
+  const thisContact = and(eq(contacts.tenantId, ctx.tenant.id), eq(contacts.id, contactId));
+  const set: {
+    displayName?: string | null;
+    email?: string | null;
+    attributes?: Record<string, AttributeValue>;
+  } = {};
+  const changed: string[] = [];
+  if (change.name !== undefined && (change.name || null) !== current.name) {
+    set.displayName = change.name || null;
+    changed.push('name');
+  }
+  if (change.email !== undefined && change.email !== current.email) {
+    set.email = change.email;
+    changed.push('email');
+  }
+  const fieldKeys: string[] = [];
+  const next = new Map(Object.entries(current.attributes));
+  for (const [key, value] of Object.entries(fieldChanges)) {
+    if (value === null ? !next.has(key) : next.get(key) === value) continue;
+    if (value === null) next.delete(key);
+    else next.set(key, value);
+    fieldKeys.push(key);
+  }
+  if (fieldKeys.length > 0) {
+    set.attributes = Object.fromEntries(next);
+    changed.push('fields');
+  }
+
+  let added: string[] = [];
+  let removed: string[] = [];
+  if (change.addTags.length > 0 || change.removeTags.length > 0) {
+    const existing = (
+      await tx
+        .select({ tag: contactTags.tag })
+        .from(contactTags)
+        .where(and(eq(contactTags.tenantId, ctx.tenant.id), eq(contactTags.contactId, contactId)))
+    ).map((r) => r.tag);
+    added = change.addTags.filter((tag) => !existing.includes(tag));
+    removed = change.removeTags.filter((tag) => existing.includes(tag));
+    if (existing.length + added.length - removed.length > MAX_TAGS_PER_CONTACT) {
+      throw invalidField(
+        `${at}addTags`,
+        `A contact can have at most ${MAX_TAGS_PER_CONTACT} tags.`,
+      );
+    }
+    if (added.length > 0 || removed.length > 0) changed.push('tags');
+  }
+
+  if (Object.keys(set).length > 0) await tx.update(contacts).set(set).where(thisContact);
+  if (added.length > 0) {
+    await tx
+      .insert(contactTags)
+      .values(added.map((tag) => ({ id: uuidv7(), tenantId: ctx.tenant.id, contactId, tag })))
+      .onConflictDoNothing();
+  }
+  if (removed.length > 0) {
+    await tx
+      .delete(contactTags)
+      .where(
+        and(
+          eq(contactTags.tenantId, ctx.tenant.id),
+          eq(contactTags.contactId, contactId),
+          inArray(contactTags.tag, removed),
+        ),
+      );
+  }
+  if (changed.length > 0) {
+    await recordSystemAudit(
+      tx,
+      ctx.tenant.id,
+      {
+        action: 'contact.updated',
+        subjectType: 'contact',
+        subjectId: contactId,
+        correlationId: ctx.requestId,
+        metadata: {
+          changed,
+          fields: fieldKeys,
+          tagsAdded: added.length,
+          tagsRemoved: removed.length,
+          source: 'api',
+        },
+      },
+      apiActor(ctx),
+    );
+  }
+}
+
 /**
  * Changes a contact's name, email, custom field values and tags as a member's change does, in one
  * transaction with the contact row locked: an erased contact is not found, and what the contact
@@ -364,112 +553,79 @@ export async function apiUpdateContact(
   assertScope(ctx, 'contacts.write');
   if (!z.uuid().safeParse(contactId).success) throw notFound('Contact');
   const data = parseInput(apiContactUpdateSchema, input);
-  const email = data.email === undefined ? null : normalizeEmail(data.email ?? '');
-  if (email && !email.ok) throw invalidField('email', email.message);
-  const addTags = apiTags(data.addTags ?? [], 'addTags');
-  const removeTags = apiTags(data.removeTags ?? [], 'removeTags');
-  const both = addTags.find((tag) => removeTags.includes(tag));
-  if (both) throw invalidField('removeTags', `The tag ${both} cannot be both added and removed.`);
+  const change = prepareContactChange(data, '');
   return deps.db.run(ctx.scope, async (tx) => {
     // The fields are locked before the contact, in the order a field's deletion takes them.
     const fieldChanges = data.fields ? await apiFieldChanges(tx, ctx.tenant.id, data.fields) : {};
-    const thisContact = and(eq(contacts.tenantId, ctx.tenant.id), eq(contacts.id, contactId));
     const [current] = await tx
-      .select({
-        name: contacts.displayName,
-        email: contacts.email,
-        attributes: contacts.attributes,
-        erasedAt: contacts.erasedAt,
-      })
+      .select(lockedContactColumns)
       .from(contacts)
-      .where(thisContact)
+      .where(and(eq(contacts.tenantId, ctx.tenant.id), eq(contacts.id, contactId)))
       .for('update');
     if (!current || current.erasedAt) throw notFound('Contact');
-
-    const set: {
-      displayName?: string | null;
-      email?: string | null;
-      attributes?: Record<string, AttributeValue>;
-    } = {};
-    const changed: string[] = [];
-    if (data.name !== undefined && (data.name || null) !== current.name) {
-      set.displayName = data.name || null;
-      changed.push('name');
-    }
-    if (email?.ok && email.email !== current.email) {
-      set.email = email.email;
-      changed.push('email');
-    }
-    const fieldKeys: string[] = [];
-    const next = new Map(Object.entries(current.attributes));
-    for (const [key, value] of Object.entries(fieldChanges)) {
-      if (value === null ? !next.has(key) : next.get(key) === value) continue;
-      if (value === null) next.delete(key);
-      else next.set(key, value);
-      fieldKeys.push(key);
-    }
-    if (fieldKeys.length > 0) {
-      set.attributes = Object.fromEntries(next);
-      changed.push('fields');
-    }
-
-    let added: string[] = [];
-    let removed: string[] = [];
-    if (addTags.length > 0 || removeTags.length > 0) {
-      const existing = (
-        await tx
-          .select({ tag: contactTags.tag })
-          .from(contactTags)
-          .where(and(eq(contactTags.tenantId, ctx.tenant.id), eq(contactTags.contactId, contactId)))
-      ).map((r) => r.tag);
-      added = addTags.filter((tag) => !existing.includes(tag));
-      removed = removeTags.filter((tag) => existing.includes(tag));
-      if (existing.length + added.length - removed.length > MAX_TAGS_PER_CONTACT) {
-        throw invalidField('addTags', `A contact can have at most ${MAX_TAGS_PER_CONTACT} tags.`);
-      }
-      if (added.length > 0 || removed.length > 0) changed.push('tags');
-    }
-
-    if (Object.keys(set).length > 0) await tx.update(contacts).set(set).where(thisContact);
-    if (added.length > 0) {
-      await tx
-        .insert(contactTags)
-        .values(added.map((tag) => ({ id: uuidv7(), tenantId: ctx.tenant.id, contactId, tag })))
-        .onConflictDoNothing();
-    }
-    if (removed.length > 0) {
-      await tx
-        .delete(contactTags)
-        .where(
-          and(
-            eq(contactTags.tenantId, ctx.tenant.id),
-            eq(contactTags.contactId, contactId),
-            inArray(contactTags.tag, removed),
-          ),
-        );
-    }
-    if (changed.length > 0) {
-      await recordSystemAudit(
-        tx,
-        ctx.tenant.id,
-        {
-          action: 'contact.updated',
-          subjectType: 'contact',
-          subjectId: contactId,
-          correlationId: ctx.requestId,
-          metadata: {
-            changed,
-            fields: fieldKeys,
-            tagsAdded: added.length,
-            tagsRemoved: removed.length,
-            source: 'api',
-          },
-        },
-        apiActor(ctx),
-      );
-    }
+    await changeLockedContact(tx, ctx, current, change, fieldChanges, '');
     const row = await apiContactById(tx, ctx.tenant.id, contactId);
     if (!row) throw notFound('Contact');
     return toApiContact(row);
+  });
+}
+
+const unknownContact = (index: number) =>
+  invalidField(
+    `contacts.${index}.id`,
+    'The company has no contact with this id, or it was erased (GET /contacts).',
+  );
+
+/**
+ * Changes up to 100 contacts in one transaction, each as `PATCH /contacts/{id}` changes one, all of
+ * them or none (ADR-122). Every field any change names is locked first, in one statement, as a
+ * field's deletion takes them; then the contacts, in id order, so calls naming the same contacts
+ * take turns. A contact of another company, an erased one, a value of the wrong type or too many
+ * tags refuses the call naming its place (`contacts.<index>.…`) and nothing is changed. The
+ * contacts are changed in the order given and answered in it.
+ */
+export async function apiUpdateManyContacts(
+  deps: Pick<OutboundDeps, 'db'>,
+  ctx: ApiContext,
+  input: unknown,
+): Promise<ApiContact[]> {
+  assertScope(ctx, 'contacts.write');
+  const data = parseInput(apiUpdateManyContactsSchema, input);
+  const changes = data.contacts.map((item, index) => ({
+    id: item.id,
+    change: prepareContactChange(item, `contacts.${index}.`),
+  }));
+  const ids = changes.map((c) => c.id);
+  return deps.db.run(ctx.scope, async (tx) => {
+    const keys = [...new Set(changes.flatMap((c) => Object.keys(c.change.fields ?? {})))].sort();
+    const defined = await lockFields(tx, ctx.tenant.id, keys);
+    const fieldChanges = changes.map((c, index) =>
+      c.change.fields ? checkFieldChanges(defined, c.change.fields, `contacts.${index}.`) : {},
+    );
+    const locked = await tx
+      .select(lockedContactColumns)
+      .from(contacts)
+      .where(and(eq(contacts.tenantId, ctx.tenant.id), inArray(contacts.id, ids)))
+      .orderBy(asc(contacts.id))
+      .for('update');
+    const byId = new Map(locked.map((row) => [row.id, row]));
+    const work = changes.map((c, index) => {
+      const row = byId.get(c.id);
+      if (!row || row.erasedAt) throw unknownContact(index);
+      return { row, change: c.change, fields: fieldChanges[index] ?? {} };
+    });
+    for (const [index, w] of work.entries()) {
+      await changeLockedContact(tx, ctx, w.row, w.change, w.fields, `contacts.${index}.`);
+    }
+    const rows = await tx
+      .select(apiContactColumns)
+      .from(contacts)
+      .where(and(eq(contacts.tenantId, ctx.tenant.id), inArray(contacts.id, ids)));
+    const after = new Map(rows.map((row) => [row.id, row]));
+    return ids.map((id, index) => {
+      const row = after.get(id);
+      if (!row) throw unknownContact(index);
+      return toApiContact(row);
+    });
   });
 }

@@ -507,14 +507,18 @@ verification, app review, Embedded Signup configuration).
   reads; refusals name the condition's part). **[Changing many conversations in one call built,
   locally verified]** (ADR-120: `POST /conversations/update-many` assigns, moves, resolves or reopens
   up to 100 conversations, each as `PATCH` changes one, all of them or none, locked in id order).
+  **[Changing many contacts in one call built, locally verified]** (ADR-122:
+  `POST /contacts/update-many` changes the name, email, custom field values and tags of up to 100
+  contacts, each as `PATCH` changes one, all of them or none, the fields locked first and the
+  contacts in id order).
   Remaining: media messages, call-to-action messages through the API, taking reactions back,
-  choosing conversations to change by a filter, media downloads, starting or
-  stopping runs for many contacts in one call, bulk sends in one call, changing a field's type,
-  changing numbers or many contacts in one call, contact searches by name or by conversation and
-  campaign conditions, which fields of a contact changed in the contact feed (webhooks name them since ADR-121), limits per endpoint,
-  availability per single endpoint (plans choose per scope since ADR-092). The one-argument key
-  lookup kept for rolling deploys (0051) is dropped (0074). Replaying many deliveries in one call
-  is built with P5-09 (ADR-095).
+  choosing conversations to change by a filter, media downloads, starting or stopping runs for many
+  contacts in one call, bulk sends in one call, changing a field's type, changing numbers, choosing
+  contacts to change by a filter, contact searches by name or by conversation and campaign
+  conditions, which fields of a contact changed in the contact feed (webhooks name them since
+  ADR-121), limits per endpoint, availability per single endpoint (plans choose per scope since
+  ADR-092). The one-argument key lookup kept for rolling deploys (0051) is dropped (0074). Replaying
+  many deliveries in one call is built with P5-09 (ADR-095).
 - **P5-09 Outgoing webhooks** **[built, locally verified; delivered to local test receivers only]**
   (ADR-053): up to 10 endpoints per company (`developer.manage`) for `message.received`,
   `message.status`, `consent.changed` and `template.status_changed`, captured by database triggers

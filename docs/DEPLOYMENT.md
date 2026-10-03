@@ -108,7 +108,8 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    them.
    ADR-120 adds no migration; until the web rollout ends, a server from before it answers
    `POST /api/v1/conversations/update-many` with 405 (the path reads as a conversation id there,
-   which takes no POST).
+   which takes no POST). ADR-122 adds no migration either, and such a server answers
+   `POST /api/v1/contacts/update-many` with 405 in the same way.
    Migration 0096 (ADR-121) adds a nullable column to `app.webhook_events` with a check added
    `NOT VALID` (no rewrite and no table read, so captures wait for its lock only briefly) and
    replaces the contact capture and trigger functions, which record what changed from then on;
