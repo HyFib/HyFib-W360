@@ -3,11 +3,19 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import type { z } from 'zod';
 import { AppError, isAppError, sha256Hex } from '@w360/core';
-import { API_SCOPES, CAMPAIGN_STATUSES } from '@w360/db';
+import { API_SCOPES, CAMPAIGN_STATUSES, MESSAGE_STATUSES, RECIPIENT_STATES } from '@w360/db';
 import { PERMISSIONS, ROLE_PERMISSIONS } from '../authz/permissions';
 import { apiErrorResponse, apiRequestError } from './errors';
 import { NUL_CHARACTER_MESSAGE, assertNoNulCharacter, nulCharacterPath } from './request-text';
-import { apiCampaignListQuerySchema, apiGetCampaign, apiListCampaigns } from './campaigns';
+import {
+  apiCampaignListQuerySchema,
+  apiCampaignRecipientQuerySchema,
+  apiCampaignResultsSchema,
+  apiGetCampaign,
+  apiListCampaignRecipients,
+  apiListCampaigns,
+} from './campaigns';
+import { RECIPIENT_OUTCOMES } from '../campaigns/outcomes';
 import { allowedNetworksSchema, bearerToken, generateApiToken, networkEntryProblem } from './keys';
 import {
   apiAddressRefusal,
@@ -2393,7 +2401,7 @@ describe('reading campaigns (ADR-125)', () => {
       writes: false,
     });
     expect(API_SCOPE_INFO['campaigns.read'].description).toContain(
-      'Never recipients, members or costs',
+      "A key that also reads contacts lists each campaign's recipients and what happened to each. Never members or costs.",
     );
   });
 
@@ -2438,7 +2446,9 @@ describe('reading campaigns (ADR-125)', () => {
     const one = paths['/campaigns/{id}']?.get;
     expect(JSON.stringify(one?.responses['200'])).toContain('CampaignWithResults');
     expect(Object.keys(one?.responses ?? {})).toContain('404');
-    expect(one?.description).toContain('never recipients, members or costs');
+    expect(one?.description).toContain(
+      'Counts only (GET /campaigns/{id}/recipients lists the recipients): never members or costs.',
+    );
     const schemas = doc.components.schemas as unknown as Record<
       string,
       { properties: Record<string, { description?: string }>; required: string[] }
@@ -2456,12 +2466,154 @@ describe('reading campaigns (ADR-125)', () => {
     for (const hidden of ['recipients', 'variables', 'budgetMicros', 'launchedBy', 'segmentId']) {
       expect(Object.keys(schemas.CampaignWithResults?.properties ?? {})).not.toContain(hidden);
     }
-    expect(doc.info.description).toContain('read campaigns and their results');
+    expect(doc.info.description).toContain('read campaigns, their results and their recipients');
     expect(API_ROUTES).toEqual(
       expect.arrayContaining([
         ['get', '/campaigns'],
         ['get', '/campaigns/{id}'],
       ]),
     );
+  });
+});
+
+describe('listing a campaign’s recipients (ADR-127)', () => {
+  const ctx = (scopes: string[]) =>
+    ({
+      tenant: { id: 't', status: 'active' },
+      key: { id: 'k', scopes: new Set(scopes) },
+      planScopes: null,
+    }) as unknown as ApiContext;
+  const code = (promise: Promise<unknown>) =>
+    promise.then(
+      () => 'done',
+      (error: unknown) => (isAppError(error) ? error.code : String(error)),
+    );
+  const id = '0190a000-0000-7000-8000-000000000001';
+
+  it('leave other scopes’ labels out of the scope’s description, so each checkbox has its own name', () => {
+    for (const scope of API_SCOPE_KEYS) {
+      for (const other of API_SCOPE_KEYS.filter((k) => k !== scope)) {
+        expect([scope, API_SCOPE_INFO[scope].description]).not.toEqual([
+          scope,
+          expect.stringContaining(API_SCOPE_INFO[other].label),
+        ]);
+      }
+    }
+  });
+
+  it('name each outcome after the count of the results it lists', () => {
+    const camel = (outcome: string) =>
+      outcome === 'message_canceled'
+        ? 'messagesCanceled'
+        : outcome.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
+    const counts = Object.keys(apiCampaignResultsSchema.shape);
+    for (const outcome of RECIPIENT_OUTCOMES) expect(counts).toContain(camel(outcome));
+    // Every count of recipients has its outcome, less the audience (every recipient: no outcome).
+    expect(
+      counts.filter((k) => !['audience', 'skipReasons', 'failureCodes'].includes(k)).sort(),
+    ).toEqual(RECIPIENT_OUTCOMES.map(camel).sort());
+  });
+
+  it('take a page and one outcome, and nothing else', () => {
+    const parse = (query: Record<string, unknown>) =>
+      apiCampaignRecipientQuerySchema.safeParse(query);
+    for (const outcome of RECIPIENT_OUTCOMES) expect(parse({ outcome }).success).toBe(true);
+    expect(parse({ limit: '100', cursor: id }).success).toBe(true);
+    expect(parse({ outcome: 'all' }).success).toBe(false);
+    expect(parse({ outcome: 'clicked' }).success).toBe(false);
+    expect(parse({ limit: '0' }).success).toBe(false);
+    expect(parse({ limit: '101' }).success).toBe(false);
+    expect(parse({ state: 'queued' }).success).toBe(false);
+    expect(parse({ cursor: 'eyJhdCI6IjIwMjYifQ' }).error?.issues[0]).toMatchObject({
+      path: ['cursor'],
+      message: 'Invalid cursor: give the nextCursor of the previous page.',
+    });
+    expect(apiCampaignRecipientQuerySchema.parse({}).limit).toBe(50);
+  });
+
+  it('need both scopes, checked before anything is read, and a bad id is not found', async () => {
+    const list = (scopes: string[], campaignId: string, query: unknown = {}) =>
+      code(apiListCampaignRecipients({} as never, ctx(scopes), campaignId, query));
+    expect(await list(['contacts.read'], id)).toBe('forbidden');
+    expect(await list(['campaigns.read'], id)).toBe('forbidden');
+    await expect(
+      apiListCampaignRecipients({} as never, ctx(['campaigns.read']), id, {}),
+    ).rejects.toThrow('This API key does not have the contacts.read scope.');
+    await expect(
+      apiListCampaignRecipients({} as never, ctx(['contacts.read']), id, {}),
+    ).rejects.toThrow('This API key does not have the campaigns.read scope.');
+    const both = ['campaigns.read', 'contacts.read'];
+    expect(await list(both, 'not-an-id')).toBe('not_found');
+    expect(await list(both, id, { outcome: 'clicked' })).toBe('validation_failed');
+    expect(await list(both, id, { cursor: 'x' })).toBe('validation_failed');
+    // A plan without either scope refuses it, naming the plan.
+    const planless = { ...ctx(both), planScopes: new Set(['campaigns.read']) } as ApiContext;
+    await expect(apiListCampaignRecipients({} as never, planless, id, {})).rejects.toMatchObject({
+      code: 'forbidden',
+      details: { apiReason: 'not_in_plan' },
+    });
+  });
+
+  it('are described: both scopes, the outcomes, the recipient without costs', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    type Operation = {
+      operationId: string;
+      description: string;
+      parameters: Record<string, unknown>[];
+      responses: Record<string, unknown>;
+    };
+    const paths = doc.paths as unknown as Record<string, Record<string, Operation>>;
+    const op = paths['/campaigns/{id}/recipients']?.get;
+    expect(op?.operationId).toBe('listCampaignRecipients');
+    expect(op?.description).toContain('Scope: `campaigns.read`. Also needs `contacts.read`');
+    expect(op?.description).toContain('the API never lists erased contacts');
+    expect(op?.parameters.map((p) => p.name ?? p.$ref)).toEqual([
+      '#/components/parameters/Id',
+      'limit',
+      'cursor',
+      'outcome',
+    ]);
+    expect(op?.parameters.find((p) => p.name === 'outcome')).toMatchObject({
+      in: 'query',
+      schema: { enum: [...RECIPIENT_OUTCOMES] },
+    });
+    expect(JSON.stringify(op?.responses['200'])).toContain(
+      '#/components/schemas/CampaignRecipient"',
+    );
+    expect(Object.keys(op?.responses ?? {})).toEqual(expect.arrayContaining(['403', '404', '422']));
+    const schemas = doc.components.schemas as unknown as Record<
+      string,
+      {
+        properties: Record<
+          string,
+          { properties?: Record<string, unknown>; enum?: string[]; anyOf?: unknown[] }
+        >;
+      }
+    >;
+    const recipient = schemas.CampaignRecipient?.properties ?? {};
+    expect(Object.keys(recipient).sort()).toEqual(
+      [
+        'id',
+        'contact',
+        'state',
+        'skipReason',
+        'message',
+        'queuedAt',
+        'repliedAt',
+        'optedOutAt',
+      ].sort(),
+    );
+    expect(Object.keys(recipient.contact?.properties ?? {}).sort()).toEqual([
+      'id',
+      'name',
+      'phone',
+    ]);
+    expect(recipient.state?.enum).toEqual([...RECIPIENT_STATES]);
+    expect(JSON.stringify(recipient.message)).toContain(JSON.stringify([...MESSAGE_STATUSES]));
+    expect(recipient.message?.anyOf).toEqual(expect.arrayContaining([{ type: 'null' }]));
+    for (const hidden of ['market', 'estimatedCostMicros', 'cost', 'email', 'tags']) {
+      expect(JSON.stringify(schemas.CampaignRecipient)).not.toContain(`"${hidden}"`);
+    }
+    expect(API_ROUTES).toEqual(expect.arrayContaining([['get', '/campaigns/{id}/recipients']]));
   });
 });

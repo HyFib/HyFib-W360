@@ -71,6 +71,7 @@ export * from './campaigns/costs';
 export * from './campaigns/segments';
 export * from './campaigns/audience';
 export * from './campaigns/attribution';
+export * from './campaigns/outcomes';
 export * from './campaigns/service';
 export * from './campaigns/runner';
 export * from './campaigns/frequency-cap';

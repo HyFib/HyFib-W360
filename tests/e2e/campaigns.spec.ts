@@ -225,4 +225,47 @@ test('a campaign is drafted, reviewed, started by the worker and reported per re
   expect(await search([{ type: 'last_message', op: 'not_within_days', days: 1 }])).toEqual([
     'Bina Shah',
   ]);
+
+  // Reading campaigns and contacts, it lists the recipients the Recipients page shows, each with
+  // what happened to it, and those one count of the results counts (ADR-127).
+  type Recipients = {
+    data: {
+      contact: { name: string; phone: string };
+      state: string;
+      skipReason: string | null;
+      message: { status: string } | null;
+      repliedAt: string | null;
+    }[];
+    nextCursor: string | null;
+  };
+  const recipients = await request.get(`/api/v1/campaigns/${campaignId}/recipients`, {
+    headers: auth,
+  });
+  expect(recipients.status()).toBe(200);
+  const everyone = (await recipients.json()) as Recipients;
+  expect(everyone.nextCursor).toBeNull();
+  const byName = new Map(everyone.data.map((r) => [r.contact.name, r]));
+  expect([...byName.keys()].sort()).toEqual(['Asha Rao', 'Bina Shah']);
+  expect(byName.get('Asha Rao')).toMatchObject({
+    contact: { phone: '+919876512345' },
+    state: 'queued',
+    message: { status: 'delivered' },
+    repliedAt: expect.any(String),
+  });
+  expect(byName.get('Bina Shah')).toMatchObject({
+    state: 'skipped',
+    skipReason: 'no_marketing_opt_in',
+    message: null,
+  });
+  const replied = await request.get(`/api/v1/campaigns/${campaignId}/recipients?outcome=replied`, {
+    headers: auth,
+  });
+  expect(((await replied.json()) as Recipients).data.map((r) => r.contact.name)).toEqual([
+    'Asha Rao',
+  ]);
+  const unknownOutcome = await request.get(
+    `/api/v1/campaigns/${campaignId}/recipients?outcome=clicked`,
+    { headers: auth },
+  );
+  expect(unknownOutcome.status()).toBe(422);
 });

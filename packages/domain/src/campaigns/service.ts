@@ -53,6 +53,7 @@ import {
 } from './audience';
 import { loadRateTable, marketFor, parseAmountToMicros, priceFor, rateCategoryFor } from './costs';
 import { recountedCounters } from './counters';
+import { RECIPIENT_OUTCOME_SQL } from './outcomes';
 import {
   formatTimeOfDay,
   isValidTimeZone,
@@ -567,23 +568,22 @@ export async function campaignAnalytics(
   tenantId: string,
   campaignId: string,
 ): Promise<CampaignAnalytics> {
+  const o = RECIPIENT_OUTCOME_SQL;
   const res = await tx.execute<Record<string, number | string | null>>(sql`
     select count(*)::int as audience,
-      (count(*) filter (where r.state = 'pending'))::int as pending,
-      (count(*) filter (where r.state = 'skipped'))::int as skipped,
-      (count(*) filter (where r.state = 'canceled'))::int as canceled,
-      (count(*) filter (where r.state = 'queued'))::int as queued,
-      (count(*) filter (where r.state = 'queued' and m.status in ('queued', 'sending', 'accepted')))::int as in_progress,
-      (count(*) filter (where r.state = 'queued' and m.status in ('sent', 'delivered', 'read', 'played')))::int as sent,
-      (count(*) filter (where r.state = 'queued' and m.status in ('delivered', 'read', 'played')))::int as delivered,
-      (count(*) filter (where r.state = 'queued' and m.status in ('read', 'played')))::int as read,
-      (count(*) filter (where r.state = 'queued' and m.status = 'failed'))::int as failed,
-      (count(*) filter (where r.state = 'queued' and m.status = 'unknown_outcome'))::int as unknown,
-      (count(*) filter (where m.status = 'canceled'))::int as message_canceled,
-      (count(*) filter (where r.replied_at is not null
-                          and m.status in ('delivered', 'read', 'played')))::int as replied,
-      (count(*) filter (where r.opted_out_at is not null
-                          and m.status in ('delivered', 'read', 'played')))::int as opted_out,
+      (count(*) filter (where ${o.pending}))::int as pending,
+      (count(*) filter (where ${o.skipped}))::int as skipped,
+      (count(*) filter (where ${o.canceled}))::int as canceled,
+      (count(*) filter (where ${o.queued}))::int as queued,
+      (count(*) filter (where ${o.in_progress}))::int as in_progress,
+      (count(*) filter (where ${o.sent}))::int as sent,
+      (count(*) filter (where ${o.delivered}))::int as delivered,
+      (count(*) filter (where ${o.read}))::int as read,
+      (count(*) filter (where ${o.failed}))::int as failed,
+      (count(*) filter (where ${o.unknown}))::int as unknown,
+      (count(*) filter (where ${o.message_canceled}))::int as message_canceled,
+      (count(*) filter (where ${o.replied}))::int as replied,
+      (count(*) filter (where ${o.opted_out}))::int as opted_out,
       coalesce(sum(r.estimated_cost_micros) filter (where r.state = 'queued'), 0)::bigint as estimate_micros,
       (count(*) filter (where r.state = 'queued' and r.estimated_cost_micros is null))::int as estimate_missing
     from app.campaign_recipients r

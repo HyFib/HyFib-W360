@@ -4756,23 +4756,24 @@ Decision:
   code (the 10 commonest). The row and the counts are read in
   one read-only snapshot (repeatable read), so they agree. A draft has no recipients: `results` is
   null. An id that is not a UUID, unknown or another company's answers 404 `not_found`.
-- **Counts only:** no recipients, contacts or messages (members' recipient list and its CSV export
-  stay in the app; a campaign's messages reach integrations through the message feeds and
-  `message.status` with `conversations.read` and webhooks), no members (who created, submitted,
-  approved, launched or cancelled it, and the review note), no costs (the estimate members see and
-  the spending cap: estimates from published rate cards, not what Meta bills, which a key that
-  reads campaigns does not need), and not the audience's definition, the template's variables or
-  the pacing (time zone, window, rate, caps).
+- **Counts only:** no recipients, contacts or messages (since ADR-127 a key that also reads contacts
+  lists the recipients; members' CSV export stays in the app; a campaign's messages reach
+  integrations through the message feeds and `message.status` with `conversations.read` and
+  webhooks), no members (who created, submitted, approved, launched or cancelled it, and the review
+  note), no costs (the estimate members see and the spending cap: estimates from published rate
+  cards, not what Meta bills, which a key that reads campaigns does not need), and not the
+  audience's definition, the template's variables or the pacing (time zone, window, rate, caps).
 - **The cost of a read:** the list reads stored columns. The detail counts every recipient of the
-  campaign and its message once per request, as the page does on each view: a campaign of 100,000
-  recipients is one pass over its recipients through their campaign index. Rate limits (ADR-068)
-  and monthly requests (ADR-061) bound how often a key repeats it.
+  campaign and its message once per request, as the page does on each view: a campaign of 50,000
+  recipients (the most one has, `MAX_AUDIENCE`) is one pass over its recipients through their
+  campaign index. Rate limits (ADR-068) and monthly requests (ADR-061) bound how often a key repeats
+  it.
 - **Migration 0099** replaces the key and plan scope checks with the 12 scopes and validates them
   at once, as 0092 did (one row per key and per plan version).
 
-Not built: changing campaigns through the API (creating, submitting, approving, pausing, resuming
-or cancelling them), each recipient's outcome, costs, filters by template, number or time,
-results for a time range or grouped by day, and campaign results in `campaign.status_changed`
+Not built: changing campaigns through the API (creating, submitting, approving, pausing, resuming or
+cancelling them), each recipient's outcome (since ADR-127), costs, filters by template, number or
+time, results for a time range or grouped by day, and campaign results in `campaign.status_changed`
 (ADR-087 left them out: they change with every message status).
 
 ## ADR-126 Conversation and campaign conditions in contact searches through the public API (2026-10-03)
@@ -4813,3 +4814,70 @@ Decision:
 Not built: groups of conditions, a name condition (segments have none), conditions on a
 conversation's status, member or team, on a campaign's message other than these outcomes (clicked
 buttons, opt-outs), and on automation runs.
+
+## ADR-127 A campaign's recipients through the public API (2026-10-03)
+
+Context: since ADR-125 a key with `campaigns.read` reads a campaign's results: how many recipients
+were skipped and why, how many messages were delivered, read or failed, how many replied. Which
+contacts those were is on members' recipients page only (with `campaigns.read` and
+`contacts.read`), or in its CSV export (with `contacts.export`). ADR-126 finds contacts by five
+outcomes, a page of contacts at a time, without the message's status, when it was reached or why it
+failed. An integration that marks in its CRM which customers got an offer, reaches the ones whose
+message failed some other way, or reconciles a campaign with its own records had a member export the
+CSV by hand.
+
+Decision:
+
+- **`GET /api/v1/campaigns/{id}/recipients`** (`listCampaignRecipients`) lists the campaign's
+  recipients, each with what happened to it: the contact (id, name and number), the recipient's
+  state (`pending`, `queued`, `skipped` with the reason, or `canceled`: the campaign was cancelled
+  before its turn or before its queued message was sent), the message queued for it (id, status as
+  the API's messages name it, when it reached that status, and why it failed or was not sent:
+  WhatsApp's error, or HyFib's reason such as `campaign_canceled`), when it was queued, and when a
+  reply and an opt-out were counted for it (ADR-125's attribution). The message id is the one the
+  message feeds (with `conversations.read`) and `message.status` webhooks give; `GET /messages/{id}`
+  reads messages sent through the API only. The contact's email, tags, fields and consent are read
+  with `GET /contacts/{id}`.
+- **It needs `campaigns.read` and `contacts.read`**, the pair members need for the recipients page:
+  the list names contacts. Without either the request is refused with 403 before anything is read,
+  naming the scope (`not_in_plan` when the plan leaves it out, ADR-092). No new scope; the
+  description of `campaigns.read` in Settings → API keys says a key that also reads contacts lists
+  recipients (and names no other scope's label, so each checkbox keeps its own accessible name,
+  which a unit test checks).
+- **`outcome` lists the recipients one count of `results` counts** (ADR-125): `pending`, `skipped`,
+  `canceled`, `queued`, `in_progress`, `sent`, `delivered`, `read`, `failed`, `unknown`,
+  `message_canceled`, `replied` or `opted_out`. Each is the very condition the count uses: one
+  definition (`RECIPIENT_OUTCOME_SQL`, `campaigns/outcomes.ts`) serves `campaignAnalytics` and the
+  list, so an outcome lists as many recipients as its count, less those whose contact was erased,
+  when nothing changes in between. Replies and opt-outs count among delivered messages only: a STOP
+  sent before the message is reported delivered has its time on the recipient but is in neither
+  list. Members' recipients page filters differently: its Failed includes unknown outcomes, and its
+  Replied shows a reply whatever its message's status. The API follows the counts.
+- **Recipients whose contact was erased are left out**, as the API leaves erased contacts out
+  everywhere; `results` still counts them, as members' campaign page does.
+- **Pages in a fixed order:** recipients are listed by their id (a campaign's recipients are taken
+  once, when it is submitted, and none are added later), on keyset pages: `cursor` is the last
+  recipient's id, `limit` up to 100, 50 by default, so paging never skips or repeats a recipient.
+  Each page is read when it is asked for: while the campaign runs, a recipient can change outcome
+  between pages, and paging one outcome can miss a recipient that reaches it behind the cursor. A
+  campaign sent back to draft (withdrawn or rejected) loses its recipients and lists none.
+- **Refusals:** an id that is not a UUID, unknown or another company's answers 404 `not_found`, as
+  `GET /campaigns/{id}`; a draft has no recipients and lists none. A cursor that is not a recipient
+  id, an unknown outcome and unknown parameters are refused with 422, naming them.
+- **The cost of a page:** a campaign has at most 50,000 recipients (`MAX_AUDIENCE`). A page joins
+  each recipient to its contact and message by their keys and stops when it is full; an outcome few
+  recipients have reads the campaign's queued recipients until the page is full, all of them for an
+  outcome none has. Measured on the local PostgreSQL 18 with a campaign of 50,000 recipients (a
+  throwaway test, not kept): a page of 100 took 4 to 6 ms (median of 7) for every recipient, one
+  state or a common outcome, and 15 to 25 ms for outcomes few have (10 failed, none unknown, 500
+  read). The test database held little else, so the planner read the messages table directly for
+  rare outcomes; next to a large messages table it was not measured. Rate limits (ADR-068) and
+  monthly requests (ADR-061) bound how often a key repeats a page.
+- **No costs and no members:** the market and estimated cost of each recipient stay in members'
+  CSV export, as ADR-125 left costs out.
+- **No migration.** The OpenAPI document lists the path, its `outcome` values and
+  `CampaignRecipient`.
+
+Not built: recipients through webhooks, filters by contact, number or time, the conversation of the
+message, costs per recipient, members' groupings of failed and replied recipients, and changing
+campaigns through the API.

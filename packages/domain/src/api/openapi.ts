@@ -37,10 +37,15 @@ import {
   pingPayloadSchema,
   templateStatusPayloadSchema,
 } from '../webhooks/payloads';
+import { RECIPIENT_OUTCOMES } from '../campaigns/outcomes';
 import { CONTACT_FIELD_KEY_RE } from '../contacts/field-definitions';
 import { MAX_CONTACT_FIELDS } from '../contacts/fields';
 import { apiStartAutomationSchema } from './automations';
-import { apiCampaignSchema, apiCampaignWithResultsSchema } from './campaigns';
+import {
+  apiCampaignRecipientSchema,
+  apiCampaignSchema,
+  apiCampaignWithResultsSchema,
+} from './campaigns';
 import { apiContactFieldCreateSchema, apiContactFieldUpdateSchema } from './contact-fields';
 import { apiContactSearchSchema } from './contact-search';
 import { apiContactSchema } from './contact-view';
@@ -504,7 +509,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       title: 'HyFib W360 API',
       version: '1.0.0',
       description: [
-        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations, their messages (one conversation or all of them) and their notes, resolve, reopen and assign conversations or move them between teams, manage contacts and consent, read campaigns and their results, and read message status for your company.',
+        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations, their messages (one conversation or all of them) and their notes, resolve, reopen and assign conversations or move them between teams, manage contacts and consent, read campaigns, their results and their recipients, and read message status for your company.',
         '',
         'Authenticate with `Authorization: Bearer <API key>`; keys are created in Settings → API keys and belong to the company. A key, and the company for all its keys, can be limited to the addresses its systems call from: a request from any other address is refused with 403 (reason `ip_not_allowed`).',
         `Scopes: ${API_SCOPE_KEYS.map((s) => `\`${s}\` (${API_SCOPE_INFO[s].label.toLowerCase()})`).join(', ')}. A company's plan may include only some of them: a request that needs a scope the plan leaves out is refused with 403 (reason \`not_in_plan\`), whatever scopes its key has.`,
@@ -1075,7 +1080,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         get: {
           operationId: 'getCampaign',
           summary: 'A campaign with its results',
-          description: `${scopeNote('campaigns.read')} The results are counted when the campaign is read, as its page in the app counts them: messages sent, delivered, read and failed, replies and opt-outs, why recipients were skipped and the commonest WhatsApp error codes of failed messages; null for a draft. Counts only: never recipients, members or costs.`,
+          description: `${scopeNote('campaigns.read')} The results are counted when the campaign is read, as its page in the app counts them: messages sent, delivered, read and failed, replies and opt-outs, why recipients were skipped and the commonest WhatsApp error codes of failed messages; null for a draft. Counts only (GET /campaigns/{id}/recipients lists the recipients): never members or costs.`,
           parameters: [{ $ref: '#/components/parameters/Id' }],
           responses: {
             '200': {
@@ -1083,6 +1088,28 @@ export function buildOpenApiDocument(serverUrl: string) {
               content: json(dataOf(ref('CampaignWithResults'))),
             },
             ...errors(401, 403, 404, 429, 500),
+          },
+        },
+      },
+      '/campaigns/{id}/recipients': {
+        get: {
+          operationId: 'listCampaignRecipients',
+          summary: 'A campaign’s recipients and what happened to each',
+          description: `${scopeNote('campaigns.read')} Also needs \`contacts.read\`, as the list names contacts. The campaign's recipients in a fixed order (by id), on pages that never skip or repeat one: the contact, whether the recipient is waiting, queued, skipped (and why) or was left out when the campaign was canceled, the message queued for it (the id the message feeds, with \`conversations.read\`, and \`message.status\` webhooks give it) with its status and WhatsApp's error, and when a reply and an opt-out were counted for it. \`outcome\` keeps the recipients one count of the campaign's results counts (GET /campaigns/{id}), by the count's own rule, so it lists as many recipients as that count, less those whose contact was erased: the API never lists erased contacts. Each page is read when it is asked for, so outcomes can change between pages while the campaign runs. A draft has no recipients.`,
+          parameters: [
+            { $ref: '#/components/parameters/Id' },
+            ...pageParams,
+            {
+              name: 'outcome',
+              in: 'query',
+              schema: { type: 'string', enum: [...RECIPIENT_OUTCOMES] },
+              description:
+                'Only the recipients this count of the results counts: in_progress is inProgress, message_canceled messagesCanceled and opted_out optedOut.',
+            },
+          ],
+          responses: {
+            '200': { description: 'A page of recipients.', content: pageOf('CampaignRecipient') },
+            ...errors(401, 403, 404, 422, 429, 500),
           },
         },
       },
@@ -1613,6 +1640,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         ConversationNote: jsonSchema(apiConversationNoteSchema),
         Campaign: jsonSchema(apiCampaignSchema),
         CampaignWithResults: jsonSchema(apiCampaignWithResultsSchema),
+        CampaignRecipient: jsonSchema(apiCampaignRecipientSchema),
         Automation: jsonSchema(apiAutomationSchema),
         AutomationRun: jsonSchema(apiAutomationRunSchema),
         StartAutomationRun: jsonSchema(apiStartAutomationSchema, 'input'),
@@ -1675,6 +1703,7 @@ export const API_ROUTES = [
   ['get', '/teams'],
   ['get', '/campaigns'],
   ['get', '/campaigns/{id}'],
+  ['get', '/campaigns/{id}/recipients'],
   ['get', '/automations'],
   ['post', '/automations/{id}/runs'],
   ['get', '/automation-runs/{id}'],

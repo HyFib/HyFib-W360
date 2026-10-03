@@ -620,11 +620,11 @@ Phase 5 rules (Public API, P5-08):
   (granted only by members holding `campaigns.read`) and read the key's company's campaigns in its
   scope: an id of another company's campaign answers 404 as an unknown one does, and an id that is
   not a UUID is refused before any query. They answer counts only, never recipients, contacts,
-  messages, members or costs, so a key with the scope learns how a campaign did but not who received
-  it; campaign and template names are the only text. A campaign's results are counted when read, one
-  pass over its recipients, and rate limits and monthly requests bound how often a key repeats it.
-  As a reading scope it keeps working while the company is suspended or restricted, as members'
-  campaign pages do.
+  messages, members or costs, so a key with the scope alone learns how a campaign did but not who
+  received it (listing recipients also needs `contacts.read`, ADR-127, below); campaign and template
+  names are the only text. A campaign's results are counted when read, one pass over its recipients,
+  and rate limits and monthly requests bound how often a key repeats it. As a reading scope it keeps
+  working while the company is suspended or restricted, as members' campaign pages do.
 - Conversation and campaign conditions in contact searches (ADR-126): a `last_message` condition
   (whether a contact wrote in the last days) needs `conversations.read` as well as `contacts.read`,
   and a `campaign` condition (what happened to a campaign's message to a contact) needs
@@ -633,6 +633,16 @@ Phase 5 rules (Public API, P5-08):
   reply from, as members who hold both see a campaign's recipients. A campaign the key's company
   does not have (another company's included) is refused as unknown, and the campaign id and the days
   are bound parameters, never SQL. The pages read at most 2,000 contacts, as before.
+- A campaign's recipients (ADR-127): `GET /campaigns/{id}/recipients` names contacts (name and
+  number) and what happened to each one's message, so it needs `campaigns.read` and `contacts.read`,
+  the pair members need to see a campaign's recipients, both checked before anything is read. The
+  campaign is looked up in the key's company first (RLS and an explicit filter): another company's
+  campaign answers 404 as an unknown one does. An id or cursor that is not a UUID and an outcome the
+  results do not count are refused before any query; the cursor is a bound parameter and the outcome
+  picks one fixed condition, never SQL from the request. Recipients whose contact was erased are
+  left out, as the API leaves erased contacts out everywhere (the results still count them), and no
+  costs, members or other contact details are returned. A page reads one campaign's recipients
+  (50,000 at most) and stops when it is full; rate limits and monthly requests bound repeats.
 - Following contact changes (ADR-114): `GET /contact-changes` reads the key's company's changes
   only (`contacts.read`, RLS and an explicit company filter). Its cursor, a database transaction id
   and a row id, is sealed with the keyring (AES-256-GCM) with the company in the associated data, so

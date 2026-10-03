@@ -136,6 +136,9 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    ADR-126 adds no migration; until the web rollout ends, a server from before it refuses
    `last_message` and `campaign` conditions in `POST /api/v1/contacts/search` with 422 naming the
    condition's type.
+   ADR-127 adds no migration; until the web rollout ends, a server from before it answers
+   `GET /api/v1/campaigns/{id}/recipients` with 404, and Settings → API keys describes
+   `campaigns.read` without recipients.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

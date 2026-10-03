@@ -893,6 +893,11 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `campaignAnalytics` (`campaigns/service.ts`), the counting members' campaign page uses, in one
   repeatable-read, read-only transaction, so the row and its counts agree; a draft has no results.
   The answers hold counts and names only.
+- **A campaign's recipients (ADR-127):** `apiListCampaignRecipients` (`api/campaigns.ts`,
+  `campaigns.read` and `contacts.read`) checks that the campaign is the company's, then reads its
+  recipients with their contacts and messages in id order on keyset pages, erased contacts left out.
+  `outcome` picks one condition of `RECIPIENT_OUTCOME_SQL` (`campaigns/outcomes.ts`), the conditions
+  `campaignAnalytics` counts with, so a list and its count share one definition.
 - **Searching contacts (ADR-117):** `POST /contacts/search` (`api/contact-search.ts`) parses
   segments' conditions (`last_message` with `conversations.read` and `campaign` with
   `campaigns.read` since ADR-126, a named campaign checked to be the company's), checks them against

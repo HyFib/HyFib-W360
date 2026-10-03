@@ -524,12 +524,15 @@ verification, app review, Embedded Signup configuration).
   `POST /contacts/search` takes segments' `last_message` condition with `conversations.read` and
   `campaign` condition with `campaigns.read`, finding the contacts a segment with the same
   conditions finds).
+  **[A campaign's recipients built, locally verified]** (ADR-127: `GET /campaigns/{id}/recipients`
+  lists a campaign's recipients with what happened to each one's message, with `campaigns.read` and
+  `contacts.read`, by the outcomes its results count, erased contacts left out).
   Remaining: media messages, call-to-action messages through the API, taking reactions back,
   choosing conversations to change by a filter, media downloads, starting or stopping runs for many
   contacts in one call, bulk sends in one call, changing a field's type, changing numbers, choosing
   contacts to change by a filter, a name condition in `POST /contacts/search`, groups of conditions,
   which fields of a contact changed in the contact feed (webhooks name them since ADR-121), changing
-  campaigns and reading each recipient's outcome through the API, limits per endpoint, availability
+  campaigns through the API, campaign recipients through webhooks, limits per endpoint, availability
   per single endpoint (plans choose per scope since ADR-092). The one-argument key lookup kept for
   rolling deploys (0051) is dropped (0074). Replaying many deliveries in one call is built with
   P5-09 (ADR-095).

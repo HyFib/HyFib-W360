@@ -4,6 +4,8 @@ import {
   CAMPAIGN_COMPLETION_REASONS,
   CAMPAIGN_PAUSE_REASONS,
   CAMPAIGN_STATUSES,
+  MESSAGE_STATUSES,
+  RECIPIENT_STATES,
   SKIP_REASONS,
   and,
   campaigns,
@@ -13,10 +15,14 @@ import {
   exactTimestamp,
   messageTemplates,
   sql,
+  type MessageStatus,
+  type RecipientState,
+  type SkipReason,
   type SQL,
   type Tx,
 } from '@w360/db';
 import { ATTRIBUTION_WINDOW_HOURS } from '../campaigns/attribution';
+import { RECIPIENT_OUTCOMES, RECIPIENT_OUTCOME_SQL } from '../campaigns/outcomes';
 import { campaignAnalytics } from '../campaigns/service';
 import type { OutboundDeps } from '../messaging/outbound';
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
@@ -26,8 +32,9 @@ import { API_LIMITS } from './model';
 /**
  * Campaigns through the public API (ADR-125): a key with `campaigns.read` lists the company's
  * campaigns, newest first, as the campaign events describe them (ADR-087), and reads one with its
- * results as members' campaign page counts them (`campaignAnalytics`), when it is read. Counts
- * only: never recipients, members or costs.
+ * results as members' campaign page counts them (`campaignAnalytics`), when it is read. A key that
+ * also reads contacts lists a campaign's recipients, each with what happened to it (ADR-127).
+ * Never members or costs.
  */
 
 export const apiCampaignListQuerySchema = z
@@ -267,5 +274,149 @@ export async function apiGetCampaign(
       };
     },
     { isolationLevel: 'repeatable read', accessMode: 'read only' },
+  );
+}
+
+export const apiCampaignRecipientQuerySchema = z
+  .object({
+    limit: z.coerce.number().int().min(1).max(API_LIMITS.pageSize).default(50),
+    cursor: z
+      .uuid({ error: 'Invalid cursor: give the nextCursor of the previous page.' })
+      .optional()
+      .describe('`nextCursor` from the previous page.'),
+    outcome: z
+      .enum(RECIPIENT_OUTCOMES)
+      .optional()
+      .describe(
+        'Only the recipients one count of the campaign’s results counts (GET /campaigns/{id}): in_progress is inProgress, message_canceled messagesCanceled and opted_out optedOut. Recipients whose contact was erased are never listed.',
+      ),
+  })
+  .strict();
+
+const attributed = (what: string, from: string) =>
+  `When ${what} was counted for the recipient’s message: it counts once, for the last campaign message (of any campaign) queued to the contact${from} in the ${ATTRIBUTION_WINDOW_HOURS} hours before it, if WhatsApp had accepted that message. The results count it once the message is delivered.`;
+
+export const apiCampaignRecipientSchema = z.object({
+  id: z.uuid(),
+  contact: z.object({
+    id: z.uuid(),
+    name: z.string().nullable(),
+    phone: z.string().nullable().describe('E.164, like +919876543210.'),
+  }),
+  state: z
+    .enum(RECIPIENT_STATES)
+    .describe(
+      'pending: not processed yet; queued: its message was queued; skipped: not sent, for skipReason; canceled: the campaign was canceled before its turn, or before its queued message was sent.',
+    ),
+  skipReason: z.enum(SKIP_REASONS).nullable().describe('Why it was skipped; null otherwise.'),
+  message: z
+    .object({
+      id: z.uuid(),
+      status: z.enum(MESSAGE_STATUSES),
+      statusAt: z.iso.datetime().describe('When the message reached its status.'),
+      error: z
+        .object({ code: z.string().nullable(), title: z.string().nullable() })
+        .nullable()
+        .describe(
+          'Why the message failed or was not sent: WhatsApp’s error code and title, or HyFib’s reason (like campaign_canceled) for one canceled before it was sent.',
+        ),
+    })
+    .nullable()
+    .describe('The message queued for the recipient; null until it is queued.'),
+  queuedAt: z.iso.datetime().nullable(),
+  repliedAt: z.iso
+    .datetime()
+    .nullable()
+    .describe(attributed('a reply', ' from the number the reply came to')),
+  optedOutAt: z.iso.datetime().nullable().describe(attributed('an opt-out from marketing', '')),
+});
+export type ApiCampaignRecipient = z.infer<typeof apiCampaignRecipientSchema>;
+
+type RecipientRow = {
+  id: string;
+  contact_id: string;
+  display_name: string | null;
+  phone_e164: string | null;
+  state: RecipientState;
+  skip_reason: SkipReason | null;
+  message_id: string | null;
+  message_status: MessageStatus | null;
+  message_status_at: string | Date | null;
+  error_code: string | null;
+  error_title: string | null;
+  queued_at: string | Date | null;
+  replied_at: string | Date | null;
+  opted_out_at: string | Date | null;
+};
+
+const iso = (value: string | Date | null) => (value ? new Date(value).toISOString() : null);
+
+function toApiRecipient(r: RecipientRow): ApiCampaignRecipient {
+  const statusAt = iso(r.message_status_at);
+  return {
+    id: r.id,
+    contact: { id: r.contact_id, name: r.display_name, phone: r.phone_e164 },
+    state: r.state,
+    skipReason: r.skip_reason,
+    message:
+      r.message_id && r.message_status && statusAt
+        ? {
+            id: r.message_id,
+            status: r.message_status,
+            statusAt,
+            error:
+              r.error_code || r.error_title ? { code: r.error_code, title: r.error_title } : null,
+          }
+        : null,
+    queuedAt: iso(r.queued_at),
+    repliedAt: iso(r.replied_at),
+    optedOutAt: iso(r.opted_out_at),
+  };
+}
+
+/**
+ * The recipients of one of the company's campaigns by id, on keyset pages: a campaign's recipients
+ * are taken once, when it is submitted, so paging never skips or repeats one. `outcome` keeps the
+ * recipients one count of its results counts, with the count's own condition. Recipients whose
+ * contact was erased are left out, as the API leaves erased contacts out everywhere.
+ */
+export async function apiListCampaignRecipients(
+  deps: Pick<OutboundDeps, 'db'>,
+  ctx: ApiContext,
+  campaignId: string,
+  query: unknown,
+): Promise<{ data: ApiCampaignRecipient[]; nextCursor: string | null }> {
+  assertScope(ctx, 'campaigns.read');
+  assertScope(ctx, 'contacts.read');
+  if (!z.uuid().safeParse(campaignId).success) throw notFound('Campaign');
+  const q = parseInput(apiCampaignRecipientQuerySchema, query);
+  return deps.db.run(
+    ctx.scope,
+    async (tx) => {
+      const [campaign] = await tx
+        .select({ id: campaigns.id })
+        .from(campaigns)
+        .where(and(eq(campaigns.tenantId, ctx.tenant.id), eq(campaigns.id, campaignId)));
+      if (!campaign) throw notFound('Campaign');
+      const res = await tx.execute<RecipientRow>(sql`
+        select r.id, r.contact_id, c.display_name, c.phone_e164, r.state, r.skip_reason,
+               r.message_id, m.status as message_status, m.status_at as message_status_at,
+               m.error_code, m.error_title, r.queued_at, r.replied_at, r.opted_out_at
+          from app.campaign_recipients r
+          join app.contacts c on c.tenant_id = r.tenant_id and c.id = r.contact_id
+          left join app.messages m on m.tenant_id = r.tenant_id and m.id = r.message_id
+         where r.tenant_id = ${ctx.tenant.id} and r.campaign_id = ${campaignId}
+           and c.erased_at is null
+           ${q.outcome ? sql`and ${RECIPIENT_OUTCOME_SQL[q.outcome]}` : sql``}
+           ${q.cursor ? sql`and r.id > ${q.cursor}::uuid` : sql``}
+         order by r.id
+         limit ${q.limit + 1}`);
+      const shown = res.rows.slice(0, q.limit);
+      return {
+        data: shown.map(toApiRecipient),
+        nextCursor: res.rows.length > q.limit ? (shown.at(-1)?.id ?? null) : null,
+      };
+    },
+    { accessMode: 'read only' },
   );
 }

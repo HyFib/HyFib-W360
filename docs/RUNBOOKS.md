@@ -1698,6 +1698,20 @@ last campaign message in the 72 hours before the reply, of any campaign), so a l
 a reply from an earlier one. A segment with the same conditions finds the same contacts: preview it
 in the app to compare.
 
+**A campaign's recipients through the API differ from its results or from the Recipients page, or
+answer 403, 404 or 422 (ADR-127).** Each `outcome` of `GET /api/v1/campaigns/{id}/recipients` lists
+the recipients its count in `results` counts, read when each page is asked for: while a campaign
+runs, recipients move between outcomes, so compare a list with a count read at the same moment.
+Recipients whose contact was erased are never listed but still counted. Replies and opt-outs count
+once their message is delivered: a recipient with `repliedAt` whose message is still `sent` is in
+neither `replied` nor its count. The Recipients page in the app groups differently: its Failed
+includes unknown outcomes and its Replied shows a reply whatever its message's status. 403
+`forbidden` names the scope the key lacks, `campaigns.read` or `contacts.read` (keys keep the scopes
+they were created with: create a key with both); `not_in_plan` means the plan leaves it out
+(ADR-092). 404 means the id is not one of the key's company's campaigns. 422 names the parameter: an
+`outcome` the results do not count, a `cursor` that is not the previous page's `nextCursor`, or an
+unknown parameter.
+
 **A search with `POST /api/v1/contacts/search` gives short or empty pages, or a 422 (ADR-117).**
 Its pages read at most 2,000 contacts, as filtered lists do (entry above): the integration sends the
 same conditions with each `nextCursor` until it is `null`. A 422 names the condition's part:

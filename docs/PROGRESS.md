@@ -1,5 +1,92 @@
 # Progress
 
+## 2026-10-03 — Phase 5: a campaign's recipients through the public API (P5-08, ADR-127)
+
+Status: **Implemented and locally verified (test data and the Graph stand-in only).** Since ADR-125
+a key read a campaign's results (how many were delivered, read, failed or replied), but which
+contacts those were, with each message's status and error, was on members' recipients page and its
+CSV export only.
+
+### Completed
+
+- **Design (ADR-127):** `GET /campaigns/{id}/recipients` lists a campaign's recipients in a fixed
+  order (by id) on keyset pages, each with its contact (id, name, number), state and skip reason,
+  the message queued for it (id, status, when, WhatsApp's error or HyFib's reason) and when a reply
+  and an opt-out were counted for it. It needs `campaigns.read` and `contacts.read`, the pair members
+  need for the recipients page. `outcome` lists the recipients one count of the results counts,
+  with that count's own condition; erased contacts are left out (the results still count them). No
+  migration and no new scope.
+- **Domain:** `campaigns/outcomes.ts` (`RECIPIENT_OUTCOMES`, `RECIPIENT_OUTCOME_SQL`), which
+  `campaignAnalytics` now counts with; `api/campaigns.ts` (`apiCampaignRecipientQuerySchema`,
+  `apiCampaignRecipientSchema`, `apiListCampaignRecipients`); the `campaigns.read` description says
+  a key that also reads contacts lists recipients; OpenAPI: the path, `outcome`, `CampaignRecipient`
+  and the info text.
+- **Web:** `GET /api/v1/campaigns/{id}/recipients`.
+- **Tests:**
+  - Unit (`api.test.ts`, 5 new, 2 changed): each outcome named after a count of the results and
+    every count of recipients given an outcome; the query's rules (every outcome, page sizes, a
+    cursor that is not an id, unknown parameters); both scopes before anything is read, named, and
+    a plan without one; no scope description holding another scope's label (the first wording,
+    "With Read contacts", gave the Read campaigns checkbox a second scope's name, which the e2e
+    test's `/Read contacts/` selector caught); the OpenAPI entries, without costs.
+  - Integration (`api-campaigns.test.ts`, 2 new, with the Graph stand-in): every recipient of a run
+    campaign (delivered with a reply, read with a STOP, failed with WhatsApp's error, skipped,
+    unknown after a lost connection, sent with a STOP before delivery, erased after delivery) with
+    its contact, state, message status, time and error as the database and the message feed hold
+    them, in the order and set members' list holds less the erased contact; pages of two; each of
+    the 13 outcomes listing as many recipients as its count over four campaigns (run, waiting,
+    cancelled before its turn, cancelled with queued messages); a draft listing none; another
+    company's campaign, an unknown and a bad id not found; keys with one scope and bad parameters
+    refused, naming them.
+  - e2e (`campaigns.spec.ts`, extended): the key that reads the campaign lists its two recipients as
+    the Recipients page shows them (delivered with a reply, skipped for no opt-in), the one who
+    replied, and an unknown outcome refused with 422.
+- **Docs:** ADR-127 (and ADR-125's notes: recipients listed since ADR-127, and a campaign has at
+  most 50,000 recipients, not the 100,000 its cost note said); SECURITY (the ADR-125 bullet, a
+  bullet); THREAT-MODEL T140; RUNBOOKS (results differing from lists, 403, 404, 422);
+  ARCHITECTURE; DEPLOYMENT (the rollout); BACKLOG P5-08; FEATURE-MATRIX W-134, H-033.
+- **Measured** (a throwaway test, not kept): on the local PostgreSQL 18, with a campaign of 50,000
+  recipients, a page of 100 took 4 to 6 ms (median of 7) for every recipient, one state or a common
+  outcome, and 15 to 25 ms for outcomes few have; the database held little else.
+- **Mutation checks:** 47 regressions tried, 45 caught, 2 equivalent:
+  - caught: 5 in who may read (each scope dropped, another scope asked, a bad id sent to the
+    database, an unknown or another company's campaign answered with nothing), 6 in the query's
+    rules (an outcome of the results left out or one they do not count taken, a cursor that is not
+    an id sent to the database, longer pages, a smaller default page, unknown parameters), 9 in
+    the list (erased contacts listed, the outcome or the cursor ignored, the cursor repeating the
+    last recipient, contact order, no next page, the next cursor at the first recipient, a page one
+    recipient longer, every campaign's recipients listed), 9 in a recipient's fields (name and
+    number swapped, the message given only to recipients who replied, its status from the
+    recipient's state, the error or its title left out, the status time from the queueing time,
+    replies and opt-outs swapped, no skip reason, no queueing time), 9 in the outcomes shared with
+    the results (failed including unknown outcomes and replies counted without delivery, as
+    members' page groups them, opt-outs without delivery, cancelled messages of queued recipients
+    only, queued messages not in progress, read including delivered, sent leaving out messages
+    only sent, skipped listing waiting recipients, the results counting unknown outcomes as
+    failed), 5 in OpenAPI and the scope's description and 2 through the e2e test (the route passing
+    no query, the route nesting the page in `data`);
+  - equivalent: the company dropped from the campaign's lookup or the list's query, which RLS
+    keeps to the key's company anyway (another company's campaign still answers 404).
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                                                                                                                 | Result                                                                 |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                    | clean                                                                  |
+| `pnpm test`                                                                                                                                             | 558 passed                                                             |
+| `pnpm test:integration` on PostgreSQL 18.6 and 17.11                                                                                                    | 762 passed on each                                                     |
+| `pnpm build`, then `campaigns.spec.ts`, `api-keys.spec.ts` and `api-contact-search.spec.ts` on chromium and mobile-chromium (database migrated to 0099) | 16 passed                                                              |
+| Mutation checks                                                                                                                                         | 47 regressions tried, 45 caught (2 through the e2e test), 2 equivalent |
+| gitleaks 8.30.1 on the commit                                                                                                                           | no leaks found                                                         |
+
+### Known gaps
+
+- Recipients through webhooks, filters by contact, number or time, the message's conversation,
+  costs per recipient and members' groupings of failed and replied recipients are not built
+  (ADR-127).
+- How a rare outcome's page behaves next to a large messages table was not measured: the
+  measurement's database held one campaign.
+
 ## 2026-10-03 — Phase 5: conversation and campaign conditions in API contact searches (P5-08, ADR-126)
 
 Status: **Implemented and locally verified (test data and the Graph stand-in only).** `POST
