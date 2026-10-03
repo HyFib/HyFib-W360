@@ -4208,8 +4208,9 @@ Decision:
   comparison and grow with every value saved.
 - **Scope:** `contacts.read`, which listing contacts already needs.
 
-Not built: other comparisons (contains, greater or less than, not set), several values for one
-filter, orders other than newest first, contacts changed since a time, and searching by name.
+Not built: other comparisons (contains, greater or less than, not set; built by ADR-117 as
+`POST /contacts/search`), several values for one filter, orders other than newest first, contacts
+changed since a time, and searching by name.
 
 ## ADR-114 Following contact changes through the public API (2026-10-02)
 
@@ -4382,3 +4383,55 @@ Decision:
 Not built: filters (direction, number, conversation), a time to start from, which part of a message
 changed (the item is the message as it is now), notes and conversation changes (the conversation
 webhooks carry those), and media.
+
+## ADR-117 Searching contacts with segment conditions through the public API (2026-10-03)
+
+Context: since ADR-113 `GET /contacts` finds contacts by number, email, tag and custom field values
+equal to a given value. An integration asking for the contacts with more than three orders, without
+the tag `vip`, opted in to marketing, added after a date or whose city contains "pur" had to read
+every contact and filter them itself (ADR-113's Not built: other comparisons). Members ask such
+questions in segments (P3-04), which compare custom fields (set, not set, equals, not equals,
+contains, greater or less than, before or after, yes or no) and contacts' tags, consent, creation
+day, source and calling code, matching all of the conditions or any.
+
+Decision:
+
+- **Endpoint:** `POST /api/v1/contacts/search` (`searchContacts`, scope `contacts.read`), with a JSON
+  body `{ match, conditions, limit, cursor }`: `match` is `all` (the default) or `any`, and
+  `conditions` holds 1 to 20 conditions. It answers as `GET /contacts` does: the company's contacts
+  newest first, `{ data, nextCursor }`, on exact keyset pages, erased contacts left out. POST
+  because a list of conditions has no query string form that OpenAPI 3.1 can describe (`deepObject`
+  does not nest); the search only reads (a read-only transaction, no `Idempotency-Key`, nothing
+  audited) and counts as one request like any other.
+- **Segments' conditions, compiled by segments' code:** `field` (a key, a comparison and a value),
+  `tag` (`has`, `not_has`), `consent` (a purpose and `opted_in`, `opted_out` or `not_recorded`),
+  `created` (before or after a day, in the company's time zone), `source` and `calling_code`, each
+  turned into SQL by the function segments use, so a key and a segment with the same conditions find
+  the same contacts (tested). Which comparison applies to which type of field, and which needs a
+  value, are segments' rules too, kept in one shared function. Values are compared as segments
+  compare them: text whatever its case (`contains` looks for the text as written, never as a
+  pattern), numbers as numbers, dates as `YYYY-MM-DD`; `not_equals` also finds contacts without a
+  value.
+- **Not offered:** segments' `last_message` and `campaign` conditions. They read conversations and
+  campaign outcomes, which `contacts.read` does not give (conversations need `conversations.read`;
+  campaigns have no scope).
+- **Strict refusals:** 422 naming the condition's part, like `conditions.1.key`: a key the company has
+  no field for, a comparison its type does not take (the message lists those it takes), a value
+  missing where a comparison needs one or given where it takes none, a value that is not a number
+  (as members type numbers) for a number field or not a date that exists for a date field, a
+  creation day that does not exist, or a bad tag. Text and date values are strings; a number may be a
+  JSON number or a string of one.
+- **Windows, not scans:** every page reads at most 2,000 of the company's contacts, newest first, as
+  `GET /contacts` filtered by tag or field does (ADR-113, now one function for both): when the
+  conditions leave out most contacts, a page holds fewer than `limit`, or none, and still gives
+  `nextCursor`; pages never skip or repeat a contact, and both reads of a page see one snapshot. No
+  migration and no index.
+- **Also fixed: dates that do not exist in segments.** A segment's creation day and its date
+  comparisons were checked only for the `YYYY-MM-DD` form, so 30 February passed: as a creation day
+  it then failed the segment's preview, its page and a campaign's audience with a database error,
+  and as a date comparison it was compared as text. Both now need a date that exists, and are
+  refused with the problem named, for new segments and for saved ones alike.
+
+Not built: the `last_message` and `campaign` conditions, searching by name, groups of conditions
+(all of some and any of others), orders other than newest first, counting the matches, and saved
+segments through the API.

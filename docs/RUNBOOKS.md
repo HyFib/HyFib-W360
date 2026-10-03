@@ -1636,6 +1636,24 @@ field for (`GET /api/v1/contact-fields`), a value of another type (numbers as me
 dates `YYYY-MM-DD`, `true` or `false`) or an empty one, `email` or `tag`. Text matches whatever its
 case but compares whole values, not parts of them.
 
+**A search with `POST /api/v1/contacts/search` gives short or empty pages, or a 422 (ADR-117).**
+Its pages read at most 2,000 contacts, as filtered lists do (entry above): the integration sends the
+same conditions with each `nextCursor` until it is `null`. A 422 names the condition's part:
+`conditions.<i>.key` for a key the company has no field for (`GET /api/v1/contact-fields`), `.op` for
+a comparison the field's type does not take (the message lists those it takes), `.value` for a value
+missing, given to a comparison that takes none (`is_set`, `is_not_set`, `is_true`, `is_false`), not a
+number, not a date that exists, or a number for a text or date field, `.tag`, `.date` for a creation
+day that does not exist, and `.type` for a condition the API does not offer (segments'
+`last_message` and `campaign` read conversations and campaigns, which `contacts.read` does not
+give). Creation days are the company's, in its time zone (Settings → General), so a contact added
+late in the evening UTC can fall on the next day there. The search and a segment with the same
+conditions find the same contacts.
+
+**A segment or campaign says "Enter a date written as YYYY-MM-DD." (ADR-117).** One of its
+conditions has a creation day or a date comparison that does not exist, like 30 February. Such a
+segment used to make its page or the campaign's audience fail; now it names the problem and shows no
+preview until a member changes the condition to a real date.
+
 **The contact change feed shows nothing new for a while, or refuses a cursor (ADR-114).**
 `GET /api/v1/contact-changes` reads a change only once every transaction that began before it has
 finished, so a long transaction anywhere in the database (a large import, a session left idle in a

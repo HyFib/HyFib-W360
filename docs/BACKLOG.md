@@ -72,7 +72,8 @@ verification, app review, Embedded Signup configuration).
   frequency cap, message and estimated spending caps (platform rate cards), pause/resume and
   idempotent cancel, test sends, per-recipient outcomes, last-touch reply/opt-out attribution,
   results with denominators, CSV export. Local 10,000-recipient run: snapshot 0.6 s, all recipients
-  queued in 21 ticks. **Remaining:** the 10k run in staging with real dispatch, per-recipient time
+  queued in 21 ticks. Segments refuse dates that do not exist (ADR-117; a creation day of 30
+  February used to fail the preview, the segment page and a campaign's audience). **Remaining:** the 10k run in staging with real dispatch, per-recipient time
   zones, A/B variants, messaging-tier awareness (read the number's limit from Meta), campaign
   sends through the public API (the API sends single templates since P5-08), media-header
   templates.
@@ -499,12 +500,16 @@ verification, app review, Embedded Signup configuration).
   its changes were saved (received or sent, its status, status time or error, its contact erased),
   from the start or from a cursor sealed to the company and the feed; the trigger on messages moves
   each message's one row to the transaction that changed it, so following the cursor misses no
-  status and nothing needs compacting).
+  status and nothing needs compacting); **[searching contacts with segment conditions built,
+  locally verified]** (ADR-117: `POST /contacts/search` finds contacts with segments' conditions,
+  compiled by segments' code: custom field comparisons, tags, consent, the creation day in the
+  company's time zone, source and calling code, all or any of them, on the pages `GET /contacts`
+  reads; refusals name the condition's part).
   Remaining: media messages, call-to-action messages through the API, taking reactions back,
   assigning many conversations at once, media downloads, starting or
   stopping runs for many contacts in one call, bulk sends in one call, changing a field's type,
-  changing numbers or many contacts in one call, other comparisons in contact searches, which fields
-  of a contact changed, limits per endpoint,
+  changing numbers or many contacts in one call, contact searches by name or by conversation and
+  campaign conditions, which fields of a contact changed, limits per endpoint,
   availability per single endpoint (plans choose per scope since ADR-092). The one-argument key
   lookup kept for rolling deploys (0051) is dropped (0074). Replaying many deliveries in one call
   is built with P5-09 (ADR-095).

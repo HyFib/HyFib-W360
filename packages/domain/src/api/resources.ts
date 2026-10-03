@@ -11,9 +11,7 @@ import {
   contactTags,
   contacts,
   conversations,
-  desc,
   eq,
-  exactTimestamp,
   inArray,
   isNotNull,
   isNull,
@@ -61,11 +59,11 @@ import {
   sendSpecFor,
   TEMPLATE_LIMITS,
 } from '../templates/definition';
-import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
-import { apiContactById, apiContactColumns, toApiContact, type ApiContact } from './contact-view';
+import { decodeKeysetCursor, parseInput } from '../validation';
+import { apiContactById, toApiContact, type ApiContact } from './contact-view';
 import {
-  API_CONTACT_SEARCH_WINDOW,
   apiContactFieldFiltersSchema,
+  apiContactPage,
   apiContactFieldsSchema,
   apiContactListFilters,
   apiFieldChanges,
@@ -636,51 +634,15 @@ export async function apiListContacts(
         filters.push(sql`exists (select 1 from app.contact_tags t where t.tenant_id = ${contacts.tenantId}
           and t.contact_id = ${contacts.id} and t.tag = ${tag})`);
       }
-      const range = and(
-        eq(contacts.tenantId, ctx.tenant.id),
-        isNull(contacts.erasedAt),
-        phone ? eq(contacts.phoneE164, phone) : undefined,
-        email ? sql`lower(${contacts.email}) = lower(${email})` : undefined,
-        cursor
-          ? sql`(${contacts.createdAt}, ${contacts.id}) < (${cursor.at}::timestamptz, ${cursor.id}::uuid)`
-          : undefined,
-      );
-      // The last contact this page may read; none when fewer remain or nothing is filtered.
-      const [edge] =
-        filters.length > 0
-          ? await tx
-              .select({ at: exactTimestamp(contacts.createdAt), id: contacts.id })
-              .from(contacts)
-              .where(range)
-              .orderBy(desc(contacts.createdAt), desc(contacts.id))
-              .offset(API_CONTACT_SEARCH_WINDOW - 1)
-              .limit(1)
-          : [];
-      const rows = await tx
-        .select({ ...apiContactColumns, cursorAt: exactTimestamp(contacts.createdAt) })
-        .from(contacts)
-        .where(
-          and(
-            range,
-            edge
-              ? sql`(${contacts.createdAt}, ${contacts.id}) >= (${edge.at}::timestamptz, ${edge.id}::uuid)`
-              : undefined,
-            ...filters,
-          ),
-        )
-        .orderBy(desc(contacts.createdAt), desc(contacts.id))
-        .limit(q.limit + 1);
-      const page = rows.slice(0, q.limit);
-      const last = page.at(-1);
-      return {
-        data: page.map(toApiContact),
-        nextCursor:
-          rows.length > q.limit && last
-            ? encodeKeysetCursor(last.cursorAt, last.id)
-            : edge
-              ? encodeKeysetCursor(edge.at, edge.id)
-              : null,
-      };
+      return apiContactPage(tx, ctx.tenant.id, {
+        cursor,
+        limit: q.limit,
+        narrow: [
+          phone ? eq(contacts.phoneE164, phone) : undefined,
+          email ? sql`lower(${contacts.email}) = lower(${email})` : undefined,
+        ],
+        filters,
+      });
     },
     { isolationLevel: 'repeatable read', accessMode: 'read only' },
   );

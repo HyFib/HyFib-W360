@@ -1,5 +1,73 @@
 # Progress
 
+## 2026-10-03 — Phase 5: searching contacts with segment conditions through the public API (P5-08, ADR-117)
+
+Status: **Implemented and locally verified (test data only).** Since ADR-113 keys found contacts
+only by values equal to a given one; an integration asking for contacts with more than three
+orders, without a tag, opted in to marketing or added after a day had to read every contact. Members
+ask such questions in segments.
+
+### Completed
+
+- **Design (ADR-117):** `POST /contacts/search` (`contacts.read`) takes 1 to 20 of segments'
+  conditions (custom field comparisons, tags, consent, the creation day in the company's time zone,
+  source, calling code), all or any of them, and answers with `GET /contacts`'s pages. Segments'
+  `last_message` and `campaign` conditions are not offered: they read conversations and campaigns.
+- **Domain and web:** `api/contact-search.ts` (the body, the checks with paths like
+  `conditions.1.key`, the search), segments' rules shared through `fieldConditionProblem`,
+  `comparisonTakesValue`, `fieldComparisonsFor` and `segmentConditionsSql` (`campaigns/segments.ts`),
+  `apiContactPage` (`api/contacts.ts`) shared with `GET /contacts`, the route, the OpenAPI operation
+  and body schema. No migration.
+- **Also fixed:** segments took a creation day or a date comparison that does not exist (30
+  February): the creation day then failed the preview, the segment page and a campaign's audience
+  with a database error. Both are refused now, with the problem named.
+- **Tests:**
+  - Unit (`contact-search.test.ts`, 4; `segments.test.ts`, 4): the body (1 to 20 conditions, strict,
+    segments' conversation and campaign conditions refused); the scope and refusals before anything
+    is read; reads for suspended and restricted companies in one read-only snapshot; the OpenAPI
+    entries; the comparisons of each type, the problems they can have, dates that exist, and
+    segments' checks in members' words.
+  - Integration (`api-contact-search.test.ts`, 6): each comparison of each type of field, numbers
+    given as numbers or strings, `contains` as written (`%_` finds only the contact whose text holds
+    it), all or any, a limit splitting pages; tags, consent, creation days in India's time zone,
+    source and calling code; the contacts a segment with the same conditions counts; every refusal
+    naming its part, and keys without `contacts.read`; windows across an edge, empty and with a
+    limit of one; segments refusing dates that do not exist.
+  - e2e (`api-contact-search.spec.ts`): a key defines fields, adds contacts and finds them with a
+    comparison and a tag it must not have, then with any of two conditions; a refusal names its part.
+- **Docs:** ADR-117 (ADR-113 annotated); SECURITY; THREAT-MODEL T130; RUNBOOKS (a search giving short
+  pages or a 422; a segment naming a date that does not exist); ARCHITECTURE; BACKLOG P5-08 and
+  P3-04; FEATURE-MATRIX W-134, W-054, H-033.
+- **Mutation checks:** 33 regressions tried, 32 caught:
+  - 7 in the body (the body or a condition not strict, no conditions or more than 20 accepted, limits
+    above a page, any by default, segments' last-message condition offered), 10 in the search
+    (unknown keys, numbers for text fields, values for comparisons that take none, values not
+    trimmed, creation days not checked, bad tags taken, all or any ignored, days in UTC, the scope,
+    the read-only snapshot), 8 in segments' shared rules and code (comparisons of another type, a
+    missing value, numbers, dates, segments' creation days, any matched as all, `contains` read as a
+    pattern, a date check taking the form only), 5 in the shared pages (no window, a window one
+    contact longer, the window's last contact left out, erased contacts found, the cursor after the
+    look-ahead contact; each also caught by `GET /contacts`' tests), 1 in the routes and 1 through the
+    e2e test (the route answering the page inside `data`).
+  - Not caught, as it removes a defense something else repeats: the company condition in the shared
+    pages (forced row-level security limits every read to the company's contacts).
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                                                                                                                                       | Result                                                                     |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                          | clean                                                                      |
+| `pnpm test`                                                                                                                                                                   | 530 passed                                                                 |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                                                           | 730 passed on each                                                         |
+| `pnpm build`, then `api-contact-search.spec.ts` and `api-contact-fields.spec.ts` on chromium and mobile-chromium, on a database migrated to 0093 (no migration in this slice) | 4 passed                                                                   |
+| Mutation checks                                                                                                                                                               | 33 regressions, 32 caught (1 through the e2e test; the other listed above) |
+| gitleaks 8.30.1 on the commit                                                                                                                                                 | no leaks                                                                   |
+
+### Known gaps
+
+- Searching by name, the `last_message` and `campaign` conditions, groups of conditions, orders other
+  than newest first, counting matches and saved segments through the API are not built (ADR-117).
+
 ## 2026-10-03 — Phase 5: following messages through the public API (P5-08, ADR-116)
 
 Status: **Implemented and locally verified (test data only; sends through the Graph stand-in).**

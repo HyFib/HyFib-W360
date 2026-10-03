@@ -38,6 +38,7 @@ import { CONTACT_FIELD_KEY_RE } from '../contacts/field-definitions';
 import { MAX_CONTACT_FIELDS } from '../contacts/fields';
 import { apiStartAutomationSchema } from './automations';
 import { apiContactFieldCreateSchema, apiContactFieldUpdateSchema } from './contact-fields';
+import { apiContactSearchSchema } from './contact-search';
 import { apiContactSchema } from './contact-view';
 import {
   API_CONTACT_SEARCH_WINDOW,
@@ -596,6 +597,18 @@ export function buildOpenApiDocument(serverUrl: string) {
               }),
             },
             ...errors(400, 401, 403, 412, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/contacts/search': {
+        post: {
+          operationId: 'searchContacts',
+          summary: 'Contacts matching conditions, as segments find them, newest first',
+          description: `${scopeNote('contacts.read')} Finds contacts with segments' conditions and comparisons: custom field values, tags, consent, the day a contact was added (in the company's time zone), where it came from and its country calling code, matching all of them or any. Answers as GET /contacts does: newest first, erased contacts left out, pages that never skip or repeat a contact. Each page reads at most ${API_CONTACT_SEARCH_WINDOW.toLocaleString('en-US')} of the company's contacts: when the conditions leave out most of them, a page can hold fewer contacts than \`limit\`, or none, and still give a \`nextCursor\`; send the same conditions with it until it is \`null\`. A condition the company's fields do not allow is refused, naming it (like \`conditions.1.key\`). It only reads, so no \`Idempotency-Key\` is needed.`,
+          requestBody: { required: true, content: json(ref('ContactSearch')) },
+          responses: {
+            '200': { description: 'A page of contacts.', content: pageOf('Contact') },
+            ...errors(400, 401, 403, 415, 422, 429, 500),
           },
         },
       },
@@ -1436,6 +1449,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         Contact: jsonSchema(apiContactSchema),
         ContactCreate: jsonSchema(apiContactCreateSchema, 'input'),
         ContactUpdate: jsonSchema(apiContactUpdateSchema, 'input'),
+        ContactSearch: jsonSchema(apiContactSearchSchema, 'input'),
         ContactField: jsonSchema(apiContactFieldSchema),
         ContactFieldCreate: jsonSchema(apiContactFieldCreateSchema, 'input'),
         ContactFieldUpdate: jsonSchema(apiContactFieldUpdateSchema, 'input'),
@@ -1523,6 +1537,7 @@ export const API_ROUTES = [
   ['get', '/templates'],
   ['get', '/contacts'],
   ['post', '/contacts'],
+  ['post', '/contacts/search'],
   ['get', '/contacts/{id}'],
   ['patch', '/contacts/{id}'],
   ['post', '/contacts/{id}/consent'],

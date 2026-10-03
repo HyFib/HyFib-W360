@@ -608,6 +608,14 @@ Phase 5 rules (Public API, P5-08):
   contact is read as `erased` with nothing of it. Only the trigger on `app.messages` writes the rows,
   through a function owned by the definer role; the runtime role may only read them, so no code can
   move a message to another place in the feed.
+- Searching contacts (ADR-117): `POST /contacts/search` (`contacts.read`) finds the key's company's
+  live contacts only (RLS and an explicit company filter; erased contacts never match), with
+  segments' conditions on data a contact already shows (custom fields, tags, consent, creation day,
+  source, calling code). Segments' conditions on conversations and campaigns are not offered, since
+  `contacts.read` does not give them. Field keys are checked against the company's fields first, and
+  keys, values, tags and dates are bound parameters, never part of the SQL text; `contains` escapes
+  `%` and `_`, so a value is never a pattern. Each page reads at most 2,000 contacts, so no condition
+  can make one request read every contact a company has. It writes nothing.
 - Only the token's SHA-256 is stored; the runtime role cannot read it. The token is shown once in
   the browser and kept only in the page's memory; it is never logged, and audit entries carry the
   public prefix only.

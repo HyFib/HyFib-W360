@@ -879,6 +879,13 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   contact of its range (`API_CONTACT_SEARCH_WINDOW`) and reads only down to it, so its cursor goes on
   past the window when few contacts match, as the message feed's does; both reads share a repeatable
   read snapshot.
+- **Searching contacts (ADR-117):** `POST /contacts/search` (`api/contact-search.ts`) parses
+  segments' conditions less `last_message` and `campaign`, checks them against the company's fields
+  with segments' rules (`fieldConditionProblem` and `comparisonTakesValue` in
+  `campaigns/segments.ts`, which `checkSegmentDefinition` uses too, each in its own words), and
+  compiles them with `segmentConditionsSql`, which `segmentWhere` wraps for segments and campaigns.
+  Its pages and `GET /contacts`'s come from one function, `apiContactPage` (`api/contacts.ts`): the
+  window's edge, then the matching rows down to it, in one repeatable read snapshot.
 - **Following contact changes (0091, ADR-114):** triggers on `contacts` (insert, and an update of
   the columns the API describes), `contact_tags` (insert, delete) and `contact_consents` (set, status
   changed) call `app.capture_contact_change`, which inserts one `app.contact_changes` row per contact

@@ -4,6 +4,7 @@ export * from './context';
 export * from './idempotency';
 export * from './contact-view';
 export * from './contacts';
+export * from './contact-search';
 export * from './change-cursors';
 export * from './contact-changes';
 export * from './contact-fields';

@@ -6,8 +6,11 @@ import {
   contactFields,
   contactTags,
   contacts,
+  desc,
   eq,
+  exactTimestamp,
   inArray,
+  isNull,
   sql,
   type ContactFieldType,
   type SQL,
@@ -24,14 +27,15 @@ import {
   type AttributeValue,
 } from '../contacts/fields';
 import type { OutboundDeps } from '../messaging/outbound';
-import { parseInput } from '../validation';
-import { apiContactById, toApiContact, type ApiContact } from './contact-view';
+import { encodeKeysetCursor, parseInput } from '../validation';
+import { apiContactById, apiContactColumns, toApiContact, type ApiContact } from './contact-view';
 import { apiActor, assertAnyScope, assertScope, type ApiContext } from './context';
 
 /**
  * Contact custom fields and contact changes through the public API (ADR-112): the company's field
- * definitions, values checked strictly against their field's type, and `PATCH /contacts/{id}`; and
- * the filters `GET /contacts` finds contacts with (ADR-113).
+ * definitions, values checked strictly against their field's type, and `PATCH /contacts/{id}`; the
+ * filters `GET /contacts` finds contacts with (ADR-113), and the pages it and contact searches
+ * (ADR-117) read.
  */
 
 const FIELD_KEY = z.string().max(40);
@@ -163,6 +167,71 @@ export const MAX_FIELD_FILTERS = 5;
  * contact it has (as the message feed reads, ADR-088).
  */
 export const API_CONTACT_SEARCH_WINDOW = 2000;
+
+/**
+ * One page of the company's contacts, newest first, on exact keyset pages (ADR-113): `narrow` holds
+ * conditions read with the contacts (a number or an email address, which their indexes find), and
+ * `filters`, when there are any, are checked in a window of at most API_CONTACT_SEARCH_WINDOW
+ * contacts. A page whose filters leave out most contacts then holds fewer than the limit, or none,
+ * and its cursor continues after the last contact it read, so pages never skip or repeat one. Run it
+ * in a repeatable read transaction, so both reads see one snapshot.
+ */
+export async function apiContactPage(
+  tx: Tx,
+  tenantId: string,
+  page: {
+    cursor: { at: string; id: string } | null;
+    limit: number;
+    narrow: (SQL | undefined)[];
+    filters: SQL[];
+  },
+): Promise<{ data: ApiContact[]; nextCursor: string | null }> {
+  const { cursor } = page;
+  const range = and(
+    eq(contacts.tenantId, tenantId),
+    isNull(contacts.erasedAt),
+    ...page.narrow,
+    cursor
+      ? sql`(${contacts.createdAt}, ${contacts.id}) < (${cursor.at}::timestamptz, ${cursor.id}::uuid)`
+      : undefined,
+  );
+  // The last contact this page may read; none when fewer remain or nothing is filtered.
+  const [edge] =
+    page.filters.length > 0
+      ? await tx
+          .select({ at: exactTimestamp(contacts.createdAt), id: contacts.id })
+          .from(contacts)
+          .where(range)
+          .orderBy(desc(contacts.createdAt), desc(contacts.id))
+          .offset(API_CONTACT_SEARCH_WINDOW - 1)
+          .limit(1)
+      : [];
+  const rows = await tx
+    .select({ ...apiContactColumns, cursorAt: exactTimestamp(contacts.createdAt) })
+    .from(contacts)
+    .where(
+      and(
+        range,
+        edge
+          ? sql`(${contacts.createdAt}, ${contacts.id}) >= (${edge.at}::timestamptz, ${edge.id}::uuid)`
+          : undefined,
+        ...page.filters,
+      ),
+    )
+    .orderBy(desc(contacts.createdAt), desc(contacts.id))
+    .limit(page.limit + 1);
+  const shown = rows.slice(0, page.limit);
+  const last = shown.at(-1);
+  return {
+    data: shown.map(toApiContact),
+    nextCursor:
+      rows.length > page.limit && last
+        ? encodeKeysetCursor(last.cursorAt, last.id)
+        : edge
+          ? encodeKeysetCursor(edge.at, edge.id)
+          : null,
+  };
+}
 
 /** The custom field values `GET /contacts` finds contacts by, from `fields[<key>]` parameters. */
 export const apiContactFieldFiltersSchema = z
