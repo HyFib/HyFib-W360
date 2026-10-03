@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { TEMPLATE_LIMITS } from '../templates/definition';
 import {
   campaignVariablesSchema,
   checkVariables,
@@ -40,6 +41,29 @@ describe('campaign variables', () => {
     ).toEqual({
       ok: true,
       params: { header: ['Diwali offer'], body: ['there', 'your city', 'Yes'] },
+    });
+  });
+
+  it('clips a value to the parameter limit without splitting an emoji (ADR-133)', () => {
+    // Meta would get half of the emoji where the limit falls between its two halves.
+    const city = `${'x'.repeat(TEMPLATE_LIMITS.parameterValue - 1)}😀 and more`;
+    expect(
+      resolveVariables(variables, { displayName: 'Asha', attributes: { city, points: 1 } }),
+    ).toEqual({
+      ok: true,
+      params: {
+        header: ['Diwali offer'],
+        body: ['Asha', 'x'.repeat(TEMPLATE_LIMITS.parameterValue - 1), '1'],
+      },
+    });
+    expect(
+      resolveVariables(
+        { header: [{ source: 'field', key: 'city' }], body: [] },
+        { displayName: null, attributes: { city } },
+      ),
+    ).toEqual({
+      ok: true,
+      params: { header: ['x'.repeat(TEMPLATE_LIMITS.parameterValue - 1)], body: [] },
     });
   });
 

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { AppError, notFound, uuidv7, type Clock } from '@w360/core';
+import { AppError, clipText, notFound, uuidv7, type Clock } from '@w360/core';
 import {
   and,
   asc,
@@ -823,7 +823,7 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
         if (index >= 0) suggestedFields[field.key] = index;
       }
       return {
-        fileName: input.fileName.slice(0, 200),
+        fileName: clipText(input.fileName, 200),
         headers,
         sample: parsed.rows.slice(0, 5).map((r) => r.map(restoreCell)),
         totalRows: parsed.rows.length,

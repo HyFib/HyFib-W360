@@ -534,6 +534,22 @@ describe('outbound sends', () => {
     expect(conv!.assigned_membership_id).toBe(ctx.membership.id);
   });
 
+  it("clips the conversation's preview of a reply without splitting an emoji (ADR-133)", async () => {
+    const c = await companyWithChannel();
+    const conversationId = await openConversation(c);
+    const ctx = await ctxFor(c, c.agent);
+    await queueTextMessage(outboundDeps(), ctx, {
+      conversationId,
+      text: `${'x'.repeat(199)}😀 and the rest of a long reply`,
+      clientKey: 'ck-preview-emoji',
+    });
+    const [conv] = await adminQuery<{ last_message_preview: string }>(
+      'SELECT last_message_preview FROM app.conversations WHERE id = $1',
+      [conversationId],
+    );
+    expect(conv!.last_message_preview).toBe('x'.repeat(199));
+  });
+
   it('schedules retries for rate limits and server errors, and fails permanently otherwise', async () => {
     const c = await companyWithChannel();
     const conversationId = await openConversation(c);

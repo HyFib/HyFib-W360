@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { AppError, notFound, uuidv7, type Clock, type Keyring } from '@w360/core';
+import { AppError, clipText, notFound, uuidv7, type Clock, type Keyring } from '@w360/core';
 import { QUEUES } from '@w360/contracts';
 import {
   and,
@@ -655,7 +655,7 @@ export function createCommerceService(deps: CommerceDeps) {
           .update(conversations)
           .set({
             lastMessageAt: now,
-            lastMessagePreview: preview.slice(0, 200),
+            lastMessagePreview: clipText(preview, 200),
             unreadCount: 0,
             status: 'open',
             ...(claim ? { assignedMembershipId: ctx.membership.id } : {}),

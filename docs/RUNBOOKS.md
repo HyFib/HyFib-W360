@@ -1693,14 +1693,15 @@ the replacement character "�" where the character was; nothing else in the mes
 answer is changed.
 
 **A message shows "This message was too large to keep." or "N contacts were too large to keep", or
-text ends with "�" (ADR-131).** A message's content may take at most 64 KB: a contact card keeps
-the contacts that fit and counts the rest, and content larger than that (far beyond what WhatsApp
-sends) is kept without it; ask the customer to send it again in parts. "�" stands for half of an
-emoji or another character that a clip or a provider cut: inbound text is clipped without
-splitting one, so it appears only in text clipped elsewhere or sent that way. A status's errors and
-pricing larger than their columns hold (4 KB and 2 KB) are kept shortened. The receipt is processed
-either way; none of these ever fails one. The API's messages and the `message.received` webhook
-say the same with `contentTooLarge` (its text, reply and media type are then null) and
+text ends with "�" (ADR-131).** A message's content may take at most 64 KB: a contact card keeps the
+contacts that fit and counts the rest, and content larger than that (far beyond what WhatsApp sends)
+is kept without it; ask the customer to send it again in parts. "�" stands for half of an emoji or
+another character that a clip or a provider cut: HyFib clips text without splitting one (inbound
+text since ADR-131, text sent to Meta or Razorpay or shown to members since ADR-133), so it appears
+only where a provider or an API request sent half of one, or in clipped error text. A status's
+errors and pricing larger than their columns hold (4 KB and 2 KB) are kept shortened. The receipt is
+processed either way; none of these ever fails one. The API's messages and the `message.received`
+webhook say the same with `contentTooLarge` (its text, reply and media type are then null) and
 `contactsLeftOut` (ADR-132), so an integration can tell such a message from one without text.
 
 **A key's campaign results differ from the campaign page, or a campaign read through the API answers

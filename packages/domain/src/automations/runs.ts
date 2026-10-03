@@ -16,7 +16,7 @@ import {
   type AutomationStepOutcome,
   type Tx,
 } from '@w360/db';
-import { uuidv7 } from '@w360/core';
+import { clipText, uuidv7 } from '@w360/core';
 import { routeConversation } from '../inbox/routing';
 import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
@@ -121,6 +121,11 @@ export async function lockActiveRun(
   return run ?? null;
 }
 
+/** Text for the step log and a run's end, clipped without splitting a character (ADR-133). */
+function clipped(text: string | null | undefined, max: number): string | null {
+  return text === null || text === undefined ? null : clipText(text, max);
+}
+
 /** Appends a row to the run's step log (numbered per run; the caller holds the run lock). */
 export async function appendRunStep(
   tx: Tx,
@@ -144,9 +149,9 @@ export async function appendRunStep(
     nodeId: entry.nodeId,
     nodeType: entry.nodeType,
     outcome: entry.outcome,
-    branch: entry.branch?.slice(0, 80) ?? null,
+    branch: clipped(entry.branch, 80),
     messageId: entry.messageId ?? null,
-    detail: entry.detail?.slice(0, 300) ?? null,
+    detail: clipped(entry.detail, 300),
   });
 }
 
@@ -243,7 +248,7 @@ export async function endRun(tx: Tx, run: AutomationRun, input: EndRunInput): Pr
       ...input.state,
       status: input.status,
       endReason: input.reason,
-      endDetail: input.detail?.slice(0, 300) ?? null,
+      endDetail: clipped(input.detail, 300),
       endedByMembershipId: input.endedByMembershipId ?? null,
       endedAt,
       waitingFor: null,

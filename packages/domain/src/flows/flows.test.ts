@@ -241,5 +241,13 @@ describe('flow messages and health', () => {
         },
       ],
     });
+    // Meta's text is clipped without splitting an emoji (ADR-133).
+    expect(
+      flowHealthSummary({
+        entities: [
+          { entity_type: 'FLOW', errors: [{ error_description: `${'x'.repeat(499)}😀 more` }] },
+        ],
+      }).problems,
+    ).toEqual([{ entity: 'FLOW', description: 'x'.repeat(499), solution: null }]);
   });
 });

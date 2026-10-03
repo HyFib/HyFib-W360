@@ -1,4 +1,4 @@
-import { jsonbText, uuidv7, type Clock, type Keyring } from '@w360/core';
+import { clipText, jsonbText, uuidv7, type Clock, type Keyring } from '@w360/core';
 import { QUEUES } from '@w360/contracts';
 import {
   and,
@@ -334,7 +334,7 @@ export async function queueBotMessage(
   });
   await tx
     .update(conversations)
-    .set({ lastMessageAt: now, lastMessagePreview: preview.slice(0, 200) })
+    .set({ lastMessageAt: now, lastMessagePreview: clipText(preview, 200) })
     .where(and(eq(conversations.tenantId, run.tenantId), eq(conversations.id, conversation.id)));
   await emitTenantEvent(tx, run.tenantId, {
     type: 'message.created',
@@ -506,7 +506,7 @@ export async function queueBotTemplate(
   });
   await tx
     .update(conversations)
-    .set({ lastMessageAt: now, lastMessagePreview: built.rendered.body.slice(0, 200) })
+    .set({ lastMessageAt: now, lastMessagePreview: clipText(built.rendered.body, 200) })
     .where(and(eq(conversations.tenantId, run.tenantId), eq(conversations.id, conversation.id)));
   await emitTenantEvent(tx, run.tenantId, {
     type: 'message.created',

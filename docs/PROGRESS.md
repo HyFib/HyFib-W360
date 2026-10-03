@@ -1,5 +1,64 @@
 # Progress
 
+## 2026-10-03 — Phase 5: clips that keep characters whole (ADR-133)
+
+Status: **Implemented and locally verified (test data and the provider stand-ins only).** ADR-131
+kept emoji whole in inbound text only. Elsewhere text was clipped by UTF-16 code units, so a
+template variable, an automation's message, answer or field value, a saved reply inserted into the
+composer, or a Razorpay customer's name or plan's name cut inside an emoji went to Meta or Razorpay
+with half of it (as the escape `\ud83d`, whose handling is not confirmed), and members saw "�" at
+the end of clipped previews, store and catalog text, ad headlines and other text.
+
+### Completed
+
+- **Design (ADR-133):** clips of text that reaches providers or members use `clipText`; error and
+  status text (in English) and identifiers stay clipped by code units.
+- **Core:** `@w360/core/text`, an export of `text.ts` with no Node dependency, for code the browser
+  also runs.
+- **Domain and web:** `clipText` for template variables (campaigns, order messages, automations),
+  an automation's messages, questions, answers, field values and values saved from responses, a
+  company endpoint's refusal shown in a Flow, Razorpay's customer name and email, a recurring
+  charge's description and a plan's name, conversations' previews (members' replies, templates
+  sent from the inbox, the API and automations, Flows, order and product messages, campaigns),
+  stores' text and errors, catalogs' and products' names from Meta, ads' headlines, Flows' health
+  text, import file names, automation run step logs, a deletion's clean-up list, a saved reply
+  inserted into the composer and the automation diagram's labels.
+- **Tests:**
+  - Unit (4 new, 4 extended): an automation's message and template variable shortened before an
+    emoji with "…", an answer and a value read from a response, also through the interpreter;
+    campaign and store message variables, header and body; Razorpay's customer, plan and recurring
+    charge fields; a store's text and error; an ad's headline; a Flow's health text.
+  - Integration (real PostgreSQL; 2 new, 1 changed): a member's reply and a template whose
+    previews are cut where an emoji's halves meet; an automation's field value clipped before the
+    emoji instead of ending in U+FFFD (ADR-131's test).
+  - Converted by the same call without a test of their own: the previews of order messages, API
+    sends, Flows, product messages, campaigns and automations' sends, catalog and product names
+    from Meta, import file names, run step logs, a deletion's clean-up list, a Flow endpoint's
+    refusal, the composer and the diagram.
+- **Docs:** ADR-133 (and notes on ADR-131); SECURITY ("Text input"); THREAT-MODEL T145;
+  ARCHITECTURE (request flow); RUNBOOKS ("�").
+- **Mutation checks:** 19 deliberate regressions tried, 19 caught.
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                                                                                                                                                                                                                                                                                            | Result                          |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                                                                                                                                                                               | clean                           |
+| `pnpm test`                                                                                                                                                                                                                                                                                                                        | 612 passed                      |
+| `pnpm test:integration` on PostgreSQL 18.6 and 17.11                                                                                                                                                                                                                                                                               | 787 passed on each              |
+| `pnpm build`, then `inbox.spec.ts`, `inbox-teams.spec.ts`, `automations.spec.ts`, `stores.spec.ts`, `templates.spec.ts`, `campaigns.spec.ts`, `flows.spec.ts`, `commerce.spec.ts`, `growth.spec.ts`, `contacts.spec.ts`, `billing.spec.ts`, `plan-subscription.spec.ts` and `company-data.spec.ts` on chromium and mobile-chromium | 46 passed                       |
+| Mutation checks                                                                                                                                                                                                                                                                                                                    | 19 regressions tried, 19 caught |
+| gitleaks 8.30.1 on the commit                                                                                                                                                                                                                                                                                                      | no leaks found                  |
+
+### Known gaps
+
+- Clips separate an emoji's parts that are characters of their own (joined by zero-width joiners,
+  a flag's two regional indicators, a skin tone), showing a different emoji, never half of one.
+- Error and status text and identifiers are still clipped by code units (a half stored as U+FFFD).
+- A contact card's contacts are not given by the API or webhooks, nor shown in the inbox (ADR-132).
+- Pages' URL segments and query strings are not checked as such (services check ids, slugs,
+  cursors and filters by format or through `parseInput`).
+
 ## 2026-10-03 — Phase 5: what was left out of a message, in the API and webhooks (ADR-132)
 
 Status: **Implemented and locally verified (test data and the provider stand-ins only).** Since

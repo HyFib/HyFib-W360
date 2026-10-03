@@ -1,9 +1,10 @@
 import { createHmac } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { StoreApiError, expectOk } from './http';
+import { StoreApiError, expectOk, storeErrorText } from './http';
 import {
   CONNECT_TOKEN_RE,
   STORE_WEBHOOK_ID_RE,
+  clip,
   connectTokenHash,
   newConnectToken,
   newStoreWebhookId,
@@ -196,6 +197,12 @@ describe('money and people', () => {
     expect(storeCustomerPhone('09876543210', '91')).toBe('+919876543210');
     expect(storeCustomerPhone('call me', '91')).toBeNull();
     expect(storeCustomerPhone(null, '91')).toBeNull();
+  });
+
+  it('clips a store’s text and errors without splitting an emoji (ADR-133)', () => {
+    expect(clip(`  ${'x'.repeat(199)}😀 Tea  `, 200)).toBe('x'.repeat(199));
+    expect(clip('   ', 200)).toBeNull();
+    expect(storeErrorText({ message: `${'x'.repeat(199)}😀 failed` })).toBe('x'.repeat(199));
   });
 
   it('reads WooCommerce GMT times without a zone as UTC', () => {

@@ -1,4 +1,4 @@
-import { uuidv7, type Clock, type Keyring } from '@w360/core';
+import { clipText, uuidv7, type Clock, type Keyring } from '@w360/core';
 import { QUEUES } from '@w360/contracts';
 import {
   and,
@@ -842,7 +842,7 @@ async function queueLinkMessage(
     .update(conversations)
     .set({
       lastMessageAt: now,
-      lastMessagePreview: text.slice(0, 200),
+      lastMessagePreview: clipText(text, 200),
       version: sql`${conversations.version} + 1`,
     })
     .where(and(eq(conversations.tenantId, tenantId), eq(conversations.id, conversation.id)));

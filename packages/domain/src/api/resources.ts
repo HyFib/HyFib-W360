@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { AppError, jsonbText, notFound, uuidv7 } from '@w360/core';
+import { AppError, clipText, jsonbText, notFound, uuidv7 } from '@w360/core';
 import { QUEUES } from '@w360/contracts';
 import {
   and,
@@ -1028,7 +1028,7 @@ export async function apiSendTemplate(
         .update(conversations)
         .set({
           lastMessageAt: now,
-          lastMessagePreview: built.rendered.body.slice(0, 200),
+          lastMessagePreview: clipText(built.rendered.body, 200),
           version: sql`${conversations.version} + 1`,
         })
         .where(
@@ -1276,7 +1276,7 @@ async function sendReply(
         .update(conversations)
         .set({
           lastMessageAt: now,
-          lastMessagePreview: built.preview.slice(0, 200),
+          lastMessagePreview: clipText(built.preview, 200),
           version: sql`${conversations.version} + 1`,
         })
         .where(

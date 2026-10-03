@@ -1,5 +1,13 @@
 import { z } from 'zod';
-import { AppError, forbidden, notFound, uuidv7, type Clock, type Keyring } from '@w360/core';
+import {
+  AppError,
+  clipText,
+  forbidden,
+  notFound,
+  uuidv7,
+  type Clock,
+  type Keyring,
+} from '@w360/core';
 import { QUEUES } from '@w360/contracts';
 import {
   and,
@@ -239,7 +247,7 @@ export async function queueTextMessage(deps: OutboundDeps, ctx: TenantContext, i
       .update(conversations)
       .set({
         lastMessageAt: now,
-        lastMessagePreview: data.text.slice(0, 200),
+        lastMessagePreview: clipText(data.text, 200),
         unreadCount: 0,
         status: 'open',
         ...(claim ? { assignedMembershipId: ctx.membership.id } : {}),
@@ -461,7 +469,7 @@ export async function queueTemplateMessage(deps: OutboundDeps, ctx: TenantContex
       .update(conversations)
       .set({
         lastMessageAt: now,
-        lastMessagePreview: built.rendered.body.slice(0, 200),
+        lastMessagePreview: clipText(built.rendered.body, 200),
         status: 'open',
         ...(claim ? { assignedMembershipId: ctx.membership.id } : {}),
         version: sql`${conversations.version} + 1`,

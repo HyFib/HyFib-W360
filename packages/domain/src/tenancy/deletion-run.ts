@@ -327,7 +327,7 @@ async function notifyDeleted(
         kind: 'tenant.notice',
         companyName: started.companyName,
         subject: 'Company deleted',
-        lines: lines.map((line) => line.slice(0, 600)),
+        lines: lines.map((line) => clipText(line, 600)),
       },
     });
   }

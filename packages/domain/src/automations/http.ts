@@ -1,4 +1,4 @@
-import { parseExternalJson, uuidv7, type Clock, type Keyring } from '@w360/core';
+import { clipText, parseExternalJson, uuidv7, type Clock, type Keyring } from '@w360/core';
 import { EgressError, type EgressClient } from '@w360/core/egress';
 import { QUEUES } from '@w360/contracts';
 import {
@@ -248,7 +248,7 @@ export function valueAtPath(document: unknown, path: string): string | null {
       return null;
     }
   }
-  if (typeof current === 'string') return current.slice(0, AUTOMATION_LIMITS.answerLength);
+  if (typeof current === 'string') return clipText(current, AUTOMATION_LIMITS.answerLength);
   if (typeof current === 'number' && Number.isFinite(current)) return String(current);
   if (typeof current === 'boolean') return current ? 'true' : 'false';
   return null;

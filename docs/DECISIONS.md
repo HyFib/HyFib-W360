@@ -5108,7 +5108,8 @@ Decision:
   body, an order's note, a conversation's preview, a contact's profile name and a company deletion's
   label for a WhatsApp account use it. Clips elsewhere may still split a pair (an automation step's
   field value, clipped to 500 characters by the interpreter the browser also runs, for one), which
-  is stored as U+FFFD in text and jsonb alike.
+  is stored as U+FFFD in text and jsonb alike (since ADR-133 only clips of error text and
+  identifiers do).
 - **Inbound content is bounded by construction (SEC-12).** Values read from a message keep text
   (clipped), finite numbers and true or false, nothing else; an interactive reply keeps its id,
   title and description; an unsupported message keeps at most 5 errors' code, title, message and
@@ -5136,7 +5137,7 @@ transaction, as no inbound content can fail it any more.
 Not built: the API and webhooks do not say that a message's content was too large (its text is
 null) or how many contacts a card left out (since ADR-132 they do); contact cards' contacts are
 still not shown in the inbox; clips outside the inbound path may still split a pair (stored as
-U+FFFD).
+U+FFFD; since ADR-133 only those of error text and identifiers).
 
 ## ADR-132 What was left out of a message, in the API and webhooks (2026-10-03)
 
@@ -5171,3 +5172,37 @@ and ask the customer to send it again in parts, and knows when a contact card is
 
 Not built: a contact card's contacts in the API and webhooks (and in the inbox), until Meta's
 contact object is confirmed from its reference.
+
+## ADR-133 Clips that keep characters whole, in what goes to providers and members (2026-10-03)
+
+Context: ADR-131 clipped inbound text without splitting a surrogate pair and wrote jsonb with half
+of an emoji as U+FFFD, but other clips still cut by UTF-16 code units. Text sent to Meta could end
+in half of an emoji: a template variable cut to its 1,000 characters (a campaign's or an order
+message's, from a contact's field or a store's order, or an automation's), an automation's message
+or question cut to its limit, an answer or a value from an HTTP step's response cut to 1,000, a
+contact field value an automation sets cut to 500 (stored as U+FFFD since ADR-131), a saved reply
+inserted into the composer up to its limit, and a company endpoint's refusal shown in a Flow.
+Razorpay could get half of an emoji in a customer's name or email, a recurring charge's
+description or a plan's name. `JSON.stringify` writes such a half as an escape (`\ud83d`), and what
+Meta and Razorpay do with it is not confirmed: refuse the request, or show "�". Members saw "�"
+where a clip fell inside an emoji: in a conversation's preview (a member's reply, a template, a
+Flow, an order or product message, an automation's message and a campaign's), a store's, catalog's
+or product's text, an ad's headline, a Flow's health text, an import's file name, an automation
+run's step log and a company deletion's clean-up list.
+
+Decision:
+
+- **Clips of text that reaches providers or members use `clipText`** (`@w360/core`, ADR-131),
+  which stops before a surrogate pair it would split; an automation's shortened text keeps its
+  "…". The automation interpreter, the store message model, the inbox composer and the automation
+  diagram, which the browser also runs, import it from `@w360/core/text`, a new export with no
+  Node dependency.
+- **Left as they are:** error and status text, HyFib's own or a provider's (in English), and ids,
+  keys, slugs, dates and search text, clipped by code units; a half there is stored as U+FFFD.
+
+What follows: Meta and Razorpay never get half of an emoji from HyFib's clips, and members no
+longer see "�" at the end of clipped text outside error messages.
+
+Not built: clips by grapheme: a clip may still separate an emoji's parts that are characters of
+their own (a family joined by zero-width joiners, a flag's two regional indicators, a skin tone),
+which shows a different emoji, never half of one.

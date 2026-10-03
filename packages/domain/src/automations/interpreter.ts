@@ -1,3 +1,4 @@
+import { clipText } from '@w360/core/text';
 import { EMAIL_RE, normalizeTag } from '../contacts/fields';
 import { TEMPLATE_LIMITS } from '../templates/definition';
 import {
@@ -216,7 +217,7 @@ export function initialRunState(graph: AutomationGraph): RunState {
 }
 
 function truncate(text: string, max: number): string {
-  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+  return text.length <= max ? text : `${clipText(text, max - 1)}…`;
 }
 
 function numberOf(value: string | number | boolean | undefined): number | null {
@@ -287,7 +288,7 @@ export function acceptAnswer(
   if (!text) return null;
   if (format === 'number') return numberOf(text) === null ? null : text;
   if (format === 'email') return text.length <= 254 && EMAIL_RE.test(text) ? text : null;
-  return text.slice(0, AUTOMATION_LIMITS.answerLength);
+  return clipText(text, AUTOMATION_LIMITS.answerLength);
 }
 
 /** The button a reply chose: a tap on this question's button, or its title typed as text. */
@@ -518,8 +519,8 @@ export function advance(input: AdvanceInput): StepResult {
             ? {
                 kind: 'set_field',
                 field: action.field,
-                value: renderText(action.value, values(base.variables)).slice(
-                  0,
+                value: clipText(
+                  renderText(action.value, values(base.variables)),
                   AUTOMATION_LIMITS.fieldValueLength,
                 ),
               }
@@ -635,7 +636,7 @@ export function advance(input: AdvanceInput): StepResult {
       for (const item of node.save) {
         const value = event.values[item.saveAs];
         if (typeof value === 'string') {
-          variables[item.saveAs] = value.slice(0, AUTOMATION_LIMITS.answerLength);
+          variables[item.saveAs] = clipText(value, AUTOMATION_LIMITS.answerLength);
         }
       }
       return moveTo(node.next, { ...counted, variables }, [], 'responded', 'success', event.detail);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildTemplateSend, sendSpecFor } from '../templates/definition';
+import { TEMPLATE_LIMITS, buildTemplateSend, sendSpecFor } from '../templates/definition';
 import {
   checkoutReminders,
   checkoutValues,
@@ -247,6 +247,23 @@ describe('template variables', () => {
         { subject: 'order', values },
       ),
     ).toEqual({ ok: false, missing: 'body.2' });
+    // A value is clipped to the parameter limit without splitting an emoji (ADR-133).
+    const long = `${'x'.repeat(TEMPLATE_LIMITS.parameterValue - 1)}😀 and more`;
+    expect(
+      resolveStoreVariables(
+        {
+          header: [{ source: 'order', field: 'customer_name' }],
+          body: [{ source: 'order', field: 'customer_name' }],
+        },
+        { subject: 'order', values: { ...values, customer_name: long } },
+      ),
+    ).toEqual({
+      ok: true,
+      params: {
+        header: ['x'.repeat(TEMPLATE_LIMITS.parameterValue - 1)],
+        body: ['x'.repeat(TEMPLATE_LIMITS.parameterValue - 1)],
+      },
+    });
   });
 });
 

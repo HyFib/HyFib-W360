@@ -11,7 +11,7 @@
  *   `unknown`     the request may have reached Meta but no response was received (timeouts,
  *                 resets). Callers must NOT blindly retry sends in this case.
  */
-import { parseExternalJson } from '@w360/core';
+import { clipText, parseExternalJson } from '@w360/core';
 import type { FlowValidationError } from '@w360/db';
 
 export type GraphFailureKind = 'retryable' | 'permanent' | 'auth' | 'unknown';
@@ -455,8 +455,13 @@ export class GraphClient {
         const catalogs = (json.data as Record<string, unknown>[]).flatMap((c): RemoteCatalog[] => {
           const id = str(c?.id);
           if (!id || !/^[0-9]{1,32}$/.test(id)) return [];
+          const name = str(c.name);
           return [
-            { id, name: str(c.name)?.slice(0, 200) ?? null, productCount: num(c.product_count) },
+            {
+              id,
+              name: name === null ? null : clipText(name, 200),
+              productCount: num(c.product_count),
+            },
           ];
         });
         const paging = (json.paging ?? {}) as { cursors?: { after?: unknown }; next?: unknown };
@@ -483,7 +488,7 @@ export class GraphClient {
         if (!Array.isArray(json.data)) return null;
         const clip = (v: unknown, max: number) => {
           const t = str(v)?.trim();
-          return t ? t.slice(0, max) : null;
+          return t ? clipText(t, max) : null;
         };
         const products = (json.data as Record<string, unknown>[]).flatMap((p): RemoteProduct[] => {
           const retailerId = str(p?.retailer_id);

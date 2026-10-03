@@ -444,9 +444,10 @@ describe('automation HTTP step', () => {
     ]);
   });
 
-  it("saves an answer cut mid-emoji by a field's 500 characters to a contact field, with U+FFFD in its place (ADR-131)", async () => {
-    // The step clips the value to a field's 500 characters, here between the two halves of an
-    // emoji; jsonb refused the half left (22P02) where the field was set.
+  it("saves an answer longer than a field's 500 characters to a contact field without splitting an emoji (ADR-131, ADR-133)", async () => {
+    // The answer is clipped to a field's 500 characters where the cut falls between the two halves
+    // of an emoji: jsonb refused the half left (22P02, ADR-131), and since ADR-133 the clip stops
+    // before the emoji instead of leaving U+FFFD in its place.
     const s = await setup();
     await createContactsService({ db: fx.dbs.app, clock: systemClock }).createField(s.owner, {
       label: 'City',
@@ -491,7 +492,7 @@ describe('automation HTTP step', () => {
         WHERE cv.id = $1`,
       [conv],
     );
-    expect(contact?.attributes).toEqual({ city: `${'x'.repeat(499)}\ufffd` });
+    expect(contact?.attributes).toEqual({ city: 'x'.repeat(499) });
   });
 
   it('takes the failure branch on an error status, a removed domain or a missing secret', async () => {

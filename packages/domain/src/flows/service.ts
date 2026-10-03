@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import { AppError, notFound, uuidv7, type Clock } from '@w360/core';
+import { AppError, clipText, notFound, uuidv7, type Clock } from '@w360/core';
 import { QUEUES } from '@w360/contracts';
 import { EgressError, parseEgressUrl } from '@w360/core/egress';
 import {
@@ -1260,7 +1260,7 @@ export function createFlowsService(deps: FlowsDeps) {
           .update(conversations)
           .set({
             lastMessageAt: now,
-            lastMessagePreview: `[Form] ${flow.name}`.slice(0, 200),
+            lastMessagePreview: clipText(`[Form] ${flow.name}`, 200),
             unreadCount: 0,
             status: 'open',
             ...(claim ? { assignedMembershipId: ctx.membership.id } : {}),
