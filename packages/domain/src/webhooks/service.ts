@@ -24,11 +24,13 @@ import { assertCan, type TenantContext } from '../authz/context';
 import { assertRecentSignIn } from '../authz/step-up';
 import { parseInput } from '../validation';
 import {
+  WEBHOOK_CONTACT_PARTS,
   WEBHOOK_EVENT_KEYS,
   WEBHOOK_LIMITS,
   WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_REPLAY_PERIODS,
   webhookHost,
+  type WebhookContactPart,
   type WebhookMessageStatus,
 } from './model';
 
@@ -187,6 +189,34 @@ export function webhookMessageStatusesFor(
   return kept ? [...kept] : null;
 }
 
+/**
+ * The parts of a contact whose change an endpoint takes as `contact.updated` (ADR-123), in the
+ * order Settings lists them; null takes every change, including parts added later.
+ */
+export const webhookContactPartsSchema = z
+  .array(z.enum(WEBHOOK_CONTACT_PARTS, { error: 'Choose contact parts from the list.' }))
+  .min(1, 'Choose at least one contact part, or take every change.')
+  .max(WEBHOOK_CONTACT_PARTS.length, 'Give each contact part once.')
+  .transform((chosen) => WEBHOOK_CONTACT_PARTS.filter((part) => chosen.includes(part)))
+  .nullable();
+
+export const WEBHOOK_PARTS_NEED_THE_EVENT =
+  'Choose contact parts only for an endpoint that receives Contact changed.';
+
+/**
+ * The parts an endpoint keeps after it is added or changed: every change (null) unless it takes
+ * `contact.updated`; then those given, or else the ones it had.
+ */
+export function webhookContactPartsFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly WebhookContactPart[] | null | undefined,
+  current: readonly WebhookContactPart[] | null,
+): WebhookContactPart[] | null {
+  if (!eventTypes.includes('contact.updated')) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
 /** A new signing secret: `whsec_` and 32 random bytes. */
 export function generateWebhookSecret(): string {
   return `whsec_${randomBytes(32).toString('base64url')}`;
@@ -214,6 +244,11 @@ const endpointFields = z.object({
   headers: webhookHeadersSchema.optional(),
   /** Given, the `message.status` statuses it takes (null: every status); left out, they stay. */
   messageStatuses: webhookMessageStatusesSchema.optional(),
+  /**
+   * Given, the contact parts it takes as `contact.updated` (null: every change); left out, they
+   * stay.
+   */
+  contactParts: webhookContactPartsSchema.optional(),
 });
 /** Statuses are chosen only for an endpoint that takes `message.status`. */
 const statusesNeedTheEvent = {
@@ -221,14 +256,20 @@ const statusesNeedTheEvent = {
     !data.messageStatuses || data.eventTypes.includes('message.status'),
   options: { path: ['messageStatuses'], message: WEBHOOK_STATUSES_NEED_THE_EVENT },
 };
-const endpointSchema = endpointFields.refine(
-  statusesNeedTheEvent.check,
-  statusesNeedTheEvent.options,
-);
+/** Contact parts are chosen only for an endpoint that takes `contact.updated` (ADR-123). */
+const partsNeedTheEvent = {
+  check: (data: { eventTypes: WebhookEventType[]; contactParts?: unknown }) =>
+    !data.contactParts || data.eventTypes.includes('contact.updated'),
+  options: { path: ['contactParts'], message: WEBHOOK_PARTS_NEED_THE_EVENT },
+};
+const endpointSchema = endpointFields
+  .refine(statusesNeedTheEvent.check, statusesNeedTheEvent.options)
+  .refine(partsNeedTheEvent.check, partsNeedTheEvent.options);
 const endpointIdSchema = z.object({ endpointId: z.uuid() });
 const updateSchema = endpointFields
   .extend({ endpointId: z.uuid() })
-  .refine(statusesNeedTheEvent.check, statusesNeedTheEvent.options);
+  .refine(statusesNeedTheEvent.check, statusesNeedTheEvent.options)
+  .refine(partsNeedTheEvent.check, partsNeedTheEvent.options);
 const enabledSchema = endpointIdSchema.extend({ enabled: z.boolean() });
 const deliveryIdSchema = z.object({ deliveryId: z.uuid() });
 const replayFailedSchema = endpointIdSchema.extend({
@@ -256,6 +297,8 @@ export interface WebhookEndpointView {
   headerNames: string[];
   /** The `message.status` statuses it takes (ADR-119); null takes every status. */
   messageStatuses: WebhookMessageStatus[] | null;
+  /** The contact parts it takes as `contact.updated` (ADR-123); null takes every change. */
+  contactParts: WebhookContactPart[] | null;
   createdAt: Date;
   /** The member who added the endpoint in settings (null once their account is gone). */
   createdBy: string | null;
@@ -332,6 +375,7 @@ export async function lockWebhookEndpoint(
       secretCiphertext: webhookEndpoints.secretCiphertext,
       eventTypes: webhookEndpoints.eventTypes,
       messageStatuses: webhookEndpoints.messageStatuses,
+      contactParts: webhookEndpoints.contactParts,
     })
     .from(webhookEndpoints)
     .where(
@@ -365,6 +409,7 @@ export async function insertWebhookEndpoint(
     eventTypes: WebhookEventType[];
     headers: readonly WebhookHeader[];
     messageStatuses: WebhookMessageStatus[] | null;
+    contactParts: WebhookContactPart[] | null;
     creator: WebhookEndpointCreator;
   },
 ): Promise<{ id: string; secret: string }> {
@@ -390,6 +435,7 @@ export async function insertWebhookEndpoint(
     secretCiphertext: keyring.encrypt(secret, webhookSecretAad(tenantId, id, 1)),
     ...sealWebhookHeaders(keyring, tenantId, id, input.headers),
     messageStatuses: input.messageStatuses,
+    contactParts: input.contactParts,
     createdByUserId: 'userId' in input.creator ? input.creator.userId : null,
     createdByApiKeyId: 'apiKeyId' in input.creator ? input.creator.apiKeyId : null,
   });
@@ -676,6 +722,7 @@ export function createWebhooksService(deps: {
               previousSecretExpiresAt: webhookEndpoints.previousSecretExpiresAt,
               headerNames: webhookEndpoints.headerNames,
               messageStatuses: webhookEndpoints.messageStatuses,
+              contactParts: webhookEndpoints.contactParts,
               createdAt: webhookEndpoints.createdAt,
               createdBy: users.name,
               keyName: apiKeys.name,
@@ -741,12 +788,14 @@ export function createWebhooksService(deps: {
           data.messageStatuses,
           null,
         );
+        const contactParts = webhookContactPartsFor(data.eventTypes, data.contactParts, null);
         const { id, secret } = await insertWebhookEndpoint(tx, keyring, ctx.tenant.id, {
           url,
           description: data.description || null,
           eventTypes: data.eventTypes,
           headers,
           messageStatuses,
+          contactParts,
           creator: { userId: ctx.user.id },
         });
         await recordAudit(
@@ -761,6 +810,7 @@ export function createWebhooksService(deps: {
               eventTypes: data.eventTypes,
               ...(headers.length > 0 ? { headers: headers.map((h) => h.name) } : {}),
               ...(messageStatuses ? { messageStatuses } : {}),
+              ...(contactParts ? { contactParts } : {}),
             },
           },
           meta,
@@ -781,6 +831,11 @@ export function createWebhooksService(deps: {
           data.messageStatuses,
           endpoint.messageStatuses,
         );
+        const contactParts = webhookContactPartsFor(
+          data.eventTypes,
+          data.contactParts,
+          endpoint.contactParts,
+        );
         await tx
           .update(webhookEndpoints)
           .set({
@@ -788,6 +843,7 @@ export function createWebhooksService(deps: {
             description: data.description || null,
             eventTypes: data.eventTypes,
             messageStatuses,
+            contactParts,
             ...(data.headers
               ? sealWebhookHeaders(keyring, ctx.tenant.id, data.endpointId, data.headers)
               : {}),
@@ -811,6 +867,7 @@ export function createWebhooksService(deps: {
               eventTypes: data.eventTypes,
               ...(data.headers ? { headers: data.headers.map((h) => h.name) } : {}),
               ...(messageStatuses ? { messageStatuses } : {}),
+              ...(contactParts ? { contactParts } : {}),
             },
           },
           meta,

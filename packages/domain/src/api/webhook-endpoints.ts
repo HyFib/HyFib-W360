@@ -18,6 +18,7 @@ import {
   type Database,
   type Tx,
   type WebhookDeliveryState,
+  type WebhookContactPart,
   type WebhookEventType,
   type WebhookMessageStatus,
 } from '@w360/db';
@@ -37,7 +38,10 @@ import {
   rotateWebhookEndpointSecret,
   sealWebhookHeaders,
   setWebhookEndpointEnabled,
+  webhookContactPartsFor,
+  webhookContactPartsSchema,
   webhookDeliveryColumns,
+  WEBHOOK_PARTS_NEED_THE_EVENT,
   WEBHOOK_STATUSES_NEED_THE_EVENT,
   webhookEventTypesSchema,
   webhookHeadersSchema,
@@ -78,6 +82,16 @@ const invalidStatuses = () =>
     issues: [{ path: 'messageStatuses', message: WEBHOOK_STATUSES_NEED_THE_EVENT }],
   });
 
+const contactPartsField = webhookContactPartsSchema.describe(
+  'The parts of a contact whose change the endpoint receives as contact.updated (name, phone, email, tags, fields: a change of any custom field), only with the contact.updated event: an event is sent when its change names one of them, and names every part that changed; null receives every change, including parts added later.',
+);
+
+/** Contact parts are chosen only for an endpoint that receives `contact.updated` (ADR-123). */
+const invalidParts = () =>
+  new AppError('validation_failed', WEBHOOK_PARTS_NEED_THE_EVENT, {
+    issues: [{ path: 'contactParts', message: WEBHOOK_PARTS_NEED_THE_EVENT }],
+  });
+
 export const apiCreateWebhookEndpointSchema = z
   .object({
     url: z
@@ -92,11 +106,16 @@ export const apiCreateWebhookEndpointSchema = z
     description: descriptionField.optional().describe('A note for members, up to 200 characters.'),
     headers: headersField.optional(),
     messageStatuses: messageStatusesField.optional(),
+    contactParts: contactPartsField.optional(),
   })
   .strict()
   .refine((data) => !data.messageStatuses || data.events.includes('message.status'), {
     path: ['messageStatuses'],
     message: WEBHOOK_STATUSES_NEED_THE_EVENT,
+  })
+  .refine((data) => !data.contactParts || data.events.includes('contact.updated'), {
+    path: ['contactParts'],
+    message: WEBHOOK_PARTS_NEED_THE_EVENT,
   });
 
 export const apiUpdateWebhookEndpointSchema = z
@@ -121,6 +140,11 @@ export const apiUpdateWebhookEndpointSchema = z
       .describe(
         'The message.status statuses the endpoint receives; null receives every status. Left out, they stay, unless the events no longer include message.status, which clears them.',
       ),
+    contactParts: contactPartsField
+      .optional()
+      .describe(
+        'The parts of a contact whose change the endpoint receives as contact.updated; null receives every change. Left out, they stay, unless the events no longer include contact.updated, which clears them.',
+      ),
   })
   .strict()
   .refine(
@@ -129,8 +153,9 @@ export const apiUpdateWebhookEndpointSchema = z
       data.description !== undefined ||
       data.enabled !== undefined ||
       data.headers !== undefined ||
-      data.messageStatuses !== undefined,
-    'Give the events, the description, the headers, the message statuses or whether the endpoint is enabled',
+      data.messageStatuses !== undefined ||
+      data.contactParts !== undefined,
+    'Give the events, the description, the headers, the message statuses, the contact parts or whether the endpoint is enabled',
   );
 
 export interface ApiWebhookEndpoint {
@@ -151,6 +176,8 @@ export interface ApiWebhookEndpoint {
   headers: { name: string }[];
   /** The `message.status` statuses it receives (ADR-119); null receives every status. */
   messageStatuses: WebhookMessageStatus[] | null;
+  /** The contact parts it receives as `contact.updated` (ADR-123); null receives every change. */
+  contactParts: WebhookContactPart[] | null;
   /** The key that added the endpoint. */
   apiKeyId: string;
   createdAt: string;
@@ -233,6 +260,7 @@ const columns = {
   previousSecretExpiresAt: webhookEndpoints.previousSecretExpiresAt,
   headerNames: webhookEndpoints.headerNames,
   messageStatuses: webhookEndpoints.messageStatuses,
+  contactParts: webhookEndpoints.contactParts,
   apiKeyId: webhookEndpoints.createdByApiKeyId,
   createdAt: webhookEndpoints.createdAt,
   updatedAt: webhookEndpoints.updatedAt,
@@ -253,6 +281,7 @@ type EndpointRow = Pick<
   | 'previousSecretExpiresAt'
   | 'headerNames'
   | 'messageStatuses'
+  | 'contactParts'
   | 'createdAt'
   | 'updatedAt'
 > & { apiKeyId: string | null };
@@ -278,6 +307,7 @@ function toApiEndpoint(row: EndpointRow, now: Date): ApiWebhookEndpoint {
         : null,
     headers: row.headerNames.map((name) => ({ name })),
     messageStatuses: row.messageStatuses,
+    contactParts: row.contactParts,
     apiKeyId: row.apiKeyId,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -475,12 +505,14 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               data.messageStatuses,
               null,
             );
+            const contactParts = webhookContactPartsFor(data.events, data.contactParts, null);
             const { id, secret } = await insertWebhookEndpoint(tx, deps.keyring, ctx.tenant.id, {
               url,
               description: data.description || null,
               eventTypes: data.events,
               headers,
               messageStatuses,
+              contactParts,
               creator: { apiKeyId: ctx.key.id },
             });
             await audit(tx, ctx, 'webhook.endpoint_created', id, {
@@ -488,6 +520,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               eventTypes: data.events,
               ...(headers.length > 0 ? { headers: headers.map((h) => h.name) } : {}),
               ...(messageStatuses ? { messageStatuses } : {}),
+              ...(contactParts ? { contactParts } : {}),
             });
             await announce(tx, ctx, { host, events: data.events, at: now });
             const endpoint = await readEndpoint(tx, ctx, id, now);
@@ -514,11 +547,13 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         const host = webhookHost(endpoint.url);
         const events = data.events ?? endpoint.eventTypes;
         if (data.messageStatuses && !events.includes('message.status')) throw invalidStatuses();
+        if (data.contactParts && !events.includes('contact.updated')) throw invalidParts();
         if (
           data.events !== undefined ||
           data.description !== undefined ||
           data.headers !== undefined ||
-          data.messageStatuses !== undefined
+          data.messageStatuses !== undefined ||
+          data.contactParts !== undefined
         ) {
           const [changed] = await tx
             .update(webhookEndpoints)
@@ -533,12 +568,18 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
                 data.messageStatuses,
                 endpoint.messageStatuses,
               ),
+              contactParts: webhookContactPartsFor(
+                events,
+                data.contactParts,
+                endpoint.contactParts,
+              ),
               updatedAt: now,
             })
             .where(and(eq(webhookEndpoints.tenantId, ctx.tenant.id), eq(webhookEndpoints.id, id)))
             .returning({
               eventTypes: webhookEndpoints.eventTypes,
               messageStatuses: webhookEndpoints.messageStatuses,
+              contactParts: webhookEndpoints.contactParts,
             });
           if (!changed) throw new Error('A locked endpoint was not updated');
           await audit(tx, ctx, 'webhook.endpoint_updated', id, {
@@ -546,6 +587,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
             eventTypes: changed.eventTypes,
             ...(data.headers !== undefined ? { headers: data.headers.map((h) => h.name) } : {}),
             ...(changed.messageStatuses ? { messageStatuses: changed.messageStatuses } : {}),
+            ...(changed.contactParts ? { contactParts: changed.contactParts } : {}),
           });
         }
         if (data.enabled !== undefined) {

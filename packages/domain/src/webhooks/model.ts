@@ -1,6 +1,6 @@
-import type { WebhookEventType, WebhookMessageStatus } from '@w360/db';
+import type { WebhookContactPart, WebhookEventType, WebhookMessageStatus } from '@w360/db';
 
-export type { WebhookEventType, WebhookMessageStatus } from '@w360/db';
+export type { WebhookContactPart, WebhookEventType, WebhookMessageStatus } from '@w360/db';
 
 /**
  * Outgoing webhooks (P5-09, ADR-053, ADR-074, ADR-078, ADR-085, ADR-087, ADR-094): the parts the
@@ -124,6 +124,27 @@ export const WEBHOOK_MESSAGE_STATUS_LABELS: Record<WebhookMessageStatus, string>
   failed: 'Failed',
   canceled: 'Canceled',
   unknown_outcome: 'Outcome unknown',
+};
+
+/**
+ * The parts of a contact whose change a `contact.updated` endpoint can choose (ADR-123), as the
+ * event names them; `fields` takes a change of any custom field (`fields.<key>`).
+ */
+export const WEBHOOK_CONTACT_PARTS = [
+  'name',
+  'phone',
+  'email',
+  'tags',
+  'fields',
+] as const satisfies readonly WebhookContactPart[];
+
+/** How Settings names each part an endpoint can choose (ADR-123). */
+export const WEBHOOK_CONTACT_PART_LABELS: Record<WebhookContactPart, string> = {
+  name: 'Name',
+  phone: 'Number',
+  email: 'Email',
+  tags: 'Tags',
+  fields: 'Custom field values',
 };
 
 export const WEBHOOK_LIMITS = {

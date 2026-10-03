@@ -1,5 +1,85 @@
 # Progress
 
+## 2026-10-03 — Phase 5: choosing the contact changes a webhook endpoint receives (P5-09, ADR-123)
+
+Status: **Implemented and locally verified (local test receivers only).** Since ADR-121 a
+`contact.updated` names what its change changed, but an endpoint that takes the event still received
+every change: a receiver that only copies emails to a mailing tool was sent every tag an automation
+or an import added, and had to read and drop each.
+
+### Completed
+
+- **Design (ADR-123):** an endpoint takes every `contact.updated` (null, as before, including parts
+  added later) or only those whose change names one of 1 to 5 parts it chooses (`name`, `phone`,
+  `email`, `tags`, `fields` for any custom field); chosen in Settings → Webhooks under "Contact
+  changed" or through the API (`contactParts` on `POST` and `PATCH /webhook-endpoints`), only while
+  the endpoint takes `contact.updated`. A change that removes the event clears the list; an API
+  change that leaves it out keeps it. Audited with the list. Each endpoint receives the same event,
+  naming every part that changed.
+- **Migration 0098:** `contact_parts text[]` on `app.webhook_endpoints` with a check (null, or 1 to
+  5 known parts while `contact.updated` is among the events), an update grant for the runtime role,
+  and `app.capture_contact_webhook_event` replaced with the same signature: the first capture of a
+  contact's update queues the endpoints that take one of its parts, and each later change in the
+  transaction those it newly concerns that have no delivery of the event yet.
+- **Domain:** `webhookContactPartsSchema` and `webhookContactPartsFor` (`webhooks/service.ts`),
+  `WEBHOOK_CONTACT_PARTS` and their labels (`webhooks/model.ts`); the settings service and the API
+  store, keep, clear and audit the list; the API answers `contactParts` and refuses a list without
+  the event (`contactParts`, 422) or with an unknown part (named by its place); the export carries
+  the column. OpenAPI: the field in the endpoint and the bodies, and a sentence on the
+  `contact.updated` webhook.
+- **Web:** under "Contact changed", the add and edit forms show the parts, all ticked to begin with
+  (all ticked saves none, so later parts arrive too); the endpoints list shows "Contact changes
+  sent: …".
+- **Tests:**
+  - Unit (`webhooks.test.ts`, 2; `api.test.ts`, 1 changed): the list's rules (known parts, 1 to 5,
+    repeats merged, Settings' order, a field key refused, null) and how a change keeps, replaces or
+    clears it; the OpenAPI schemas and the webhook's sentence.
+  - Integration (`webhook-events.test.ts`, 2; `webhooks.test.ts`, 1;
+    `api-webhook-endpoints.test.ts`, 1): endpoints taking every change, emails, and tags and fields
+    each queued only for their parts (a name, an email, a tag, a field value), once each; a name
+    then a tag in one transaction reaching the tags endpoint at the second change; an email then a
+    rolled-back tag leaving no tag delivery; a tag, an email and another tag queuing each endpoint
+    once; endpoints taking only added contacts, or turned off, never queued; the bodies naming every
+    part; an erasure (as the definer role) still sending only `contact.erased` and queuing nothing
+    for another company's endpoint; refusals, keeping, replacing and clearing, audits and each
+    clause of the database check; through the API: chosen, answered in order, kept, cleared with the
+    event, refused without it, empty or with an unknown part named by its place, audited.
+  - e2e (`webhooks.spec.ts`): emails chosen in Settings next to an endpoint taking every change; a
+    member's tag reaches only the latter and an email change both, the emails endpoint's page
+    listing one delivery; tags added on its page; ticking every part keeps none.
+- **Docs:** ADR-123; SECURITY; THREAT-MODEL T136; RUNBOOKS (a receiver getting fewer contact events
+  than expected); ARCHITECTURE (also dropping a not-built item ADR-121 had built); DEPLOYMENT
+  (0098); DATA-RETENTION; BACKLOG P5-09; FEATURE-MATRIX W-138, W-139, H-014.
+- **Mutation checks:** 31 regressions tried, 31 caught:
+  - 13 in the database (an empty list, any part, parts without the event, no update grant; a first
+    change queued for every endpoint, a field change not the part `fields`, an endpoint without
+    parts not queued; a later change queuing nobody, an endpoint twice, every endpoint, endpoints
+    without the event, turned off or of other companies), 4 on the list (an empty list, kept as
+    given, kept without the event, null keeping it), 5 in the settings service (parts without the
+    event, changes not saving them, adding without them, audits without them, the list without
+    them), 5 in the API (adding or changing parts without the event, answering without them, changes
+    keeping them, adding without them), 2 in OpenAPI (the parts, the webhook's sentence), 1 in the
+    export and 1 through the e2e test (every part ticked saved as a list).
+  - Before the run, the capture test gained an endpoint taking only added contacts, one turned off
+    and another company's endpoint during an erasure, so that each condition of a later change is
+    tested; no first result was corrected.
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                                                                                        | Result                                                   |
+| ------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                           | clean                                                    |
+| `pnpm test`                                                                                                                    | 544 passed                                               |
+| `pnpm test:integration` on PostgreSQL 18.6 and 17.11                                                                           | 753 passed on each                                       |
+| `pnpm build`, then `webhooks.spec.ts` and `webhook-events.spec.ts` on chromium and mobile-chromium (database migrated to 0098) | 24 passed                                                |
+| Mutation checks                                                                                                                | 31 regressions tried, 31 caught (1 through the e2e test) |
+| gitleaks 8.30.1 on the commit                                                                                                  | no leaks                                                 |
+
+### Known gaps
+
+- Field keys chosen one by one, filters for `contact.created` or `contact.erased`, and filters on a
+  contact's values (a tag, a field's value) are not built (ADR-123).
+
 ## 2026-10-03 — Phase 5: changing many contacts in one call through the public API (P5-08, ADR-122)
 
 Status: **Implemented and locally verified (test data only).** Since ADR-112 a key changed one

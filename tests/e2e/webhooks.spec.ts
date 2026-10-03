@@ -14,6 +14,7 @@ import {
 } from './messaging-support';
 import {
   expectNoHorizontalOverflow,
+  openFromNav,
   signUpAndVerify,
   uniqueEmail,
   waitForEmailContaining,
@@ -700,4 +701,105 @@ test('an endpoint receives only the message statuses it takes: chosen in setting
   await page.goto(`/c/${slug}/settings/webhooks`);
   await expect(page.getByText(`http://${HOST}:${port}${path}`)).toBeVisible();
   await expect(page.getByText(/^Message statuses sent:/)).toHaveCount(0);
+});
+
+test('an endpoint receives only the contact changes it takes: chosen in settings and on its page (ADR-123)', async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(180_000);
+  const email = uniqueEmail('parthooks');
+  const slug = `parthooks-${Date.now().toString(36)}`;
+  const emailsPath = `/hooks/${slug}/emails`;
+  const everyPath = `/hooks/${slug}/every`;
+  const updatesAt = (path: string) =>
+    received
+      .filter((r) => r.path === path && r.headers['w360-event-type'] === 'contact.updated')
+      .map((r) => (JSON.parse(r.body) as { data: { changes: string[] | null } }).data.changes);
+  await signUpAndVerify(page, { name: 'Pia Parts', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('Part Works');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+  const { wabaId, phoneNumberId } = await connectTestChannel({ ownerEmail: email, slug });
+
+  // Settings → Webhooks: contact changes, emails only; then an endpoint taking every change.
+  const part = (label: string, value: string) =>
+    page.getByRole('checkbox', { name: `${label} (${value})`, exact: true });
+  const allButEmail = [
+    ['Name', 'name'],
+    ['Number', 'phone'],
+    ['Tags', 'tags'],
+    ['Custom field values', 'fields'],
+  ] as const;
+  await page.goto(`/c/${slug}/settings/webhooks`);
+  await page.getByLabel('Endpoint URL').fill(`http://${HOST}:${port}${emailsPath}`);
+  await page.getByRole('checkbox', { name: /Contact changed/ }).check();
+  for (const [label, value] of allButEmail) await part(label, value).uncheck();
+  await expect(part('Email', 'email')).toBeChecked();
+  await expectNoHorizontalOverflow(page);
+  await page.getByRole('button', { name: 'Add endpoint' }).click();
+  await page.getByRole('button', { name: 'I have stored the secret' }).click();
+  await page.getByLabel('Endpoint URL').fill(`http://${HOST}:${port}${everyPath}`);
+  await page.getByRole('checkbox', { name: /Contact changed/ }).check();
+  await page.getByRole('button', { name: 'Add endpoint' }).click();
+  await page.getByRole('button', { name: 'I have stored the secret' }).click();
+  await page.reload();
+  const endpoints = page.getByRole('list', { name: 'Endpoints' }).getByRole('listitem');
+  const emailsItem = endpoints.filter({ hasText: emailsPath });
+  await expect(emailsItem.getByText('Contact changes sent: Email', { exact: true })).toBeVisible();
+  await expect(page.getByText(/^Contact changes sent:/)).toHaveCount(1);
+
+  // A customer writes; a member tags the contact, then changes its email.
+  const waId = randomWaId();
+  await sendSignedWebhook(request, inboundMessage(wabaId, phoneNumberId, waId, 'Hello'));
+  await page.goto(`/c/${slug}/inbox`);
+  await expect(page.getByRole('link', { name: /Priya Customer/ })).toBeVisible({ timeout: 20_000 });
+  await openFromNav(page, 'Contacts');
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}/contacts$`));
+  await page.getByRole('link', { name: 'Priya Customer' }).click();
+  await expect(page.getByRole('heading', { name: 'Priya Customer', level: 1 })).toBeVisible();
+  await page.getByLabel('Add tags').fill('vip');
+  await page.getByRole('button', { name: 'Add', exact: true }).click();
+  await expect(async () => expect(updatesAt(everyPath)).toHaveLength(1)).toPass({
+    timeout: 30_000,
+  });
+  await page.getByLabel('Email (optional)').fill('priya@example.test');
+  await page.getByRole('button', { name: 'Save contact' }).click();
+  await expect(async () => expect(updatesAt(everyPath)).toHaveLength(2)).toPass({
+    timeout: 30_000,
+  });
+  await expect(async () => expect(updatesAt(emailsPath)).toHaveLength(1)).toPass({
+    timeout: 30_000,
+  });
+  expect(updatesAt(everyPath)).toEqual([['tags'], ['email']]);
+  expect(updatesAt(emailsPath)).toEqual([['email']]);
+
+  // Deliveries are queued when a change is saved: the emails endpoint has none for the tag.
+  await page.goto(`/c/${slug}/settings/webhooks`);
+  await emailsItem.getByRole('link', { name: `Deliveries and settings for ${HOST}` }).click();
+  await expect(page.getByRole('heading', { name: `Deliveries to ${HOST}` })).toBeVisible();
+  const deliveries = page.getByRole('list', { name: 'Deliveries' }).getByRole('listitem');
+  await expect(deliveries).toHaveCount(1);
+  await expect(deliveries.filter({ hasText: 'contact.updated' })).toHaveCount(1);
+
+  // On its page, tags too; then every part, which takes every change (none listed).
+  await expect(part('Email', 'email')).toBeChecked();
+  await expect(part('Tags', 'tags')).not.toBeChecked();
+  await part('Tags', 'tags').check();
+  await expectNoHorizontalOverflow(page);
+  await page.getByRole('button', { name: 'Save endpoint' }).click();
+  await expect(page.getByText('Endpoint saved.')).toBeVisible();
+  const endpointPage = page.url();
+  await page.goto(`/c/${slug}/settings/webhooks`);
+  await expect(
+    emailsItem.getByText('Contact changes sent: Email, Tags', { exact: true }),
+  ).toBeVisible();
+  await page.goto(endpointPage);
+  for (const [label, value] of allButEmail) await part(label, value).check();
+  await page.getByRole('button', { name: 'Save endpoint' }).click();
+  await expect(page.getByText('Endpoint saved.')).toBeVisible();
+  await page.goto(`/c/${slug}/settings/webhooks`);
+  await expect(emailsItem).toBeVisible();
+  await expect(page.getByText(/^Contact changes sent:/)).toHaveCount(0);
 });

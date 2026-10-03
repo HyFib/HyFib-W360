@@ -767,6 +767,81 @@ describe('message status filters (ADR-119)', () => {
   });
 });
 
+describe('contact part filters (ADR-123)', () => {
+  it('are refused without contact.updated, unknown or empty, kept by a change that leaves them out and cleared with the event; the database keeps them to that event', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const url = 'https://hooks.example.com/in';
+    const refused = (eventTypes: string[], contactParts: unknown, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, contactParts }),
+        'validation_failed',
+        message,
+      );
+    await refused(
+      ['contact.created', 'contact.erased'],
+      ['email'],
+      /only for an endpoint that receives Contact changed/,
+    );
+    await refused(['contact.updated'], [], /at least one contact part/);
+    await refused(['contact.updated'], ['fields.plan'], /from the list/);
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['contact.updated', 'contact.erased'],
+      contactParts: ['tags', 'email'],
+    });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toMatchObject({ contactParts: ['email', 'tags'] });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['contact.updated', 'contact.erased'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.contactParts;
+    expect(await current()).toEqual(['email', 'tags']);
+    await change({ description: 'kept' });
+    expect(await current()).toEqual(['email', 'tags']);
+    await change({ contactParts: ['name'] });
+    expect(await current()).toEqual(['name']);
+    const updates = await fx.query<{ metadata: { contactParts?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(updates.map((u) => u.metadata.contactParts)).toEqual([['email', 'tags'], ['name']]);
+    await change({ contactParts: null });
+    expect(await current()).toBeNull();
+    await change({ contactParts: ['fields'] });
+    // The database refuses an empty list, an unknown part or a field key from an endpoint taking
+    // the event…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET contact_parts = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    for (const bad of [`'{}'`, `'{email,address}'`, `'{fields.plan}'`]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(/webhook_endpoints_contact_parts/);
+    }
+    await change({ eventTypes: ['contact.erased'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['contact.erased'], contactParts: ['email'] }),
+      'validation_failed',
+      /only for an endpoint that receives Contact changed/,
+    );
+    // …and any list for an endpoint that does not take it.
+    await expect(setInDatabase(`'{email}'`)).rejects.toThrow(/webhook_endpoints_contact_parts/);
+  });
+});
+
 describe('event capture', () => {
   it('records an event only for subscribed types, with one delivery per active subscribed endpoint, and none from a rolled-back change', async () => {
     const c = await fx.company();

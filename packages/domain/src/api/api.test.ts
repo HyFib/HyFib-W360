@@ -1297,6 +1297,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       additionalProperties: unknown;
     };
     expect(Object.keys(update.properties).sort()).toEqual([
+      'contactParts',
       'description',
       'enabled',
       'events',
@@ -1326,6 +1327,15 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     const webhooks = doc.webhooks as Record<string, { post?: { description?: string } }>;
     expect(webhooks['message.status']?.post?.description).toContain(
       'An endpoint receives every status unless it names the ones it takes',
+    );
+    // The contact parts an endpoint receives as contact.updated (ADR-123): a list, or null.
+    const parts = (answered.properties as Record<string, { anyOf?: unknown[] }>).contactParts;
+    expect(parts?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('contactParts');
+    const createBody = schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> };
+    expect(Object.keys(createBody.properties)).toContain('contactParts');
+    expect(webhooks['contact.updated']?.post?.description).toContain(
+      'An endpoint receives every change unless it names the parts it takes',
     );
   });
 });

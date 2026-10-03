@@ -214,6 +214,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       previousSecretExpiresAt: null,
       headers: [],
       messageStatuses: null,
+      contactParts: null,
       apiKeyId: key.id,
       createdAt: expect.any(String),
       updatedAt: expect.any(String),
@@ -625,6 +626,82 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
     expect(await issueOf(api().update(key.ctx, id, { messageStatuses: [] }))).toMatchObject({
       path: 'messageStatuses',
+    });
+  });
+
+  it('choose the contact parts an endpoint receives as contact.updated, kept by changes that leave them out and cleared with the event (ADR-123)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // Parts need the event, at least one, and each from the list (an unknown one named by place).
+    const refusals = [
+      [['contact.created', 'contact.erased'], ['email'], 'contactParts'],
+      [['contact.updated'], [], 'contactParts'],
+      [['contact.updated'], ['email', 'fields.plan'], 'contactParts.1'],
+    ] as const;
+    for (const [index, [events, contactParts, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, contactParts },
+            idem(`parts-bad-${index}`, JSON.stringify(contactParts)),
+          ),
+        ),
+        JSON.stringify(contactParts),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'parts-1', {
+      url: receiverUrl(),
+      events: ['contact.updated', 'contact.erased'],
+      contactParts: ['tags', 'email', 'tags'],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.contactParts).toEqual(['email', 'tags']);
+    expect((await api().get(key.ctx, id)).contactParts).toEqual(['email', 'tags']);
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id, id],
+    );
+    expect(audit?.metadata).toMatchObject({ contactParts: ['email', 'tags'] });
+
+    expect(await api().update(key.ctx, id, { description: 'Emails and tags' })).toMatchObject({
+      contactParts: ['email', 'tags'],
+    });
+    expect(await api().update(key.ctx, id, { contactParts: ['fields'] })).toMatchObject({
+      contactParts: ['fields'],
+    });
+    const updates = await fx.query<{ metadata: { contactParts?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_updated'
+        ORDER BY occurred_at`,
+      [c.tenant.id, id],
+    );
+    expect(updates.map((u) => u.metadata.contactParts)).toEqual([['email', 'tags'], ['fields']]);
+    expect(await api().update(key.ctx, id, { events: ['contact.updated'] })).toMatchObject({
+      contactParts: ['fields'],
+    });
+    expect(await api().update(key.ctx, id, { events: ['contact.erased'] })).toMatchObject({
+      events: ['contact.erased'],
+      contactParts: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { contactParts: ['name'] }))).toMatchObject({
+      path: 'contactParts',
+    });
+    expect(
+      await api().update(key.ctx, id, { events: ['contact.updated'], contactParts: ['name'] }),
+    ).toMatchObject({ contactParts: ['name'] });
+    expect(await api().update(key.ctx, id, { contactParts: null })).toMatchObject({
+      contactParts: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { contactParts: [] }))).toMatchObject({
+      path: 'contactParts',
     });
   });
 

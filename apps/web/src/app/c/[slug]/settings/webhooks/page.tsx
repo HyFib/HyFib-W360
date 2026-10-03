@@ -3,6 +3,7 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import {
   can,
+  WEBHOOK_CONTACT_PART_LABELS,
   WEBHOOK_EVENT_INFO,
   WEBHOOK_LIMITS,
   WEBHOOK_MESSAGE_STATUS_LABELS,
@@ -101,6 +102,12 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                       <p className="text-xs text-muted-foreground">
                         Message statuses sent:{' '}
                         {e.messageStatuses.map((s) => WEBHOOK_MESSAGE_STATUS_LABELS[s]).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.contactParts ? (
+                      <p className="text-xs text-muted-foreground">
+                        Contact changes sent:{' '}
+                        {e.contactParts.map((p) => WEBHOOK_CONTACT_PART_LABELS[p]).join(', ')}
                       </p>
                     ) : null}
                     {e.headerNames.length > 0 ? (

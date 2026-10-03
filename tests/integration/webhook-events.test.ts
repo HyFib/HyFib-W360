@@ -54,6 +54,7 @@ import {
   type CatalogSyncDeps,
   type TemplateDefinition,
   type TenantContext,
+  type WebhookContactPart,
   type WebhookEventType,
 } from '@w360/domain';
 import { startRazorpayStandIn, type RazorpayStandIn } from '../support/razorpay-stand-in';
@@ -110,13 +111,21 @@ const webhooks = () =>
 const inbox = () => createInboxService({ db: fx.dbs.app, clock: systemClock });
 const contactsService = () => createContactsService({ db: fx.dbs.app, clock: systemClock });
 
-/** An endpoint of the company taking `eventTypes`, on a path of the receiver of its own. */
-async function addEndpoint(c: Company, eventTypes: WebhookEventType[]) {
+/**
+ * An endpoint of the company taking `eventTypes` (and only the contact parts given, ADR-123), on a
+ * path of the receiver of its own.
+ */
+async function addEndpoint(
+  c: Company,
+  eventTypes: WebhookEventType[],
+  contactParts: WebhookContactPart[] | null = null,
+) {
   const path = `/ok/${randomBytes(6).toString('hex')}`;
   const owner = await fx.ctx(c, c.owner);
   const created = await webhooks().create(owner, {
     url: `http://${HOST}:${port}${path}`,
     eventTypes,
+    contactParts,
   });
   return { ...created, path };
 }
@@ -947,6 +956,165 @@ describe('contact events', () => {
       ),
       check,
     );
+  });
+});
+
+describe('contact part filters (ADR-123)', () => {
+  /** Each contact.updated of the company, oldest first: what it changed, and who it is queued for. */
+  const updatesOf = async (c: Company, names: Map<string, string>) =>
+    (
+      await fx.query<{ changes: string[] | null; endpoints: string[] }>(
+        `SELECT e.contact_changes AS changes,
+                coalesce((SELECT array_agg(d.endpoint_id::text) FROM app.webhook_deliveries d
+                           WHERE d.tenant_id = e.tenant_id AND d.event_id = e.id), '{}') AS endpoints
+           FROM app.webhook_events e
+          WHERE e.tenant_id = $1 AND e.type = 'contact.updated' ORDER BY e.created_at, e.id`,
+        [c.tenant.id],
+      )
+    ).map((e) => [e.changes, e.endpoints.map((id) => names.get(id) ?? id).sort()]);
+
+  it('queue a change for the endpoints that take one of its parts, a later change in the transaction for those it newly concerns, and none from a rolled-back savepoint', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const service = contactsService();
+    await service.createField(owner, { label: 'City', key: 'city', type: 'text' });
+    const every = await addEndpoint(c, ['contact.updated']);
+    const emails = await addEndpoint(c, ['contact.updated'], ['email']);
+    const tagsAndFields = await addEndpoint(
+      c,
+      ['contact.updated', 'contact.erased'],
+      ['tags', 'fields'],
+    );
+    // Neither an endpoint taking only added contacts nor one turned off is queued an update.
+    const createdOnly = await addEndpoint(c, ['contact.created']);
+    const off = await addEndpoint(c, ['contact.updated']);
+    await webhooks().setEnabled(owner, { endpointId: off.id, enabled: false });
+    const names = new Map([
+      [every.id, 'every'],
+      [emails.id, 'emails'],
+      [tagsAndFields.id, 'tagsAndFields'],
+      [createdOnly.id, 'createdOnly'],
+      [off.id, 'off'],
+    ]);
+    expect(
+      (await webhooks().list(owner)).map((e) => [names.get(e.id), e.contactParts]).sort(),
+    ).toEqual([
+      ['createdOnly', null],
+      ['emails', ['email']],
+      ['every', null],
+      ['off', null],
+      ['tagsAndFields', ['tags', 'fields']],
+    ]);
+    const { id: contactId } = await service.createContact(owner, {
+      displayName: 'Dev',
+      phone: '+919811100061',
+    });
+
+    // One part at a time.
+    await service.updateContact(owner, contactId, { displayName: 'Dev K' });
+    await service.updateContact(owner, contactId, {
+      displayName: 'Dev K',
+      email: 'dev@example.test',
+    });
+    await service.addTags(owner, contactId, ['gold']);
+    await service.updateContact(owner, contactId, {
+      displayName: 'Dev K',
+      attributes: { city: 'Pune' },
+    });
+    const scope = authorizedTenantScope(c.tenant.id, c.owner.id);
+    const rename = (name: string) =>
+      sql`update app.contacts set display_name = ${name} where id = ${contactId}::uuid`;
+    const setEmail = (email: string) =>
+      sql`update app.contacts set email = ${email} where id = ${contactId}::uuid`;
+    const addTag = (tag: string) =>
+      sql`insert into app.contact_tags (id, tenant_id, contact_id, tag)
+        values (gen_random_uuid(), ${c.tenant.id}::uuid, ${contactId}::uuid, ${tag})`;
+    // A name, then a tag, in one transaction: the tag reaches the endpoint that takes tags.
+    await fx.dbs.app.run(scope, async (tx) => {
+      await tx.execute(rename('Dev Kumar'));
+      await tx.execute(addTag('silver'));
+    });
+    // An email, then a tag in a savepoint that rolls back: the tag's delivery goes with it.
+    await fx.dbs.app.run(scope, async (tx) => {
+      await tx.execute(setEmail('devk@example.test'));
+      await tx
+        .transaction(async (sp) => {
+          await sp.execute(addTag('bronze'));
+          throw new Error('roll the savepoint back');
+        })
+        .catch((error: unknown) => {
+          if (!(error instanceof Error) || error.message !== 'roll the savepoint back') throw error;
+        });
+    });
+    // A tag, an email and another tag in one transaction: each endpoint is queued once.
+    await fx.dbs.app.run(scope, async (tx) => {
+      await tx.execute(addTag('platinum'));
+      await tx.execute(setEmail('dk@example.test'));
+      await tx.execute(addTag('steel'));
+    });
+
+    expect(await updatesOf(c, names)).toEqual([
+      [['name'], ['every']],
+      [['email'], ['emails', 'every']],
+      [['tags'], ['every', 'tagsAndFields']],
+      [['fields.city'], ['every', 'tagsAndFields']],
+      [
+        ['name', 'tags'],
+        ['every', 'tagsAndFields'],
+      ],
+      [['email'], ['emails', 'every']],
+      [
+        ['email', 'tags'],
+        ['emails', 'every', 'tagsAndFields'],
+      ],
+    ]);
+
+    // Each endpoint gets the same event, naming every part that changed.
+    await deliverDue(c);
+    const changesAt = (path: string) =>
+      bodiesAt(path)
+        .filter((b) => b.type === 'contact.updated')
+        .map((b) => JSON.stringify(b.data.changes))
+        .sort();
+    expect(changesAt(every.path)).toHaveLength(7);
+    expect(changesAt(emails.path)).toEqual(['["email","tags"]', '["email"]', '["email"]']);
+    expect(changesAt(tagsAndFields.path)).toEqual([
+      '["email","tags"]',
+      '["fields.city"]',
+      '["name","tags"]',
+      '["tags"]',
+    ]);
+  });
+
+  it('an erasure still sends only contact.erased to an endpoint that takes tag changes', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const service = contactsService();
+    const tags = await addEndpoint(c, ['contact.updated', 'contact.erased'], ['tags']);
+    // Another company's endpoint takes every change; the definer role erasing sees every company's
+    // endpoints, and none of them may be queued anything.
+    const other = await fx.company();
+    await addEndpoint(other, ['contact.updated']);
+    const { id: contactId } = await service.createContact(owner, {
+      phone: '+919811100071',
+      tags: ['gold', 'silver'],
+    });
+    await service.addTags(owner, contactId, ['bronze']);
+    expect(await updatesOf(c, new Map([[tags.id, 'tags']]))).toEqual([[['tags'], ['tags']]]);
+    // Erasing removes the three tags, as the definer role (the first queues the endpoint, the
+    // others add nothing more), then drops the transaction's update with its delivery.
+    await service.eraseContact(owner, { contactId, suppress: false });
+    expect((await eventsOf(c, 'contact.')).map((e) => [e.type, e.deliveries])).toEqual([
+      ['contact.created', 0],
+      ['contact.updated', 1],
+      ['contact.erased', 1],
+    ]);
+    await deliverDue(c);
+    expect(bodiesAt(tags.path).map((b) => b.type)).toEqual(
+      expect.arrayContaining(['contact.updated', 'contact.erased']),
+    );
+    expect(bodiesAt(tags.path)).toHaveLength(2);
+    expect(await eventsOf(other, 'contact.')).toEqual([]);
   });
 });
 

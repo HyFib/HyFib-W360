@@ -12,6 +12,8 @@ import { apiContactSchema } from '../api/contact-view';
 import { buildOpenApiDocument } from '../api/openapi';
 import { renderEmail } from '../email/templates';
 import {
+  WEBHOOK_CONTACT_PART_LABELS,
+  WEBHOOK_CONTACT_PARTS,
   WEBHOOK_EVENT_INFO,
   WEBHOOK_EVENT_KEYS,
   WEBHOOK_LIMITS,
@@ -50,6 +52,8 @@ import {
   openWebhookHeaders,
   reservedWebhookHeader,
   sealWebhookHeaders,
+  webhookContactPartsFor,
+  webhookContactPartsSchema,
   webhookHeadersAad,
   webhookHeadersSchema,
   webhookMessageStatusesFor,
@@ -1032,5 +1036,43 @@ describe('message status filters (ADR-119)', () => {
     expect(webhookMessageStatusesFor([...both], undefined, null)).toBeNull();
     expect(webhookMessageStatusesFor(['consent.changed'], ['failed'], ['read'])).toBeNull();
     expect(webhookMessageStatusesFor(['consent.changed'], undefined, ['read'])).toBeNull();
+  });
+});
+
+describe('contact part filters (ADR-123)', () => {
+  it('take 1 to 5 known parts, once each, in the order Settings lists them; null takes every change', () => {
+    expect(webhookContactPartsSchema.parse(['tags', 'email', 'tags'])).toEqual(['email', 'tags']);
+    expect(webhookContactPartsSchema.parse(null)).toBeNull();
+    expect(webhookContactPartsSchema.parse([...WEBHOOK_CONTACT_PARTS].reverse())).toEqual([
+      ...WEBHOOK_CONTACT_PARTS,
+    ]);
+    expect(WEBHOOK_CONTACT_PARTS).toEqual(['name', 'phone', 'email', 'tags', 'fields']);
+    // A part is what a change names before its first dot: fields.<key> is fields.
+    for (const part of WEBHOOK_CONTACT_PARTS) {
+      expect(CONTACT_CHANGE_PART_RE.test(part === 'fields' ? 'fields.plan' : part)).toBe(true);
+    }
+    for (const refused of [
+      [],
+      ['fields.plan'],
+      ['Email'],
+      ['address'],
+      'email',
+      Array(6).fill('email'),
+    ]) {
+      expect(webhookContactPartsSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(Object.keys(WEBHOOK_CONTACT_PART_LABELS)).toEqual([...WEBHOOK_CONTACT_PARTS]);
+  });
+
+  it('are kept only while the endpoint takes contact.updated: given, kept, or cleared', () => {
+    const both = ['contact.updated', 'contact.erased'] as const;
+    expect(webhookContactPartsFor([...both], ['email'], null)).toEqual(['email']);
+    expect(webhookContactPartsFor([...both], undefined, ['tags'])).toEqual(['tags']);
+    expect(webhookContactPartsFor([...both], null, ['tags'])).toBeNull();
+    expect(webhookContactPartsFor([...both], undefined, null)).toBeNull();
+    expect(webhookContactPartsFor(['contact.erased'], ['email'], ['tags'])).toBeNull();
+    expect(webhookContactPartsFor(['contact.created'], undefined, ['tags'])).toBeNull();
   });
 });

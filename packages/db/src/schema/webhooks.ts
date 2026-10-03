@@ -30,6 +30,12 @@ export type WebhookEventType = (typeof WEBHOOK_EVENT_TYPES)[number];
 export type WebhookMessageStatus =
   'accepted' | 'sent' | 'delivered' | 'read' | 'played' | 'failed' | 'canceled' | 'unknown_outcome';
 
+/**
+ * The parts of a contact whose change a `contact.updated` endpoint can choose (ADR-123); `fields`
+ * is a change of any custom field.
+ */
+export type WebhookContactPart = 'name' | 'phone' | 'email' | 'tags' | 'fields';
+
 export const WEBHOOK_DELIVERY_STATES = ['pending', 'delivering', 'succeeded', 'failed'] as const;
 export type WebhookDeliveryState = (typeof WEBHOOK_DELIVERY_STATES)[number];
 
@@ -53,6 +59,11 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    * while `message.status` is among its events.
    */
   messageStatuses: text('message_statuses').array().$type<WebhookMessageStatus[]>(),
+  /**
+   * The parts of a contact whose change it takes as `contact.updated` (ADR-123); null takes every
+   * change. Set only while `contact.updated` is among its events.
+   */
+  contactParts: text('contact_parts').array().$type<WebhookContactPart[]>(),
   state: text('state', { enum: ['active', 'disabled'] })
     .notNull()
     .default('active'),

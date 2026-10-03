@@ -19,6 +19,8 @@ export async function createWebhookEndpointAction(
     headers: { name: string; value: string }[];
     /** The message.status statuses the endpoint takes; null takes every status. */
     messageStatuses: string[] | null;
+    /** The contact parts it takes as contact.updated; null takes every change. */
+    contactParts: string[] | null;
   },
 ): Promise<ActionResult<{ endpointId: string; secret: string }>> {
   return runAction(async () => {
@@ -41,6 +43,8 @@ export async function updateWebhookEndpointAction(
     headers?: { name: string; value: string }[];
     /** The message.status statuses the endpoint takes; null takes every status. */
     messageStatuses: string[] | null;
+    /** The contact parts it takes as contact.updated; null takes every change. */
+    contactParts: string[] | null;
   },
 ): Promise<ActionResult> {
   return runAction(async () => {

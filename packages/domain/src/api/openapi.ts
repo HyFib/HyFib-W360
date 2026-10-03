@@ -10,6 +10,7 @@ import {
   type MessageStatus,
 } from '@w360/db';
 import {
+  WEBHOOK_CONTACT_PARTS,
   WEBHOOK_EVENT_INFO,
   WEBHOOK_EVENT_KEYS,
   WEBHOOK_LIMITS,
@@ -320,6 +321,12 @@ export const apiWebhookEndpointSchema = z.object({
     .nullable()
     .describe(
       'The message.status statuses the endpoint receives; null receives every status, including statuses added later.',
+    ),
+  contactParts: z
+    .array(z.enum(WEBHOOK_CONTACT_PARTS))
+    .nullable()
+    .describe(
+      'The parts of a contact whose change the endpoint receives as contact.updated (fields: a change of any custom field); null receives every change, including parts added later.',
     ),
   apiKeyId: z.uuid().describe('The API key that added the endpoint.'),
   createdAt: z.iso.datetime(),
@@ -1395,7 +1402,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'contact.updated': webhook(
         'webhookContactUpdated',
         WEBHOOK_EVENT_INFO['contact.updated'].label,
-        `${WEBHOOK_EVENT_INFO['contact.updated'].description} One event per contact for each change saved; a contact added in the same change is sent as contact.created only.`,
+        `${WEBHOOK_EVENT_INFO['contact.updated'].description} One event per contact for each change saved; a contact added in the same change is sent as contact.created only. An endpoint receives every change unless it names the parts it takes (its \`contactParts\`, or the parts ticked in Settings → Webhooks): then it receives the events whose changes name one of them, each naming every part that changed.`,
         'WebhookContactUpdated',
       ),
       'contact.erased': webhook(

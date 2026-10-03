@@ -561,13 +561,16 @@ verification, app review, Embedded Signup configuration).
   Settings or through the API, or every status as before; applied where events are captured, so a
   status no endpoint takes is not recorded). **[What a contact change changed built, locally
   verified]** (ADR-121: `contact.updated` names what its transaction changed, `name`, `phone`,
-  `email`, `tags` and `fields.<key>`, never a value; null for events captured before). Remaining:
-  filters for other event types and on a message's fields (such as by automation, campaign or
-  template), `contact.updated` only for chosen parts, which tags were added or removed, other
-  authentication (OAuth client credentials, headers computed per delivery), mutual TLS, fixed
-  egress addresses, delivery counts in campaign events, events for store orders, Payment Links and
-  each step of a run, `createdAt` finer than the millisecond, replays across endpoints or by event
-  type, load tests.
+  `email`, `tags` and `fields.<key>`, never a value; null for events captured before). **[Contact
+  part filters built, locally verified]** (ADR-123: an endpoint takes `contact.updated` only for
+  the parts it chooses, `name`, `phone`, `email`, `tags` and `fields`, in Settings or through the
+  API, or every change as before; applied where events are captured, a later change in the
+  transaction queuing the endpoints it newly concerns). Remaining: filters for other event types
+  and on a message's or contact's values (such as by automation, campaign, template, tag or field
+  key), which tags were added or removed, other authentication (OAuth client credentials, headers
+  computed per delivery), mutual TLS, fixed egress addresses, delivery counts in campaign events,
+  events for store orders, Payment Links and each step of a run, `createdAt` finer than the
+  millisecond, replays across endpoints or by event type, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,

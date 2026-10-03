@@ -712,6 +712,14 @@ Phase 5 rules (outgoing webhooks, P5-09):
   (a database check too), and applied in `app.capture_webhook_event`, which reads the company's own
   endpoints: it narrows what one endpoint receives and never what another endpoint or company
   receives, and a status no endpoint takes is not recorded. Audited with the list. Tested.
+- An endpoint can take `contact.updated` only for some parts of a contact (ADR-123), chosen the
+  same way. The list is checked against the parts the event names, kept only while the endpoint
+  takes `contact.updated` (a database check too), and applied in
+  `app.capture_contact_webhook_event`, which reads the company's own endpoints as the role making
+  the change: it narrows what one endpoint receives and never adds an event, a part or a delivery
+  for another company. A later change in the transaction queues only an event that transaction
+  captured, once per endpoint, and a rolled-back savepoint takes back what it queued. The event
+  names every part that changed, as before. Audited with the list. Tested.
 - Conversation and contact events (ADR-074) follow the same rules. Conversation events name the
   member and the team by id only (ADR-094), the ids the API gives `conversations.read` keys
   (ADR-093): names are read through `GET /members` and `GET /teams` with such a key, and no email or

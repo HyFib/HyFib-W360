@@ -1531,6 +1531,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'previous_secret_expires_at',
       'header_names',
       'message_statuses',
+      'contact_parts',
       'state',
       'disabled_reason',
       'disabled_at',

@@ -4640,3 +4640,39 @@ Decision:
 Not built: choosing contacts to change by a filter (all with a tag, a segment), changes that partly
 succeed, adding contacts in the same call, changing numbers, and the same change for many contacts
 in the inbox (members change contacts one at a time, or by import).
+
+## ADR-123 Choosing the contact changes a webhook endpoint receives (2026-10-03)
+
+Context: since ADR-121 a `contact.updated` names what its change changed (`name`, `phone`, `email`,
+`tags`, `fields.<key>`). An endpoint that takes the event still receives every change: a receiver
+that only copies emails to a mailing tool is sent every tag an automation or an import adds, and
+must read and drop each. ADR-119 lets an endpoint take only some message statuses; P5-09's
+Remaining listed `contact.updated` only for chosen parts.
+
+Decision:
+
+- **What an endpoint chooses:** `contactParts`, null for every change (as before), or 1 to 5 of
+  `name`, `phone`, `email`, `tags` and `fields` (a change of any custom field), only while the
+  endpoint takes `contact.updated`. Chosen in Settings → Webhooks under "Contact changed" (all
+  ticked keeps none, so parts added later arrive too) or through the API (`contactParts` on
+  `POST` and `PATCH /webhook-endpoints`). A change that removes the event clears the list; an API
+  change that leaves it out keeps it. Audited with the list; the company data export carries it.
+- **Where it applies:** where the event is captured. The first capture of a contact's
+  `contact.updated` in a transaction creates a delivery for each endpoint whose list is null or
+  holds a part the change names; each later change of the contact in the transaction, which adds
+  what it changed to the event (ADR-121), creates one for each endpoint that now takes it and has
+  none of this event yet (the event is the transaction's own, so no replay of it can exist). A
+  savepoint that rolls back takes back the deliveries it created with the parts it added. The
+  event is still written when an endpoint takes `contact.created` or `contact.updated`, even if
+  none takes the parts of the first change, and every endpoint that receives it is sent the same
+  event, naming every part that changed: an endpoint taking emails is told when one transaction
+  changed the email and the tags.
+- **Unchanged:** `contact.created` and `contact.erased`, the other event types, replays, test
+  events and the payload.
+- **Migration 0098:** `contact_parts text[]` on `app.webhook_endpoints` with a check (null, or 1 to
+  5 known parts while `contact.updated` is among the events) validated at once (at most 10
+  endpoints per company), the runtime role's update of the column, and
+  `app.capture_contact_webhook_event` replaced with the same signature.
+
+Not built: field keys chosen one by one, filters for `contact.created` or `contact.erased`, and
+filters on a contact's values (a tag, a field's value).

@@ -116,6 +116,13 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    0097 validates the check while captures go on. Workers from before it deliver `contact.updated`
    without `changes` until the worker rollout ends; rolling workers back to an image from before it
    does the same, and the recorded lists stay for later deliveries and replays.
+   Migration 0098 (ADR-123) adds a nullable column to `app.webhook_endpoints` with a check it
+   validates by reading the table (small, as above) and replaces
+   `app.capture_contact_webhook_event`, which applies the filter from then on; every endpoint
+   starts with none, so nothing changes until a member or a key chooses parts. Web servers from
+   before it neither show nor change the column: until the web rollout ends, an old server's
+   change that drops `contact.updated` from an endpoint with parts fails on the check (it works once
+   the rollout ends), and its other changes keep them.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

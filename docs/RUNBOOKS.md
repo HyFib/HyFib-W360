@@ -1927,6 +1927,16 @@ before WhatsApp reported its delivery never reaches `delivered`: a receiver that
 `delivered` misses such messages, and one that needs to know a message arrived should take `read`
 too.
 
+**A receiver gets fewer `contact.updated` events than expected (ADR-123).** An endpoint can take
+the event only for some parts of a contact; the endpoints list shows them ("Contact changes sent:
+…"), and the API answers `contactParts` (null takes every change). A change that names none of
+them is never queued for the endpoint, and changes saved before the endpoint took more are not sent
+afterwards. To take more, tick them under "Contact changed" on the endpoint's page (all ticked takes
+every change, including parts added later), or `PATCH /webhook-endpoints/{id}` with `contactParts`
+(null for every change). Removing the `contact.updated` event clears the list. One event stands
+for a contact's whole transaction and names every part it changed, so an endpoint taking only
+emails also receives an event that changed the email and the tags, naming both.
+
 **An endpoint was turned off automatically.** It failed every attempt for 72 hours; its waiting
 deliveries were marked failed (`endpoint_disabled`), owners and administrators got the
 "Webhook endpoint turned off" email, and the audit log has `webhook.endpoint_auto_disabled`. Fix the

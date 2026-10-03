@@ -3,6 +3,8 @@ import { useId, useState } from 'react';
 import { Alert, Button, Checkbox, Field, Input, Label, Select } from '@w360/ui';
 import { ConfirmDialog } from '@w360/ui/client';
 import {
+  WEBHOOK_CONTACT_PART_LABELS,
+  WEBHOOK_CONTACT_PARTS,
   WEBHOOK_EVENT_INFO,
   WEBHOOK_EVENT_KEYS,
   WEBHOOK_LIMITS,
@@ -10,6 +12,7 @@ import {
   WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_REPLAY_PERIODS,
   webhookReplaySummary,
+  type WebhookContactPart,
   type WebhookEventType,
   type WebhookMessageStatus,
   type WebhookReplayPeriod,
@@ -100,18 +103,66 @@ function StatusChoices({
   );
 }
 
+/**
+ * The parts of a contact whose change an endpoint takes as `contact.updated` (ADR-123), shown while
+ * it takes the event.
+ */
+function PartChoices({
+  prefix,
+  chosen,
+  onChange,
+}: {
+  prefix: string;
+  chosen: WebhookContactPart[];
+  onChange: (next: WebhookContactPart[]) => void;
+}) {
+  return (
+    <fieldset className="ml-6 grid gap-1">
+      <legend className="mb-1 text-xs text-muted-foreground">
+        Changes sent (all of them unless you untick some; an event names every part that changed)
+      </legend>
+      {WEBHOOK_CONTACT_PARTS.map((part) => {
+        const id = `${prefix}-part-${part}`;
+        return (
+          <div key={part} className="flex items-center gap-2">
+            <Checkbox
+              id={id}
+              checked={chosen.includes(part)}
+              onChange={(e) =>
+                onChange(
+                  e.target.checked
+                    ? WEBHOOK_CONTACT_PARTS.filter((p) => p === part || chosen.includes(p))
+                    : chosen.filter((p) => p !== part),
+                )
+              }
+            />
+            <Label htmlFor={id} className="font-normal">
+              {WEBHOOK_CONTACT_PART_LABELS[part]}{' '}
+              <span className="font-mono text-xs">({part})</span>
+            </Label>
+          </div>
+        );
+      })}
+    </fieldset>
+  );
+}
+
 function EventChoices({
   prefix,
   chosen,
   onChange,
   statuses,
   onStatusesChange,
+  parts,
+  onPartsChange,
 }: {
   prefix: string;
   chosen: WebhookEventType[];
   onChange: (next: WebhookEventType[]) => void;
   statuses: WebhookMessageStatus[];
   onStatusesChange: (next: WebhookMessageStatus[]) => void;
+  parts: WebhookContactPart[];
+  onPartsChange: (next: WebhookContactPart[]) => void;
 }) {
   return (
     <fieldset className="grid gap-2">
@@ -139,6 +190,9 @@ function EventChoices({
             </div>
             {type === 'message.status' && chosen.includes(type) ? (
               <StatusChoices prefix={prefix} chosen={statuses} onChange={onStatusesChange} />
+            ) : null}
+            {type === 'contact.updated' && chosen.includes(type) ? (
+              <PartChoices prefix={prefix} chosen={parts} onChange={onPartsChange} />
             ) : null}
           </div>
         );
@@ -236,6 +290,7 @@ export function WebhookEndpointForm({
     eventTypes: WebhookEventType[];
     headerNames: string[];
     messageStatuses: WebhookMessageStatus[] | null;
+    contactParts: WebhookContactPart[] | null;
   };
   atLimit?: boolean;
 }) {
@@ -245,6 +300,9 @@ export function WebhookEndpointForm({
   const [eventTypes, setEventTypes] = useState<WebhookEventType[]>(endpoint?.eventTypes ?? []);
   const [statuses, setStatuses] = useState<WebhookMessageStatus[]>(
     endpoint?.messageStatuses ?? [...WEBHOOK_MESSAGE_STATUSES],
+  );
+  const [parts, setParts] = useState<WebhookContactPart[]>(
+    endpoint?.contactParts ?? [...WEBHOOK_CONTACT_PARTS],
   );
   const [headers, setHeaders] = useState<HeaderRow[]>([]);
   // Changing an endpoint keeps its headers unless they are given again.
@@ -278,7 +336,12 @@ export function WebhookEndpointForm({
           eventTypes.includes('message.status') && statuses.length < WEBHOOK_MESSAGE_STATUSES.length
             ? statuses
             : null;
-        const input = { url, description, eventTypes, messageStatuses };
+        // Every part ticked takes every change, including parts added later (null).
+        const contactParts =
+          eventTypes.includes('contact.updated') && parts.length < WEBHOOK_CONTACT_PARTS.length
+            ? parts
+            : null;
+        const input = { url, description, eventTypes, messageStatuses, contactParts };
         const done = (r: { ok: true } | { ok: false; code: string; message: string }) => {
           setBusy(false);
           if (!r.ok) setError(r);
@@ -305,6 +368,7 @@ export function WebhookEndpointForm({
               setDescription('');
               setEventTypes([]);
               setStatuses([...WEBHOOK_MESSAGE_STATUSES]);
+              setParts([...WEBHOOK_CONTACT_PARTS]);
               setHeaders([]);
             }
           });
@@ -355,6 +419,8 @@ export function WebhookEndpointForm({
         onChange={setEventTypes}
         statuses={statuses}
         onStatusesChange={setStatuses}
+        parts={parts}
+        onPartsChange={setParts}
       />
       <fieldset className="grid gap-2">
         <legend className="mb-1 text-sm font-medium">Headers</legend>

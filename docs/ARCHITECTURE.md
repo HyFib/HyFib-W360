@@ -1185,7 +1185,10 @@ true`); the same key with another request (method, path and body hashed) answers
   that. Since 0096 (ADR-121) each trigger also says what changed (`name`, `phone`, `email`, `tags`,
   `fields.<key>`), kept in `contact_changes` on the `contact.updated` event; a later change in the
   same transaction adds to it through `app.add_contact_webhook_changes`, a definer function that
-  updates only an event its caller's transaction captured. Their payloads are built when
+  updates only an event its caller's transaction captured. Since 0098 (ADR-123) a `contact.updated`
+  delivery is created only for an endpoint whose `contact_parts` is null or holds a part the change
+  names (`fields` for any `fields.<key>`), and a later change in the transaction queues the
+  endpoints it newly concerns. Their payloads are built when
   delivered: conversation events as the message events are, contact events with the API's contact
   (`api/contact-view.ts`, shared with the public API) and `erased`, an erased contact keeping its
   id, source and creation time only, and `contact.updated` with `changes` (null for events captured
@@ -1257,6 +1260,16 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   holds the status, and writes no event when none does; other types, replays and test events are
   unchanged. Settings and the API (`messageStatuses`) set it; a change that drops the event clears
   it.
+- **Contact part filters** (migration 0098, ADR-123): `contact_parts` on an endpoint lists the parts
+  of a contact whose change it takes as `contact.updated` (`name`, `phone`, `email`, `tags`,
+  `fields`), null for every change; a check keeps it to 1 to 5 known parts and to endpoints that
+  take `contact.updated`. `app.capture_contact_webhook_event` (replaced with the same signature)
+  queues the first capture of a contact's update for endpoints whose list is null or holds a part
+  it names, and each later change of the contact in the transaction for those it newly concerns
+  that have no delivery of the event yet; the event is still written when an endpoint takes
+  `contact.created` or `contact.updated`, and each endpoint receives the same event, naming every
+  part that changed. Settings and the API (`contactParts`) set it; a change that drops the event
+  clears it.
 - **Health:** a success clears the failing state; a failure when the endpoint has been failing for
   72 hours without a success turns it off (`failing`), fails its waiting deliveries as
   `endpoint_disabled`, records a system audit entry and emails the company's active owners and
@@ -1266,13 +1279,14 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   only in the page's memory); sending a test event (`ping`); rotating the secret; turning off and
   on; deleting. Each endpoint's page lists its latest 100 deliveries (or only failed ones) with
   attempts, result and timings, replays finished ones (a new delivery of the same event, audited)
-  and edits the URL, description, events, the message statuses it takes and headers (names shown,
-  values never; replacing gives each again). The OpenAPI document describes every event under
-  `webhooks`. Audit entries name the endpoint's host, never its full URL or secret.
-- **Not built yet:** filters for other event types or on a message's fields, ordering, other authentication (OAuth client
-  credentials, headers computed per delivery), mutual TLS, fixed
-  egress addresses for receivers' allowlists, endpoints per number, events for conversations
-  started, notes or merges, and an event naming the contact fields that changed.
+  and edits the URL, description, events, the message statuses and contact parts it takes and
+  headers (names shown, values never; replacing gives each again). The OpenAPI document describes
+  every event under `webhooks`. Audit entries name the endpoint's host, never its full URL or
+  secret.
+- **Not built yet:** filters for other event types or on a message's or contact's values, ordering,
+  other authentication (OAuth client credentials, headers computed per delivery), mutual TLS, fixed
+  egress addresses for receivers' allowlists, endpoints per number, and events for conversations
+  started, notes or merges.
 
 ## 6P. Platform operations console **[built — verified with local test data only; no production companies yet]**
 
