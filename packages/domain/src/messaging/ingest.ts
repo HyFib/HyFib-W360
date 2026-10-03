@@ -1,4 +1,4 @@
-import { uuidv7, type Clock, type Keyring } from '@w360/core';
+import { parseExternalJson, uuidv7, type Clock, type Keyring } from '@w360/core';
 import {
   and,
   authorizedTenantScope,
@@ -186,7 +186,8 @@ export async function processMetaWebhookReceipt(
     let envelopeJson: unknown;
     try {
       if (!claimed.bodyCiphertext) throw new Error('body erased');
-      envelopeJson = JSON.parse(
+      // A NUL character in a message would fail the whole receipt where it is stored (ADR-130).
+      envelopeJson = parseExternalJson(
         deps.keyring.decryptString(claimed.bodyCiphertext, receiptAad(claimed.id)),
       );
     } catch {

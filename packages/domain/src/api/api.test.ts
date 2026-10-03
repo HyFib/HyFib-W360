@@ -6,7 +6,8 @@ import { AppError, isAppError, sha256Hex } from '@w360/core';
 import { API_SCOPES, CAMPAIGN_STATUSES, MESSAGE_STATUSES, RECIPIENT_STATES } from '@w360/db';
 import { PERMISSIONS, ROLE_PERMISSIONS } from '../authz/permissions';
 import { apiErrorResponse, apiRequestError } from './errors';
-import { NUL_CHARACTER_MESSAGE, assertNoNulCharacter, nulCharacterPath } from './request-text';
+import { NUL_CHARACTER_MESSAGE } from '../validation';
+import { assertNoNulCharacter, nulCharacterPath } from './request-text';
 import {
   apiCampaignListQuerySchema,
   apiCampaignRecipientQuerySchema,

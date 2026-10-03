@@ -1,5 +1,6 @@
 import 'server-only';
 import { betterAuth } from 'better-auth';
+import { APIError, createAuthMiddleware } from 'better-auth/api';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import { nextCookies } from 'better-auth/next-js';
 import { twoFactor } from 'better-auth/plugins/two-factor';
@@ -16,6 +17,8 @@ import {
 import { betterAuthSchema, systemScope, type Database } from '@w360/db';
 import {
   enqueueEmail,
+  NUL_CHARACTER_MESSAGE,
+  nulCharacterPathIn,
   RECENT_SIGN_IN_MINUTES,
   recordSecurityEvent,
   type OutboxDeps,
@@ -143,6 +146,16 @@ export function createAuth(deps: {
             }
           : {}),
       },
+    },
+    // Members' auth forms (names, emails, passwords, tokens) are refused when they hold the NUL
+    // character, as every other form is (ADR-130): PostgreSQL text cannot store it, so the query
+    // would otherwise fail.
+    hooks: {
+      before: createAuthMiddleware(async (ctx) => {
+        if (nulCharacterPathIn({ body: ctx.body, query: ctx.query, params: ctx.params }) !== null) {
+          throw new APIError('BAD_REQUEST', { message: NUL_CHARACTER_MESSAGE });
+        }
+      }),
     },
     // Better Auth's own lines through ours: an error among a line's arguments (a failed query's
     // repeats its parameters: emails, names, session and verification tokens) is written without

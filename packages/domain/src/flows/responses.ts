@@ -1,4 +1,4 @@
-import { uuidv7 } from '@w360/core';
+import { parseExternalJson, uuidv7 } from '@w360/core';
 import {
   and,
   contactFields,
@@ -49,7 +49,7 @@ export function parseFlowCompletion(interactive: unknown): FlowCompletion | null
   }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(raw);
+    parsed = parseExternalJson(raw);
   } catch {
     return { token: null, answers: null, tooLarge: false, body };
   }

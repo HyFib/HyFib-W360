@@ -1,8 +1,10 @@
+import { randomBytes } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createLogger, isAppError, isDatabaseQueryError, systemClock, uuidv7 } from '@w360/core';
 import { authorizedTenantScope, contacts, eq, isUniqueViolation, sql } from '@w360/db';
 import {
   createContactsService,
+  NUL_CHARACTER_MESSAGE,
   processMetaWebhookReceipt,
   storeWebhookReceipt,
   type ContactsService,
@@ -163,42 +165,88 @@ describe('database errors', () => {
     });
   });
 
-  it("fail members' contact search on a NUL character without the search text", async () => {
+  it("refuse members' contact search holding a NUL character before the database (ADR-130)", async () => {
     const ctx = await fx.ctx(company, company.owner);
     const error = await rejection(contactsSvc.listContacts(ctx, { q: `${NAME}\u0000${PHONE}` }));
-    // PostgreSQL refuses the character in text: "invalid byte sequence for encoding "UTF8": 0x00".
-    expect(isDatabaseQueryError(error)).toBe(true);
-    expect((error as Error).message).toBe('Database query failed (SQLSTATE 22021)');
-    expect(String((error as Error).stack)).not.toMatch(QUOTED);
+    // PostgreSQL text cannot hold it ("invalid byte sequence for encoding "UTF8": 0x00", 22021),
+    // so what the schema keeps is refused first, naming the field and never the text.
+    expect(isAppError(error)).toBe(true);
+    expect(error).toMatchObject({
+      code: 'validation_failed',
+      message: NUL_CHARACTER_MESSAGE,
+      issues: [{ path: 'q', message: NUL_CHARACTER_MESSAGE }],
+    });
     expect(logLine(error)).not.toMatch(QUOTED);
   });
 
-  it("keep a receipt's last error to the SQLSTATE when its processing fails in the database", async () => {
-    const deps = {
-      db: fx.dbs.app,
-      keyring: fx.keyring,
-      jobs: fx.jobs(),
-      signer: fx.signer,
-      clock: systemClock,
-    };
-    const body = fx.messagesBody(company, {
-      messages: [{ waId: '919876543210', text: `${NAME}\u0000 call me on ${PHONE}` }],
-    });
+  const receiptDeps = () => ({
+    db: fx.dbs.app,
+    keyring: fx.keyring,
+    jobs: fx.jobs(),
+    signer: fx.signer,
+    clock: systemClock,
+  });
+
+  async function receiptFor(body: unknown) {
+    const deps = receiptDeps();
     const stored = await storeWebhookReceipt(deps, {
       provider: 'meta_whatsapp',
       rawBody: Buffer.from(JSON.stringify(body)),
     });
-    const error = await rejection(processMetaWebhookReceipt(deps, stored.receiptId));
-    expect(isDatabaseQueryError(error)).toBe(true);
-    const [receipt] = await fx.query<{ status: string; last_error: string }>(
+    const outcome = await processMetaWebhookReceipt(deps, stored.receiptId).catch(
+      (error: unknown) => error,
+    );
+    const [receipt] = await fx.query<{ status: string; last_error: string | null }>(
       'SELECT status, last_error FROM ops.webhook_receipts WHERE id = $1',
       [stored.receiptId],
     );
-    // The message's jsonb holds "\u0000", which PostgreSQL cannot convert to text (22P05); the
-    // receipt kept the whole insert, with the text and the number, as its last error before.
+    return { outcome, receipt };
+  }
+
+  it("keep a receipt's last error to PostgreSQL's sentence when its processing fails in the database", async () => {
+    // A contact card larger than a message's content may be (64 KB): PostgreSQL refuses the row,
+    // and its detail, "Failing row contains (…)", repeated the card with the name and number.
+    const { outcome, receipt } = await receiptFor(
+      fx.messagesBody(company, {
+        messages: [
+          {
+            waId: '919876543210',
+            type: 'contacts',
+            extra: {
+              contacts: [
+                {
+                  name: {
+                    formatted_name: `${NAME} ${PHONE} ${randomBytes(60_000).toString('hex')}`,
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    );
+    expect(isDatabaseQueryError(outcome)).toBe(true);
     expect(receipt).toEqual({
       status: 'failed',
-      last_error: 'Database query failed (SQLSTATE 22P05)',
+      last_error:
+        'new row for relation "messages" violates check constraint "messages_content_check"',
     });
+  });
+
+  it('keep an inbound message holding a NUL character, with U+FFFD in its place (ADR-130)', async () => {
+    const id = `wamid.in.${randomBytes(6).toString('hex')}`;
+    const { outcome, receipt } = await receiptFor(
+      fx.messagesBody(company, {
+        messages: [{ id, waId: '919876543211', text: `Hi\u0000 call me back` }],
+      }),
+    );
+    // The receipt failed on the message's jsonb before (22P05), with every other message in it.
+    expect(outcome).toBe('processed');
+    expect(receipt).toEqual({ status: 'processed', last_error: null });
+    const [message] = await fx.query<{ content: { text: string } }>(
+      'SELECT content FROM app.messages WHERE tenant_id = $1 AND external_message_id = $2',
+      [company.tenant.id, id],
+    );
+    expect(message?.content.text).toBe('Hi\uFFFD call me back');
   });
 });

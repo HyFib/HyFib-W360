@@ -1,4 +1,4 @@
-import { uuidv7, type Clock, type Keyring } from '@w360/core';
+import { parseExternalJson, uuidv7, type Clock, type Keyring } from '@w360/core';
 import { EgressError, type EgressClient } from '@w360/core/egress';
 import { QUEUES } from '@w360/contracts';
 import {
@@ -262,7 +262,7 @@ export function savedValuesFrom(
   if (save.length === 0 || body.length === 0) return {};
   let document: unknown;
   try {
-    document = JSON.parse(body.toString('utf8'));
+    document = parseExternalJson(body.toString('utf8'));
   } catch {
     // Not JSON: there is nothing to save, and the call's outcome still stands.
     return {};

@@ -1,5 +1,75 @@
 # Progress
 
+## 2026-10-03 — Phase 5: text the database cannot store, in forms and provider payloads (ADR-130)
+
+Status: **Implemented and locally verified (test data and the provider stand-ins only).**
+PostgreSQL's text and jsonb cannot hold the NUL character (U+0000). ADR-124 refused it in the
+public API only: members' forms and searches, Better Auth's sign-up and account forms, imported CSV
+files and providers' JSON took it to a query, which failed. Members saw an internal error, and one
+inbound WhatsApp message holding it failed its whole webhook receipt, with every other message and
+status in it.
+
+### Completed
+
+- **Design (ADR-130):** members' input is refused, naming the field; providers' text is kept with
+  U+FFFD in place of the character.
+- **Core:** `parseExternalJson`, `NUL` and `NUL_REPLACEMENT` (`text.ts`): JSON text holds the
+  character only as the escape `\u0000`, so each such escape becomes `�` before parsing, keys
+  included, an escaped backslash read as a pair (`\\u0000` stays a backslash and "u0000").
+- **Domain:** `parseInput` refuses what a schema keeps when it holds the character
+  (`validation_failed` with the field's path, the API's message); the walk moved from the API's
+  check to `validation.ts` (`nulCharacterPathIn`, `NUL_CHARACTER_MESSAGE`, `writtenKey`), which the
+  API's check now uses; `parseCsv` refuses a value holding it with its line and a hint for files
+  saved as UTF-16. `parseExternalJson` parses Meta's webhooks (and a completed Flow's answers),
+  Graph's and Razorpay's answers, Razorpay's webhooks, companies' payment link webhooks, Shopify's
+  and WooCommerce's webhooks and REST answers, and a company endpoint's answer to an automation's
+  HTTP step.
+- **Web:** a Better Auth hook refuses the character in any auth request's body, query and path
+  parameters before the endpoint runs (400, the same message).
+- **Tests:**
+  - Unit (`text.test.ts`, 3 new; `validation.test.ts`, 3 new; `csv.test.ts`, 1 new;
+    `outside-json.test.ts`, 5 new): strings and keys at any depth, escaped backslashes before
+    "u0000", anything else exactly as `JSON.parse`; `parseInput` refusing a value, a list item, a
+    record's value and key with their paths, keeping what the schema drops and other control
+    characters, schema errors first, deep nesting without recursion; a CSV value with its line and a
+    UTF-16 file; Graph's, Razorpay's and a store's answers, an automation's saved value and a Flow's
+    answers keeping U+FFFD.
+  - Integration (real PostgreSQL): members' contact search with the character refused naming `q`
+    (it failed with 22021 before); an inbound message holding it processed and kept with U+FFFD (its
+    receipt failed with 22P05 before); a Razorpay event whose name holds it ignored, its receipt's
+    summary kept with U+FFFD (the receipt failed with 22P05 before); a payment link event whose name
+    holds it recorded with U+FFFD (its insert failed with 22021 before); a Shopify redaction naming
+    an email that holds it answered 200, as for any unknown email (it answered 500 before:
+    PostgreSQL refuses a text parameter holding the character with 22021). ADR-129's receipt test
+    now fails its receipt with a contact card larger than a message's content may be.
+  - E2E (`onboarding.spec.ts`, 1 new): a sign-up holding the character answers 400 with the
+    message.
+- **Docs:** ADR-130 (and notes on ADR-124 and ADR-129); SECURITY ("Text input" control);
+  THREAT-MODEL T143 (and T142's tests); ARCHITECTURE (request flow); RUNBOOKS (a refusal or "�"
+  in a message); BACKLOG SEC-12 (oversized inbound content, found with this slice).
+- **Mutation checks:** 20 deliberate regressions tried, all caught: 5 in `parseInput`'s check and
+  walk, 1 in CSV values, 4 in the parser, 9 at the provider sites (each delivered the character
+  through it) and the Better Auth hook disabled (caught by the browser run, which got 422 instead of
+  400).
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                                                                                                                                                                                                | Result                                                                                                                                                                                                                 |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                                                                                   | clean                                                                                                                                                                                                                  |
+| `pnpm test`                                                                                                                                                                                                                            | 589 passed                                                                                                                                                                                                             |
+| `pnpm test:integration` on PostgreSQL 18.6 and 17.11                                                                                                                                                                                   | 773 passed on each                                                                                                                                                                                                     |
+| `pnpm build`, then `onboarding.spec.ts`, `contacts.spec.ts`, `inbox.spec.ts`, `two-factor.spec.ts`, `step-up.spec.ts`, `stores.spec.ts`, `billing.spec.ts`, `flows.spec.ts` and `web-requests.spec.ts` on chromium and mobile-chromium | 40 passed                                                                                                                                                                                                              |
+| The Razorpay, payment link and Shopify webhook tests with `parseExternalJson` undone at their site                                                                                                                                     | each failed: Razorpay's receipt with SQLSTATE 22P05, the payment link event's insert with 22021, Shopify's redaction with 500 (PostgreSQL refuses a text parameter holding the character with 22021, checked directly) |
+| Mutation checks                                                                                                                                                                                                                        | 20 regressions tried, all caught                                                                                                                                                                                       |
+| gitleaks 8.30.1 on the commit                                                                                                                                                                                                          | no leaks found                                                                                                                                                                                                         |
+
+### Known gaps
+
+- Pages' URL segments and query strings are not checked as such (services check ids, slugs,
+  cursors and filters by format or through `parseInput`).
+- An inbound message whose content is larger than 64 KB still fails its receipt (SEC-12).
+
 ## 2026-10-03 — Phase 5: database errors without the data they quote (SEC-11, ADR-129)
 
 Status: **Implemented and locally verified (test data only).** A query that failed with an error the

@@ -28,6 +28,16 @@ describe('parseCsv', () => {
     expect(() => parseCsv('a,b\n"1"x,2\n')).toThrow(/after a closing quote/);
   });
 
+  it('refuses a value holding the NUL character, naming its line (ADR-130)', () => {
+    expect(() => parseCsv('name,phone\nAsha,+919800000000\n"Pri\u0000ya",+919800000001\n')).toThrow(
+      /line 3 holds the NUL character \(U\+0000\)/,
+    );
+    // A file saved as UTF-16 and read as UTF-8: a NUL character after each letter.
+    const utf16 = Buffer.from('name,phone\n', 'utf16le').toString('utf8');
+    expect(() => parseCsv(utf16)).toThrow(/save it as CSV UTF-8/);
+    expect(parseCsv('name\nAsha\n').rows).toEqual([['Asha']]);
+  });
+
   it('enforces size, row, column and field limits', () => {
     const limits = { maxBytes: 100, maxRows: 2, maxColumns: 3, maxFieldLength: 5 };
     expect(() => parseCsv('a\n1\n2\n3\n', limits)).toThrow(/more than 2 rows/);

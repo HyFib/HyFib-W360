@@ -119,3 +119,18 @@ test('choosing a company address that is taken shows a clear field error', async
   ).toBeVisible();
   await expect(page.getByText('Already taken', { exact: true })).toBeVisible();
 });
+
+test('a sign-up holding the NUL character is refused with a clear message before the database', async ({
+  page,
+  baseURL,
+}) => {
+  // PostgreSQL text cannot hold U+0000, so the user insert failed as an internal error (ADR-130).
+  const response = await page.request.post('/api/auth/sign-up/email', {
+    headers: { origin: baseURL ?? '' },
+    data: { name: 'Nul\u0000Name', email: uniqueEmail('nul'), password: PASSWORD },
+  });
+  expect(response.status()).toBe(400);
+  expect(await response.json()).toMatchObject({
+    message: 'Text cannot hold the NUL character (U+0000).',
+  });
+});

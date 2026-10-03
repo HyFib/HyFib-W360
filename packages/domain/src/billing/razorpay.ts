@@ -1,4 +1,4 @@
-import { constantTimeEqual, hmacSha256Hex } from '@w360/core';
+import { constantTimeEqual, hmacSha256Hex, parseExternalJson } from '@w360/core';
 
 /**
  * Minimal typed client for the Razorpay endpoints we use (docs/research/razorpay-billing.md). Keys
@@ -511,7 +511,7 @@ export class RazorpayClient {
     }
     let json: unknown;
     try {
-      json = await response.json();
+      json = parseExternalJson(await response.text());
     } catch {
       if (response.ok)
         return {

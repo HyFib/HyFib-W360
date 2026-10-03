@@ -4719,7 +4719,8 @@ which have no name; adding one changes segments too), matching names whatever th
 Unicode form (a name saved with combining accents is found only by text written the same way), fuzzy
 or phonetic matching, finding contacts by part of an email, an index for names, and the same check
 in members' forms and searches and in provider payloads, which still fail as before when they hold
-the character (since ADR-129 without the text in logs or a receipt's last error).
+the character (since ADR-129 without the text in logs or a receipt's last error; settled by ADR-130,
+which refuses members' input and keeps providers' text with U+FFFD in place of the character).
 
 ## ADR-125 Reading campaigns and their results through the public API (2026-10-03)
 
@@ -5008,7 +5009,8 @@ Decision:
   outputs (so dead letters name `DatabaseQueryError` and its SQLSTATE, not `Error` without a code)
   and receipts' `last_error` hold the sanitised error. Members' contact search with a NUL character
   still fails (22021), and so does an inbound message holding one (22P05, the receipt `failed`), as
-  ADR-124 left them, now without the text.
+  ADR-124 left them, now without the text (since ADR-130 the search is refused naming `q`, and the
+  message kept with U+FFFD).
 - **Finding a failed query** uses the SQLSTATE, constraint, table and column, the frames, and the
   request or job that failed, never logged values (RUNBOOKS, triage).
 
@@ -5019,3 +5021,55 @@ PostgreSQL's error in its failed job's output (those queries hold job envelopes:
 signature); an error kept under another property than `cause` (or `errors`) is logged as pino
 logs it; Better Auth's lookup of a session's or user's related rows, when its query fails, prints
 that error to the console itself (its parameters are ids).
+
+## ADR-130 Text the database cannot store, in members' forms and provider payloads (2026-10-03)
+
+Context: PostgreSQL's text and jsonb cannot hold the NUL character (U+0000). ADR-124 refused it in
+the public API and left it everywhere else: members' forms and searches, the sign-up and account
+forms Better Auth serves, imported CSV files and the JSON providers send all took it to a query,
+which failed. A member saw an internal error instead of the field to fix (since ADR-129 the logs
+hold only its SQLSTATE). A provider payload failed where it was stored, and with it everything
+delivered beside it: an inbound WhatsApp message holding the character failed its whole webhook
+receipt (every message and status in it, `failed` after the retries, with an operations alert), a
+store's product or order failed its sync job, and a company endpoint's answer failed the automation
+step saving from it.
+
+Decision:
+
+- **Members' input is refused, naming where.** `parseInput`, which validates what every service is
+  given (members, platform staff, API keys, jobs), refuses what the schema keeps when it holds the
+  character: `validation_failed`, "Text cannot hold the NUL character (U+0000).", with the field's
+  path (`q`, `tags.1`, `fields.city`; a key holding it written `\u0000`), as the API answers. What a
+  schema drops is not checked, as it never reaches a query, and other control characters are kept,
+  as the API keeps them. The walk is the API's (`nulCharacterPathIn`, without recursion), so the
+  two cannot disagree.
+- **Imported CSV files** are refused at the value holding it, with its line and a hint for files
+  saved as UTF-16, which read as UTF-8 hold the character after most letters (`parseCsv`); the
+  import's options never carried the file's text, so `parseInput` does not see it.
+- **Better Auth's forms** (sign-up, names, passwords, tokens in links) are refused by a hook before
+  any endpoint runs, its body, query and path parameters checked: 400 with the same message.
+- **Provider and outside JSON is kept, with U+FFFD in place of the character.** Meta's webhooks (and
+  a completed Flow's answers inside them), Graph's answers, Razorpay's webhooks and answers, a
+  company's Razorpay payment link webhooks, Shopify's and WooCommerce's webhooks and REST answers,
+  and a company endpoint's answer to an automation's HTTP step are parsed by `parseExternalJson`
+  (`@w360/core`). JSON text holds the character only as the escape `\u0000` (a raw one is not valid
+  JSON), so every such escape becomes `�` before parsing, keys included; an escaped backslash
+  is read as a pair, so `\\u0000` (a backslash, then "u0000") stays as it is. A message is kept with
+  the replacement character, visible where the character was, instead of failing with everything
+  delivered beside it. Signatures are still checked on the bytes as received, before parsing.
+- **Not replaced:** requests to the Flow endpoint (stored nowhere: forwarded to the company's
+  endpoint as WhatsApp sent them) and its answers (returned to WhatsApp as the company sent them),
+  WooCommerce's key handover (keys checked by format and stored encrypted), and the app's own stored
+  JSON (which cannot hold the character).
+- **What follows:** members are told which field to fix; inbound messages, statuses, store data and
+  saved answers holding the character are kept. The ADR-129 tests that used the character to make
+  the database fail now use a contact card larger than a message's content may be (64 KB), which
+  PostgreSQL refuses, to fail a receipt.
+
+Not built: a check of pages' URL segments and query strings as such (they reach services as ids,
+slugs, cursors and filters, checked by format or through `parseInput`; one that is not would still
+fail in the database, without the text since ADR-129); media bytes (kept in object storage) and
+headers (HTTP forbids the character) need none, and invalid UTF-8 never reaches a query (Node
+decodes it to U+FFFD). An inbound message whose content is larger than 64 KB (a contact card or a
+reply with an oversized field, far beyond what WhatsApp sends) still fails its receipt, as that test
+shows.

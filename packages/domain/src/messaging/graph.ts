@@ -11,6 +11,7 @@
  *   `unknown`     the request may have reached Meta but no response was received (timeouts,
  *                 resets). Callers must NOT blindly retry sends in this case.
  */
+import { parseExternalJson } from '@w360/core';
 import type { FlowValidationError } from '@w360/db';
 
 export type GraphFailureKind = 'retryable' | 'permanent' | 'auth' | 'unknown';
@@ -260,7 +261,7 @@ export class GraphClient {
     }
     let json: unknown;
     try {
-      json = await response.json();
+      json = parseExternalJson(await response.text());
     } catch {
       if (response.ok)
         return {

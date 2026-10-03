@@ -191,6 +191,14 @@ async function deliver(event: string, payload: Record<string, unknown>) {
   const outcome = await processRazorpayReceipt({ ...providerDeps(), keyring }, stored.receiptId);
   return { ...stored, outcome };
 }
+async function receiptSummary(receiptId: string) {
+  const [row] = await adminQuery<{ status: string; summary: Record<string, unknown> }>(
+    `SELECT status, summary FROM ops.webhook_receipts WHERE id = $1`,
+    [receiptId],
+  );
+  return row;
+}
+
 const paymentEvent = (event: string, p: StandInPayment) =>
   deliver(event, {
     payment: {
@@ -1234,5 +1242,18 @@ describe('abandoned card setups', () => {
         signature: checkoutSignature(second.orderId, auth.id),
       }),
     ).toEqual({ status: 'active' });
+  });
+});
+
+describe('Razorpay events holding the NUL character (ADR-130)', () => {
+  it('are kept with U+FFFD in its place instead of failing their receipt', async () => {
+    // The receipt's summary is jsonb, which cannot hold U+0000 (22P05): the receipt failed and
+    // Razorpay's retries met the same refusal.
+    const { receiptId, outcome } = await deliver('payment.odd\u0000ity', {});
+    expect(outcome).toBe('ignored');
+    expect(await receiptSummary(receiptId)).toEqual({
+      status: 'ignored',
+      summary: { event: 'payment.odd\uFFFDity' },
+    });
   });
 });

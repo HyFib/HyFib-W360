@@ -1685,6 +1685,13 @@ cannot store; the refusal's `issues` names the parameter as sent or the body's p
 field) before sending. Before ADR-124 such a request failed with 500 and an `api request failed` log
 line naming the database's encoding error (`invalid byte sequence for encoding "UTF8": 0x00`).
 
+**A member's form, a sign-up or a CSV import is refused with "Text cannot hold the NUL character
+(U+0000)", or a message shows "�" (ADR-130).** The text held U+0000, which PostgreSQL cannot store,
+often pasted from a binary field or left by a file saved as UTF-16 (re-save the CSV as UTF-8; the
+refusal names the line). Text from WhatsApp, Razorpay, the stores and companies' endpoints keeps
+the replacement character "�" where the character was; nothing else in the message, product or
+answer is changed.
+
 **A key's campaign results differ from the campaign page, or a campaign read through the API answers
 403 or 404 (ADR-125).** `GET /api/v1/campaigns/{id}` counts the results when it is read, as the
 campaign page does on each view: both move as delivery statuses, replies and opt-outs arrive, so

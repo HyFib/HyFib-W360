@@ -75,6 +75,13 @@ export function parseCsv(input: string, limits: CsvLimits = DEFAULT_CSV_LIMITS):
   let recordLine = 1;
 
   const pushField = () => {
+    // PostgreSQL text cannot hold it (ADR-130); a file saved as UTF-16 holds one after most letters.
+    if (field.includes('\u0000')) {
+      throw new CsvError(
+        `A value on line ${recordLine} holds the NUL character (U+0000), which no contact can hold. If the file was saved as UTF-16, save it as CSV UTF-8 and try again.`,
+        recordLine,
+      );
+    }
     if (field.length > limits.maxFieldLength) {
       throw new CsvError(
         `A value on line ${recordLine} is longer than ${limits.maxFieldLength} characters.`,

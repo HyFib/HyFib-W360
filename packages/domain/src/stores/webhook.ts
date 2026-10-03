@@ -1,4 +1,4 @@
-import { uuidv7, type Clock } from '@w360/core';
+import { parseExternalJson, uuidv7, type Clock } from '@w360/core';
 import {
   and,
   authorizedTenantScope,
@@ -267,7 +267,7 @@ export async function handleShopifyWebhook(
   }
   let body: Record<string, unknown> | null;
   try {
-    body = asRecord(JSON.parse(input.rawBody.toString('utf8')));
+    body = asRecord(parseExternalJson(input.rawBody.toString('utf8')));
   } catch {
     body = null;
   }
@@ -641,7 +641,7 @@ export async function handleWooWebhook(
   }
   let body: Record<string, unknown> | null;
   try {
-    body = asRecord(JSON.parse(input.rawBody.toString('utf8')));
+    body = asRecord(parseExternalJson(input.rawBody.toString('utf8')));
   } catch {
     body = null;
   }

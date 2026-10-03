@@ -848,6 +848,27 @@ describe('payment links', () => {
       }),
     ).toMatchObject({ status: 404 });
 
+    // An event name holding the NUL character is recorded with U+FFFD in its place (ADR-130): its
+    // insert failed before (22021), and Razorpay retried it for days.
+    const odd = signedEvent(
+      account.webhookSecret,
+      'payment_link.pa\u0000id',
+      link.provider_link_id as string,
+    );
+    expect(
+      await handlePaymentWebhook(deps, {
+        publicId: account.publicId,
+        rawBody: odd.rawBody,
+        signature: odd.signature,
+        eventId: 'evt_nul_000001',
+      }),
+    ).toMatchObject({ status: 200, log: { outcome: 'ignored' } });
+    const [recorded] = await fx.query<{ event: string }>(
+      `SELECT event FROM app.commerce_payment_events WHERE tenant_id = $1 AND event_id = $2`,
+      [c.tenant.id, 'evt_nul_000001'],
+    );
+    expect(recorded?.event).toBe('payment_link.pa\uFFFDid');
+
     // The customer pays: Razorpay's link is paid, and only then is the order.
     rzp.payLink(link.provider_link_id as string);
     const paidEvent = signedEvent(
