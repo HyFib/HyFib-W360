@@ -4720,3 +4720,57 @@ Unicode form (a name saved with combining accents is found only by text written 
 fuzzy or phonetic matching, finding contacts by part of an email, an index for names, and the same
 check in members' forms and searches and in provider payloads, which still fail as before when they
 hold the character.
+
+## ADR-125 Reading campaigns and their results through the public API (2026-10-03)
+
+Context: companies send marketing campaigns to their contacts (P3-04), and an endpoint that takes
+`campaign.status_changed` (ADR-087) learns when one is approved, starts, pauses or completes, with
+its stored counters (the audience, the recipients queued and skipped). But how its messages did
+(delivered, read, failed, replies, opt-outs) is on members' campaign page only: the public API does
+not read campaigns (ADR-087 lists it as not built). A marketing tool or a reporting job that shows
+a campaign's results had a member copy them from the page or export recipients by hand.
+
+Decision:
+
+- **A new scope, `campaigns.read`** ("Read campaigns", reading only), which a member creating a key
+  grants only if they hold `campaigns.read` themselves, as every scope needs its permission
+  (ADR-052). Existing keys keep their scopes, so they gain nothing; a plan version that chose its
+  scopes (ADR-092) leaves it out until a new version includes it, and one with every scope (`NULL`)
+  includes it. As a reading scope it works while the company is suspended or restricted, as
+  members' campaign pages do.
+- **`GET /api/v1/campaigns`** (`listCampaigns`): the company's campaigns, newest first by creation,
+  on exact keyset pages (creation time to the microsecond, then id; neither changes), so paging
+  never skips or repeats one; `status` keeps one status (`draft` to `canceled`); `limit` up to 100,
+  50 by default. A page reads the campaigns' index (`campaigns_list_idx`) in its order; companies
+  make campaigns by hand, so they have few. Each campaign: id, name, status, why it paused or
+  completed, the template's id and name, the number it sends from (id and number as WhatsApp
+  displays it), when it was scheduled, started, completed or cancelled and created, and the
+  counters it stores, as the campaign event carries them (ADR-087).
+- **`GET /api/v1/campaigns/{id}`** (`getCampaign`): one campaign with `results` counted when read,
+  as members' campaign page counts them (`campaignAnalytics`): recipients by state (audience,
+  pending, skipped, canceled, queued), queued messages by outcome (in progress, sent, delivered,
+  read, failed, unknown and canceled; sent includes delivered and read, delivered includes read),
+  replies and opt-outs among delivered recipients, each counted once, for the last campaign message
+  (whichever campaign sent it) queued to the contact in the 72 hours before it (a reply on the same
+  number; a STOP is both), skipped recipients by reason and failed messages by WhatsApp's error
+  code (the 10 commonest). The row and the counts are read in
+  one read-only snapshot (repeatable read), so they agree. A draft has no recipients: `results` is
+  null. An id that is not a UUID, unknown or another company's answers 404 `not_found`.
+- **Counts only:** no recipients, contacts or messages (members' recipient list and its CSV export
+  stay in the app; a campaign's messages reach integrations through the message feeds and
+  `message.status` with `conversations.read` and webhooks), no members (who created, submitted,
+  approved, launched or cancelled it, and the review note), no costs (the estimate members see and
+  the spending cap: estimates from published rate cards, not what Meta bills, which a key that
+  reads campaigns does not need), and not the audience's definition, the template's variables or
+  the pacing (time zone, window, rate, caps).
+- **The cost of a read:** the list reads stored columns. The detail counts every recipient of the
+  campaign and its message once per request, as the page does on each view: a campaign of 100,000
+  recipients is one pass over its recipients through their campaign index. Rate limits (ADR-068)
+  and monthly requests (ADR-061) bound how often a key repeats it.
+- **Migration 0099** replaces the key and plan scope checks with the 12 scopes and validates them
+  at once, as 0092 did (one row per key and per plan version).
+
+Not built: changing campaigns through the API (creating, submitting, approving, pausing, resuming
+or cancelling them), each recipient's outcome, costs, filters by template, number or time,
+results for a time range or grouped by day, and campaign results in `campaign.status_changed`
+(ADR-087 left them out: they change with every message status).

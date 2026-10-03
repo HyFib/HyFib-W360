@@ -128,6 +128,11 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    ADR-124 adds no migration; until the web rollout ends, a server from before it refuses
    `GET /api/v1/contacts?name=` with 422 (a parameter it does not know) and still answers a
    request holding the NUL character with 500.
+   Migration 0099 (ADR-125) widens the same scope checks as 0092, with the same brief locks. As with
+   0092, web servers from before it do not know the new scope: until the web rollout ends, an old
+   server answers Settings → API keys with an error for a company with a key holding
+   `campaigns.read` (and the platform plan pages for a plan version including it), and
+   `/api/v1/campaigns` with 404; rolling web servers back to an image from before it does the same.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

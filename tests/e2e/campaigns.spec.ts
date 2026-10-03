@@ -153,4 +153,42 @@ test('a campaign is drafted, reviewed, started by the worker and reported per re
   const text = await csv.text();
   expect(text).toContain('+919876512345,Asha Rao,queued,,delivered');
   expect(text).toContain('+919876512346,Bina Shah,skipped,no_marketing_opt_in');
+
+  // A key that reads campaigns finds the campaign and the results the page shows (ADR-125).
+  await page.goto(`/c/${slug}/settings/api-keys`);
+  await page.getByLabel('Name', { exact: true }).fill('Campaign reports');
+  await page.getByRole('checkbox', { name: /Read campaigns/ }).check();
+  await page.getByRole('button', { name: 'Create API key' }).click();
+  const tokenField = page.getByLabel('API key', { exact: true });
+  await expect(tokenField).toBeVisible();
+  const token = await tokenField.inputValue();
+  await page.getByRole('button', { name: 'I have stored the key' }).click();
+  const auth = { Authorization: `Bearer ${token}` };
+  const campaignId = campaignPath.split('/').pop()!;
+  const listed = await request.get('/api/v1/campaigns?status=completed', { headers: auth });
+  expect(listed.status()).toBe(200);
+  expect(((await listed.json()) as { data: unknown[] }).data).toEqual([
+    expect.objectContaining({
+      id: campaignId,
+      name: 'Spring launch',
+      status: 'completed',
+      completionReason: 'all_processed',
+      templateName: 'spring_sale',
+      audienceCount: 2,
+      queuedCount: 1,
+      skippedCount: 1,
+    }),
+  ]);
+  const one = await request.get(`/api/v1/campaigns/${campaignId}`, { headers: auth });
+  expect(one.status()).toBe(200);
+  expect(((await one.json()) as { data: { results: unknown } }).data.results).toMatchObject({
+    audience: 2,
+    queued: 1,
+    sent: 1,
+    delivered: 1,
+    read: 0,
+    failed: 0,
+    skipped: 1,
+    skipReasons: [{ reason: 'no_marketing_opt_in', count: 1 }],
+  });
 });

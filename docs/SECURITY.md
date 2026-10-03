@@ -443,12 +443,13 @@ Phase 5 rules (Public API, P5-08):
 - Members with `developer.manage` (owners and administrators) create, rotate and revoke the
   company's API keys; a key belongs to the company, not to its author. Each scope needs the
   permission a member needs for the same work: `templates.read`, `contacts.read`, `contacts.write`,
-  `inbox.reply` for `messages.send` (utility templates) and `messages.reply` (text replies, ADR-070),
-  `campaigns.send` for `messages.send_marketing`, `inbox.read_all` for `conversations.read`
-  (ADR-072), `inbox.supervise` for `conversations.write` (ADR-075), `automations.publish` for
-  `automations.start` (ADR-077), and `tenant.settings.manage` for `contact_fields.manage` (ADR-115).
-  Nobody grants a key more than they hold, and rotating needs the same. A key keeps the scopes it was
-  created with.
+  `inbox.reply` for `messages.send` (utility templates) and `messages.reply` (text replies,
+  ADR-070), `campaigns.send` for `messages.send_marketing`, `inbox.read_all` for
+  `conversations.read` (ADR-072), `inbox.supervise` for `conversations.write` (ADR-075),
+  `automations.publish` for `automations.start` (ADR-077), `tenant.settings.manage` for
+  `contact_fields.manage` (ADR-115), and `campaigns.read` for the scope of the same name (ADR-125).
+  Nobody grants a key more than they hold, and rotating needs the same. A key keeps the scopes it
+  was created with.
 - A request acts for the key's company only, as the key: its company comes from the key found by
   the token's hash, never from the path, body or headers, and data access runs in that company's
   scope (RLS). Audit rows name the key (`api_key`). Writing scopes are refused while the company is
@@ -615,6 +616,15 @@ Phase 5 rules (Public API, P5-08):
   refused with 422 naming where, instead of failing in a query as an internal error that a client
   could repeat to fill error logs and alerts. The body is walked without recursion, so no nesting
   exhausts the stack.
+- Reading campaigns (ADR-125): `GET /campaigns` and `GET /campaigns/{id}` need `campaigns.read`
+  (granted only by members holding `campaigns.read`) and read the key's company's campaigns in its
+  scope: an id of another company's campaign answers 404 as an unknown one does, and an id that is
+  not a UUID is refused before any query. They answer counts only, never recipients, contacts,
+  messages, members or costs, so a key with the scope learns how a campaign did but not who received
+  it; campaign and template names are the only text. A campaign's results are counted when read, one
+  pass over its recipients, and rate limits and monthly requests bound how often a key repeats it.
+  As a reading scope it keeps working while the company is suspended or restricted, as members'
+  campaign pages do.
 - Following contact changes (ADR-114): `GET /contact-changes` reads the key's company's changes
   only (`contacts.read`, RLS and an explicit company filter). Its cursor, a database transaction id
   and a row id, is sealed with the keyring (AES-256-GCM) with the company in the associated data, so

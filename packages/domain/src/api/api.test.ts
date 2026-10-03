@@ -3,10 +3,11 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import type { z } from 'zod';
 import { AppError, isAppError, sha256Hex } from '@w360/core';
-import { API_SCOPES } from '@w360/db';
+import { API_SCOPES, CAMPAIGN_STATUSES } from '@w360/db';
 import { PERMISSIONS, ROLE_PERMISSIONS } from '../authz/permissions';
 import { apiErrorResponse, apiRequestError } from './errors';
 import { NUL_CHARACTER_MESSAGE, assertNoNulCharacter, nulCharacterPath } from './request-text';
+import { apiCampaignListQuerySchema, apiGetCampaign, apiListCampaigns } from './campaigns';
 import { allowedNetworksSchema, bearerToken, generateApiToken, networkEntryProblem } from './keys';
 import {
   apiAddressRefusal,
@@ -2368,5 +2369,99 @@ describe('finding contacts by name, and text with the NUL character (ADR-124)', 
         issues: [{ path: 'contacts.1.name', message: NUL_CHARACTER_MESSAGE }],
       },
     ]);
+  });
+});
+
+describe('reading campaigns (ADR-125)', () => {
+  const ctx = (scopes: string[]) =>
+    ({
+      tenant: { id: 't', status: 'active' },
+      key: { id: 'k', scopes: new Set(scopes) },
+      planScopes: null,
+    }) as unknown as ApiContext;
+  const code = (promise: Promise<unknown>) =>
+    promise.then(
+      () => 'done',
+      (error: unknown) => (isAppError(error) ? error.code : String(error)),
+    );
+
+  it('have their own reading scope, which members who see campaigns grant', () => {
+    expect(API_SCOPE_KEYS).toContain('campaigns.read');
+    expect(API_SCOPE_INFO['campaigns.read']).toMatchObject({
+      label: 'Read campaigns',
+      permission: 'campaigns.read',
+      writes: false,
+    });
+    expect(API_SCOPE_INFO['campaigns.read'].description).toContain(
+      'Never recipients, members or costs',
+    );
+  });
+
+  it('take a page and one status, and nothing else', () => {
+    const parse = (query: Record<string, unknown>) =>
+      apiCampaignListQuerySchema.safeParse(query).success;
+    for (const status of CAMPAIGN_STATUSES) expect(parse({ status })).toBe(true);
+    expect(parse({ limit: '100', cursor: 'x' })).toBe(true);
+    expect(parse({ status: 'finished' })).toBe(false);
+    expect(parse({ limit: '0' })).toBe(false);
+    expect(parse({ limit: '101' })).toBe(false);
+    expect(parse({ name: 'Festive' })).toBe(false);
+    expect(apiCampaignListQuerySchema.parse({}).limit).toBe(50);
+  });
+
+  it('are refused before anything is read without the scope, and a bad id is not found', async () => {
+    expect(await code(apiListCampaigns({} as never, ctx(['contacts.read']), {}))).toBe('forbidden');
+    expect(await code(apiGetCampaign({} as never, ctx(['contacts.read']), 'x'))).toBe('forbidden');
+    expect(
+      await code(apiListCampaigns({} as never, ctx(['campaigns.read']), { status: 'x' })),
+    ).toBe('validation_failed');
+    expect(await code(apiGetCampaign({} as never, ctx(['campaigns.read']), 'not-an-id'))).toBe(
+      'not_found',
+    );
+  });
+
+  it('are described: the list with its status filter, the campaign with its results, counts only', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    type Operation = {
+      description: string;
+      parameters: Record<string, unknown>[];
+      responses: Record<string, { content?: Record<string, { schema: unknown }> }>;
+    };
+    const paths = doc.paths as unknown as Record<string, Record<string, Operation>>;
+    const list = paths['/campaigns']?.get;
+    expect(list?.parameters.map((p) => p.name ?? p.$ref)).toEqual(['limit', 'cursor', 'status']);
+    expect(list?.parameters.find((p) => p.name === 'status')).toMatchObject({
+      in: 'query',
+      schema: { enum: [...CAMPAIGN_STATUSES] },
+    });
+    expect(JSON.stringify(list?.responses['200'])).toContain('#/components/schemas/Campaign"');
+    const one = paths['/campaigns/{id}']?.get;
+    expect(JSON.stringify(one?.responses['200'])).toContain('CampaignWithResults');
+    expect(Object.keys(one?.responses ?? {})).toContain('404');
+    expect(one?.description).toContain('never recipients, members or costs');
+    const schemas = doc.components.schemas as unknown as Record<
+      string,
+      { properties: Record<string, { description?: string }>; required: string[] }
+    >;
+    expect(schemas.CampaignWithResults?.required).toContain('results');
+    expect(schemas.Campaign?.properties).not.toHaveProperty('results');
+    // Null for a draft: the schema allows null, whatever its description says.
+    expect(schemas.CampaignWithResults?.properties.results).toMatchObject({
+      anyOf: expect.arrayContaining([{ type: 'null' }]),
+    });
+    // Counts only: no recipients, members, costs or the draft's settings.
+    expect(Object.keys(schemas.CampaignWithResults?.properties ?? {}).sort()).toEqual(
+      [...Object.keys(schemas.Campaign?.properties ?? {}), 'results'].sort(),
+    );
+    for (const hidden of ['recipients', 'variables', 'budgetMicros', 'launchedBy', 'segmentId']) {
+      expect(Object.keys(schemas.CampaignWithResults?.properties ?? {})).not.toContain(hidden);
+    }
+    expect(doc.info.description).toContain('read campaigns and their results');
+    expect(API_ROUTES).toEqual(
+      expect.arrayContaining([
+        ['get', '/campaigns'],
+        ['get', '/campaigns/{id}'],
+      ]),
+    );
   });
 });

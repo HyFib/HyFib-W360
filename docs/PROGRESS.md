@@ -1,5 +1,80 @@
 # Progress
 
+## 2026-10-03 — Phase 5: reading campaigns and their results through the public API (P5-08, ADR-125)
+
+Status: **Implemented and locally verified (test data and the Graph stand-in only).** An endpoint
+taking `campaign.status_changed` (ADR-087) learned when a campaign started or finished, with its
+stored counters, but how its messages did (delivered, read, failed, replies, opt-outs) was on
+members' campaign page only: the public API did not read campaigns.
+
+### Completed
+
+- **Design (ADR-125):** a new reading scope, `campaigns.read` ("Read campaigns"), granted only by
+  members holding `campaigns.read`. `GET /campaigns` lists the company's campaigns newest first on
+  exact keyset pages, in one status or all, with the counters they store; `GET /campaigns/{id}`
+  reads one with `results` counted when read as members' campaign page counts them (recipients by
+  state, messages by outcome, replies and opt-outs as attributed, skip reasons and the commonest
+  failure codes), in one read-only snapshot; null for a draft. Counts and names only: no recipients,
+  members or costs.
+- **Migration 0099:** the key and plan scope checks take the 12 scopes (as 0092); existing keys gain
+  nothing, and a plan version that chose its scopes leaves the new one out.
+- **Domain:** `api/campaigns.ts` (`apiCampaignListQuerySchema`, `apiCampaignSchema`,
+  `apiCampaignResultsSchema`, `apiListCampaigns`, `apiGetCampaign`, the latter through
+  `campaignAnalytics`); the scope in `API_SCOPES`, `API_SCOPE_KEYS` and `API_SCOPE_INFO`; OpenAPI:
+  both paths, `Campaign` and `CampaignWithResults`, and the info text.
+- **Web:** `GET /api/v1/campaigns` and `GET /api/v1/campaigns/{id}`; Settings → API keys and the
+  platform plan form list the scope from `API_SCOPE_KEYS`.
+- **Tests:**
+  - Unit (`api.test.ts`, 4): the scope, its permission and that it reads only; the query's rules
+    (every status, the page size, unknown parameters); refusals before anything is read without the
+    scope and for a bad id; the OpenAPI entries, with no recipients, members, costs or draft
+    settings in the schemas.
+  - Integration (`api-campaigns.test.ts`, 2, with the Graph stand-in): three campaigns newest first
+    (a completed run, a draft without a number or template, one cancelled before it started) with
+    their counters, number, template and times; one status at a time and exact pages of two; the
+    run's results from the send pipeline, delivery statuses, a reply and a STOP, equal to what
+    members' campaign page counts; the cancelled one's recipients not counted as cancelled messages;
+    a draft without results; another company's campaign never listed and read as not found; keys
+    without the scope and bad filters refused, naming them.
+  - e2e (`campaigns.spec.ts`, extended): a key created in Settings → API keys with "Read campaigns"
+    lists the completed campaign the test ran and reads the results its page shows.
+- **Docs:** ADR-125; SECURITY (the scope's permission, a bullet); THREAT-MODEL T138; RUNBOOKS
+  (results that differ from the page, 403 and 404); ARCHITECTURE; DEPLOYMENT (the rollout); BACKLOG
+  P5-08; FEATURE-MATRIX W-134, H-033.
+- **Mutation checks:** 44 regressions tried, 42 caught, 2 equivalent:
+  - caught: 3 in who may read (the scope checks, another scope), 8 in the list (the status filter,
+    the cursor ignored or compared the wrong way, oldest first, no next cursor, one campaign too
+    many, longer pages, unknown parameters), 6 in a campaign's fields (the number's phone, a number
+    given to a campaign without one, the template's name, the template joined by the wrong column,
+    the scheduled and cancellation times), 13 in one campaign and its results (a bad id sent to the
+    database, an unknown one answered with nothing, results for drafts or for none, 9 counts and
+    lists mixed up or left out), 5 in the scope (left out of the scope list, granted by the wrong
+    permission, counted as writing, missing from 0099's key or plan check), 5 in OpenAPI and 2
+    through the e2e test (the list route answering nothing, the campaign route answering without
+    `data`);
+  - the unit test first missed results that are never null: it looked for the word, which the
+    description holds. It now checks that the schema allows null, and the regression is caught;
+  - equivalent: the company dropped from the list's or the read's query, which RLS keeps to the
+    key's company anyway (another company's campaign is still never listed or read).
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                                                                                                                       | Result                                                                 |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                          | clean                                                                  |
+| `pnpm test`                                                                                                                                                   | 552 passed                                                             |
+| `pnpm test:integration` on PostgreSQL 18.6 and 17.11                                                                                                          | 758 passed on each                                                     |
+| `pnpm build`, then `campaigns.spec.ts`, `api.spec.ts`, `api-keys.spec.ts` and `api-quota.spec.ts` on chromium and mobile-chromium (database migrated to 0099) | 30 passed                                                              |
+| Mutation checks                                                                                                                                               | 44 regressions tried, 42 caught (2 through the e2e test), 2 equivalent |
+| gitleaks 8.30.1 on the commit                                                                                                                                 | no leaks                                                               |
+
+### Known gaps
+
+- Changing campaigns through the API, each recipient's outcome, costs, filters by template, number
+  or time, and results by day are not built (ADR-125).
+- The repeatable-read snapshot that keeps a campaign's row and its counts in agreement has no test:
+  no test writes between the two reads.
+
 ## 2026-10-03 — Phase 5: finding contacts by name through the public API (P5-08, ADR-124)
 
 Status: **Implemented and locally verified (test data only).** `GET /contacts` found contacts by

@@ -1676,6 +1676,16 @@ cannot store; the refusal's `issues` names the parameter as sent or the body's p
 field) before sending. Before ADR-124 such a request failed with 500 and an `api request failed` log
 line naming the database's encoding error (`invalid byte sequence for encoding "UTF8": 0x00`).
 
+**A key's campaign results differ from the campaign page, or a campaign read through the API answers
+403 or 404 (ADR-125).** `GET /api/v1/campaigns/{id}` counts the results when it is read, as the
+campaign page does on each view: both move as delivery statuses, replies and opt-outs arrive, so
+compare them at the same moment. A reply or an opt-out counts once, for the last campaign message
+queued to the contact in the 72 hours before it, whichever campaign sent it: a later campaign takes
+it from an earlier one. A draft answers `results: null`. 403 `forbidden` means the key lacks
+`campaigns.read` (keys keep the scopes they were created with: create a key with it); 403
+`not_in_plan` means the company's plan version chose its scopes without it (ADR-092). 404 means the
+id is not one of the key's company's campaigns.
+
 **A search with `POST /api/v1/contacts/search` gives short or empty pages, or a 422 (ADR-117).**
 Its pages read at most 2,000 contacts, as filtered lists do (entry above): the integration sends the
 same conditions with each `nextCursor` until it is `null`. A 422 names the condition's part:

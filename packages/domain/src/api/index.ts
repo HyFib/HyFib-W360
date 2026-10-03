@@ -21,3 +21,4 @@ export * from './message-changes';
 export * from './members';
 export * from './automations';
 export * from './webhook-endpoints';
+export * from './campaigns';

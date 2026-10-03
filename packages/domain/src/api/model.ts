@@ -18,6 +18,7 @@ export const API_SCOPE_KEYS = [
   'messages.reply',
   'conversations.read',
   'conversations.write',
+  'campaigns.read',
   'automations.start',
   'webhooks.manage',
 ] as const satisfies readonly ApiScope[];
@@ -90,6 +91,13 @@ export const API_SCOPE_INFO: Record<
       'Mark conversations resolved, or open again, assign them to members or move them between teams, as members do in the inbox, and add internal notes the team reads there (WhatsApp never receives them). Resolving a conversation or assigning it to a member stops an automation answering it.',
     permission: 'inbox.supervise',
     writes: true,
+  },
+  'campaigns.read': {
+    label: 'Read campaigns',
+    description:
+      "List the company's campaigns and read each one's progress and results: messages sent, delivered, read and failed, replies and opt-outs, and why recipients were skipped. Never recipients, members or costs.",
+    permission: 'campaigns.read',
+    writes: false,
   },
   'automations.start': {
     label: 'Start automations',

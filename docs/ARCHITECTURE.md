@@ -822,8 +822,9 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   grant a scope only when they hold its permission (`templates.read`, `contacts.read`,
   `contacts.write`, `inbox.reply` for `messages.send` and `messages.reply`, `campaigns.send` for
   `messages.send_marketing`, `inbox.read_all` for `conversations.read`, `inbox.supervise` for
-  `conversations.write`, `automations.publish` for `automations.start`); at most 20 active keys
-  per company, counted under an advisory lock.
+  `conversations.write`, `automations.publish` for `automations.start`, `tenant.settings.manage` for
+  `contact_fields.manage`, and `campaigns.read` for itself, ADR-125); at most 20 active keys per
+  company, counted under an advisory lock.
   Rotation creates a key with the same name, scopes, lifetime and networks and lets the old one work
   for 0 to 72 hours (0 revokes it); revocation is immediate. Each change is audited without the
   token. A key may list up to 20 networks it accepts requests from (`allowed_networks cidr[]`, 0051,
@@ -886,6 +887,12 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   it and refuses it empty) adds `display_name ilike likePattern(name)` to the windowed filters, the
   comparison members' search makes (`contacts/service.ts`), so a page filtered by name reads at most
   `API_CONTACT_SEARCH_WINDOW` contacts, as one filtered by tag or field does.
+- **Campaigns (0099, ADR-125):** `campaigns.read` (reading) lists the company's campaigns from their
+  rows (`apiListCampaigns`, `api/campaigns.ts`: keyset pages over `campaigns_list_idx`, an optional
+  status, the template and number joined by the company and id) and reads one with
+  `campaignAnalytics` (`campaigns/service.ts`), the counting members' campaign page uses, in one
+  repeatable-read, read-only transaction, so the row and its counts agree; a draft has no results.
+  The answers hold counts and names only.
 - **Searching contacts (ADR-117):** `POST /contacts/search` (`api/contact-search.ts`) parses
   segments' conditions less `last_message` and `campaign`, checks them against the company's fields
   with segments' rules (`fieldConditionProblem` and `comparisonTakesValue` in

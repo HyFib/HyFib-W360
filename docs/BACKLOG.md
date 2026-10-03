@@ -515,14 +515,20 @@ verification, app review, Embedded Signup configuration).
   contacts whose name contains a text whatever its case, as members' search does, the text taken as
   written, on the windowed pages of the other filters; a request whose query string or body holds
   the NUL character is refused with 422 naming where, instead of failing in the database).
+  **[Reading campaigns built, locally verified]** (ADR-125: a new reading scope, `campaigns.read`,
+  lists the company's campaigns newest first, in one status or all, and reads one with its results
+  counted when read as its page counts them: recipients by state, messages sent, delivered, read and
+  failed, replies, opt-outs, skip reasons and failure codes; counts only, no recipients, members or
+  costs; migration 0099).
   Remaining: media messages, call-to-action messages through the API, taking reactions back,
   choosing conversations to change by a filter, media downloads, starting or stopping runs for many
   contacts in one call, bulk sends in one call, changing a field's type, changing numbers, choosing
   contacts to change by a filter, contact searches by conversation and campaign conditions, a name
   condition in `POST /contacts/search`, which fields of a contact changed in the contact feed
-  (webhooks name them since ADR-121), limits per endpoint, availability per single endpoint (plans
-  choose per scope since ADR-092). The one-argument key lookup kept for rolling deploys (0051) is
-  dropped (0074). Replaying many deliveries in one call is built with P5-09 (ADR-095).
+  (webhooks name them since ADR-121), changing campaigns and reading each recipient's outcome
+  through the API, limits per endpoint, availability per single endpoint (plans choose per scope
+  since ADR-092). The one-argument key lookup kept for rolling deploys (0051) is dropped (0074).
+  Replaying many deliveries in one call is built with P5-09 (ADR-095).
 - **P5-09 Outgoing webhooks** **[built, locally verified; delivered to local test receivers only]**
   (ADR-053): up to 10 endpoints per company (`developer.manage`) for `message.received`,
   `message.status`, `consent.changed` and `template.status_changed`, captured by database triggers

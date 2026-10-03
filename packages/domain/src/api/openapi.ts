@@ -2,6 +2,7 @@ import { z } from 'zod';
 import {
   AUTOMATION_END_REASONS,
   AUTOMATION_RUN_STATUSES,
+  CAMPAIGN_STATUSES,
   CONVERSATION_STATUSES,
   MESSAGE_STATUSES,
   TEAM_ASSIGNMENT_MODES,
@@ -39,6 +40,7 @@ import {
 import { CONTACT_FIELD_KEY_RE } from '../contacts/field-definitions';
 import { MAX_CONTACT_FIELDS } from '../contacts/fields';
 import { apiStartAutomationSchema } from './automations';
+import { apiCampaignSchema, apiCampaignWithResultsSchema } from './campaigns';
 import { apiContactFieldCreateSchema, apiContactFieldUpdateSchema } from './contact-fields';
 import { apiContactSearchSchema } from './contact-search';
 import { apiContactSchema } from './contact-view';
@@ -502,7 +504,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       title: 'HyFib W360 API',
       version: '1.0.0',
       description: [
-        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations, their messages (one conversation or all of them) and their notes, resolve, reopen and assign conversations or move them between teams, manage contacts and consent, and read message status for your company.',
+        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations, their messages (one conversation or all of them) and their notes, resolve, reopen and assign conversations or move them between teams, manage contacts and consent, read campaigns and their results, and read message status for your company.',
         '',
         'Authenticate with `Authorization: Bearer <API key>`; keys are created in Settings → API keys and belong to the company. A key, and the company for all its keys, can be limited to the addresses its systems call from: a request from any other address is refused with 403 (reason `ip_not_allowed`).',
         `Scopes: ${API_SCOPE_KEYS.map((s) => `\`${s}\` (${API_SCOPE_INFO[s].label.toLowerCase()})`).join(', ')}. A company's plan may include only some of them: a request that needs a scope the plan leaves out is refused with 403 (reason \`not_in_plan\`), whatever scopes its key has.`,
@@ -1049,6 +1051,41 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
         },
       },
+      '/campaigns': {
+        get: {
+          operationId: 'listCampaigns',
+          summary: 'Campaigns, newest first',
+          description: `${scopeNote('campaigns.read')} The company's campaigns, whoever made them, with the counters kept as they run: the audience taken when each was submitted and the recipients queued and skipped. GET /campaigns/{id} adds the results.`,
+          parameters: [
+            ...pageParams,
+            {
+              name: 'status',
+              in: 'query',
+              schema: { type: 'string', enum: [...CAMPAIGN_STATUSES] },
+              description: 'Only campaigns in this status.',
+            },
+          ],
+          responses: {
+            '200': { description: 'A page of campaigns.', content: pageOf('Campaign') },
+            ...errors(401, 403, 422, 429, 500),
+          },
+        },
+      },
+      '/campaigns/{id}': {
+        get: {
+          operationId: 'getCampaign',
+          summary: 'A campaign with its results',
+          description: `${scopeNote('campaigns.read')} The results are counted when the campaign is read, as its page in the app counts them: messages sent, delivered, read and failed, replies and opt-outs, why recipients were skipped and the commonest WhatsApp error codes of failed messages; null for a draft. Counts only: never recipients, members or costs.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': {
+              description: 'The campaign with its results.',
+              content: json(dataOf(ref('CampaignWithResults'))),
+            },
+            ...errors(401, 403, 404, 429, 500),
+          },
+        },
+      },
       '/automations': {
         get: {
           operationId: 'listAutomations',
@@ -1574,6 +1611,8 @@ export function buildOpenApiDocument(serverUrl: string) {
         Team: jsonSchema(apiTeamSchema),
         AddConversationNote: jsonSchema(apiAddNoteSchema, 'input'),
         ConversationNote: jsonSchema(apiConversationNoteSchema),
+        Campaign: jsonSchema(apiCampaignSchema),
+        CampaignWithResults: jsonSchema(apiCampaignWithResultsSchema),
         Automation: jsonSchema(apiAutomationSchema),
         AutomationRun: jsonSchema(apiAutomationRunSchema),
         StartAutomationRun: jsonSchema(apiStartAutomationSchema, 'input'),
@@ -1634,6 +1673,8 @@ export const API_ROUTES = [
   ['get', '/conversations/{id}/messages'],
   ['get', '/members'],
   ['get', '/teams'],
+  ['get', '/campaigns'],
+  ['get', '/campaigns/{id}'],
   ['get', '/automations'],
   ['post', '/automations/{id}/runs'],
   ['get', '/automation-runs/{id}'],

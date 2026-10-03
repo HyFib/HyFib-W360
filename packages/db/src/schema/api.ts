@@ -14,6 +14,7 @@ export const API_SCOPES = [
   'messages.reply',
   'conversations.read',
   'conversations.write',
+  'campaigns.read',
   'automations.start',
   'webhooks.manage',
 ] as const;
