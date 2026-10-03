@@ -4774,3 +4774,42 @@ Not built: changing campaigns through the API (creating, submitting, approving, 
 or cancelling them), each recipient's outcome, costs, filters by template, number or time,
 results for a time range or grouped by day, and campaign results in `campaign.status_changed`
 (ADR-087 left them out: they change with every message status).
+
+## ADR-126 Conversation and campaign conditions in contact searches through the public API (2026-10-03)
+
+Context: `POST /contacts/search` finds contacts with segments' conditions (ADR-117), less the two
+that read conversations and campaigns: `last_message` (the contact wrote, or did not, in the last
+days) and `campaign` (what happened to a campaign's message to the contact). ADR-117 left them out
+because `contacts.read` gives neither, conversations need `conversations.read` and campaigns had no
+scope. ADR-125 added `campaigns.read`. Integrations ask for both: a marketing tool following up
+with the recipients who read a campaign but did not reply, a support tool listing the customers who
+wrote this week.
+
+Decision:
+
+- **Both conditions, as segments have them:** `last_message` with `within_days` (contacts who wrote
+  in the last 1 to 365 days, in any of their conversations) or `not_within_days` (the others,
+  contacts who never wrote included); `campaign` with one of the company's campaigns and an outcome
+  among the recipients it was sent to: `delivered` (read included), `not_delivered` (failed or not
+  delivered yet), `read`, `replied` (a reply was counted for the campaign's message: the last
+  campaign message the contact was sent in the 72 hours before replying, once WhatsApp had accepted
+  it; the results of ADR-125 count it once the message is delivered) or `not_replied` (delivered,
+  without a reply). Recipients the campaign skipped or cancelled match no outcome. The conditions
+  are checked by segments' rules and turned into SQL by segments' own function, so a key and a
+  segment with the same conditions find the same contacts. `days` is a JSON number.
+- **Each also needs the scope that reads what it reads:** a search with a `last_message` condition
+  needs `conversations.read`, and one with a `campaign` condition `campaigns.read`, as well as
+  `contacts.read`; without it the search is refused with 403 before anything is read, naming the
+  scope (and with `not_in_plan` when the plan leaves the scope out, ADR-092). Members see a
+  campaign's recipients with `campaigns.read` and `contacts.read` together, the same pair.
+- **A campaign the company does not have** (unknown, or another company's) is refused with 422
+  naming the condition's `campaignId`, as segments refuse it; a draft has no recipients and finds
+  nobody.
+- **The same pages:** each page still reads at most 2,000 of the company's contacts (ADR-113); the
+  two conditions are checked for those contacts only, through the conversations' and the campaign
+  recipients' indexes.
+- **No migration;** the OpenAPI document lists the two condition shapes.
+
+Not built: groups of conditions, a name condition (segments have none), conditions on a
+conversation's status, member or team, on a campaign's message other than these outcomes (clicked
+buttons, opt-outs), and on automation runs.

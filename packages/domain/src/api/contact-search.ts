@@ -1,8 +1,20 @@
 import { z } from 'zod';
 import { AppError, notFound } from '@w360/core';
-import { CONTACT_SOURCES, eq, tenants, type ContactFieldType } from '@w360/db';
 import {
+  CONTACT_SOURCES,
+  and,
+  campaigns,
+  eq,
+  inArray,
+  tenants,
+  type ContactFieldType,
+  type Tx,
+} from '@w360/db';
+import {
+  CAMPAIGN_OUTCOMES,
   FIELD_COMPARISONS,
+  LAST_MESSAGE_COMPARISONS,
+  LAST_MESSAGE_DAYS,
   SEGMENT_LIMITS,
   comparisonTakesValue,
   fieldComparisonsFor,
@@ -23,9 +35,10 @@ import { API_LIMITS } from './model';
 
 /**
  * Finding contacts with segments' conditions through the public API (ADR-117). The conditions are
- * those of segments (P3-04) less the two that read conversations or campaigns; they are checked by
- * segments' rules and turned into SQL by segments' own function, so a key and a segment with the
- * same conditions find the same contacts. Pages are those of `GET /contacts` (ADR-113).
+ * those of segments (P3-04); the two that read conversations and campaigns also need the scope that
+ * reads them (ADR-126). They are checked by segments' rules and turned into SQL by segments' own
+ * function, so a key and a segment with the same conditions find the same contacts. Pages are those
+ * of `GET /contacts` (ADR-113).
  */
 
 const apiSearchConditionSchema = z.discriminatedUnion('type', [
@@ -87,6 +100,28 @@ const apiSearchConditionSchema = z.discriminatedUnion('type', [
         .string()
         .regex(/^[1-9][0-9]{0,3}$/, 'Give a country calling code: 1 to 4 digits, without +.')
         .describe('A country calling code without +, like 91: contacts whose number has it.'),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('last_message'),
+      op: z
+        .enum(LAST_MESSAGE_COMPARISONS)
+        .describe(
+          'within_days: contacts who wrote in the last `days` days; not_within_days: the others, contacts who never wrote included. Needs conversations.read too.',
+        ),
+      days: z.number().int().min(LAST_MESSAGE_DAYS.min).max(LAST_MESSAGE_DAYS.max),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('campaign'),
+      campaignId: z.uuid().describe('One of the company’s campaigns (GET /campaigns).'),
+      outcome: z
+        .enum(CAMPAIGN_OUTCOMES)
+        .describe(
+          'What happened to the campaign’s message to the contact, among the recipients it was sent to: delivered (or read), not_delivered (failed or not delivered yet), read, replied (a reply was counted for it: the last campaign message the contact was sent in the 72 hours before replying), or not_replied (delivered, without a reply). Needs campaigns.read too.',
+        ),
     })
     .strict(),
 ]);
@@ -174,9 +209,39 @@ function segmentConditions(
 }
 
 /**
+ * Refuses a campaign condition naming a campaign the company does not have, as segments do, naming
+ * the condition's `campaignId`; another company's campaign reads as one that does not exist.
+ */
+async function assertCampaignsExist(
+  tx: Tx,
+  tenantId: string,
+  conditions: readonly ApiSearchCondition[],
+): Promise<void> {
+  const named = conditions.flatMap((c) => (c.type === 'campaign' ? [c.campaignId] : []));
+  if (named.length === 0) return;
+  const found = new Set(
+    (
+      await tx
+        .select({ id: campaigns.id })
+        .from(campaigns)
+        .where(and(eq(campaigns.tenantId, tenantId), inArray(campaigns.id, named)))
+    ).map((r) => r.id),
+  );
+  conditions.forEach((c, i) => {
+    if (c.type === 'campaign' && !found.has(c.campaignId)) {
+      throw invalid(
+        `conditions.${i}.campaignId`,
+        'The company has no campaign with this id (GET /campaigns).',
+      );
+    }
+  });
+}
+
+/**
  * The company's contacts matching the conditions, newest first, on the pages `GET /contacts` reads
  * (ADR-113): each reads at most API_CONTACT_SEARCH_WINDOW contacts, and both of its reads see one
- * snapshot. It only reads, so it needs no Idempotency-Key and records nothing.
+ * snapshot. A `last_message` condition also needs `conversations.read`, and a `campaign` condition
+ * `campaigns.read` (ADR-126). It only reads, so it needs no Idempotency-Key and records nothing.
  */
 export async function apiSearchContacts(
   deps: Pick<OutboundDeps, 'db'>,
@@ -185,12 +250,15 @@ export async function apiSearchContacts(
 ): Promise<{ data: ApiContact[]; nextCursor: string | null }> {
   assertScope(ctx, 'contacts.read');
   const q = parseInput(apiContactSearchSchema, input);
+  if (q.conditions.some((c) => c.type === 'last_message')) assertScope(ctx, 'conversations.read');
+  if (q.conditions.some((c) => c.type === 'campaign')) assertScope(ctx, 'campaigns.read');
   const cursor = decodeKeysetCursor(q.cursor);
   return deps.db.run(
     ctx.scope,
     async (tx) => {
       const fields = await loadFieldTypes(tx, ctx.tenant.id);
       const conditions = segmentConditions(q.conditions, fields);
+      await assertCampaignsExist(tx, ctx.tenant.id, q.conditions);
       // `created` days are the company's, as in segments.
       const [company] = await tx
         .select({ timezone: tenants.timezone })

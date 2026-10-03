@@ -71,9 +71,17 @@ describe('contact searches through the API (ADR-117)', () => {
       { conditions: [{ type: 'source', source: 'fax' }] },
       { conditions: [{ type: 'calling_code', prefix: '+91' }] },
       { conditions: [{ type: 'calling_code', prefix: '01' }] },
-      // Segments' conditions on conversations and campaigns are not offered.
-      { conditions: [{ type: 'last_message', op: 'within_days', days: 7 }] },
-      { conditions: [{ type: 'campaign', campaignId: TENANT, outcome: 'replied' }] },
+      { conditions: [{ type: 'last_message', op: 'within_days', days: 0 }] },
+      { conditions: [{ type: 'last_message', op: 'within_days', days: 366 }] },
+      { conditions: [{ type: 'last_message', op: 'within_days', days: 2.5 }] },
+      { conditions: [{ type: 'last_message', op: 'within_days', days: '7' }] },
+      { conditions: [{ type: 'last_message', op: 'since', days: 7 }] },
+      { conditions: [{ type: 'last_message', op: 'within_days' }] },
+      { conditions: [{ type: 'last_message', op: 'within_days', days: 7, extra: 1 }] },
+      { conditions: [{ type: 'campaign', campaignId: 'c1', outcome: 'replied' }] },
+      { conditions: [{ type: 'campaign', campaignId: TENANT, outcome: 'clicked' }] },
+      { conditions: [{ type: 'campaign', campaignId: TENANT }] },
+      { conditions: [{ type: 'campaign', outcome: 'read' }] },
     ]) {
       expect(apiContactSearchSchema.safeParse(body).success).toBe(false);
     }
@@ -90,6 +98,13 @@ describe('contact searches through the API (ADR-117)', () => {
           { type: 'created', op: 'after', date: '2026-01-01' },
           { type: 'source', source: 'store' },
           { type: 'calling_code', prefix: '971' },
+          { type: 'last_message', op: 'within_days', days: 1 },
+          { type: 'last_message', op: 'not_within_days', days: 365 },
+          ...['delivered', 'not_delivered', 'read', 'replied', 'not_replied'].map((outcome) => ({
+            type: 'campaign',
+            campaignId: TENANT,
+            outcome,
+          })),
         ],
       }).success,
     ).toBe(true);
@@ -112,6 +127,50 @@ describe('contact searches through the API (ADR-117)', () => {
         }),
       ),
     ).toMatchObject({ code: 'validation_failed' });
+  });
+
+  it('needs conversations.read for a last_message condition and campaigns.read for a campaign one, before it reads anything (ADR-126)', async () => {
+    const lastMessage = { type: 'last_message', op: 'within_days', days: 7 };
+    const campaign = { type: 'campaign', campaignId: TENANT, outcome: 'delivered' };
+    const refused = async (scopes: string[], conditions: unknown[]) => {
+      try {
+        await apiSearchContacts({ db: untouched }, ctx(scopes), { conditions });
+      } catch (error) {
+        if (isAppError(error)) return [error.code, error.publicMessage];
+        throw error;
+      }
+      throw new Error('expected a refusal');
+    };
+    expect(await refused(['contacts.read'], [isSet, lastMessage])).toEqual([
+      'forbidden',
+      'This API key does not have the conversations.read scope.',
+    ]);
+    expect(await refused(['contacts.read', 'conversations.read'], [campaign])).toEqual([
+      'forbidden',
+      'This API key does not have the campaigns.read scope.',
+    ]);
+    expect(await refused(['conversations.read', 'campaigns.read'], [lastMessage])).toEqual([
+      'forbidden',
+      'This API key does not have the contacts.read scope.',
+    ]);
+    // With the scopes, the search goes on to the database.
+    for (const [scopes, conditions] of [
+      [['contacts.read', 'conversations.read'], [lastMessage]],
+      [
+        ['contacts.read', 'campaigns.read'],
+        [campaign, isSet],
+      ],
+      [
+        ['contacts.read', 'conversations.read', 'campaigns.read'],
+        [lastMessage, campaign],
+      ],
+    ] as const) {
+      const { db, reads } = reached();
+      await expect(
+        apiSearchContacts({ db }, ctx([...scopes]), { conditions: [...conditions] }),
+      ).rejects.toThrow('reached the database');
+      expect(reads).toHaveLength(1);
+    }
   });
 
   it('reads for suspended and restricted companies too, in one read-only snapshot', async () => {
@@ -141,6 +200,9 @@ describe('contact searches through the API (ADR-117)', () => {
     expect(search.description).toContain("segments' conditions");
     expect(search.description).toContain('at most 2,000 of the company');
     expect(search.description).toContain('like `conditions.1.key`');
+    expect(search.description).toContain('(`last_message`, which also needs `conversations.read`)');
+    expect(search.description).toContain('(`campaign`, which also needs `campaigns.read`)');
+    expect(search.description).toContain('or a campaign it does not have');
     expect(search.description).toContain('no `Idempotency-Key` is needed');
     expect(search.requestBody).toEqual({
       required: true,
@@ -163,6 +225,8 @@ describe('contact searches through the API (ADR-117)', () => {
       'created',
       'source',
       'calling_code',
+      'last_message',
+      'campaign',
     ]);
   });
 });

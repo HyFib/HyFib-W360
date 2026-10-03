@@ -1,5 +1,73 @@
 # Progress
 
+## 2026-10-03 — Phase 5: conversation and campaign conditions in API contact searches (P5-08, ADR-126)
+
+Status: **Implemented and locally verified (test data and the Graph stand-in only).** `POST
+/contacts/search` found contacts with segments' conditions (ADR-117) less the two that read
+conversations and campaigns, `last_message` and `campaign`, because `contacts.read` gave neither and
+campaigns had no scope. ADR-125 added `campaigns.read`.
+
+### Completed
+
+- **Design (ADR-126):** both conditions as segments have them: `last_message` (`within_days` or
+  `not_within_days`, 1 to 365 days; contacts who never wrote are among those who did not write) and
+  `campaign` (one of the company's campaigns and an outcome among the recipients it was sent to:
+  delivered, not_delivered, read, replied, not_replied). A `last_message` condition also needs
+  `conversations.read` and a `campaign` condition `campaigns.read`, refused with 403 before anything
+  is read; a campaign the company does not have is refused with 422 naming the condition's
+  `campaignId`. No migration.
+- **Domain:** `api/contact-search.ts` takes the two shapes (`days` a JSON number), checks the scopes
+  after parsing and the named campaigns in the company before building the query; the outcome list,
+  the `last_message` comparisons and the days' bounds move to constants in `campaigns/segments.ts`,
+  shared by segments and the API. OpenAPI: the two shapes in `ContactSearch`, and the description
+  naming the scopes and the refusal of an unknown campaign.
+- **Tests:**
+  - Unit (`contact-search.test.ts`, 1 new and 2 changed): the two conditions' forms (days 1 to 365,
+    whole JSON numbers, the comparisons and outcomes, no other keys); each scope needed before
+    anything is read, named in the refusal, and the search reaching the database with them; the
+    OpenAPI entries.
+  - Integration: `api-contact-search.test.ts` (1 new, 1 changed): contacts who wrote an hour, 10 or
+    40 days ago or never, found by `within_days` and `not_within_days`, with a tag all or any, never
+    another company's contact; the same counts as segments' preview; keys with contacts.read or
+    conversations.read alone refused. `api-campaigns.test.ts` (1 new): each outcome among the
+    recipients of a run campaign (delivered, read, failed, a reply, a skipped recipient matching
+    none), a draft finding nobody, the same counts as segments' preview, another company's campaign
+    refused naming `conditions.1.campaignId`, keys with contacts.read or campaigns.read alone
+    refused.
+  - e2e (`campaigns.spec.ts`, extended): the key that reads the campaign also reads contacts and
+    conversations; after Asha answers, it finds her by `replied` and `delivered` and as the contact
+    who wrote in the last day, and Bina, skipped, by no outcome and as the contact who did not.
+- **Docs:** ADR-126; SECURITY (the ADR-117 bullet, a bullet); THREAT-MODEL T139; RUNBOOKS (403, 422
+  and unexpected results); ARCHITECTURE; DEPLOYMENT (the rollout); BACKLOG P5-08; FEATURE-MATRIX
+  W-134, H-033.
+- **Mutation checks:** 21 regressions tried, 20 caught, 1 equivalent:
+  - caught: 4 in who may search (each scope dropped, the two swapped, a scope needed only when
+    every condition needs it), 4 in the campaign check (never run, an unknown campaign taken and a
+    known one refused, the refusal naming the first condition or the condition itself), 4 in the
+    conditions' form (days unbounded or taken as text, unknown keys taken, an outcome segments do
+    not have), 5 in what they find (not_within_days finding those who wrote, every campaign read
+    for one, replied read from opt-outs, not_replied including undelivered messages, skipped
+    recipients matched), 2 in OpenAPI and 1 through the e2e test (last_message finding nobody);
+  - equivalent: the company dropped from the campaign check's query, which RLS keeps to the key's
+    company anyway (another company's campaign is still refused).
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                                                                                             | Result                                                                 |
+| ----------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                | clean                                                                  |
+| `pnpm test`                                                                                                                         | 553 passed                                                             |
+| `pnpm test:integration` on PostgreSQL 18.6 and 17.11                                                                                | 760 passed on each                                                     |
+| `pnpm build`, then `campaigns.spec.ts` and `api-contact-search.spec.ts` on chromium and mobile-chromium (database migrated to 0099) | 6 passed                                                               |
+| Mutation checks                                                                                                                     | 21 regressions tried, 20 caught (1 through the e2e test), 1 equivalent |
+| gitleaks 8.30.1 on the commit                                                                                                       | no leaks                                                               |
+
+### Known gaps
+
+- Groups of conditions, a name condition, conditions on a conversation's status, member or team,
+  campaign outcomes other than these (opt-outs, buttons) and automation runs are not built
+  (ADR-126).
+
 ## 2026-10-03 — Phase 5: reading campaigns and their results through the public API (P5-08, ADR-125)
 
 Status: **Implemented and locally verified (test data and the Graph stand-in only).** An endpoint

@@ -1686,6 +1686,18 @@ it from an earlier one. A draft answers `results: null`. 403 `forbidden` means t
 `not_in_plan` means the company's plan version chose its scopes without it (ADR-092). 404 means the
 id is not one of the key's company's campaigns.
 
+**A contact search with a `last_message` or `campaign` condition answers 403 or 422, or finds other
+contacts than expected (ADR-126).** 403 `forbidden` names the scope the key lacks:
+`conversations.read` for `last_message`, `campaigns.read` for `campaign` (keys keep the scopes they
+were created with: create a key with it). 422 naming `conditions.N.campaignId` means the company has
+no such campaign (`GET /campaigns` lists them). `last_message` reads when the contact last wrote, in
+any conversation, so a contact who only received messages has not written; `not_within_days` also
+finds contacts who never wrote. Campaign outcomes count only the recipients a message was sent to:
+skipped and cancelled recipients match none. `replied` follows the campaign's reply attribution (the
+last campaign message in the 72 hours before the reply, of any campaign), so a later campaign takes
+a reply from an earlier one. A segment with the same conditions finds the same contacts: preview it
+in the app to compare.
+
 **A search with `POST /api/v1/contacts/search` gives short or empty pages, or a 422 (ADR-117).**
 Its pages read at most 2,000 contacts, as filtered lists do (entry above): the integration sends the
 same conditions with each `nextCursor` until it is `null`. A 422 names the condition's part:

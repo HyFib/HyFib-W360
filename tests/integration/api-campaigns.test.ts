@@ -4,11 +4,13 @@ import { authorizedTenantScope, type TenantScope } from '@w360/db';
 import {
   apiGetCampaign,
   apiListCampaigns,
+  apiSearchContacts,
   authenticateApiToken,
   createApiKeysService,
   createCampaignsService,
   createConsentService,
   createContactsService,
+  createSegmentsService,
   createTemplatesService,
   processSendIntent,
   processTemplateSubmit,
@@ -26,7 +28,8 @@ import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './what
  * exact pages; one campaign with its results counted as members' campaign page counts them, from
  * the send pipeline, delivery statuses, a reply and a STOP, and a cancelled one's recipients; null
  * results for a draft; never another company's campaigns; refusals without the scope or with a bad
- * filter.
+ * filter. Also finding contacts by what happened to a campaign's message to them, which needs
+ * contacts.read and campaigns.read (ADR-126).
  */
 let fx: WhatsAppFixture;
 
@@ -379,5 +382,89 @@ describe('reading campaigns (ADR-125)', () => {
       'validation_failed',
     );
     expect((await apiListCampaigns(deps(), ctx, {})).data).toEqual([]);
+  });
+});
+
+describe('finding contacts by campaign outcome (ADR-126)', () => {
+  it('finds the recipients by what happened to their message, with campaigns.read, as segments do', async () => {
+    const s = await setup();
+    // Created in this order, so pages list them newest first.
+    const asha = await s.contact('+919820002001', 'Asha');
+    const bina = await s.contact('+919820002002', 'Bina');
+    const chitra = await s.contact('+919820002003', 'Chitra');
+    await s.contact('+919820002004', 'Dev', false);
+    const festive = await s.draft('Festive launch');
+    await s.run(festive);
+    const draft = await s.draft('Spring draft');
+    const wamids = await fx.query<{ external_message_id: string; contact_id: string }>(
+      `SELECT m.external_message_id, cv.contact_id FROM app.messages m
+         JOIN app.conversations cv ON cv.id = m.conversation_id WHERE m.campaign_id = $1`,
+      [festive],
+    );
+    const wamidOf = (contactId: string) =>
+      wamids.find((w) => w.contact_id === contactId)!.external_message_id;
+    const now = String(Math.floor(Date.now() / 1000));
+    await fx.deliver(
+      fx.messagesBody(s.c, {
+        statuses: [
+          { id: wamidOf(asha), status: 'delivered', timestamp: now, recipient_id: '919820002001' },
+          { id: wamidOf(bina), status: 'read', timestamp: now, recipient_id: '919820002002' },
+          {
+            id: wamidOf(chitra),
+            status: 'failed',
+            timestamp: now,
+            recipient_id: '919820002003',
+            errors: [{ code: 131049, title: 'Not delivered to maintain healthy engagement.' }],
+          },
+        ],
+      }),
+    );
+    await fx.deliver(
+      fx.messagesBody(s.c, { messages: [{ waId: '919820002001', text: 'Interested!' }] }),
+    );
+    const other = await setup();
+    await other.contact('+919820002005', 'Other');
+    const theirs = await other.draft('Their campaign');
+
+    const reader = await apiKey(s.c, ['contacts.read', 'campaigns.read']);
+    const outcome = (campaignId: string, value: string) => ({
+      type: 'campaign',
+      campaignId,
+      outcome: value,
+    });
+    const found = async (conditions: unknown[]) =>
+      (await apiSearchContacts(deps(), reader, { conditions, limit: 100 })).data.map((c) => c.name);
+    // Dev was skipped: no outcome finds him.
+    expect(await found([outcome(festive, 'delivered')])).toEqual(['Bina', 'Asha']);
+    expect(await found([outcome(festive, 'not_delivered')])).toEqual(['Chitra']);
+    expect(await found([outcome(festive, 'read')])).toEqual(['Bina']);
+    expect(await found([outcome(festive, 'replied')])).toEqual(['Asha']);
+    expect(await found([outcome(festive, 'not_replied')])).toEqual(['Bina']);
+    // A draft has no recipients yet.
+    expect(await found([outcome(draft, 'delivered')])).toEqual([]);
+    expect(await found([outcome(draft, 'not_delivered')])).toEqual([]);
+    // The same contacts a segment with the same conditions counts.
+    const segments = createSegmentsService({ db: fx.dbs.app, clock: systemClock });
+    for (const value of ['delivered', 'not_delivered', 'read', 'replied', 'not_replied']) {
+      const definition = { match: 'all', conditions: [outcome(festive, value)] };
+      const preview = await segments.previewDefinition(s.owner, definition);
+      expect((await found(definition.conditions)).length).toBe(preview.count);
+    }
+    // Another company's campaign is one the company does not have, named by its place.
+    const unknown = await refusal(
+      apiSearchContacts(deps(), reader, {
+        conditions: [outcome(festive, 'delivered'), outcome(theirs, 'delivered')],
+      }),
+    );
+    expect(unknown).toEqual({ code: 'validation_failed', paths: ['conditions.1.campaignId'] });
+    // A key that reads contacts but not campaigns is refused, and so is one that reads only
+    // campaigns.
+    for (const scopes of [['contacts.read'], ['campaigns.read']] as const) {
+      const key = await apiKey(s.c, [...scopes]);
+      const r = await refusal(
+        apiSearchContacts(deps(), key, { conditions: [outcome(festive, 'delivered')] }),
+      );
+      expect(r.code).toBe('forbidden');
+    }
   });
 });

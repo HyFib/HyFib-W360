@@ -625,6 +625,14 @@ Phase 5 rules (Public API, P5-08):
   pass over its recipients, and rate limits and monthly requests bound how often a key repeats it.
   As a reading scope it keeps working while the company is suspended or restricted, as members'
   campaign pages do.
+- Conversation and campaign conditions in contact searches (ADR-126): a `last_message` condition
+  (whether a contact wrote in the last days) needs `conversations.read` as well as `contacts.read`,
+  and a `campaign` condition (what happened to a campaign's message to a contact) needs
+  `campaigns.read`; without the scope the search is refused before anything is read. With
+  `campaigns.read` and `contacts.read` a key learns which contacts a campaign reached, read or got a
+  reply from, as members who hold both see a campaign's recipients. A campaign the key's company
+  does not have (another company's included) is refused as unknown, and the campaign id and the days
+  are bound parameters, never SQL. The pages read at most 2,000 contacts, as before.
 - Following contact changes (ADR-114): `GET /contact-changes` reads the key's company's changes
   only (`contacts.read`, RLS and an explicit company filter). Its cursor, a database transaction id
   and a row id, is sealed with the keyring (AES-256-GCM) with the company in the associated data, so
@@ -653,11 +661,11 @@ Phase 5 rules (Public API, P5-08):
 - Searching contacts (ADR-117): `POST /contacts/search` (`contacts.read`) finds the key's company's
   live contacts only (RLS and an explicit company filter; erased contacts never match), with
   segments' conditions on data a contact already shows (custom fields, tags, consent, creation day,
-  source, calling code). Segments' conditions on conversations and campaigns are not offered, since
-  `contacts.read` does not give them. Field keys are checked against the company's fields first, and
+  source, calling code). Segments' conditions on conversations and campaigns also need the scope
+  that reads them (ADR-126, below). Field keys are checked against the company's fields first, and
   keys, values, tags and dates are bound parameters, never part of the SQL text; `contains` escapes
-  `%` and `_`, so a value is never a pattern. Each page reads at most 2,000 contacts, so no condition
-  can make one request read every contact a company has. It writes nothing.
+  `%` and `_`, so a value is never a pattern. Each page reads at most 2,000 contacts, so no
+  condition can make one request read every contact a company has. It writes nothing.
 - Only the token's SHA-256 is stored; the runtime role cannot read it. The token is shown once in
   the browser and kept only in the page's memory; it is never logged, and audit entries carry the
   public prefix only.

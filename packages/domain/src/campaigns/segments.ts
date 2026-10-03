@@ -48,6 +48,18 @@ export const FIELD_COMPARISONS = [
 ] as const;
 export type FieldComparison = (typeof FIELD_COMPARISONS)[number];
 
+/** Whether a contact wrote within the last days (the `last_message` condition), and how far back. */
+export const LAST_MESSAGE_COMPARISONS = ['within_days', 'not_within_days'] as const;
+export const LAST_MESSAGE_DAYS = { min: 1, max: 365 } as const;
+/** What happened to a campaign's message to a contact (the `campaign` condition). */
+export const CAMPAIGN_OUTCOMES = [
+  'delivered',
+  'not_delivered',
+  'read',
+  'replied',
+  'not_replied',
+] as const;
+
 const conditionSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('tag'),
@@ -73,8 +85,8 @@ const conditionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('source'), source: z.enum(CONTACT_SOURCES) }),
   z.object({
     type: z.literal('last_message'),
-    op: z.enum(['within_days', 'not_within_days']),
-    days: z.coerce.number().int().min(1).max(365),
+    op: z.enum(LAST_MESSAGE_COMPARISONS),
+    days: z.coerce.number().int().min(LAST_MESSAGE_DAYS.min).max(LAST_MESSAGE_DAYS.max),
   }),
   z.object({
     type: z.literal('calling_code'),
@@ -83,7 +95,7 @@ const conditionSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('campaign'),
     campaignId: z.uuid(),
-    outcome: z.enum(['delivered', 'not_delivered', 'read', 'replied', 'not_replied']),
+    outcome: z.enum(CAMPAIGN_OUTCOMES),
   }),
 ]);
 export type SegmentCondition = z.infer<typeof conditionSchema>;

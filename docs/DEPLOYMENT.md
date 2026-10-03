@@ -133,6 +133,9 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    server answers Settings → API keys with an error for a company with a key holding
    `campaigns.read` (and the platform plan pages for a plan version including it), and
    `/api/v1/campaigns` with 404; rolling web servers back to an image from before it does the same.
+   ADR-126 adds no migration; until the web rollout ends, a server from before it refuses
+   `last_message` and `campaign` conditions in `POST /api/v1/contacts/search` with 422 naming the
+   condition's type.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

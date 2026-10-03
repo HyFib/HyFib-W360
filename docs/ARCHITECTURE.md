@@ -894,8 +894,9 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   repeatable-read, read-only transaction, so the row and its counts agree; a draft has no results.
   The answers hold counts and names only.
 - **Searching contacts (ADR-117):** `POST /contacts/search` (`api/contact-search.ts`) parses
-  segments' conditions less `last_message` and `campaign`, checks them against the company's fields
-  with segments' rules (`fieldConditionProblem` and `comparisonTakesValue` in
+  segments' conditions (`last_message` with `conversations.read` and `campaign` with
+  `campaigns.read` since ADR-126, a named campaign checked to be the company's), checks them against
+  the company's fields with segments' rules (`fieldConditionProblem` and `comparisonTakesValue` in
   `campaigns/segments.ts`, which `checkSegmentDefinition` uses too, each in its own words), and
   compiles them with `segmentConditionsSql`, which `segmentWhere` wraps for segments and campaigns.
   Its pages and `GET /contacts`'s come from one function, `apiContactPage` (`api/contacts.ts`): the

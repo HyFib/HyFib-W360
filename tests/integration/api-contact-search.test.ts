@@ -18,7 +18,8 @@ import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './what
  * PostgreSQL: every comparison of each type of custom field, tags, consent, the day a contact was
  * added in the company's time zone, source and calling code, all or any of them; the same contacts
  * a segment with the same conditions counts; refusals naming the condition's part; pages read in
- * windows. Also segments refusing dates that do not exist instead of failing in the query.
+ * windows. Also segments refusing dates that do not exist instead of failing in the query, and
+ * finding contacts by when they last wrote, which also needs conversations.read (ADR-126).
  */
 let fx: WhatsAppFixture;
 
@@ -367,12 +368,21 @@ describe('searching contacts with segment conditions (ADR-117)', () => {
       );
       expect([r.code, r.paths, r.message]).toEqual(['validation_failed', [path], message]);
     }
-    // Conditions segments have but keys may not use, and malformed searches.
+    // Conditions on conversations and campaigns need those scopes too (ADR-126).
+    for (const condition of [
+      { type: 'last_message', op: 'within_days', days: 7 },
+      { type: 'campaign', campaignId: uuidv7(), outcome: 'replied' },
+    ]) {
+      expect(
+        (await refusal(apiSearchContacts(deps(), ctx, { conditions: [condition] }))).code,
+      ).toBe('forbidden');
+    }
+    // Malformed searches.
     for (const [body, path] of [
-      [{ conditions: [{ type: 'last_message', op: 'within_days', days: 7 }] }, 'conditions.0.type'],
+      [{ conditions: [{ type: 'last_message', op: 'within_days', days: 0 }] }, 'conditions.0.days'],
       [
-        { conditions: [{ type: 'campaign', campaignId: uuidv7(), outcome: 'replied' }] },
-        'conditions.0.type',
+        { conditions: [{ type: 'campaign', campaignId: 'c1', outcome: 'replied' }] },
+        'conditions.0.campaignId',
       ],
       [{ conditions: [] }, 'conditions'],
       [{ conditions: Array.from({ length: 21 }, () => field('city', 'is_set')) }, 'conditions'],
@@ -435,6 +445,79 @@ describe('searching contacts with segment conditions (ADR-117)', () => {
     // Several conditions are checked in the same windows.
     const containsPun = { type: 'field', key: 'city', op: 'contains', value: 'PUN' };
     expect((await pages({ match: 'all', conditions: [containsPun, isPune] })).flat()).toEqual(pune);
+  });
+});
+
+describe('finding contacts by when they last wrote (ADR-126)', () => {
+  it('finds contacts who wrote, or did not, in the last days, with conversations.read, as segments do', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const service = contactsService();
+    const now = Math.floor(Date.now() / 1000);
+    const day = 86_400;
+    // Created in this order, so pages list them newest first: Dev, Chitra, Bina, Asha.
+    for (const [name, wrote] of [
+      ['Asha', now - 3_600],
+      ['Bina', now - 10 * day],
+      ['Chitra', null],
+      ['Dev', now - 40 * day],
+    ] as const) {
+      const phone = nextPhone();
+      const created = await service.createContact(owner, { displayName: name, phone });
+      if (name === 'Bina') await service.addTags(owner, created.id, ['vip']);
+      if (wrote !== null) {
+        await fx.deliver(
+          fx.messagesBody(c, {
+            messages: [{ waId: phone.slice(1), text: 'Hi', timestamp: wrote }],
+          }),
+        );
+      }
+    }
+    // Another company's contact who wrote today is never found.
+    const other = await fx.company();
+    const theirPhone = nextPhone();
+    await contactsService().createContact(await fx.ctx(other, other.owner), {
+      displayName: 'Theirs',
+      phone: theirPhone,
+    });
+    await fx.deliver(fx.messagesBody(other, { messages: [{ waId: theirPhone.slice(1) }] }));
+
+    const reader = await apiKey(c, ['contacts.read', 'conversations.read']);
+    const search = async (conditions: unknown[], match = 'all') =>
+      names(await apiSearchContacts(deps(), reader, { match, conditions, limit: 100 }));
+    const lastMessage = (op: string, days: number) => ({ type: 'last_message', op, days });
+    expect(await search([lastMessage('within_days', 7)])).toEqual(['Asha']);
+    expect(await search([lastMessage('within_days', 30)])).toEqual(['Bina', 'Asha']);
+    expect(await search([lastMessage('not_within_days', 7)])).toEqual(['Dev', 'Chitra', 'Bina']);
+    // Contacts who never wrote are among those who did not write in the last days.
+    expect(await search([lastMessage('not_within_days', 365)])).toEqual(['Chitra']);
+    expect(
+      await search([lastMessage('within_days', 1), { type: 'tag', op: 'has', tag: 'vip' }], 'any'),
+    ).toEqual(['Bina', 'Asha']);
+    expect(
+      await search([lastMessage('within_days', 7), { type: 'tag', op: 'has', tag: 'vip' }]),
+    ).toEqual([]);
+    // The same contacts a segment with the same conditions counts.
+    for (const definition of [
+      { match: 'all', conditions: [lastMessage('within_days', 30)] },
+      { match: 'all', conditions: [lastMessage('not_within_days', 7)] },
+      {
+        match: 'any',
+        conditions: [lastMessage('within_days', 1), { type: 'tag', op: 'has', tag: 'vip' }],
+      },
+    ]) {
+      const preview = await segmentsService().previewDefinition(owner, definition);
+      expect((await search(definition.conditions, definition.match)).length).toBe(preview.count);
+    }
+    // A key that reads contacts but not conversations is refused, and so is one that reads only
+    // conversations.
+    for (const scopes of [['contacts.read'], ['conversations.read']] as const) {
+      const key = await apiKey(c, [...scopes]);
+      const r = await refusal(
+        apiSearchContacts(deps(), key, { conditions: [lastMessage('within_days', 7)] }),
+      );
+      expect(r.code).toBe('forbidden');
+    }
   });
 });
 

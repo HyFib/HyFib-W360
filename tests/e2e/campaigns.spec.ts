@@ -1,6 +1,7 @@
 import { expect, test } from './fixtures';
 import {
   connectTestChannel,
+  inboundMessage,
   messagingConfigured,
   sendSignedWebhook,
   standInRequests,
@@ -158,6 +159,8 @@ test('a campaign is drafted, reviewed, started by the worker and reported per re
   await page.goto(`/c/${slug}/settings/api-keys`);
   await page.getByLabel('Name', { exact: true }).fill('Campaign reports');
   await page.getByRole('checkbox', { name: /Read campaigns/ }).check();
+  await page.getByRole('checkbox', { name: /Read contacts/ }).check();
+  await page.getByRole('checkbox', { name: /Read conversations/ }).check();
   await page.getByRole('button', { name: 'Create API key' }).click();
   const tokenField = page.getByLabel('API key', { exact: true });
   await expect(tokenField).toBeVisible();
@@ -191,4 +194,35 @@ test('a campaign is drafted, reviewed, started by the worker and reported per re
     skipped: 1,
     skipReasons: [{ reason: 'no_marketing_opt_in', count: 1 }],
   });
+
+  // Reading contacts and conversations too, it finds the contacts by what happened to the
+  // campaign's message and by when they last wrote (ADR-126): Asha answers the campaign.
+  await sendSignedWebhook(
+    request,
+    inboundMessage(wabaId, phoneNumberId, '919876512345', 'Interested in the sale!'),
+  );
+  const search = async (conditions: unknown[]) => {
+    const found = await request.post('/api/v1/contacts/search', {
+      headers: auth,
+      data: { conditions },
+    });
+    expect(found.status()).toBe(200);
+    return ((await found.json()) as { data: { name: string }[] }).data.map((c) => c.name);
+  };
+  await expect(async () => {
+    expect(await search([{ type: 'campaign', campaignId, outcome: 'replied' }])).toEqual([
+      'Asha Rao',
+    ]);
+  }).toPass({ timeout: 30_000 });
+  expect(await search([{ type: 'campaign', campaignId, outcome: 'delivered' }])).toEqual([
+    'Asha Rao',
+  ]);
+  // Bina was skipped: the campaign sent her nothing, so no outcome finds her.
+  expect(await search([{ type: 'campaign', campaignId, outcome: 'not_delivered' }])).toEqual([]);
+  expect(await search([{ type: 'last_message', op: 'within_days', days: 1 }])).toEqual([
+    'Asha Rao',
+  ]);
+  expect(await search([{ type: 'last_message', op: 'not_within_days', days: 1 }])).toEqual([
+    'Bina Shah',
+  ]);
 });
