@@ -26,6 +26,7 @@ import {
 import { apiContactColumns, apiContactSchema, toApiContact } from '../api/contact-view';
 import { COMMERCE_LIMITS } from '../commerce/model';
 import { findAnsweredMessageId } from '../messaging/reply-context';
+import { WEBHOOK_MESSAGE_STATUSES } from './model';
 
 /**
  * The JSON bodies of outgoing webhooks (ADR-053, ADR-074, ADR-078, ADR-085, ADR-087). The zod schemas
@@ -56,17 +57,6 @@ function envelope<T extends string, D extends z.ZodType>(type: T, data: D) {
     data,
   });
 }
-
-export const WEBHOOK_MESSAGE_STATUSES = [
-  'accepted',
-  'sent',
-  'delivered',
-  'read',
-  'played',
-  'failed',
-  'canceled',
-  'unknown_outcome',
-] as const;
 
 /** The reply a contact tapped, as webhooks and the API give it (ADR-080 added type and description). */
 export const tappedReplySchema = z

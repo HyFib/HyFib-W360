@@ -213,6 +213,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       secretVersion: 1,
       previousSecretExpiresAt: null,
       headers: [],
+      messageStatuses: null,
       apiKeyId: key.id,
       createdAt: expect.any(String),
       updatedAt: expect.any(String),
@@ -556,6 +557,75 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     }
     expect((await api().list(key.ctx)).data).toHaveLength(1);
     expect((await api().get(key.ctx, endpoint.id)).headers).toEqual([]);
+  });
+
+  it('choose the message statuses an endpoint receives, kept by changes that leave them out and cleared with the event (ADR-119)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    expect(
+      await issueOf(
+        api().create(
+          key.ctx,
+          { url: receiverUrl(), events: ['contact.created'], messageStatuses: ['failed'] },
+          idem('statuses-bad', 'x'),
+        ),
+      ),
+    ).toMatchObject({ path: 'messageStatuses' });
+
+    const created = await addThroughApi(key.ctx, 'statuses-1', {
+      url: receiverUrl(),
+      events: ['message.status'],
+      messageStatuses: ['failed', 'delivered', 'failed'],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.messageStatuses).toEqual(['delivered', 'failed']);
+    expect((await api().get(key.ctx, id)).messageStatuses).toEqual(['delivered', 'failed']);
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id, id],
+    );
+    expect(audit?.metadata).toMatchObject({ messageStatuses: ['delivered', 'failed'] });
+
+    expect(await api().update(key.ctx, id, { description: 'Failures' })).toMatchObject({
+      messageStatuses: ['delivered', 'failed'],
+    });
+    expect(await api().update(key.ctx, id, { messageStatuses: ['read'] })).toMatchObject({
+      messageStatuses: ['read'],
+    });
+    const updates = await fx.query<{ metadata: { messageStatuses?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_updated'
+        ORDER BY occurred_at`,
+      [c.tenant.id, id],
+    );
+    expect(updates.map((u) => u.metadata.messageStatuses)).toEqual([
+      ['delivered', 'failed'],
+      ['read'],
+    ]);
+    expect(
+      await api().update(key.ctx, id, { events: ['message.status', 'contact.created'] }),
+    ).toMatchObject({ messageStatuses: ['read'] });
+    expect(await api().update(key.ctx, id, { events: ['contact.created'] })).toMatchObject({
+      events: ['contact.created'],
+      messageStatuses: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { messageStatuses: ['failed'] }))).toMatchObject(
+      { path: 'messageStatuses' },
+    );
+    expect(
+      await api().update(key.ctx, id, { events: ['message.status'], messageStatuses: ['failed'] }),
+    ).toMatchObject({ messageStatuses: ['failed'] });
+    expect(await api().update(key.ctx, id, { messageStatuses: null })).toMatchObject({
+      messageStatuses: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { messageStatuses: [] }))).toMatchObject({
+      path: 'messageStatuses',
+    });
   });
 
   it('refuse keys without the scope, suspended and restricted companies, bad input, addresses the egress guard refuses and an eleventh endpoint, changing nothing', async () => {

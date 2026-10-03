@@ -23,7 +23,14 @@ import { recordAudit, type RequestMeta } from '../audit';
 import { assertCan, type TenantContext } from '../authz/context';
 import { assertRecentSignIn } from '../authz/step-up';
 import { parseInput } from '../validation';
-import { WEBHOOK_EVENT_KEYS, WEBHOOK_LIMITS, WEBHOOK_REPLAY_PERIODS, webhookHost } from './model';
+import {
+  WEBHOOK_EVENT_KEYS,
+  WEBHOOK_LIMITS,
+  WEBHOOK_MESSAGE_STATUSES,
+  WEBHOOK_REPLAY_PERIODS,
+  webhookHost,
+  type WebhookMessageStatus,
+} from './model';
 
 /** Binds an endpoint's secret to its company, the endpoint and the secret's version. */
 export const webhookSecretAad = (tenantId: string, endpointId: string, version: number) =>
@@ -152,6 +159,34 @@ export function openWebhookHeaders(
   return headers;
 }
 
+/**
+ * The `message.status` statuses an endpoint takes (ADR-119), in the order a message reaches them;
+ * null takes every status, including statuses added later.
+ */
+export const webhookMessageStatusesSchema = z
+  .array(z.enum(WEBHOOK_MESSAGE_STATUSES, { error: 'Choose message statuses from the list.' }))
+  .min(1, 'Choose at least one message status, or take every status.')
+  .max(WEBHOOK_MESSAGE_STATUSES.length, 'Give each message status once.')
+  .transform((chosen) => WEBHOOK_MESSAGE_STATUSES.filter((status) => chosen.includes(status)))
+  .nullable();
+
+export const WEBHOOK_STATUSES_NEED_THE_EVENT =
+  'Choose message statuses only for an endpoint that receives Message status.';
+
+/**
+ * The statuses an endpoint keeps after it is added or changed: every status (null) unless it takes
+ * `message.status`; then those given, or else the ones it had.
+ */
+export function webhookMessageStatusesFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly WebhookMessageStatus[] | null | undefined,
+  current: readonly WebhookMessageStatus[] | null,
+): WebhookMessageStatus[] | null {
+  if (!eventTypes.includes('message.status')) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
 /** A new signing secret: `whsec_` and 32 random bytes. */
 export function generateWebhookSecret(): string {
   return `whsec_${randomBytes(32).toString('base64url')}`;
@@ -162,7 +197,7 @@ export const webhookEventTypesSchema = z
   .min(1, 'Choose at least one event')
   .transform((chosen) => WEBHOOK_EVENT_KEYS.filter((e) => chosen.includes(e)));
 
-const endpointSchema = z.object({
+const endpointFields = z.object({
   url: z
     .string({ error: 'Enter the endpoint URL' })
     .trim()
@@ -177,9 +212,23 @@ const endpointSchema = z.object({
   eventTypes: webhookEventTypesSchema,
   /** Given, the endpoint's headers become these; left out, a change keeps them. */
   headers: webhookHeadersSchema.optional(),
+  /** Given, the `message.status` statuses it takes (null: every status); left out, they stay. */
+  messageStatuses: webhookMessageStatusesSchema.optional(),
 });
+/** Statuses are chosen only for an endpoint that takes `message.status`. */
+const statusesNeedTheEvent = {
+  check: (data: { eventTypes: WebhookEventType[]; messageStatuses?: unknown }) =>
+    !data.messageStatuses || data.eventTypes.includes('message.status'),
+  options: { path: ['messageStatuses'], message: WEBHOOK_STATUSES_NEED_THE_EVENT },
+};
+const endpointSchema = endpointFields.refine(
+  statusesNeedTheEvent.check,
+  statusesNeedTheEvent.options,
+);
 const endpointIdSchema = z.object({ endpointId: z.uuid() });
-const updateSchema = endpointSchema.extend({ endpointId: z.uuid() });
+const updateSchema = endpointFields
+  .extend({ endpointId: z.uuid() })
+  .refine(statusesNeedTheEvent.check, statusesNeedTheEvent.options);
 const enabledSchema = endpointIdSchema.extend({ enabled: z.boolean() });
 const deliveryIdSchema = z.object({ deliveryId: z.uuid() });
 const replayFailedSchema = endpointIdSchema.extend({
@@ -205,6 +254,8 @@ export interface WebhookEndpointView {
   previousSecretExpiresAt: Date | null;
   /** The names of the endpoint's own headers (ADR-118); their values are never shown. */
   headerNames: string[];
+  /** The `message.status` statuses it takes (ADR-119); null takes every status. */
+  messageStatuses: WebhookMessageStatus[] | null;
   createdAt: Date;
   /** The member who added the endpoint in settings (null once their account is gone). */
   createdBy: string | null;
@@ -279,6 +330,8 @@ export async function lockWebhookEndpoint(
       state: webhookEndpoints.state,
       secretVersion: webhookEndpoints.secretVersion,
       secretCiphertext: webhookEndpoints.secretCiphertext,
+      eventTypes: webhookEndpoints.eventTypes,
+      messageStatuses: webhookEndpoints.messageStatuses,
     })
     .from(webhookEndpoints)
     .where(
@@ -311,6 +364,7 @@ export async function insertWebhookEndpoint(
     description: string | null;
     eventTypes: WebhookEventType[];
     headers: readonly WebhookHeader[];
+    messageStatuses: WebhookMessageStatus[] | null;
     creator: WebhookEndpointCreator;
   },
 ): Promise<{ id: string; secret: string }> {
@@ -335,6 +389,7 @@ export async function insertWebhookEndpoint(
     eventTypes: input.eventTypes,
     secretCiphertext: keyring.encrypt(secret, webhookSecretAad(tenantId, id, 1)),
     ...sealWebhookHeaders(keyring, tenantId, id, input.headers),
+    messageStatuses: input.messageStatuses,
     createdByUserId: 'userId' in input.creator ? input.creator.userId : null,
     createdByApiKeyId: 'apiKeyId' in input.creator ? input.creator.apiKeyId : null,
   });
@@ -620,6 +675,7 @@ export function createWebhooksService(deps: {
               secretVersion: webhookEndpoints.secretVersion,
               previousSecretExpiresAt: webhookEndpoints.previousSecretExpiresAt,
               headerNames: webhookEndpoints.headerNames,
+              messageStatuses: webhookEndpoints.messageStatuses,
               createdAt: webhookEndpoints.createdAt,
               createdBy: users.name,
               keyName: apiKeys.name,
@@ -680,11 +736,17 @@ export function createWebhooksService(deps: {
       const { url, host } = checkedWebhookUrl(data.url, deps.egressPolicy);
       return db.run(ctx.scope, async (tx) => {
         const headers = data.headers ?? [];
+        const messageStatuses = webhookMessageStatusesFor(
+          data.eventTypes,
+          data.messageStatuses,
+          null,
+        );
         const { id, secret } = await insertWebhookEndpoint(tx, keyring, ctx.tenant.id, {
           url,
           description: data.description || null,
           eventTypes: data.eventTypes,
           headers,
+          messageStatuses,
           creator: { userId: ctx.user.id },
         });
         await recordAudit(
@@ -698,6 +760,7 @@ export function createWebhooksService(deps: {
               host,
               eventTypes: data.eventTypes,
               ...(headers.length > 0 ? { headers: headers.map((h) => h.name) } : {}),
+              ...(messageStatuses ? { messageStatuses } : {}),
             },
           },
           meta,
@@ -712,13 +775,19 @@ export function createWebhooksService(deps: {
       const data = parseInput(updateSchema, input);
       const { url, host } = checkedWebhookUrl(data.url, deps.egressPolicy);
       await db.run(ctx.scope, async (tx) => {
-        await lockWebhookEndpoint(tx, ctx.tenant.id, data.endpointId);
+        const endpoint = await lockWebhookEndpoint(tx, ctx.tenant.id, data.endpointId);
+        const messageStatuses = webhookMessageStatusesFor(
+          data.eventTypes,
+          data.messageStatuses,
+          endpoint.messageStatuses,
+        );
         await tx
           .update(webhookEndpoints)
           .set({
             url,
             description: data.description || null,
             eventTypes: data.eventTypes,
+            messageStatuses,
             ...(data.headers
               ? sealWebhookHeaders(keyring, ctx.tenant.id, data.endpointId, data.headers)
               : {}),
@@ -741,6 +810,7 @@ export function createWebhooksService(deps: {
               host,
               eventTypes: data.eventTypes,
               ...(data.headers ? { headers: data.headers.map((h) => h.name) } : {}),
+              ...(messageStatuses ? { messageStatuses } : {}),
             },
           },
           meta,

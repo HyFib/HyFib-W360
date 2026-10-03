@@ -17,6 +17,8 @@ export async function createWebhookEndpointAction(
     description: string;
     eventTypes: string[];
     headers: { name: string; value: string }[];
+    /** The message.status statuses the endpoint takes; null takes every status. */
+    messageStatuses: string[] | null;
   },
 ): Promise<ActionResult<{ endpointId: string; secret: string }>> {
   return runAction(async () => {
@@ -37,6 +39,8 @@ export async function updateWebhookEndpointAction(
     eventTypes: string[];
     /** Given, the endpoint's headers become these; left out, they stay. */
     headers?: { name: string; value: string }[];
+    /** The message.status statuses the endpoint takes; null takes every status. */
+    messageStatuses: string[] | null;
   },
 ): Promise<ActionResult> {
   return runAction(async () => {

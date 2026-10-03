@@ -1892,6 +1892,18 @@ headers (`Host`, `Content-Length`, `Transfer-Encoding`, `Connection`, `Keep-Aliv
 cannot be served by this endpoint. A change takes effect at the next attempt, even of a delivery
 already waiting.
 
+**A receiver gets fewer `message.status` events than expected (ADR-119).** An endpoint can take
+only some statuses; the endpoints list shows them ("Message statuses sent: …"), and the API answers
+`messageStatuses` (null takes every status). A status the endpoint does not take is never queued for
+it, and when no endpoint of the company takes it, no event is recorded at all, so there is nothing
+to replay: statuses captured before a change are not sent afterwards. To take more, tick them under
+"Message status" on the endpoint's page (all ticked takes every status, including statuses added
+later), or `PATCH /webhook-endpoints/{id}` with `messageStatuses` (null for every status). Removing
+the `message.status` event clears the list. A message's status only moves forward, so one read
+before WhatsApp reported its delivery never reaches `delivered`: a receiver that takes only
+`delivered` misses such messages, and one that needs to know a message arrived should take `read`
+too.
+
 **An endpoint was turned off automatically.** It failed every attempt for 72 hours; its waiting
 deliveries were marked failed (`endpoint_disabled`), owners and administrators got the
 "Webhook endpoint turned off" email, and the audit log has `webhook.endpoint_auto_disabled`. Fix the

@@ -1,6 +1,6 @@
-import type { WebhookEventType } from '@w360/db';
+import type { WebhookEventType, WebhookMessageStatus } from '@w360/db';
 
-export type { WebhookEventType } from '@w360/db';
+export type { WebhookEventType, WebhookMessageStatus } from '@w360/db';
 
 /**
  * Outgoing webhooks (P5-09, ADR-053, ADR-074, ADR-078, ADR-085, ADR-087, ADR-094): the parts the
@@ -100,6 +100,30 @@ export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; descr
         'A campaign was submitted for approval, sent back to draft, scheduled, started, paused, resumed, completed or cancelled, by a member or as it ran.',
     },
   };
+
+/** The statuses a `message.status` event carries, in the order a message reaches them. */
+export const WEBHOOK_MESSAGE_STATUSES = [
+  'accepted',
+  'sent',
+  'delivered',
+  'read',
+  'played',
+  'failed',
+  'canceled',
+  'unknown_outcome',
+] as const satisfies readonly WebhookMessageStatus[];
+
+/** How Settings names each status an endpoint can choose (ADR-119). */
+export const WEBHOOK_MESSAGE_STATUS_LABELS: Record<WebhookMessageStatus, string> = {
+  accepted: 'Accepted by WhatsApp',
+  sent: 'Sent',
+  delivered: 'Delivered',
+  read: 'Read',
+  played: 'Played',
+  failed: 'Failed',
+  canceled: 'Canceled',
+  unknown_outcome: 'Outcome unknown',
+};
 
 export const WEBHOOK_LIMITS = {
   endpoints: 10,

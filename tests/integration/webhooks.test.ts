@@ -616,6 +616,157 @@ describe('endpoint headers (ADR-118)', () => {
   });
 });
 
+describe('message status filters (ADR-119)', () => {
+  const statusesOf = (path: string) =>
+    requestsTo(path)
+      .filter((r) => r.headers['w360-event-type'] === 'message.status')
+      .map((r) => messageStatusPayloadSchema.parse(JSON.parse(r.body)).data.message.status);
+
+  it('send an endpoint only the statuses it takes, another every status, and capture no event nobody takes', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const from = waId();
+    const msg = await inbound(c, from, 'Hi');
+    const add = async (messageStatuses: string[] | null, eventTypes = ['message.status']) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes,
+        messageStatuses,
+      });
+      return { ...created, path };
+    };
+    const status = (wamid: string, value: string, extra: Record<string, unknown> = {}) =>
+      fx.deliver(
+        fx.messagesBody(c, {
+          statuses: [
+            {
+              id: wamid,
+              status: value,
+              timestamp: String(Math.floor(Date.now() / 1000) + 5),
+              recipient_id: from,
+              ...extra,
+            },
+          ],
+        }),
+      );
+    const messageStatusEvents = async () =>
+      (await eventsOf(c)).filter((e) => e.type === 'message.status').map((e) => e.status);
+
+    // Only failures: neither the acceptance nor the delivery of a reply is captured at all.
+    const failures = await add(['failed'], ['message.status', 'message.received']);
+    expect((await webhooks().list(owner))[0]?.messageStatuses).toEqual(['failed']);
+    const [created] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(created?.metadata).toMatchObject({ messageStatuses: ['failed'] });
+    const first = await sendReply(c, msg.conversation_id, 'It ships today.');
+    await status(first.wamid, 'delivered');
+    expect(await messageStatusEvents()).toEqual([]);
+    const second = await sendReply(c, msg.conversation_id, 'And a second note.');
+    await status(second.wamid, 'failed', {
+      errors: [{ code: 131026, title: 'Message undeliverable' }],
+    });
+    expect(await messageStatusEvents()).toEqual(['failed']);
+    // Its other events are not filtered: the customer's next message is captured for it.
+    await inbound(c, from, 'Thanks');
+    expect((await eventsOf(c)).map((e) => e.type)).toEqual(['message.status', 'message.received']);
+
+    // Then an endpoint taking every status and one taking deliveries and reads.
+    const everything = await add(null);
+    const deliveries = await add(['read', 'delivered']);
+    expect((await webhooks().list(owner)).map((e) => [e.id, e.messageStatuses])).toEqual(
+      expect.arrayContaining([
+        [everything.id, null],
+        [deliveries.id, ['delivered', 'read']],
+      ]),
+    );
+    const third = await sendReply(c, msg.conversation_id, 'A third note.');
+    await status(third.wamid, 'delivered');
+    expect(await messageStatusEvents()).toEqual(['failed', 'accepted', 'delivered']);
+
+    expect(await deliverDue(c)).toMatchObject({ attempted: 5, succeeded: 5 });
+    expect(
+      requestsTo(failures.path)
+        .map((r) => String(r.headers['w360-event-type']))
+        .sort(),
+    ).toEqual(['message.received', 'message.status']);
+    expect(statusesOf(failures.path)).toEqual(['failed']);
+    expect(statusesOf(everything.path).sort()).toEqual(['accepted', 'delivered']);
+    expect(statusesOf(deliveries.path)).toEqual(['delivered']);
+  });
+
+  it('are refused without message.status, unknown or empty, kept by a change that leaves them out and cleared with the event; the database keeps them to that event', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const url = 'https://hooks.example.com/in';
+    const refused = (eventTypes: string[], messageStatuses: unknown, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, messageStatuses }),
+        'validation_failed',
+        message,
+      );
+    await refused(
+      ['consent.changed'],
+      ['failed'],
+      /only for an endpoint that receives Message status/,
+    );
+    await refused(['message.status'], [], /at least one message status/);
+    await refused(['message.status'], ['queued'], /from the list/);
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['message.status', 'consent.changed'],
+      messageStatuses: ['failed', 'canceled'],
+    });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['message.status', 'consent.changed'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.messageStatuses;
+    await change({ description: 'kept' });
+    expect(await current()).toEqual(['failed', 'canceled']);
+    await change({ messageStatuses: ['read'] });
+    expect(await current()).toEqual(['read']);
+    const updates = await fx.query<{ metadata: { messageStatuses?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(updates.map((u) => u.metadata.messageStatuses)).toEqual([
+      ['failed', 'canceled'],
+      ['read'],
+    ]);
+    await change({ messageStatuses: null });
+    expect(await current()).toBeNull();
+    await change({ messageStatuses: ['failed'] });
+    // The database refuses an empty list or an unknown status from an endpoint taking the event…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET message_statuses = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    for (const bad of [`'{}'`, `'{failed,queued}'`]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(/webhook_endpoints_message_statuses/);
+    }
+    await change({ eventTypes: ['consent.changed'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['consent.changed'], messageStatuses: ['failed'] }),
+      'validation_failed',
+      /only for an endpoint that receives Message status/,
+    );
+    // …and any list for an endpoint that does not take it.
+    await expect(setInDatabase(`'{failed}'`)).rejects.toThrow(/webhook_endpoints_message_statuses/);
+  });
+});
+
 describe('event capture', () => {
   it('records an event only for subscribed types, with one delivery per active subscribed endpoint, and none from a rolled-back change', async () => {
     const c = await fx.company();

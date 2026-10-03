@@ -13,6 +13,7 @@ import {
   WEBHOOK_EVENT_INFO,
   WEBHOOK_EVENT_KEYS,
   WEBHOOK_LIMITS,
+  WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_RETRY_SECONDS,
 } from '../webhooks/model';
 import {
@@ -311,6 +312,12 @@ export const apiWebhookEndpointSchema = z.object({
     .array(z.object({ name: z.string() }))
     .describe(
       'The headers sent with every delivery, by name: their values are secrets and never shown.',
+    ),
+  messageStatuses: z
+    .array(z.enum(WEBHOOK_MESSAGE_STATUSES))
+    .nullable()
+    .describe(
+      'The message.status statuses the endpoint receives; null receives every status, including statuses added later.',
     ),
   apiKeyId: z.uuid().describe('The API key that added the endpoint.'),
   createdAt: z.iso.datetime(),
@@ -1300,7 +1307,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'message.status': webhook(
         'webhookMessageStatus',
         WEBHOOK_EVENT_INFO['message.status'].label,
-        WEBHOOK_EVENT_INFO['message.status'].description,
+        `${WEBHOOK_EVENT_INFO['message.status'].description} An endpoint receives every status unless it names the ones it takes (its \`messageStatuses\`, or the statuses ticked in Settings → Webhooks); a status no endpoint takes is not recorded.`,
         'WebhookMessageStatus',
       ),
       'consent.changed': webhook(

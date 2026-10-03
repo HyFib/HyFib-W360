@@ -5,6 +5,7 @@ import {
   can,
   WEBHOOK_EVENT_INFO,
   WEBHOOK_LIMITS,
+  WEBHOOK_MESSAGE_STATUS_LABELS,
   webhookHost,
   type WebhookEndpointView,
 } from '@w360/domain';
@@ -96,6 +97,12 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                     </div>
                     <p className="font-mono text-xs break-all">{e.url}</p>
                     {e.description ? <p className="text-sm">{e.description}</p> : null}
+                    {e.messageStatuses ? (
+                      <p className="text-xs text-muted-foreground">
+                        Message statuses sent:{' '}
+                        {e.messageStatuses.map((s) => WEBHOOK_MESSAGE_STATUS_LABELS[s]).join(', ')}
+                      </p>
+                    ) : null}
                     {e.headerNames.length > 0 ? (
                       <p className="text-xs text-muted-foreground">
                         Headers sent: {e.headerNames.join(', ')} (values hidden)

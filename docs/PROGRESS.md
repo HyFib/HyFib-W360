@@ -1,5 +1,87 @@
 # Progress
 
+## 2026-10-03 — Phase 5: choosing the message statuses a webhook endpoint receives (P5-09, ADR-119)
+
+Status: **Implemented and locally verified (local test receivers only).** `message.status` is the
+busiest event: every message a company sends is accepted, sent, delivered and often read, so a
+receiver that acts only on failures was sent four or five deliveries per message and discarded most
+of them.
+
+### Completed
+
+- **Design (ADR-119):** an endpoint takes every `message.status` status (null, as before, including
+  statuses added later) or a list of 1 to 8 of them, kept in the order a message reaches them;
+  chosen in Settings → Webhooks under "Message status" or through the API (`messageStatuses` on
+  `POST` and `PATCH /webhook-endpoints`), only while the endpoint takes `message.status`. A change
+  that removes the event clears the list; an API change that leaves it out keeps it. Audited with
+  the list.
+- **Migration 0095:** `message_statuses text[]` on `app.webhook_endpoints` with a check (null, or 1
+  to 8 known statuses while `message.status` is among the events), an update grant for the runtime
+  role, and `app.capture_webhook_event` replaced with the same signature: a `message.status`
+  delivery is created only for the endpoints that take the status, and no event is written when no
+  active endpoint takes it.
+- **Domain:** `webhookMessageStatusesSchema` and `webhookMessageStatusesFor` (`webhooks/service.ts`),
+  `WEBHOOK_MESSAGE_STATUSES` and their labels (`webhooks/model.ts`); the settings service and the
+  API store, keep, clear and audit the list; the API answers `messageStatuses` and refuses a list
+  without the event (`messageStatuses`, 422); the export carries the column. OpenAPI: the field in
+  the endpoint and the bodies, and a sentence on the `message.status` webhook.
+- **Web:** under "Message status", the add and edit forms show the statuses, all ticked to begin with
+  (all ticked saves none, so later statuses arrive too); the endpoints list shows "Message statuses
+  sent: …".
+- **Tests:**
+  - Unit (`webhooks.test.ts`, 2; `api.test.ts`, 1 changed): the list's rules (known statuses, 1 to 8,
+    repeats merged, catalogue order, null) and how a change keeps, replaces or clears it; the
+    OpenAPI schemas and the webhook's sentence.
+  - Integration (`webhooks.test.ts`, 2; `api-webhook-endpoints.test.ts`, 1 and 1 changed): an
+    endpoint taking failures only gets nothing (and no event is recorded) for an acceptance or a
+    delivery, then its failure; its other event types are not filtered; with endpoints taking every
+    status and deliveries and reads, each gets only its statuses; refusals (without the event, empty,
+    unknown) change nothing; a change keeps, replaces, clears with null or with the event; the audit
+    of additions and changes; the database check; through the API: chosen, answered in order, kept
+    by changes that leave them out, cleared with the event, refused without it or empty, audited.
+  - e2e (`webhooks.spec.ts`): failures chosen in Settings, deliveries added on the endpoint's page,
+    a key's endpoint taking reads (refused without the event); a reply sent through the API and
+    reported sent, delivered and read reaches each endpoint once, with its status only (and the
+    delivery histories say so); the key takes every status again; ticking every status in Settings
+    keeps none.
+- **Docs:** ADR-119; SECURITY; THREAT-MODEL T132; RUNBOOKS (a receiver getting fewer status events
+  than expected); ARCHITECTURE; DEPLOYMENT (0095); DATA-RETENTION; BACKLOG P5-09; FEATURE-MATRIX
+  W-138, W-139, H-014.
+- **Mutation checks:** 46 regressions tried, 46 caught:
+  - 8 on the list (statuses not checked, empty, more than 8, kept as given, null refused, kept
+    without the event, a change that leaves it out clearing it, null keeping it), 10 in the settings
+    service (statuses without the event when adding or changing, adding storing none or ignoring
+    them, a change ignoring or not storing them, the audit of additions and changes, the list and the
+    lock without them), 11 in the API (statuses without the event when adding or changing, a change
+    checked against the old events, adding ignoring them, the audit of additions and changes, a
+    change of statuses alone doing nothing or refused, a change ignoring them, none answered or
+    read), 2 in OpenAPI (the endpoint's statuses not nullable, the webhook's sentence), 9 in the
+    database (no check, unknown statuses, an empty list, statuses without the event, no update grant,
+    an event recorded or deliveries created for a status no endpoint takes, other event types
+    filtered for events or for deliveries), 1 in the export and 5 through the e2e test (Settings
+    sending every status, every status ticked saved as a list, ticking adding nothing, the
+    endpoint's page forgetting the statuses, the list not showing them).
+  - Two first results were corrected: the database check's unknown-status and empty-list clauses
+    survived until the test set each on an endpoint that takes `message.status` (the event clause
+    had refused them first); rerun: caught.
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                                                                                            | Result                                                                                                                                            |
+| ---------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                               | clean                                                                                                                                             |
+| `pnpm test`                                                                                                                        | 536 passed                                                                                                                                        |
+| `pnpm test:integration` on PostgreSQL 18.6 and 17.11                                                                               | 738 passed on each                                                                                                                                |
+| `pnpm build`, then `webhooks.spec.ts` and `webhook-events.spec.ts` on chromium and mobile-chromium, on a database migrated to 0095 | 22 passed                                                                                                                                         |
+| Mutation checks                                                                                                                    | 46 regressions tried, 46 caught (5 through the e2e test); two first results corrected once the database check's clauses were tested one at a time |
+| gitleaks 8.30.1 on the commit                                                                                                      | no leaks                                                                                                                                          |
+
+### Known gaps
+
+- Filters for other event types (conversation statuses, automations, campaigns), filters on a
+  message's fields (its template, number or sender) and retry settings per status are not built
+  (ADR-119).
+
 ## 2026-10-03 — Phase 5: custom headers on webhook endpoints (P5-09, ADR-118)
 
 Status: **Implemented and locally verified (local test receivers only).** Receivers that accept

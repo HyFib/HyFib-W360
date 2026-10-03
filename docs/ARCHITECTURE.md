@@ -1149,7 +1149,8 @@ true`); the same key with another request (method, path and body hashed) answers
   or `unknown_outcome`, with the error code and title), `app.consent_events` (every opt-in and
   opt-out) and `app.template_status_events` (the statuses Meta reports, and deletion) call
   `app.capture_webhook_event`, which writes an event and its deliveries only when an active endpoint
-  of the row's company subscribes to the type. They run as the role making the change (the runtime
+  of the row's company subscribes to the type (for `message.status`, since 0095, only when one also
+  takes the status, ADR-119). They run as the role making the change (the runtime
   role in the company's scope, or a definer function such as `app.erase_contact`), so row security
   keeps each event in its row's company, and a rolled-back change leaves none. A delivery insert
   sends an empty `w360_webhooks` notification.
@@ -1228,6 +1229,13 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   and sends them before HyFib's own headers, which names HyFib or the transport sets can never
   replace (refused when saved and when opened); headers that do not open end the delivery as
   `payload_failed`, stage `headers`.
+- **Message status filters** (migration 0095, ADR-119): `message_statuses` on an endpoint lists the
+  `message.status` statuses it takes, null for every status; a check keeps it to 1 to 8 known
+  statuses and to endpoints that take `message.status`. `app.capture_webhook_event` (replaced with
+  the same signature) creates a `message.status` delivery only for endpoints whose list is null or
+  holds the status, and writes no event when none does; other types, replays and test events are
+  unchanged. Settings and the API (`messageStatuses`) set it; a change that drops the event clears
+  it.
 - **Health:** a success clears the failing state; a failure when the endpoint has been failing for
   72 hours without a success turns it off (`failing`), fails its waiting deliveries as
   `endpoint_disabled`, records a system audit entry and emails the company's active owners and
@@ -1237,10 +1245,10 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   only in the page's memory); sending a test event (`ping`); rotating the secret; turning off and
   on; deleting. Each endpoint's page lists its latest 100 deliveries (or only failed ones) with
   attempts, result and timings, replays finished ones (a new delivery of the same event, audited)
-  and edits the URL, description, events and headers (names shown, values never; replacing gives
-  each again). The OpenAPI document describes every event under
+  and edits the URL, description, events, the message statuses it takes and headers (names shown,
+  values never; replacing gives each again). The OpenAPI document describes every event under
   `webhooks`. Audit entries name the endpoint's host, never its full URL or secret.
-- **Not built yet:** filters beyond the event type, ordering, other authentication (OAuth client
+- **Not built yet:** filters for other event types or on a message's fields, ordering, other authentication (OAuth client
   credentials, headers computed per delivery), mutual TLS, fixed
   egress addresses for receivers' allowlists, endpoints per number, events for conversations
   started, notes or merges, and an event naming the contact fields that changed.

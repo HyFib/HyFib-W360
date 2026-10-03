@@ -26,6 +26,10 @@ export const WEBHOOK_EVENT_TYPES = [
 ] as const;
 export type WebhookEventType = (typeof WEBHOOK_EVENT_TYPES)[number];
 
+/** The statuses a `message.status` event carries, which an endpoint can choose (ADR-119). */
+export type WebhookMessageStatus =
+  'accepted' | 'sent' | 'delivered' | 'read' | 'played' | 'failed' | 'canceled' | 'unknown_outcome';
+
 export const WEBHOOK_DELIVERY_STATES = ['pending', 'delivering', 'succeeded', 'failed'] as const;
 export type WebhookDeliveryState = (typeof WEBHOOK_DELIVERY_STATES)[number];
 
@@ -44,6 +48,11 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
   headerNames: text('header_names').array().notNull().default([]),
   /** The headers, names and values, encrypted by the keyring; null without headers. */
   headersCiphertext: text('headers_ciphertext'),
+  /**
+   * The `message.status` statuses the endpoint takes (ADR-119); null takes every status. Set only
+   * while `message.status` is among its events.
+   */
+  messageStatuses: text('message_statuses').array().$type<WebhookMessageStatus[]>(),
   state: text('state', { enum: ['active', 'disabled'] })
     .notNull()
     .default('active'),

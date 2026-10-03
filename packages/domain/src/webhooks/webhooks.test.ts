@@ -15,6 +15,8 @@ import {
   WEBHOOK_EVENT_INFO,
   WEBHOOK_EVENT_KEYS,
   WEBHOOK_LIMITS,
+  WEBHOOK_MESSAGE_STATUS_LABELS,
+  WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_REPLAY_PERIODS,
   WEBHOOK_RETRY_SECONDS,
   webhookErrorLabel,
@@ -49,6 +51,8 @@ import {
   sealWebhookHeaders,
   webhookHeadersAad,
   webhookHeadersSchema,
+  webhookMessageStatusesFor,
+  webhookMessageStatusesSchema,
 } from './service';
 
 const SECRET = 'whsec_test-secret-one';
@@ -933,5 +937,34 @@ describe('endpoint headers (ADR-118)', () => {
         JSON.stringify(content),
       ).toThrow(/^Sealed webhook headers/);
     }
+  });
+});
+
+describe('message status filters (ADR-119)', () => {
+  it('take 1 to 8 known statuses, once each, in the order a message reaches them; null takes every status', () => {
+    expect(webhookMessageStatusesSchema.parse(['failed', 'delivered', 'failed'])).toEqual([
+      'delivered',
+      'failed',
+    ]);
+    expect(webhookMessageStatusesSchema.parse(null)).toBeNull();
+    expect(webhookMessageStatusesSchema.parse([...WEBHOOK_MESSAGE_STATUSES].reverse())).toEqual([
+      ...WEBHOOK_MESSAGE_STATUSES,
+    ]);
+    for (const refused of [[], ['queued'], ['Failed'], 'failed', Array(9).fill('failed')]) {
+      expect(webhookMessageStatusesSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(Object.keys(WEBHOOK_MESSAGE_STATUS_LABELS)).toEqual([...WEBHOOK_MESSAGE_STATUSES]);
+  });
+
+  it('are kept only while the endpoint takes message.status: given, kept, or cleared', () => {
+    const both = ['message.status', 'consent.changed'] as const;
+    expect(webhookMessageStatusesFor([...both], ['failed'], null)).toEqual(['failed']);
+    expect(webhookMessageStatusesFor([...both], undefined, ['read'])).toEqual(['read']);
+    expect(webhookMessageStatusesFor([...both], null, ['read'])).toBeNull();
+    expect(webhookMessageStatusesFor([...both], undefined, null)).toBeNull();
+    expect(webhookMessageStatusesFor(['consent.changed'], ['failed'], ['read'])).toBeNull();
+    expect(webhookMessageStatusesFor(['consent.changed'], undefined, ['read'])).toBeNull();
   });
 });

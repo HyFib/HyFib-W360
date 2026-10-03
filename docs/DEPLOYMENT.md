@@ -99,6 +99,13 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    servers, so no worker without ADR-118 sees an endpoint's headers; rolling workers back to an
    image from before it sends deliveries without them, which their receivers may refuse (the
    deliveries are retried).
+   Migration 0095 (ADR-119) adds a nullable column to `app.webhook_endpoints` with a check it
+   validates by reading the table (small, as above) and replaces `app.capture_webhook_event`, which
+   applies the filter from then on; every endpoint starts with none, so nothing changes until a
+   member or a key chooses statuses. Web servers from before it neither show nor change the column:
+   until the web rollout ends, an old server's change that drops `message.status` from an endpoint
+   with statuses fails on the check (it works once the rollout ends), and its other changes keep
+   them.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

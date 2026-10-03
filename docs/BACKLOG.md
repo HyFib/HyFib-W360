@@ -550,9 +550,12 @@ verification, app review, Embedded Signup configuration).
   nothing). **[Endpoint headers built, locally verified]** (ADR-118: up to 5 headers an endpoint's
   receiver asks for, such as an `Authorization` header it issued, given in Settings or through the
   API, sent with every attempt, test event and replay; values sealed and never shown, logged,
-  audited or exported; names HyFib or the transport sets refused). Remaining: filters beyond the
-  event type (such as by automation or status), other authentication (OAuth client credentials,
-  headers computed per delivery), mutual TLS, fixed egress addresses, which custom fields
+  audited or exported; names HyFib or the transport sets refused). **[Message status filters built,
+  locally verified]** (ADR-119: an endpoint takes only the `message.status` statuses it chooses, in
+  Settings or through the API, or every status as before; applied where events are captured, so a
+  status no endpoint takes is not recorded). Remaining: filters for other event types and on a
+  message's fields (such as by automation, campaign or template), other authentication (OAuth
+  client credentials, headers computed per delivery), mutual TLS, fixed egress addresses, which custom fields
   changed (the contact is sent as it is, ADR-112), delivery counts in campaign events, events for store orders, Payment Links and each step of a
   run, `createdAt` finer than the millisecond, replays across endpoints or by event type, load
   tests.

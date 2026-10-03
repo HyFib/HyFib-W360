@@ -6,9 +6,12 @@ import {
   WEBHOOK_EVENT_INFO,
   WEBHOOK_EVENT_KEYS,
   WEBHOOK_LIMITS,
+  WEBHOOK_MESSAGE_STATUS_LABELS,
+  WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_REPLAY_PERIODS,
   webhookReplaySummary,
   type WebhookEventType,
+  type WebhookMessageStatus,
   type WebhookReplayPeriod,
 } from '@w360/domain/webhook-model';
 import {
@@ -56,14 +59,59 @@ function NewSecret({
   );
 }
 
-function EventChoices({
+/** The statuses an endpoint takes of `message.status` (ADR-119), shown while it takes the event. */
+function StatusChoices({
   prefix,
   chosen,
   onChange,
 }: {
   prefix: string;
+  chosen: WebhookMessageStatus[];
+  onChange: (next: WebhookMessageStatus[]) => void;
+}) {
+  return (
+    <fieldset className="ml-6 grid gap-1">
+      <legend className="mb-1 text-xs text-muted-foreground">
+        Statuses sent (all of them unless you untick some)
+      </legend>
+      {WEBHOOK_MESSAGE_STATUSES.map((status) => {
+        const id = `${prefix}-status-${status}`;
+        return (
+          <div key={status} className="flex items-center gap-2">
+            <Checkbox
+              id={id}
+              checked={chosen.includes(status)}
+              onChange={(e) =>
+                onChange(
+                  e.target.checked
+                    ? WEBHOOK_MESSAGE_STATUSES.filter((s) => s === status || chosen.includes(s))
+                    : chosen.filter((s) => s !== status),
+                )
+              }
+            />
+            <Label htmlFor={id} className="font-normal">
+              {WEBHOOK_MESSAGE_STATUS_LABELS[status]}{' '}
+              <span className="font-mono text-xs">({status})</span>
+            </Label>
+          </div>
+        );
+      })}
+    </fieldset>
+  );
+}
+
+function EventChoices({
+  prefix,
+  chosen,
+  onChange,
+  statuses,
+  onStatusesChange,
+}: {
+  prefix: string;
   chosen: WebhookEventType[];
   onChange: (next: WebhookEventType[]) => void;
+  statuses: WebhookMessageStatus[];
+  onStatusesChange: (next: WebhookMessageStatus[]) => void;
 }) {
   return (
     <fieldset className="grid gap-2">
@@ -72,21 +120,26 @@ function EventChoices({
         const id = `${prefix}-event-${type}`;
         const info = WEBHOOK_EVENT_INFO[type];
         return (
-          <div key={type} className="flex items-start gap-2">
-            <Checkbox
-              id={id}
-              className="mt-0.5"
-              checked={chosen.includes(type)}
-              onChange={(e) =>
-                onChange(e.target.checked ? [...chosen, type] : chosen.filter((t) => t !== type))
-              }
-            />
-            <Label htmlFor={id} className="grid gap-0.5 font-normal">
-              <span className="font-medium">
-                {info.label} <span className="font-mono text-xs">({type})</span>
-              </span>
-              <span className="text-xs text-muted-foreground">{info.description}</span>
-            </Label>
+          <div key={type} className="grid gap-2">
+            <div className="flex items-start gap-2">
+              <Checkbox
+                id={id}
+                className="mt-0.5"
+                checked={chosen.includes(type)}
+                onChange={(e) =>
+                  onChange(e.target.checked ? [...chosen, type] : chosen.filter((t) => t !== type))
+                }
+              />
+              <Label htmlFor={id} className="grid gap-0.5 font-normal">
+                <span className="font-medium">
+                  {info.label} <span className="font-mono text-xs">({type})</span>
+                </span>
+                <span className="text-xs text-muted-foreground">{info.description}</span>
+              </Label>
+            </div>
+            {type === 'message.status' && chosen.includes(type) ? (
+              <StatusChoices prefix={prefix} chosen={statuses} onChange={onStatusesChange} />
+            ) : null}
           </div>
         );
       })}
@@ -182,6 +235,7 @@ export function WebhookEndpointForm({
     description: string | null;
     eventTypes: WebhookEventType[];
     headerNames: string[];
+    messageStatuses: WebhookMessageStatus[] | null;
   };
   atLimit?: boolean;
 }) {
@@ -189,6 +243,9 @@ export function WebhookEndpointForm({
   const [url, setUrl] = useState(endpoint?.url ?? '');
   const [description, setDescription] = useState(endpoint?.description ?? '');
   const [eventTypes, setEventTypes] = useState<WebhookEventType[]>(endpoint?.eventTypes ?? []);
+  const [statuses, setStatuses] = useState<WebhookMessageStatus[]>(
+    endpoint?.messageStatuses ?? [...WEBHOOK_MESSAGE_STATUSES],
+  );
   const [headers, setHeaders] = useState<HeaderRow[]>([]);
   // Changing an endpoint keeps its headers unless they are given again.
   const [replaceHeaders, setReplaceHeaders] = useState(false);
@@ -216,7 +273,12 @@ export function WebhookEndpointForm({
         setBusy(true);
         setError(null);
         setSaved(null);
-        const input = { url, description, eventTypes };
+        // Every status ticked takes every status, including statuses added later (null).
+        const messageStatuses =
+          eventTypes.includes('message.status') && statuses.length < WEBHOOK_MESSAGE_STATUSES.length
+            ? statuses
+            : null;
+        const input = { url, description, eventTypes, messageStatuses };
         const done = (r: { ok: true } | { ok: false; code: string; message: string }) => {
           setBusy(false);
           if (!r.ok) setError(r);
@@ -242,6 +304,7 @@ export function WebhookEndpointForm({
               setUrl('');
               setDescription('');
               setEventTypes([]);
+              setStatuses([...WEBHOOK_MESSAGE_STATUSES]);
               setHeaders([]);
             }
           });
@@ -286,7 +349,13 @@ export function WebhookEndpointForm({
           )}
         </Field>
       </div>
-      <EventChoices prefix={prefix} chosen={eventTypes} onChange={setEventTypes} />
+      <EventChoices
+        prefix={prefix}
+        chosen={eventTypes}
+        onChange={setEventTypes}
+        statuses={statuses}
+        onStatusesChange={setStatuses}
+      />
       <fieldset className="grid gap-2">
         <legend className="mb-1 text-sm font-medium">Headers</legend>
         <p className="text-xs text-muted-foreground">

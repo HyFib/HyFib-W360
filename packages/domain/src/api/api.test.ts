@@ -1253,6 +1253,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'enabled',
       'events',
       'headers',
+      'messageStatuses',
     ]);
     expect(update.additionalProperties).toBe(false);
     // Headers are given with their values, at most 5, and answered by name only (ADR-118).
@@ -1270,6 +1271,14 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     };
     expect(Object.keys(answered.properties.headers?.items?.properties ?? {})).toEqual(['name']);
     expect(answered.required).toContain('headers');
+    // The message statuses an endpoint receives (ADR-119): a list, or null for every status.
+    const statuses = (answered.properties as Record<string, { anyOf?: unknown[] }>).messageStatuses;
+    expect(statuses?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('messageStatuses');
+    const webhooks = doc.webhooks as Record<string, { post?: { description?: string } }>;
+    expect(webhooks['message.status']?.post?.description).toContain(
+      'An endpoint receives every status unless it names the ones it takes',
+    );
   });
 });
 

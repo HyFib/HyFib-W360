@@ -4481,3 +4481,42 @@ Decision:
 Not built: other authentication schemes (OAuth client credentials, mutual TLS), headers computed
 per delivery (a signed token), headers per event type, values outside printable ASCII, and showing
 a value again.
+
+## ADR-119 Choosing the message statuses a webhook endpoint receives (2026-10-03)
+
+Context: `message.status` is the busiest event (ADR-053). Every message a company sends is
+accepted, sent, delivered and often read, so a receiver that acts only on failures (to retry from
+its own system, or to alert a person) was sent four or five deliveries for each message and
+discarded most of them: a campaign to 10,000 contacts meant about 40,000 deliveries, each retried
+while the receiver was down. P5-09's Remaining listed filters beyond the event type.
+
+Decision:
+
+- **A list of statuses per endpoint,** for `message.status` only. None (null) receives every
+  status, as before, including statuses added later. A list holds 1 to 8 of `accepted`, `sent`,
+  `delivered`, `read`, `played`, `failed`, `canceled` and `unknown_outcome`, the statuses the
+  message trigger captures (0025), kept in the order a message reaches them with repeats merged.
+  It is chosen in Settings → Webhooks under "Message status" (every status ticked to begin with;
+  saving all of them ticked keeps none, so later statuses arrive too) and shown on the endpoint as
+  "Message statuses sent: …", and through the API as `messageStatuses` on `POST /webhook-endpoints`
+  and `PATCH /webhook-endpoints/{id}` and in every endpoint the API answers.
+- **Only with the event:** statuses given for an endpoint that does not receive `message.status`
+  are refused (`messageStatuses`; 422 through the API). A change that removes the event clears
+  them, and a `PATCH` that leaves them out keeps them; Settings always sends them. A check in the
+  database holds the same rule.
+- **Applied when the event is captured:** `app.capture_webhook_event` creates a `message.status`
+  delivery only for the endpoints with no list or whose list holds the status, and writes no event
+  when no active endpoint takes it, as it already did for an event type nobody receives. A status
+  nobody takes costs no row, delivery or attempt. A change applies to statuses captured after it;
+  deliveries already created are still sent. Replays and test events do not pass through the
+  capture and are unchanged.
+- **Audited:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry `messageStatuses`
+  when the endpoint has a list, and the company data export carries the column.
+- **Migration 0095:** `message_statuses text[]` on `app.webhook_endpoints` with a check (null, or 1
+  to 8 known statuses while `message.status` is among the events), an update grant on the column
+  for the runtime role (it inserts it with its table grant), and `app.capture_webhook_event`
+  replaced with the same signature, so its owner and grants stay. Existing endpoints keep null;
+  nothing is backfilled.
+
+Not built: filters for other event types (conversation statuses, automations, campaigns), filters
+on a message's fields (its template, number or sender), and retry settings per status.

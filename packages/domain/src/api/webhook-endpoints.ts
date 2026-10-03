@@ -19,6 +19,7 @@ import {
   type Tx,
   type WebhookDeliveryState,
   type WebhookEventType,
+  type WebhookMessageStatus,
 } from '@w360/db';
 import { recordSystemAudit } from '../audit';
 import { enqueueEmail, type OutboxDeps } from '../email/outbox';
@@ -37,8 +38,11 @@ import {
   sealWebhookHeaders,
   setWebhookEndpointEnabled,
   webhookDeliveryColumns,
+  WEBHOOK_STATUSES_NEED_THE_EVENT,
   webhookEventTypesSchema,
   webhookHeadersSchema,
+  webhookMessageStatusesFor,
+  webhookMessageStatusesSchema,
   type WebhookDeliveryView,
 } from '../webhooks/service';
 import { apiActor, assertScope, type ApiContext } from './context';
@@ -64,6 +68,16 @@ const headersField = webhookHeadersSchema.describe(
   `Up to ${WEBHOOK_LIMITS.headers} headers the receiver asks for, sent with every delivery (for example an Authorization header it issued). Values are secrets: they are stored encrypted and never shown again. Not allowed: Content-Type, Content-Encoding, User-Agent, the transport's headers (Host, Content-Length, Transfer-Encoding, Connection, Keep-Alive, Upgrade, TE, Trailer, Expect, Accept-Encoding), Proxy-* and HyFib's W360-*.`,
 );
 
+const messageStatusesField = webhookMessageStatusesSchema.describe(
+  'The message.status statuses the endpoint receives (accepted, sent, delivered, read, played, failed, canceled, unknown_outcome), only with the message.status event; null receives every status, including statuses added later.',
+);
+
+/** Statuses are chosen only for an endpoint that receives `message.status` (ADR-119). */
+const invalidStatuses = () =>
+  new AppError('validation_failed', WEBHOOK_STATUSES_NEED_THE_EVENT, {
+    issues: [{ path: 'messageStatuses', message: WEBHOOK_STATUSES_NEED_THE_EVENT }],
+  });
+
 export const apiCreateWebhookEndpointSchema = z
   .object({
     url: z
@@ -77,8 +91,13 @@ export const apiCreateWebhookEndpointSchema = z
     events: webhookEventTypesSchema.describe('The events the endpoint receives.'),
     description: descriptionField.optional().describe('A note for members, up to 200 characters.'),
     headers: headersField.optional(),
+    messageStatuses: messageStatusesField.optional(),
   })
-  .strict();
+  .strict()
+  .refine((data) => !data.messageStatuses || data.events.includes('message.status'), {
+    path: ['messageStatuses'],
+    message: WEBHOOK_STATUSES_NEED_THE_EVENT,
+  });
 
 export const apiUpdateWebhookEndpointSchema = z
   .object({
@@ -97,6 +116,11 @@ export const apiUpdateWebhookEndpointSchema = z
       .describe(
         'Replaces the endpoint’s headers with these (all of them: values are never shown, so give each again); an empty list removes them. Left out, the headers stay.',
       ),
+    messageStatuses: messageStatusesField
+      .optional()
+      .describe(
+        'The message.status statuses the endpoint receives; null receives every status. Left out, they stay, unless the events no longer include message.status, which clears them.',
+      ),
   })
   .strict()
   .refine(
@@ -104,8 +128,9 @@ export const apiUpdateWebhookEndpointSchema = z
       data.events !== undefined ||
       data.description !== undefined ||
       data.enabled !== undefined ||
-      data.headers !== undefined,
-    'Give the events, the description, the headers or whether the endpoint is enabled',
+      data.headers !== undefined ||
+      data.messageStatuses !== undefined,
+    'Give the events, the description, the headers, the message statuses or whether the endpoint is enabled',
   );
 
 export interface ApiWebhookEndpoint {
@@ -124,6 +149,8 @@ export interface ApiWebhookEndpoint {
   previousSecretExpiresAt: string | null;
   /** The endpoint's own headers, by name only (ADR-118): values are never shown. */
   headers: { name: string }[];
+  /** The `message.status` statuses it receives (ADR-119); null receives every status. */
+  messageStatuses: WebhookMessageStatus[] | null;
   /** The key that added the endpoint. */
   apiKeyId: string;
   createdAt: string;
@@ -205,6 +232,7 @@ const columns = {
   secretVersion: webhookEndpoints.secretVersion,
   previousSecretExpiresAt: webhookEndpoints.previousSecretExpiresAt,
   headerNames: webhookEndpoints.headerNames,
+  messageStatuses: webhookEndpoints.messageStatuses,
   apiKeyId: webhookEndpoints.createdByApiKeyId,
   createdAt: webhookEndpoints.createdAt,
   updatedAt: webhookEndpoints.updatedAt,
@@ -224,6 +252,7 @@ type EndpointRow = Pick<
   | 'secretVersion'
   | 'previousSecretExpiresAt'
   | 'headerNames'
+  | 'messageStatuses'
   | 'createdAt'
   | 'updatedAt'
 > & { apiKeyId: string | null };
@@ -248,6 +277,7 @@ function toApiEndpoint(row: EndpointRow, now: Date): ApiWebhookEndpoint {
         ? row.previousSecretExpiresAt.toISOString()
         : null,
     headers: row.headerNames.map((name) => ({ name })),
+    messageStatuses: row.messageStatuses,
     apiKeyId: row.apiKeyId,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -440,17 +470,24 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
           now,
           async () => {
             const headers = data.headers ?? [];
+            const messageStatuses = webhookMessageStatusesFor(
+              data.events,
+              data.messageStatuses,
+              null,
+            );
             const { id, secret } = await insertWebhookEndpoint(tx, deps.keyring, ctx.tenant.id, {
               url,
               description: data.description || null,
               eventTypes: data.events,
               headers,
+              messageStatuses,
               creator: { apiKeyId: ctx.key.id },
             });
             await audit(tx, ctx, 'webhook.endpoint_created', id, {
               host,
               eventTypes: data.events,
               ...(headers.length > 0 ? { headers: headers.map((h) => h.name) } : {}),
+              ...(messageStatuses ? { messageStatuses } : {}),
             });
             await announce(tx, ctx, { host, events: data.events, at: now });
             const endpoint = await readEndpoint(tx, ctx, id, now);
@@ -475,10 +512,13 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
           keysOnly: true,
         });
         const host = webhookHost(endpoint.url);
+        const events = data.events ?? endpoint.eventTypes;
+        if (data.messageStatuses && !events.includes('message.status')) throw invalidStatuses();
         if (
           data.events !== undefined ||
           data.description !== undefined ||
-          data.headers !== undefined
+          data.headers !== undefined ||
+          data.messageStatuses !== undefined
         ) {
           const [changed] = await tx
             .update(webhookEndpoints)
@@ -488,15 +528,24 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               ...(data.headers !== undefined
                 ? sealWebhookHeaders(deps.keyring, ctx.tenant.id, id, data.headers)
                 : {}),
+              messageStatuses: webhookMessageStatusesFor(
+                events,
+                data.messageStatuses,
+                endpoint.messageStatuses,
+              ),
               updatedAt: now,
             })
             .where(and(eq(webhookEndpoints.tenantId, ctx.tenant.id), eq(webhookEndpoints.id, id)))
-            .returning({ eventTypes: webhookEndpoints.eventTypes });
+            .returning({
+              eventTypes: webhookEndpoints.eventTypes,
+              messageStatuses: webhookEndpoints.messageStatuses,
+            });
           if (!changed) throw new Error('A locked endpoint was not updated');
           await audit(tx, ctx, 'webhook.endpoint_updated', id, {
             host,
             eventTypes: changed.eventTypes,
             ...(data.headers !== undefined ? { headers: data.headers.map((h) => h.name) } : {}),
+            ...(changed.messageStatuses ? { messageStatuses: changed.messageStatuses } : {}),
           });
         }
         if (data.enabled !== undefined) {

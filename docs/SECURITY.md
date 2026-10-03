@@ -686,6 +686,12 @@ Phase 5 rules (outgoing webhooks, P5-09):
   inject another. Only the worker opens them, for the endpoint they are bound to; headers that do
   not open fail that delivery alone as `payload_failed` (stage `headers`), logged without them.
   Tested.
+- An endpoint can take only some `message.status` statuses (ADR-119), chosen by whoever may change
+  it (members with `developer.manage`, or the key that manages it). The list is checked against
+  the statuses the message trigger captures, kept only while the endpoint takes `message.status`
+  (a database check too), and applied in `app.capture_webhook_event`, which reads the company's own
+  endpoints: it narrows what one endpoint receives and never what another endpoint or company
+  receives, and a status no endpoint takes is not recorded. Audited with the list. Tested.
 - Conversation and contact events (ADR-074) follow the same rules. Conversation events name the
   member and the team by id only (ADR-094), the ids the API gives `conversations.read` keys
   (ADR-093): names are read through `GET /members` and `GET /teams` with such a key, and no email or
