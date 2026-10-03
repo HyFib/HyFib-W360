@@ -1695,6 +1695,19 @@ describe('OpenAPI document', () => {
     );
   });
 
+  it('says which messages were too large to keep and how many contacts a card left out (ADR-132)', () => {
+    type Shape = { required?: string[]; properties?: Record<string, Shape>; type?: string };
+    const schemas = doc.components.schemas as Record<string, Shape>;
+    const received = schemas.WebhookMessageReceived?.properties?.data?.properties?.message;
+    for (const message of [schemas.ConversationMessage, schemas.FeedMessage, received]) {
+      expect(message?.required).toEqual(
+        expect.arrayContaining(['contentTooLarge', 'contactsLeftOut']),
+      );
+      expect(message?.properties?.contentTooLarge).toMatchObject({ type: 'boolean' });
+      expect(message?.properties?.contactsLeftOut).toMatchObject({ type: 'integer', minimum: 0 });
+    }
+  });
+
   it('names the plan refusals in the 403 and 429 responses and the error reason', () => {
     const responses = paths['/contacts']?.get?.responses as Record<string, { description: string }>;
     expect(responses['403']?.description).toContain('not_in_plan');

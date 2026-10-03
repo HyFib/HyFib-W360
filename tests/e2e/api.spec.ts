@@ -278,6 +278,8 @@ test('a key answers a customer who wrote, reads the conversation and resolves it
       text: 'Order A-1001 ships today.',
       sentBy: 'api',
       status: 'accepted',
+      contentTooLarge: false,
+      contactsLeftOut: 0,
     }),
   ]);
   const older = await request.get(
@@ -292,6 +294,9 @@ test('a key answers a customer who wrote, reads the conversation and resolves it
       text: 'Where is my order A-1001?',
       sentBy: null,
       status: 'received',
+      // Nothing was left out of it (ADR-132).
+      contentTooLarge: false,
+      contactsLeftOut: 0,
     }),
   ]);
   const resolved = await request.get('/api/v1/conversations?status=resolved', { headers: auth });

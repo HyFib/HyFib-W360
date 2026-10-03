@@ -1699,7 +1699,9 @@ sends) is kept without it; ask the customer to send it again in parts. "�" sta
 emoji or another character that a clip or a provider cut: inbound text is clipped without
 splitting one, so it appears only in text clipped elsewhere or sent that way. A status's errors and
 pricing larger than their columns hold (4 KB and 2 KB) are kept shortened. The receipt is processed
-either way; none of these ever fails one.
+either way; none of these ever fails one. The API's messages and the `message.received` webhook
+say the same with `contentTooLarge` (its text, reply and media type are then null) and
+`contactsLeftOut` (ADR-132), so an integration can tell such a message from one without text.
 
 **A key's campaign results differ from the campaign page, or a campaign read through the API answers
 403 or 404 (ADR-125).** `GET /api/v1/campaigns/{id}` counts the results when it is read, as the

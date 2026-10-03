@@ -1,5 +1,59 @@
 # Progress
 
+## 2026-10-03 — Phase 5: what was left out of a message, in the API and webhooks (ADR-132)
+
+Status: **Implemented and locally verified (test data and the provider stand-ins only).** Since
+ADR-131 a contact card keeps the contacts that fit and counts the rest, and content larger than a
+message may hold is kept as too large. The inbox said so; the API and the `message.received`
+webhook gave such a message `text: null`, as for a message without text, a tapped button kept as
+too large a reply of nulls, and a contact card nothing about the contacts it left out.
+
+### Completed
+
+- **Design (ADR-132):** two fields say what was left out; content kept as too large has nothing to
+  read; a card's contacts wait for Meta's contact object to be confirmed from its reference, which
+  this environment's network policy kept from being read.
+- **Domain** (`webhooks/payloads.ts`, `api/conversations.ts`, `api/openapi.ts`):
+  `inboundOmissions` reads `contentTooLarge` (only `true`) and `contactsLeftOut` (a contact card's
+  whole count above 0, otherwise 0) from stored content, and `inboundSummary` gives no text, reply
+  or media type for content kept as too large. The `message.received` payload and the API's
+  messages (`GET /conversations/{id}/messages`, `GET /messages`, `GET /message-changes`) carry
+  both, false and 0 for outbound messages, and the OpenAPI document requires and describes them.
+- **Tests:**
+  - Unit (`webhooks.test.ts` and `api.test.ts`, 1 new each; 2 updated): a too-large button and
+    image without a reply or media type; the fields for content too large, a card with 3 contacts
+    left out, an empty card, a count on a text message, and counts that are negative, fractional,
+    text, NaN or infinite; the OpenAPI document requiring both on its three message schemas.
+  - Integration (real PostgreSQL; `api.test.ts` and `webhooks.test.ts`, 1 new each; 1 updated): a
+    system message too large to keep, a 25-contact card larger than a message holds and a text,
+    read through a conversation's messages and the message feed, and posted as `message.received`.
+  - E2E (`api.spec.ts` and `webhooks.spec.ts`, 2 updated): the API's messages and a delivered
+    `message.received` say nothing was left out of a text.
+- **Docs:** ADR-132 (and a note on ADR-131); ARCHITECTURE (conversation reads); RUNBOOKS (a
+  message too large to keep); BACKLOG P5-08 and P5-09.
+- **Mutation checks:** 13 deliberate regressions tried, 13 caught.
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                                                                                                                           | Result                          |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                              | clean                           |
+| `pnpm test`                                                                                                                                                       | 608 passed                      |
+| `pnpm test:integration` on PostgreSQL 18.6 and 17.11                                                                                                              | 785 passed on each              |
+| `pnpm build`, then `api.spec.ts`, `webhooks.spec.ts`, `api-message-changes.spec.ts`, `webhook-events.spec.ts` and `inbox.spec.ts` on chromium and mobile-chromium | 46 passed                       |
+| Mutation checks                                                                                                                                                   | 13 regressions tried, 13 caught |
+| gitleaks 8.30.1 on the commit                                                                                                                                     | no leaks found                  |
+
+### Known gaps
+
+- A contact card's contacts are not given by the API or webhooks, nor shown in the inbox: Meta's
+  contact object is not in the research notes, and its reference could not be read from this
+  environment.
+- Clips outside the inbound path may still split a pair, stored as U+FFFD (an automation step's
+  field value, clipped by the interpreter the browser also runs).
+- Pages' URL segments and query strings are not checked as such (services check ids, slugs,
+  cursors and filters by format or through `parseInput`).
+
 ## 2026-10-03 — Phase 5: split emoji and oversized inbound messages (ADR-131)
 
 Status: **Implemented and locally verified (test data and the provider stand-ins only).**

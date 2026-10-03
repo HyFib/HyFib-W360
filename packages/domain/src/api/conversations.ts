@@ -28,7 +28,7 @@ import { NOTE_MAX_LENGTH } from '../messaging/notes';
 import { SERVICE_WINDOW_MS, type OutboundDeps } from '../messaging/outbound';
 import { answeredJoin, answeredMessages } from '../messaging/reply-context';
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
-import { inboundSummary, type TappedReply } from '../webhooks/payloads';
+import { inboundOmissions, inboundSummary, type TappedReply } from '../webhooks/payloads';
 import { apiActor, assertScope, type ApiContext } from './context';
 import type { ApiResponse, IdempotencyInput } from './idempotency';
 import { API_LIMITS } from './model';
@@ -204,6 +204,10 @@ export interface ApiConversationMessage {
   /** The message this one quotes, reacts to or taps a button of, when it is in the conversation (ADR-082). */
   replyTo: string | null;
   mimeType: string | null;
+  /** The content was too large to keep (ADR-131, ADR-132); false for outbound messages. */
+  contentTooLarge: boolean;
+  /** How many contacts a contact card left out (ADR-131, ADR-132); 0 otherwise. */
+  contactsLeftOut: number;
   templateId: string | null;
   templateName: string | null;
   sentBy: ApiSentBy | null;
@@ -418,6 +422,9 @@ function toApiMessage(m: MessageRow): ApiConversationMessage {
   const summary = inbound
     ? inboundSummary(m.type, m.content)
     : { text: outboundText(m.type, m.content), reply: null, mimeType: null };
+  const omissions = inbound
+    ? inboundOmissions(m.type, m.content)
+    : { contentTooLarge: false, contactsLeftOut: 0 };
   const template = obj(m.content.template);
   return {
     id: m.id,
@@ -428,6 +435,8 @@ function toApiMessage(m: MessageRow): ApiConversationMessage {
     reply: summary.reply,
     replyTo: m.replyTo,
     mimeType: summary.mimeType,
+    contentTooLarge: omissions.contentTooLarge,
+    contactsLeftOut: omissions.contactsLeftOut,
     templateId: m.templateId,
     templateName: m.type === 'template' ? str(template?.name) : null,
     sentBy: inbound ? null : sentBy(m.senderType),

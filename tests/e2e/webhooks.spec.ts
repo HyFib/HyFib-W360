@@ -134,7 +134,13 @@ test('an endpoint added in settings receives signed events, replays and a rotate
   expect(JSON.parse(message.body)).toMatchObject({
     type: 'message.received',
     data: {
-      message: { type: 'text', text: 'Is my parcel out?' },
+      // Nothing was left out of it (ADR-132).
+      message: {
+        type: 'text',
+        text: 'Is my parcel out?',
+        contentTooLarge: false,
+        contactsLeftOut: 0,
+      },
       contact: { phone: `+${waId}`, name: 'Priya Customer' },
     },
   });

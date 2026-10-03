@@ -5134,5 +5134,40 @@ failing statement (a real PostgreSQL error quoting a name and a number) in the r
 transaction, as no inbound content can fail it any more.
 
 Not built: the API and webhooks do not say that a message's content was too large (its text is
-null) or how many contacts a card left out; contact cards' contacts are still not shown in the
-inbox; clips outside the inbound path may still split a pair (stored as U+FFFD).
+null) or how many contacts a card left out (since ADR-132 they do); contact cards' contacts are
+still not shown in the inbox; clips outside the inbound path may still split a pair (stored as
+U+FFFD).
+
+## ADR-132 What was left out of a message, in the API and webhooks (2026-10-03)
+
+Context: since ADR-131 an inbound message's content is bounded under the 64 KB its column allows: a
+contact card keeps its first contacts that fit and records how many it left out
+(`omittedContacts`), and content that would still exceed the budget is kept as
+`{"tooLarge": true}`. The inbox says so; the API and the `message.received` webhook did not. A
+message kept as too large came with `text: null`, as a message without text does, a tapped template
+button kept as too large came with a reply whose id and title were null, and a contact card said
+nothing of the contacts it left out. The API and webhooks do not give a card's contacts at all:
+that would mean naming the fields of Meta's contact object, which the research notes do not cover
+and whose reference on developers.facebook.com could not be read from this environment (its network
+policy blocks the host), so it stays undecided.
+
+Decision:
+
+- **Two fields say what was left out.** Every message the API returns (a conversation's messages,
+  `GET /messages` and `GET /message-changes`) and the `message.received` webhook carry
+  `contentTooLarge`, true when WhatsApp sent more than a message may hold, so its content was not
+  kept (false for outbound messages), and `contactsLeftOut`, how many contacts a contact card left
+  out (0 otherwise). One function, `inboundOmissions`, reads both from the stored content: only
+  `true` marks content as too large, and only a whole number above 0 on a contact card counts.
+- **Content kept as too large has nothing to read:** its text, reply and media type are null,
+  whatever its type, a tapped button's included.
+- **Additive and documented:** both fields are required in the OpenAPI document's
+  `ConversationMessage`, `FeedMessage` and `WebhookMessageReceived`, with their meaning. Webhook
+  bodies are built when delivered (ADR-053), so deliveries and replays of events captured before
+  carry them too.
+
+What follows: an integration can tell a message HyFib could not keep from a message without text,
+and ask the customer to send it again in parts, and knows when a contact card is incomplete.
+
+Not built: a contact card's contacts in the API and webhooks (and in the inbox), until Meta's
+contact object is confirmed from its reference.

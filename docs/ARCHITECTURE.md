@@ -964,8 +964,10 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   ids), the unread count, the last message and
   inbound times and when the 24-hour window ends; a message reads in the webhooks' words
   (`inboundSummary` for inbound; for outbound the text, a template's rendered body or an interactive
-  message's body), with who sent it (`agent`, `bot`, `campaign`, `api`, `system`), the key for API
-  messages, the status and its error, never the media or internal notes. `updatedSince` compares the
+  message's body; since ADR-132 `inboundOmissions` says whether inbound content was too large to
+  keep and how many contacts a card left out), with who sent it (`agent`, `bot`, `campaign`, `api`,
+  `system`), the key for API messages, the status and its error, never the media or internal
+  notes. `updatedSince` compares the
   row's `updated_at`, which its trigger stamps with the transaction's start, so integrations are
   told to overlap their passes. `conversations_created_idx` (0045, built concurrently) serves the
   pages.

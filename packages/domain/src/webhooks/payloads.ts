@@ -76,6 +76,22 @@ export const tappedReplySchema = z
 
 export type TappedReply = z.infer<typeof tappedReplySchema>;
 
+/** Whether an inbound message's content was too large to keep (ADR-131, ADR-132). */
+export const contentTooLargeSchema = z
+  .boolean()
+  .describe(
+    'True when WhatsApp sent more than a message may hold (64 KB), so its content was not kept: text, reply and mimeType are null. False for outbound messages.',
+  );
+
+/** How many contacts an inbound contact card left out (ADR-131, ADR-132). */
+export const contactsLeftOutSchema = z
+  .number()
+  .int()
+  .min(0)
+  .describe(
+    'For a contact card: how many of its contacts were left out because the card was larger than a message may hold; 0 otherwise. The cards’ contacts are not given.',
+  );
+
 export const messageReceivedPayloadSchema = envelope(
   'message.received',
   z.object({
@@ -98,6 +114,8 @@ export const messageReceivedPayloadSchema = envelope(
           'The id of the message this one answers: the message the contact quoted, the message a reaction is for, or the message whose button or row was tapped. Null when there is none or it is not in the conversation.',
         ),
       mimeType: z.string().nullable().describe('For media messages (the media is not attached).'),
+      contentTooLarge: contentTooLargeSchema,
+      contactsLeftOut: contactsLeftOutSchema,
       receivedAt: z.iso.datetime(),
     }),
     conversation: z.object({ id: z.uuid() }),
@@ -475,6 +493,8 @@ export function inboundSummary(
   reply: TappedReply;
   mimeType: string | null;
 } {
+  // Content larger than a message may hold was kept without it (ADR-131): nothing to read.
+  if (content.tooLarge === true) return { text: null, reply: null, mimeType: null };
   switch (type) {
     case 'text':
       return { text: str(content.text), reply: null, mimeType: null };
@@ -518,6 +538,23 @@ export function inboundSummary(
     default:
       return { text: null, reply: null, mimeType: null };
   }
+}
+
+/**
+ * What was left out of an inbound message's content (ADR-132): whether WhatsApp sent more than a
+ * message may hold, so its content was not kept, and how many contacts a contact card left out
+ * (ADR-131).
+ */
+export function inboundOmissions(
+  type: string,
+  content: Record<string, unknown>,
+): { contentTooLarge: boolean; contactsLeftOut: number } {
+  const leftOut = type === 'contacts' ? content.omittedContacts : undefined;
+  return {
+    contentTooLarge: content.tooLarge === true,
+    contactsLeftOut:
+      typeof leftOut === 'number' && Number.isSafeInteger(leftOut) && leftOut > 0 ? leftOut : 0,
+  };
 }
 
 async function contactOf(tx: Tx, tenantId: string, contactId: string | null) {
@@ -969,6 +1006,7 @@ export async function buildWebhookPayload(
               id: event.messageId,
               type: message.type,
               ...inboundSummary(message.type, message.content),
+              ...inboundOmissions(message.type, message.content),
               replyTo: await findAnsweredMessageId(tx, tenantId, {
                 conversationId: message.conversationId,
                 channelAccountId: message.channelId,

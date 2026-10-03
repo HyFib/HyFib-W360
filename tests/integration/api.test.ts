@@ -2819,6 +2819,8 @@ describe('conversation reads (ADR-072)', () => {
       reply: null,
       replyTo: null,
       mimeType: null,
+      contentTooLarge: false,
+      contactsLeftOut: 0,
       templateId: null,
       templateName: null,
       sentBy: null,
@@ -2903,6 +2905,72 @@ describe('conversation reads (ADR-072)', () => {
     );
     expect(onePerPage.flat().map((m) => m.id)).toEqual(newestFirst);
     expect(newestFirst).toHaveLength(11);
+  });
+
+  it('say which messages were too large to keep and how many contacts a card left out (ADR-132)', async () => {
+    const c = await fx.company();
+    const reader = await apiKey(c, ['conversations.read']);
+    const waId = '919811100072';
+    // A system update larger than a message may hold, kept as too large (ADR-131).
+    const wide = '𝒳'.repeat(2048); // 4,096 code units, 8 KB as UTF-8
+    const system = Object.fromEntries(
+      [
+        'type',
+        'body',
+        'user_id',
+        'parent_user_id',
+        'previous_user_id',
+        'previous_parent_user_id',
+        'wa_id',
+        'new_wa_id',
+      ].map((key) => [key, wide]),
+    );
+    // A contact card of 25 contacts of about 4 KB, which keeps the first that fit.
+    const card = Array.from({ length: 25 }, (_, i) => ({
+      name: { formatted_name: `Contact ${i}` },
+      addresses: [{ street: 'x'.repeat(4_000), city: 'Pune' }],
+    }));
+    await inbound(c, waId, [
+      { text: 'Hello' },
+      { type: 'system', extra: { system } },
+      { type: 'contacts', extra: { contacts: card } },
+    ]);
+    const conv = await conversationOf(c, waId);
+    const [stored] = await fx.query<{ omitted: number }>(
+      `SELECT (content->>'omittedContacts')::int AS omitted FROM app.messages
+        WHERE conversation_id = $1 AND type = 'contacts'`,
+      [conv.id],
+    );
+    expect(stored!.omitted).toBeGreaterThan(0);
+
+    const { data } = await apiListConversationMessages(deps(), reader.ctx, conv.id, {});
+    const byType = new Map(data.map((m) => [m.type, m]));
+    expect(byType.get('system')).toMatchObject({
+      text: null,
+      reply: null,
+      mimeType: null,
+      contentTooLarge: true,
+      contactsLeftOut: 0,
+    });
+    expect(byType.get('contacts')).toMatchObject({
+      text: null,
+      contentTooLarge: false,
+      contactsLeftOut: stored!.omitted,
+    });
+    expect(byType.get('text')).toMatchObject({
+      text: 'Hello',
+      contentTooLarge: false,
+      contactsLeftOut: 0,
+    });
+    // The feed across conversations (this company has only this one) says the same.
+    const feed = await apiListMessages(deps(), reader.ctx, {});
+    expect(feed.data.map((m) => [m.type, m.contentTooLarge, m.contactsLeftOut]).sort()).toEqual(
+      [
+        ['contacts', false, stored!.omitted],
+        ['system', true, 0],
+        ['text', false, 0],
+      ].sort(),
+    );
   });
 
   it('leave out erased contacts and other companies, and check what they are asked', async () => {

@@ -38,6 +38,7 @@ import {
   conversationAssignmentPayloadSchema,
   conversationStatusPayloadSchema,
   conversationTeamPayloadSchema,
+  inboundOmissions,
   inboundSummary,
   messageReceivedPayloadSchema,
   messageStatusPayloadSchema,
@@ -157,6 +158,32 @@ describe('inbound message summaries', () => {
     expect(inboundSummary('text', { text: 42 }).text).toBeNull();
   });
 
+  it('says what was left out: content too large to keep and contacts a card left out (ADR-132)', () => {
+    // Content kept as too large (ADR-131) has nothing to read, a tapped button included.
+    const nothing = { text: null, reply: null, mimeType: null };
+    expect(inboundSummary('button', { tooLarge: true })).toEqual(nothing);
+    expect(inboundSummary('image', { tooLarge: true })).toEqual(nothing);
+    expect(inboundOmissions('system', { tooLarge: true })).toEqual({
+      contentTooLarge: true,
+      contactsLeftOut: 0,
+    });
+    expect(inboundOmissions('text', { text: 'Hello' })).toEqual({
+      contentTooLarge: false,
+      contactsLeftOut: 0,
+    });
+    expect(inboundOmissions('contacts', { contacts: [{}], omittedContacts: 3 })).toEqual({
+      contentTooLarge: false,
+      contactsLeftOut: 3,
+    });
+    expect(inboundOmissions('contacts', { contacts: [] }).contactsLeftOut).toBe(0);
+    // Only a contact card's count is given, and only a whole number above 0.
+    expect(inboundOmissions('text', { text: 'x', omittedContacts: 3 }).contactsLeftOut).toBe(0);
+    for (const omittedContacts of [-1, 1.5, '3', Number.NaN, Number.POSITIVE_INFINITY])
+      expect(inboundOmissions('contacts', { omittedContacts }).contactsLeftOut).toBe(0);
+    // Only true marks content as too large.
+    expect(inboundOmissions('text', { tooLarge: 'true' }).contentTooLarge).toBe(false);
+  });
+
   it('says whether a tap was a reply button or a list row, with the row’s description (ADR-080)', () => {
     const tap = (interactiveType: string, reply: Record<string, unknown>) =>
       inboundSummary('interactive', { interactiveType, reply }).reply;
@@ -206,6 +233,8 @@ describe('webhook payload schemas', () => {
             reply: null,
             replyTo: null,
             mimeType: null,
+            contentTooLarge: false,
+            contactsLeftOut: 0,
             receivedAt: base.createdAt,
           },
           conversation,

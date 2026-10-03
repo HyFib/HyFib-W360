@@ -531,8 +531,12 @@ verification, app review, Embedded Signup configuration).
   `campaigns.stop`, granted by `campaigns.send`, pauses a scheduled or running campaign and cancels
   one that has not finished, as members do, the key named in the campaign's history and the audit;
   resuming stays with members; migration 0100).
+  **[What was left out of a message built, locally verified]** (ADR-132: every message says
+  `contentTooLarge` when WhatsApp sent more than a message may hold, so its content was not kept,
+  and `contactsLeftOut` when a contact card left contacts out; the same in `message.received`).
   Remaining: media messages, call-to-action messages through the API, taking reactions back,
-  choosing conversations to change by a filter, media downloads, starting or stopping runs for many
+  choosing conversations to change by a filter, media downloads, a contact card's contacts (Meta's
+  contact object is not confirmed), starting or stopping runs for many
   contacts in one call, bulk sends in one call, changing a field's type, changing numbers, choosing
   contacts to change by a filter, a name condition in `POST /contacts/search`, groups of conditions,
   which fields of a contact changed in the contact feed (webhooks name them since ADR-121),
@@ -586,7 +590,10 @@ verification, app review, Embedded Signup configuration).
   part filters built, locally verified]** (ADR-123: an endpoint takes `contact.updated` only for
   the parts it chooses, `name`, `phone`, `email`, `tags` and `fields`, in Settings or through the
   API, or every change as before; applied where events are captured, a later change in the
-  transaction queuing the endpoints it newly concerns). Remaining: filters for other event types
+  transaction queuing the endpoints it newly concerns). **[What was left out of a message built,
+  locally verified]** (ADR-132: `message.received` says `contentTooLarge` and `contactsLeftOut`,
+  as the API does; bodies are built when delivered, so replays of earlier events say them too).
+  Remaining: filters for other event types
   and on a message's or contact's values (such as by automation, campaign, template, tag or field
   key), which tags were added or removed, other authentication (OAuth client credentials, headers
   computed per delivery), mutual TLS, fixed egress addresses, delivery counts in campaign events,

@@ -900,6 +900,55 @@ describe('event capture', () => {
 });
 
 describe('delivery', () => {
+  it('posts message.received saying what was left out of a message too large to keep and of a contact card (ADR-132)', async () => {
+    const c = await fx.company();
+    const e = await addEndpoint(c, 'ok', ['message.received']);
+    const from = waId();
+    const wide = '𝒳'.repeat(2048); // 4,096 code units, 8 KB as UTF-8
+    const system = Object.fromEntries(
+      [
+        'type',
+        'body',
+        'user_id',
+        'parent_user_id',
+        'previous_user_id',
+        'previous_parent_user_id',
+        'wa_id',
+        'new_wa_id',
+      ].map((key) => [key, wide]),
+    );
+    const card = Array.from({ length: 25 }, (_, i) => ({
+      name: { formatted_name: `Contact ${i}` },
+      addresses: [{ street: 'x'.repeat(4_000), city: 'Pune' }],
+    }));
+    await fx.deliver(
+      fx.messagesBody(c, {
+        messages: [
+          { waId: from, type: 'system', extra: { system } },
+          { waId: from, type: 'contacts', extra: { contacts: card } },
+        ],
+      }),
+    );
+    const [stored] = await fx.query<{ omitted: number }>(
+      `SELECT (content->>'omittedContacts')::int AS omitted FROM app.messages
+        WHERE tenant_id = $1 AND type = 'contacts'`,
+      [c.tenant.id],
+    );
+    expect(stored!.omitted).toBeGreaterThan(0);
+    expect(await deliverDue(c)).toMatchObject({ attempted: 2, succeeded: 2 });
+    const messages = requestsTo(e.path).map(
+      (r) => messageReceivedPayloadSchema.parse(JSON.parse(r.body)).data.message,
+    );
+    expect(
+      messages.map((m) => [m.type, m.text, m.contentTooLarge, m.contactsLeftOut]).sort(),
+    ).toEqual(
+      [
+        ['contacts', null, false, stored!.omitted],
+        ['system', null, true, 0],
+      ].sort(),
+    );
+  });
+
   it('posts message.received signed, with the contact and the text, once', async () => {
     const c = await fx.company();
     const e = await addEndpoint(c, 'ok', ['message.received']);
