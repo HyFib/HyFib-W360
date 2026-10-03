@@ -25,6 +25,8 @@ export const EXPORT_EXCLUDED_TABLES: Readonly<Record<string, string>> = {
   'app.flow_key_uploads': 'Bookkeeping of Flow key uploads to Meta.',
   'app.flow_keys':
     'Flow encryption keys: the private key is never exported and the public key is at Meta.',
+  'app.message_changes':
+    'Positions of the API’s message change feed (ADR-116): which message changed last in which transaction; the messages themselves are exported.',
   'app.send_intents': 'The delivery queue; the messages themselves are exported.',
   'app.tenant_events': 'Live-update notifications, kept a few days.',
   'app.webhook_deliveries': 'Outgoing webhook delivery attempts, kept 30 days.',

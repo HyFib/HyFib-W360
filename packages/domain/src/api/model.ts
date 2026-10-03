@@ -80,7 +80,7 @@ export const API_SCOPE_INFO: Record<
   'conversations.read': {
     label: 'Read conversations',
     description:
-      "List the company's conversations and read their messages, one conversation or all of them, including what contacts wrote, and their internal notes, with the teams and the members conversations can be assigned to (names only).",
+      "List the company's conversations and read their messages, one conversation or all of them, including what contacts wrote, follow the messages as they change, and read the conversations' internal notes, with the teams and the members conversations can be assigned to (names only).",
     permission: 'inbox.read_all',
     writes: false,
   },

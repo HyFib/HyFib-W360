@@ -600,6 +600,14 @@ Phase 5 rules (Public API, P5-08):
   field, as in Settings. Additions of one company take turns under a lock, so the 50-field limit
   holds for members and keys at once. Every change is audited as the key or the member with the
   field's key, never values; renames are audited now, in Settings too.
+- Following message changes (ADR-116): `GET /message-changes` reads the key's company's messages
+  only (`conversations.read`, which only members who read every conversation grant; RLS and an
+  explicit company filter). Its cursor is sealed as the contact feed's is, with the feed's name and
+  the company in the associated data, so a contact feed cursor or another company's does not open.
+  Change rows hold no personal data (a message id and a transaction id); a message of an erased
+  contact is read as `erased` with nothing of it. Only the trigger on `app.messages` writes the rows,
+  through a function owned by the definer role; the runtime role may only read them, so no code can
+  move a message to another place in the feed.
 - Only the token's SHA-256 is stored; the runtime role cannot read it. The token is shown once in
   the browser and kept only in the page's memory; it is never logged, and audit entries carry the
   public prefix only.

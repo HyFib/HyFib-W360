@@ -86,7 +86,13 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    tag at the same moment can deadlock, as adding one already could; PostgreSQL ends one of the two
    with an error.
    Migration 0092 (ADR-115) only widens the scope checks of `app.api_keys` and `ops.plans`; it holds
-   an exclusive lock on each until it commits, which is brief, since both tables are small.
+   an exclusive lock on each until it commits, which is brief, since both tables are small. Web
+   servers from before it do not know the new scope: until the web rollout ends, an old server
+   answers Settings → API keys with an error for a company with a key holding it (and the platform
+   plan pages for a plan version including it), and the new endpoints with 404 or 405.
+   Migration 0093 (ADR-116) records every existing message once while its triggers hold a write lock
+   on `app.messages`, so new and changed messages wait for it (measured locally: about 2.4 seconds
+   for 400,000 messages); on a large messages table run it at a quiet time.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

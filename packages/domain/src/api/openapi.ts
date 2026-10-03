@@ -784,7 +784,7 @@ export function buildOpenApiDocument(serverUrl: string) {
           description: [
             `${scopeNote('conversations.read')} Every message the company's conversations hold, read as \`GET /conversations/{id}/messages\` reads them, with the conversation's contact (\`contactId\`) and the number the message was received on or sent from (\`channelId\`); media is not attached and internal notes are not messages. Messages of erased contacts' conversations are left out.`,
             `Pages never skip or repeat a message. Each page reads at most ${API_MESSAGE_FEED_WINDOW.toLocaleString('en-US')} of the company's messages, newest first: when \`direction\` or \`channelId\` leave out most of them, a page can hold fewer messages than \`limit\`, or none, and still give a \`nextCursor\`; follow it until it is \`null\`.`,
-            'To catch up on what you missed (after your receiver was down, say), ask for `since` a little before your previous pass began (a minute) and expect to see some messages again: a message carries the time it began to be saved, so one still being saved while you read can carry an earlier time. Statuses change after a message is created; follow them with the `message.status` webhook.',
+            'To catch up on what you missed (after your receiver was down, say), ask for `since` a little before your previous pass began (a minute) and expect to see some messages again: a message carries the time it began to be saved, so one still being saved while you read can carry an earlier time. Statuses change after a message is created; follow them, exactly, with `GET /message-changes`, or with the `message.status` webhook.',
           ].join('\n\n'),
           parameters: [
             ...pageParams,
@@ -1226,6 +1226,51 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
         },
       },
+      '/message-changes': {
+        get: {
+          operationId: 'listMessageChanges',
+          summary: 'Messages in the order they changed',
+          description: [
+            `${scopeNote('conversations.read')} Every message the company's conversations hold, once, as it is now, in the order its changes were saved: received or sent, its status, status time or error changed, or its contact erased. Each message is given as \`GET /messages\` gives it; a message whose contact was erased is given as erased, with nothing else of it. Start without a cursor to read every message the company has; keep \`nextCursor\` and ask again with it to read what changed since.`,
+            'No change is skipped: a change appears once every change saved before it has finished, and a message changed again (a template sent, then delivered, then read) appears again. Read pages until `hasMore` is false, then ask again later with the last `nextCursor`. A cursor works only for the company that read it, and only with this feed.',
+          ].join('\n\n'),
+          parameters: [
+            {
+              name: 'limit',
+              in: 'query',
+              schema: { type: 'integer', minimum: 1, maximum: API_LIMITS.pageSize, default: 50 },
+            },
+            {
+              name: 'cursor',
+              in: 'query',
+              schema: { type: 'string', maxLength: 400 },
+              description:
+                '`nextCursor` from the previous page; none to start from the first change.',
+            },
+          ],
+          responses: {
+            '200': {
+              description: 'A page of changed messages.',
+              content: json({
+                type: 'object',
+                properties: {
+                  data: { type: 'array', items: ref('MessageChange') },
+                  nextCursor: {
+                    type: 'string',
+                    description: 'Where the next page starts; keep it to ask again later.',
+                  },
+                  hasMore: {
+                    type: 'boolean',
+                    description: 'Whether more changes can be read now.',
+                  },
+                },
+                required: ['data', 'nextCursor', 'hasMore'],
+              }),
+            },
+            ...errors(401, 403, 422, 429, 500),
+          },
+        },
+      },
     },
     webhooks: {
       'message.received': webhook(
@@ -1421,6 +1466,21 @@ export function buildOpenApiDocument(serverUrl: string) {
         Conversation: jsonSchema(apiConversationSchema),
         ConversationMessage: jsonSchema(apiConversationMessageSchema),
         FeedMessage: jsonSchema(apiFeedMessageSchema),
+        MessageChange: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', format: 'uuid', description: 'The message’s id.' },
+            erased: {
+              type: 'boolean',
+              description: 'Whether the message’s contact was erased.',
+            },
+            message: {
+              oneOf: [ref('FeedMessage'), { type: 'null' }],
+              description: 'The message as it is now; null once its contact was erased.',
+            },
+          },
+          required: ['id', 'erased', 'message'],
+        },
         UpdateConversation: jsonSchema(apiUpdateConversationSchema, 'input'),
         Member: jsonSchema(apiMemberSchema),
         Team: jsonSchema(apiTeamSchema),
@@ -1474,6 +1534,7 @@ export const API_ROUTES = [
   ['post', '/messages'],
   ['get', '/messages'],
   ['get', '/messages/{id}'],
+  ['get', '/message-changes'],
   ['get', '/conversations'],
   ['get', '/conversations/{id}'],
   ['patch', '/conversations/{id}'],

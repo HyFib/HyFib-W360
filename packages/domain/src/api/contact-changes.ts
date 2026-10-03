@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { AppError, type Keyring } from '@w360/core';
+import type { Keyring } from '@w360/core';
 import {
   and,
   asc,
@@ -12,6 +12,7 @@ import {
   type Database,
 } from '@w360/db';
 import { parseInput } from '../validation';
+import { openChangeCursor, sealChangeCursor, type ChangePosition } from './change-cursors';
 import { apiContactColumns, toApiContact, type ApiContact } from './contact-view';
 import { assertScope, type ApiContext } from './context';
 import { API_LIMITS } from './model';
@@ -50,57 +51,21 @@ export interface ApiContactChangePage {
   hasMore: boolean;
 }
 
-/** A place in a company's feed: after the change with this transaction and id. */
-export interface ContactChangePosition {
-  xact: string;
-  id: string;
-}
+/** A place in the company's feed: after the change with this transaction and id. */
+export type ContactChangePosition = ChangePosition;
 
-const START: ContactChangePosition = { xact: '0', id: '0' };
-const POSITION_RE = /^(\d{1,20})\.(\d{1,19})$/;
-const INVALID_CURSOR =
-  'Invalid cursor: give the nextCursor of a page of this feed, or no cursor to start again from the first change.';
-
-// A cursor is sealed to its company: a position is a database transaction id, which would show how
-// busy the whole platform is, and another company's cursor must not open.
-const cursorAad = (tenantId: string) => `contact-changes|tenant:${tenantId}`;
-
-export function sealContactChangeCursor(
+/** A cursor sealed to the company and to this feed (ADR-114). */
+export const sealContactChangeCursor = (
   keyring: Keyring,
   tenantId: string,
   at: ContactChangePosition,
-): string {
-  return Buffer.from(keyring.encrypt(`${at.xact}.${at.id}`, cursorAad(tenantId))).toString(
-    'base64url',
-  );
-}
+): string => sealChangeCursor(keyring, 'contact-changes', tenantId, at);
 
-export function openContactChangeCursor(
+export const openContactChangeCursor = (
   keyring: Keyring,
   tenantId: string,
   cursor: string | undefined,
-): ContactChangePosition {
-  if (cursor === undefined) return START;
-  let position: string;
-  try {
-    position = keyring.decryptString(
-      Buffer.from(cursor, 'base64url').toString('utf8'),
-      cursorAad(tenantId),
-    );
-  } catch {
-    // Tampered, another company's, or sealed with a key the platform no longer holds.
-    throw new AppError('validation_failed', INVALID_CURSOR, {
-      issues: [{ path: 'cursor', message: INVALID_CURSOR }],
-    });
-  }
-  const match = POSITION_RE.exec(position);
-  if (!match?.[1] || !match[2]) {
-    throw new AppError('validation_failed', INVALID_CURSOR, {
-      issues: [{ path: 'cursor', message: INVALID_CURSOR }],
-    });
-  }
-  return { xact: match[1], id: match[2] };
-}
+): ContactChangePosition => openChangeCursor(keyring, 'contact-changes', tenantId, cursor);
 
 export async function apiContactChanges(
   deps: { db: Database; keyring: Keyring },

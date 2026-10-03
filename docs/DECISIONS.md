@@ -2928,11 +2928,12 @@ Decision:
   pass began (a minute) and to expect some messages again (deduplicating on the id), rather than
   promising an exact feed. Statuses change after a message is created, and the feed does not follow
   them: the `message.status` webhook does (and `GET /messages/{id}` for messages sent through the
-  API).
+  API). Since ADR-116, `GET /message-changes` follows new messages and statuses exactly.
 - **No migration.**
 
-Not built: statuses changed since a time, filters by contact or conversation (a conversation's
-messages endpoint reads one), media, notes, counts, and a push feed (the webhooks are that).
+Not built: statuses changed since a time (built by ADR-116), filters by contact or conversation (a
+conversation's messages endpoint reads one), media, notes, counts, and a push feed (the webhooks are
+that).
 
 ## ADR-089 Reading internal notes through the public API (2026-09-30)
 
@@ -4315,3 +4316,69 @@ Decision:
 Not built: changing a field's type, renaming fields in the app (Settings adds and deletes them;
 the service could always rename, and now audits it), choices for a field (a list of allowed values),
 field order, and events for field definitions.
+
+## ADR-116 Following messages through the public API (2026-10-03)
+
+Context: an integration that keeps its own copy of a company's conversations (a helpdesk, a CRM
+timeline, a warehouse) reads messages through `GET /messages` (ADR-088) and hears of new ones and of
+status changes through the webhooks (`message.received`, `message.status`). A receiver that was down
+past the retries, an endpoint disabled after 72 hours of failures, or a new install can only catch
+up with `since`, which ADR-088 asks to overlap and deduplicate, and the feed does not follow
+statuses: a template sent yesterday and read this morning shows its new status only to a reader who
+reads it again by id or by conversation ("statuses changed since a time", ADR-088's Not built).
+
+Decision:
+
+- **Endpoint:** `GET /api/v1/message-changes` (`listMessageChanges`, scope `conversations.read`):
+  every message of the company's conversations whose API description changed (received or sent; its
+  status, status time or error changed; its contact erased), once, as it is now, in the order the
+  changes were saved. Each item is `{ id, erased, message }`, `message` being the message as
+  `GET /messages` gives it (with `contactId` and `channelId`; one function builds both), or null once
+  its contact is erased. Pages hold up to `limit` (1 to 100, 50 by default) and say `hasMore`;
+  `nextCursor` is always given. Without a cursor the feed starts from the first change, which lists
+  every message the company has. No new scope: `conversations.read` already reads every message of
+  every conversation. It does not write, so suspended and restricted companies can still read.
+- **One row per message, moved by each change:** migration 0093 adds `app.message_changes`, one row
+  per message holding the id of the last transaction that changed it (`pg_current_xact_id()`),
+  written by triggers on `app.messages` in the transaction that makes the change, whoever makes it
+  (ingestion, the send worker and its recovery, campaigns, automations, keys, members, erasure).
+  Contact changes (ADR-114) come from three tables and are only inserted, so that changes of one
+  contact never wait for each other on a shared row. Every change of a message updates the
+  message's own row, which the changing transaction then holds locked until it ends, so the trigger
+  moves the message's row right after (an insert, or an update on conflict) without adding a wait,
+  and a message has one row however often it changes: there is nothing to compact. Two changes in
+  one transaction are one change; a write that leaves the columns as they were records nothing.
+- **What counts:** a message inserted, or an update that changes its status, status time, error code,
+  error title or content (only erasure changes content after a message is saved: it redacts it and
+  cancels sends not yet made). The provider's message id, the pricing and the status rank change
+  with a status or are not described, so they do not count.
+- **Only the trigger writes:** the trigger function is SECURITY DEFINER, owned by the definer role
+  (pinned `search_path`, not executable by PUBLIC); the runtime role may only read the rows, in its
+  company, so no code can move a message to another place in the feed or record a transaction that
+  did not change it.
+- **Never past a change still being saved:** as for contact changes, the feed reads only rows whose
+  transaction id is below the reading snapshot's xmin. A message whose latest change is still held
+  back is read once that change can be, at its new place; a reader that reads before the change
+  commits still reads it at its old place, as it was. A transaction still running anywhere holds the
+  feed back until it ends; it never makes the feed skip.
+- **Sealed cursors:** sealed as the contact feed's are (ADR-114), with the feed's name and the
+  company as associated data (`api/change-cursors.ts`, shared by both feeds; the contact feed's
+  cursors are unchanged), so a contact feed cursor, another company's, a changed one or one sealed
+  with a key the platform no longer holds is refused (422, path `cursor`).
+- **Erased contacts:** erasure redacts each message of the contact, so each comes once more, as
+  `{ id, erased: true, message: null }`, telling an integration to delete its copy; nothing of the
+  message is shown again.
+- **Existing messages:** the migration records every existing message once, each company's in the
+  order they were saved, while its triggers lock `app.messages` against writes until it commits.
+  The keys, the foreign key and the feed's index are added after the rows, which builds each once:
+  measured locally on 402,976 synthetic messages in a rolled-back transaction (as the superuser),
+  recording them took 1.2 seconds and the keys and the index 1.2 seconds more; with the keys in place
+  it took 19.6 seconds.
+- **Kept and deleted:** rows hold no personal data (a message id and a transaction id); they are
+  deleted with the company (ADR-055), before its messages (a status recorded while the deletion runs
+  adds a row back, which goes with its message), and are not in the company export (the messages
+  are).
+
+Not built: filters (direction, number, conversation), a time to start from, which part of a message
+changed (the item is the message as it is now), notes and conversation changes (the conversation
+webhooks carry those), and media.

@@ -494,9 +494,14 @@ verification, app review, Embedded Signup configuration).
   `contact_fields.manage`, granted only by owners and administrators, adds, renames and deletes the
   company's custom fields by key, as Settings does, through the same functions; key and type never
   change; additions take turns under a lock, so the 50-field limit holds for members and keys at
-  once; renames are audited, in Settings too).
+  once; renames are audited, in Settings too); **[following message changes built, locally
+  verified]** (ADR-116: `GET /message-changes` reads every message once, as it is now, in the order
+  its changes were saved (received or sent, its status, status time or error, its contact erased),
+  from the start or from a cursor sealed to the company and the feed; the trigger on messages moves
+  each message's one row to the transaction that changed it, so following the cursor misses no
+  status and nothing needs compacting).
   Remaining: media messages, call-to-action messages through the API, taking reactions back,
-  assigning many conversations at once, media downloads, statuses changed since a time, starting or
+  assigning many conversations at once, media downloads, starting or
   stopping runs for many contacts in one call, bulk sends in one call, changing a field's type,
   changing numbers or many contacts in one call, other comparisons in contact searches, which fields
   of a contact changed, limits per endpoint,

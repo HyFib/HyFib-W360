@@ -898,6 +898,15 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   label (`contact_fields` grants `UPDATE (label)` only); a deletion removes the field row, then the
   values (`attributes - key`), in the order a contact change locks them (ADR-112). 0092 widens the
   scope checks of `app.api_keys` and `ops.plans`.
+- **Following message changes (0093, ADR-116):** triggers on `messages` (insert, and an update that
+  changes the status, status time, error or content) call `app.message_changes_capture`, a SECURITY
+  DEFINER function that upserts the message's one `app.message_changes` row with `xact` =
+  `pg_current_xact_id()` (the message row is already locked by its change, so the upsert adds no
+  wait and nothing needs compacting). `apiMessageChanges` (`api/message-changes.ts`) reads rows above
+  the cursor and below `pg_snapshot_xmin`, joined to the message, its conversation and contact for
+  the current state (`feedMessageColumns`, `toApiFeedMessage`, shared with `GET /messages`); both
+  change feeds seal cursors with `api/change-cursors.ts`, the feed's name and the company being the
+  associated data.
 - **Text replies (0042, ADR-070):** `POST /messages` with `type: "text"` (`apiSendMessage` picks
   `apiSendText`; no `type` is a template) needs `messages.reply`. It finds an existing, not erased
   contact by number and locks its conversation on the number (`from`, or the only active one); a

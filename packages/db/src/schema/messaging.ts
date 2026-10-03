@@ -225,6 +225,17 @@ export const messages = appSchema.table('messages', {
   createdAt: tz('created_at').notNull().defaultNow(),
 });
 
+/**
+ * Each message's latest change (migration 0093, ADR-116): the transaction that last changed how the
+ * API describes it. Only the trigger on `app.messages` writes it; keys read it in order.
+ */
+export const messageChanges = appSchema.table('message_changes', {
+  id: bigint('id', { mode: 'bigint' }).notNull(),
+  tenantId: uuid('tenant_id').notNull(),
+  messageId: uuid('message_id').notNull(),
+  xact: xid8('xact').notNull(),
+});
+
 export const messageStatusEvents = appSchema.table('message_status_events', {
   id: uuid('id').primaryKey(),
   tenantId: uuid('tenant_id').notNull(),

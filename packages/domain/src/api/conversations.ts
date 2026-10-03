@@ -411,6 +411,24 @@ function toApiMessage(m: MessageRow): ApiConversationMessage {
   };
 }
 
+/**
+ * The columns of a feed message (ADR-088, ADR-116): a message's, with its conversation's contact and
+ * the number it was received on or sent from. The query joins the message's conversation and
+ * `answeredMessages`.
+ */
+export const feedMessageColumns = {
+  ...messageColumns,
+  contactId: conversations.contactId,
+  channelId: messages.channelAccountId,
+};
+
+/** A message of a feed across conversations, as GET /messages gives it. */
+export function toApiFeedMessage(
+  m: MessageRow & { contactId: string; channelId: string },
+): ApiFeedMessage {
+  return { ...toApiMessage(m), contactId: m.contactId, channelId: m.channelId };
+}
+
 export async function apiListConversationMessages(
   deps: Pick<OutboundDeps, 'db'>,
   ctx: ApiContext,
@@ -556,11 +574,7 @@ export async function apiListMessages(
         .offset(API_MESSAGE_FEED_WINDOW - 1)
         .limit(1);
       const rows = await tx
-        .select({
-          ...messageColumns,
-          contactId: conversations.contactId,
-          channelId: messages.channelAccountId,
-        })
+        .select(feedMessageColumns)
         .from(messages)
         .innerJoin(
           conversations,
@@ -586,11 +600,7 @@ export async function apiListMessages(
       const shown = rows.slice(0, q.limit);
       const last = shown.at(-1);
       return {
-        data: shown.map((m): ApiFeedMessage => ({
-          ...toApiMessage(m),
-          contactId: m.contactId,
-          channelId: m.channelId,
-        })),
+        data: shown.map(toApiFeedMessage),
         nextCursor:
           rows.length > q.limit && last
             ? encodeKeysetCursor(last.cursorAt, last.id)

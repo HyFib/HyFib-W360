@@ -1658,6 +1658,17 @@ means the company has no field with that key (keys are lower-case; list them wit
 Who added, renamed or deleted a field is in the audit log (`contact_field.created`, `.renamed`,
 `.deleted`, actor `api_key` or `user`). Deleting a field deletes every contact's value for it.
 
+**The message change feed shows nothing new for a while, or refuses a cursor (ADR-116).**
+`GET /api/v1/message-changes` reads a change only once every transaction that began before it has
+finished, as the contact change feed does (its entry above has the query that finds a long
+transaction); nothing is skipped. A message changed by a transaction still running is read once that
+transaction ends, at its new place. A 422 with path `cursor` means the cursor is not one this
+company's message feed gave (a contact feed cursor does not open it), was changed, or was sealed
+with an encryption key the platform no longer holds: the integration starts again without a cursor,
+which lists every message. The rows are written only by the trigger on `app.messages`; a message
+missing from the feed after its change committed and every older transaction ended is a bug: check
+`SELECT xact FROM app.message_changes WHERE message_id = '<id>'` against `pg_current_snapshot()`.
+
 **The company is suspended or its plan ended.** Keys keep reading; creating and changing contacts,
 recording consent, defining contact fields, sending, resolving conversations and adding notes to
 them, starting and stopping automations, and managing webhook endpoints (reading them and their

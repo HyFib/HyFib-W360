@@ -1,5 +1,78 @@
 # Progress
 
+## 2026-10-03 — Phase 5: following messages through the public API (P5-08, ADR-116)
+
+Status: **Implemented and locally verified (test data only; sends through the Graph stand-in).**
+Integrations that keep a copy of a company's conversations could catch up on messages only with
+`since` (ADR-088), which asks them to overlap and deduplicate, and could not follow statuses at all
+without the webhooks: a template read this morning showed its new status only when read again.
+
+### Completed
+
+- **Design (ADR-116):** `GET /message-changes` (`conversations.read`) reads every message once, as it
+  is now, in the order its changes were saved (received or sent; status, status time or error
+  changed; contact erased), from the start or from a cursor. Items are `{ id, erased, message }`,
+  the message as `GET /messages` gives it, or null once its contact is erased.
+- **Migration 0093:** `app.message_changes`, one row per message moved to the transaction that last
+  changed it by a SECURITY DEFINER trigger function on `app.messages` (insert, or an update of the
+  status, status time, error or content), read only below the snapshot's xmin. The message row is
+  locked by its change already, so the upsert adds no wait, and there is nothing to compact. Every
+  existing message is recorded once; the keys, foreign key and index are built after the rows
+  (measured locally: 2.4 seconds for 402,976 messages, against 19.6 row by row). Deleted with the
+  company before its messages; not exported.
+- **Domain and web:** `api/message-changes.ts`, `api/change-cursors.ts` (both feeds' cursors, sealed
+  to the feed and the company; the contact feed's are unchanged), `feedMessageColumns` and
+  `toApiFeedMessage` shared with `GET /messages`, the route, the OpenAPI operation and schema, the
+  `conversations.read` description, the export classification.
+- **Tests:**
+  - Unit (`message-changes.test.ts`, 9): cursors bound to the feed and the company, the contact
+    feed's unchanged; the query; the scope and refusals before anything is read; reads for suspended
+    and restricted companies; each message as the message feed gives it, erased ones as erased, the
+    cursor after the last message shown; a full last page saying no more remain; an empty page
+    keeping its place; the OpenAPI entries.
+  - Integration (`api-message-changes.test.ts`, 4): a message received and a reply queued, accepted,
+    delivered and read, read once at its latest change from the start and from cursors, a late status
+    changing nothing, one message a page; a failure with its error, two changes in one transaction,
+    writes that change nothing and pricing, an erasure giving each message once as erased; a
+    transaction held open, nothing read past it and none twice; foreign, contact-feed, changed and
+    garbled cursors refused, a key without the scope refused, the runtime role unable to write rows.
+  - e2e (`api-message-changes.spec.ts`): a key follows a customer's message, then its reply as the
+    worker sends it and WhatsApp reports it delivered and read, through the Graph stand-in.
+- **Docs:** ADR-116 (ADR-088 annotated); SECURITY; THREAT-MODEL T129; RUNBOOKS (a feed held back or a refused cursor);
+  ARCHITECTURE; DATA-RETENTION; DEPLOYMENT (0093's lock, and 0092's note on web servers from before
+  it); BACKLOG P5-08; FEATURE-MATRIX W-134, H-033.
+- **Mutation checks:** 31 regressions tried, 30 caught:
+  - 13 in migration 0093 (new messages, status changes, errors or erasure not recorded; writes that
+    change nothing, or pricing, recorded; a change never moving the row; the trigger run as whoever
+    changes the message; the runtime role able to write the rows, or keys unable to read them; the
+    definer unable to move a row; the rows not deleted with the company, or deleted after its
+    messages), 1 in the export (the table left unclassified), 10 in the feed (the scope, passing
+    changes still being saved, the cursor read again or compared by row alone, messages in the order
+    they were first recorded, erased contacts' messages shown or not marked, more said to remain on a
+    full last page, the cursor after the look-ahead message, an empty page starting again), 3 in the
+    cursors (not bound to their feed or their company, the message feed sealing as the contact
+    feed), 2 in the OpenAPI document and routes, and 1 through the e2e test (the route answering the
+    page inside `data`).
+  - Not caught, as it removes a defense something else repeats: the company condition in the feed's
+    query (forced row-level security limits every read to the company's rows).
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                                                                                                  | Result                                                                                            |
+| ---------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                     | clean                                                                                             |
+| `pnpm test`                                                                                                                              | 522 passed                                                                                        |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                      | 724 passed on each                                                                                |
+| `pnpm build`, then `api-message-changes.spec.ts` and `api.spec.ts` on chromium and mobile-chromium, on a fresh database migrated to 0093 | 14 passed                                                                                         |
+| Migration 0093 on a copy of a local database with 12,593 messages in 132 companies                                                       | each message recorded once, in each company's order; the runtime role's insert and update refused |
+| Mutation checks                                                                                                                          | 31 regressions, 30 caught (1 through the e2e test; the other listed above)                        |
+| gitleaks 8.30.1 on the commit                                                                                                            | no leaks                                                                                          |
+
+### Known gaps
+
+- Filters on the feed, a time to start from, which part of a message changed, notes and conversation
+  changes, and media are not built (ADR-116).
+
 ## 2026-10-02 — Phase 5: defining contact fields through the public API (P5-08, ADR-115)
 
 Status: **Implemented and locally verified (test data only).** Since ADR-112 integrations read and
