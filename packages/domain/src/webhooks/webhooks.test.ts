@@ -12,6 +12,7 @@ import { apiContactSchema } from '../api/contact-view';
 import { buildOpenApiDocument } from '../api/openapi';
 import { renderEmail } from '../email/templates';
 import {
+  WEBHOOK_AUTOMATION_EVENTS,
   WEBHOOK_CONTACT_PART_LABELS,
   WEBHOOK_CONTACT_PARTS,
   WEBHOOK_EVENT_INFO,
@@ -25,6 +26,7 @@ import {
   webhookHost,
   webhookReplaySummary,
   webhookRetryDelaySeconds,
+  webhookTakesAutomationRuns,
 } from './model';
 import {
   automationRunEndedPayloadSchema,
@@ -53,6 +55,8 @@ import {
   openWebhookHeaders,
   reservedWebhookHeader,
   sealWebhookHeaders,
+  webhookAutomationIdsFor,
+  webhookAutomationIdsSchema,
   webhookContactPartsFor,
   webhookContactPartsSchema,
   webhookHeadersAad,
@@ -1103,5 +1107,58 @@ describe('contact part filters (ADR-123)', () => {
     expect(webhookContactPartsFor([...both], undefined, null)).toBeNull();
     expect(webhookContactPartsFor(['contact.erased'], ['email'], ['tags'])).toBeNull();
     expect(webhookContactPartsFor(['contact.created'], undefined, ['tags'])).toBeNull();
+  });
+});
+
+describe('automation filters (ADR-145)', () => {
+  const greeter = '0e1a2b3c-4d5e-4f60-8172-8394a5b6c7d8';
+  const farewell = '1f2e3d4c-5b6a-4978-8695-a4b3c2d1e0f9';
+
+  it('take 1 to 20 automation ids, once each and in lower case, in the order given; null takes every automation', () => {
+    expect(
+      webhookAutomationIdsSchema.parse([farewell, greeter.toUpperCase(), farewell, greeter]),
+    ).toEqual([farewell, greeter]);
+    expect(webhookAutomationIdsSchema.parse(null)).toBeNull();
+    const ids = Array.from(
+      { length: WEBHOOK_LIMITS.automations + 1 },
+      (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+    );
+    expect(WEBHOOK_LIMITS.automations).toBe(20);
+    expect(webhookAutomationIdsSchema.parse(ids.slice(1))).toEqual(ids.slice(1));
+    for (const refused of [[], ids, ['greeter'], [greeter, null], greeter, [42]]) {
+      expect(webhookAutomationIdsSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(webhookAutomationIdsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one automation, or take every automation.',
+    );
+    expect(webhookAutomationIdsSchema.safeParse(ids).error?.issues[0]?.message).toBe(
+      'Choose at most 20 automations.',
+    );
+  });
+
+  it('apply to the two automation run events and no other', () => {
+    expect(WEBHOOK_AUTOMATION_EVENTS).toEqual(['automation.run_started', 'automation.run_ended']);
+    expect(webhookTakesAutomationRuns(['automation.run_started'])).toBe(true);
+    expect(webhookTakesAutomationRuns(['consent.changed', 'automation.run_ended'])).toBe(true);
+    for (const type of WEBHOOK_EVENT_KEYS.filter((t) => !t.startsWith('automation.'))) {
+      expect(webhookTakesAutomationRuns([type]), type).toBe(false);
+    }
+    expect(webhookTakesAutomationRuns([])).toBe(false);
+  });
+
+  it('are kept only while the endpoint takes an automation run event: given, kept, or cleared', () => {
+    const both = ['automation.run_started', 'automation.run_ended'] as const;
+    expect(webhookAutomationIdsFor([...both], [greeter], null)).toEqual([greeter]);
+    expect(webhookAutomationIdsFor([...both], undefined, [farewell])).toEqual([farewell]);
+    expect(webhookAutomationIdsFor([...both], null, [farewell])).toBeNull();
+    expect(webhookAutomationIdsFor([...both], undefined, null)).toBeNull();
+    // One of the two events is enough to keep the list.
+    expect(webhookAutomationIdsFor(['automation.run_ended'], undefined, [farewell])).toEqual([
+      farewell,
+    ]);
+    expect(webhookAutomationIdsFor(['consent.changed'], [greeter], [farewell])).toBeNull();
+    expect(webhookAutomationIdsFor(['message.received'], undefined, [farewell])).toBeNull();
   });
 });

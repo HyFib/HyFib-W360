@@ -163,7 +163,34 @@ export const WEBHOOK_LIMITS = {
   /** An endpoint's own headers (ADR-118): how many, and how long a value can be. */
   headers: 5,
   headerValueLength: 1000,
+  /** The automations an endpoint can choose to take the runs of (ADR-145). */
+  automations: 20,
 } as const;
+
+/** The events of automation runs, which an endpoint can take for chosen automations (ADR-145). */
+export const WEBHOOK_AUTOMATION_EVENTS = [
+  'automation.run_started',
+  'automation.run_ended',
+] as const satisfies readonly WebhookEventType[];
+
+/** An automation an endpoint takes the runs of (ADR-145). */
+export interface WebhookEndpointAutomation {
+  id: string;
+  name: string;
+  archived: boolean;
+}
+
+/** An automation an endpoint can choose (ADR-145): published, so it cannot be deleted. */
+export interface WebhookAutomationChoice {
+  id: string;
+  name: string;
+  status: 'draft' | 'active' | 'paused' | 'archived';
+}
+
+/** Whether an endpoint with these events takes automation runs, and can choose automations. */
+export function webhookTakesAutomationRuns(eventTypes: readonly WebhookEventType[]): boolean {
+  return WEBHOOK_AUTOMATION_EVENTS.some((type) => eventTypes.includes(type));
+}
 
 /**
  * The periods Settings → Webhooks replays failed deliveries from (ADR-095), up to the deliveries

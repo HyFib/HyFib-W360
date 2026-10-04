@@ -2063,6 +2063,17 @@ every change, including parts added later), or `PATCH /webhook-endpoints/{id}` w
 for a contact's whole transaction and names every part it changed, so an endpoint taking only
 emails also receives an event that changed the email and the tags, naming both.
 
+**A receiver gets no automation run events for an automation (ADR-145).** An endpoint can take
+the runs of chosen automations only; the endpoints list shows them ("Automation runs sent: …",
+archived ones marked), and the API answers `automationIds` (null takes every automation's runs). A
+run of another automation is never queued for it, and when no endpoint of the company takes a run,
+no event is recorded at all, so there is nothing to replay: runs that started or ended before a
+change are not sent afterwards. To take more, choose "Every automation’s runs" or tick the
+automation under "Automation runs sent" on the endpoint's page (only published automations are
+offered; publish a draft first), or `PATCH /webhook-endpoints/{id}` with `automationIds` (null for
+every automation). Removing both automation run events clears the list. An archived automation has
+no runs until it is restored; it stays in the list meanwhile.
+
 **An endpoint was turned off automatically.** It failed every attempt for 72 hours; its waiting
 deliveries were marked failed (`endpoint_disabled`), owners and administrators got the
 "Webhook endpoint turned off" email, and the audit log has `webhook.endpoint_auto_disabled`. Fix the

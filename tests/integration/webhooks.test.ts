@@ -19,6 +19,7 @@ import {
 } from '@w360/db';
 import {
   consentChangedPayloadSchema,
+  createAutomationService,
   createConsentService,
   createContactsService,
   createTemplatesService,
@@ -40,6 +41,7 @@ import {
   WEBHOOK_USER_AGENT,
   webhookHeadersAad,
   webhookSecretAad,
+  type TenantContext,
   type WebhookDeliveryLogger,
   type WebhookEventType,
 } from '@w360/domain';
@@ -839,6 +841,230 @@ describe('contact part filters (ADR-123)', () => {
     );
     // …and any list for an endpoint that does not take it.
     await expect(setInDatabase(`'{email}'`)).rejects.toThrow(/webhook_endpoints_contact_parts/);
+  });
+});
+
+describe('automation filters (ADR-145)', () => {
+  const automationService = () =>
+    createAutomationService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+    });
+
+  /** An automation of the company replying to its name, published unless it stays a draft. */
+  async function automation(owner: TenantContext, name: string, draft = false) {
+    const svc = automationService();
+    const { id } = await svc.createAutomation(owner, { name });
+    const saved = await svc.updateAutomation(owner, {
+      id,
+      expectedVersion: 0,
+      name,
+      description: null,
+      channelAccountId: null,
+      trigger: {
+        type: 'keyword',
+        keywords: [name.toLowerCase()],
+        match: 'contains',
+        hours: 'any',
+        cooldownMinutes: 0,
+      },
+      graph: {
+        version: 1,
+        start: 'say',
+        nodes: [{ id: 'say', type: 'send_text', text: `${name} here.`, next: null }],
+      },
+    });
+    expect(saved.issues).toEqual([]);
+    if (draft) return { id, version: saved.version };
+    const published = await svc.publishAutomation(owner, {
+      id,
+      expectedVersion: saved.version,
+      note: null,
+    });
+    return { id, version: published.version };
+  }
+
+  /** A member's test run of a draft in a new conversation: the draft gains a test version only. */
+  async function tested(c: Company, owner: TenantContext, draft: { id: string; version: number }) {
+    const { conversation_id: conversationId } = await inbound(c, waId(), 'Hi');
+    await automationService().startTestRun(owner, {
+      id: draft.id,
+      expectedVersion: draft.version,
+      conversationId,
+    });
+    const versions = await fx.query<{ kind: string }>(
+      'SELECT kind FROM app.automation_versions WHERE automation_id = $1',
+      [draft.id],
+    );
+    expect(versions.map((v) => v.kind)).toEqual(['test']);
+  }
+
+  it('are refused without an automation run event, empty, over 20 or naming an automation the company has not published; kept by a change that leaves them out and cleared with the events; the database keeps them to those events', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const greeter = await automation(owner, 'Greeter');
+    const farewell = await automation(owner, 'Farewell');
+    const draft = await automation(owner, 'Draft', true);
+    await tested(c, owner, draft);
+    const d = await fx.company();
+    const elsewhere = await automation(await fx.ctx(d, d.owner), 'Elsewhere');
+    const url = 'https://hooks.example.com/in';
+    const runs = ['automation.run_started', 'automation.run_ended'];
+    const refused = async (
+      eventTypes: string[],
+      automationIds: unknown,
+      message: RegExp,
+      path = 'automationIds',
+    ) => {
+      const error = await expectAppError(
+        webhooks().create(owner, { url, eventTypes, automationIds }),
+        'validation_failed',
+        message,
+      );
+      expect(isAppError(error) && error.issues?.[0]?.path, JSON.stringify(automationIds)).toBe(
+        path,
+      );
+    };
+    await refused(
+      ['consent.changed'],
+      [greeter.id],
+      /only for an endpoint that receives Automation started or Automation ended/,
+    );
+    await refused(runs, [], /at least one automation/);
+    await refused(runs, ['greeter'], /from the list/, 'automationIds.0');
+    await refused(
+      runs,
+      Array.from({ length: 21 }, () => uuidv7()),
+      /at most 20 automations/,
+    );
+    // Only the company's published automations: not a draft (even one tested), another company's or
+    // an unknown id.
+    await refused(runs, [greeter.id, draft.id], /that have been published/, 'automationIds.1');
+    await refused(runs, [elsewhere.id], /that have been published/, 'automationIds.0');
+    await refused(
+      ['automation.run_ended'],
+      [uuidv7()],
+      /that have been published/,
+      'automationIds.0',
+    );
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: [...runs, 'consent.changed'],
+      automationIds: [farewell.id, greeter.id.toUpperCase(), farewell.id],
+    });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toMatchObject({ automationIds: [farewell.id, greeter.id] });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: [...runs, 'consent.changed'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.automations;
+    expect(await current()).toEqual([
+      { id: farewell.id, name: 'Farewell', archived: false },
+      { id: greeter.id, name: 'Greeter', archived: false },
+    ]);
+    await change({ description: 'kept' });
+    expect((await current())?.map((a) => a.id)).toEqual([farewell.id, greeter.id]);
+    // An archived automation stays named, and stays allowed in a list given again.
+    await automationService().archiveAutomation(owner, {
+      id: greeter.id,
+      expectedVersion: greeter.version,
+    });
+    expect(await current()).toEqual([
+      { id: farewell.id, name: 'Farewell', archived: false },
+      { id: greeter.id, name: 'Greeter', archived: true },
+    ]);
+    await change({ automationIds: [greeter.id] });
+    expect(await current()).toEqual([{ id: greeter.id, name: 'Greeter', archived: true }]);
+    const updates = await fx.query<{ metadata: { automationIds?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(updates.map((u) => u.metadata.automationIds)).toEqual([
+      [farewell.id, greeter.id],
+      [greeter.id],
+    ]);
+    // A list given again is checked again, changing nothing when it is refused.
+    await expectAppError(
+      change({ automationIds: [greeter.id, draft.id] }),
+      'validation_failed',
+      /that have been published/,
+    );
+    expect((await current())?.map((a) => a.id)).toEqual([greeter.id]);
+    await change({ automationIds: null });
+    expect(await current()).toBeNull();
+    await change({ automationIds: [farewell.id] });
+    // Either event keeps the list.
+    await change({ eventTypes: ['automation.run_ended'] });
+    expect((await current())?.map((a) => a.id)).toEqual([farewell.id]);
+    // The database refuses an empty list, more than 20 or a missing id from an endpoint taking the
+    // events…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET automation_ids = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    const many = `ARRAY[${Array.from({ length: 21 }, () => `'${uuidv7()}'`).join(',')}]::uuid[]`;
+    for (const bad of [`'{}'`, many, `ARRAY['${farewell.id}', NULL]::uuid[]`]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(/webhook_endpoints_automation_ids/);
+    }
+    await change({ eventTypes: ['consent.changed'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['consent.changed'], automationIds: [farewell.id] }),
+      'validation_failed',
+      /only for an endpoint that receives Automation started or Automation ended/,
+    );
+    // …and any list for an endpoint that takes neither.
+    await expect(setInDatabase(`ARRAY['${farewell.id}']::uuid[]`)).rejects.toThrow(
+      /webhook_endpoints_automation_ids/,
+    );
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'automation_ids', 'UPDATE')
+                AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+
+  it('offer the company’s published automations by name, archived ones included, to developers only', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const zebra = await automation(owner, 'Zebra follow-up');
+    const alpha = await automation(owner, 'Alpha welcome');
+    const paused = await automation(owner, 'Order reminder');
+    await tested(c, owner, await automation(owner, 'Never published', true));
+    await automationService().archiveAutomation(owner, {
+      id: zebra.id,
+      expectedVersion: zebra.version,
+    });
+    await automationService().setAutomationStatus(owner, {
+      id: paused.id,
+      expectedVersion: paused.version,
+      status: 'paused',
+    });
+    const d = await fx.company();
+    await automation(await fx.ctx(d, d.owner), 'Alpha elsewhere');
+    expect(await webhooks().automationChoices(owner)).toEqual([
+      { id: alpha.id, name: 'Alpha welcome', status: 'active' },
+      { id: paused.id, name: 'Order reminder', status: 'paused' },
+      { id: zebra.id, name: 'Zebra follow-up', status: 'archived' },
+    ]);
+    for (const user of [c.agent, c.marketer]) {
+      await expectAppError(webhooks().automationChoices(await fx.ctx(c, user)), 'forbidden');
+    }
   });
 });
 

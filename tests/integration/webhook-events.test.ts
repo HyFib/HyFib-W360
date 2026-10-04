@@ -112,13 +112,14 @@ const inbox = () => createInboxService({ db: fx.dbs.app, clock: systemClock });
 const contactsService = () => createContactsService({ db: fx.dbs.app, clock: systemClock });
 
 /**
- * An endpoint of the company taking `eventTypes` (and only the contact parts given, ADR-123), on a
- * path of the receiver of its own.
+ * An endpoint of the company taking `eventTypes` (and only the contact parts given, ADR-123, and
+ * the runs of the automations given, ADR-145), on a path of the receiver of its own.
  */
 async function addEndpoint(
   c: Company,
   eventTypes: WebhookEventType[],
   contactParts: WebhookContactPart[] | null = null,
+  automationIds: string[] | null = null,
 ) {
   const path = `/ok/${randomBytes(6).toString('hex')}`;
   const owner = await fx.ctx(c, c.owner);
@@ -126,6 +127,7 @@ async function addEndpoint(
     url: `http://${HOST}:${port}${path}`,
     eventTypes,
     contactParts,
+    automationIds,
   });
   return { ...created, path };
 }
@@ -1410,6 +1412,91 @@ describe('automation run events (ADR-078)', () => {
       'automation.run_started',
       'automation.run_ended',
     ]);
+  });
+
+  it('sends an endpoint that names automations only their runs, others every run, and captures no run event nobody takes (ADR-145)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const greeter = await publishAutomation(
+      owner,
+      'Greeter',
+      keyword('hello'),
+      sayGraph('Hello there.'),
+    );
+    const farewell = await publishAutomation(
+      owner,
+      'Farewell',
+      keyword('bye'),
+      sayGraph('Goodbye for now.'),
+    );
+    // Greeter's runs and every message; the end of every run; Farewell's starts only.
+    const greeterOnly = await addEndpoint(
+      c,
+      ['message.received', 'automation.run_started', 'automation.run_ended'],
+      null,
+      [greeter],
+    );
+    const everyEnd = await addEndpoint(c, ['automation.run_ended']);
+    const farewellStarts = await addEndpoint(c, ['automation.run_started'], null, [farewell]);
+    const runOf = async (text: string) => {
+      const { conversation_id: conversationId } = await inbound(c, waId(), text);
+      const [run] = await runsIn(conversationId);
+      if (!run) throw new Error(`no run started by “${text}”`);
+      expect(await driveRun(c, run.id)).toBe('ended');
+      return run.id;
+    };
+    const hello = await runOf('hello');
+    const bye = await runOf('bye');
+    expect(
+      (await eventsOf(c, 'automation.')).map((e) => [e.type, e.detail.runId, e.deliveries]),
+    ).toEqual([
+      ['automation.run_started', hello, 1],
+      ['automation.run_ended', hello, 2],
+      ['automation.run_started', bye, 1],
+      ['automation.run_ended', bye, 1],
+    ]);
+
+    await deliverDue(c);
+    const runsAt = (path: string) =>
+      bodiesAt(path)
+        .filter((b) => b.type.startsWith('automation.'))
+        .map((b) => {
+          const { run } = (
+            b.type === 'automation.run_started'
+              ? automationRunStartedPayloadSchema
+              : automationRunEndedPayloadSchema
+          ).parse(b).data;
+          return [b.type, run.id, run.automationName];
+        })
+        .sort();
+    expect(runsAt(greeterOnly.path)).toEqual(
+      [
+        ['automation.run_ended', hello, 'Greeter'],
+        ['automation.run_started', hello, 'Greeter'],
+      ].sort(),
+    );
+    expect(runsAt(everyEnd.path)).toEqual(
+      [
+        ['automation.run_ended', hello, 'Greeter'],
+        ['automation.run_ended', bye, 'Farewell'],
+      ].sort(),
+    );
+    expect(runsAt(farewellStarts.path)).toEqual([['automation.run_started', bye, 'Farewell']]);
+
+    // With those two endpoints turned off, no endpoint takes Farewell's runs: nothing of the next
+    // one is captured. The endpoint's other events are not filtered: it hears every customer.
+    await webhooks().setEnabled(owner, { endpointId: everyEnd.id, enabled: false });
+    await webhooks().setEnabled(owner, { endpointId: farewellStarts.id, enabled: false });
+    expect(await runOf('bye again')).not.toBe(bye);
+    expect((await eventsOf(c, 'automation.')).map((e) => e.detail.runId)).toEqual([
+      hello,
+      hello,
+      bye,
+      bye,
+    ]);
+    await deliverDue(c);
+    expect(bodiesAt(greeterOnly.path).filter((b) => b.type === 'message.received')).toHaveLength(3);
+    expect(runsAt(greeterOnly.path)).toHaveLength(2);
   });
 
   it('names the key that started a run through the API', async () => {

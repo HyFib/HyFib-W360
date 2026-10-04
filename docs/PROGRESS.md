@@ -1,5 +1,93 @@
 # Progress
 
+## 2026-10-04 — Phase 5: choosing the automations whose runs a webhook endpoint receives (P5-09, ADR-145)
+
+Status: **Implemented and locally verified (test data only).** Since ADR-078 an endpoint that took
+`automation.run_started` or `automation.run_ended` received the start and end of every run of every
+automation, and a receiver that acts on one automation (a CRM recording what a qualification flow collects)
+had to read and drop the greetings and order updates of all the others. ADR-119 and ADR-123 had let
+an endpoint take some message statuses and some contact changes; ADR-078 and ADR-119 left filters by
+automation unbuilt (P5-09 Remaining).
+
+### Completed
+
+- **Design (ADR-145):** an endpoint takes every automation's runs (null, as before, including
+  automations published later) or the runs of 1 to 20 automations it chooses, one list for both
+  events, kept only while it takes one of them; only automations of the company with a published
+  version, which cannot be deleted (only archived), so a list never names one that is gone; another
+  company's automation refused like an unknown id; applied where events are captured, in the run's
+  own transaction, and no run event recorded when no endpoint takes it; audited and exported.
+- **Migration 0109:** `app.webhook_endpoints.automation_ids` (`uuid[]`, a check: null, or 1 to 20
+  ids without nulls while a run event is among the events), the runtime role's update of the column,
+  and `app.capture_webhook_event` replaced with the same signature (0095's, with the automation
+  condition in both its existence check and its deliveries).
+- **Domain:** `webhooks/model.ts` (`WEBHOOK_LIMITS.automations`, `WEBHOOK_AUTOMATION_EVENTS`,
+  `webhookTakesAutomationRuns`, the view and choice types); `webhooks/service.ts`
+  (`webhookAutomationIdsSchema`, `webhookAutomationIdsFor`, `assertWebhookAutomations` naming a
+  refused id by its place, the schemas' rule, `automations` on each listed endpoint with names and
+  archived ones marked, `automationChoices`, create and update storing, checking and auditing the
+  list); `api/webhook-endpoints.ts` (`automationIds` on `POST` and `PATCH /webhook-endpoints` and in
+  every answer, checked, kept or cleared, audited); OpenAPI (`automationIds`, and both run events
+  say how the filter applies); the company data export carries the column.
+- **Web:** Settings → Webhooks, under the events: "Automation runs sent" while either run event is
+  ticked, with "Every automation’s runs" or "Only the runs of the automations ticked" from the
+  company's published automations by name (paused and archived marked; an archived one offered only
+  while the endpoint has it); the endpoints list says "Automation runs sent: …".
+- **Tests:**
+  - Unit (4 new, 1 extended): the list's rules (1 to 20 ids, once each in lower case, null, refusals and their
+    messages), the two events and no other, keeping and clearing; the API's schemas (only with a run
+    event, a list alone is a change) and the OpenAPI entries.
+  - Integration (4 new, 1 changed): each endpoint gets only the runs of its automations, start and
+    end, an endpoint taking every automation every run, its other events unfiltered, and no run event
+    recorded when no endpoint takes it (`webhook-events.test.ts`); refusals of a draft, a tested
+    draft (a test version only), another company's automation, an unknown id, more than 20 and an
+    empty list, each named by its place, an archived automation kept, named and given again, keeping,
+    replacing and clearing, the audits, each clause of the database check and the column grant
+    (`webhooks.test.ts`); the choices by name, archived included, tested drafts and other companies
+    left out, for developers only; the same rules through the API, a refused list changing nothing,
+    and Settings naming the API's choice (`api-webhook-endpoints.test.ts`, whose endpoint shape now
+    includes `automationIds`).
+  - E2E (1 extended in `webhook-events.spec.ts`): a second automation is published and the endpoint
+    changed on its page to take only its runs (the choice kept after a reload, the endpoints list
+    naming it); a customer writing to the first automation adds no delivery once its run has ended,
+    and one writing to the second brings its start and end; both archived, the endpoint's page no
+    longer offers the first and still ticks the second, marked archived, as the list does.
+- **Docs:** ADR-145 (and ADR-078's and ADR-119's "Not built" annotated); SECURITY (Phase 5 rules);
+  THREAT-MODEL T154; ARCHITECTURE; RUNBOOKS; DEPLOYMENT (0109's rollout); DATA-RETENTION; BACKLOG
+  P5-09 (automation filters left the remaining list); feature matrix H-014, W-138 and W-139.
+- **Mutation checks:** 56 deliberate regressions tried, 55 caught: 12 by unit tests and 32 by
+  integration tests in the domain, the API and the migration (the limit, the two events, the list's
+  rules, keeping and clearing, the published check and the place it names, the schemas' rule, the
+  names and archived marks, the choices' permission, filter and order, each store, check and audit
+  in Settings and the API, the OpenAPI entry, the export, the capture's existence check and
+  deliveries, the null branch, both events filtered, each clause of the database check and the
+  column grant), and 11 in the web through the e2e test (the choices shown, what is sent, ticking,
+  the radio, the page's starting state, archived automations offered and marked, the endpoints list
+  and its archived mark, the endpoint's page knowing its list and its choices). One web regression
+  was first written so that it did not compile and was rewritten to compile, then caught. The
+  published check without its company condition is equivalent: RLS keeps it to the company, as the
+  test with another company's automation saw. The form's checks are covered by the e2e test only for
+  what it exercises (a choice made, kept, archived); paused automations' mark is not.
+
+### Test commands and results (local, 2026-10-04)
+
+| Command                                                                                  | Result                                                                                             |
+| ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`                                       | clean                                                                                              |
+| `pnpm test` (unit)                                                                       | 680 passed (74 files; 4 new)                                                                       |
+| `pnpm test:integration` on PostgreSQL 18.6                                               | 846 passed (56 files; 4 new)                                                                       |
+| `pnpm test:integration` on PostgreSQL 17.11                                              | 846 passed (56 files)                                                                              |
+| `pnpm build`                                                                             | passed                                                                                             |
+| e2e: webhooks, webhook-events, api-contact-fields, api-quota (chromium, mobile-chromium) | 32 passed (6.2 min) on the final build; Firefox and WebKit are not installed here, so CI runs them |
+| Mutation checks                                                                          | 56 tried, 55 caught (12 by unit, 32 by integration, 11 through the e2e test), 1 equivalent (RLS)   |
+| gitleaks 8.30.1 on the staged changes                                                    | no leaks found                                                                                     |
+
+### Known gaps
+
+- Filters on other facts of a run (its trigger, how it ended, the key that started it), choosing
+  automations by tag or folder, and filters for campaigns, templates, orders or conversations by
+  team or channel.
+
 ## 2026-10-04 — Phase 5: usage warnings at a share each company chooses (P5-01, ADR-144)
 
 Status: **Implemented and locally verified (test data only).** Since ADR-062 the billing managers

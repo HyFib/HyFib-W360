@@ -339,6 +339,12 @@ export const apiWebhookEndpointSchema = z.object({
     .describe(
       'The parts of a contact whose change the endpoint receives as contact.updated (fields: a change of any custom field); null receives every change, including parts added later.',
     ),
+  automationIds: z
+    .array(z.uuid())
+    .nullable()
+    .describe(
+      "The automations whose runs the endpoint receives as automation.run_started and automation.run_ended; null receives every automation's runs, including automations published later.",
+    ),
   apiKeyId: z.uuid().describe('The API key that added the endpoint.'),
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime(),
@@ -1525,13 +1531,13 @@ export function buildOpenApiDocument(serverUrl: string) {
       'automation.run_started': webhook(
         'webhookAutomationRunStarted',
         WEBHOOK_EVENT_INFO['automation.run_started'].label,
-        `${WEBHOOK_EVENT_INFO['automation.run_started'].description} For a run started through the API, run.id is the id POST /automations/{id}/runs answered and run.apiKeyId names the key that called it.`,
+        `${WEBHOOK_EVENT_INFO['automation.run_started'].description} For a run started through the API, run.id is the id POST /automations/{id}/runs answered and run.apiKeyId names the key that called it. An endpoint receives every automation's runs unless it names the automations it takes (its \`automationIds\`, or the automations chosen in Settings → Webhooks).`,
         'WebhookAutomationRunStarted',
       ),
       'automation.run_ended': webhook(
         'webhookAutomationRunEnded',
         WEBHOOK_EVENT_INFO['automation.run_ended'].label,
-        `${WEBHOOK_EVENT_INFO['automation.run_ended'].description} Deliveries are not ordered: the end of a short run can arrive before its start, so compare run.startedAt and run.endedAt.`,
+        `${WEBHOOK_EVENT_INFO['automation.run_ended'].description} Deliveries are not ordered: the end of a short run can arrive before its start, so compare run.startedAt and run.endedAt. An endpoint that names the automations it takes receives only their runs, as for automation.run_started.`,
         'WebhookAutomationRunEnded',
       ),
       'order.received': webhook(

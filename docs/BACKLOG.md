@@ -616,9 +616,13 @@ verification, app review, Embedded Signup configuration).
   transaction queuing the endpoints it newly concerns). **[What was left out of a message built,
   locally verified]** (ADR-132: `message.received` says `contentTooLarge` and `contactsLeftOut`,
   as the API does; bodies are built when delivered, so replays of earlier events say them too).
-  Remaining: filters for other event types
-  and on a message's or contact's values (such as by automation, campaign, template, tag or field
-  key), which tags were added or removed, other authentication (OAuth client credentials, headers
+  **[Automation filters built, locally verified]** (ADR-145: an endpoint takes
+  `automation.run_started` and `automation.run_ended` only for the automations it chooses, up to
+  20 of the company's published automations, in Settings or through the API, or every
+  automation's runs as before; applied where events are captured, so a run no endpoint takes is not
+  recorded). Remaining: filters for other event types and on a message's or contact's values (such
+  as by campaign, template, tag or field key, or a run's trigger or outcome), which tags were added
+  or removed, other authentication (OAuth client credentials, headers
   computed per delivery), mutual TLS, fixed egress addresses, delivery counts in campaign events,
   events for store orders, Payment Links and each step of a run, `createdAt` finer than the
   millisecond, replays across endpoints or by event type, load tests.

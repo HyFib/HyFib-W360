@@ -42,7 +42,10 @@ export default async function WebhookEndpointPage({
   const endpoint = (await webhooks.list(ctx)).find((e) => e.id === endpointId);
   if (!endpoint) notFound();
   const failedOnly = failed === '1';
-  const deliveries = await webhooks.deliveries(ctx, { endpointId, failedOnly });
+  const [deliveries, automationChoices] = await Promise.all([
+    webhooks.deliveries(ctx, { endpointId, failedOnly }),
+    webhooks.automationChoices(ctx),
+  ]);
   const tz = ctx.tenant.timezone;
   const host = webhookHost(endpoint.url) ?? endpoint.url;
   const base = `/c/${ctx.tenant.slug}/settings/webhooks`;
@@ -175,7 +178,9 @@ export default async function WebhookEndpointPage({
               headerNames: endpoint.headerNames,
               messageStatuses: endpoint.messageStatuses,
               contactParts: endpoint.contactParts,
+              automationIds: endpoint.automations?.map((a) => a.id) ?? null,
             }}
+            automationChoices={automationChoices}
           />
         </CardContent>
       </Card>

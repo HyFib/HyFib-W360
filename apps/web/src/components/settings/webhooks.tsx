@@ -12,6 +12,8 @@ import {
   WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_REPLAY_PERIODS,
   webhookReplaySummary,
+  webhookTakesAutomationRuns,
+  type WebhookAutomationChoice,
   type WebhookContactPart,
   type WebhookEventType,
   type WebhookMessageStatus,
@@ -143,6 +145,102 @@ function PartChoices({
           </div>
         );
       })}
+    </fieldset>
+  );
+}
+
+/**
+ * The automations whose runs an endpoint takes (ADR-145), shown while it takes an automation run
+ * event: every automation, including automations published later, or only those ticked. Only
+ * published automations can be chosen; an archived one is listed only if the endpoint has it.
+ */
+function AutomationChoices({
+  prefix,
+  choices,
+  stored,
+  every,
+  onEveryChange,
+  chosen,
+  onChange,
+}: {
+  prefix: string;
+  choices: WebhookAutomationChoice[];
+  /** The automations the endpoint has now, so an archived one stays listed until saved. */
+  stored: readonly string[];
+  every: boolean;
+  onEveryChange: (next: boolean) => void;
+  chosen: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const listed = choices.filter((a) => a.status !== 'archived' || stored.includes(a.id));
+  return (
+    <fieldset className="grid gap-2">
+      <legend className="mb-1 text-sm font-medium">Automation runs sent</legend>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-automations`}
+          className="mt-1"
+          checked={every}
+          onChange={() => onEveryChange(true)}
+        />
+        <span>
+          Every automation’s runs
+          <span className="block text-xs text-muted-foreground">
+            Including automations published later.
+          </span>
+        </span>
+      </label>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-automations`}
+          className="mt-1"
+          checked={!every}
+          disabled={listed.length === 0}
+          onChange={() => onEveryChange(false)}
+        />
+        <span>
+          Only the runs of the automations ticked
+          {listed.length === 0 ? (
+            <span className="block text-xs text-muted-foreground">
+              No automation has been published yet.
+            </span>
+          ) : null}
+        </span>
+      </label>
+      {!every ? (
+        <div className="ml-6 grid gap-1">
+          {listed.map((a) => {
+            const id = `${prefix}-automation-${a.id}`;
+            return (
+              <div key={a.id} className="flex items-center gap-2">
+                <Checkbox
+                  id={id}
+                  checked={chosen.includes(a.id)}
+                  onChange={(e) =>
+                    onChange(
+                      e.target.checked
+                        ? listed
+                            .filter((l) => l.id === a.id || chosen.includes(l.id))
+                            .map((l) => l.id)
+                        : chosen.filter((c) => c !== a.id),
+                    )
+                  }
+                />
+                <Label htmlFor={id} className="font-normal">
+                  {a.name}
+                  {a.status === 'archived'
+                    ? ' (archived)'
+                    : a.status === 'paused'
+                      ? ' (paused)'
+                      : ''}
+                </Label>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
     </fieldset>
   );
 }
@@ -280,6 +378,7 @@ function HeaderRows({
 export function WebhookEndpointForm({
   slug,
   endpoint,
+  automationChoices,
   atLimit = false,
 }: {
   slug: string;
@@ -291,7 +390,10 @@ export function WebhookEndpointForm({
     headerNames: string[];
     messageStatuses: WebhookMessageStatus[] | null;
     contactParts: WebhookContactPart[] | null;
+    automationIds: string[] | null;
   };
+  /** The company's published automations, which an endpoint can choose (ADR-145). */
+  automationChoices: WebhookAutomationChoice[];
   atLimit?: boolean;
 }) {
   const prefix = useId();
@@ -304,6 +406,8 @@ export function WebhookEndpointForm({
   const [parts, setParts] = useState<WebhookContactPart[]>(
     endpoint?.contactParts ?? [...WEBHOOK_CONTACT_PARTS],
   );
+  const [everyAutomation, setEveryAutomation] = useState(!endpoint?.automationIds);
+  const [automationIds, setAutomationIds] = useState<string[]>(endpoint?.automationIds ?? []);
   const [headers, setHeaders] = useState<HeaderRow[]>([]);
   // Changing an endpoint keeps its headers unless they are given again.
   const [replaceHeaders, setReplaceHeaders] = useState(false);
@@ -341,7 +445,17 @@ export function WebhookEndpointForm({
           eventTypes.includes('contact.updated') && parts.length < WEBHOOK_CONTACT_PARTS.length
             ? parts
             : null;
-        const input = { url, description, eventTypes, messageStatuses, contactParts };
+        // Every automation's runs unless the automations ticked are chosen (ADR-145).
+        const chosenAutomations =
+          webhookTakesAutomationRuns(eventTypes) && !everyAutomation ? automationIds : null;
+        const input = {
+          url,
+          description,
+          eventTypes,
+          messageStatuses,
+          contactParts,
+          automationIds: chosenAutomations,
+        };
         const done = (r: { ok: true } | { ok: false; code: string; message: string }) => {
           setBusy(false);
           if (!r.ok) setError(r);
@@ -369,6 +483,8 @@ export function WebhookEndpointForm({
               setEventTypes([]);
               setStatuses([...WEBHOOK_MESSAGE_STATUSES]);
               setParts([...WEBHOOK_CONTACT_PARTS]);
+              setEveryAutomation(true);
+              setAutomationIds([]);
               setHeaders([]);
             }
           });
@@ -422,6 +538,17 @@ export function WebhookEndpointForm({
         parts={parts}
         onPartsChange={setParts}
       />
+      {webhookTakesAutomationRuns(eventTypes) ? (
+        <AutomationChoices
+          prefix={prefix}
+          choices={automationChoices}
+          stored={endpoint?.automationIds ?? []}
+          every={everyAutomation}
+          onEveryChange={setEveryAutomation}
+          chosen={automationIds}
+          onChange={setAutomationIds}
+        />
+      ) : null}
       <fieldset className="grid gap-2">
         <legend className="mb-1 text-sm font-medium">Headers</legend>
         <p className="text-xs text-muted-foreground">

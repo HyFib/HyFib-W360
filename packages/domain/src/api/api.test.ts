@@ -102,6 +102,7 @@ import {
   createApiWebhookEndpoints,
   endpointAnnouncement,
 } from './webhook-endpoints';
+import { WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS } from '../webhooks/service';
 
 describe('API tokens', () => {
   it('have a public prefix, a 256-bit secret and only their SHA-256 is kept', () => {
@@ -1313,6 +1314,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       additionalProperties: unknown;
     };
     expect(Object.keys(update.properties).sort()).toEqual([
+      'automationIds',
       'contactParts',
       'description',
       'enabled',
@@ -1353,6 +1355,72 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(webhooks['contact.updated']?.post?.description).toContain(
       'An endpoint receives every change unless it names the parts it takes',
     );
+    // The automations whose runs an endpoint receives (ADR-145): a list, or null.
+    const chosen = (answered.properties as Record<string, { anyOf?: unknown[] }>).automationIds;
+    expect(chosen?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('automationIds');
+    expect(Object.keys(createBody.properties)).toContain('automationIds');
+    expect(webhooks['automation.run_started']?.post?.description).toContain(
+      "An endpoint receives every automation's runs unless it names the automations it takes",
+    );
+    expect(webhooks['automation.run_ended']?.post?.description).toContain(
+      'An endpoint that names the automations it takes receives only their runs',
+    );
+  });
+
+  it('take automations only with an automation run event, and a list of them alone is a change (ADR-145)', () => {
+    const greeter = '0E1A2B3C-4D5E-4F60-8172-8394A5B6C7D8';
+    const farewell = '1f2e3d4c-5b6a-4978-8695-a4b3c2d1e0f9';
+    for (const events of [
+      ['automation.run_started'],
+      ['automation.run_ended', 'consent.changed'],
+    ]) {
+      expect(
+        apiCreateWebhookEndpointSchema.parse({
+          url: 'https://hooks.example.com/w360',
+          events,
+          automationIds: [greeter, farewell, greeter.toLowerCase()],
+        }).automationIds,
+        JSON.stringify(events),
+      ).toEqual([greeter.toLowerCase(), farewell]);
+    }
+    const base = { url: 'https://hooks.example.com/w360', events: ['automation.run_ended'] };
+    expect(apiCreateWebhookEndpointSchema.parse({ ...base, automationIds: null })).toEqual({
+      ...base,
+      automationIds: null,
+    });
+    const tooMany = Array.from(
+      { length: 21 },
+      (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+    );
+    expect(
+      apiCreateWebhookEndpointSchema.safeParse({ ...base, automationIds: tooMany.slice(1) })
+        .success,
+    ).toBe(true);
+    for (const body of [
+      { ...base, events: ['consent.changed'], automationIds: [greeter] },
+      { ...base, automationIds: [] },
+      { ...base, automationIds: ['greeter'] },
+      { ...base, automationIds: tooMany },
+      { ...base, automationIds: greeter },
+    ]) {
+      const parsed = apiCreateWebhookEndpointSchema.safeParse(body);
+      expect(parsed.success, JSON.stringify(body)).toBe(false);
+    }
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['consent.changed'],
+      automationIds: [greeter],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['automationIds', WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS],
+    ]);
+    expect(apiUpdateWebhookEndpointSchema.parse({ automationIds: null })).toEqual({
+      automationIds: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ automationIds: [farewell] })).toEqual({
+      automationIds: [farewell],
+    });
   });
 });
 

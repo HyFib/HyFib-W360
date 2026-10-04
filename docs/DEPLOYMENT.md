@@ -155,6 +155,14 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    it), answers `/api/v1/campaigns/{id}/pause` and `/cancel` with 404, and shows a campaign a key
    paused with the reason as stored (`api`); rolling web servers back to an image from before it
    does the same.
+   Migration 0109 (ADR-145) adds a nullable column to `app.webhook_endpoints` with a check it
+   validates by reading the table (small, as for 0098) and replaces `app.capture_webhook_event`
+   with the same signature, which applies the automation filter from then on; every endpoint starts
+   with none, so nothing changes until a member or a key chooses automations. Workers are not
+   involved (capture runs in the database). Web servers from before it neither show nor change the
+   column: until the web rollout ends, an old server's change that drops both automation run events
+   from an endpoint with automations fails on the check (it works once the rollout ends), and its
+   other changes keep them.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

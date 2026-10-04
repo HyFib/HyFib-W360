@@ -26,8 +26,14 @@ import { recordSystemAudit } from '../audit';
 import { enqueueEmail, type OutboxDeps } from '../email/outbox';
 import { deletionRecipients, formatCompanyTime } from '../tenancy/deletion';
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
-import { WEBHOOK_EVENT_INFO, WEBHOOK_LIMITS, webhookHost } from '../webhooks/model';
 import {
+  WEBHOOK_EVENT_INFO,
+  WEBHOOK_LIMITS,
+  webhookHost,
+  webhookTakesAutomationRuns,
+} from '../webhooks/model';
+import {
+  assertWebhookAutomations,
   checkedWebhookUrl,
   deliveryEventJoin,
   insertWebhookEndpoint,
@@ -38,6 +44,9 @@ import {
   rotateWebhookEndpointSecret,
   sealWebhookHeaders,
   setWebhookEndpointEnabled,
+  WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS,
+  webhookAutomationIdsFor,
+  webhookAutomationIdsSchema,
   webhookContactPartsFor,
   webhookContactPartsSchema,
   webhookDeliveryColumns,
@@ -92,6 +101,16 @@ const invalidParts = () =>
     issues: [{ path: 'contactParts', message: WEBHOOK_PARTS_NEED_THE_EVENT }],
   });
 
+const automationIdsField = webhookAutomationIdsSchema.describe(
+  `The automations whose runs the endpoint receives as automation.run_started and automation.run_ended, 1 to ${WEBHOOK_LIMITS.automations} ids of the company's automations that have been published (an archived one stays allowed), only with one of those events; null receives every automation's runs, including automations published later.`,
+);
+
+/** Automations are chosen only for an endpoint that receives automation runs (ADR-145). */
+const invalidAutomations = () =>
+  new AppError('validation_failed', WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS, {
+    issues: [{ path: 'automationIds', message: WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS }],
+  });
+
 export const apiCreateWebhookEndpointSchema = z
   .object({
     url: z
@@ -107,6 +126,7 @@ export const apiCreateWebhookEndpointSchema = z
     headers: headersField.optional(),
     messageStatuses: messageStatusesField.optional(),
     contactParts: contactPartsField.optional(),
+    automationIds: automationIdsField.optional(),
   })
   .strict()
   .refine((data) => !data.messageStatuses || data.events.includes('message.status'), {
@@ -116,6 +136,10 @@ export const apiCreateWebhookEndpointSchema = z
   .refine((data) => !data.contactParts || data.events.includes('contact.updated'), {
     path: ['contactParts'],
     message: WEBHOOK_PARTS_NEED_THE_EVENT,
+  })
+  .refine((data) => !data.automationIds || webhookTakesAutomationRuns(data.events), {
+    path: ['automationIds'],
+    message: WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS,
   });
 
 export const apiUpdateWebhookEndpointSchema = z
@@ -145,6 +169,11 @@ export const apiUpdateWebhookEndpointSchema = z
       .describe(
         'The parts of a contact whose change the endpoint receives as contact.updated; null receives every change. Left out, they stay, unless the events no longer include contact.updated, which clears them.',
       ),
+    automationIds: automationIdsField
+      .optional()
+      .describe(
+        "The automations whose runs the endpoint receives (the company's published automations); null receives every automation's runs. Left out, they stay, unless the events no longer include automation.run_started or automation.run_ended, which clears them.",
+      ),
   })
   .strict()
   .refine(
@@ -154,8 +183,9 @@ export const apiUpdateWebhookEndpointSchema = z
       data.enabled !== undefined ||
       data.headers !== undefined ||
       data.messageStatuses !== undefined ||
-      data.contactParts !== undefined,
-    'Give the events, the description, the headers, the message statuses, the contact parts or whether the endpoint is enabled',
+      data.contactParts !== undefined ||
+      data.automationIds !== undefined,
+    'Give the events, the description, the headers, the message statuses, the contact parts, the automations or whether the endpoint is enabled',
   );
 
 export interface ApiWebhookEndpoint {
@@ -178,6 +208,8 @@ export interface ApiWebhookEndpoint {
   messageStatuses: WebhookMessageStatus[] | null;
   /** The contact parts it receives as `contact.updated` (ADR-123); null receives every change. */
   contactParts: WebhookContactPart[] | null;
+  /** The automations whose runs it receives (ADR-145); null receives every automation's runs. */
+  automationIds: string[] | null;
   /** The key that added the endpoint. */
   apiKeyId: string;
   createdAt: string;
@@ -261,6 +293,7 @@ const columns = {
   headerNames: webhookEndpoints.headerNames,
   messageStatuses: webhookEndpoints.messageStatuses,
   contactParts: webhookEndpoints.contactParts,
+  automationIds: webhookEndpoints.automationIds,
   apiKeyId: webhookEndpoints.createdByApiKeyId,
   createdAt: webhookEndpoints.createdAt,
   updatedAt: webhookEndpoints.updatedAt,
@@ -282,6 +315,7 @@ type EndpointRow = Pick<
   | 'headerNames'
   | 'messageStatuses'
   | 'contactParts'
+  | 'automationIds'
   | 'createdAt'
   | 'updatedAt'
 > & { apiKeyId: string | null };
@@ -308,6 +342,7 @@ function toApiEndpoint(row: EndpointRow, now: Date): ApiWebhookEndpoint {
     headers: row.headerNames.map((name) => ({ name })),
     messageStatuses: row.messageStatuses,
     contactParts: row.contactParts,
+    automationIds: row.automationIds,
     apiKeyId: row.apiKeyId,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -506,6 +541,8 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               null,
             );
             const contactParts = webhookContactPartsFor(data.events, data.contactParts, null);
+            const automationIds = webhookAutomationIdsFor(data.events, data.automationIds, null);
+            await assertWebhookAutomations(tx, ctx.tenant.id, automationIds);
             const { id, secret } = await insertWebhookEndpoint(tx, deps.keyring, ctx.tenant.id, {
               url,
               description: data.description || null,
@@ -513,6 +550,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               headers,
               messageStatuses,
               contactParts,
+              automationIds,
               creator: { apiKeyId: ctx.key.id },
             });
             await audit(tx, ctx, 'webhook.endpoint_created', id, {
@@ -521,6 +559,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               ...(headers.length > 0 ? { headers: headers.map((h) => h.name) } : {}),
               ...(messageStatuses ? { messageStatuses } : {}),
               ...(contactParts ? { contactParts } : {}),
+              ...(automationIds ? { automationIds } : {}),
             });
             await announce(tx, ctx, { host, events: data.events, at: now });
             const endpoint = await readEndpoint(tx, ctx, id, now);
@@ -548,12 +587,18 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         const events = data.events ?? endpoint.eventTypes;
         if (data.messageStatuses && !events.includes('message.status')) throw invalidStatuses();
         if (data.contactParts && !events.includes('contact.updated')) throw invalidParts();
+        if (data.automationIds && !webhookTakesAutomationRuns(events)) throw invalidAutomations();
+        // Only a list given now is checked: the automations kept were checked when chosen.
+        if (data.automationIds !== undefined) {
+          await assertWebhookAutomations(tx, ctx.tenant.id, data.automationIds);
+        }
         if (
           data.events !== undefined ||
           data.description !== undefined ||
           data.headers !== undefined ||
           data.messageStatuses !== undefined ||
-          data.contactParts !== undefined
+          data.contactParts !== undefined ||
+          data.automationIds !== undefined
         ) {
           const [changed] = await tx
             .update(webhookEndpoints)
@@ -573,6 +618,11 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
                 data.contactParts,
                 endpoint.contactParts,
               ),
+              automationIds: webhookAutomationIdsFor(
+                events,
+                data.automationIds,
+                endpoint.automationIds,
+              ),
               updatedAt: now,
             })
             .where(and(eq(webhookEndpoints.tenantId, ctx.tenant.id), eq(webhookEndpoints.id, id)))
@@ -580,6 +630,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               eventTypes: webhookEndpoints.eventTypes,
               messageStatuses: webhookEndpoints.messageStatuses,
               contactParts: webhookEndpoints.contactParts,
+              automationIds: webhookEndpoints.automationIds,
             });
           if (!changed) throw new Error('A locked endpoint was not updated');
           await audit(tx, ctx, 'webhook.endpoint_updated', id, {
@@ -588,6 +639,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
             ...(data.headers !== undefined ? { headers: data.headers.map((h) => h.name) } : {}),
             ...(changed.messageStatuses ? { messageStatuses: changed.messageStatuses } : {}),
             ...(changed.contactParts ? { contactParts: changed.contactParts } : {}),
+            ...(changed.automationIds ? { automationIds: changed.automationIds } : {}),
           });
         }
         if (data.enabled !== undefined) {

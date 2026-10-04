@@ -2477,7 +2477,8 @@ Decision:
   runs, after the migrations and the workers, so every worker delivering them knows them.
 
 Not built: events per step or message of a run, test runs, answers or inputs in the payload,
-filters by automation, and reading runs not started through the API with the API.
+filters by automation (built by ADR-145), and reading runs not started through the API with the
+API.
 
 ## ADR-079 Stopping automation runs through the public API (2026-09-29)
 
@@ -4519,8 +4520,9 @@ Decision:
   replaced with the same signature, so its owner and grants stay. Existing endpoints keep null;
   nothing is backfilled.
 
-Not built: filters for other event types (conversation statuses, automations, campaigns), filters
-on a message's fields (its template, number or sender), and retry settings per status.
+Not built: filters for other event types (conversation statuses, automations (built by ADR-145),
+campaigns), filters on a message's fields (its template, number or sender), and retry settings per
+status.
 
 ## ADR-120 Changing many conversations in one call through the public API (2026-10-03)
 
@@ -5741,3 +5743,65 @@ Decision:
 
 Not built: shares per limit or per member, more than one warning per period, a share for keys' own
 limits, and choosing who is warned.
+
+## ADR-145 Choosing the automations whose runs a webhook endpoint receives (P5-09) (2026-10-04)
+
+Context: since ADR-078 an endpoint that takes `automation.run_started` or `automation.run_ended`
+receives every run of every automation. A company runs many automations (greetings, order updates,
+qualification flows, runs started through the API), and a receiver usually acts on one or two: a
+CRM that records the leads a qualification flow collects was sent every greeting and order update,
+twice, and had to read and drop each. ADR-119 and ADR-123 let an endpoint take some message
+statuses and some contact changes; ADR-078 and ADR-119 left filters by automation unbuilt (P5-09
+Remaining).
+
+Decision:
+
+- **What an endpoint chooses:** `automationIds`, null for every automation's runs (as before,
+  including automations published later), or 1 to 20 automation ids, in the order given with
+  repeats merged (compared in lower case), only while the endpoint takes `automation.run_started`
+  or `automation.run_ended`. One list applies to both events. It is chosen in Settings → Webhooks
+  under "Automation runs sent", shown while either event is ticked: "Every automation’s runs" or
+  "Only the runs of the automations ticked", from the company's published automations by name
+  (paused and archived ones marked; an archived one is offered only while it is chosen). The
+  endpoint shows "Automation runs sent: …", archived ones marked. Through the API it is
+  `automationIds` on `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in every
+  endpoint the API answers (ids only).
+- **Only the company's published automations:** each id must be an automation of the endpoint's
+  company with a published version. Anything else is refused as `validation_failed`, with the issue
+  naming its place (`automationIds.<n>`; 422 through the API). A draft has no live runs. Another
+  company's automation is refused with the same message as an unknown id (the lookup runs in the
+  company's scope). A published automation cannot be deleted, only archived: the service refuses
+  to delete an automation with versions, the runtime role can neither change nor delete versions
+  (0011: no grant, and a trigger), and their foreign key keeps the automation. So a list never names
+  an automation that is gone. An archived one stays in a list, may be given again, and has no runs
+  to send until it is restored. A list given again is checked again; one
+  kept by a change is not (it was checked when it was chosen).
+- **Kept with its events:** a change that removes both events clears the list, and a list given
+  without either is refused (`automationIds`). A `PATCH` that leaves it out keeps it; Settings
+  always sends it. A check in the database holds the same rule (null, or 1 to 20 ids without nulls
+  while one of the two events is among the endpoint's). The ids are not foreign keys (an array
+  cannot reference rows); the services check them as above.
+- **Applied when the event is captured:** `app.capture_webhook_event` creates a run event's
+  delivery only for the active endpoints that take the event and whose list is null or holds the
+  run's automation (the `automationId` 0055's trigger puts in the event's detail). It writes no
+  event when no endpoint takes it, as for the other filters. The capture runs in the run's own
+  transaction, from the trigger on `app.automation_runs`, so whether a delivery exists is settled
+  when the run starts or ends. A change applies to runs that start or end after it. Deliveries
+  already created are still sent, and an endpoint taking only ends receives the end of a run that
+  started before the change. Replays, test events and the payload are unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `automationIds` when the endpoint has a list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` (owners and administrators, who can
+  read automations too) choose them in Settings and see the names. Keys with `webhooks.manage`
+  choose them through the API. The API answers and audits ids only, and its refusals say only that
+  an id is not one of the company's published automations. Run event deliveries already carry each
+  run's automation id and name to the company's receivers.
+- **Migration 0109:** `automation_ids uuid[]` on `app.webhook_endpoints` with the check, validated
+  at once (a company has at most 10 endpoints), an update grant on the column for the runtime role
+  (it inserts it with its table grant), and `app.capture_webhook_event` replaced with the same
+  signature (0095's, with the automation condition), so its owner and grants stay. Existing
+  endpoints keep null; nothing is backfilled.
+
+Not built: filters on other facts of a run (its trigger, how it ended, the key that started it),
+choosing automations by tag or folder, and filters for campaigns, templates, orders or conversations
+by team or channel.

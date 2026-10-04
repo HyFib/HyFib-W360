@@ -65,6 +65,11 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    * change. Set only while `contact.updated` is among its events.
    */
   contactParts: text('contact_parts').array().$type<WebhookContactPart[]>(),
+  /**
+   * The automations whose runs it takes as `automation.run_started` and `automation.run_ended`
+   * (ADR-145); null takes every automation. Set only while one of those is among its events.
+   */
+  automationIds: uuid('automation_ids').array(),
   state: text('state', { enum: ['active', 'disabled'] })
     .notNull()
     .default('active'),

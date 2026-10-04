@@ -776,6 +776,15 @@ Phase 5 rules (outgoing webhooks, P5-09):
   for another company. A later change in the transaction queues only an event that transaction
   captured, once per endpoint, and a rolled-back savepoint takes back what it queued. The event
   names every part that changed, as before. Audited with the list. Tested.
+- An endpoint can take automation run events only for some automations (ADR-145), chosen the same
+  way. Each id must be an automation of the endpoint's company with a published version, looked up
+  in the company's scope, so another company's automation is refused like an unknown id and the
+  refusal reveals nothing about it; a published automation cannot be deleted, so a list never
+  points at an automation that is gone. The list is kept only while the endpoint takes a run event
+  (a database check too) and applied in `app.capture_webhook_event`, in the run's own transaction:
+  it narrows what one endpoint receives and never adds an event or a delivery for another endpoint
+  or company. The API answers and audits ids only; Settings names them to members with
+  `developer.manage`, who can read automations anyway. Audited with the list. Tested.
 - Conversation and contact events (ADR-074) follow the same rules. Conversation events name the
   member and the team by id only (ADR-094), the ids the API gives `conversations.read` keys
   (ADR-093): names are read through `GET /members` and `GET /teams` with such a key, and no email or

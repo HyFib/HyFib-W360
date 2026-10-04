@@ -33,7 +33,10 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
   const ctx = await requireTenant(slug);
   if (!can(ctx, 'developer.manage')) notFound();
   const { webhooks } = await getRuntime();
-  const endpoints = await webhooks.list(ctx);
+  const [endpoints, automationChoices] = await Promise.all([
+    webhooks.list(ctx),
+    webhooks.automationChoices(ctx),
+  ]);
   const tz = ctx.tenant.timezone;
   const base = `/c/${ctx.tenant.slug}/settings/webhooks`;
   return (
@@ -108,6 +111,14 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                       <p className="text-xs text-muted-foreground">
                         Contact changes sent:{' '}
                         {e.contactParts.map((p) => WEBHOOK_CONTACT_PART_LABELS[p]).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.automations ? (
+                      <p className="text-xs text-muted-foreground">
+                        Automation runs sent:{' '}
+                        {e.automations
+                          .map((a) => (a.archived ? `${a.name} (archived)` : a.name))
+                          .join(', ')}
                       </p>
                     ) : null}
                     {e.headerNames.length > 0 ? (
@@ -201,6 +212,7 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
         <CardContent>
           <WebhookEndpointForm
             slug={ctx.tenant.slug}
+            automationChoices={automationChoices}
             atLimit={endpoints.length >= WEBHOOK_LIMITS.endpoints}
           />
         </CardContent>

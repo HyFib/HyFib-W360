@@ -10,6 +10,7 @@ import {
   authenticateApiToken,
   createApiKeysService,
   createApiWebhookEndpoints,
+  createAutomationService,
   createWebhooksService,
   outboxAad,
   processWebhookDeliveries,
@@ -176,6 +177,42 @@ async function companyNotices(tenantId: string) {
   }));
 }
 
+/** An automation of the company replying to its name, published unless it stays a draft. */
+async function automationOf(c: Company, name: string, publish = true) {
+  const owner = await fx.ctx(c, c.owner);
+  const svc = createAutomationService({
+    db: fx.dbs.app,
+    clock: systemClock,
+    jobs: fx.jobs(),
+    signer: fx.signer,
+  });
+  const { id } = await svc.createAutomation(owner, { name });
+  const saved = await svc.updateAutomation(owner, {
+    id,
+    expectedVersion: 0,
+    name,
+    description: null,
+    channelAccountId: null,
+    trigger: {
+      type: 'keyword',
+      keywords: [name.toLowerCase()],
+      match: 'contains',
+      hours: 'any',
+      cooldownMinutes: 0,
+    },
+    graph: {
+      version: 1,
+      start: 'say',
+      nodes: [{ id: 'say', type: 'send_text', text: `${name} here.`, next: null }],
+    },
+  });
+  expect(saved.issues).toEqual([]);
+  if (publish) {
+    await svc.publishAutomation(owner, { id, expectedVersion: saved.version, note: null });
+  }
+  return id;
+}
+
 type EndpointBody = { data: Record<string, unknown> & { id: string; secret: string | null } };
 
 async function addThroughApi(ctx: ApiContext, key: string, body: Record<string, unknown>) {
@@ -215,6 +252,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       headers: [],
       messageStatuses: null,
       contactParts: null,
+      automationIds: null,
       apiKeyId: key.id,
       createdAt: expect.any(String),
       updatedAt: expect.any(String),
@@ -702,6 +740,104 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
     expect(await issueOf(api().update(key.ctx, id, { contactParts: [] }))).toMatchObject({
       path: 'contactParts',
+    });
+  });
+
+  it('choose the automations whose runs an endpoint receives, kept by changes that leave them out and cleared with the events (ADR-145)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const greeter = await automationOf(c, 'Greeter');
+    const farewell = await automationOf(c, 'Farewell');
+    const draft = await automationOf(c, 'Draft', false);
+    const elsewhere = await automationOf(await fx.company(), 'Elsewhere');
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    const runs = ['automation.run_started', 'automation.run_ended'];
+    // Automations need a run event, at least one, each an id of the company's published
+    // automations (named by place).
+    const refusals = [
+      [['consent.changed'], [greeter], 'automationIds'],
+      [runs, [], 'automationIds'],
+      [runs, [greeter, 'greeter'], 'automationIds.1'],
+      [runs, [greeter, draft], 'automationIds.1'],
+      [['automation.run_ended'], [elsewhere], 'automationIds.0'],
+    ] as const;
+    for (const [index, [events, automationIds, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, automationIds },
+            idem(`automations-bad-${index}`, JSON.stringify(automationIds)),
+          ),
+        ),
+        JSON.stringify(automationIds),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'automations-1', {
+      url: receiverUrl(),
+      events: runs,
+      automationIds: [greeter, farewell, greeter],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.automationIds).toEqual([greeter, farewell]);
+    expect((await api().get(key.ctx, id)).automationIds).toEqual([greeter, farewell]);
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id, id],
+    );
+    expect(audit?.metadata).toMatchObject({ automationIds: [greeter, farewell] });
+    // Settings names them.
+    const owner = await fx.ctx(c, c.owner);
+    expect((await settings().list(owner)).find((e) => e.id === id)?.automations).toEqual([
+      { id: greeter, name: 'Greeter', archived: false },
+      { id: farewell, name: 'Farewell', archived: false },
+    ]);
+
+    expect(await api().update(key.ctx, id, { description: 'Greetings' })).toMatchObject({
+      automationIds: [greeter, farewell],
+    });
+    expect(await api().update(key.ctx, id, { automationIds: [farewell] })).toMatchObject({
+      automationIds: [farewell],
+    });
+    const updates = await fx.query<{ metadata: { automationIds?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_updated'
+        ORDER BY occurred_at`,
+      [c.tenant.id, id],
+    );
+    expect(updates.map((u) => u.metadata.automationIds)).toEqual([[greeter, farewell], [farewell]]);
+    expect(await api().update(key.ctx, id, { events: ['automation.run_ended'] })).toMatchObject({
+      automationIds: [farewell],
+    });
+    expect(await api().update(key.ctx, id, { events: ['consent.changed'] })).toMatchObject({
+      events: ['consent.changed'],
+      automationIds: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { automationIds: [greeter] }))).toMatchObject({
+      path: 'automationIds',
+    });
+    expect(
+      await api().update(key.ctx, id, {
+        events: ['automation.run_started'],
+        automationIds: [greeter],
+      }),
+    ).toMatchObject({ automationIds: [greeter] });
+    // A list given again is checked again, changing nothing when it is refused.
+    expect(await issueOf(api().update(key.ctx, id, { automationIds: [draft] }))).toMatchObject({
+      path: 'automationIds.0',
+    });
+    expect((await api().get(key.ctx, id)).automationIds).toEqual([greeter]);
+    expect(await api().update(key.ctx, id, { automationIds: null })).toMatchObject({
+      automationIds: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { automationIds: [] }))).toMatchObject({
+      path: 'automationIds',
     });
   });
 

@@ -5,9 +5,13 @@ import { EgressError, parseEgressUrl, type EgressPolicy } from '@w360/core/egres
 import {
   and,
   apiKeys,
+  asc,
+  automationVersions,
+  automations,
   desc,
   eq,
   gt,
+  inArray,
   isNotNull,
   sql,
   users,
@@ -30,7 +34,10 @@ import {
   WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_REPLAY_PERIODS,
   webhookHost,
+  webhookTakesAutomationRuns,
+  type WebhookAutomationChoice,
   type WebhookContactPart,
+  type WebhookEndpointAutomation,
   type WebhookMessageStatus,
 } from './model';
 
@@ -217,6 +224,67 @@ export function webhookContactPartsFor(
   return kept ? [...kept] : null;
 }
 
+/**
+ * The automations whose runs an endpoint takes as `automation.run_started` and
+ * `automation.run_ended` (ADR-145), each once; null takes every automation, including automations
+ * published later.
+ */
+export const webhookAutomationIdsSchema = z
+  .array(z.uuid({ error: 'Choose automations from the list.' }))
+  .min(1, 'Choose at least one automation, or take every automation.')
+  .max(WEBHOOK_LIMITS.automations, `Choose at most ${WEBHOOK_LIMITS.automations} automations.`)
+  .transform((ids) => [...new Set(ids.map((id) => id.toLowerCase()))])
+  .nullable();
+
+export const WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS =
+  'Choose automations only for an endpoint that receives Automation started or Automation ended.';
+
+export const WEBHOOK_AUTOMATIONS_NOT_PUBLISHED =
+  'Choose automations of this company that have been published.';
+
+/**
+ * The automations an endpoint keeps after it is added or changed: every automation (null) unless it
+ * takes an automation run event; then those given, or else the ones it had.
+ */
+export function webhookAutomationIdsFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly string[] | null | undefined,
+  current: readonly string[] | null,
+): string[] | null {
+  if (!webhookTakesAutomationRuns(eventTypes)) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * Refuses automations given for an endpoint unless each is the company's and has a published
+ * version (ADR-145). Such an automation cannot be deleted (its versions keep it), only archived, so
+ * a list never names an automation that is gone. `tx` is in the company's scope.
+ */
+export async function assertWebhookAutomations(
+  tx: Tx,
+  tenantId: string,
+  ids: readonly string[] | null | undefined,
+): Promise<void> {
+  if (!ids || ids.length === 0) return;
+  const rows = await tx
+    .selectDistinct({ id: automationVersions.automationId })
+    .from(automationVersions)
+    .where(
+      and(
+        eq(automationVersions.tenantId, tenantId),
+        inArray(automationVersions.automationId, [...ids]),
+        eq(automationVersions.kind, 'published'),
+      ),
+    );
+  const published = new Set(rows.map((r) => r.id));
+  const index = ids.findIndex((id) => !published.has(id));
+  if (index === -1) return;
+  throw new AppError('validation_failed', WEBHOOK_AUTOMATIONS_NOT_PUBLISHED, {
+    issues: [{ path: `automationIds.${index}`, message: WEBHOOK_AUTOMATIONS_NOT_PUBLISHED }],
+  });
+}
+
 /** A new signing secret: `whsec_` and 32 random bytes. */
 export function generateWebhookSecret(): string {
   return `whsec_${randomBytes(32).toString('base64url')}`;
@@ -249,6 +317,11 @@ const endpointFields = z.object({
    * stay.
    */
   contactParts: webhookContactPartsSchema.optional(),
+  /**
+   * Given, the automations whose runs it takes (null: every automation, ADR-145); left out, they
+   * stay.
+   */
+  automationIds: webhookAutomationIdsSchema.optional(),
 });
 /** Statuses are chosen only for an endpoint that takes `message.status`. */
 const statusesNeedTheEvent = {
@@ -262,14 +335,22 @@ const partsNeedTheEvent = {
     !data.contactParts || data.eventTypes.includes('contact.updated'),
   options: { path: ['contactParts'], message: WEBHOOK_PARTS_NEED_THE_EVENT },
 };
+/** Automations are chosen only for an endpoint that takes automation runs (ADR-145). */
+const automationsNeedTheEvents = {
+  check: (data: { eventTypes: WebhookEventType[]; automationIds?: unknown }) =>
+    !data.automationIds || webhookTakesAutomationRuns(data.eventTypes),
+  options: { path: ['automationIds'], message: WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS },
+};
 const endpointSchema = endpointFields
   .refine(statusesNeedTheEvent.check, statusesNeedTheEvent.options)
-  .refine(partsNeedTheEvent.check, partsNeedTheEvent.options);
+  .refine(partsNeedTheEvent.check, partsNeedTheEvent.options)
+  .refine(automationsNeedTheEvents.check, automationsNeedTheEvents.options);
 const endpointIdSchema = z.object({ endpointId: z.uuid() });
 const updateSchema = endpointFields
   .extend({ endpointId: z.uuid() })
   .refine(statusesNeedTheEvent.check, statusesNeedTheEvent.options)
-  .refine(partsNeedTheEvent.check, partsNeedTheEvent.options);
+  .refine(partsNeedTheEvent.check, partsNeedTheEvent.options)
+  .refine(automationsNeedTheEvents.check, automationsNeedTheEvents.options);
 const enabledSchema = endpointIdSchema.extend({ enabled: z.boolean() });
 const deliveryIdSchema = z.object({ deliveryId: z.uuid() });
 const replayFailedSchema = endpointIdSchema.extend({
@@ -299,6 +380,11 @@ export interface WebhookEndpointView {
   messageStatuses: WebhookMessageStatus[] | null;
   /** The contact parts it takes as `contact.updated` (ADR-123); null takes every change. */
   contactParts: WebhookContactPart[] | null;
+  /**
+   * The automations whose runs it takes (ADR-145), as stored, with their names and whether they
+   * are archived; null takes every automation.
+   */
+  automations: WebhookEndpointAutomation[] | null;
   createdAt: Date;
   /** The member who added the endpoint in settings (null once their account is gone). */
   createdBy: string | null;
@@ -376,6 +462,7 @@ export async function lockWebhookEndpoint(
       eventTypes: webhookEndpoints.eventTypes,
       messageStatuses: webhookEndpoints.messageStatuses,
       contactParts: webhookEndpoints.contactParts,
+      automationIds: webhookEndpoints.automationIds,
     })
     .from(webhookEndpoints)
     .where(
@@ -410,6 +497,7 @@ export async function insertWebhookEndpoint(
     headers: readonly WebhookHeader[];
     messageStatuses: WebhookMessageStatus[] | null;
     contactParts: WebhookContactPart[] | null;
+    automationIds: string[] | null;
     creator: WebhookEndpointCreator;
   },
 ): Promise<{ id: string; secret: string }> {
@@ -436,6 +524,7 @@ export async function insertWebhookEndpoint(
     ...sealWebhookHeaders(keyring, tenantId, id, input.headers),
     messageStatuses: input.messageStatuses,
     contactParts: input.contactParts,
+    automationIds: input.automationIds,
     createdByUserId: 'userId' in input.creator ? input.creator.userId : null,
     createdByApiKeyId: 'apiKeyId' in input.creator ? input.creator.apiKeyId : null,
   });
@@ -723,6 +812,7 @@ export function createWebhooksService(deps: {
               headerNames: webhookEndpoints.headerNames,
               messageStatuses: webhookEndpoints.messageStatuses,
               contactParts: webhookEndpoints.contactParts,
+              automationIds: webhookEndpoints.automationIds,
               createdAt: webhookEndpoints.createdAt,
               createdBy: users.name,
               keyName: apiKeys.name,
@@ -753,6 +843,22 @@ export function createWebhooksService(deps: {
               ),
             )
             .groupBy(webhookDeliveries.endpointId, webhookDeliveries.state);
+          // The names of the automations endpoints chose (ADR-145).
+          const chosen = [...new Set(rows.flatMap((r) => r.automationIds ?? []))];
+          const named =
+            chosen.length === 0
+              ? []
+              : await tx
+                  .select({
+                    id: automations.id,
+                    name: automations.name,
+                    status: automations.status,
+                  })
+                  .from(automations)
+                  .where(
+                    and(eq(automations.tenantId, ctx.tenant.id), inArray(automations.id, chosen)),
+                  );
+          const byId = new Map(named.map((a) => [a.id, a]));
           return rows.map((r) => {
             const recent: Record<WebhookDeliveryState, number> = {
               pending: 0,
@@ -762,15 +868,60 @@ export function createWebhooksService(deps: {
             };
             for (const c of counts) if (c.endpointId === r.id) recent[c.state] = c.n;
             const previousSigns = r.previousSecretExpiresAt && r.previousSecretExpiresAt > now;
-            const { keyName, keyPrefix, ...endpoint } = r;
+            const { keyName, keyPrefix, automationIds, ...endpoint } = r;
             return {
               ...endpoint,
+              automations: automationIds
+                ? automationIds.map((id) => {
+                    const automation = byId.get(id);
+                    return {
+                      id,
+                      name: automation?.name ?? 'Unknown automation',
+                      archived: automation?.status === 'archived',
+                    };
+                  })
+                : null,
               createdByKey: keyName && keyPrefix ? { name: keyName, keyPrefix } : null,
               previousSecretExpiresAt: previousSigns ? r.previousSecretExpiresAt : null,
               recent,
             };
           });
         },
+        { accessMode: 'read only' },
+      );
+    },
+
+    /**
+     * The automations an endpoint can choose to take the runs of (ADR-145): the company's
+     * automations with a published version, by name. Archived ones are listed too, so a list that
+     * holds one is shown and kept.
+     */
+    async automationChoices(ctx: TenantContext): Promise<WebhookAutomationChoice[]> {
+      assertCan(ctx, 'developer.manage');
+      return db.run(
+        ctx.scope,
+        (tx) =>
+          tx
+            .select({ id: automations.id, name: automations.name, status: automations.status })
+            .from(automations)
+            .where(
+              and(
+                eq(automations.tenantId, ctx.tenant.id),
+                inArray(
+                  automations.id,
+                  tx
+                    .select({ id: automationVersions.automationId })
+                    .from(automationVersions)
+                    .where(
+                      and(
+                        eq(automationVersions.tenantId, ctx.tenant.id),
+                        eq(automationVersions.kind, 'published'),
+                      ),
+                    ),
+                ),
+              ),
+            )
+            .orderBy(asc(automations.name), asc(automations.id)),
         { accessMode: 'read only' },
       );
     },
@@ -789,6 +940,8 @@ export function createWebhooksService(deps: {
           null,
         );
         const contactParts = webhookContactPartsFor(data.eventTypes, data.contactParts, null);
+        const automationIds = webhookAutomationIdsFor(data.eventTypes, data.automationIds, null);
+        await assertWebhookAutomations(tx, ctx.tenant.id, automationIds);
         const { id, secret } = await insertWebhookEndpoint(tx, keyring, ctx.tenant.id, {
           url,
           description: data.description || null,
@@ -796,6 +949,7 @@ export function createWebhooksService(deps: {
           headers,
           messageStatuses,
           contactParts,
+          automationIds,
           creator: { userId: ctx.user.id },
         });
         await recordAudit(
@@ -811,6 +965,7 @@ export function createWebhooksService(deps: {
               ...(headers.length > 0 ? { headers: headers.map((h) => h.name) } : {}),
               ...(messageStatuses ? { messageStatuses } : {}),
               ...(contactParts ? { contactParts } : {}),
+              ...(automationIds ? { automationIds } : {}),
             },
           },
           meta,
@@ -836,6 +991,15 @@ export function createWebhooksService(deps: {
           data.contactParts,
           endpoint.contactParts,
         );
+        const automationIds = webhookAutomationIdsFor(
+          data.eventTypes,
+          data.automationIds,
+          endpoint.automationIds,
+        );
+        // Only a list given now is checked: the automations kept were checked when chosen.
+        if (data.automationIds !== undefined) {
+          await assertWebhookAutomations(tx, ctx.tenant.id, automationIds);
+        }
         await tx
           .update(webhookEndpoints)
           .set({
@@ -844,6 +1008,7 @@ export function createWebhooksService(deps: {
             eventTypes: data.eventTypes,
             messageStatuses,
             contactParts,
+            automationIds,
             ...(data.headers
               ? sealWebhookHeaders(keyring, ctx.tenant.id, data.endpointId, data.headers)
               : {}),
@@ -868,6 +1033,7 @@ export function createWebhooksService(deps: {
               ...(data.headers ? { headers: data.headers.map((h) => h.name) } : {}),
               ...(messageStatuses ? { messageStatuses } : {}),
               ...(contactParts ? { contactParts } : {}),
+              ...(automationIds ? { automationIds } : {}),
             },
           },
           meta,

@@ -303,11 +303,11 @@ interface RunEventBody {
   };
 }
 
-test('automation run events reach an endpoint: a live run starts and ends, and a member’s test run sends nothing', async ({
+test('automation run events reach an endpoint: a live run starts and ends, a member’s test run sends nothing, and an endpoint can take chosen automations only', async ({
   page,
   request,
 }) => {
-  test.setTimeout(180_000);
+  test.setTimeout(240_000);
   const email = uniqueEmail('hookrun');
   const slug = `hookrun-${Date.now().toString(36)}`;
   const path = `/runs/${slug}`;
@@ -408,6 +408,85 @@ test('automation run events reach an endpoint: a live run starts and ends, and a
     ['automation.run_ended', 'keyword', `+${second}`],
     ['automation.run_started', 'keyword', `+${second}`],
   ]);
+
+  // A second automation says goodbye to a customer who writes "bye" (ADR-145)…
+  await page.goto(`/c/${slug}/automations`);
+  await page.getByLabel('Name', { exact: true }).fill('Farewell');
+  await page.getByRole('button', { name: 'Create draft' }).click();
+  await expect(page.getByRole('heading', { name: 'Farewell' })).toBeVisible();
+  const farewellUrl = page.url();
+  await page.getByLabel('Start when').selectOption('keyword');
+  await page.getByLabel('Keywords').fill('bye');
+  await page.locator('#step-welcome-text').fill('Goodbye {{name}}, talk soon!');
+  await page.getByRole('button', { name: 'Save draft' }).click();
+  await expect(page.getByText('Draft saved.')).toBeVisible();
+  await page.getByRole('button', { name: 'Publish' }).click();
+  await page.getByRole('alertdialog').getByRole('button', { name: 'Publish' }).click();
+  await expect(page.getByText('Published.')).toBeVisible();
+
+  // …and the endpoint is changed to take only its runs.
+  await page.goto(`/c/${slug}/settings/webhooks`);
+  await page.getByRole('link', { name: /Deliveries and settings/ }).click();
+  await expect(page.getByRole('heading', { name: /^Deliveries to/ })).toBeVisible();
+  const deliveriesUrl = page.url();
+  await page.getByRole('radio', { name: /Only the runs of the automations ticked/ }).check();
+  await page.getByRole('checkbox', { name: 'Farewell', exact: true }).check();
+  await page.getByRole('button', { name: 'Save endpoint' }).click();
+  await expect(page.getByText('Endpoint saved.')).toBeVisible();
+  await page.reload();
+  await expect(
+    page.getByRole('radio', { name: /Only the runs of the automations ticked/ }),
+  ).toBeChecked();
+  await expect(page.getByRole('checkbox', { name: 'Farewell', exact: true })).toBeChecked();
+  await expect(page.getByRole('checkbox', { name: 'Greeter', exact: true })).not.toBeChecked();
+  await page.goto(`/c/${slug}/settings/webhooks`);
+  await expect(page.getByText('Automation runs sent: Farewell')).toBeVisible();
+
+  // A third customer writes "hello": Greeter's run starts and ends with nothing captured for the
+  // endpoint (capture is part of the run's own changes), so its deliveries stay at four.
+  const third = randomWaId();
+  await sendSignedWebhook(request, inboundMessage(wabaId, phoneNumberId, third, 'hello'));
+  const liveRuns = page
+    .locator('li')
+    .filter({ hasText: 'Completed' })
+    .filter({ hasText: 'Keyword' });
+  await expect(async () => {
+    await page.goto(automationUrl);
+    await expect(liveRuns).toHaveCount(3, { timeout: 1_000 });
+  }).toPass({ timeout: 30_000 });
+  await page.goto(deliveriesUrl);
+  await expect(page.getByRole('list', { name: 'Deliveries' }).getByRole('listitem')).toHaveCount(4);
+  expect(forUs()).toHaveLength(4);
+
+  // A fourth customer writes "bye": Farewell's start and end arrive.
+  const fourth = randomWaId();
+  await sendSignedWebhook(request, inboundMessage(wabaId, phoneNumberId, fourth, 'bye'));
+  await expect(async () => expect(forUs()).toHaveLength(6)).toPass({ timeout: 30_000 });
+  expect(
+    forUs()
+      .slice(4)
+      .map((e) => [e.json.type, e.json.data.run.automationName, e.json.data.contact.phone])
+      .sort(),
+  ).toEqual([
+    ['automation.run_ended', 'Farewell', `+${fourth}`],
+    ['automation.run_started', 'Farewell', `+${fourth}`],
+  ]);
+
+  // Both automations are archived: Greeter, not chosen, is no longer offered; Farewell, chosen,
+  // stays listed and ticked, marked archived.
+  for (const url of [automationUrl, farewellUrl]) {
+    await page.goto(url);
+    await page.getByRole('button', { name: 'Archive' }).click();
+    await page.getByRole('alertdialog').getByRole('button', { name: 'Archive' }).click();
+    await expect(page.getByText('Archived.')).toBeVisible();
+  }
+  await page.goto(deliveriesUrl);
+  await expect(
+    page.getByRole('checkbox', { name: 'Farewell (archived)', exact: true }),
+  ).toBeChecked();
+  await expect(page.getByRole('checkbox', { name: /^Greeter/ })).toHaveCount(0);
+  await page.goto(`/c/${slug}/settings/webhooks`);
+  await expect(page.getByText('Automation runs sent: Farewell (archived)')).toBeVisible();
 });
 
 /** An order event body, as far as this test reads it. */
