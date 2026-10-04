@@ -1,5 +1,73 @@
 # Progress
 
+## 2026-10-04 — Phases 3 and 5: name conditions in segments and contact searches (P3-04, P5-08, ADR-143)
+
+Status: **Implemented and locally verified (test data only).** Segments compared contacts' custom
+fields, tags, consent, creation day, source, calling code, last message and campaign outcomes, but
+not their names, so members could not target "contacts named Asha" or "contacts without a name";
+`POST /contacts/search`, which takes segments' conditions, had no name condition either (the
+backlog's "a name condition in `POST /contacts/search`").
+
+### Completed
+
+- **Design (ADR-143):** a `name` condition with a text field's comparisons (`is_set`,
+  `is_not_set`, `equals`, `not_equals`, `contains`), the same in segments and in the API search:
+  whole names compared whatever their case, `contains` taking the text as written (never as a
+  pattern), `not_equals` also finding contacts without a name. WhatsApp profile names are kept as
+  sent, so the condition compares the name without the spaces around it and counts a name of spaces
+  only as none; stored names are not rewritten. No migration.
+- **Domain:** `campaigns/segments.ts` (the condition in the definition schema, its check in
+  members' words and its SQL, `NAME_COMPARISONS`); `api/contact-search.ts` (the strict API shape,
+  described in the OpenAPI document, refusals naming `conditions.N.value`, mapped to the segment
+  condition so segments' function compiles both); the OpenAPI search description names names.
+- **Web:** the segment builder (segments and campaign audiences) offers "Name" with "contains",
+  "is", "is not", "has a name" and "has no name"; the name field shows only when a comparison takes
+  one.
+- **Tests:**
+  - Unit (3 new in `segments.test.ts`, 2 extended in `contact-search.test.ts`): the comparisons kept
+    equal to a text field's; a missing name refused for `equals`, `not_equals` and `contains`, none
+    needed for `is_set` and `is_not_set`; values trimmed, 200 characters at most, other comparisons
+    refused; the API shape (comparisons, a number, a longer name, other keys refused) and its place
+    in the OpenAPI document.
+  - Integration (2 new in `api-contact-search.test.ts`): each comparison against members' contacts
+    and WhatsApp contacts whose profile names were padded with spaces or were spaces only (kept as
+    received), erased contacts and another company's left out, `%` and `_` taken as written, with a
+    tag and with `any`; the same counts as segments previewed and saved with the same conditions;
+    refusals naming `conditions.1.value` and the schema's paths; segments refusing the same in
+    members' words.
+  - E2E (1 extended in `api-contact-search.spec.ts`): a key's name conditions find what `name` on
+    `GET /contacts` and members' Contacts search find, and a missing name is refused with 422; a
+    member builds a segment on the name, previews 2 matches, the name field leaving for "has no
+    name", and the saved segment lists the same two contacts.
+- **Docs:** ADR-143 (and ADR-117's and ADR-126's "Not built" annotated); SECURITY; THREAT-MODEL
+  T130; ARCHITECTURE; BACKLOG P3-04 and P5-08 (the name condition left the remaining list); feature
+  matrix W-054, W-134 and H-033 (W-054 also no longer says keys lack the recent-message and
+  campaign conditions, which ADR-126 added).
+- **Mutation checks:** 32 deliberate regressions tried, all caught: 26 in the domain through unit and
+  integration tests (the comparisons, the definition's trimming and bound, the check, each
+  comparison's SQL, the spaces around a name and names of spaces only, case, `contains` read as a
+  pattern, the API's checks, trimming, shape and description), one of them (`not_equals` minding
+  case) only after its test compared a name in another case; 6 in the builder through the e2e
+  test.
+
+### Test commands and results (local, 2026-10-04)
+
+| Command                                                        | Result                                                                              |
+| -------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`             | clean                                                                               |
+| `pnpm test` (unit)                                             | 674 passed (74 files; 3 new, 2 extended)                                            |
+| `pnpm test:integration` on PostgreSQL 18.6                     | 837 passed (56 files; 2 new)                                                        |
+| `pnpm test:integration` on PostgreSQL 17.11                    | 837 passed (56 files)                                                               |
+| `pnpm build`                                                   | passed                                                                              |
+| e2e: api-contact-search, campaigns (chromium, mobile-chromium) | 6 passed (1.2 min); Firefox and WebKit are not installed here, so CI runs them      |
+| Mutation checks                                                | 32 tried, 32 caught (26 through unit and integration tests, 6 through the e2e test) |
+| gitleaks 8.30.1 on the staged changes                          | no leaks found                                                                      |
+
+### Known gaps
+
+- Names compared regardless of accents (é and e differ), starts-with and ends-with comparisons,
+  and conditions on a contact's email.
+
 ## 2026-10-04 — CI: the dependency audit cleared (ADR-142)
 
 Status: **Fixed and locally verified; CI to confirm.** PR #19's "Dependency audit and secret scan"

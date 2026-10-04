@@ -17,6 +17,7 @@ export type Condition =
       status: 'opted_in' | 'opted_out' | 'not_recorded';
     }
   | { type: 'field'; key: string; op: string; value?: string }
+  | { type: 'name'; op: (typeof NAME_OPS)[number]['value']; value?: string }
   | { type: 'created'; op: 'before' | 'after'; date: string }
   | { type: 'source'; source: 'whatsapp' | 'manual' | 'import' | 'api' | 'store' }
   | { type: 'last_message'; op: 'within_days' | 'not_within_days'; days: number }
@@ -68,6 +69,14 @@ const FIELD_OPS: Record<BuilderField['type'], { value: string; label: string }[]
     { value: 'is_not_set', label: 'has no value' },
   ],
 };
+/** How the contact's name is compared (ADR-143): as a text field's value is. */
+const NAME_OPS = [
+  { value: 'contains', label: 'contains' },
+  { value: 'equals', label: 'is' },
+  { value: 'not_equals', label: 'is not' },
+  { value: 'is_set', label: 'has a name' },
+  { value: 'is_not_set', label: 'has no name' },
+] as const;
 const NEEDS_VALUE = new Set([
   'equals',
   'not_equals',
@@ -81,6 +90,7 @@ const NEEDS_VALUE = new Set([
 const TYPES: { value: Condition['type']; label: string }[] = [
   { value: 'tag', label: 'Tag' },
   { value: 'consent', label: 'Consent' },
+  { value: 'name', label: 'Name' },
   { value: 'field', label: 'Custom field' },
   { value: 'created', label: 'Added to contacts' },
   { value: 'source', label: 'Source' },
@@ -101,6 +111,8 @@ function blank(
       return { type, purpose: 'marketing', status: 'opted_in' };
     case 'field':
       return { type, key: fields[0]?.key ?? '', op: 'is_set' };
+    case 'name':
+      return { type, op: 'contains', value: '' };
     case 'created':
       return { type, op: 'after', date: '' };
     case 'source':
@@ -395,6 +407,43 @@ function ConditionFields({
         </div>
       );
     }
+    case 'name':
+      return (
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Field id={`${id}-op`} label="Comparison">
+            {(aria) => (
+              <Select
+                {...aria}
+                value={c.op}
+                onChange={(e) =>
+                  onChange({
+                    ...c,
+                    op: NAME_OPS.find((o) => o.value === e.target.value)?.value ?? 'contains',
+                  })
+                }
+              >
+                {NAME_OPS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </Select>
+            )}
+          </Field>
+          {NEEDS_VALUE.has(c.op) ? (
+            <Field id={`${id}-value`} label="Name">
+              {(aria) => (
+                <Input
+                  {...aria}
+                  value={c.value ?? ''}
+                  maxLength={200}
+                  onChange={(e) => onChange({ ...c, value: e.target.value })}
+                />
+              )}
+            </Field>
+          ) : null}
+        </div>
+      );
     case 'created':
       return (
         <div className="grid gap-3 sm:grid-cols-2">

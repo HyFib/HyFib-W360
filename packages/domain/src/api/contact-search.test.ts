@@ -82,6 +82,11 @@ describe('contact searches through the API (ADR-117)', () => {
       { conditions: [{ type: 'campaign', campaignId: TENANT, outcome: 'clicked' }] },
       { conditions: [{ type: 'campaign', campaignId: TENANT }] },
       { conditions: [{ type: 'campaign', outcome: 'read' }] },
+      { conditions: [{ type: 'name', op: 'greater_than', value: 'a' }] },
+      { conditions: [{ type: 'name', op: 'equals', value: 5 }] },
+      { conditions: [{ type: 'name', op: 'equals', value: 'x'.repeat(201) }] },
+      { conditions: [{ type: 'name', op: 'contains', value: 'a', key: 'city' }] },
+      { conditions: [{ type: 'name', value: 'a' }] },
     ]) {
       expect(apiContactSearchSchema.safeParse(body).success).toBe(false);
     }
@@ -93,6 +98,9 @@ describe('contact searches through the API (ADR-117)', () => {
         conditions: [
           { type: 'field', key: 'orders', op: 'greater_than', value: 3 },
           { type: 'field', key: 'orders', op: 'less_than', value: '3.5' },
+          { type: 'name', op: 'contains', value: 'x'.repeat(200) },
+          ...['is_set', 'is_not_set'].map((op) => ({ type: 'name', op })),
+          ...['equals', 'not_equals'].map((op) => ({ type: 'name', op, value: 'Asha' })),
           { type: 'tag', op: 'not_has', tag: 'vip' },
           { type: 'consent', purpose: 'utility', status: 'not_recorded' },
           { type: 'created', op: 'after', date: '2026-01-01' },
@@ -198,6 +206,7 @@ describe('contact searches through the API (ADR-117)', () => {
     expect(search.operationId).toBe('searchContacts');
     expect(search.description).toContain('`contacts.read`');
     expect(search.description).toContain("segments' conditions");
+    expect(search.description).toContain("comparisons: the contact's name, custom field values");
     expect(search.description).toContain('at most 2,000 of the company');
     expect(search.description).toContain('like `conditions.1.key`');
     expect(search.description).toContain('(`last_message`, which also needs `conversations.read`)');
@@ -220,6 +229,7 @@ describe('contact searches through the API (ADR-117)', () => {
     expect(body.additionalProperties).toBe(false);
     expect(body.properties.conditions.items.oneOf.map((c) => c.properties.type.const)).toEqual([
       'field',
+      'name',
       'tag',
       'consent',
       'created',

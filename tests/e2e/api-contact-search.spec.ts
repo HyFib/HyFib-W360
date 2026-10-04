@@ -96,7 +96,7 @@ test('a key finds contacts with segment conditions: comparisons, tags, all or an
   expect((await request.get('/api/v1/contacts/search', { headers: auth })).status()).toBe(405);
 });
 
-test('a key finds contacts by part of their name as members do, and text holding the NUL character is refused where it is (ADR-124)', async ({
+test('a key finds contacts by part of their name as members do, with name conditions in searches and segments too (ADR-143), and text holding the NUL character is refused where it is (ADR-124)', async ({
   page,
   request,
 }) => {
@@ -152,6 +152,54 @@ test('a key finds contacts by part of their name as members do, and text holding
     'MARTINA Rao',
     'Élodie Martin',
   ]);
+
+  // A name condition in a search finds the same contacts, and compares whole names whatever their
+  // case; without the name to compare with it is refused, naming it (ADR-143).
+  const byName = async (condition: Record<string, unknown>) => {
+    const res = await request.post('/api/v1/contacts/search', {
+      headers: auth,
+      data: { conditions: [{ type: 'name', ...condition }] },
+    });
+    return [res.status(), ((await res.json()) as Page).data?.map((c) => c.name)];
+  };
+  expect(await byName({ op: 'contains', value: 'mart' })).toEqual([
+    200,
+    ['MARTINA Rao', 'Élodie Martin'],
+  ]);
+  expect(await byName({ op: 'equals', value: 'martina rao' })).toEqual([200, ['MARTINA Rao']]);
+  expect(await byName({ op: 'not_equals', value: 'martina rao' })).toEqual([
+    200,
+    ['Ravi 100% Real', 'Élodie Martin'],
+  ]);
+  const noName = await request.post('/api/v1/contacts/search', {
+    headers: auth,
+    data: { conditions: [{ type: 'name', op: 'equals' }] },
+  });
+  expect([
+    noName.status(),
+    ((await noName.json()) as { error: { issues: unknown } }).error.issues,
+  ]).toEqual([
+    422,
+    [{ path: 'conditions.0.value', message: 'equals needs a name to compare with.' }],
+  ]);
+
+  // A member builds a segment with the same condition: it counts the same contacts.
+  await page.goto(`/c/${slug}/contacts/segments`);
+  await page.getByLabel('Segment name').fill('Martins');
+  await page.getByLabel('Condition 1').selectOption({ label: 'Name' });
+  await expect(page.getByLabel('Comparison')).toHaveValue('contains');
+  await page.getByLabel('Name', { exact: true }).fill('MART');
+  await page.getByRole('button', { name: 'Preview matches' }).click();
+  await expect(page.getByText('2 contacts match now.')).toBeVisible();
+  // Without a name to compare with, the value field goes away.
+  await page.getByLabel('Comparison').selectOption({ label: 'has no name' });
+  await expect(page.getByLabel('Name', { exact: true })).toHaveCount(0);
+  await page.getByLabel('Comparison').selectOption({ label: 'contains' });
+  await page.getByLabel('Name', { exact: true }).fill('MART');
+  await page.getByRole('button', { name: 'Save segment' }).click();
+  await expect(page.getByRole('heading', { name: 'Martins', level: 1 })).toBeVisible();
+  await expect(page.getByText('2 contacts match now', { exact: true })).toBeVisible();
+  await expect(page.getByText('Élodie Martin, MARTINA Rao', { exact: true })).toBeVisible();
 
   // Refusals name the parameter, or where the body holds the NUL character; nothing is saved.
   const issues = async (res: Awaited<ReturnType<typeof request.get>>) =>

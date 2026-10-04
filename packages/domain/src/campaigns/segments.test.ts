@@ -3,10 +3,12 @@ import type { Tx } from '@w360/db';
 import { validDate } from '../contacts/fields';
 import {
   FIELD_COMPARISONS,
+  NAME_COMPARISONS,
   checkSegmentDefinition,
   comparisonTakesValue,
   fieldComparisonsFor,
   fieldConditionProblem,
+  segmentDefinitionSchema,
   type SegmentDefinition,
 } from './segments';
 
@@ -92,5 +94,36 @@ describe('field conditions (segments and contact searches, ADR-117)', () => {
       'A condition uses a custom field that does not exist.',
     );
     expect(await check([{ type: 'created', op: 'after', date: '2024-02-29' }])).toBeNull();
+  });
+});
+
+describe('name conditions (ADR-143)', () => {
+  const check = (conditions: SegmentDefinition['conditions']) =>
+    checkSegmentDefinition(noTx, 'tenant', { match: 'all', conditions }, new Map());
+
+  it('compares a name as a text field’s value is compared', () => {
+    expect([...NAME_COMPARISONS]).toEqual(fieldComparisonsFor('text'));
+  });
+
+  it('needs the name to compare with for equals, not_equals and contains, in members’ words', async () => {
+    for (const op of ['equals', 'not_equals', 'contains'] as const) {
+      expect(await check([{ type: 'name', op }])).toBe('Enter a name to compare with.');
+      expect(await check([{ type: 'name', op, value: '' }])).toBe('Enter a name to compare with.');
+      expect(await check([{ type: 'name', op, value: 'Asha' }])).toBeNull();
+    }
+    expect(await check([{ type: 'name', op: 'is_set' }])).toBeNull();
+    expect(await check([{ type: 'name', op: 'is_not_set' }])).toBeNull();
+  });
+
+  it('reads a definition’s name conditions trimmed, up to 200 characters, with the comparisons that apply', () => {
+    const parse = (condition: Record<string, unknown>) =>
+      segmentDefinitionSchema.safeParse({ conditions: [condition] });
+    expect(parse({ type: 'name', op: 'contains', value: '  Asha  ' }).data?.conditions).toEqual([
+      { type: 'name', op: 'contains', value: 'Asha' },
+    ]);
+    expect(parse({ type: 'name', op: 'equals', value: ` ${'x'.repeat(200)} ` }).success).toBe(true);
+    expect(parse({ type: 'name', op: 'equals', value: 'x'.repeat(201) }).success).toBe(false);
+    expect(parse({ type: 'name', op: 'greater_than', value: 'a' }).success).toBe(false);
+    expect(parse({ type: 'name', op: 'is_true' }).success).toBe(false);
   });
 });

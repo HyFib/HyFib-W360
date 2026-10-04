@@ -83,7 +83,8 @@ verification, app review, Embedded Signup configuration).
   idempotent cancel, test sends, per-recipient outcomes, last-touch reply/opt-out attribution,
   results with denominators, CSV export. Local 10,000-recipient run: snapshot 0.6 s, all recipients
   queued in 21 ticks. Segments refuse dates that do not exist (ADR-117; a creation day of 30
-  February used to fail the preview, the segment page and a campaign's audience). **Remaining:** the 10k run in staging with real dispatch, per-recipient time
+  February used to fail the preview, the segment page and a campaign's audience), and compare
+  contacts' names (ADR-143). **Remaining:** the 10k run in staging with real dispatch, per-recipient time
   zones, A/B variants, messaging-tier awareness (read the number's limit from Meta), campaign
   sends through the public API (the API sends single templates since P5-08), media-header
   templates.
@@ -538,6 +539,10 @@ verification, app review, Embedded Signup configuration).
   `POST /contacts/search` takes segments' `last_message` condition with `conversations.read` and
   `campaign` condition with `campaigns.read`, finding the contacts a segment with the same
   conditions finds).
+  **[Name conditions in contact searches built, locally verified]** (ADR-143:
+  `POST /contacts/search` and segments take a `name` condition with a text field's comparisons, the
+  whole name compared whatever its case, `contains` taking the text as written, a name of spaces
+  only counted as none).
   **[A campaign's recipients built, locally verified]** (ADR-127: `GET /campaigns/{id}/recipients`
   lists a campaign's recipients with what happened to each one's message, with `campaigns.read` and
   `contacts.read`, by the outcomes its results count, erased contacts left out).
@@ -552,7 +557,7 @@ verification, app review, Embedded Signup configuration).
   choosing conversations to change by a filter, media downloads, a contact card's contacts (Meta's
   contact object is not confirmed), starting or stopping runs for many
   contacts in one call, bulk sends in one call, changing a field's type, changing numbers, choosing
-  contacts to change by a filter, a name condition in `POST /contacts/search`, groups of conditions,
+  contacts to change by a filter, groups of conditions,
   which fields of a contact changed in the contact feed (webhooks name them since ADR-121),
   resuming, approving, scheduling, creating and editing campaigns through the API, campaign
   recipients through webhooks, limits per endpoint, availability per single endpoint (plans choose

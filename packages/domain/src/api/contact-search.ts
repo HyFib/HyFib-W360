@@ -15,6 +15,7 @@ import {
   FIELD_COMPARISONS,
   LAST_MESSAGE_COMPARISONS,
   LAST_MESSAGE_DAYS,
+  NAME_COMPARISONS,
   SEGMENT_LIMITS,
   comparisonTakesValue,
   fieldComparisonsFor,
@@ -56,6 +57,23 @@ const apiSearchConditionSchema = z.discriminatedUnion('type', [
         .optional()
         .describe(
           'What to compare with, for every comparison but is_set, is_not_set, is_true and is_false, which take none: text, compared whatever its case (contains looks for it as written, never as a pattern); a number, or a string of one, for a number field; a date as YYYY-MM-DD for a date field. not_equals also finds contacts without a value.',
+        ),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('name'),
+      op: z
+        .enum(NAME_COMPARISONS)
+        .describe(
+          'The contact’s name, as a text field’s value: is_set, is_not_set, equals, not_equals, contains. A name of spaces only counts as none.',
+        ),
+      value: z
+        .string()
+        .max(200)
+        .optional()
+        .describe(
+          'The name to compare with, for equals, not_equals and contains (is_set and is_not_set take none): compared whatever its case; contains looks for it as written, never as a pattern. not_equals also finds contacts without a name.',
         ),
     })
     .strict(),
@@ -193,6 +211,16 @@ function segmentConditions(
           throw invalid(at(part), message(c.op, type));
         }
         return { type: 'field', key: c.key, op: c.op, value };
+      }
+      case 'name': {
+        const value = c.value?.trim();
+        if (value !== undefined && !comparisonTakesValue(c.op)) {
+          throw invalid(at('value'), `${c.op} takes no value.`);
+        }
+        if (comparisonTakesValue(c.op) && !value) {
+          throw invalid(at('value'), `${c.op} needs a name to compare with.`);
+        }
+        return { type: 'name', op: c.op, value };
       }
       case 'tag': {
         const tag = normalizeTag(c.tag);

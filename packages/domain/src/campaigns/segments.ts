@@ -48,6 +48,18 @@ export const FIELD_COMPARISONS = [
 ] as const;
 export type FieldComparison = (typeof FIELD_COMPARISONS)[number];
 
+/**
+ * How a `name` condition compares the contact's name (ADR-143): as a text field's value is, with a
+ * name of spaces only read as none.
+ */
+export const NAME_COMPARISONS = [
+  'is_set',
+  'is_not_set',
+  'equals',
+  'not_equals',
+  'contains',
+] as const;
+
 /** Whether a contact wrote within the last days (the `last_message` condition), and how far back. */
 export const LAST_MESSAGE_COMPARISONS = ['within_days', 'not_within_days'] as const;
 export const LAST_MESSAGE_DAYS = { min: 1, max: 365 } as const;
@@ -75,6 +87,11 @@ const conditionSchema = z.discriminatedUnion('type', [
     type: z.literal('field'),
     key: z.string().regex(FIELD_KEY_RE, 'Choose a field'),
     op: z.enum(FIELD_COMPARISONS),
+    value: z.string().trim().max(200).optional(),
+  }),
+  z.object({
+    type: z.literal('name'),
+    op: z.enum(NAME_COMPARISONS),
     value: z.string().trim().max(200).optional(),
   }),
   z.object({
@@ -179,6 +196,9 @@ export async function checkSegmentDefinition(
       const problem = fieldConditionProblem(type, c.op, c.value);
       if (problem) return FIELD_PROBLEM_MESSAGES[problem](type);
     }
+    if (c.type === 'name' && comparisonTakesValue(c.op) && !c.value) {
+      return 'Enter a name to compare with.';
+    }
     // The schema checks the form only; 30 February would fail in the query.
     if (c.type === 'created' && !validDate(c.date)) return 'Enter a date written as YYYY-MM-DD.';
     if (c.type === 'campaign') {
@@ -226,6 +246,24 @@ function fieldSql(c: Extract<SegmentCondition, { type: 'field' }>, type: Contact
   }
 }
 
+function nameSql(c: Extract<SegmentCondition, { type: 'name' }>): SQL {
+  // WhatsApp profile names are kept as sent, so a name of spaces only reads as none.
+  const name = sql`nullif(btrim(${contacts.displayName}), '')`;
+  const v = c.value ?? '';
+  switch (c.op) {
+    case 'is_set':
+      return sql`${name} is not null`;
+    case 'is_not_set':
+      return sql`${name} is null`;
+    case 'equals':
+      return sql`lower(${name}) = lower(${v})`;
+    case 'not_equals':
+      return sql`${name} is null or lower(${name}) <> lower(${v})`;
+    case 'contains':
+      return sql`${contacts.displayName} ilike ${likePattern(v)}`;
+  }
+}
+
 function conditionSql(
   c: SegmentCondition,
   timezone: string,
@@ -248,6 +286,8 @@ function conditionSql(
       // Unknown fields are refused by checkSegmentDefinition; match nothing if one slips through.
       return type ? fieldSql(c, type) : sql`false`;
     }
+    case 'name':
+      return nameSql(c);
     case 'created': {
       // A date in the company's time zone: "before 2026-10-01" means before its local midnight.
       const midnight = sql`((${c.date}::date)::timestamp at time zone ${timezone})`;

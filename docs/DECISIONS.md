@@ -4432,9 +4432,9 @@ Decision:
   and as a date comparison it was compared as text. Both now need a date that exists, and are
   refused with the problem named, for new segments and for saved ones alike.
 
-Not built: the `last_message` and `campaign` conditions, searching by name, groups of conditions
-(all of some and any of others), orders other than newest first, counting the matches, and saved
-segments through the API.
+Not built: the `last_message` and `campaign` conditions (since ADR-126), searching by name (a name
+condition since ADR-143), groups of conditions (all of some and any of others), orders other than
+newest first, counting the matches, and saved segments through the API.
 
 ## ADR-118 Custom headers on webhook endpoints (2026-10-03)
 
@@ -4812,8 +4812,8 @@ Decision:
   recipients' indexes.
 - **No migration;** the OpenAPI document lists the two condition shapes.
 
-Not built: groups of conditions, a name condition (segments have none), conditions on a
-conversation's status, member or team, on a campaign's message other than these outcomes (clicked
+Not built: groups of conditions, a name condition (in segments and searches since ADR-143),
+conditions on a conversation's status, member or team, on a campaign's message other than these outcomes (clicked
 buttons, opt-outs), and on automation runs.
 
 ## ADR-127 A campaign's recipients through the public API (2026-10-03)
@@ -5659,3 +5659,43 @@ install step fails without `patches/` and succeeds with it, and both images' bui
 
 Not done: `eslint-config-next`, which `apps/web` still lists, shares the patched plugin and was left
 in place.
+
+## ADR-143 Name conditions in segments and contact searches (P3-04, P5-08) (2026-10-04)
+
+Context: segments (P3-04) compare contacts' custom fields, tags, consent, creation day, source,
+calling code, last message and campaign outcomes, but not the contact's own name, so members could
+not target "contacts named Asha" or "contacts without a name", and `POST /contacts/search`, which
+takes segments' conditions (ADR-117, ADR-126), had no name condition either. `GET /contacts?name=`
+finds part of a name since ADR-124, but cannot ask for a name that is not something, for no name,
+or for a name among conditions matched with `any`. Names come from members, imports, the API, store
+orders, Flows answers and WhatsApp profile names; profile names are kept as WhatsApp sends them, so
+a name can carry spaces around it, or be spaces only.
+
+Decision:
+
+- **A `name` condition with a text field's comparisons:** `is_set`, `is_not_set`, `equals`,
+  `not_equals` and `contains`, in segments and in `POST /contacts/search` alike (one list,
+  `NAME_COMPARISONS`, which a unit test keeps equal to a text field's). `equals` and `not_equals`
+  compare the whole name whatever its case; `contains` looks for the text as written, never as a
+  pattern (`%`, `_` and `\` are escaped); `not_equals` also finds contacts without a name, as it
+  does contacts without a field value.
+- **A name of spaces only counts as none, and spaces around a name are not compared:** the
+  condition reads `nullif(btrim(display_name), '')`, so a WhatsApp profile name of spaces only is
+  found by `is_not_set` and " Ravi Kumar " equals "ravi kumar". Stored names are not rewritten.
+- **The name to compare with:** at most 200 characters (a name's longest), trimmed; `equals`,
+  `not_equals` and `contains` need one, `is_set` and `is_not_set` take none. Segments refuse a
+  missing name in members' words ("Enter a name to compare with."); the API answers 422 naming
+  `conditions.N.value` ("equals needs a name to compare with.", "is_set takes no value."), and its
+  schema refuses another comparison, a number or a longer name.
+- **Compiled by segments' function:** the API turns its condition into the segment condition, and
+  segments' function turns that into parameterised SQL, so a key and a segment with the same
+  conditions find the same contacts (tested for each comparison and for a saved segment). The name
+  is part of the contact, so the condition needs only `contacts.read`.
+- **Builder:** segments and campaign audiences offer "Name" with "contains" (the default), "is",
+  "is not", "has a name" and "has no name"; the name field shows only for the comparisons that take
+  one.
+- **No migration and no index:** each API page still reads at most 2,000 of the company's contacts
+  (ADR-113), and segments read the company's contacts as for every other condition.
+
+Not built: names compared regardless of accents (é and e differ), starts-with and ends-with
+comparisons, and conditions on a contact's email.

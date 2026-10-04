@@ -247,9 +247,11 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 ## 6B. Segments and campaigns **[built — sends verified against a local Graph stand-in only]**
 
 - **Segments** (`packages/domain/src/campaigns/segments.ts`): saved, dynamic lists of conditions
-  (tags, consent, typed custom fields, creation date in the company's time zone, source, last
-  inbound message, calling code, response to an earlier campaign) combined with all/any. They
-  compile to parameterised SQL over `app.contacts`; erased contacts never match.
+  (the contact's name, tags, consent, typed custom fields, creation date in the company's time zone,
+  source, last inbound message, calling code, response to an earlier campaign) combined with
+  all/any. They compile to parameterised SQL over `app.contacts`; erased contacts never match. A
+  name condition compares the name with its surrounding spaces removed, a name of spaces only
+  counted as none (ADR-143).
 - **Campaign lifecycle** (`campaigns/service.ts`): draft → (pending_approval →) scheduled → running
   → completed, with paused and canceled. Submitting runs the readiness checks, freezes the audience
   (`campaign_recipients`, one row per contact, pending or skipped with a reason, no personal data)
@@ -926,9 +928,10 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   the key's name on the event's `apiKeyId`.
 - **Searching contacts (ADR-117):** `POST /contacts/search` (`api/contact-search.ts`) parses
   segments' conditions (`last_message` with `conversations.read` and `campaign` with
-  `campaigns.read` since ADR-126, a named campaign checked to be the company's), checks them against
-  the company's fields with segments' rules (`fieldConditionProblem` and `comparisonTakesValue` in
-  `campaigns/segments.ts`, which `checkSegmentDefinition` uses too, each in its own words), and
+  `campaigns.read` since ADR-126, a named campaign checked to be the company's, `name` since
+  ADR-143), checks them against the company's fields with segments' rules (`fieldConditionProblem`
+  and `comparisonTakesValue` in `campaigns/segments.ts`, which `checkSegmentDefinition` uses too,
+  each in its own words), and
   compiles them with `segmentConditionsSql`, which `segmentWhere` wraps for segments and campaigns.
   Its pages and `GET /contacts`'s come from one function, `apiContactPage` (`api/contacts.ts`): the
   window's edge, then the matching rows down to it, in one repeatable read snapshot.

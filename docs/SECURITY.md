@@ -686,11 +686,12 @@ Phase 5 rules (Public API, P5-08):
 - Searching contacts (ADR-117): `POST /contacts/search` (`contacts.read`) finds the key's company's
   live contacts only (RLS and an explicit company filter; erased contacts never match), with
   segments' conditions on data a contact already shows (custom fields, tags, consent, creation day,
-  source, calling code). Segments' conditions on conversations and campaigns also need the scope
-  that reads them (ADR-126, below). Field keys are checked against the company's fields first, and
-  keys, values, tags and dates are bound parameters, never part of the SQL text; `contains` escapes
-  `%` and `_`, so a value is never a pattern. Each page reads at most 2,000 contacts, so no
-  condition can make one request read every contact a company has. It writes nothing.
+  source, calling code, and the name since ADR-143). Segments' conditions on conversations and
+  campaigns also need the scope that reads them (ADR-126, below). Field keys are checked against
+  the company's fields first, and keys, values, tags and dates are bound parameters, never part of
+  the SQL text; `contains` escapes `%` and `_`, so a value is never a pattern. Each page reads at
+  most 2,000 contacts, so no condition can make one request read every contact a company has. It
+  writes nothing.
 - Only the token's SHA-256 is stored; the runtime role cannot read it. The token is shown once in
   the browser and kept only in the page's memory; it is never logged, and audit entries carry the
   public prefix only.

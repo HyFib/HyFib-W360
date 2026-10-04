@@ -18,8 +18,9 @@ import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './what
  * PostgreSQL: every comparison of each type of custom field, tags, consent, the day a contact was
  * added in the company's time zone, source and calling code, all or any of them; the same contacts
  * a segment with the same conditions counts; refusals naming the condition's part; pages read in
- * windows. Also segments refusing dates that do not exist instead of failing in the query, and
- * finding contacts by when they last wrote, which also needs conversations.read (ADR-126).
+ * windows. Also segments refusing dates that do not exist instead of failing in the query,
+ * finding contacts by when they last wrote, which also needs conversations.read (ADR-126), and by
+ * name, in segments and searches alike (ADR-143).
  */
 let fx: WhatsAppFixture;
 
@@ -518,6 +519,147 @@ describe('finding contacts by when they last wrote (ADR-126)', () => {
       );
       expect(r.code).toBe('forbidden');
     }
+  });
+});
+
+describe('finding contacts by name (ADR-143)', () => {
+  it('compares names as text fields are, a name of spaces only read as none, as segments do', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const service = contactsService();
+    const kept = await service.createContact(owner, {
+      displayName: 'Asha Rao',
+      phone: nextPhone(),
+    });
+    await service.addTags(owner, kept.id, ['vip']);
+    await service.createContact(owner, { displayName: 'asha', phone: nextPhone() });
+    await service.createContact(owner, { displayName: 'Bina_100%', phone: nextPhone() });
+    await service.createContact(owner, { phone: nextPhone() });
+    // WhatsApp profile names are kept as sent: one padded with spaces, one of spaces only.
+    for (const profileName of ['  Ravi Kumar  ', '   ']) {
+      await fx.deliver(
+        fx.messagesBody(c, { messages: [{ waId: nextPhone().slice(1), text: 'Hi', profileName }] }),
+      );
+    }
+    // An erased contact had a matching name, and another company's contact has one.
+    const gone = await service.createContact(owner, { displayName: 'Asha', phone: nextPhone() });
+    await service.eraseContact(owner, { contactId: gone.id, suppress: false });
+    const other = await fx.company();
+    await contactsService().createContact(await fx.ctx(other, other.owner), {
+      displayName: 'asha',
+      phone: nextPhone(),
+    });
+
+    const ctx = await apiKey(c, ['contacts.read']);
+    const search = async (conditions: unknown[], match = 'all') =>
+      names(await apiSearchContacts(deps(), ctx, { match, conditions, limit: 100 }));
+    const name = (op: string, value?: string) => ({
+      type: 'name',
+      op,
+      ...(value === undefined ? {} : { value }),
+    });
+    // Newest first: the two WhatsApp contacts, the one without a name, then the named ones.
+    expect(await search([name('equals', 'ASHA')])).toEqual(['asha']);
+    expect(await search([name('equals', ' asha ')])).toEqual(['asha']);
+    expect(await search([name('equals', 'ravi kumar')])).toEqual(['  Ravi Kumar  ']);
+    // not_equals compares whatever the case too, and also finds contacts without a name, one of
+    // spaces only included.
+    expect(await search([name('not_equals', 'ASHA')])).toEqual([
+      '   ',
+      '  Ravi Kumar  ',
+      null,
+      'Bina_100%',
+      'Asha Rao',
+    ]);
+    // contains looks for the name as written, whatever its case, never as a pattern.
+    expect(await search([name('contains', 'SHA')])).toEqual(['asha', 'Asha Rao']);
+    expect(await search([name('contains', 'a_')])).toEqual(['Bina_100%']);
+    expect(await search([name('contains', '%')])).toEqual(['Bina_100%']);
+    expect(await search([name('is_set')])).toEqual([
+      '  Ravi Kumar  ',
+      'Bina_100%',
+      'asha',
+      'Asha Rao',
+    ]);
+    expect(await search([name('is_not_set')])).toEqual(['   ', null]);
+    expect(
+      await search([name('contains', 'asha'), { type: 'tag', op: 'has', tag: 'vip' }]),
+    ).toEqual(['Asha Rao']);
+    expect(await search([name('is_not_set'), name('contains', 'bina')], 'any')).toEqual([
+      '   ',
+      null,
+      'Bina_100%',
+    ]);
+    // The same contacts a segment with the same conditions counts, saved or previewed.
+    for (const definition of [
+      { match: 'all', conditions: [name('equals', 'asha')] },
+      { match: 'all', conditions: [name('not_equals', 'asha')] },
+      { match: 'all', conditions: [name('is_not_set')] },
+      {
+        match: 'any',
+        conditions: [name('contains', 'ravi'), { type: 'tag', op: 'has', tag: 'vip' }],
+      },
+    ]) {
+      const preview = await segmentsService().previewDefinition(owner, definition);
+      expect((await search(definition.conditions, definition.match)).length).toBe(preview.count);
+    }
+    const saved = await segmentsService().createSegment(
+      owner,
+      { name: 'Ashas', definition: { match: 'all', conditions: [name('contains', 'asha')] } },
+      {},
+    );
+    const segment = await segmentsService().getSegment(owner, saved.id);
+    expect([segment.problem, segment.preview?.count]).toEqual([null, 2]);
+  });
+
+  it('refuses a name condition without the name it compares with, or with one it takes none of', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const ctx = await apiKey(c, ['contacts.read']);
+    for (const [condition, message] of [
+      [{ type: 'name', op: 'equals' }, 'equals needs a name to compare with.'],
+      [{ type: 'name', op: 'not_equals', value: '' }, 'not_equals needs a name to compare with.'],
+      [{ type: 'name', op: 'contains', value: '   ' }, 'contains needs a name to compare with.'],
+      [{ type: 'name', op: 'is_set', value: 'Asha' }, 'is_set takes no value.'],
+      [{ type: 'name', op: 'is_not_set', value: '' }, 'is_not_set takes no value.'],
+    ] as const) {
+      const r = await refusal(
+        apiSearchContacts(deps(), ctx, {
+          conditions: [{ type: 'tag', op: 'has', tag: 'vip' }, condition],
+        }),
+      );
+      expect([r.code, r.paths, r.message]).toEqual([
+        'validation_failed',
+        ['conditions.1.value'],
+        message,
+      ]);
+    }
+    for (const [condition, path] of [
+      [{ type: 'name', op: 'greater_than', value: 'a' }, 'conditions.0.op'],
+      [{ type: 'name', op: 'equals', value: 5 }, 'conditions.0.value'],
+      [{ type: 'name', op: 'equals', value: 'a'.repeat(201) }, 'conditions.0.value'],
+      [{ type: 'name', op: 'equals', value: 'a', key: 'city' }, 'conditions.0'],
+    ] as const) {
+      const r = await refusal(apiSearchContacts(deps(), ctx, { conditions: [condition] }));
+      expect([r.code, r.paths]).toEqual(['validation_failed', [path]]);
+    }
+    // Segments refuse the same, in members' words.
+    for (const condition of [
+      { type: 'name', op: 'equals' },
+      { type: 'name', op: 'contains', value: '   ' },
+    ]) {
+      const r = await refusal(
+        segmentsService().previewDefinition(owner, { match: 'all', conditions: [condition] }),
+      );
+      expect([r.code, r.message]).toEqual(['validation_failed', 'Enter a name to compare with.']);
+    }
+    const unknown = await refusal(
+      segmentsService().previewDefinition(owner, {
+        match: 'all',
+        conditions: [{ type: 'name', op: 'greater_than', value: 'a' }],
+      }),
+    );
+    expect(unknown.code).toBe('validation_failed');
   });
 });
 
