@@ -105,6 +105,7 @@ import {
 import {
   WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS,
   WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT,
+  WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT,
 } from '../webhooks/service';
 
 describe('API tokens', () => {
@@ -1325,6 +1326,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'events',
       'headers',
       'messageStatuses',
+      'orderStatuses',
     ]);
     expect(update.additionalProperties).toBe(false);
     // Headers are given with their values, at most 5, and answered by name only (ADR-118).
@@ -1379,6 +1381,47 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(webhooks['campaign.status_changed']?.post?.description).toContain(
       'An endpoint receives every status unless it names the statuses it takes',
     );
+    // The order statuses an endpoint receives (ADR-147): a list, or null.
+    const orderStatuses = (answered.properties as Record<string, { anyOf?: unknown[] }>)
+      .orderStatuses;
+    expect(orderStatuses?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('orderStatuses');
+    expect(Object.keys(createBody.properties)).toContain('orderStatuses');
+    expect(webhooks['order.status_changed']?.post?.description).toContain(
+      'An endpoint receives every status unless it names the statuses it takes (its `orderStatuses`',
+    );
+  });
+
+  it('take order statuses only with order.status_changed, and a list of them alone is a change (ADR-147)', () => {
+    const base = { url: 'https://hooks.example.com/w360', events: ['order.status_changed'] };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...base,
+        orderStatuses: ['cancelled', 'paid', 'cancelled'],
+      }).orderStatuses,
+    ).toEqual(['paid', 'cancelled']);
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['order.received'],
+      orderStatuses: ['paid'],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['orderStatuses', WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT],
+    ]);
+    for (const body of [
+      { ...base, orderStatuses: [] },
+      { ...base, orderStatuses: ['received'] },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(apiUpdateWebhookEndpointSchema.parse({ orderStatuses: null })).toEqual({
+      orderStatuses: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ orderStatuses: ['fulfilled'] })).toEqual({
+      orderStatuses: ['fulfilled'],
+    });
   });
 
   it('take campaign statuses only with campaign.status_changed, and a list of them alone is a change (ADR-146)', () => {

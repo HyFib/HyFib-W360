@@ -180,6 +180,7 @@ export default async function WebhookEndpointPage({
               contactParts: endpoint.contactParts,
               automationIds: endpoint.automations?.map((a) => a.id) ?? null,
               campaignStatuses: endpoint.campaignStatuses,
+              orderStatuses: endpoint.orderStatuses,
             }}
             automationChoices={automationChoices}
           />

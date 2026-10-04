@@ -32,6 +32,7 @@ import {
   WEBHOOK_CONTACT_PARTS,
   WEBHOOK_EVENT_KEYS,
   WEBHOOK_LIMITS,
+  WEBHOOK_ORDER_STATUSES,
   WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_REPLAY_PERIODS,
   webhookHost,
@@ -41,6 +42,7 @@ import {
   type WebhookContactPart,
   type WebhookEndpointAutomation,
   type WebhookMessageStatus,
+  type WebhookOrderStatus,
 } from './model';
 
 /** Binds an endpoint's secret to its company, the endpoint and the secret's version. */
@@ -227,6 +229,34 @@ export function webhookCampaignStatusesFor(
 }
 
 /**
+ * The statuses an order reaches that an endpoint takes as `order.status_changed` (ADR-147), in the
+ * order an order reaches them; null takes every status.
+ */
+export const webhookOrderStatusesSchema = z
+  .array(z.enum(WEBHOOK_ORDER_STATUSES, { error: 'Choose order statuses from the list.' }))
+  .min(1, 'Choose at least one order status, or take every status.')
+  .max(WEBHOOK_ORDER_STATUSES.length, 'Give each order status once.')
+  .transform((chosen) => WEBHOOK_ORDER_STATUSES.filter((status) => chosen.includes(status)))
+  .nullable();
+
+export const WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT =
+  'Choose order statuses only for an endpoint that receives Order status.';
+
+/**
+ * The order statuses an endpoint keeps after it is added or changed: every status (null) unless it
+ * takes `order.status_changed`; then those given, or else the ones it had.
+ */
+export function webhookOrderStatusesFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly WebhookOrderStatus[] | null | undefined,
+  current: readonly WebhookOrderStatus[] | null,
+): WebhookOrderStatus[] | null {
+  if (!eventTypes.includes('order.status_changed')) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
  * The parts of a contact whose change an endpoint takes as `contact.updated` (ADR-123), in the
  * order Settings lists them; null takes every change, including parts added later.
  */
@@ -356,6 +386,8 @@ const endpointFields = z.object({
    * Given, the campaign statuses it takes (null: every status, ADR-146); left out, they stay.
    */
   campaignStatuses: webhookCampaignStatusesSchema.optional(),
+  /** Given, the order statuses it takes (null: every status, ADR-147); left out, they stay. */
+  orderStatuses: webhookOrderStatusesSchema.optional(),
 });
 /** Statuses are chosen only for an endpoint that takes `message.status`. */
 const statusesNeedTheEvent = {
@@ -381,18 +413,26 @@ const campaignStatusesNeedTheEvent = {
     !data.campaignStatuses || data.eventTypes.includes('campaign.status_changed'),
   options: { path: ['campaignStatuses'], message: WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT },
 };
+/** Order statuses are chosen only for an endpoint that takes order changes (ADR-147). */
+const orderStatusesNeedTheEvent = {
+  check: (data: { eventTypes: WebhookEventType[]; orderStatuses?: unknown }) =>
+    !data.orderStatuses || data.eventTypes.includes('order.status_changed'),
+  options: { path: ['orderStatuses'], message: WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT },
+};
 const endpointSchema = endpointFields
   .refine(statusesNeedTheEvent.check, statusesNeedTheEvent.options)
   .refine(partsNeedTheEvent.check, partsNeedTheEvent.options)
   .refine(automationsNeedTheEvents.check, automationsNeedTheEvents.options)
-  .refine(campaignStatusesNeedTheEvent.check, campaignStatusesNeedTheEvent.options);
+  .refine(campaignStatusesNeedTheEvent.check, campaignStatusesNeedTheEvent.options)
+  .refine(orderStatusesNeedTheEvent.check, orderStatusesNeedTheEvent.options);
 const endpointIdSchema = z.object({ endpointId: z.uuid() });
 const updateSchema = endpointFields
   .extend({ endpointId: z.uuid() })
   .refine(statusesNeedTheEvent.check, statusesNeedTheEvent.options)
   .refine(partsNeedTheEvent.check, partsNeedTheEvent.options)
   .refine(automationsNeedTheEvents.check, automationsNeedTheEvents.options)
-  .refine(campaignStatusesNeedTheEvent.check, campaignStatusesNeedTheEvent.options);
+  .refine(campaignStatusesNeedTheEvent.check, campaignStatusesNeedTheEvent.options)
+  .refine(orderStatusesNeedTheEvent.check, orderStatusesNeedTheEvent.options);
 const enabledSchema = endpointIdSchema.extend({ enabled: z.boolean() });
 const deliveryIdSchema = z.object({ deliveryId: z.uuid() });
 const replayFailedSchema = endpointIdSchema.extend({
@@ -429,6 +469,8 @@ export interface WebhookEndpointView {
   automations: WebhookEndpointAutomation[] | null;
   /** The campaign statuses it takes (ADR-146); null takes every status. */
   campaignStatuses: WebhookCampaignStatus[] | null;
+  /** The order statuses it takes (ADR-147); null takes every status. */
+  orderStatuses: WebhookOrderStatus[] | null;
   createdAt: Date;
   /** The member who added the endpoint in settings (null once their account is gone). */
   createdBy: string | null;
@@ -508,6 +550,7 @@ export async function lockWebhookEndpoint(
       contactParts: webhookEndpoints.contactParts,
       automationIds: webhookEndpoints.automationIds,
       campaignStatuses: webhookEndpoints.campaignStatuses,
+      orderStatuses: webhookEndpoints.orderStatuses,
     })
     .from(webhookEndpoints)
     .where(
@@ -544,6 +587,7 @@ export async function insertWebhookEndpoint(
     contactParts: WebhookContactPart[] | null;
     automationIds: string[] | null;
     campaignStatuses: WebhookCampaignStatus[] | null;
+    orderStatuses: WebhookOrderStatus[] | null;
     creator: WebhookEndpointCreator;
   },
 ): Promise<{ id: string; secret: string }> {
@@ -572,6 +616,7 @@ export async function insertWebhookEndpoint(
     contactParts: input.contactParts,
     automationIds: input.automationIds,
     campaignStatuses: input.campaignStatuses,
+    orderStatuses: input.orderStatuses,
     createdByUserId: 'userId' in input.creator ? input.creator.userId : null,
     createdByApiKeyId: 'apiKeyId' in input.creator ? input.creator.apiKeyId : null,
   });
@@ -861,6 +906,7 @@ export function createWebhooksService(deps: {
               contactParts: webhookEndpoints.contactParts,
               automationIds: webhookEndpoints.automationIds,
               campaignStatuses: webhookEndpoints.campaignStatuses,
+              orderStatuses: webhookEndpoints.orderStatuses,
               createdAt: webhookEndpoints.createdAt,
               createdBy: users.name,
               keyName: apiKeys.name,
@@ -995,6 +1041,7 @@ export function createWebhooksService(deps: {
           data.campaignStatuses,
           null,
         );
+        const orderStatuses = webhookOrderStatusesFor(data.eventTypes, data.orderStatuses, null);
         const { id, secret } = await insertWebhookEndpoint(tx, keyring, ctx.tenant.id, {
           url,
           description: data.description || null,
@@ -1004,6 +1051,7 @@ export function createWebhooksService(deps: {
           contactParts,
           automationIds,
           campaignStatuses,
+          orderStatuses,
           creator: { userId: ctx.user.id },
         });
         await recordAudit(
@@ -1021,6 +1069,7 @@ export function createWebhooksService(deps: {
               ...(contactParts ? { contactParts } : {}),
               ...(automationIds ? { automationIds } : {}),
               ...(campaignStatuses ? { campaignStatuses } : {}),
+              ...(orderStatuses ? { orderStatuses } : {}),
             },
           },
           meta,
@@ -1060,6 +1109,11 @@ export function createWebhooksService(deps: {
           data.campaignStatuses,
           endpoint.campaignStatuses,
         );
+        const orderStatuses = webhookOrderStatusesFor(
+          data.eventTypes,
+          data.orderStatuses,
+          endpoint.orderStatuses,
+        );
         await tx
           .update(webhookEndpoints)
           .set({
@@ -1070,6 +1124,7 @@ export function createWebhooksService(deps: {
             contactParts,
             automationIds,
             campaignStatuses,
+            orderStatuses,
             ...(data.headers
               ? sealWebhookHeaders(keyring, ctx.tenant.id, data.endpointId, data.headers)
               : {}),
@@ -1096,6 +1151,7 @@ export function createWebhooksService(deps: {
               ...(contactParts ? { contactParts } : {}),
               ...(automationIds ? { automationIds } : {}),
               ...(campaignStatuses ? { campaignStatuses } : {}),
+              ...(orderStatuses ? { orderStatuses } : {}),
             },
           },
           meta,

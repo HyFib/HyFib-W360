@@ -935,6 +935,93 @@ describe('campaign status filters (ADR-146)', () => {
   });
 });
 
+describe('order status filters (ADR-147)', () => {
+  it('are refused without order.status_changed, unknown, received or empty, kept by a change that leaves them out and cleared with the event; the database keeps them to that event', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const url = 'https://hooks.example.com/in';
+    const refused = (eventTypes: string[], orderStatuses: unknown, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, orderStatuses }),
+        'validation_failed',
+        message,
+      );
+    await refused(['order.received'], ['paid'], /only for an endpoint that receives Order status/);
+    await refused(['order.status_changed'], [], /at least one order status/);
+    await refused(['order.status_changed'], ['received'], /from the list/);
+    await refused(['order.status_changed'], ['canceled'], /from the list/);
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['order.status_changed', 'consent.changed'],
+      orderStatuses: ['cancelled', 'paid', 'cancelled'],
+    });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toMatchObject({ orderStatuses: ['paid', 'cancelled'] });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['order.status_changed', 'consent.changed'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.orderStatuses;
+    expect(await current()).toEqual(['paid', 'cancelled']);
+    await change({ description: 'kept' });
+    expect(await current()).toEqual(['paid', 'cancelled']);
+    await change({ orderStatuses: ['fulfilled'] });
+    expect(await current()).toEqual(['fulfilled']);
+    const updates = await fx.query<{ metadata: { orderStatuses?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(updates.map((u) => u.metadata.orderStatuses)).toEqual([
+      ['paid', 'cancelled'],
+      ['fulfilled'],
+    ]);
+    await change({ orderStatuses: null });
+    expect(await current()).toBeNull();
+    await change({ orderStatuses: ['awaiting_payment'] });
+    // The database refuses an empty list, more than five entries, an unknown status, received or a
+    // missing one from an endpoint taking the event…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET order_statuses = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    for (const bad of [
+      `'{}'`,
+      `'{${Array(6).fill('paid').join(',')}}'`,
+      `'{paid,received}'`,
+      `'{paid,canceled}'`,
+      `ARRAY['paid', NULL]::text[]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(/webhook_endpoints_order_statuses/);
+    }
+    await change({ eventTypes: ['consent.changed'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['consent.changed'], orderStatuses: ['paid'] }),
+      'validation_failed',
+      /only for an endpoint that receives Order status/,
+    );
+    // …and any list for an endpoint that does not take it.
+    await expect(setInDatabase(`'{paid}'`)).rejects.toThrow(/webhook_endpoints_order_statuses/);
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'order_statuses',
+                'UPDATE') AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+});
+
 describe('automation filters (ADR-145)', () => {
   const automationService = () =>
     createAutomationService({

@@ -1,5 +1,91 @@
 # Progress
 
+## 2026-10-04 — Phase 5: choosing the order statuses a webhook endpoint receives (P5-09, ADR-147)
+
+Status: **Implemented and locally verified (test data only).** Since ADR-085 an endpoint that took
+`order.status_changed` received every change of every WhatsApp order's status: confirmations,
+fulfilments and cancellations by members, Payment Links requested, Razorpay's payments and the
+return to confirmed when a link ends unpaid. A receiver that acts on a few of them (a warehouse on
+paid orders, a refund desk on cancellations) had to read and drop the rest. ADR-085 left filters by
+status unbuilt; ADR-146 had just built them for campaigns.
+
+### Completed
+
+- **Design (ADR-147):** an endpoint takes every order status (null, as before) or 1 to 5 of the
+  statuses a change reaches (`confirmed`, `awaiting_payment`, `paid`, `fulfilled`, `cancelled`;
+  `received` only arrives as `order.received`, which is never filtered), the status reached and not
+  the one before, kept only while it takes `order.status_changed`; applied where events are
+  captured, in the transaction that changes the order, whoever changes it; audited and exported;
+  permissions unchanged.
+- **Migration 0111:** `app.webhook_endpoints.order_statuses` (`text[]`, a check: null, or 1 to 5
+  known statuses while `order.status_changed` is among the events; containment also refuses a null
+  entry and `received`), the runtime role's update of the column, and `app.capture_webhook_event`
+  replaced with the same signature (0110's, with the order condition in both its existence check
+  and its deliveries).
+- **Domain:** `webhooks/model.ts` (`WEBHOOK_ORDER_STATUSES` in the order an order reaches them,
+  their labels as Orders names them); `webhooks/service.ts` (`webhookOrderStatusesSchema`,
+  `webhookOrderStatusesFor`, the schemas' rule, `orderStatuses` on each listed endpoint, create and
+  update storing and auditing the list); `api/webhook-endpoints.ts` (`orderStatuses` on `POST` and
+  `PATCH /webhook-endpoints` and in every answer, kept or cleared, audited); OpenAPI
+  (`orderStatuses`, and the event says how the filter applies); the company data export carries the
+  column.
+- **Web:** Settings → Webhooks, under "Order status" while it is ticked: "Statuses sent", every
+  status ticked to begin with (saving all of them keeps none); the endpoints list says "Order
+  statuses sent: …". Campaign and order statuses now share one control (`ReachedStatusChoices`),
+  with the campaign checkboxes' ids and names unchanged.
+- **Tests:**
+  - Unit (3 new, 1 extended): the list's rules (1 to 5 known statuses, `received` and `canceled`
+    refused, repeats merged into the order an order reaches them, null, the empty list's message,
+    the labels), keeping and clearing; the API's schemas (only with the event, a list alone is a
+    change) and the OpenAPI entries.
+  - Integration (3 new, 1 changed): an endpoint naming fulfilled and cancelled gets only those
+    changes and every `order.received`, one taking every status gets each change, and no change is
+    recorded when no endpoint takes it (`webhook-events.test.ts`, whose endpoint helper takes the
+    statuses); refusals of statuses without the event, an empty list, `received` and an unknown
+    status, keeping, replacing and clearing, the audits, each clause of the database check (an empty
+    list, six entries, `received`, an unknown status, a null entry, any list without the event) and
+    the column grant (`webhooks.test.ts`); the same rules through the API, `received` and an
+    unknown status named by their place (`api-webhook-endpoints.test.ts`, whose endpoint shape now
+    includes `orderStatuses`).
+  - E2E (1 extended in `webhook-events.spec.ts`): a second endpoint is added with only fulfilments
+    ticked (every status unticked, then fulfilments ticked again); the form starts afresh, the
+    endpoints list names its statuses and no other endpoint's, its page ticks fulfilments only, and
+    once a member confirms and fulfils the order it has received the fulfilment alone while the
+    first endpoint has both changes. The campaign events test, which uses the shared control, still
+    passes.
+- **Docs:** ADR-147 (and ADR-085's and ADR-146's "Not built" annotated); SECURITY (Phase 5 rules);
+  THREAT-MODEL T156; ARCHITECTURE; RUNBOOKS; DEPLOYMENT (0111's rollout); DATA-RETENTION; BACKLOG
+  P5-09; feature matrix H-014, W-138 and W-139.
+- **Mutation checks:** 62 deliberate regressions tried, all caught on the first run: 14 by unit
+  tests and 36 by integration tests in the domain, the API and the migration (the statuses, their
+  order and `received` refused, the list's rules, keeping and clearing, the schemas' rule, each
+  store, read and audit in Settings and the API, the OpenAPI entries, the export, the capture's
+  existence check and deliveries, the null branch, the condition kept to order changes in both
+  places, the status reached rather than the one before, each clause of the database check and the
+  column grant), and 12 in the web through the e2e test (the statuses shown, what is sent, every
+  status ticked sent as none, ticking and unticking in the shared control, the page's starting
+  state, the form starting afresh, the endpoints list and its labels, the endpoint's page knowing
+  its list, the names Orders uses). Unlike ADR-146's first run, the capture test already named the
+  other event it expects (`order.received`, whose status `received` no list can hold).
+
+### Test commands and results (local, 2026-10-04)
+
+| Command                                                                                  | Result                                                                                             |
+| ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`                                       | clean                                                                                              |
+| `pnpm test` (unit)                                                                       | 686 passed (74 files; 3 new)                                                                       |
+| `pnpm test:integration` on PostgreSQL 18.6                                               | 852 passed (56 files; 3 new)                                                                       |
+| `pnpm test:integration` on PostgreSQL 17.11                                              | 852 passed (56 files)                                                                              |
+| `pnpm build`                                                                             | passed                                                                                             |
+| e2e: webhooks, webhook-events, api-contact-fields, api-quota (chromium, mobile-chromium) | 32 passed (6.4 min) on the final build; Firefox and WebKit are not installed here, so CI runs them |
+| Mutation checks                                                                          | 62 tried, all caught (14 by unit, 36 by integration, 12 through the e2e test)                      |
+| gitleaks 8.30.1 on the staged changes                                                    | no leaks found                                                                                     |
+
+### Known gaps
+
+- Filters by the status before a change, by store or catalog, by amount or by payment method,
+  filters for `order.received`, and filters for template or conversation statuses.
+
 ## 2026-10-04 — Phase 5: choosing the campaign statuses a webhook endpoint receives (P5-09, ADR-146)
 
 Status: **Implemented and locally verified (test data only).** Since ADR-087 an endpoint that took

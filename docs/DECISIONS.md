@@ -2791,7 +2791,7 @@ Decision:
   delivering them knows them.
 
 Not built: store order events, Payment Link events, reading or changing orders through the public
-API, catalog and product events, and filters by status.
+API, catalog and product events, and filters by status (the status reached built by ADR-147).
 
 ## ADR-086 Product messages through the public API (2026-09-30)
 
@@ -5850,4 +5850,53 @@ Decision:
   endpoints keep null; nothing is backfilled.
 
 Not built: filters by campaign, by the status before a change or by why a campaign paused or
-completed, and filters for template, order or conversation statuses.
+completed, and filters for template, order (built by ADR-147) or conversation statuses.
+
+## ADR-147 Choosing the order statuses a webhook endpoint receives (P5-09) (2026-10-04)
+
+Context: since ADR-085 an endpoint that takes `order.status_changed` receives every change of every
+WhatsApp order's status: a member's confirmation, fulfilment or cancellation, a Payment Link
+requested, Razorpay's payment, and the return to confirmed when a link ends unpaid. Most receivers
+act on a few of them: a warehouse picks orders once they are paid or confirmed for cash on
+delivery, and a refund desk wants cancellations. ADR-085 left filters by status unbuilt, and
+ADR-146 built them for campaigns.
+
+Decision:
+
+- **A list of statuses per endpoint,** for `order.status_changed` only: null receives every status,
+  as before; a list holds 1 to 5 of `confirmed`, `awaiting_payment`, `paid`, `fulfilled` and
+  `cancelled`, the status the change reached (the event's `order.status`, not the one before), in
+  the order an order reaches them with repeats merged. An order is `received` only when it is
+  recorded, which `order.received` reports and no change reaches (members move an order from it,
+  the worker never back to it), so the list cannot name it. It is chosen in Settings → Webhooks
+  under "Order status" (every status ticked to begin with; saving all of them ticked keeps none)
+  and shown on the endpoint as "Order statuses sent: …", with the names Orders uses, and through
+  the API as `orderStatuses` on `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and
+  in every endpoint the API answers.
+- **Only with the event:** statuses given for an endpoint that does not receive
+  `order.status_changed` are refused (`orderStatuses`; 422 through the API). A change that removes
+  the event clears them, and a `PATCH` that leaves them out keeps them; Settings always sends them.
+  A check in the database holds the same rule (null, or 1 to 5 known statuses while the event is
+  among the endpoint's). `order.received` is never filtered.
+- **Applied when the event is captured:** `app.capture_webhook_event` creates an
+  `order.status_changed` delivery only for the active endpoints whose list is null or holds the
+  status the order reached, and writes no event when none takes it, as for campaign statuses. The
+  capture is in the transaction that changes the order's status, from 0063's trigger, whether a
+  member, the Payment Link worker or Razorpay's payment makes the change. A change of the list
+  applies to changes captured after it; deliveries already created are still sent. Replays, test
+  events and the payload are unchanged; the payload still carries the status before.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `orderStatuses` when the endpoint has a list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API. The list names statuses only, never an order.
+- **One control for both lists:** Settings shows campaign and order statuses with the same
+  component, so both keep the order statuses are reached in and both send none when every status
+  is ticked.
+- **Migration 0111:** `order_statuses text[]` on `app.webhook_endpoints` with the check, validated
+  at once (a company has at most 10 endpoints), an update grant on the column for the runtime role
+  (it inserts it with its table grant), and `app.capture_webhook_event` replaced with the same
+  signature (0110's, with the order condition), so its owner and grants stay. Existing endpoints
+  keep null; nothing is backfilled.
+
+Not built: filters by the status before a change, by store or catalog, by amount or by payment
+method, filters for `order.received`, and filters for template or conversation statuses.

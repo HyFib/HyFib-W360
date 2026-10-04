@@ -22,6 +22,8 @@ import {
   WEBHOOK_LIMITS,
   WEBHOOK_MESSAGE_STATUS_LABELS,
   WEBHOOK_MESSAGE_STATUSES,
+  WEBHOOK_ORDER_STATUS_LABELS,
+  WEBHOOK_ORDER_STATUSES,
   WEBHOOK_REPLAY_PERIODS,
   WEBHOOK_RETRY_SECONDS,
   webhookErrorLabel,
@@ -67,6 +69,8 @@ import {
   webhookHeadersSchema,
   webhookMessageStatusesFor,
   webhookMessageStatusesSchema,
+  webhookOrderStatusesFor,
+  webhookOrderStatusesSchema,
 } from './service';
 
 const SECRET = 'whsec_test-secret-one';
@@ -1205,5 +1209,47 @@ describe('campaign status filters (ADR-146)', () => {
     expect(webhookCampaignStatusesFor([...both], undefined, null)).toBeNull();
     expect(webhookCampaignStatusesFor(['message.status'], ['paused'], ['completed'])).toBeNull();
     expect(webhookCampaignStatusesFor(['order.status_changed'], undefined, ['paused'])).toBeNull();
+  });
+});
+
+describe('order status filters (ADR-147)', () => {
+  it('take 1 to 5 of the statuses an order change reaches, once each, in the order an order reaches them; null takes every status', () => {
+    expect(webhookOrderStatusesSchema.parse(['cancelled', 'paid', 'cancelled'])).toEqual([
+      'paid',
+      'cancelled',
+    ]);
+    expect(webhookOrderStatusesSchema.parse(null)).toBeNull();
+    expect(webhookOrderStatusesSchema.parse([...WEBHOOK_ORDER_STATUSES].reverse())).toEqual([
+      ...WEBHOOK_ORDER_STATUSES,
+    ]);
+    // Every order status but `received`, which only order.received reports.
+    expect(WEBHOOK_ORDER_STATUSES).toEqual(ORDER_STATUSES.filter((s) => s !== 'received'));
+    for (const refused of [
+      [],
+      ['received'],
+      ['canceled'],
+      ['Paid'],
+      'paid',
+      [null],
+      Array(6).fill('paid'),
+    ]) {
+      expect(webhookOrderStatusesSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(webhookOrderStatusesSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one order status, or take every status.',
+    );
+    expect(Object.keys(WEBHOOK_ORDER_STATUS_LABELS)).toEqual([...WEBHOOK_ORDER_STATUSES]);
+  });
+
+  it('are kept only while the endpoint takes order.status_changed: given, kept, or cleared', () => {
+    const both = ['order.status_changed', 'order.received'] as const;
+    expect(webhookOrderStatusesFor([...both], ['paid'], null)).toEqual(['paid']);
+    expect(webhookOrderStatusesFor([...both], undefined, ['fulfilled'])).toEqual(['fulfilled']);
+    expect(webhookOrderStatusesFor([...both], null, ['fulfilled'])).toBeNull();
+    expect(webhookOrderStatusesFor([...both], undefined, null)).toBeNull();
+    expect(webhookOrderStatusesFor(['order.received'], ['paid'], ['fulfilled'])).toBeNull();
+    expect(webhookOrderStatusesFor(['campaign.status_changed'], undefined, ['paid'])).toBeNull();
   });
 });

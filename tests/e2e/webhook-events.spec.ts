@@ -503,7 +503,7 @@ interface OrderEventBody {
   };
 }
 
-test('order events reach an endpoint: a customer sends a cart, and a member confirms and fulfils the order', async ({
+test('order events reach an endpoint: a customer sends a cart, and a member confirms and fulfils the order; an endpoint can take chosen statuses only', async ({
   page,
   request,
 }) => {
@@ -532,6 +532,47 @@ test('order events reach an endpoint: a customer sends a cart, and a member conf
   await expect(secretField).toBeVisible();
   const secret = await secretField.inputValue();
   await page.getByRole('button', { name: 'I have stored the secret' }).click();
+
+  // A second endpoint takes only fulfilments (ADR-147).
+  const fulfilledPath = `${path}/fulfilled`;
+  const forFulfilled = () =>
+    received
+      .filter((r) => r.path === fulfilledPath)
+      .map((r) => JSON.parse(r.body) as OrderEventBody);
+  await page.getByLabel('Endpoint URL').fill(`http://${HOST}:${port}${fulfilledPath}`);
+  await page.getByRole('checkbox', { name: /Order status/ }).check();
+  const statusBox = (name: string) => page.getByRole('checkbox', { name, exact: true });
+  for (const name of [
+    'Confirmed (confirmed)',
+    'Waiting for payment (awaiting_payment)',
+    'Paid (paid)',
+    'Fulfilled (fulfilled)',
+    'Cancelled (cancelled)',
+  ]) {
+    await statusBox(name).uncheck();
+  }
+  await statusBox('Fulfilled (fulfilled)').check();
+  await page.getByRole('button', { name: 'Add endpoint' }).click();
+  await expect(page.getByLabel('Signing secret')).toBeVisible();
+  await page.getByRole('button', { name: 'I have stored the secret' }).click();
+  // The form starts afresh: the event ticked again takes every status.
+  await page.getByRole('checkbox', { name: /Order status/ }).check();
+  await expect(statusBox('Confirmed (confirmed)')).toBeChecked();
+  await page.reload();
+  // Only the second endpoint names statuses: every status ticked keeps none.
+  await expect(page.getByText(/^Order statuses sent:/)).toHaveText([
+    'Order statuses sent: Fulfilled',
+  ]);
+  // The endpoint's own page shows the statuses it takes.
+  await page
+    .getByRole('list', { name: 'Endpoints' })
+    .getByRole('listitem')
+    .filter({ hasText: 'Order statuses sent: Fulfilled' })
+    .getByRole('link', { name: /Deliveries and settings/ })
+    .click();
+  await expect(page.getByRole('heading', { name: /^Deliveries to/ })).toBeVisible();
+  await expect(statusBox('Fulfilled (fulfilled)')).toBeChecked();
+  await expect(statusBox('Confirmed (confirmed)')).not.toBeChecked();
 
   // A customer sends a cart from the company's WhatsApp catalog.
   const customer = randomWaId();
@@ -596,6 +637,11 @@ test('order events reach an endpoint: a customer sends a cart, and a member conf
   ).toEqual([
     ['order.status_changed', orderId, 'confirmed', 'received'],
     ['order.status_changed', orderId, 'fulfilled', 'confirmed'],
+  ]);
+  // The endpoint taking fulfilments only received the fulfilment.
+  await expect(async () => expect(forFulfilled()).toHaveLength(1)).toPass({ timeout: 30_000 });
+  expect(forFulfilled().map((e) => [e.type, e.data.order.id, e.data.order.status])).toEqual([
+    ['order.status_changed', orderId, 'fulfilled'],
   ]);
 });
 

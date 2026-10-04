@@ -7,6 +7,7 @@ import {
   WEBHOOK_CONTACT_PART_LABELS,
   WEBHOOK_EVENT_INFO,
   WEBHOOK_LIMITS,
+  WEBHOOK_ORDER_STATUS_LABELS,
   WEBHOOK_MESSAGE_STATUS_LABELS,
   webhookHost,
   type WebhookEndpointView,
@@ -112,6 +113,12 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                       <p className="text-xs text-muted-foreground">
                         Contact changes sent:{' '}
                         {e.contactParts.map((p) => WEBHOOK_CONTACT_PART_LABELS[p]).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.orderStatuses ? (
+                      <p className="text-xs text-muted-foreground">
+                        Order statuses sent:{' '}
+                        {e.orderStatuses.map((o) => WEBHOOK_ORDER_STATUS_LABELS[o]).join(', ')}
                       </p>
                     ) : null}
                     {e.campaignStatuses ? (

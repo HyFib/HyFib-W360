@@ -41,6 +41,13 @@ export type WebhookContactPart = 'name' | 'phone' | 'email' | 'tags' | 'fields';
 export type WebhookCampaignStatus =
   'draft' | 'pending_approval' | 'scheduled' | 'running' | 'paused' | 'completed' | 'canceled';
 
+/**
+ * The statuses an `order.status_changed` event reports, which an endpoint can choose (ADR-147); an
+ * order is `received` only when it is recorded, which `order.received` reports.
+ */
+export type WebhookOrderStatus =
+  'confirmed' | 'awaiting_payment' | 'paid' | 'fulfilled' | 'cancelled';
+
 export const WEBHOOK_DELIVERY_STATES = ['pending', 'delivering', 'succeeded', 'failed'] as const;
 export type WebhookDeliveryState = (typeof WEBHOOK_DELIVERY_STATES)[number];
 
@@ -79,6 +86,11 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    * takes every status. Set only while `campaign.status_changed` is among its events.
    */
   campaignStatuses: text('campaign_statuses').array().$type<WebhookCampaignStatus[]>(),
+  /**
+   * The statuses an order reaches that it takes as `order.status_changed` (ADR-147); null takes
+   * every status. Set only while `order.status_changed` is among its events.
+   */
+  orderStatuses: text('order_statuses').array().$type<WebhookOrderStatus[]>(),
   state: text('state', { enum: ['active', 'disabled'] })
     .notNull()
     .default('active'),

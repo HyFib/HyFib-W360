@@ -22,6 +22,7 @@ import {
   type WebhookContactPart,
   type WebhookEventType,
   type WebhookMessageStatus,
+  type WebhookOrderStatus,
 } from '@w360/db';
 import { recordSystemAudit } from '../audit';
 import { enqueueEmail, type OutboxDeps } from '../email/outbox';
@@ -47,6 +48,7 @@ import {
   setWebhookEndpointEnabled,
   WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS,
   WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT,
+  WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT,
   webhookAutomationIdsFor,
   webhookAutomationIdsSchema,
   webhookCampaignStatusesFor,
@@ -60,6 +62,8 @@ import {
   webhookHeadersSchema,
   webhookMessageStatusesFor,
   webhookMessageStatusesSchema,
+  webhookOrderStatusesFor,
+  webhookOrderStatusesSchema,
   type WebhookDeliveryView,
 } from '../webhooks/service';
 import { apiActor, assertScope, type ApiContext } from './context';
@@ -125,6 +129,16 @@ const invalidCampaignStatuses = () =>
     issues: [{ path: 'campaignStatuses', message: WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT }],
   });
 
+const orderStatusesField = webhookOrderStatusesSchema.describe(
+  'The statuses an order reaches that the endpoint receives as order.status_changed (confirmed, awaiting_payment, paid, fulfilled, cancelled), only with the order.status_changed event; null receives every status.',
+);
+
+/** Order statuses are chosen only for an endpoint that receives order changes (ADR-147). */
+const invalidOrderStatuses = () =>
+  new AppError('validation_failed', WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT, {
+    issues: [{ path: 'orderStatuses', message: WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT }],
+  });
+
 export const apiCreateWebhookEndpointSchema = z
   .object({
     url: z
@@ -142,6 +156,7 @@ export const apiCreateWebhookEndpointSchema = z
     contactParts: contactPartsField.optional(),
     automationIds: automationIdsField.optional(),
     campaignStatuses: campaignStatusesField.optional(),
+    orderStatuses: orderStatusesField.optional(),
   })
   .strict()
   .refine((data) => !data.messageStatuses || data.events.includes('message.status'), {
@@ -159,6 +174,10 @@ export const apiCreateWebhookEndpointSchema = z
   .refine((data) => !data.campaignStatuses || data.events.includes('campaign.status_changed'), {
     path: ['campaignStatuses'],
     message: WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT,
+  })
+  .refine((data) => !data.orderStatuses || data.events.includes('order.status_changed'), {
+    path: ['orderStatuses'],
+    message: WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT,
   });
 
 export const apiUpdateWebhookEndpointSchema = z
@@ -198,6 +217,11 @@ export const apiUpdateWebhookEndpointSchema = z
       .describe(
         'The statuses a campaign reaches that the endpoint receives as campaign.status_changed; null receives every status. Left out, they stay, unless the events no longer include campaign.status_changed, which clears them.',
       ),
+    orderStatuses: orderStatusesField
+      .optional()
+      .describe(
+        'The statuses an order reaches that the endpoint receives as order.status_changed; null receives every status. Left out, they stay, unless the events no longer include order.status_changed, which clears them.',
+      ),
   })
   .strict()
   .refine(
@@ -209,8 +233,9 @@ export const apiUpdateWebhookEndpointSchema = z
       data.messageStatuses !== undefined ||
       data.contactParts !== undefined ||
       data.automationIds !== undefined ||
-      data.campaignStatuses !== undefined,
-    'Give the events, the description, the headers, the message statuses, the contact parts, the automations, the campaign statuses or whether the endpoint is enabled',
+      data.campaignStatuses !== undefined ||
+      data.orderStatuses !== undefined,
+    'Give the events, the description, the headers, the message statuses, the contact parts, the automations, the campaign statuses, the order statuses or whether the endpoint is enabled',
   );
 
 export interface ApiWebhookEndpoint {
@@ -237,6 +262,8 @@ export interface ApiWebhookEndpoint {
   automationIds: string[] | null;
   /** The campaign statuses it receives (ADR-146); null receives every status. */
   campaignStatuses: WebhookCampaignStatus[] | null;
+  /** The order statuses it receives (ADR-147); null receives every status. */
+  orderStatuses: WebhookOrderStatus[] | null;
   /** The key that added the endpoint. */
   apiKeyId: string;
   createdAt: string;
@@ -322,6 +349,7 @@ const columns = {
   contactParts: webhookEndpoints.contactParts,
   automationIds: webhookEndpoints.automationIds,
   campaignStatuses: webhookEndpoints.campaignStatuses,
+  orderStatuses: webhookEndpoints.orderStatuses,
   apiKeyId: webhookEndpoints.createdByApiKeyId,
   createdAt: webhookEndpoints.createdAt,
   updatedAt: webhookEndpoints.updatedAt,
@@ -345,6 +373,7 @@ type EndpointRow = Pick<
   | 'contactParts'
   | 'automationIds'
   | 'campaignStatuses'
+  | 'orderStatuses'
   | 'createdAt'
   | 'updatedAt'
 > & { apiKeyId: string | null };
@@ -373,6 +402,7 @@ function toApiEndpoint(row: EndpointRow, now: Date): ApiWebhookEndpoint {
     contactParts: row.contactParts,
     automationIds: row.automationIds,
     campaignStatuses: row.campaignStatuses,
+    orderStatuses: row.orderStatuses,
     apiKeyId: row.apiKeyId,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -578,6 +608,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               data.campaignStatuses,
               null,
             );
+            const orderStatuses = webhookOrderStatusesFor(data.events, data.orderStatuses, null);
             const { id, secret } = await insertWebhookEndpoint(tx, deps.keyring, ctx.tenant.id, {
               url,
               description: data.description || null,
@@ -587,6 +618,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               contactParts,
               automationIds,
               campaignStatuses,
+              orderStatuses,
               creator: { apiKeyId: ctx.key.id },
             });
             await audit(tx, ctx, 'webhook.endpoint_created', id, {
@@ -597,6 +629,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               ...(contactParts ? { contactParts } : {}),
               ...(automationIds ? { automationIds } : {}),
               ...(campaignStatuses ? { campaignStatuses } : {}),
+              ...(orderStatuses ? { orderStatuses } : {}),
             });
             await announce(tx, ctx, { host, events: data.events, at: now });
             const endpoint = await readEndpoint(tx, ctx, id, now);
@@ -628,6 +661,9 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         if (data.campaignStatuses && !events.includes('campaign.status_changed')) {
           throw invalidCampaignStatuses();
         }
+        if (data.orderStatuses && !events.includes('order.status_changed')) {
+          throw invalidOrderStatuses();
+        }
         // Only a list given now is checked: the automations kept were checked when chosen.
         if (data.automationIds !== undefined) {
           await assertWebhookAutomations(tx, ctx.tenant.id, data.automationIds);
@@ -639,7 +675,8 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
           data.messageStatuses !== undefined ||
           data.contactParts !== undefined ||
           data.automationIds !== undefined ||
-          data.campaignStatuses !== undefined
+          data.campaignStatuses !== undefined ||
+          data.orderStatuses !== undefined
         ) {
           const [changed] = await tx
             .update(webhookEndpoints)
@@ -669,6 +706,11 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
                 data.campaignStatuses,
                 endpoint.campaignStatuses,
               ),
+              orderStatuses: webhookOrderStatusesFor(
+                events,
+                data.orderStatuses,
+                endpoint.orderStatuses,
+              ),
               updatedAt: now,
             })
             .where(and(eq(webhookEndpoints.tenantId, ctx.tenant.id), eq(webhookEndpoints.id, id)))
@@ -678,6 +720,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               contactParts: webhookEndpoints.contactParts,
               automationIds: webhookEndpoints.automationIds,
               campaignStatuses: webhookEndpoints.campaignStatuses,
+              orderStatuses: webhookEndpoints.orderStatuses,
             });
           if (!changed) throw new Error('A locked endpoint was not updated');
           await audit(tx, ctx, 'webhook.endpoint_updated', id, {
@@ -688,6 +731,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
             ...(changed.contactParts ? { contactParts: changed.contactParts } : {}),
             ...(changed.automationIds ? { automationIds: changed.automationIds } : {}),
             ...(changed.campaignStatuses ? { campaignStatuses: changed.campaignStatuses } : {}),
+            ...(changed.orderStatuses ? { orderStatuses: changed.orderStatuses } : {}),
           });
         }
         if (data.enabled !== undefined) {

@@ -623,7 +623,11 @@ verification, app review, Embedded Signup configuration).
   recorded). **[Campaign status filters built, locally verified]** (ADR-146: an endpoint takes
   `campaign.status_changed` only for the statuses a campaign reaches that it chooses, in Settings
   or through the API, or every status as before; applied where events are captured, so a change no
-  endpoint takes is not recorded). Remaining: filters for other event types and on a message's or contact's values (such
+  endpoint takes is not recorded). **[Order status filters built, locally verified]** (ADR-147: an
+  endpoint takes `order.status_changed` only for the statuses an order reaches that it chooses,
+  `confirmed`, `awaiting_payment`, `paid`, `fulfilled` and `cancelled`, in Settings or through the
+  API, or every status as before; applied where events are captured, whoever changes the order).
+  Remaining: filters for other event types and on a message's or contact's values (such
   as by campaign, template, tag or field key, or a run's trigger or outcome), which tags were added
   or removed, other authentication (OAuth client credentials, headers
   computed per delivery), mutual TLS, fixed egress addresses, delivery counts in campaign events,

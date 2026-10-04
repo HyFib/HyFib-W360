@@ -17,6 +17,7 @@ import {
   WEBHOOK_EVENT_KEYS,
   WEBHOOK_LIMITS,
   WEBHOOK_MESSAGE_STATUSES,
+  WEBHOOK_ORDER_STATUSES,
   WEBHOOK_RETRY_SECONDS,
 } from '../webhooks/model';
 import {
@@ -351,6 +352,12 @@ export const apiWebhookEndpointSchema = z.object({
     .nullable()
     .describe(
       'The statuses a campaign reaches that the endpoint receives as campaign.status_changed; null receives every status.',
+    ),
+  orderStatuses: z
+    .array(z.enum(WEBHOOK_ORDER_STATUSES))
+    .nullable()
+    .describe(
+      'The statuses an order reaches that the endpoint receives as order.status_changed; null receives every status.',
     ),
   apiKeyId: z.uuid().describe('The API key that added the endpoint.'),
   createdAt: z.iso.datetime(),
@@ -1556,7 +1563,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'order.status_changed': webhook(
         'webhookOrderStatusChanged',
         WEBHOOK_EVENT_INFO['order.status_changed'].label,
-        `${WEBHOOK_EVENT_INFO['order.status_changed'].description} order.status and order.previousStatus are the change; the rest is the order when the event is delivered. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
+        `${WEBHOOK_EVENT_INFO['order.status_changed'].description} order.status and order.previousStatus are the change; the rest is the order when the event is delivered. Deliveries are not ordered: the latest change is the one with the latest createdAt. An endpoint receives every status unless it names the statuses it takes (its \`orderStatuses\`, or the statuses ticked in Settings → Webhooks).`,
         'WebhookOrderStatusChanged',
       ),
       'campaign.status_changed': webhook(

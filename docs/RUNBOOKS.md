@@ -2085,6 +2085,18 @@ only `completed` learns what a campaign completed from. To take more, tick the s
 or `PATCH /webhook-endpoints/{id}` with `campaignStatuses` (null for every status). Removing the
 `campaign.status_changed` event clears the list.
 
+**A receiver gets fewer order.status_changed events than expected (ADR-147).** An endpoint can take
+only the statuses an order reaches that it chose; the endpoints list shows them ("Order statuses
+sent: …"), and the API answers `orderStatuses` (null takes every status). A change to another
+status is never queued for it, and when no endpoint of the company takes a change, no event is
+recorded at all, so there is nothing to replay: changes made before an edit are not sent
+afterwards. `order.received` is never filtered, and each change still names the status before it
+(`previousStatus`). An order paid through its Payment Link reaches `awaiting_payment` and then
+`paid`; one whose link ended unpaid goes back to `confirmed`, which an endpoint taking only `paid`
+does not receive. To take more, tick the statuses under "Order status" on the endpoint's page (all
+ticked takes every status, as a new endpoint does), or `PATCH /webhook-endpoints/{id}` with
+`orderStatuses` (null for every status). Removing the `order.status_changed` event clears the list.
+
 **An endpoint was turned off automatically.** It failed every attempt for 72 hours; its waiting
 deliveries were marked failed (`endpoint_disabled`), owners and administrators got the
 "Webhook endpoint turned off" email, and the audit log has `webhook.endpoint_auto_disabled`. Fix the

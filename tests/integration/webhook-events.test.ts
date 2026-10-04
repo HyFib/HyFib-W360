@@ -113,8 +113,8 @@ const contactsService = () => createContactsService({ db: fx.dbs.app, clock: sys
 
 /**
  * An endpoint of the company taking `eventTypes` (and only the contact parts given, ADR-123, the
- * runs of the automations given, ADR-145, and the campaign statuses given, ADR-146), on a path of
- * the receiver of its own.
+ * runs of the automations given, ADR-145, the campaign statuses given, ADR-146, and the order
+ * statuses given, ADR-147), on a path of the receiver of its own.
  */
 async function addEndpoint(
   c: Company,
@@ -122,6 +122,7 @@ async function addEndpoint(
   contactParts: WebhookContactPart[] | null = null,
   automationIds: string[] | null = null,
   campaignStatuses: string[] | null = null,
+  orderStatuses: string[] | null = null,
 ) {
   const path = `/ok/${randomBytes(6).toString('hex')}`;
   const owner = await fx.ctx(c, c.owner);
@@ -131,6 +132,7 @@ async function addEndpoint(
     contactParts,
     automationIds,
     campaignStatuses,
+    orderStatuses,
   });
   return { ...created, path };
 }
@@ -1966,6 +1968,83 @@ describe('order events (ADR-085)', () => {
       ['message.received', order.message_id],
     ]);
     expect(messageBodies[0]!.data.message).toMatchObject({ type: 'order' });
+  });
+
+  it('sends an endpoint that names statuses only those, another every status, and captures no change nobody takes (ADR-147)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    await syncedCatalog(c, '5558511');
+    const outcomes = await addEndpoint(
+      c,
+      ['order.received', 'order.status_changed'],
+      null,
+      null,
+      null,
+      ['cancelled', 'fulfilled'],
+    );
+    const every = await addEndpoint(c, ['order.status_changed']);
+    expect((await webhooks().list(owner)).map((e) => [e.id, e.orderStatuses]).sort()).toEqual(
+      [
+        [outcomes.id, ['fulfilled', 'cancelled']],
+        [every.id, null],
+      ].sort(),
+    );
+
+    // An order a member confirms and fulfils.
+    const first = await sendCart(c, waId(), '5558511', [
+      { retailerId: 'sku-1', quantity: 1, price: 10 },
+    ]);
+    await setOrderStatus(agent, first.id, 'confirmed');
+    await setOrderStatus(agent, first.id, 'fulfilled');
+    const changesOf = async (orderId: string) =>
+      (await eventsOf(c, 'order.'))
+        .filter((e) => e.detail.orderId === orderId)
+        .map((e) => [e.type, e.status, e.deliveries]);
+    expect(await changesOf(first.id)).toEqual([
+      ['order.received', 'received', 1],
+      ['order.status_changed', 'confirmed', 1],
+      ['order.status_changed', 'fulfilled', 2],
+    ]);
+
+    await deliverDue(c);
+
+    // With the endpoint taking every status turned off, a second order's confirmation is captured
+    // for nobody and its cancellation for the first endpoint.
+    await webhooks().setEnabled(owner, { endpointId: every.id, enabled: false });
+    const second = await sendCart(c, waId(), '5558511', [
+      { retailerId: 'sku-2', quantity: 2, price: 20 },
+    ]);
+    await setOrderStatus(agent, second.id, 'confirmed');
+    await setOrderStatus(agent, second.id, 'cancelled');
+    expect(await changesOf(second.id)).toEqual([
+      ['order.received', 'received', 1],
+      ['order.status_changed', 'cancelled', 1],
+    ]);
+
+    await deliverDue(c);
+    const ordersAt = (path: string) =>
+      bodiesAt(path)
+        .map((b) => {
+          const { order } = b.data as { order: { id: string; status: string } };
+          return [b.type, order.id, order.status];
+        })
+        .sort();
+    // Its other order event is not filtered: order.received (status received) reached it.
+    expect(ordersAt(outcomes.path)).toEqual(
+      [
+        ['order.received', first.id, 'received'],
+        ['order.status_changed', first.id, 'fulfilled'],
+        ['order.received', second.id, 'received'],
+        ['order.status_changed', second.id, 'cancelled'],
+      ].sort(),
+    );
+    expect(ordersAt(every.path)).toEqual(
+      [
+        ['order.status_changed', first.id, 'confirmed'],
+        ['order.status_changed', first.id, 'fulfilled'],
+      ].sort(),
+    );
   });
 
   it('sends an erased contact’s orders without their number, name or note, captures nothing without an endpoint for orders, and fails a delivery whose order is gone', async () => {

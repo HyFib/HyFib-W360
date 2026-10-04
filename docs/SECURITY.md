@@ -792,6 +792,14 @@ Phase 5 rules (outgoing webhooks, P5-09):
   transaction: it narrows what one endpoint receives and never adds an event or a delivery for
   another endpoint or company, and a status no endpoint takes is not recorded. Statuses are not
   personal data. Audited with the list. Tested.
+- An endpoint can take `order.status_changed` only for some of the statuses an order reaches
+  (ADR-147), chosen the same way. The list is checked against the five statuses a change can reach
+  (`received` only arrives as `order.received`, which is never filtered), kept only while the
+  endpoint takes `order.status_changed` (a database check too, which also refuses a null entry),
+  and applied in `app.capture_webhook_event`, in the transaction that changes the order, whether a
+  member, the Payment Link worker or Razorpay's payment changes it: it narrows what one endpoint
+  receives and never adds an event or a delivery for another endpoint or company. Audited with the
+  list. Tested.
 - Conversation and contact events (ADR-074) follow the same rules. Conversation events name the
   member and the team by id only (ADR-094), the ids the API gives `conversations.read` keys
   (ADR-093): names are read through `GET /members` and `GET /teams` with such a key, and no email or

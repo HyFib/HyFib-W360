@@ -3,6 +3,7 @@ import type {
   WebhookContactPart,
   WebhookEventType,
   WebhookMessageStatus,
+  WebhookOrderStatus,
 } from '@w360/db';
 
 export type {
@@ -10,6 +11,7 @@ export type {
   WebhookContactPart,
   WebhookEventType,
   WebhookMessageStatus,
+  WebhookOrderStatus,
 } from '@w360/db';
 
 /**
@@ -180,6 +182,27 @@ export const WEBHOOK_CAMPAIGN_STATUS_LABELS: Record<WebhookCampaignStatus, strin
   paused: 'Paused',
   completed: 'Completed',
   canceled: 'Cancelled',
+};
+
+/**
+ * The statuses an `order.status_changed` event reports, which an endpoint can choose (ADR-147), in
+ * the order an order reaches them; `received` is reported only by `order.received`.
+ */
+export const WEBHOOK_ORDER_STATUSES = [
+  'confirmed',
+  'awaiting_payment',
+  'paid',
+  'fulfilled',
+  'cancelled',
+] as const satisfies readonly WebhookOrderStatus[];
+
+/** How Settings names each order status an endpoint can choose (ADR-147), as Orders does. */
+export const WEBHOOK_ORDER_STATUS_LABELS: Record<WebhookOrderStatus, string> = {
+  confirmed: 'Confirmed',
+  awaiting_payment: 'Waiting for payment',
+  paid: 'Paid',
+  fulfilled: 'Fulfilled',
+  cancelled: 'Cancelled',
 };
 
 export const WEBHOOK_LIMITS = {

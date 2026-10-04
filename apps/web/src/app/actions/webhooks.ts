@@ -25,6 +25,8 @@ export async function createWebhookEndpointAction(
     automationIds: string[] | null;
     /** The campaign statuses it takes (ADR-146); null takes every status. */
     campaignStatuses: string[] | null;
+    /** The order statuses it takes (ADR-147); null takes every status. */
+    orderStatuses: string[] | null;
   },
 ): Promise<ActionResult<{ endpointId: string; secret: string }>> {
   return runAction(async () => {
@@ -53,6 +55,8 @@ export async function updateWebhookEndpointAction(
     automationIds: string[] | null;
     /** The campaign statuses it takes (ADR-146); null takes every status. */
     campaignStatuses: string[] | null;
+    /** The order statuses it takes (ADR-147); null takes every status. */
+    orderStatuses: string[] | null;
   },
 ): Promise<ActionResult> {
   return runAction(async () => {
