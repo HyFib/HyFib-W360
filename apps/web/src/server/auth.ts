@@ -23,6 +23,7 @@ import {
   recordSecurityEvent,
   type OutboxDeps,
 } from '@w360/domain';
+import { signInHistory } from './sign-in-history';
 
 /**
  * Identity: email/password with mandatory email verification, TOTP two-factor with backup codes,
@@ -186,6 +187,9 @@ export function createAuth(deps: {
         issuer: 'HyFib W360',
         backupCodeOptions: { amount: 10, length: 12 },
       }),
+      // After two-factor, which withdraws the password step's session until a code is given, and
+      // before nextCookies: records each completed sign-in (ADR-136).
+      signInHistory({ db, logger }),
       // Must be last: lets server actions set auth cookies.
       nextCookies(),
     ],

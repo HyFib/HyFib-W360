@@ -11,7 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 RESEARCH = ROOT / 'docs/research/wati-benchmark.md'
 OUT = ROOT / 'docs/FEATURE-MATRIX.md'
-MATRIX_DATE = '2026-10-02'
+MATRIX_DATE = '2026-10-04'
 
 AREA = {
     'Plans & billing': ('5', 'Platform-admin configurable plans, trials, seats, quotas and add-ons; INR prepaid service-credit wallet on an immutable balanced ledger; hosted card top-ups; opt-in auto-recharge on a card mandate.',
@@ -204,8 +204,8 @@ O = {
               'Integration tests (acceptance rules, concurrent demotion) and e2e invite/accept flow pass.', 'locally verified'),
     'W-148': ('1', 'TOTP two-factor with backup codes; required for owner, administrator and billing roles after a grace period; company-wide MFA policy. Step-up: exporting or deleting the company, payment settings, the company’s Razorpay keys, API keys, webhook endpoints, new owners and turning off required two-factor need a sign-in within the last 15 minutes (ADR-056).', '—',
               'Grace/blocking logic implemented; enrolment e2e test added; step-up: unit tests, 3 integration tests (every protected action refused to a stale sign-in before any change, allowed after signing in again, safe changes never asking), 21 mutation checks, e2e with an aged session on desktop and mobile Chromium.', 'locally verified'),
-    'W-149': ('1', 'Append-only company audit log of sensitive actions (members, invitations, settings, platform actions); security events for sign-in anomalies. A per-user login history view is planned.', '—',
-              'Audit rows cannot be updated or deleted by runtime roles (tested).', 'implemented'),
+    'W-149': ('1', 'Append-only company audit log of sensitive actions (members, invitations, settings, platform actions); security events for invalid signatures, password resets, sign-ups with an existing address and every completed sign-in. Each person sees their last 20 sign-ins (when, device, address, how) on Account & security (ADR-136); failed attempts are not listed.', '—',
+              'Audit rows cannot be updated or deleted by runtime roles (tested). Sign-in history: unit tests (which requests are sign-ins, failing closed), 5 integration tests (own sign-ins only, limits, privileges, index) and an e2e test through Better Auth’s real flows (link, password and code, trusted device, backup code; turning two-factor on and wrong codes not recorded).', 'locally verified'),
     'W-150': ('1/7', 'Per-company isolation via RLS (FORCE), transaction-local context, separate DB roles; backups via managed PostgreSQL PITR with a documented restore drill.', 'Managed PostgreSQL with PITR; restore drill.',
               'Isolation suite passes; restore drill evidence recorded.', 'locally verified'),
     'W-151': ('7', 'Data export/deletion and DPA templates planned; no compliance claim until legal review.', 'Legal review per launch market.', '—', 'planned'),

@@ -24,6 +24,7 @@ import {
   PgBossJobQueue,
   pgBossErrorContext,
   RazorpayClient,
+  createAccountService,
   createApiKeysService,
   createWebhooksService,
   createApiWebhookEndpoints,
@@ -68,6 +69,7 @@ import {
   createCompanyDeletionService,
   createWebRequestService,
   writeCompanyExport,
+  type AccountService,
   type CompanyDeletionService,
   type RequestMeta,
   type TenantContext,
@@ -138,6 +140,8 @@ export interface Runtime {
   jobs: JobQueue;
   signer: JobSigner;
   auth: Auth;
+  /** The signed-in person's own account: their sign-in history (ADR-136). */
+  account: AccountService;
   tenancy: TenancyService;
   /** Deleting the company after its grace period (Settings → Company data). */
   companyDeletion: CompanyDeletionService;
@@ -304,6 +308,7 @@ async function init(): Promise<Runtime> {
   const exportDeps = { ...outbox, db, clock: systemClock, appBaseUrl: config.APP_BASE_URL };
   const companyExport: Runtime['companyExport'] = (ctx, write, meta) =>
     writeCompanyExport(exportDeps, ctx, write, meta);
+  const account = createAccountService({ db });
   const platform = createPlatformService({ db, platformDb, clock: systemClock });
   const platformOps = createPlatformOpsService({
     platformDb,
@@ -491,6 +496,7 @@ async function init(): Promise<Runtime> {
     jobs,
     signer,
     auth,
+    account,
     tenancy,
     companyDeletion,
     companyExport,

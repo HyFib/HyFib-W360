@@ -1,5 +1,86 @@
 # Progress
 
+## 2026-10-04 — Phase 5: sign-in history for each person (SEC-9, ADR-136)
+
+Status: **Implemented and locally verified (test data only).** Account & security listed a
+person's active sessions, but a session is gone once it is signed out or expires, so nobody could
+see when, from where and how their account was signed in to (SEC-9).
+
+### Completed
+
+- **Design (ADR-136):** every completed sign-in is a security event `auth.sign_in` with the
+  address and browser of the session it handed out, how they signed in and the session's id;
+  people read only their own.
+- **Web:** a HyFib plugin to Better Auth, after its two-factor plugin and before nextCookies,
+  records the sign-in after the password step, an authenticator code, a backup code and the email
+  confirmation link, once a session was handed out: not the password step that waits for a code
+  (the two-factor plugin withdraws its session), not a renewal of the same person's session
+  (turning two-factor on), not a wrong password or code. A sign-in that cannot be recorded fails and
+  its session is deleted. Account & security gains "Recent sign-ins": the last 20, when (UTC), the
+  device and browser, the address, how, and which one started the current session. The page's
+  grid now keeps a wide table within the screen on phones.
+- **Domain:** `signInFrom` (which requests are sign-ins, and how), `signInRecorder` (the hook,
+  failing closed), `recordSignIn`, and the account service's `signInHistory`.
+- **Database** (migration 0103): `ops.my_sign_ins` (security definer, run by the application role
+  only, the signed-in person's sign-ins newest first, at most 100, refused without a person); a
+  partial index on the person and time of sign-ins; the definer reads the columns it returns.
+- **Tests:**
+  - Unit (11 new): the endpoints watched; the session handed out with its address and browser;
+    nothing when the two-factor plugin withdrew it; each method, a trusted device included; a renewal
+    of the same person's session is none, a password sign-in again while signed in and a link
+    followed while signed in as someone else are sign-ins; other endpoints are none; the hook
+    records once and fails closed (the session deleted, the recording's error thrown, a failed
+    deletion logged); reading rows and labels.
+  - Integration (real PostgreSQL; 5 new): the person's own sign-ins newest first with method,
+    session, address (an IPv4 address mapped into IPv6 kept as IPv4) and browser, nobody else's and
+    no other security event; the last 20 by default and 100 at most; refused without a signed-in
+    person; the application role still cannot read security events; the function a definer with a
+    pinned search path run by the application role only, the definer reading and not writing; the
+    lookup served by the index.
+  - E2E (new): one person signs up and follows the link, turns two-factor on, signs in with a
+    password and a wrong then a right code trusting the device, signs in again on the trusted
+    device with the password alone, and signs in with a backup code on a device that is not
+    trusted: Account & security lists exactly those four sign-ins, newest first, with how, marks
+    the current one and does not scroll sideways.
+- **Docs:** ADR-136; SECURITY (audit); THREAT-MODEL T2 and T148; RUNBOOKS (compromised account,
+  Signals, migration 0103); DATA-RETENTION; ARCHITECTURE; BACKLOG SEC-9 settled; feature matrix
+  W-149.
+- **Mutation checks:** 33 deliberate regressions tried, 33 caught (29 against the
+  domain module and the migration, 4 against the plugin and the page through the e2e test).
+
+### Test commands and results (local, 2026-10-04)
+
+| Command                                                                                                                  | Result                                                                                                                                                                                                  |
+| ------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`                                                                       | clean                                                                                                                                                                                                   |
+| `pnpm test` (unit)                                                                                                       | 645 passed (71 files; 11 new)                                                                                                                                                                           |
+| `pnpm test:integration` on PostgreSQL 18.6                                                                               | 802 passed (55 files; 5 new)                                                                                                                                                                            |
+| `pnpm test:integration` on PostgreSQL 17.11                                                                              | 802 passed (55 files)                                                                                                                                                                                   |
+| `pnpm db:migrate` on the e2e database at 0102, and on a new database                                                     | 0103 applied; all 103 applied                                                                                                                                                                           |
+| `pnpm build`                                                                                                             | passed                                                                                                                                                                                                  |
+| e2e on a new database: sign-in-history, two-factor, step-up, onboarding, forms, platform-ops (chromium, mobile-chromium) | 28 passed                                                                                                                                                                                               |
+| Mutation checks                                                                                                          | 33 tried, 33 caught (29 against the domain module and migration 0103; 4 through the e2e test: the plugin before two-factor or not registered, every sign-in marked current, the grid widening the page) |
+| gitleaks 8.30.1 on the staged changes                                                                                    | no leaks found                                                                                                                                                                                          |
+
+The first e2e run used the long-lived e2e database: platform-ops failed on both projects because six
+jobs queued during ADR-135's by-hand rotation check are signed with that check's key, so the
+console rightly showed "Jobs that will be refused"; on a new database it passes. The new test's
+check that the page does not scroll sideways then failed on mobile: the Account page's grid let
+the table widen it (541 px on a 412 px screen). The grid now uses a column that can shrink
+(`grid-cols-1`, as the operations pages do), and the run above is clean.
+
+### Known gaps
+
+- Failed sign-in attempts are not listed (recording a wrong password for an address with an account
+  only would tell whoever tries whether it has one, and anyone could fill a person's history); no
+  email about a sign-in from a new device; a sign-in's session cannot be signed out from the
+  history (Active sessions does that).
+- A session renewed by turning two-factor on or off or by a password change keeps no link to its
+  sign-in, so the current session's sign-in is marked only until then.
+- Security events are not purged after the retention period DATA-RETENTION proposes.
+- Sign-ins before this release were not recorded; addresses need a trusted proxy header, as for
+  the sessions list.
+
 ## 2026-10-03 — Phase 5: rotating the job signing key without draining the queues (SEC-4, ADR-135)
 
 Status: **Implemented and locally verified (test data and the provider stand-ins only).** The job

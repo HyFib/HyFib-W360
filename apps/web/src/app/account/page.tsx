@@ -1,11 +1,27 @@
 import type { Metadata } from 'next';
 import { headers } from 'next/headers';
 import Link from 'next/link';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
+import {
+  Badge,
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+  TBody,
+  TD,
+  TH,
+  THead,
+  TR,
+  Table,
+} from '@w360/ui';
+import { SIGN_IN_HISTORY_LIMIT, SIGN_IN_METHOD_LABELS } from '@w360/domain';
 import { ChangePasswordForm, ProfileForm } from '@/components/account/profile-form';
 import { SessionsList } from '@/components/account/sessions-list';
 import { TwoFactorSettings } from '@/components/account/two-factor-settings';
 import { Brand } from '@/components/brand';
+import { formatDateTime } from '@/lib/format';
+import { summariseAgent } from '@/lib/user-agent';
 import { getRuntime } from '@/server/runtime';
 import { requireSession } from '@/server/session';
 
@@ -14,10 +30,11 @@ export const dynamic = 'force-dynamic';
 
 export default async function AccountPage() {
   const session = await requireSession('/account');
-  const { tenancy, auth } = await getRuntime();
-  const [companies, rawSessions] = await Promise.all([
+  const { tenancy, auth, account } = await getRuntime();
+  const [companies, rawSessions, signIns] = await Promise.all([
     tenancy.listMyCompanies(session.user.id),
     auth.api.listSessions({ headers: await headers() }),
+    account.signInHistory(session.user.id),
   ]);
   const sessions = rawSessions.map((s) => ({
     id: s.id,
@@ -39,7 +56,7 @@ export default async function AccountPage() {
           Back to workspace
         </Link>
       </header>
-      <main id="main" className="mx-auto grid max-w-3xl gap-6 px-4 py-8">
+      <main id="main" className="mx-auto grid max-w-3xl grid-cols-1 gap-6 px-4 py-8">
         <h1 className="text-2xl font-semibold tracking-tight">Account & security</h1>
         <Card>
           <CardHeader>
@@ -76,6 +93,49 @@ export default async function AccountPage() {
           </CardHeader>
           <CardContent>
             <SessionsList sessions={sessions} currentSessionId={session.sessionId} />
+          </CardContent>
+        </Card>
+        <Card id="sign-ins">
+          <CardHeader>
+            <CardTitle>Recent sign-ins</CardTitle>
+            <CardDescription>
+              Your last {SIGN_IN_HISTORY_LIMIT} sign-ins, newest first. If one is not yours, change
+              your password, which signs your other sessions out
+              {session.user.twoFactorEnabled ? '.' : ', and turn on two-factor authentication.'}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {signIns.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No sign-in has been recorded yet.</p>
+            ) : (
+              <Table aria-label="Recent sign-ins">
+                <THead>
+                  <TR>
+                    <TH>When (UTC)</TH>
+                    <TH>Device</TH>
+                    <TH>Address</TH>
+                    <TH>How</TH>
+                  </TR>
+                </THead>
+                <TBody>
+                  {signIns.map((s, i) => (
+                    <TR key={`${s.at.toISOString()}-${i}`}>
+                      <TD>
+                        <span className="whitespace-nowrap">{formatDateTime(s.at, 'UTC')}</span>
+                        {s.sessionId !== null && s.sessionId === session.sessionId ? (
+                          <Badge tone="info" className="ml-2">
+                            This session
+                          </Badge>
+                        ) : null}
+                      </TD>
+                      <TD>{summariseAgent(s.userAgent)}</TD>
+                      <TD className="font-mono">{s.ipAddress ?? 'Unknown'}</TD>
+                      <TD>{s.method === null ? 'Another way' : SIGN_IN_METHOD_LABELS[s.method]}</TD>
+                    </TR>
+                  ))}
+                </TBody>
+              </Table>
+            )}
           </CardContent>
         </Card>
         <Card>

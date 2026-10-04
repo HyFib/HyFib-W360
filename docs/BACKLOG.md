@@ -675,7 +675,10 @@ review; production rollout per RELEASE-CHECKLIST.
   `ops.step_up_verifications` for sensitive settings (billing, security).~~ Settled by ADR-056: a
   new sign-in within the last 15 minutes, which reuses the sign-in's rate limits, two-factor attempt
   limit and lockout instead of a second verification path.
-- **SEC-9** Per-user login history view.
+- **SEC-9** ~~Per-user login history view.~~ Settled by ADR-136: every completed sign-in (the
+  password step once two-factor has decided, an authenticator or backup code, the email
+  confirmation link) is a security event with its address, browser and method, and Account &
+  security lists each person's last 20; failed attempts are not listed.
 - **SEC-10** ~~Keyring re-encryption job: re-encrypt every keyring ciphertext (provider tokens,
   HTTP secrets, flow private keys, stored webhook bodies) under the primary key so an old key can be
   removed (`Keyring.needsRotation` exists; the job does not).~~ Settled by ADR-134: while a key

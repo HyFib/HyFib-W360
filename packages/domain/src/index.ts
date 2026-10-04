@@ -2,6 +2,7 @@ export * from './authz/permissions';
 export * from './authz/context';
 export * from './authz/step-up';
 export * from './audit';
+export * from './account/sign-ins';
 export * from './jobs/envelope';
 export * from './jobs/queue';
 export * from './email/outbox';

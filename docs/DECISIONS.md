@@ -5313,3 +5313,53 @@ durable rows it belongs to (ARCHITECTURE §4).
 
 Not built: rotating on demand from the console, alerts for jobs that do not verify (the worker logs
 them), rotating Better Auth's secret.
+
+## ADR-136 Sign-in history for each person (SEC-9) (2026-10-04)
+
+Context: Account & security lists a person's active sessions (Better Auth's: device, address, when
+it was signed in), but a session is gone once it is signed out or expires, so nobody can see when,
+from where and how their account was signed in to over time (SEC-9). Security events
+(`ops.security_events`) record password resets and sign-ups with an address that has an account;
+the application role inserts them and cannot read them (0001).
+
+Decision:
+
+- **Every completed sign-in is a security event** `auth.sign_in` (info): the person, the address
+  and browser Better Auth stored with the new session, and in its details how they signed in and
+  the session's id. A HyFib plugin to Better Auth records it after each endpoint that signs people
+  in: the password step (`/sign-in/email`), an authenticator code (`/two-factor/verify-totp`), a
+  backup code (`/two-factor/verify-backup-code`) and the email confirmation link (`/verify-email`,
+  which signs people in). The methods: password; password on a trusted device (two-factor is on and
+  the device's trust skipped the code); password and authenticator code; password and backup code;
+  email confirmation link.
+- **Only a sign-in that hands out a session counts.** For someone with two-factor on, the password
+  step creates a session that Better Auth's two-factor plugin deletes until a code is given, and
+  then it clears the endpoint's new session; the plugin runs after it (and before the one that lets
+  server actions set cookies), so that step records nothing and the code's records the sign-in.
+  Turning two-factor on or off and changing the password renew a person's session under a new id,
+  which is no sign-in: on the code and link endpoints a session issued to someone already signed in
+  as the same person records nothing, and the other endpoints are not watched. Wrong passwords and
+  codes record nothing; Better Auth's rate limits and two-factor lockout apply as before.
+- **A sign-in that cannot be recorded fails**: the plugin deletes the session the endpoint created
+  and the request fails, so every session handed out has its sign-in in the history.
+- **People read only their own**: `ops.my_sign_ins(limit)` (security definer, run by the
+  application role, pinned search path) returns the signed-in person's sign-ins (time, method,
+  session id, address, browser), newest first, at most 100, and refuses without a signed-in person;
+  the application role still cannot read security events otherwise. A partial index on the person
+  and time of sign-ins serves it.
+- **Account & security → Recent sign-ins** lists the last 20: when, the device and browser, the
+  address and how; it marks the one that started the current session and says what to do about one
+  that is not yours (change the password, which signs other sessions out, and turn on two-factor).
+
+What follows: people see their last 20 sign-ins and how each was made, so a backup code's use or an
+unknown device stands out; platform staff see sign-in counts among the security events on the
+operations console (Signals). Sign-ins before this release were not recorded. A session renewed by
+turning two-factor on or off or by a password change keeps no link to its sign-in, so the current
+session's sign-in is marked only until then. The address is the one Better Auth determines (no
+address without a trusted proxy header, as for the sessions list).
+
+Not built: failed attempts in the history (recording a wrong password for an address with an
+account only would let whoever tries tell, by how long a sign-in takes, whether the address has
+one, and anyone could fill a person's history), emails about sign-ins from new devices, signing a
+sign-in's session out from the history, and purging security events after the retention period
+(DATA-RETENTION proposes a year).

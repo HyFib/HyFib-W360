@@ -52,6 +52,8 @@ Business logic never lives in React components.
 
 - **Identity** (users, sessions, credentials, TOTP) lives in schema `auth`, managed by Better Auth
   through the `w360_auth` role. Tenant code can read only public profile columns of `auth.users`.
+  A HyFib plugin records each completed sign-in as a security event, which the person reads back
+  through `ops.my_sign_ins` (ADR-136).
 - **Tenancy** (companies = `app.tenants`, memberships, invitations, audit) lives in schema `app`.
 - **Platform operations** (platform admins, support grants, platform audit, security events, email
   outbox) live in schema `ops`.

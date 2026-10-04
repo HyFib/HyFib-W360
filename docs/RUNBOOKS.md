@@ -2208,7 +2208,8 @@ letters: section 3; plan past due: section 10M. Quality is as of the number's la
 **Signals (7 days).** A flag asks for a review of that company's sending, not an action: look at its
 campaigns, templates and opt-out keywords (support grant if content is needed). Suspension stays a
 reasoned, audited action on the company page. The thresholds are HyFib's own heuristics
-(ADR-054), not Meta's rules.
+(ADR-054), not Meta's rules. Security events are counted by kind; `auth.sign_in` (info) counts
+completed sign-ins (ADR-136).
 
 **Onboarding.** Failed signups show the reason Meta returned; abandoned ones expired before the
 popup finished (the person can start again). A number setup stuck for over 30 minutes: check the
@@ -2322,6 +2323,11 @@ whatever the configuration, so it stays counted under the key it names; cancel i
 should not wait for that. After 1,000 such jobs a worker stops signing jobs again until it restarts
 and logs an error naming `W360_JOB_SIGNING_KEY_PREVIOUS`: check that the previous key's value is
 right. "Jobs that will be refused" name a key that is not configured.
+
+**Migration 0103 failed.** It only creates `ops.my_sign_ins` and an index of sign-in events, in one
+transaction; a failure rolls it back (usually the bootstrap roles: fix them and run the migrations
+again). Web servers of this release then fail to show Account & security until it is applied, while
+sign-ins still work and are recorded; web servers of the previous release record no sign-in.
 
 **Migration 0102 failed.** It only creates `ops.job_signing_key_counts`, in one transaction; a
 failure rolls it back (usually the bootstrap roles: fix them and run the migrations again). The
@@ -2447,7 +2453,10 @@ cancel with the same signature.
    payment settings or the company's Razorpay keys, create API keys or webhook endpoints, add an
    owner or turn off required two-factor: those need a sign-in within the last 15 minutes
    (ADR-056). Check the audit log for them anyway (a stolen password is enough to sign in).
-4. Review the company audit log and security events; export evidence; notify the owner.
+4. Review the company audit log and security events; export evidence; notify the owner. The
+   person sees their last 20 sign-ins on Account & security (when, device, address, how;
+   ADR-136); platform staff with database access find all of them as `auth.sign_in` security
+   events with the person's `user_id`.
 5. Reactivate with a reason once clean.
 
 **"Sign in again to continue".** Members see it when an action needs a sign-in within the last 15
