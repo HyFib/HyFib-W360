@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { systemClock, uuidv7, type Clock } from '@w360/core';
+import { isAppError, systemClock, uuidv7, type Clock } from '@w360/core';
 import { authorizedTenantScope } from '@w360/db';
 import {
   admitApiRequest,
@@ -28,7 +28,8 @@ import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './what
  * month's automation runs or API requests reach 80% of the limit, never below it, never for a limit
  * so small that 80% is the limit, never once the limit is reached (the used-up notice comes
  * instead). Neither a warning nor a used-up notice goes out for a counter of an earlier period, and
- * a counter whose limit changed after the sweep listed it is left for a later sweep.
+ * a counter whose limit changed after the sweep listed it is left for a later sweep. Since ADR-144
+ * the share is the company's own, chosen by a member who manages billing.
  */
 let fx: WhatsAppFixture;
 beforeAll(async () => {
@@ -500,5 +501,197 @@ describe('notices in the app (ADR-140)', () => {
     await counter(noAutomations, 'automation_runs', 10);
     await counter(noAutomations, 'api_requests', 5);
     expect(await seen(noAutomations, noAutomations.owner)).toEqual(['api_requests:used_up:5/5']);
+  });
+});
+
+describe('usage warning thresholds chosen per company (ADR-144)', () => {
+  const plans = () => createPlansService({ db: fx.dbs.app, clock: systemClock });
+
+  async function member(c: Company, role: string): Promise<TestUser> {
+    const user = await createUser(fx.dbs, { name: `A ${role}` });
+    const { token } = await invite(fx.dbs, c.tenant, c.owner, user.email, [role]);
+    await acceptInvitation(fx.dbs, user, token);
+    return user;
+  }
+
+  const choose = async (c: Company, user: TestUser, percent: unknown) =>
+    plans().setUsageWarningPercent(await fx.ctx(c, user), { percent }, {});
+
+  /** The lines of the company's last billing notice. */
+  async function lastLines(tenantId: string) {
+    const { rows } = await fx.dbs.adminPool.query<{ id: string; payload_ciphertext: string }>(
+      `SELECT id, payload_ciphertext FROM ops.email_outbox
+        WHERE tenant_id = $1 AND kind = 'billing.notice' ORDER BY id DESC LIMIT 1`,
+      [tenantId],
+    );
+    const row = rows[0]!;
+    return (
+      JSON.parse(fx.keyring.decryptString(row.payload_ciphertext, outboxAad(row.id))) as {
+        lines: string[];
+      }
+    ).lines;
+  }
+
+  const audits = (tenantId: string) =>
+    fx.query<{ actor_id: string; metadata: Record<string, unknown> }>(
+      `SELECT actor_id, metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'billing.usage_warning_changed' ORDER BY occurred_at, id`,
+      [tenantId],
+    );
+
+  it('warns at the share a member who manages billing chose, from the list to the email, the notices and the plan', async () => {
+    const owner = await platformOwner();
+    const c = await onPlan(owner, { automationRunsMonthly: '20', apiRequestsMonthly: '20' });
+    const ctx = await fx.ctx(c, c.owner);
+    expect((await plans().overview(ctx)).usageWarningPercent).toBe(80);
+    expect(await choose(c, c.owner, 50)).toEqual({ percent: 50, changed: true });
+    expect((await plans().overview(ctx)).usageWarningPercent).toBe(50);
+
+    // Half of 20 is 10: nothing at 9, the warning at 10, in the sweep's list and the email.
+    await runs(c, 9);
+    expect(await warningsDue(c.tenant.id)).toBe(0);
+    await sweep();
+    expect(await billingNotices(c.tenant.id)).toEqual([]);
+    expect(await plans().limitNotices(ctx)).toEqual([]);
+    await runs(c, 1);
+    expect(await warningsDue(c.tenant.id)).toBe(1);
+    await sweep();
+    expect(await billingNotices(c.tenant.id)).toEqual([
+      [
+        "This month's automation runs are nearly used up",
+        'Your company has used 10 of the 20 automation runs of the Pro plan for this month.',
+      ],
+    ]);
+    expect((await lastLines(c.tenant.id)).at(-1)).toBe(
+      'This warning comes at 50% of a monthly limit; a member who manages billing can change that under Billing → Usage warnings.',
+    );
+    expect((await plans().limitNotices(ctx)).map((n) => [n.metric, n.state, n.used])).toEqual([
+      ['automation_runs', 'nearly', 10],
+    ]);
+
+    // Raised to 95%: the runs, already warned, are not warned again; the requests warn at 19.
+    expect(await choose(c, c.owner, '95')).toEqual({ percent: 95, changed: true });
+    const key = await apiKey(c);
+    await requests(key, 18);
+    await runs(c, 9);
+    expect(await warningsDue(c.tenant.id)).toBe(0);
+    expect((await plans().limitNotices(ctx)).map((n) => [n.metric, n.state])).toEqual([
+      ['automation_runs', 'nearly'],
+    ]);
+    await requests(key, 1);
+    expect(await warningsDue(c.tenant.id)).toBe(1);
+    await sweep();
+    await sweep();
+    expect((await billingNotices(c.tenant.id)).map(([subject]) => subject)).toEqual([
+      "This month's automation runs are nearly used up",
+      "This month's API requests are nearly used up",
+    ]);
+    expect(await audits(c.tenant.id)).toEqual([
+      { actor_id: c.owner.id, metadata: { from: 80, to: 50 } },
+      { actor_id: c.owner.id, metadata: { from: 50, to: 95 } },
+    ]);
+  });
+
+  it('warns at the next sweep when the share is lowered below what was already used', async () => {
+    const owner = await platformOwner();
+    const c = await onPlan(owner, { apiRequestsMonthly: '20' });
+    await requests(await apiKey(c), 12);
+    expect(await warningsDue(c.tenant.id)).toBe(0);
+    await sweep();
+    expect(await billingNotices(c.tenant.id)).toEqual([]);
+    await choose(c, c.owner, 60);
+    expect(await warningsDue(c.tenant.id)).toBe(1);
+    await sweep();
+    expect(await billingNotices(c.tenant.id)).toEqual([
+      [
+        "This month's API requests are nearly used up",
+        'Your company has used 12 of the 20 API requests of the Pro plan for this month.',
+      ],
+    ]);
+    // The sweep's check uses the share when it sends: one raised after the list was read waits.
+    const d = await onPlan(owner, { apiRequestsMonthly: '20' });
+    await requests(await apiKey(d), 16);
+    const { rows } = await fx.dbs.adminPool.query<{ id: string }>(
+      `SELECT id FROM app.usage_counters WHERE tenant_id = $1`,
+      [d.tenant.id],
+    );
+    expect(await warningsDue(d.tenant.id)).toBe(1);
+    await choose(d, d.owner, 85);
+    expect(await warnBeforeLimit(deps(), d.tenant.id, rows[0]!.id)).toBe(false);
+    expect(await warningsDue(d.tenant.id)).toBe(0);
+    await choose(d, d.owner, 80);
+    expect(await warnBeforeLimit(deps(), d.tenant.id, rows[0]!.id)).toBe(true);
+  });
+
+  it('rounds the share of a limit up, in the sweep and the notices alike', async () => {
+    const owner = await platformOwner();
+    const c = await onPlan(owner, { apiRequestsMonthly: '7' });
+    const ctx = await fx.ctx(c, c.owner);
+    await choose(c, c.owner, 50);
+    const key = await apiKey(c);
+    // Half of 7 is 3.5: nothing at 3, the warning at 4.
+    await requests(key, 3);
+    expect(await warningsDue(c.tenant.id)).toBe(0);
+    expect(await plans().limitNotices(ctx)).toEqual([]);
+    await requests(key, 1);
+    expect(await warningsDue(c.tenant.id)).toBe(1);
+    expect((await plans().limitNotices(ctx)).map((n) => [n.metric, n.state, n.used])).toEqual([
+      ['api_requests', 'nearly', 4],
+    ]);
+  });
+
+  it('is chosen only by members who manage billing, from 50% to 95% in steps of 5, for their company alone', async () => {
+    const owner = await platformOwner();
+    const c = await onPlan(owner, { apiRequestsMonthly: '20' });
+    const other = await onPlan(owner, { apiRequestsMonthly: '20' });
+    const billing = await member(c, 'billing');
+    const admin = await member(c, 'admin');
+    const refusal = async (user: TestUser, percent: unknown) => {
+      try {
+        await choose(c, user, percent);
+      } catch (error) {
+        if (isAppError(error)) return [error.code, error.publicMessage];
+        throw error;
+      }
+      throw new Error('expected a refusal');
+    };
+    // Administrators read billing but do not manage it.
+    expect((await refusal(admin, 70))[0]).toBe('forbidden');
+    expect((await refusal(c.marketer, 70))[0]).toBe('forbidden');
+    for (const percent of [45, 100, 82, 0, 'seventy', 70.5]) {
+      expect(await refusal(billing, percent)).toEqual([
+        'validation_failed',
+        'Choose a share from 50% to 95%, in steps of 5.',
+      ]);
+    }
+    expect(await choose(c, billing, 70)).toEqual({ percent: 70, changed: true });
+    // The same share again changes and audits nothing.
+    expect(await choose(c, billing, 70)).toEqual({ percent: 70, changed: false });
+    expect(await audits(c.tenant.id)).toEqual([
+      { actor_id: billing.id, metadata: { from: 80, to: 70 } },
+    ]);
+    const [{ percent }] = (await fx.query<{ percent: number }>(
+      `SELECT usage_warning_percent AS percent FROM app.tenants WHERE id = $1`,
+      [other.tenant.id],
+    )) as [{ percent: number }];
+    expect(percent).toBe(80);
+    // The database refuses a share outside the list too.
+    for (const bad of [45, 82, 100]) {
+      await expect(
+        fx.dbs.adminPool.query(`UPDATE app.tenants SET usage_warning_percent = $2 WHERE id = $1`, [
+          c.tenant.id,
+          bad,
+        ]),
+      ).rejects.toThrow(/tenants_usage_warning_percent/);
+    }
+    // The runtime role may change this column of the company's row, not others such as its status.
+    const grants = await fx.query<{ column: string; can: boolean }>(
+      `SELECT c AS column, has_column_privilege('w360_app', 'app.tenants', c, 'UPDATE') AS can
+         FROM unnest(ARRAY['usage_warning_percent', 'status']) AS c`,
+    );
+    expect(grants).toEqual([
+      { column: 'usage_warning_percent', can: true },
+      { column: 'status', can: false },
+    ]);
   });
 });

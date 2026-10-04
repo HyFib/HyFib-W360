@@ -143,13 +143,21 @@ export function packsMax(included: number, size: number): number {
 }
 
 /**
- * The count at which the billing managers are warned before a monthly limit (ADR-062): 80% of the
- * limit, rounded up, when that is still below the limit; null for no warning (no limit, a limit of
- * 0, and limits of 1 to 4). Integer arithmetic, so it matches `ceil(limit * 0.8)` in SQL.
+ * The shares of a monthly limit at which a company's billing managers can choose to be warned
+ * (ADR-144); every company starts at 80%, the share of ADR-062.
  */
-export function warningThreshold(limit: number | null): number | null {
+export const USAGE_WARNING_PERCENTS = [50, 55, 60, 65, 70, 75, 80, 85, 90, 95] as const;
+export const DEFAULT_USAGE_WARNING_PERCENT = 80;
+
+/**
+ * The count at which a monthly limit warns (ADR-062, ADR-144): `percent` of the limit, rounded up,
+ * when that is still below the limit; null for no warning (no limit, a limit of 0, and limits so
+ * small that the share rounds up to the limit itself). It matches
+ * `ceil(limit * percent / 100.0)` in SQL.
+ */
+export function warningThreshold(limit: number | null, percent: number): number | null {
   if (limit === null) return null;
-  const threshold = Math.ceil((limit * 4) / 5);
+  const threshold = Math.ceil((limit * percent) / 100);
   return threshold < limit ? threshold : null;
 }
 

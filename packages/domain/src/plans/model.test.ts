@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { PERMISSIONS } from '../authz/permissions';
 import {
   addOnsForPlan,
+  DEFAULT_USAGE_WARNING_PERCENT,
   MODULE_WRITE_PERMISSIONS,
   PLAN_BOUNDS,
   PLAN_MODULE_KEYS,
@@ -13,6 +14,7 @@ import {
   planShortfallText,
   planShortfalls,
   PLAN_PAYMENT_START_LEAD_MS,
+  USAGE_WARNING_PERCENTS,
   usagePeriod,
   versionHoldingLimits,
   warningThreshold,
@@ -151,16 +153,31 @@ describe('packsMax (ADR-110)', () => {
 
 describe('warningThreshold', () => {
   it('is 80% of a monthly limit rounded up, when that is still below the limit', () => {
-    expect(warningThreshold(5)).toBe(4);
-    expect(warningThreshold(7)).toBe(6);
-    expect(warningThreshold(10)).toBe(8);
-    expect(warningThreshold(11)).toBe(9);
-    expect(warningThreshold(1_000)).toBe(800);
-    expect(warningThreshold(1_000_000_000)).toBe(800_000_000);
+    expect(warningThreshold(5, 80)).toBe(4);
+    expect(warningThreshold(7, 80)).toBe(6);
+    expect(warningThreshold(10, 80)).toBe(8);
+    expect(warningThreshold(11, 80)).toBe(9);
+    expect(warningThreshold(1_000, 80)).toBe(800);
+    expect(warningThreshold(1_000_000_000, 80)).toBe(800_000_000);
   });
 
   it('gives no warning without a limit, for no allowance, or when 80% rounds up to the limit', () => {
-    for (const limit of [null, 0, 1, 2, 3, 4]) expect(warningThreshold(limit)).toBeNull();
+    for (const limit of [null, 0, 1, 2, 3, 4]) expect(warningThreshold(limit, 80)).toBeNull();
+  });
+
+  it('is the company’s own share of the limit, rounded up, when it chose one (ADR-144)', () => {
+    expect(DEFAULT_USAGE_WARNING_PERCENT).toBe(80);
+    expect([...USAGE_WARNING_PERCENTS]).toEqual([50, 55, 60, 65, 70, 75, 80, 85, 90, 95]);
+    expect(warningThreshold(10, 50)).toBe(5);
+    expect(warningThreshold(11, 50)).toBe(6);
+    expect(warningThreshold(1_000, 65)).toBe(650);
+    expect(warningThreshold(101, 95)).toBe(96);
+    expect(warningThreshold(1_999_999_999, 95)).toBe(1_900_000_000);
+    // 95% of 19 is 18.05: 19, the limit itself, so no warning; 95% of 20 is 19.
+    expect(warningThreshold(19, 95)).toBeNull();
+    expect(warningThreshold(20, 95)).toBe(19);
+    expect(warningThreshold(2, 50)).toBe(1);
+    expect(warningThreshold(1, 50)).toBeNull();
   });
 });
 

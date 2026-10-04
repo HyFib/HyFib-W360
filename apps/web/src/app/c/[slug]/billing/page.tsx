@@ -33,6 +33,7 @@ import { AutoRechargeForm } from '@/components/billing/auto-recharge-form';
 import { CardMandateSetup, RemoveCard } from '@/components/billing/card-mandate';
 import { PlanCard } from '@/components/billing/plan-card';
 import { PlanPaymentCard } from '@/components/billing/plan-payment-card';
+import { UsageWarningForm } from '@/components/billing/usage-warning-form';
 import { PageHeader } from '@/components/page-header';
 import { RequireOwnDocument } from '@/components/require-own-document';
 import { SignInAgain } from '@/components/sign-in-again';
@@ -216,6 +217,28 @@ export default async function BillingPage({ params }: { params: Promise<{ slug: 
             : change your plan or add-ons from the end of the paid period, on{' '}
             {formatDate(changes.periodEnd, tz)}.
           </p>
+        ) : null}
+        {(plan.usage.limits.automationRuns ?? 0) > 0 || (plan.usage.limits.apiRequests ?? 0) > 0 ? (
+          <Card>
+            <CardHeader>
+              <CardTitle>Usage warnings</CardTitle>
+              <CardDescription>
+                When this month&apos;s automation runs or API requests reach this share of the
+                plan&apos;s limit, members who manage billing are emailed once and members who read
+                billing see a notice on every page.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {canManage ? (
+                <UsageWarningForm slug={ctx.tenant.slug} percent={plan.usageWarningPercent} />
+              ) : (
+                <p className="text-sm">
+                  Warned at {plan.usageWarningPercent}% of a monthly limit. A member who manages
+                  billing can change this.
+                </p>
+              )}
+            </CardContent>
+          </Card>
         ) : null}
         <PlanPaymentCard
           slug={ctx.tenant.slug}

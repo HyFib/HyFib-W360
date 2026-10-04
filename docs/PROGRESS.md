@@ -1,5 +1,79 @@
 # Progress
 
+## 2026-10-04 — Phase 5: usage warnings at a share each company chooses (P5-01, ADR-144)
+
+Status: **Implemented and locally verified (test data only).** Since ADR-062 the billing managers
+were emailed once a monthly limit (automation runs, API requests, packs included) was 80% used, and
+since ADR-140 members who read billing saw a notice from the same point; a company whose month can
+run out within a day needed the warning earlier, and one that uses most of its allowance every
+month was warned when nothing was wrong (the backlog's "thresholds chosen per company").
+
+### Completed
+
+- **Design (ADR-144):** one share per company, 50% to 95% in steps of 5, 80% until one is chosen,
+  for both monthly limits; chosen by members who manage billing (no recent sign-in: it moves no
+  money and changes no access), audited with the share before and after; the sweep's list, its
+  locked check, the notices and the plan card all warn from the share of the limit rounded up,
+  still once per counter and period; API keys' own limits keep 80%.
+- **Migration 0108:** `app.tenants.usage_warning_percent` (`smallint`, default 80, a check
+  constraint for the list) with a column grant to `w360_app`; `ops.usage_warnings_due` recreated to
+  read the company's share (SECURITY DEFINER, pinned `search_path`, `w360_app` only).
+- **Domain:** `plans/model.ts` (`USAGE_WARNING_PERCENTS`, `DEFAULT_USAGE_WARNING_PERCENT`,
+  `warningThreshold(limit, percent)`); `plans/usage-warnings.ts` (`loadUsageWarningPercent`, the
+  input schema with one message for anything off the list); `plans/service.ts`
+  (`setUsageWarningPercent`, `billing.manage`, the row locked, audited; the overview carries the
+  share); `plans/sweep.ts` (the locked check reads the share in the company's scope; the email's
+  last line says at what share it came and where to change it); `plans/limit-notices.ts` (the
+  notices read the share); `api/key-usage-notices.ts` (keys' own limits at 80%, named).
+- **Web:** Billing → Usage warnings ("Warn at", shown while the plan limits automation runs or API
+  requests; members who only read billing see the share), `setUsageWarningAction`, and the plan
+  card's "nearly used up" at the company's share.
+- **Tests:**
+  - Unit (2 new): the shares and the default; the threshold at a chosen share rounded up, none
+    where it rounds up to the limit (19 at 95%, 1 at 50%); notices at shares of 50%, 80% and 95%.
+  - Integration (4 new in `usage-warnings.test.ts`, 1 in `api-quota.test.ts`): a share of 50% in
+    the sweep's list, its email (the last line naming 50%), the notices and the plan, then 95%
+    without warning the runs again and with the requests warned at 19; a share lowered below what
+    was used warned at the next sweep, and one raised after the list was read respected under the
+    lock; half of 7 rounded up to 4 in the list and the notices; administrators and marketers
+    refused, every value off the list refused with one message (45, 100, 82, 0, text, 70.5), the
+    same share again changing and auditing nothing, the other company untouched, the check
+    constraint refusing direct updates, and the column grants; a key's own limit still warned at
+    80% when the company chose 50%, even when its counter is asked for directly.
+  - E2E (1 extended in `api-quota.spec.ts`): three of five requests are below the 80% warning; the
+    owner lowers it to 60% under Billing, and the plan card and the notices show the requests
+    nearly used up at once; the share stays chosen after a reload.
+- **Docs:** ADR-144 (and ADR-062's and ADR-140's "Not built" annotated); SECURITY (Phase 5 rules);
+  THREAT-MODEL T153 (and T152's missing status); ARCHITECTURE; RUNBOOKS; BACKLOG P5-01 (thresholds
+  per company left the remaining list); feature matrix H-051 (H-040 and H-050 point to it).
+- **Mutation checks:** 40 deliberate regressions tried, 39 caught: 7 by unit tests and 25 by integration
+  tests in the domain and the migration (the shares, the rounding, a warning at the limit itself, the
+  share read and checked, the service's permission, its no-op and audit, the overview, the sweep's
+  list and its locked check, the email, the notices, keys' own limits, the column's grant and
+  check, the function's grant and search path), and 7 in the web through the e2e test (who gets the
+  form, when the card shows, the form's starting share, what it sends, the select, the refresh, the
+  plan card). A key's own limit warned at half was caught only once a test asked for that counter
+  directly (the sweep's list, still at 80%, hid it). An update without its company condition is
+  equivalent: RLS keeps it to the company's row, and the test saw the other company keep 80%.
+
+### Test commands and results (local, 2026-10-04)
+
+| Command                                                                        | Result                                                                                                          |
+| ------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`                             | clean                                                                                                           |
+| `pnpm test` (unit)                                                             | 676 passed (74 files; 2 new)                                                                                    |
+| `pnpm test:integration` on PostgreSQL 18.6                                     | 842 passed (56 files; 5 new)                                                                                    |
+| `pnpm test:integration` on PostgreSQL 17.11                                    | 842 passed (56 files)                                                                                           |
+| `pnpm build`                                                                   | passed                                                                                                          |
+| e2e: api-quota, api-request-packs, api-keys, plans (chromium, mobile-chromium) | 18 passed (7.8 min), and 6 again on the final build; Firefox and WebKit are not installed here, so CI runs them |
+| Mutation checks                                                                | 40 tried, 39 caught (7 by unit, 25 by integration, 7 through the e2e test), 1 equivalent (RLS)                  |
+| gitleaks 8.30.1 on the staged changes                                          | no leaks found                                                                                                  |
+
+### Known gaps
+
+- Shares per limit or per member, more than one warning per period, a share for keys' own limits,
+  and choosing who is warned.
+
 ## 2026-10-04 — Phases 3 and 5: name conditions in segments and contact searches (P3-04, P5-08, ADR-143)
 
 Status: **Implemented and locally verified (test data only).** Segments compared contacts' custom

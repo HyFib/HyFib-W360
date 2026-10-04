@@ -1,9 +1,10 @@
-import type { Clock } from '@w360/core';
+import { notFound, type Clock } from '@w360/core';
 import {
   eq,
   plans,
   sql,
   tenantPlans,
+  tenants,
   type ApiScope,
   type Database,
   type PlanModule,
@@ -12,7 +13,9 @@ import {
   type Tx,
 } from '@w360/db';
 import { API_SCOPE_KEYS } from '../api/model';
+import { recordAudit, type RequestMeta } from '../audit';
 import { assertCan, type TenantContext } from '../authz/context';
+import { parseInput } from '../validation';
 import {
   activeMemberCount,
   apiRequestsUsed,
@@ -25,6 +28,7 @@ import {
 } from './entitlements';
 import { limitNotices, type LimitNotice } from './limit-notices';
 import { PLAN_MODULE_KEYS, usagePeriod, type PlanAddOnQuantities, type PlanLimits } from './model';
+import { loadUsageWarningPercent, usageWarningSchema } from './usage-warnings';
 
 /** What the company uses against its plan's limits (null limit: no limit). */
 export interface PlanUsage {
@@ -70,6 +74,8 @@ export interface CompanyPlanOverview {
   addOns: PlanAddOnQuantities;
   modules: PlanModule[];
   usage: PlanUsage;
+  /** The share of a monthly limit at which the billing managers are warned (ADR-144). */
+  usageWarningPercent: number;
 }
 
 export interface PlansServiceDeps {
@@ -187,10 +193,50 @@ export function createPlansService(deps: PlansServiceDeps) {
             },
             modules: PLAN_MODULE_KEYS.filter((m) => modules.includes(m)),
             usage,
+            usageWarningPercent: await loadUsageWarningPercent(tx, ctx.tenant.id),
           };
         },
         { accessMode: 'read only' },
       );
+    },
+
+    /**
+     * Chooses the share of a monthly limit at which the billing managers are emailed and members
+     * who read billing see a notice (ADR-144); `billing.manage`, audited with the share before and
+     * after. Choosing the share the company has changes nothing.
+     */
+    async setUsageWarningPercent(
+      ctx: TenantContext,
+      input: unknown,
+      meta: RequestMeta,
+    ): Promise<{ percent: number; changed: boolean }> {
+      assertCan(ctx, 'billing.manage');
+      const { percent } = parseInput(usageWarningSchema, input);
+      return db.run(ctx.scope, async (tx) => {
+        const [before] = await tx
+          .select({ percent: tenants.usageWarningPercent })
+          .from(tenants)
+          .where(eq(tenants.id, ctx.tenant.id))
+          .for('update');
+        if (!before) throw notFound('Company');
+        if (before.percent === percent) return { percent, changed: false };
+        await tx
+          .update(tenants)
+          .set({ usageWarningPercent: percent, updatedAt: clock.now() })
+          .where(eq(tenants.id, ctx.tenant.id));
+        await recordAudit(
+          tx,
+          ctx,
+          {
+            action: 'billing.usage_warning_changed',
+            subjectType: 'tenant',
+            subjectId: ctx.tenant.id,
+            metadata: { from: before.percent, to: percent },
+          },
+          meta,
+        );
+        return { percent, changed: true };
+      });
     },
   };
 }

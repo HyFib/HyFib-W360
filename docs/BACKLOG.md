@@ -341,9 +341,13 @@ verification, app review, Embedded Signup configuration).
   staff set them with the plan and companies under Billing → Add-ons and Change plan; the limit is
   the version's requests plus packs × size in admission, the plan card, the 80% warning and the
   used-up notice; limits with packs are bounded at 2,000,000,000 for run packs too, which fixed
-  limits past the 32-bit range that failed every company's sweep lookups).
-  Remaining: changes that take effect at once and proration, plan invoices, thresholds chosen per
-  company, packs bought once, and AI credits (Phase 6).
+  limits past the 32-bit range that failed every company's sweep lookups); **[usage warnings at a
+  share each company chooses built, locally verified]** (ADR-144: members who manage billing choose
+  50% to 95% in steps of 5 under Billing → Usage warnings, 80% until then; the sweep's email, the
+  notices on every page and the plan card all warn from that share, still once per counter and
+  period; API keys' own limits keep 80%).
+  Remaining: changes that take effect at once and proration, plan invoices, packs bought once, and
+  AI credits (Phase 6).
 - **P5-02 Ledger** **[built, locally verified]**: accounts, append-only journal balanced at commit,
   balances by trigger, holds, settlements, releases (expiry sweep), refunds and chargebacks as
   compensating postings; INR paise; monthly statements computed from the ledger (ADR-057).

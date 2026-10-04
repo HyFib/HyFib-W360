@@ -3,6 +3,7 @@ import type { Clock } from '@w360/core';
 import { assertCan, can, type TenantContext } from '../authz/context';
 import { loadEntitlements } from './entitlements';
 import { usagePeriod, warningThreshold } from './model';
+import { loadUsageWarningPercent } from './usage-warnings';
 
 /**
  * Notices in the app when a monthly limit is nearly or fully used (ADR-140): the automation runs
@@ -15,7 +16,10 @@ export type LimitNoticeMetric = 'automation_runs' | 'api_requests';
 
 export interface LimitNotice {
   metric: LimitNoticeMetric;
-  /** `used_up`: the limit is reached; `nearly`: at least 80% of it is used (ADR-062). */
+  /**
+   * `used_up`: the limit is reached; `nearly`: at least the company's warning share of it is used
+   * (ADR-062, ADR-144).
+   */
   state: 'nearly' | 'used_up';
   used: number;
   limit: number;
@@ -45,6 +49,8 @@ export interface LimitNoticeFacts {
   limits: { automationRuns: number | null; apiRequests: number | null };
   used: { automationRuns: number; apiRequests: number };
   periodEnd: Date;
+  /** The share of a limit at which the company is warned (ADR-144). */
+  warningPercent: number;
 }
 
 /** The notices one member gets for the company's counts; pure, so the rules are unit-tested. */
@@ -71,7 +77,7 @@ export function limitNoticesFor(audience: LimitNoticeAudience, facts: LimitNotic
       }
       return;
     }
-    const threshold = warningThreshold(limit);
+    const threshold = warningThreshold(limit, facts.warningPercent);
     if (audience.billing && threshold !== null && used >= threshold) {
       notices.push({
         metric,
@@ -176,6 +182,7 @@ export async function limitNotices(
         },
         used: { automationRuns: used('automation_runs'), apiRequests: used('api_requests') },
         periodEnd: period.end,
+        warningPercent: await loadUsageWarningPercent(tx, ctx.tenant.id),
       });
     },
     { accessMode: 'read only' },

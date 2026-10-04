@@ -19,6 +19,7 @@ import {
 import { notifyBillingManagers, type BillingNoticeDeps } from '../billing/notices';
 import { loadEntitlements } from './entitlements';
 import { usagePeriod, warningThreshold } from './model';
+import { loadUsageWarningPercent } from './usage-warnings';
 
 export interface PlanSweepDeps {
   db: Database;
@@ -247,6 +248,8 @@ interface NoticeCounter {
   used: number;
   /** The company's current limit for the counter's metric; null for none. */
   limit: number | null;
+  /** The share of the limit at which the company is warned (ADR-144). */
+  warningPercent: number;
   planId: string | null;
   period: { start: Date; end: Date };
 }
@@ -289,7 +292,14 @@ async function lockForNotice(
     row.metric === 'automation_runs'
       ? entitlements.limits.automationRuns
       : entitlements.limits.apiRequests;
-  return { metric: row.metric, used: row.used, limit, planId: entitlements.planId, period };
+  return {
+    metric: row.metric,
+    used: row.used,
+    limit,
+    warningPercent: await loadUsageWarningPercent(tx, tenantId),
+    planId: entitlements.planId,
+    period,
+  };
 }
 
 async function markNoticeDone(tx: Tx, tenantId: string, counterId: string, notice: UsageNotice) {
@@ -359,9 +369,10 @@ export async function announceApiQuota(
 }
 
 /**
- * Warns the company's billing managers once that 80% of a monthly limit is used (ADR-062; see
- * `lockForNotice`). A counter outside the warning range under the current limit, because the limit
- * changed after the sweep listed it, is left for a later sweep. Returns whether this call sent it.
+ * Warns the company's billing managers once that its share of a monthly limit is used (ADR-062, at
+ * the share it chose since ADR-144; see `lockForNotice`). A counter outside the warning range under
+ * the current limit and share, because one changed after the sweep listed it, is left for a later
+ * sweep. Returns whether this call sent it.
  */
 export async function warnBeforeLimit(
   deps: PlanSweepDeps,
@@ -373,12 +384,13 @@ export async function warnBeforeLimit(
     const counter = await lockForNotice(tx, deps.clock.now(), tenantId, counterId, 'warning');
     if (!counter) return false;
     const { limit, used, period } = counter;
-    const threshold = warningThreshold(limit);
+    const threshold = warningThreshold(limit, counter.warningPercent);
     if (limit === null || threshold === null || used < threshold || used >= limit) return false;
     await markNoticeDone(tx, tenantId, counterId, 'warning');
     const runs = counter.metric === 'automation_runs';
     const { planName, day } = await companyFacts(tx, tenantId, counter.planId);
     const count = (n: number) => n.toLocaleString('en-IN');
+    const whenWarned = `This warning comes at ${counter.warningPercent}% of a monthly limit; a member who manages billing can change that under Billing → Usage warnings.`;
     await notifyBillingManagers(deps.notices, tx, scope, {
       subject: runs
         ? "This month's automation runs are nearly used up"
@@ -388,11 +400,13 @@ export async function warnBeforeLimit(
             `Your company has used ${count(used)} of the ${count(limit)} automation runs of the ${planName} plan for this month.`,
             `At ${count(limit)}, automations stop starting from customer messages, store events and the API until ${day(period.end)}. Runs in progress continue.`,
             'Ask HyFib for more automation runs or a larger plan if you need them.',
+            whenWarned,
           ]
         : [
             `Your company has used ${count(used)} of the ${count(limit)} API requests of the ${planName} plan for this month.`,
             `At ${count(limit)}, the public API refuses requests until ${day(period.end)}. The app itself is not affected.`,
             'Ask HyFib for a larger plan if you need more.',
+            whenWarned,
           ],
     });
     return true;

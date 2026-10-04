@@ -41,19 +41,21 @@ function UsageRow({
   used,
   limit,
   detail,
-  monthly = false,
+  warningPercent,
 }: {
   label: string;
   used: number;
   limit: number | null;
   detail?: string;
-  /** A monthly allowance, which warns at 80% (ADR-062). */
-  monthly?: boolean;
+  /**
+   * For a monthly allowance, the share of it at which the billing managers are warned by email
+   * (ADR-062, chosen by the company since ADR-144).
+   */
+  warningPercent?: number;
 }) {
   const share = limit === null || limit === 0 ? null : Math.min(100, (used / limit) * 100);
   const full = limit !== null && used >= limit;
-  // At 80% of a monthly limit the billing managers are warned by email (ADR-062).
-  const threshold = monthly ? warningThreshold(limit) : null;
+  const threshold = warningPercent === undefined ? null : warningThreshold(limit, warningPercent);
   const nearly = !full && threshold !== null && used >= threshold;
   return (
     <TR>
@@ -269,7 +271,7 @@ export function PlanCard({
               label="Automation runs this month"
               used={runs.used}
               limit={usage.limits.automationRuns}
-              monthly
+              warningPercent={overview.usageWarningPercent}
               detail={`${day(runs.periodStart)} to ${day(runs.periodEnd)}; test runs are not counted`}
             />
             {usage.limits.apiRequests === 0 ? (
@@ -282,7 +284,7 @@ export function PlanCard({
                 label="API requests this month"
                 used={usage.apiRequests.used}
                 limit={usage.limits.apiRequests}
-                monthly
+                warningPercent={overview.usageWarningPercent}
                 detail={`${day(usage.apiRequests.periodStart)} to ${day(usage.apiRequests.periodEnd)}; requests with the company's API keys`}
               />
             )}

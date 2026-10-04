@@ -1062,6 +1062,22 @@ Phase 5 rules (packs of extra API requests, P5-01/P5-08, ADR-110):
   is never taken for add-ons the company does not have, nor a company left with add-ons it did not
   pay for, whichever server recorded the subscription.
 
+Phase 5 rules (usage warnings at a share the company chooses, P5-01, ADR-144):
+
+- Only members with `billing.manage` (owners and billing managers) choose the share, re-checked by
+  the service; administrators, who read billing, and every other role are refused. No recent
+  sign-in is asked: the share moves no money and changes no access, and the notices at a limit
+  itself do not depend on it. Each change is in the company's audit log with the share before and
+  after (`billing.usage_warning_changed`); choosing the current share writes nothing.
+- The runtime role gains `UPDATE` on `app.tenants.usage_warning_percent` alone (a column grant) and
+  reaches only its company's row (RLS); a check constraint keeps the share to 50% to 95% in steps of
+  5 for every writer, and the service refuses anything else with one message.
+- The share moves only when a warning comes, never how often: the sweep still warns each counter at
+  most once per period, under the counter's lock, after reading the company's share again in the
+  company's scope, so a share raised after the sweep listed a counter is respected.
+  `ops.usage_warnings_due` (SECURITY DEFINER, pinned `search_path`, `w360_app` alone) still returns
+  ids only. API keys' own limits keep their 80% email (ADR-098).
+
 Phase 5 rules (daily settlement reconciliation, P5-05, ADR-059):
 
 - The settlement report is used only to look HyFib's own records up by provider id; a company is

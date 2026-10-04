@@ -1780,8 +1780,9 @@ Decision:
 - **Where it shows:** the email says how much is used, what happens at the limit and when the next
   period starts; the Billing plan card marks a counter at or over the threshold as nearly used.
 
-Not built: a threshold chosen per company or per member, warnings for seats, numbers, teams or live
-automations (they refuse additions, they do not run out during the month), and in-app notices.
+Not built: a threshold chosen per company (a share per company since ADR-144) or per member,
+warnings for seats, numbers, teams or live automations (they refuse additions, they do not run out
+during the month), and in-app notices.
 
 ## ADR-063 Paying for plans with Razorpay Subscriptions (2026-09-28)
 
@@ -5573,9 +5574,9 @@ Decision:
 - **The company's limits only:** a key's own monthly limit (ADR-097) is shown per key on Settings
   → API keys and emailed when it is nearly or fully used (ADR-098).
 
-Not built: dismissing a notice, thresholds per company or per member, notices of keys' own limits,
-and notices for limits that refuse additions (seats, numbers, teams, live automations), which the
-forms they limit show.
+Not built: dismissing a notice, thresholds per company (since ADR-144) or per member, notices of
+keys' own limits, and notices for limits that refuse additions (seats, numbers, teams, live
+automations), which the forms they limit show.
 
 ## ADR-141 Acknowledging companies' failing integrations on the operations console (P5-10) (2026-10-04)
 
@@ -5699,3 +5700,44 @@ Decision:
 
 Not built: names compared regardless of accents (é and e differ), starts-with and ends-with
 comparisons, and conditions on a contact's email.
+
+## ADR-144 Usage warnings at a share each company chooses (P5-01) (2026-10-04)
+
+Context: since ADR-062 a company's billing managers are emailed once when a monthly limit
+(automation runs or API requests, packs included) is 80% used, and since ADR-140 members who read
+billing see a notice on every page from the same point. A company whose month can run out within a
+day (a campaign's automation runs, a nightly API sync) needs the warning earlier, to add packs or
+change plan in time; one that uses most of its allowance every month is warned when nothing is
+wrong. ADR-062 left a threshold chosen per company unbuilt (P5-01 Remaining).
+
+Decision:
+
+- **One share per company, from 50% to 95% in steps of 5, 80% until one is chosen:**
+  `app.tenants.usage_warning_percent` (0108; `smallint`, default 80, a check constraint keeps it to
+  the list for every writer). It applies to both monthly limits. Members who manage billing (owners
+  and billing managers) choose it under Billing → Usage warnings, shown while the plan has either
+  limit; members who only read billing, administrators among them, see the share and who may change
+  it. No recent sign-in is asked: the share moves no money and changes no access, and the notices at
+  a limit itself do not depend on it. A change is in the company's audit log
+  (`billing.usage_warning_changed`, with the share before and after); choosing the current share
+  writes nothing. Anything off the list is refused with one message, a number or not.
+- **The same point everywhere:** the sweep's list (`ops.usage_warnings_due`, recreated by 0108 to
+  read the company's share), the sweep's check under the counter's lock before it emails, the
+  notices on every page (ADR-140) and the plan card's "nearly used up" all warn from
+  `ceil(limit × share / 100)` (`warningThreshold`) while below the limit. A limit so small that the
+  share rounds up to the limit itself gets no warning, as limits of 1 to 4 at 80%: below 20 at 95%,
+  only a limit of 1 at 50%.
+- **A change counts from the next sweep:** each counter is still warned at most once per period
+  (`warned_at`), so raising the share never warns a counter again, and lowering it below what a
+  counter already used warns it at the next sweep. The sweep reads the share again in the company's
+  scope while it holds the counter, so a share raised after the list was read is respected (that
+  counter waits for a later sweep). The email ends by saying at what share it came and that a
+  member who manages billing can change it under Billing → Usage warnings.
+- **API keys' own limits stay at 80%** (ADR-098): a key's limit is set per key by members who
+  manage API keys, not by the plan, and its emails go to owners and administrators.
+- **Runtime role:** `w360_app` gains `UPDATE` on this column alone (a column grant, beside the
+  name, locale, time zone and two-factor setting it could already change), and reaches only its
+  company's row (RLS); it still cannot change the company's status.
+
+Not built: shares per limit or per member, more than one warning per period, a share for keys' own
+limits, and choosing who is warned.

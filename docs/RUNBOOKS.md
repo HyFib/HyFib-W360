@@ -1122,7 +1122,7 @@ tenant_id = …` shows them.
 of extra requests a month (the platform plan form's "API request pack (requests)" and "(₹)", both or
 neither). Staff set a company's packs with its plan on the company's platform page, and companies
 choose them under Billing → Add-ons and Billing → Change plan like the other add-ons. The company's
-limit is the version's plus packs × size, for every request, the 80% warning, the used-up email,
+limit is the version's plus packs × size, for every request, the usage warning, the used-up email,
 the plan card, Settings → API keys and the platform page; fewer packs lower it at once, and the
 month's requests already counted stay counted. `SELECT api_requests FROM
 app.tenant_entitlements(…)` shows the limit with them, and `SELECT api_request_packs FROM
@@ -1250,8 +1250,9 @@ ones do not. The company can free one, or staff can add extra seats or numbers (
 sells them) or move it to a larger version. A lower limit never removes anything.
 
 **Automations stopped answering customers.** The month's automation runs may be used up: the
-company's billing managers were emailed when 80% were used (limits of 5 or more) and again once all
-were (ADR-062), and Billing shows the runs used and the period.
+company's billing managers were emailed when 80% were used, or the share chosen under Billing →
+Usage warnings (ADR-144), and again once all were (ADR-062), and Billing shows the runs used and the
+period.
 Runs already in progress continue; runs from store events are recorded as "Not sent: the month's
 automation runs are used up". Add run packs (when the version sells them) or change the plan; the
 next customer message starts a run. The period starts on the day the current plan or trial started
@@ -1259,11 +1260,16 @@ next customer message starts a run. The period starts on the day the current pla
 ("not in the plan") and the automation pages say so.
 
 **A usage warning or used-up email did not come.** Each counter (company, automation runs or API
-requests, usage period) gets at most one warning, at 80% of the limit rounded up (none for limits of
-1 to 4, none when the limit is reached before a sweep saw 80%), and one used-up notice;
-`app.usage_counters.warned_at` and `notified_at` say when the sweep queued them. A counter of an
-earlier period is marked without an email, and a company that is suspended, restricted or being
-deleted gets none. Queued emails go out through the email outbox like every other notice.
+requests, usage period) gets at most one warning, at the company's share of the limit rounded up
+(`app.tenants.usage_warning_percent`: 80% unless a member who manages billing chose 50% to 95% under
+Billing → Usage warnings, ADR-144; none when the share rounds up to the limit itself, as for limits
+of 1 to 4 at 80%, and none when the limit is reached before a sweep saw the share), and one used-up
+notice; `app.usage_counters.warned_at` and `notified_at` say when the sweep queued them. A counter
+already warned is not warned again when the share changes; one already past a lowered share is
+warned at the next sweep. The company's audit log shows who changed the share
+(`billing.usage_warning_changed`, from and to). A counter of an earlier period is marked without an
+email, and a company that is suspended, restricted or being deleted gets none. Queued emails go out
+through the email outbox like every other notice.
 
 **A rate change email did not come, or came again.** A company is told once per published card
 (`app.rate_change_notices`: the card, its currency and effective time, when the email was queued)

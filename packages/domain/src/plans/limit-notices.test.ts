@@ -20,11 +20,13 @@ const facts = (
   used: { runs: number; api: number },
   limits: { runs: number | null; api: number | null } = { runs: 10, api: 5 },
   automationsInPlan = true,
+  warningPercent = 80,
 ): LimitNoticeFacts => ({
   automationsInPlan,
   limits: { automationRuns: limits.runs, apiRequests: limits.api },
   used: { automationRuns: used.runs, apiRequests: used.api },
   periodEnd: END,
+  warningPercent,
 });
 
 describe('which monthly limits a member is told of (ADR-140)', () => {
@@ -125,6 +127,24 @@ describe('which monthly limits a member is told of (ADR-140)', () => {
         forBilling: true,
       },
     ]);
+  });
+
+  it('tells members who read billing from the share of a limit the company chose (ADR-144)', () => {
+    const at = (runs: number, percent: number) =>
+      limitNoticesFor(BILLING, facts({ runs, api: 0 }, { runs: 20, api: 5 }, true, percent)).map(
+        (n) => [n.metric, n.state],
+      );
+    expect(at(9, 50)).toEqual([]);
+    expect(at(10, 50)).toEqual([['automation_runs', 'nearly']]);
+    expect(at(15, 80)).toEqual([]);
+    expect(at(16, 80)).toEqual([['automation_runs', 'nearly']]);
+    expect(at(18, 95)).toEqual([]);
+    expect(at(19, 95)).toEqual([['automation_runs', 'nearly']]);
+    expect(at(20, 95)).toEqual([['automation_runs', 'used_up']]);
+    // Members whose work stops are still told only once a limit is used up.
+    expect(
+      limitNoticesFor(MARKETER, facts({ runs: 19, api: 0 }, { runs: 20, api: 5 }, true, 50)),
+    ).toEqual([]);
   });
 });
 

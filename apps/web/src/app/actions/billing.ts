@@ -201,6 +201,20 @@ export async function updateAutoRechargeAction(
   });
 }
 
+/** Chooses the share of a monthly limit at which the company is warned (ADR-144). */
+export async function setUsageWarningAction(
+  slug: string,
+  percent: number,
+): Promise<ActionResult<{ percent: number }>> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { plans } = await getRuntime();
+    const result = await plans.setUsageWarningPercent(ctx, { percent }, await requestMeta());
+    refresh();
+    return { percent: result.percent };
+  });
+}
+
 /** Puts the company on a plan version HyFib offers, to pay for it (ADR-105). */
 export async function choosePlanAction(
   slug: string,

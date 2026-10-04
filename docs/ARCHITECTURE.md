@@ -1150,7 +1150,8 @@ true`); the same key with another request (method, path and body hashed) answers
   `forbidden` with reason `not_in_plan` (creating and rotating keys are refused too); a month used
   up answers 429 `rate_limited` with reason `quota_exceeded` and `Retry-After` until the next
   period. The minute plan sweep emails the billing managers once per period
-  (`ops.api_quota_reached`), and once before, at 80% of the limit (ADR-062).
+  (`ops.api_quota_reached`), and once before, at 80% of the limit or the share the company chose
+  (ADR-062, ADR-144).
 - **API scopes by plan (0069, ADR-092):** `ops.plans.api_scopes` is empty for every scope or the
   scopes the version includes; `app.tenant_entitlements` returns them. `admitApiRequest` takes the
   authenticated key (`ApiKeyContext`) and returns the request's `ApiContext` with `planScopes`, so
@@ -1536,10 +1537,12 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   `app.accept_invitation` checks the same limit in SQL. Live automation runs started by customer
   messages or store events consume `app.usage_counters` atomically (`ON CONFLICT … DO UPDATE …
 WHERE used < limit`), per monthly period from `usage_anchor`; the sweep announces a used-up month
-  once (`notified_at`) and warns once at 80% of the limit (`warned_at`, 0036, ADR-062), each time
-  locking the counter and checking it against the current limit and period (a counter of an
-  earlier period is marked without an email). The company layout shows notices of those two
-  limits (`plans/limit-notices.ts`, ADR-140): nearly used up (80%) or used up, read per page in one
+  once (`notified_at`) and warns once at 80% of the limit (`warned_at`, 0036, ADR-062), or at the
+  share from 50% to 95% that a member who manages billing chose
+  (`app.tenants.usage_warning_percent`, 0108, ADR-144), each time locking the counter and checking
+  it against the current limit, period and share (a counter of an earlier period is marked without
+  an email). The company layout shows notices of those two limits (`plans/limit-notices.ts`,
+  ADR-140): nearly used up (from the same share) or used up, read per page in one
   read-only transaction (`app.tenant_entitlements` and the period's counters) for an active company
   and a member who reads billing, automations (runs used up) or manages API keys (requests used
   up). The tenant context drops the write permissions of

@@ -56,6 +56,7 @@ export * from './plans/service';
 export * from './plans/sweep';
 export * from './plans/change-notices';
 export * from './plans/limit-notices';
+export * from './plans/usage-warnings';
 export * from './platform/plans';
 export * from './api';
 export * from './webhooks';

@@ -1106,6 +1106,21 @@ describe("emails about a key's own monthly limit (ADR-098)", () => {
     expect(await companyNotices(deleting.tenant.id)).toEqual([]);
   });
 
+  it("warns at 80% of a key's own limit whatever share the company chose for its plan (ADR-144)", async () => {
+    const c = await fx.company();
+    await plans().setUsageWarningPercent(await fx.ctx(c, c.owner), { percent: 50 }, {});
+    const key = await limitedKey(c, '10', 'Half');
+    await requests(key.ctx, 5);
+    const row = await counter(key.id);
+    // Half of the key's limit: neither listed nor sent, even when asked for that counter.
+    expect(await due(c.tenant.id)).toEqual([]);
+    expect(await noticeApiKeyUsage(noticeDeps(), c.tenant.id, row.id)).toBeNull();
+    expect((await counter(key.id)).warned_at).toBeNull();
+    await requests(key.ctx, 3);
+    expect(await due(c.tenant.id)).toEqual([row.id]);
+    expect(await noticeApiKeyUsage(noticeDeps(), c.tenant.id, row.id)).toBe('warning');
+  });
+
   it('sends each email once when two sweeps run at once', async () => {
     const c = await fx.company();
     const key = await limitedKey(c, '10');
