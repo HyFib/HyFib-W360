@@ -12,6 +12,8 @@ RUN --mount=type=secret,id=extra_ca,required=false \
     npm install -g pnpm@11.28.0
 WORKDIR /repo
 COPY pnpm-lock.yaml pnpm-workspace.yaml package.json .npmrc* ./
+# The lockfile's patched dependencies (docs/DECISIONS.md ADR-142) are applied by the install.
+COPY patches/ patches/
 COPY apps/web/package.json apps/web/
 COPY apps/worker/package.json apps/worker/
 COPY packages/core/package.json packages/core/

@@ -8,3 +8,10 @@ allowBuilds:
 minimumReleaseAgeExclude:
   - '@types/node@24.19.0'
   - react-hook-form@7.89.0
+patchedDependencies:
+  '@next/eslint-plugin-next@16.3.6': patches/@next__eslint-plugin-next@16.3.6.patch
+# The Next ESLint plugin's one use of fast-glob is patched to Node's fs.globSync (patches/,
+# docs/DECISIONS.md ADR-142): fast-glob's micromatch pulls in braces, GHSA-vfj7-8cjw-p6xm, which
+# has no patched release.
+overrides:
+  '@next/eslint-plugin-next>fast-glob': '-'

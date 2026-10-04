@@ -1,5 +1,45 @@
 # Progress
 
+## 2026-10-04 — CI: the dependency audit cleared (ADR-142)
+
+Status: **Fixed and locally verified; CI to confirm.** PR #19's "Dependency audit and secret scan"
+job had failed since GHSA-vfj7-8cjw-p6xm (a high-severity denial of service in `braces`, no patched
+release) was published, so its secret scan was skipped too. `braces` reached the repository only
+through the Next.js ESLint plugin (`@next/eslint-plugin-next` → `fast-glob` 3.3.1 → `micromatch`),
+a development dependency that its latest and canary releases still pin.
+
+### Completed
+
+- **Design (ADR-142):** remove the vulnerable package rather than ignore the advisory. The plugin
+  calls fast-glob once (`globSync(rootDir, { onlyDirectories: true })` for `settings.next.rootDir`),
+  so a pnpm patch pinned to `@next/eslint-plugin-next@16.3.6` makes that call use Node's
+  `fs.globSync` with fast-glob's results, and an override drops fast-glob from the plugin's
+  dependencies: fast-glob, micromatch, braces and 13 more packages leave the lockfile.
+- **Build:** `patches/@next__eslint-plugin-next@16.3.6.patch`; `patchedDependencies` and the
+  override in `pnpm-workspace.yaml`; both Dockerfiles copy `patches/` before their frozen install.
+- **Docs:** ADR-142; SECURITY (supply chain); THREAT-MODEL T16; RELEASE-CHECKLIST.
+
+### Test commands and results (local, 2026-10-04)
+
+| Command                                                                                                                                        | Result                                                                                                                                                                                                                                                                                   |
+| ---------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm audit --audit-level=high`                                                                                                                | before: 1 high (braces, GHSA-vfj7-8cjw-p6xm); after: no known vulnerabilities                                                                                                                                                                                                            |
+| The patched lookup against fast-glob 3.3.1 (22 patterns: plain, absolute and trailing-slash paths, `*`, braces, missing paths, symbolic links) | same directories for all but `apps/**/app`, where fast-glob also followed pnpm's symbolic links into `node_modules`                                                                                                                                                                      |
+| `getRootDirs` for this repository's `rootDir: 'apps/web'`                                                                                      | `["apps/web"]`, as before                                                                                                                                                                                                                                                                |
+| `eslint` on a probe file with an `<a>` link to a temporary `pages/` page                                                                       | `@next/next/no-html-link-for-pages` reported it, as before the patch                                                                                                                                                                                                                     |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`                                                                                             | clean                                                                                                                                                                                                                                                                                    |
+| `pnpm test` (unit)                                                                                                                             | 671 passed (74 files)                                                                                                                                                                                                                                                                    |
+| `pnpm build`                                                                                                                                   | passed                                                                                                                                                                                                                                                                                   |
+| The Dockerfiles' install step (`pnpm install --frozen-lockfile` with only the files they copy)                                                 | fails without `patches/` (the patch file is missing), succeeds with it; the plugin is patched and braces, micromatch and fast-glob are absent                                                                                                                                            |
+| `docker build --target build` for the worker and web images                                                                                    | both built; the web stage holds the patched plugin, no braces, micromatch or fast-glob, and the standalone server. The full images were not built here: their unchanged runtime stage's `apt-get update` is refused by this environment's proxy (HTTP 405), and CI builds and scans them |
+| gitleaks 8.30.1 `detect` over the full history (as CI runs it)                                                                                 | no leaks found                                                                                                                                                                                                                                                                           |
+
+### Known gaps
+
+- `eslint-config-next`, which `apps/web` still lists, shares the patched plugin and was left in
+  place. Upgrading the plugin needs the patch redone, or dropped once the plugin stops pinning
+  fast-glob or braces is fixed; the install fails until then.
+
 ## 2026-10-04 — Phase 5: acknowledging companies' failing integrations on the console (P5-10, ADR-141)
 
 Status: **Implemented and locally verified (test data only).** Since ADR-139 every platform

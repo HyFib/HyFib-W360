@@ -5,7 +5,7 @@ made. This checklist records the evidence required per gate; unchecked items blo
 
 ## Build and version
 
-- [x] Lockfile committed, exact versions pinned, `pnpm audit` clean (2026-09-26, local)
+- [x] Lockfile committed, exact versions pinned, `pnpm audit` clean (2026-10-04, local; braces advisory GHSA-vfj7-8cjw-p6xm cleared by ADR-142)
 - [x] Web and worker images build and start locally (2026-09-26)
 - [ ] Images built by CI, scanned (Trivy HIGH/CRITICAL = 0 unfixed), digests recorded
 - [ ] Release notes with commit SHA, image digests, migration list

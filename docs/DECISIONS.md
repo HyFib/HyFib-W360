@@ -5622,3 +5622,40 @@ stored times).
 Not built: assigning a failure to someone, acknowledging the console's other lists (dead letters,
 receipts, quarantine, late queues), editing or deleting a note (a new acknowledgement replaces it),
 and leaving acknowledged failures out of the alert email (each failure is emailed once anyway).
+
+## ADR-142 Clearing the braces advisory from the Next.js ESLint plugin (2026-10-04)
+
+Context: CI's dependency audit (`pnpm audit --audit-level=high`) failed on GHSA-vfj7-8cjw-p6xm, a
+high-severity denial of service in `braces` (stack exhaustion through deeply nested patterns) that
+has no patched release: 3.0.3, the latest, is affected. It reached the repository only through the
+Next.js ESLint plugin, a development dependency: `@next/eslint-plugin-next` (directly, and through
+`eslint-config-next`) pins `fast-glob` 3.3.1, whose `micromatch` depends on `braces`. Next.js's
+latest and canary releases still pin it. The plugin calls fast-glob once,
+`globSync(rootDir, { onlyDirectories: true })`, to resolve `settings.next.rootDir` (ours is
+`apps/web`) for the `no-html-link-for-pages` rule. Nothing at runtime used braces, but the check
+stayed red, and the job's secret scan, which runs after the audit, was skipped meanwhile.
+
+Decision:
+
+- **Patched, not ignored:** a pnpm patch (`patches/@next__eslint-plugin-next@16.3.6.patch`,
+  `patchedDependencies` in `pnpm-workspace.yaml`) makes that call use Node's `fs.globSync` (stable in
+  Node 24) and keeps fast-glob's result for it: the matching directories, named as the pattern
+  names them (relative or absolute), with the pattern's trailing slash. The one difference, a `**`
+  not following symbolic links to directories, does not arise with a plain path.
+- **Removed from the tree:** an override (`'@next/eslint-plugin-next>fast-glob': '-'`) drops
+  fast-glob from the plugin's dependencies, and with it micromatch, braces and 13 more packages
+  only they used; the audit then finds no known vulnerability. The advisory is not ignored: if
+  braces comes back through another package, the audit fails again.
+- **Pinned to the version:** the patch applies to `@next/eslint-plugin-next@16.3.6` only, so
+  upgrading the plugin fails the install until the patch is redone, or dropped once the plugin no
+  longer pins fast-glob or braces is fixed. Both Dockerfiles copy `patches/` before their frozen
+  install.
+
+Verified: the audit finds no known vulnerability; the patched lookup returns what fast-glob did for
+every pattern tried (plain, absolute and trailing-slash paths, `*`, braces, missing directories,
+symbolic links) except the `**` case above; with a temporary page in a `pages` directory,
+`no-html-link-for-pages` still reported an `<a>` link to it; `pnpm lint` passes; the Dockerfiles'
+install step fails without `patches/` and succeeds with it, and both images' build stages built.
+
+Not done: `eslint-config-next`, which `apps/web` still lists, shares the patched plugin and was left
+in place.
