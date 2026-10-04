@@ -800,6 +800,13 @@ Phase 5 rules (outgoing webhooks, P5-09):
   member, the Payment Link worker or Razorpay's payment changes it: it narrows what one endpoint
   receives and never adds an event or a delivery for another endpoint or company. Audited with the
   list. Tested.
+- An endpoint can take `template.status_changed` only for some of the statuses reported (ADR-148),
+  chosen the same way. The list is checked against the eleven statuses the event reports (HyFib's
+  own steps, a deletion under way or refused and an unrecognised status are never sent), kept only
+  while the endpoint takes `template.status_changed` (a database check too, which also refuses a
+  null entry), and applied in `app.capture_webhook_event`, in the transaction that records the
+  status, whoever records it: it narrows what one endpoint receives and never adds an event or a
+  delivery for another endpoint or company. Audited with the list. Tested.
 - Conversation and contact events (ADR-074) follow the same rules. Conversation events name the
   member and the team by id only (ADR-094), the ids the API gives `conversations.read` keys
   (ADR-093): names are read through `GET /members` and `GET /teams` with such a key, and no email or

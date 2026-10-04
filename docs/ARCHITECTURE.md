@@ -1348,6 +1348,15 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   reached, and writes no event when none does; other types, replays and test events are unchanged.
   Settings (the same status control as campaigns) and the API (`orderStatuses`) set it; a change
   that drops the event clears it.
+- **Template status filters** (migration 0112, ADR-148): `template_statuses` on an endpoint lists
+  the statuses it takes as `template.status_changed` (the eleven the event reports, `pending` to
+  `locked`; HyFib's own steps, a deletion under way or refused and an unrecognised status are never
+  sent), null for every status; a check keeps it to 1 to 11 known statuses and to endpoints that
+  take the event. `app.capture_webhook_event` (replaced with the same signature) creates a template
+  status's delivery only for endpoints whose list is null or holds the status reported, and writes
+  no event when none does; other types, replays and test events are unchanged. Settings (the same
+  status control as campaigns and orders) and the API (`templateStatuses`) set it; a change that
+  drops the event clears it.
 - **Health:** a success clears the failing state; a failure when the endpoint has been failing for
   72 hours without a success turns it off (`failing`), fails its waiting deliveries as
   `endpoint_disabled`, records a system audit entry and emails the company's active owners and
@@ -1358,11 +1367,11 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   on; deleting. Each endpoint's page lists its latest 100 deliveries (or only failed ones) with
   attempts, result and timings, replays finished ones (a new delivery of the same event, audited)
   and edits the URL, description, events, the message statuses, contact parts, automations,
-  campaign and order statuses it takes and headers (names shown, values never; replacing gives each
-  again).
+  campaign, order and template statuses it takes and headers (names shown, values never; replacing
+  gives each again).
   The OpenAPI document describes every event under `webhooks`. Audit entries name the endpoint's
   host, never its full URL or secret.
-- **Not built yet:** filters for other event types (templates, conversations) or on a message's
+- **Not built yet:** filters for other event types (conversations) or on a message's
   or contact's values, ordering,
   other authentication (OAuth client credentials, headers computed per delivery), mutual TLS, fixed
   egress addresses for receivers' allowlists, endpoints per number, and events for conversations

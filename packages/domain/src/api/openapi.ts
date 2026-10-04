@@ -19,6 +19,7 @@ import {
   WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_RETRY_SECONDS,
+  WEBHOOK_TEMPLATE_STATUSES,
 } from '../webhooks/model';
 import {
   automationRunEndedPayloadSchema,
@@ -358,6 +359,12 @@ export const apiWebhookEndpointSchema = z.object({
     .nullable()
     .describe(
       'The statuses an order reaches that the endpoint receives as order.status_changed; null receives every status.',
+    ),
+  templateStatuses: z
+    .array(z.enum(WEBHOOK_TEMPLATE_STATUSES))
+    .nullable()
+    .describe(
+      'The template statuses the endpoint receives as template.status_changed; null receives every status.',
     ),
   apiKeyId: z.uuid().describe('The API key that added the endpoint.'),
   createdAt: z.iso.datetime(),
@@ -1503,7 +1510,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'template.status_changed': webhook(
         'webhookTemplateStatusChanged',
         WEBHOOK_EVENT_INFO['template.status_changed'].label,
-        WEBHOOK_EVENT_INFO['template.status_changed'].description,
+        `${WEBHOOK_EVENT_INFO['template.status_changed'].description} An endpoint receives every status unless it names the statuses it takes (its \`templateStatuses\`, or the statuses ticked in Settings → Webhooks).`,
         'WebhookTemplateStatusChanged',
       ),
       'conversation.status_changed': webhook(

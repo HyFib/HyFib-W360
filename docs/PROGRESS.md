@@ -1,5 +1,91 @@
 # Progress
 
+## 2026-10-04 — Phase 5: choosing the template statuses a webhook endpoint receives (P5-09, ADR-148)
+
+Status: **Implemented and locally verified (test data only).** Since ADR-053 an endpoint that took
+`template.status_changed` received every status reported for every template: Meta's review (in
+review, approved, rejected), its later decisions (paused, disabled, flagged, in appeal, archived,
+locked, a limit exceeded) and deletions. A receiver that acts on a few of them (a team keeping its
+campaigns running on pauses, rejections and disablements, a publishing tool on approvals) had to read
+and drop the rest. ADR-146 and ADR-147 had just built filters by status for campaigns and orders.
+
+### Completed
+
+- **Design (ADR-148):** an endpoint takes every template status (null, as before) or 1 to 11 of the
+  statuses the event reports (`pending`, `approved`, `rejected`, `paused`, `disabled`, `in_appeal`,
+  `flagged`, `archived`, `deleted`, `limit_exceeded`, `locked`; HyFib's own steps, a deletion under
+  way or refused and an unrecognised status are never sent), kept only while it takes
+  `template.status_changed`; applied where events are captured, in the transaction that records the
+  status, whoever records it; audited and exported; permissions unchanged.
+- **Migration 0112:** `app.webhook_endpoints.template_statuses` (`text[]`, a check: null, or 1 to 11
+  known statuses while `template.status_changed` is among the events; containment also refuses a
+  null entry and HyFib's own steps), the runtime role's update of the column, and
+  `app.capture_webhook_event` replaced with the same signature (0111's, with the template condition
+  in both its existence check and its deliveries).
+- **Domain:** `webhooks/model.ts` (`WEBHOOK_TEMPLATE_STATUSES` in the order Templates lists them,
+  their labels as Templates names them); `webhooks/service.ts` (`webhookTemplateStatusesSchema`,
+  `webhookTemplateStatusesFor`, the schemas' rule, `templateStatuses` on each listed endpoint, create
+  and update storing and auditing the list); `api/webhook-endpoints.ts` (`templateStatuses` on
+  `POST` and `PATCH /webhook-endpoints` and in every answer, kept or cleared, audited); OpenAPI
+  (`templateStatuses`, and the event says how the filter applies); the company data export carries
+  the column.
+- **Web:** Settings → Webhooks, under "Template status" while it is ticked: "Statuses sent", every
+  status ticked to begin with (saving all of them keeps none); the endpoints list says "Template
+  statuses sent: …". The control is the one campaign and order statuses use.
+- **Tests:**
+  - Unit (3 new, 1 extended): the list's rules (1 to 11 known statuses, HyFib's own steps, a deletion
+    under way or refused and an unknown status refused, repeats merged into the order Templates
+    lists them, null, the empty list's message, the labels, the list matching the event's
+    description), keeping and clearing; the API's schemas (only with the event, a list alone is a
+    change) and the OpenAPI entries.
+  - Integration (4 new, 1 changed): an endpoint naming approvals gets only the approval and its
+    other events, one taking every status gets each status, one naming rejections and pauses gets
+    those, and no status is recorded when no endpoint takes it; the domain's list, the capture
+    trigger's and the database check's held to the same statuses; refusals of statuses without the
+    event, an empty list, HyFib's own steps and a deletion under way, keeping, replacing and
+    clearing, the audits, each clause of the database check (an empty list, twelve entries, one of
+    HyFib's own steps, a deletion under way, an unknown status, a null entry, any list without the
+    event) and the column grant (`webhooks.test.ts`); the same rules through the API, HyFib's own
+    steps and a refused deletion named by their place (`api-webhook-endpoints.test.ts`, whose
+    endpoint shape now includes `templateStatuses`).
+  - E2E (1 new in `webhook-events.spec.ts`): template events through Settings, the worker and
+    Meta's stand-in: a member submits a template and Meta approves it; an endpoint taking every
+    status gets the review and the approval, signed, with the template's name, language and
+    category, and a second endpoint added with only approvals ticked (every status unticked, then
+    approvals ticked again) gets the approval alone; the form starts afresh, the endpoints list
+    names its statuses and no other endpoint's, and its page ticks approvals only.
+- **Docs:** ADR-148 (and ADR-146's and ADR-147's "Not built" annotated); SECURITY (Phase 5 rules);
+  THREAT-MODEL T157; ARCHITECTURE; RUNBOOKS; DEPLOYMENT (0112's rollout); DATA-RETENTION; BACKLOG
+  P5-09; feature matrix H-014, W-138 and W-139.
+- **Mutation checks:** 62 deliberate regressions tried, all caught on the first run: 14 by unit
+  tests and 36 by integration tests in the domain, the API and the migration (the statuses, their
+  order and HyFib's own steps refused, the list's rules, keeping and clearing, the schemas' rule,
+  each store, read and audit in Settings and the API, the OpenAPI entries, the export, the capture's
+  existence check and deliveries, the null branch, the condition kept to template statuses in both
+  places, the statuses chosen rather than the others, each clause of the database check and the
+  column grant), and 12 in the web through the e2e test (the statuses shown, what is sent, every
+  status ticked sent as none, the statuses sent only with their event, ticking and unticking, the
+  page's starting state, the form starting afresh, the names shown in the control, the endpoints
+  list and its labels, the endpoint's page knowing its list, the names Templates uses).
+
+### Test commands and results (local, 2026-10-04)
+
+| Command                                                                                  | Result                                                                                             |
+| ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`                                       | clean                                                                                              |
+| `pnpm test` (unit)                                                                       | 689 passed (74 files; 3 new)                                                                       |
+| `pnpm test:integration` on PostgreSQL 18.6                                               | 856 passed (56 files; 4 new)                                                                       |
+| `pnpm test:integration` on PostgreSQL 17.11                                              | 856 passed (56 files)                                                                              |
+| `pnpm build`                                                                             | passed                                                                                             |
+| e2e: webhooks, webhook-events, api-contact-fields, api-quota (chromium, mobile-chromium) | 34 passed (6.6 min) on the final build; Firefox and WebKit are not installed here, so CI runs them |
+| Mutation checks                                                                          | 62 tried, all caught (14 by unit, 36 by integration, 12 through the e2e test)                      |
+| gitleaks 8.30.1 on the staged changes                                                    | no leaks found                                                                                     |
+
+### Known gaps
+
+- Filters by template, category, language or WhatsApp account, by the status before a change or by
+  Meta's reason, and filters for conversation statuses.
+
 ## 2026-10-04 — Phase 5: choosing the order statuses a webhook endpoint receives (P5-09, ADR-147)
 
 Status: **Implemented and locally verified (test data only).** Since ADR-085 an endpoint that took

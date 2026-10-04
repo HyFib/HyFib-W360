@@ -7,6 +7,7 @@ import {
   CAMPAIGN_PAUSE_REASONS,
   CAMPAIGN_STATUSES,
   ORDER_STATUSES,
+  TEMPLATE_STATUSES,
 } from '@w360/db';
 import { apiContactSchema } from '../api/contact-view';
 import { buildOpenApiDocument } from '../api/openapi';
@@ -26,6 +27,8 @@ import {
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_REPLAY_PERIODS,
   WEBHOOK_RETRY_SECONDS,
+  WEBHOOK_TEMPLATE_STATUS_LABELS,
+  WEBHOOK_TEMPLATE_STATUSES,
   webhookErrorLabel,
   webhookHost,
   webhookReplaySummary,
@@ -71,6 +74,8 @@ import {
   webhookMessageStatusesSchema,
   webhookOrderStatusesFor,
   webhookOrderStatusesSchema,
+  webhookTemplateStatusesFor,
+  webhookTemplateStatusesSchema,
 } from './service';
 
 const SECRET = 'whsec_test-secret-one';
@@ -1251,5 +1256,62 @@ describe('order status filters (ADR-147)', () => {
     expect(webhookOrderStatusesFor([...both], undefined, null)).toBeNull();
     expect(webhookOrderStatusesFor(['order.received'], ['paid'], ['fulfilled'])).toBeNull();
     expect(webhookOrderStatusesFor(['campaign.status_changed'], undefined, ['paid'])).toBeNull();
+  });
+});
+
+describe('template status filters (ADR-148)', () => {
+  it('take 1 to 11 of the statuses a template event reports, once each, in the order Templates lists them; null takes every status', () => {
+    expect(webhookTemplateStatusesSchema.parse(['paused', 'rejected', 'paused'])).toEqual([
+      'rejected',
+      'paused',
+    ]);
+    expect(webhookTemplateStatusesSchema.parse(null)).toBeNull();
+    expect(webhookTemplateStatusesSchema.parse([...WEBHOOK_TEMPLATE_STATUSES].reverse())).toEqual([
+      ...WEBHOOK_TEMPLATE_STATUSES,
+    ]);
+    // Every template status but HyFib's own steps before Meta has the template, a deletion under
+    // way or refused (not a template status) and an unrecognised one: none of them is sent.
+    expect(WEBHOOK_TEMPLATE_STATUSES).toEqual(
+      TEMPLATE_STATUSES.filter(
+        (s) => !['draft', 'submitting', 'submit_failed', 'pending_deletion', 'unknown'].includes(s),
+      ),
+    );
+    // The event says which statuses it reports, in the same order.
+    expect(templateStatusPayloadSchema.shape.data.shape.template.shape.status.description).toBe(
+      `${WEBHOOK_TEMPLATE_STATUSES.slice(0, -1).join(', ')} or ${WEBHOOK_TEMPLATE_STATUSES.at(-1)}.`,
+    );
+    for (const refused of [
+      [],
+      ['draft'],
+      ['submit_failed'],
+      ['pending_deletion'],
+      ['delete_failed'],
+      ['unknown'],
+      ['Approved'],
+      'approved',
+      [null],
+      Array(12).fill('approved'),
+    ]) {
+      expect(
+        webhookTemplateStatusesSchema.safeParse(refused).success,
+        JSON.stringify(refused),
+      ).toBe(false);
+    }
+    expect(webhookTemplateStatusesSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one template status, or take every status.',
+    );
+    expect(Object.keys(WEBHOOK_TEMPLATE_STATUS_LABELS)).toEqual([...WEBHOOK_TEMPLATE_STATUSES]);
+  });
+
+  it('are kept only while the endpoint takes template.status_changed: given, kept, or cleared', () => {
+    const both = ['template.status_changed', 'message.status'] as const;
+    expect(webhookTemplateStatusesFor([...both], ['rejected'], null)).toEqual(['rejected']);
+    expect(webhookTemplateStatusesFor([...both], undefined, ['paused'])).toEqual(['paused']);
+    expect(webhookTemplateStatusesFor([...both], null, ['paused'])).toBeNull();
+    expect(webhookTemplateStatusesFor([...both], undefined, null)).toBeNull();
+    expect(webhookTemplateStatusesFor(['message.status'], ['rejected'], ['paused'])).toBeNull();
+    expect(
+      webhookTemplateStatusesFor(['campaign.status_changed'], undefined, ['paused']),
+    ).toBeNull();
   });
 });

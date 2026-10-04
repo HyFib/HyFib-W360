@@ -255,6 +255,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       automationIds: null,
       campaignStatuses: null,
       orderStatuses: null,
+      templateStatuses: null,
       apiKeyId: key.id,
       createdAt: expect.any(String),
       updatedAt: expect.any(String),
@@ -902,6 +903,87 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
     expect(await issueOf(api().update(key.ctx, id, { orderStatuses: [] }))).toMatchObject({
       path: 'orderStatuses',
+    });
+  });
+
+  it('choose the template statuses an endpoint receives, kept by changes that leave them out and cleared with the event (ADR-148)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // Statuses need the event, at least one, and each from the list (one of HyFib's own steps or
+    // an unknown one by place).
+    const refusals = [
+      [['message.status'], ['rejected'], 'templateStatuses'],
+      [['template.status_changed'], [], 'templateStatuses'],
+      [['template.status_changed'], ['rejected', 'submit_failed'], 'templateStatuses.1'],
+      [['template.status_changed'], ['delete_failed'], 'templateStatuses.0'],
+    ] as const;
+    for (const [index, [events, templateStatuses, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, templateStatuses },
+            idem(`template-statuses-bad-${index}`, JSON.stringify(templateStatuses)),
+          ),
+        ),
+        JSON.stringify(templateStatuses),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'template-statuses-1', {
+      url: receiverUrl(),
+      events: ['template.status_changed', 'message.status'],
+      templateStatuses: ['paused', 'rejected', 'paused'],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.templateStatuses).toEqual(['rejected', 'paused']);
+    expect((await api().get(key.ctx, id)).templateStatuses).toEqual(['rejected', 'paused']);
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id, id],
+    );
+    expect(audit?.metadata).toMatchObject({ templateStatuses: ['rejected', 'paused'] });
+
+    expect(await api().update(key.ctx, id, { description: 'Reviews' })).toMatchObject({
+      templateStatuses: ['rejected', 'paused'],
+    });
+    expect(await api().update(key.ctx, id, { templateStatuses: ['disabled'] })).toMatchObject({
+      templateStatuses: ['disabled'],
+    });
+    const updates = await fx.query<{ metadata: { templateStatuses?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_updated'
+        ORDER BY occurred_at`,
+      [c.tenant.id, id],
+    );
+    expect(updates.map((u) => u.metadata.templateStatuses)).toEqual([
+      ['rejected', 'paused'],
+      ['disabled'],
+    ]);
+    expect(await api().update(key.ctx, id, { events: ['message.status'] })).toMatchObject({
+      events: ['message.status'],
+      templateStatuses: null,
+    });
+    expect(
+      await issueOf(api().update(key.ctx, id, { templateStatuses: ['rejected'] })),
+    ).toMatchObject({ path: 'templateStatuses' });
+    expect(
+      await api().update(key.ctx, id, {
+        events: ['template.status_changed'],
+        templateStatuses: ['limit_exceeded'],
+      }),
+    ).toMatchObject({ templateStatuses: ['limit_exceeded'] });
+    expect(await api().update(key.ctx, id, { templateStatuses: null })).toMatchObject({
+      templateStatuses: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { templateStatuses: [] }))).toMatchObject({
+      path: 'templateStatuses',
     });
   });
 

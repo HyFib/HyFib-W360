@@ -5850,7 +5850,8 @@ Decision:
   endpoints keep null; nothing is backfilled.
 
 Not built: filters by campaign, by the status before a change or by why a campaign paused or
-completed, and filters for template, order (built by ADR-147) or conversation statuses.
+completed, and filters for template (built by ADR-148), order (built by ADR-147) or conversation
+statuses.
 
 ## ADR-147 Choosing the order statuses a webhook endpoint receives (P5-09) (2026-10-04)
 
@@ -5899,4 +5900,56 @@ Decision:
   keep null; nothing is backfilled.
 
 Not built: filters by the status before a change, by store or catalog, by amount or by payment
-method, filters for `order.received`, and filters for template or conversation statuses.
+method, filters for `order.received`, and filters for template (built by ADR-148) or conversation
+statuses.
+
+## ADR-148 Choosing the template statuses a webhook endpoint receives (P5-09) (2026-10-04)
+
+Context: since ADR-053 an endpoint that takes `template.status_changed` receives every status
+reported for every template: Meta's review (in review, approved, rejected), its later decisions
+(paused, disabled, flagged, in appeal, archived, locked, a limit exceeded) and deletions. Most
+receivers act on a few of them: a team that keeps its campaigns running wants pauses, rejections and
+disablements, and a publishing tool wants approvals. ADR-146 and ADR-147 built filters by status for
+campaigns and orders.
+
+Decision:
+
+- **A list of statuses per endpoint,** for `template.status_changed` only: null receives every
+  status, as before; a list holds 1 to 11 of the statuses the event reports (`pending`, `approved`,
+  `rejected`, `paused`, `disabled`, `in_appeal`, `flagged`, `archived`, `deleted`,
+  `limit_exceeded`, `locked`, 0025's trigger's list), in the order Templates lists them with repeats
+  merged. HyFib's own steps before Meta has a template (`draft`, `submitting`, `submit_failed`), a
+  deletion under way or refused (`pending_deletion`, `delete_failed`) and an unrecognised status
+  (`unknown`) are never sent, so the list cannot name them. It is chosen in Settings → Webhooks
+  under "Template status" (every status ticked to begin with; saving all of them ticked keeps none)
+  and shown on the endpoint as "Template statuses sent: …", with the names Templates uses, and
+  through the API as `templateStatuses` on `POST /webhook-endpoints` and
+  `PATCH /webhook-endpoints/{id}` and in every endpoint the API answers.
+- **Only with the event:** statuses given for an endpoint that does not receive
+  `template.status_changed` are refused (`templateStatuses`; 422 through the API). A change that
+  removes the event clears them, and a `PATCH` that leaves them out keeps them; Settings always
+  sends them. A check in the database holds the same rule (null, or 1 to 11 known statuses while
+  the event is among the endpoint's).
+- **Applied when the event is captured:** `app.capture_webhook_event` creates a
+  `template.status_changed` delivery only for the active endpoints whose list is null or holds the
+  status reported, and writes no event when none takes it, as for campaign and order statuses. The
+  capture is in the transaction that records the status, from 0025's trigger, whoever records it:
+  the submission worker with Meta's answer, a sync of Meta's listing (which Meta's template
+  webhooks request), a send Meta refused for the template's status, or a deletion (including the
+  return to the status Meta last reported when a deletion fails). A change of the list applies to
+  statuses captured after it; deliveries already created are still sent. Replays, test events and
+  the payload are unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `templateStatuses` when the endpoint has a list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API. The list names statuses only, never a template.
+- **The same control as campaign and order statuses** in Settings.
+- **Migration 0112:** `template_statuses text[]` on `app.webhook_endpoints` with the check,
+  validated at once (a company has at most 10 endpoints), an update grant on the column for the
+  runtime role (it inserts it with its table grant), and `app.capture_webhook_event` replaced with
+  the same signature (0111's, with the template condition), so its owner and grants stay. Existing
+  endpoints keep null; nothing is backfilled. An integration test holds the domain's list, the
+  trigger's and the check's to the same statuses.
+
+Not built: filters by template, category, language or WhatsApp account, by the status before a
+change or by Meta's reason, and filters for conversation statuses.

@@ -106,6 +106,7 @@ import {
   WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS,
   WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT,
   WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT,
+  WEBHOOK_TEMPLATE_STATUSES_NEED_THE_EVENT,
 } from '../webhooks/service';
 
 describe('API tokens', () => {
@@ -1327,6 +1328,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'headers',
       'messageStatuses',
       'orderStatuses',
+      'templateStatuses',
     ]);
     expect(update.additionalProperties).toBe(false);
     // Headers are given with their values, at most 5, and answered by name only (ADR-118).
@@ -1390,6 +1392,47 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(webhooks['order.status_changed']?.post?.description).toContain(
       'An endpoint receives every status unless it names the statuses it takes (its `orderStatuses`',
     );
+    // The template statuses an endpoint receives (ADR-148): a list, or null.
+    const templateStatuses = (answered.properties as Record<string, { anyOf?: unknown[] }>)
+      .templateStatuses;
+    expect(templateStatuses?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('templateStatuses');
+    expect(Object.keys(createBody.properties)).toContain('templateStatuses');
+    expect(webhooks['template.status_changed']?.post?.description).toContain(
+      'An endpoint receives every status unless it names the statuses it takes (its `templateStatuses`',
+    );
+  });
+
+  it('take template statuses only with template.status_changed, and a list of them alone is a change (ADR-148)', () => {
+    const base = { url: 'https://hooks.example.com/w360', events: ['template.status_changed'] };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...base,
+        templateStatuses: ['paused', 'rejected', 'paused'],
+      }).templateStatuses,
+    ).toEqual(['rejected', 'paused']);
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['message.status'],
+      templateStatuses: ['rejected'],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['templateStatuses', WEBHOOK_TEMPLATE_STATUSES_NEED_THE_EVENT],
+    ]);
+    for (const body of [
+      { ...base, templateStatuses: [] },
+      { ...base, templateStatuses: ['draft'] },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(apiUpdateWebhookEndpointSchema.parse({ templateStatuses: null })).toEqual({
+      templateStatuses: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ templateStatuses: ['disabled'] })).toEqual({
+      templateStatuses: ['disabled'],
+    });
   });
 
   it('take order statuses only with order.status_changed, and a list of them alone is a change (ADR-147)', () => {

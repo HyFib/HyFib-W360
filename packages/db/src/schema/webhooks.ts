@@ -48,6 +48,24 @@ export type WebhookCampaignStatus =
 export type WebhookOrderStatus =
   'confirmed' | 'awaiting_payment' | 'paid' | 'fulfilled' | 'cancelled';
 
+/**
+ * The statuses a `template.status_changed` event reports, which an endpoint can choose (ADR-148):
+ * Meta's review states and the deletion; HyFib's own steps before Meta has the template, a
+ * deletion under way or refused and an unrecognised status are not sent.
+ */
+export type WebhookTemplateStatus =
+  | 'pending'
+  | 'approved'
+  | 'rejected'
+  | 'paused'
+  | 'disabled'
+  | 'in_appeal'
+  | 'flagged'
+  | 'archived'
+  | 'deleted'
+  | 'limit_exceeded'
+  | 'locked';
+
 export const WEBHOOK_DELIVERY_STATES = ['pending', 'delivering', 'succeeded', 'failed'] as const;
 export type WebhookDeliveryState = (typeof WEBHOOK_DELIVERY_STATES)[number];
 
@@ -91,6 +109,11 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    * every status. Set only while `order.status_changed` is among its events.
    */
   orderStatuses: text('order_statuses').array().$type<WebhookOrderStatus[]>(),
+  /**
+   * The template statuses it takes as `template.status_changed` (ADR-148); null takes every status.
+   * Set only while `template.status_changed` is among its events.
+   */
+  templateStatuses: text('template_statuses').array().$type<WebhookTemplateStatus[]>(),
   state: text('state', { enum: ['active', 'disabled'] })
     .notNull()
     .default('active'),

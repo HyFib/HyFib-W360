@@ -9,6 +9,7 @@ import {
   WEBHOOK_LIMITS,
   WEBHOOK_ORDER_STATUS_LABELS,
   WEBHOOK_MESSAGE_STATUS_LABELS,
+  WEBHOOK_TEMPLATE_STATUS_LABELS,
   webhookHost,
   type WebhookEndpointView,
 } from '@w360/domain';
@@ -107,6 +108,14 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                       <p className="text-xs text-muted-foreground">
                         Message statuses sent:{' '}
                         {e.messageStatuses.map((s) => WEBHOOK_MESSAGE_STATUS_LABELS[s]).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.templateStatuses ? (
+                      <p className="text-xs text-muted-foreground">
+                        Template statuses sent:{' '}
+                        {e.templateStatuses
+                          .map((t) => WEBHOOK_TEMPLATE_STATUS_LABELS[t])
+                          .join(', ')}
                       </p>
                     ) : null}
                     {e.contactParts ? (

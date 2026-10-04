@@ -627,7 +627,10 @@ verification, app review, Embedded Signup configuration).
   endpoint takes `order.status_changed` only for the statuses an order reaches that it chooses,
   `confirmed`, `awaiting_payment`, `paid`, `fulfilled` and `cancelled`, in Settings or through the
   API, or every status as before; applied where events are captured, whoever changes the order).
-  Remaining: filters for other event types and on a message's or contact's values (such
+  **[Template status filters built, locally verified]** (ADR-148: an endpoint takes
+  `template.status_changed` only for the template statuses it chooses, the eleven the event
+  reports, in Settings or through the API, or every status as before; applied where events are
+  captured, whoever records the status). Remaining: filters for other event types and on a message's or contact's values (such
   as by campaign, template, tag or field key, or a run's trigger or outcome), which tags were added
   or removed, other authentication (OAuth client credentials, headers
   computed per delivery), mutual TLS, fixed egress addresses, delivery counts in campaign events,

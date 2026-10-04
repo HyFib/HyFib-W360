@@ -2097,6 +2097,19 @@ does not receive. To take more, tick the statuses under "Order status" on the en
 ticked takes every status, as a new endpoint does), or `PATCH /webhook-endpoints/{id}` with
 `orderStatuses` (null for every status). Removing the `order.status_changed` event clears the list.
 
+**A receiver gets fewer template.status_changed events than expected (ADR-148).** An endpoint can
+take only the template statuses it chose; the endpoints list shows them ("Template statuses sent:
+…"), and the API answers `templateStatuses` (null takes every status). A status it did not choose is
+never queued for it, and when no endpoint of the company takes a status, no event is recorded at
+all, so there is nothing to replay: statuses reported before an edit are not sent afterwards. A
+template's review starts as "In review" (`pending`) and then reaches `approved` or `rejected`; a
+deletion that fails returns the template to the status Meta last reported, which is sent again to
+the endpoints that take that status. HyFib's own steps (drafts, submissions, a submission that
+failed, a deletion under way or refused) are never sent. To take more, tick the statuses under
+"Template status" on the endpoint's page (all ticked takes every status, as a new endpoint does), or
+`PATCH /webhook-endpoints/{id}` with `templateStatuses` (null for every status). Removing the
+`template.status_changed` event clears the list.
+
 **An endpoint was turned off automatically.** It failed every attempt for 72 hours; its waiting
 deliveries were marked failed (`endpoint_disabled`), owners and administrators got the
 "Webhook endpoint turned off" email, and the audit log has `webhook.endpoint_auto_disabled`. Fix the

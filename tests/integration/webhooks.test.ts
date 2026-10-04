@@ -38,6 +38,7 @@ import {
   templateStatusPayloadSchema,
   verifyWebhookSignature,
   WEBHOOK_LIMITS,
+  WEBHOOK_TEMPLATE_STATUSES,
   WEBHOOK_USER_AGENT,
   webhookHeadersAad,
   webhookSecretAad,
@@ -1016,6 +1017,214 @@ describe('order status filters (ADR-147)', () => {
     // The company role changes the list only through its column grant.
     const [grant] = await fx.query<{ can_update: boolean }>(
       `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'order_statuses',
+                'UPDATE') AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+});
+
+describe('template status filters (ADR-148)', () => {
+  /** A utility template HyFib submits and Meta's stand-in takes for review: `pending`. */
+  async function submitted(c: Company, owner: TenantContext) {
+    templateCounter += 1;
+    const name = `wh_flt_${templateCounter}_${Date.now().toString(36)}`;
+    const templateDeps = { db: fx.dbs.app, jobs: fx.jobs(), signer: fx.signer, clock: systemClock };
+    const templates = createTemplatesService(templateDeps);
+    const { id } = await templates.createDraft(owner, {
+      whatsappAccountId: c.whatsappAccountId,
+      name,
+      language: 'en',
+      definition: {
+        category: 'UTILITY',
+        header: { type: 'none' },
+        body: { text: 'Your order {{1}} is ready.', examples: ['A-1'] },
+        footer: null,
+        buttons: [],
+      },
+    });
+    await templates.submitTemplate(owner, id);
+    const graphDeps = { ...templateDeps, keyring: fx.keyring, graph: fx.graph };
+    const scope = authorizedTenantScope(c.tenant.id, null);
+    expect(await processTemplateSubmit(graphDeps, scope, id)).toBe('done');
+    const atMeta = fx.standIn.state.templates.get(c.wabaId)?.find((x) => x.name === name);
+    if (!atMeta) throw new Error('template not at the stand-in');
+    /** Meta's review gives the template `status`, which the next sync reads. */
+    const review = async (status: string) => {
+      atMeta.status = status;
+      await syncTemplates(graphDeps, scope, c.whatsappAccountId);
+    };
+    return { id, review };
+  }
+
+  const statusesOf = (path: string) =>
+    requestsTo(path)
+      .filter((r) => r.headers['w360-event-type'] === 'template.status_changed')
+      .map((r) => templateStatusPayloadSchema.parse(JSON.parse(r.body)).data.template.status);
+
+  it('send an endpoint only the statuses it takes, another every status, and capture no event nobody takes', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const add = async (
+      templateStatuses: string[] | null,
+      eventTypes: WebhookEventType[] = ['template.status_changed'],
+    ) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes,
+        templateStatuses,
+      });
+      return { ...created, path };
+    };
+    const templateEvents = async () =>
+      (await eventsOf(c)).filter((e) => e.type === 'template.status_changed').map((e) => e.status);
+
+    // Only approvals: Meta's review is not captured at all until it approves the template.
+    const approvals = await add(['approved'], ['template.status_changed', 'message.received']);
+    expect((await webhooks().list(owner))[0]?.templateStatuses).toEqual(['approved']);
+    const [created] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(created?.metadata).toMatchObject({ templateStatuses: ['approved'] });
+    const shipped = await submitted(c, owner);
+    expect(await templateEvents()).toEqual([]);
+    await shipped.review('APPROVED');
+    expect(await templateEvents()).toEqual(['approved']);
+    // Its other events are not filtered: a customer's message is captured for it.
+    await inbound(c, waId(), 'Hello');
+    expect((await eventsOf(c)).map((e) => e.type)).toEqual([
+      'template.status_changed',
+      'message.received',
+    ]);
+
+    // Then an endpoint taking every status and one taking rejections and pauses.
+    const everything = await add(null);
+    const problems = await add(['paused', 'rejected']);
+    expect((await webhooks().list(owner)).map((e) => [e.id, e.templateStatuses])).toEqual(
+      expect.arrayContaining([
+        [everything.id, null],
+        [problems.id, ['rejected', 'paused']],
+      ]),
+    );
+    const refused = await submitted(c, owner);
+    await refused.review('REJECTED');
+    await shipped.review('PAUSED');
+    expect(await templateEvents()).toEqual(['approved', 'pending', 'rejected', 'paused']);
+
+    expect(await deliverDue(c)).toMatchObject({ attempted: 7, succeeded: 7 });
+    expect(
+      requestsTo(approvals.path)
+        .map((r) => String(r.headers['w360-event-type']))
+        .sort(),
+    ).toEqual(['message.received', 'template.status_changed']);
+    expect(statusesOf(approvals.path)).toEqual(['approved']);
+    expect(statusesOf(everything.path).sort()).toEqual(['paused', 'pending', 'rejected']);
+    expect(statusesOf(problems.path).sort()).toEqual(['paused', 'rejected']);
+  });
+
+  it('can name every status the capture trigger sends, and only those', async () => {
+    const quoted = (definition: string | undefined) =>
+      [...(definition ?? '').matchAll(/'([a-z_]+)'::text/g)].map((m) => m[1]);
+    const [trigger] = await fx.query<{ definition: string }>(
+      `SELECT pg_get_triggerdef(oid) AS definition FROM pg_trigger
+        WHERE tgname = 'template_status_events_webhook'`,
+    );
+    expect(quoted(trigger?.definition)).toEqual([...WEBHOOK_TEMPLATE_STATUSES]);
+    const [check] = await fx.query<{ definition: string }>(
+      `SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint
+        WHERE conname = 'webhook_endpoints_template_statuses'`,
+    );
+    expect(quoted(check?.definition)).toEqual([...WEBHOOK_TEMPLATE_STATUSES]);
+  });
+
+  it("are refused without template.status_changed, unknown, one of HyFib's own steps or empty, kept by a change that leaves them out and cleared with the event; the database keeps them to that event", async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const url = 'https://hooks.example.com/in';
+    const refused = (eventTypes: string[], templateStatuses: unknown, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, templateStatuses }),
+        'validation_failed',
+        message,
+      );
+    await refused(
+      ['message.status'],
+      ['rejected'],
+      /only for an endpoint that receives Template status/,
+    );
+    await refused(['template.status_changed'], [], /at least one template status/);
+    await refused(['template.status_changed'], ['draft'], /from the list/);
+    await refused(['template.status_changed'], ['pending_deletion'], /from the list/);
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['template.status_changed', 'consent.changed'],
+      templateStatuses: ['paused', 'rejected', 'paused'],
+    });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toMatchObject({ templateStatuses: ['rejected', 'paused'] });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['template.status_changed', 'consent.changed'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.templateStatuses;
+    expect(await current()).toEqual(['rejected', 'paused']);
+    await change({ description: 'kept' });
+    expect(await current()).toEqual(['rejected', 'paused']);
+    await change({ templateStatuses: ['disabled'] });
+    expect(await current()).toEqual(['disabled']);
+    const updates = await fx.query<{ metadata: { templateStatuses?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(updates.map((u) => u.metadata.templateStatuses)).toEqual([
+      ['rejected', 'paused'],
+      ['disabled'],
+    ]);
+    await change({ templateStatuses: null });
+    expect(await current()).toBeNull();
+    await change({ templateStatuses: ['locked'] });
+    // The database refuses an empty list, more than eleven entries, an unknown status, one of
+    // HyFib's own steps or a missing one from an endpoint taking the event…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET template_statuses = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    for (const bad of [
+      `'{}'`,
+      `'{${Array(12).fill('approved').join(',')}}'`,
+      `'{approved,draft}'`,
+      `'{approved,pending_deletion}'`,
+      `'{approved,unknown}'`,
+      `ARRAY['approved', NULL]::text[]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(/webhook_endpoints_template_statuses/);
+    }
+    await change({ eventTypes: ['consent.changed'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['consent.changed'], templateStatuses: ['rejected'] }),
+      'validation_failed',
+      /only for an endpoint that receives Template status/,
+    );
+    // …and any list for an endpoint that does not take it.
+    await expect(setInDatabase(`'{approved}'`)).rejects.toThrow(
+      /webhook_endpoints_template_statuses/,
+    );
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'template_statuses',
                 'UPDATE') AS can_update`,
     );
     expect(grant?.can_update).toBe(true);

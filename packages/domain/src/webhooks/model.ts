@@ -4,6 +4,7 @@ import type {
   WebhookEventType,
   WebhookMessageStatus,
   WebhookOrderStatus,
+  WebhookTemplateStatus,
 } from '@w360/db';
 
 export type {
@@ -12,6 +13,7 @@ export type {
   WebhookEventType,
   WebhookMessageStatus,
   WebhookOrderStatus,
+  WebhookTemplateStatus,
 } from '@w360/db';
 
 /**
@@ -203,6 +205,39 @@ export const WEBHOOK_ORDER_STATUS_LABELS: Record<WebhookOrderStatus, string> = {
   paid: 'Paid',
   fulfilled: 'Fulfilled',
   cancelled: 'Cancelled',
+};
+
+/**
+ * The statuses a `template.status_changed` event reports, which an endpoint can choose (ADR-148), in
+ * the order Templates lists them: Meta's review states, then the deletion and Meta's limits.
+ */
+export const WEBHOOK_TEMPLATE_STATUSES = [
+  'pending',
+  'approved',
+  'rejected',
+  'paused',
+  'disabled',
+  'in_appeal',
+  'flagged',
+  'archived',
+  'deleted',
+  'limit_exceeded',
+  'locked',
+] as const satisfies readonly WebhookTemplateStatus[];
+
+/** How Settings names each template status an endpoint can choose (ADR-148), as Templates does. */
+export const WEBHOOK_TEMPLATE_STATUS_LABELS: Record<WebhookTemplateStatus, string> = {
+  pending: 'In review',
+  approved: 'Approved',
+  rejected: 'Rejected',
+  paused: 'Paused by Meta',
+  disabled: 'Disabled by Meta',
+  in_appeal: 'In appeal',
+  flagged: 'Flagged',
+  archived: 'Archived',
+  deleted: 'Deleted',
+  limit_exceeded: 'Limit exceeded',
+  locked: 'Locked',
 };
 
 export const WEBHOOK_LIMITS = {

@@ -833,3 +833,158 @@ test('campaign events reach an endpoint: a member starts a campaign, and the run
   await page.reload();
   await expect(page.getByText('Completed', { exact: true }).first()).toBeVisible();
 });
+
+/** A delivered template event, as far as this test reads it. */
+interface TemplateEventBody {
+  type: string;
+  createdAt: string;
+  data: {
+    template: {
+      id: string;
+      name: string | null;
+      language: string | null;
+      category: string | null;
+      status: string;
+      reason: string | null;
+    };
+  };
+}
+
+test('template events reach an endpoint: a member submits a template and Meta reviews and approves it; an endpoint can take chosen statuses only', async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(180_000);
+  const standIn = `http://127.0.0.1:${process.env.E2E_GRAPH_PORT}`;
+  const email = uniqueEmail('hooktpl');
+  const slug = `hooktpl-${Date.now().toString(36)}`;
+  const path = `/templates/${slug}`;
+  const forUs = () =>
+    received
+      .filter((r) => r.path === path)
+      .map((r) => ({ ...r, json: JSON.parse(r.body) as TemplateEventBody }))
+      // Deliveries are not ordered; the status reported last has the latest createdAt.
+      .sort((a, b) => a.json.createdAt.localeCompare(b.json.createdAt));
+  await signUpAndVerify(page, { name: 'Tara Templates', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('Template Hooks');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+  const { wabaId } = await connectTestChannel({ ownerEmail: email, slug });
+
+  // An endpoint for template events.
+  await page.goto(`/c/${slug}/settings/webhooks`);
+  await page.getByLabel('Endpoint URL').fill(`http://${HOST}:${port}${path}`);
+  await page.getByRole('checkbox', { name: /Template status/ }).check();
+  await page.getByRole('button', { name: 'Add endpoint' }).click();
+  const secretField = page.getByLabel('Signing secret');
+  await expect(secretField).toBeVisible();
+  const secret = await secretField.inputValue();
+  await page.getByRole('button', { name: 'I have stored the secret' }).click();
+
+  // A second endpoint takes only approvals (ADR-148).
+  const approvedPath = `${path}/approved`;
+  const forApproved = () =>
+    received
+      .filter((r) => r.path === approvedPath)
+      .map((r) => JSON.parse(r.body) as TemplateEventBody);
+  await page.getByLabel('Endpoint URL').fill(`http://${HOST}:${port}${approvedPath}`);
+  await page.getByRole('checkbox', { name: /Template status/ }).check();
+  const statusBox = (name: string) => page.getByRole('checkbox', { name, exact: true });
+  for (const name of [
+    'In review (pending)',
+    'Approved (approved)',
+    'Rejected (rejected)',
+    'Paused by Meta (paused)',
+    'Disabled by Meta (disabled)',
+    'In appeal (in_appeal)',
+    'Flagged (flagged)',
+    'Archived (archived)',
+    'Deleted (deleted)',
+    'Limit exceeded (limit_exceeded)',
+    'Locked (locked)',
+  ]) {
+    await statusBox(name).uncheck();
+  }
+  await statusBox('Approved (approved)').check();
+  await page.getByRole('button', { name: 'Add endpoint' }).click();
+  await expect(page.getByLabel('Signing secret')).toBeVisible();
+  await page.getByRole('button', { name: 'I have stored the secret' }).click();
+  // The form starts afresh: the event ticked again takes every status.
+  await page.getByRole('checkbox', { name: /Template status/ }).check();
+  await expect(statusBox('In review (pending)')).toBeChecked();
+  await page.reload();
+  // Only the second endpoint names statuses: every status ticked keeps none.
+  await expect(page.getByText(/^Template statuses sent:/)).toHaveText([
+    'Template statuses sent: Approved',
+  ]);
+  // The endpoint's own page shows the statuses it takes.
+  await page
+    .getByRole('list', { name: 'Endpoints' })
+    .getByRole('listitem')
+    .filter({ hasText: 'Template statuses sent: Approved' })
+    .getByRole('link', { name: /Deliveries and settings/ })
+    .click();
+  await expect(page.getByRole('heading', { name: /^Deliveries to/ })).toBeVisible();
+  await expect(statusBox('Approved (approved)')).toBeChecked();
+  await expect(statusBox('In review (pending)')).not.toBeChecked();
+
+  // A member submits a template: HyFib's own steps send nothing, Meta's review does.
+  await page.goto(`/c/${slug}/templates/new`);
+  await page.getByLabel('Name').fill('order_ready');
+  await page.getByLabel('Language code').fill('en');
+  await page.getByLabel('Category').selectOption('UTILITY');
+  await page.getByLabel('Body').fill('Hello {{1}}, your order is ready.');
+  await page.getByLabel('{{1}}').fill('Asha');
+  await page.getByRole('button', { name: 'Save draft' }).click();
+  await expect(page.getByRole('heading', { name: 'order_ready', level: 1 })).toBeVisible();
+  await page.getByRole('button', { name: 'Submit to Meta' }).click();
+  await page.getByRole('button', { name: 'Submit for review' }).click();
+  await expect(page.getByRole('button', { name: /^Submit/ })).toHaveCount(0);
+  await expect(async () => {
+    await page.reload();
+    await expect(page.getByText('In review', { exact: true }).first()).toBeVisible({
+      timeout: 1_000,
+    });
+  }).toPass({ timeout: 30_000 });
+  await expect(async () => expect(forUs()).toHaveLength(1)).toPass({ timeout: 30_000 });
+
+  // Meta approves; a refresh reads it.
+  const approved = await request.post(`${standIn}/__stand-in/template-status`, {
+    data: { wabaId, name: 'order_ready', status: 'APPROVED' },
+  });
+  expect(approved.status()).toBe(200);
+  await page.goto(`/c/${slug}/templates`);
+  await page.getByRole('button', { name: 'Refresh from Meta' }).click();
+  await expect(page.getByText(/Refresh requested/)).toBeVisible();
+  await expect(async () => {
+    await page.reload();
+    await expect(page.getByText('Approved', { exact: true }).first()).toBeVisible({
+      timeout: 1_000,
+    });
+  }).toPass({ timeout: 30_000 });
+
+  await expect(async () => expect(forUs()).toHaveLength(2)).toPass({ timeout: 30_000 });
+  for (const event of forUs()) {
+    expect(signatureValid(event.headers, event.body, secret)).toBe(true);
+    expect(event.headers['w360-event-type']).toBe('template.status_changed');
+  }
+  const templateId = forUs()[0]!.json.data.template.id;
+  expect(forUs().map((e) => [e.json.data.template.id, e.json.data.template.status])).toEqual([
+    [templateId, 'pending'],
+    [templateId, 'approved'],
+  ]);
+  expect(forUs()[1]!.json.data.template).toEqual({
+    id: templateId,
+    name: 'order_ready',
+    language: 'en',
+    category: 'utility',
+    status: 'approved',
+    reason: null,
+  });
+  // The second endpoint heard only of the approval.
+  await expect(async () => expect(forApproved()).toHaveLength(1)).toPass({ timeout: 30_000 });
+  expect(forApproved().map((e) => [e.data.template.id, e.data.template.status])).toEqual([
+    [templateId, 'approved'],
+  ]);
+});
