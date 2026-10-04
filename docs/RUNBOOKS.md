@@ -2326,6 +2326,20 @@ quarantine entries (section 4). Most dead letters need no action once the cause 
 the minute sweeps signal their work again or end it for its company (ADR-111); retry those of
 `template.submit` if needed (ADR-108).
 
+**Integration failure alerts (ADR-139).** Every platform administrator is emailed "N company
+integrations are failing" when the Integrations page lists failures staff were not emailed about:
+counts by kind (such as "WhatsApp number, needs reconnecting 2"), never a company or an error. One
+email covers everything new since the last one, at most every 15 minutes, and Current failures says
+when the last one went out. Each failure is emailed once while it lasts, and again if it changes
+state; one that has not been listed for an hour is forgotten, so it is emailed again if it fails
+later. The worker logs `integration failure alert emailed to platform staff`; `company integrations
+are failing but there is no platform administrator to email` means nothing is marked until there is
+one. On the email: open Current failures, look for a pattern across companies (one kind failing at
+many companies points to HyFib or the provider: the worker's logs, the provider's status page) and
+for HyFib-side kinds (accounts not checked for 26 hours, webhooks not subscribed: section 6). Most
+failures are the company's to fix, and the company is told of them; HyFib staff contact it when it
+does not act.
+
 **Keys (ADR-134).** The configured encryption key ids, the primary first, and how many stored values
 each key seals, by kind (counts only). While another key is configured the worker seals the values
 it sealed again with the primary key, up to 500 a minute, and logs `sealed values re-encrypted under
@@ -2349,6 +2363,14 @@ whatever the configuration, so it stays counted under the key it names; cancel i
 should not wait for that. After 1,000 such jobs a worker stops signing jobs again until it restarts
 and logs an error naming `W360_JOB_SIGNING_KEY_PREVIOUS`: check that the previous key's value is
 right. "Jobs that will be refused" name a key that is not configured.
+
+**Migration 0106 failed.** It creates `ops.integration_failures` and `ops.integration_alerts`,
+recreates `ops.platform_ops_integration_failures` on the shared list, and adds the alert's two
+functions and its row in `ops.platform_alerts`, in one transaction; a failure rolls it back
+(usually the bootstrap roles: fix them and run the migrations again). Workers of this release need
+it before they start, or their minute sweep fails at the alert, after the rest of its work; workers
+of the previous release send no integration alert. The first alert after it tells every failure
+listed then.
 
 **Migration 0105 failed.** It adds the webhook subscription columns to `app.whatsapp_accounts` and
 recreates `ops.whatsapp_access_checks_due` and `ops.platform_ops_integration_failures`, in one

@@ -1174,6 +1174,13 @@ message text, contact details, payloads, email addresses, secrets or full URLs:
   the worker's role; only the definer role writes `ops.queue_waits`, which the worker and platform
   roles read (queue names, counts and times). The email to every platform administrator names
   queues, counts, waits and limits only, at most every 15 minutes.
+- Integration failure alerts (ADR-139): the worker emails every platform administrator counts of
+  companies' failing integrations by kind, never a company, label, host, error or id.
+  `ops.integration_failures` (the console's list) is callable only by its owner, through the
+  console's function (platform administrators only) and the alert's two functions
+  (`ops.integration_alerts_due`, `ops.mark_integration_alert`), which are SECURITY DEFINER and
+  executable only by the worker's role; only the definer role reads and writes
+  `ops.integration_alerts`. Each failure is emailed once, at most one alert every 15 minutes.
 
 Company export and deletion (Settings → Company data, ADR-055):
 

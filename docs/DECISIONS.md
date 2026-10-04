@@ -5492,3 +5492,46 @@ token valid is subscribed again until it disconnects the numbers in HyFib; the e
 
 Not built: checking which webhook fields the app receives for an account; Meta's deauthorization
 and uninstall callbacks (unconfirmed, M-146); restoring callback overrides (HyFib uses none).
+
+## ADR-139 Alerts for companies' failing integrations (P5-10) (2026-10-04)
+
+Context: the operations console's Integrations page lists the companies' integrations that fail
+now: WhatsApp numbers and accounts that need reconnecting or failed, accounts whose access or
+webhook subscription could not be checked for 26 hours, webhooks HyFib's app is no longer
+subscribed to, stores that failed or report sync or webhook errors, Razorpay accounts that failed,
+catalog and Flow syncs that failed, and webhook endpoints failing or turned off (ADR-054, ADR-137,
+ADR-138). Staff saw them only when they opened the page. Companies are told of most of them, but
+some point to HyFib's side (an access check failing for a day, a subscription that cannot be
+restored, a store sync failing at many companies at once), and only staff see the pattern across
+companies. Work that failed for good and late queues already reach staff by email (ADR-091,
+ADR-096).
+
+Decision:
+
+- **One list:** the console and the alert read the same rule, `ops.integration_failures()`
+  (migration 0106), which only its owner may call; the console's
+  `ops.platform_ops_integration_failures` keeps its platform administrator check and reads it.
+- **What is told:** each failure once, by its integration (source and subject) and state, recorded
+  in `ops.integration_alerts`. A failure stays told while it is listed; a new state of the same
+  integration (a failing endpoint turned off, a store whose sync error became a failure) is a new
+  failure. Once the console has not listed a failure for an hour its mark is forgotten, so a later
+  failure of the same integration is told again, and one that comes and goes within the hour is not
+  told at every return.
+- **Who and how often:** every platform administrator (ADR-091's recipients), in one email at most
+  every 15 minutes (`ops.platform_alerts` kind `integrations`, its row locked so that two sweeps at
+  once send one alert), marking at most 1,000 failures per alert, oldest first. The minute messaging
+  sweep runs it after the other two alerts. Nothing is marked while there is no platform
+  administrator, and the worker warns.
+- **What:** one `platform.notice` email with how many failures it tells, by the console's kinds
+  ("Webhook endpoint, failing 3; WhatsApp number, needs reconnecting 1"), six kinds named at most,
+  and a link to Operations → Integrations. No company, label, host, error or id: those stay on the
+  console, behind platform sign-in and two-factor authentication. The Integrations page says when
+  the last integration alert went out.
+- **Already failing before this release:** told by the first alert after the deploy, since staff
+  were never told.
+
+What follows: staff hear of a company's failing integration within about 15 minutes of the console
+listing it, once. The check reads the console's list every minute (twice when something waits),
+which suits the test envelope; paging and precomputed rollups come with growth (ADR-054).
+
+Not built: alerts by kind or by company, choosing which kinds to be told of, digests, and paging.

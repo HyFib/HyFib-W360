@@ -45,7 +45,15 @@ export default async function OpsIntegrationsPage() {
           <CardDescription>
             Numbers, WhatsApp accounts, stores, payment accounts, catalog and Flow syncs, and
             webhook endpoints that are failing now. Errors are the provider&apos;s answer as HyFib
-            stored it; only the host of a URL is shown.
+            stored it; only the host of a URL is shown. Platform administrators are emailed about
+            each failure once, with counts only, at most every 15 minutes (ADR-139);{' '}
+            {o.lastIntegrationAlertAt ? (
+              <>
+                the last email went out <Utc at={o.lastIntegrationAlertAt} />.
+              </>
+            ) : (
+              'none has gone out yet.'
+            )}
           </CardDescription>
         </CardHeader>
         <CardContent>

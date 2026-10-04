@@ -1425,11 +1425,17 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   15 minutes, `ops.platform_alerts` kind `queues`; fresh checks only) in the transaction that queues
   one `platform.notice` email to every platform administrator. The Queues tab and the overview read
   `ops.queue_waits` as the platform role.
+- **Integration failure alerts** (ADR-139, migration 0106, `platform/integration-alerts.ts`): last
+  in the minute messaging sweep, `ops.integration_alerts_due` keeps the marks of failures the
+  console still lists (`ops.integration_failures`, the console's own rule), forgets those not listed
+  for an hour and counts the failures not yet told; `ops.mark_integration_alert` marks them (at most
+  every 15 minutes, `ops.platform_alerts` kind `integrations`, 1,000 at a time) in the transaction
+  that queues one `platform.notice` email to every platform administrator, with counts by kind only.
 - **Web:** `/platform/ops` (Overview, Onboarding, Integrations, Queues, Signals, Usage over 7, 30 or
   90 days) and a health card on each company's platform page. Every page re-checks the platform
   actor. The functions read every company on each view, which suits the test envelope; paging and
   precomputed rollups come with growth.
-- **Not built yet:** other alerts (a company's failing integrations) and other channels, trends,
+- **Not built yet:** other alert channels, trends,
   quality updates from Meta's quality webhook, API request counts, exports, sweeps for the work of
   `channel.onboard`, `commerce.account` and `template.delete`, retrying several dead letters at
   once, and acknowledging issues.

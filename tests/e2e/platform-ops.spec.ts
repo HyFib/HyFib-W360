@@ -65,6 +65,10 @@ test('staff read the operations console and repair a quarantined webhook event',
   await expect(
     page.getByText(/Platform administrators are emailed about each receipt that failed all/),
   ).toContainText(/the last email went out|none has gone out yet/);
+  // And about each failing integration of a company, once (ADR-139).
+  await expect(
+    page.getByText(/Platform administrators are emailed about each failure once/),
+  ).toContainText(/the last email went out|none has gone out yet/);
   const quarantine = page.getByRole('table', { name: 'Quarantined webhook events' });
   const row = quarantine.getByRole('row').filter({ hasText: wabaId });
   // The worker quarantines the receipt after the webhook is answered; the page shows what was

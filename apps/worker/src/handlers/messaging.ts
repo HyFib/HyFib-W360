@@ -4,6 +4,7 @@ import { toError } from '@w360/core';
 import { authorizedTenantScope } from '@w360/db';
 import {
   alertFailures,
+  alertIntegrationFailures,
   alertLateQueues,
   applyMessagingRetention,
   authorizeJob,
@@ -395,6 +396,25 @@ export function messagingSweepHandler(rt: WorkerRuntime) {
       rt.logger.warn(
         { queues: lateQueues.unsent },
         'job queues are late but there is no platform administrator to email',
+      );
+    }
+    // Companies' failing integrations as Operations → Integrations lists them: platform staff hear
+    // of each failure once, at most every 15 minutes (ADR-139).
+    const integrations = await alertIntegrationFailures({
+      db: rt.db,
+      outbox: rt.notices.outbox,
+      appBaseUrl: rt.notices.appBaseUrl,
+    });
+    if (integrations.alerted > 0) {
+      rt.logger.info(
+        { failures: integrations.alerted, recipients: integrations.recipients },
+        'integration failure alert emailed to platform staff',
+      );
+    }
+    if (integrations.unsent > 0) {
+      rt.logger.warn(
+        { failures: integrations.unsent },
+        'company integrations are failing but there is no platform administrator to email',
       );
     }
   };

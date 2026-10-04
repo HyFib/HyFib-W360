@@ -632,8 +632,11 @@ verification, app review, Embedded Signup configuration).
   `channel.onboard`, `commerce.account` and `template.delete` dead letters in the company's scope,
   unless a job for the same work waits or runs again: the number's setup fails with its step, the
   keys' check fails, a deletion goes back to Meta's last status; the template sync keeps a deletion
-  while its job tries; deletions and key checks retry longer). Remaining: other alerts (companies'
-  failing integrations) and channels, trends, Meta's quality webhook, API request counts, exports,
+  while its job tries; deletions and key checks retry longer). **[Alerts for companies' failing
+  integrations built, locally verified]** (ADR-139: every platform administrator emailed once about
+  each failure the Integrations page lists, by kind and with counts only, at most every 15 minutes,
+  from the console's own list; a failure not listed for an hour is forgotten). Remaining: other
+  alert channels, trends, Meta's quality webhook (unconfirmed), API request counts, exports,
   acknowledging issues, paging and rollups for many companies.
 - **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**
   (ADR-055): Settings → Company data for owners. A streamed, gzip-compressed JSON Lines export of

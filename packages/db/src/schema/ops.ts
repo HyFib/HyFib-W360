@@ -130,7 +130,7 @@ export const deadLetters = opsSchema.table('dead_letters', {
  * every 15 minutes.
  */
 export const platformAlerts = opsSchema.table('platform_alerts', {
-  kind: text('kind', { enum: ['failures', 'queues'] }).primaryKey(),
+  kind: text('kind', { enum: ['failures', 'queues', 'integrations'] }).primaryKey(),
   lastSentAt: tz('last_sent_at'),
 });
 

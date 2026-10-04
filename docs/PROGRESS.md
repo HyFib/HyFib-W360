@@ -1,5 +1,65 @@
 # Progress
 
+## 2026-10-04 — Phase 5: alerts for companies' failing integrations (P5-10, ADR-139)
+
+Status: **Implemented and locally verified (test data only).** Operations → Integrations lists the
+companies' integrations that fail now, but platform staff saw them only when they opened the page;
+work that failed for good and late queues already reached them by email (ADR-091, ADR-096).
+
+### Completed
+
+- **Design (ADR-139):** every platform administrator is emailed once about each failing integration
+  of a company that Operations → Integrations lists, by its integration and state, with counts by
+  kind only, at most every 15 minutes; a failure the console has not listed for an hour is
+  forgotten, so a later failure is told again and one that comes back within the hour is not.
+- **Database** (migration 0106): `ops.integration_failures`, the console's list as one rule for the
+  console and the alert (only its owner may call it); `ops.platform_ops_integration_failures`
+  recreated on it; `ops.integration_alerts` (what staff were emailed about, by source, subject and
+  state, and when it was last listed); `ops.integration_alerts_due` (keeps and forgets marks, counts
+  what waits) and `ops.mark_integration_alert` (marks at most 1,000, at most every 15 minutes), for
+  the worker's role only; a row in `ops.platform_alerts`.
+- **Domain and worker** (`platform/integration-alerts.ts`): the email (the console's labels, six
+  kinds named at most) and the sweep's alert, run last in the minute messaging sweep.
+- **Web:** Current failures on the Integrations tab says that staff are emailed and when the last
+  integration alert went out.
+- **Tests:**
+  - Unit (5 new): the email's kinds, order, plurals and length with every kind the console has;
+    nothing marked without an administrator; nothing read when nothing waits.
+  - Integration (5 new, 1 extended): every listed failure of a company told once to every
+    administrator with counts only, the console showing when; the 15-minute gap and two sweeps at
+    once; a failure forgotten an hour after it stops being listed and told again, not when it comes
+    back within the hour, and kept while listed; a new state told again; the functions and the table
+    kept from the runtime and platform roles (and the isolation suite's function privileges,
+    extended).
+  - E2E (1 extended): the Integrations tab says that staff are emailed about failing integrations.
+- **Docs:** ADR-139; SECURITY; THREAT-MODEL T151; RUNBOOKS (integration failure alerts, migration
+  0106); ARCHITECTURE; BACKLOG P5-10; feature matrix H-034.
+- **Mutation checks:** 15 deliberate regressions tried, 15 caught: 8 against migration 0106
+  (keeping, forgetting and counting marks, the 15-minute gap, the alert's time, the 1,000 limit, the
+  state marked, the shared list) and 1 against the console's read through integration tests, and 6
+  against the email and the sweep's steps through unit tests.
+
+### Test commands and results (local, 2026-10-04)
+
+| Command                                                                                     | Result                                                                                                                                                                                    |
+| ------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`                                          | clean                                                                                                                                                                                     |
+| `pnpm test` (unit)                                                                          | 664 passed (73 files; 5 new)                                                                                                                                                              |
+| `pnpm test:integration` on PostgreSQL 18.6                                                  | 825 passed (56 files; 5 new, 1 extended)                                                                                                                                                  |
+| `pnpm test:integration` on PostgreSQL 17.11                                                 | 825 passed (56 files)                                                                                                                                                                     |
+| `pnpm db:migrate` on the e2e database at 0105                                               | 0106 applied                                                                                                                                                                              |
+| `pnpm build`                                                                                | passed                                                                                                                                                                                    |
+| e2e: platform-ops, dead-letter-retry, whatsapp-access, webhooks (chromium, mobile-chromium) | 24 passed: 10 in the first run, where webhooks' 14 failed because this environment no longer mapped `api.w360-e2e.test` to 127.0.0.1 (CI's hosts entry); all 14 passed once it was mapped |
+| The worker's alert, by hand (local stack, Mailpit)                                          | the first sweep emailed "18 company integrations are failing" to the 5 platform administrators, with counts by kind only, and marked the 18 failures                                      |
+| Mutation checks                                                                             | 15 tried, 15 caught (8 against migration 0106 and 1 against the console's read through integration tests; 6 against the email and the sweep's steps through unit tests)                   |
+| gitleaks 8.30.1 on the staged changes                                                       | no leaks found                                                                                                                                                                            |
+
+### Known gaps
+
+- Alerts by kind or by company, choosing which kinds to be told of, digests and paging.
+- The check reads the console's whole list every minute (twice when something waits), which suits
+  the test envelope; paging and precomputed rollups come with growth.
+
 ## 2026-10-04 — Phase 5: checking and restoring each account's webhook subscription (P2-12, ADR-138)
 
 Status: **Implemented and locally verified against the Graph stand-in (test data only).** The daily

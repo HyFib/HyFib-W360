@@ -581,15 +581,18 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
           .where(gte(emailOutbox.createdAt, since7d))
           .groupBy(emailOutbox.kind)
           .orderBy(emailOutbox.kind);
-        // When platform staff were last emailed about work that failed for good (ADR-091).
-        const [alerts] = await tx
-          .select({ lastSentAt: platformAlerts.lastSentAt })
+        // When platform staff were last emailed about work that failed for good (ADR-091) and about
+        // companies' failing integrations (ADR-139).
+        const alerts = await tx
+          .select({ kind: platformAlerts.kind, lastSentAt: platformAlerts.lastSentAt })
           .from(platformAlerts)
-          .where(eq(platformAlerts.kind, 'failures'));
+          .where(inArray(platformAlerts.kind, ['failures', 'integrations']));
+        const lastSent = (kind: string) => alerts.find((a) => a.kind === kind)?.lastSentAt ?? null;
         return {
           failures,
           receipts,
-          lastFailureAlertAt: alerts?.lastSentAt ?? null,
+          lastFailureAlertAt: lastSent('failures'),
+          lastIntegrationAlertAt: lastSent('integrations'),
           quarantine: quarantine.map((q) => ({
             ...q,
             externalIds: quarantineExternalIds(q.externalIds),
