@@ -123,6 +123,7 @@ async function addEndpoint(
   automationIds: string[] | null = null,
   campaignStatuses: string[] | null = null,
   orderStatuses: string[] | null = null,
+  conversationStatuses: string[] | null = null,
 ) {
   const path = `/ok/${randomBytes(6).toString('hex')}`;
   const owner = await fx.ctx(c, c.owner);
@@ -133,6 +134,7 @@ async function addEndpoint(
     automationIds,
     campaignStatuses,
     orderStatuses,
+    conversationStatuses,
   });
   return { ...created, path };
 }
@@ -311,6 +313,48 @@ describe('conversation events', () => {
     expect(bodies[1]).toMatchObject({
       data: { conversation: { status: 'open', previousStatus: 'resolved' } },
     });
+  });
+
+  it('sends an endpoint only the statuses it takes, another every change, and records no change nobody takes (ADR-149)', async () => {
+    const c = await fx.company();
+    // Resolutions only, with the contact's messages: a reopening is not even recorded.
+    const resolutions = await addEndpoint(
+      c,
+      ['conversation.status_changed', 'message.received'],
+      null,
+      null,
+      null,
+      null,
+      ['resolved'],
+    );
+    const from = waId();
+    const { conversation_id: conversationId } = await inbound(c, from, 'Where is my order?');
+    await setStatus(c, conversationId, 'resolved');
+    await inbound(c, from, 'One more question');
+    expect((await eventsOf(c, 'conversation.')).map((e) => [e.status, e.deliveries])).toEqual([
+      ['resolved', 1],
+    ]);
+
+    // Then an endpoint taking every change: a reopening is recorded for it alone.
+    const every = await addEndpoint(c, ['conversation.status_changed']);
+    await setStatus(c, conversationId, 'resolved');
+    await inbound(c, from, 'And another');
+    expect((await eventsOf(c, 'conversation.')).map((e) => [e.status, e.deliveries])).toEqual([
+      ['resolved', 1],
+      ['resolved', 2],
+      ['open', 1],
+    ]);
+
+    await deliverDue(c);
+    const statusesAt = (path: string) =>
+      bodiesAt(path)
+        .filter((b) => b.type === 'conversation.status_changed')
+        .map((b) => (b.data.conversation as { status: string }).status)
+        .sort();
+    expect(statusesAt(resolutions.path)).toEqual(['resolved', 'resolved']);
+    // Its other events are not filtered: each of the contact's three messages.
+    expect(bodiesAt(resolutions.path).filter((b) => b.type === 'message.received')).toHaveLength(3);
+    expect(statusesAt(every.path)).toEqual(['open', 'resolved']);
   });
 
   it('sends every change of the member, naming the member before and after (ADR-094)', async () => {

@@ -2110,6 +2110,18 @@ failed, a deletion under way or refused) are never sent. To take more, tick the 
 `PATCH /webhook-endpoints/{id}` with `templateStatuses` (null for every status). Removing the
 `template.status_changed` event clears the list.
 
+**A receiver gets fewer conversation.status_changed events than expected (ADR-149).** An endpoint
+can take only the statuses a conversation reaches that it chose, `open` (reopened) or `resolved`;
+the endpoints list shows them ("Conversation statuses sent: …"), and the API answers
+`conversationStatuses` (null takes every status). A change to the other status is never queued for
+it, and when no endpoint of the company takes a change, no event is recorded at all, so there is
+nothing to replay: changes made before an edit are not sent afterwards. Each change still names the
+status before it (`previousStatus`). A conversation the contact writes to again after it was
+resolved is reopened, which an endpoint taking only `resolved` does not receive. To take more, tick
+the statuses under "Conversation status" on the endpoint's page (both ticked takes every status, as
+a new endpoint does), or `PATCH /webhook-endpoints/{id}` with `conversationStatuses` (null for every
+status). Removing the `conversation.status_changed` event clears the list.
+
 **An endpoint was turned off automatically.** It failed every attempt for 72 hours; its waiting
 deliveries were marked failed (`endpoint_disabled`), owners and administrators got the
 "Webhook endpoint turned off" email, and the audit log has `webhook.endpoint_auto_disabled`. Fix the

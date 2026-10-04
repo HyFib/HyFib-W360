@@ -5,6 +5,7 @@ import {
   can,
   WEBHOOK_CAMPAIGN_STATUS_LABELS,
   WEBHOOK_CONTACT_PART_LABELS,
+  WEBHOOK_CONVERSATION_STATUS_LABELS,
   WEBHOOK_EVENT_INFO,
   WEBHOOK_LIMITS,
   WEBHOOK_ORDER_STATUS_LABELS,
@@ -115,6 +116,14 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                         Template statuses sent:{' '}
                         {e.templateStatuses
                           .map((t) => WEBHOOK_TEMPLATE_STATUS_LABELS[t])
+                          .join(', ')}
+                      </p>
+                    ) : null}
+                    {e.conversationStatuses ? (
+                      <p className="text-xs text-muted-foreground">
+                        Conversation statuses sent:{' '}
+                        {e.conversationStatuses
+                          .map((s) => WEBHOOK_CONVERSATION_STATUS_LABELS[s])
                           .join(', ')}
                       </p>
                     ) : null}

@@ -182,6 +182,7 @@ export default async function WebhookEndpointPage({
               campaignStatuses: endpoint.campaignStatuses,
               orderStatuses: endpoint.orderStatuses,
               templateStatuses: endpoint.templateStatuses,
+              conversationStatuses: endpoint.conversationStatuses,
             }}
             automationChoices={automationChoices}
           />

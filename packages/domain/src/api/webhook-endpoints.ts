@@ -20,6 +20,7 @@ import {
   type WebhookDeliveryState,
   type WebhookCampaignStatus,
   type WebhookContactPart,
+  type WebhookConversationStatus,
   type WebhookEventType,
   type WebhookMessageStatus,
   type WebhookOrderStatus,
@@ -49,6 +50,7 @@ import {
   setWebhookEndpointEnabled,
   WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS,
   WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT,
+  WEBHOOK_CONVERSATION_STATUSES_NEED_THE_EVENT,
   WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT,
   WEBHOOK_TEMPLATE_STATUSES_NEED_THE_EVENT,
   webhookAutomationIdsFor,
@@ -56,6 +58,8 @@ import {
   webhookCampaignStatusesFor,
   webhookCampaignStatusesSchema,
   webhookContactPartsFor,
+  webhookConversationStatusesFor,
+  webhookConversationStatusesSchema,
   webhookContactPartsSchema,
   webhookDeliveryColumns,
   WEBHOOK_PARTS_NEED_THE_EVENT,
@@ -153,6 +157,18 @@ const invalidTemplateStatuses = () =>
     issues: [{ path: 'templateStatuses', message: WEBHOOK_TEMPLATE_STATUSES_NEED_THE_EVENT }],
   });
 
+const conversationStatusesField = webhookConversationStatusesSchema.describe(
+  'The statuses a conversation reaches that the endpoint receives as conversation.status_changed (open, resolved), only with the conversation.status_changed event; null receives every status.',
+);
+
+/** Conversation statuses are chosen only for an endpoint that receives their changes (ADR-149). */
+const invalidConversationStatuses = () =>
+  new AppError('validation_failed', WEBHOOK_CONVERSATION_STATUSES_NEED_THE_EVENT, {
+    issues: [
+      { path: 'conversationStatuses', message: WEBHOOK_CONVERSATION_STATUSES_NEED_THE_EVENT },
+    ],
+  });
+
 export const apiCreateWebhookEndpointSchema = z
   .object({
     url: z
@@ -172,6 +188,7 @@ export const apiCreateWebhookEndpointSchema = z
     campaignStatuses: campaignStatusesField.optional(),
     orderStatuses: orderStatusesField.optional(),
     templateStatuses: templateStatusesField.optional(),
+    conversationStatuses: conversationStatusesField.optional(),
   })
   .strict()
   .refine((data) => !data.messageStatuses || data.events.includes('message.status'), {
@@ -197,7 +214,11 @@ export const apiCreateWebhookEndpointSchema = z
   .refine((data) => !data.templateStatuses || data.events.includes('template.status_changed'), {
     path: ['templateStatuses'],
     message: WEBHOOK_TEMPLATE_STATUSES_NEED_THE_EVENT,
-  });
+  })
+  .refine(
+    (data) => !data.conversationStatuses || data.events.includes('conversation.status_changed'),
+    { path: ['conversationStatuses'], message: WEBHOOK_CONVERSATION_STATUSES_NEED_THE_EVENT },
+  );
 
 export const apiUpdateWebhookEndpointSchema = z
   .object({
@@ -246,6 +267,11 @@ export const apiUpdateWebhookEndpointSchema = z
       .describe(
         'The template statuses the endpoint receives as template.status_changed; null receives every status. Left out, they stay, unless the events no longer include template.status_changed, which clears them.',
       ),
+    conversationStatuses: conversationStatusesField
+      .optional()
+      .describe(
+        'The statuses a conversation reaches that the endpoint receives as conversation.status_changed; null receives every status. Left out, they stay, unless the events no longer include conversation.status_changed, which clears them.',
+      ),
   })
   .strict()
   .refine(
@@ -259,8 +285,9 @@ export const apiUpdateWebhookEndpointSchema = z
       data.automationIds !== undefined ||
       data.campaignStatuses !== undefined ||
       data.orderStatuses !== undefined ||
-      data.templateStatuses !== undefined,
-    'Give the events, the description, the headers, the message statuses, the contact parts, the automations, the campaign statuses, the order statuses, the template statuses or whether the endpoint is enabled',
+      data.templateStatuses !== undefined ||
+      data.conversationStatuses !== undefined,
+    'Give the events, the description, the headers, the message statuses, the contact parts, the automations, the campaign statuses, the order statuses, the template statuses, the conversation statuses or whether the endpoint is enabled',
   );
 
 export interface ApiWebhookEndpoint {
@@ -291,6 +318,8 @@ export interface ApiWebhookEndpoint {
   orderStatuses: WebhookOrderStatus[] | null;
   /** The template statuses it receives (ADR-148); null receives every status. */
   templateStatuses: WebhookTemplateStatus[] | null;
+  /** The conversation statuses it receives (ADR-149); null receives every status. */
+  conversationStatuses: WebhookConversationStatus[] | null;
   /** The key that added the endpoint. */
   apiKeyId: string;
   createdAt: string;
@@ -378,6 +407,7 @@ const columns = {
   campaignStatuses: webhookEndpoints.campaignStatuses,
   orderStatuses: webhookEndpoints.orderStatuses,
   templateStatuses: webhookEndpoints.templateStatuses,
+  conversationStatuses: webhookEndpoints.conversationStatuses,
   apiKeyId: webhookEndpoints.createdByApiKeyId,
   createdAt: webhookEndpoints.createdAt,
   updatedAt: webhookEndpoints.updatedAt,
@@ -403,6 +433,7 @@ type EndpointRow = Pick<
   | 'campaignStatuses'
   | 'orderStatuses'
   | 'templateStatuses'
+  | 'conversationStatuses'
   | 'createdAt'
   | 'updatedAt'
 > & { apiKeyId: string | null };
@@ -433,6 +464,7 @@ function toApiEndpoint(row: EndpointRow, now: Date): ApiWebhookEndpoint {
     campaignStatuses: row.campaignStatuses,
     orderStatuses: row.orderStatuses,
     templateStatuses: row.templateStatuses,
+    conversationStatuses: row.conversationStatuses,
     apiKeyId: row.apiKeyId,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -644,6 +676,11 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               data.templateStatuses,
               null,
             );
+            const conversationStatuses = webhookConversationStatusesFor(
+              data.events,
+              data.conversationStatuses,
+              null,
+            );
             const { id, secret } = await insertWebhookEndpoint(tx, deps.keyring, ctx.tenant.id, {
               url,
               description: data.description || null,
@@ -655,6 +692,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               campaignStatuses,
               orderStatuses,
               templateStatuses,
+              conversationStatuses,
               creator: { apiKeyId: ctx.key.id },
             });
             await audit(tx, ctx, 'webhook.endpoint_created', id, {
@@ -667,6 +705,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               ...(campaignStatuses ? { campaignStatuses } : {}),
               ...(orderStatuses ? { orderStatuses } : {}),
               ...(templateStatuses ? { templateStatuses } : {}),
+              ...(conversationStatuses ? { conversationStatuses } : {}),
             });
             await announce(tx, ctx, { host, events: data.events, at: now });
             const endpoint = await readEndpoint(tx, ctx, id, now);
@@ -704,6 +743,9 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         if (data.templateStatuses && !events.includes('template.status_changed')) {
           throw invalidTemplateStatuses();
         }
+        if (data.conversationStatuses && !events.includes('conversation.status_changed')) {
+          throw invalidConversationStatuses();
+        }
         // Only a list given now is checked: the automations kept were checked when chosen.
         if (data.automationIds !== undefined) {
           await assertWebhookAutomations(tx, ctx.tenant.id, data.automationIds);
@@ -717,7 +759,8 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
           data.automationIds !== undefined ||
           data.campaignStatuses !== undefined ||
           data.orderStatuses !== undefined ||
-          data.templateStatuses !== undefined
+          data.templateStatuses !== undefined ||
+          data.conversationStatuses !== undefined
         ) {
           const [changed] = await tx
             .update(webhookEndpoints)
@@ -757,6 +800,11 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
                 data.templateStatuses,
                 endpoint.templateStatuses,
               ),
+              conversationStatuses: webhookConversationStatusesFor(
+                events,
+                data.conversationStatuses,
+                endpoint.conversationStatuses,
+              ),
               updatedAt: now,
             })
             .where(and(eq(webhookEndpoints.tenantId, ctx.tenant.id), eq(webhookEndpoints.id, id)))
@@ -768,6 +816,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               campaignStatuses: webhookEndpoints.campaignStatuses,
               orderStatuses: webhookEndpoints.orderStatuses,
               templateStatuses: webhookEndpoints.templateStatuses,
+              conversationStatuses: webhookEndpoints.conversationStatuses,
             });
           if (!changed) throw new Error('A locked endpoint was not updated');
           await audit(tx, ctx, 'webhook.endpoint_updated', id, {
@@ -780,6 +829,9 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
             ...(changed.campaignStatuses ? { campaignStatuses: changed.campaignStatuses } : {}),
             ...(changed.orderStatuses ? { orderStatuses: changed.orderStatuses } : {}),
             ...(changed.templateStatuses ? { templateStatuses: changed.templateStatuses } : {}),
+            ...(changed.conversationStatuses
+              ? { conversationStatuses: changed.conversationStatuses }
+              : {}),
           });
         }
         if (data.enabled !== undefined) {

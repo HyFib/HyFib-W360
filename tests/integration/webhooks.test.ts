@@ -1231,6 +1231,101 @@ describe('template status filters (ADR-148)', () => {
   });
 });
 
+describe('conversation status filters (ADR-149)', () => {
+  it('are refused without conversation.status_changed, unknown, pending or empty, kept by a change that leaves them out and cleared with the event; the database keeps them to that event', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const url = 'https://hooks.example.com/in';
+    const refused = (eventTypes: string[], conversationStatuses: unknown, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, conversationStatuses }),
+        'validation_failed',
+        message,
+      );
+    await refused(
+      ['conversation.team_changed'],
+      ['resolved'],
+      /only for an endpoint that receives Conversation status/,
+    );
+    await refused(['conversation.status_changed'], [], /at least one conversation status/);
+    await refused(['conversation.status_changed'], ['pending'], /from the list/);
+    await refused(['conversation.status_changed'], ['closed'], /from the list/);
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['conversation.status_changed', 'consent.changed'],
+      conversationStatuses: ['resolved', 'open'],
+    });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toMatchObject({ conversationStatuses: ['open', 'resolved'] });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['conversation.status_changed', 'consent.changed'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.conversationStatuses;
+    expect(await current()).toEqual(['open', 'resolved']);
+    await change({ description: 'kept' });
+    expect(await current()).toEqual(['open', 'resolved']);
+    await change({ conversationStatuses: ['resolved'] });
+    expect(await current()).toEqual(['resolved']);
+    const updates = await fx.query<{ metadata: { conversationStatuses?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(updates.map((u) => u.metadata.conversationStatuses)).toEqual([
+      ['open', 'resolved'],
+      ['resolved'],
+    ]);
+    await change({ conversationStatuses: null });
+    expect(await current()).toBeNull();
+    await change({ conversationStatuses: ['open'] });
+    // The database refuses an empty list, more than two entries, an unknown status, pending or a
+    // missing one from an endpoint taking the event…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET conversation_statuses = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    for (const bad of [
+      `'{}'`,
+      `'{open,resolved,open}'`,
+      `'{open,pending}'`,
+      `'{open,closed}'`,
+      `ARRAY['open', NULL]::text[]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(
+        /webhook_endpoints_conversation_statuses/,
+      );
+    }
+    await change({ eventTypes: ['consent.changed'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['consent.changed'], conversationStatuses: ['resolved'] }),
+      'validation_failed',
+      /only for an endpoint that receives Conversation status/,
+    );
+    // …and any list for an endpoint that does not take it.
+    await expect(setInDatabase(`'{resolved}'`)).rejects.toThrow(
+      /webhook_endpoints_conversation_statuses/,
+    );
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'conversation_statuses',
+                'UPDATE') AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+});
+
 describe('automation filters (ADR-145)', () => {
   const automationService = () =>
     createAutomationService({

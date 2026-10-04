@@ -66,6 +66,12 @@ export type WebhookTemplateStatus =
   | 'limit_exceeded'
   | 'locked';
 
+/**
+ * The statuses a `conversation.status_changed` change reaches, which an endpoint can choose
+ * (ADR-149); nothing sets a conversation `pending` (ADR-075).
+ */
+export type WebhookConversationStatus = 'open' | 'resolved';
+
 export const WEBHOOK_DELIVERY_STATES = ['pending', 'delivering', 'succeeded', 'failed'] as const;
 export type WebhookDeliveryState = (typeof WEBHOOK_DELIVERY_STATES)[number];
 
@@ -114,6 +120,11 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    * Set only while `template.status_changed` is among its events.
    */
   templateStatuses: text('template_statuses').array().$type<WebhookTemplateStatus[]>(),
+  /**
+   * The statuses a conversation reaches that it takes as `conversation.status_changed` (ADR-149);
+   * null takes every status. Set only while `conversation.status_changed` is among its events.
+   */
+  conversationStatuses: text('conversation_statuses').array().$type<WebhookConversationStatus[]>(),
   state: text('state', { enum: ['active', 'disabled'] })
     .notNull()
     .default('active'),

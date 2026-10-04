@@ -4521,8 +4521,8 @@ Decision:
   replaced with the same signature, so its owner and grants stay. Existing endpoints keep null;
   nothing is backfilled.
 
-Not built: filters for other event types (conversation statuses, automations (built by ADR-145),
-campaigns (built by ADR-146)), filters on a message's fields (its template, number or sender), and retry settings per
+Not built: filters for other event types (conversation statuses (built by ADR-149), automations
+(built by ADR-145), campaigns (built by ADR-146)), filters on a message's fields (its template, number or sender), and retry settings per
 status.
 
 ## ADR-120 Changing many conversations in one call through the public API (2026-10-03)
@@ -5851,7 +5851,7 @@ Decision:
 
 Not built: filters by campaign, by the status before a change or by why a campaign paused or
 completed, and filters for template (built by ADR-148), order (built by ADR-147) or conversation
-statuses.
+(built by ADR-149) statuses.
 
 ## ADR-147 Choosing the order statuses a webhook endpoint receives (P5-09) (2026-10-04)
 
@@ -5901,7 +5901,7 @@ Decision:
 
 Not built: filters by the status before a change, by store or catalog, by amount or by payment
 method, filters for `order.received`, and filters for template (built by ADR-148) or conversation
-statuses.
+(built by ADR-149) statuses.
 
 ## ADR-148 Choosing the template statuses a webhook endpoint receives (P5-09) (2026-10-04)
 
@@ -5952,4 +5952,55 @@ Decision:
   trigger's and the check's to the same statuses.
 
 Not built: filters by template, category, language or WhatsApp account, by the status before a
-change or by Meta's reason, and filters for conversation statuses.
+change or by Meta's reason, and filters for conversation statuses (built by ADR-149).
+
+## ADR-149 Choosing the conversation statuses a webhook endpoint receives (P5-09) (2026-10-04)
+
+Context: since ADR-074 an endpoint that takes `conversation.status_changed` receives every change of
+every conversation's status: each resolve and each reopening, by a member, an automation, an API key
+or the contact writing again. A receiver that acts on one of them (a survey tool or a CRM closing
+its ticket on resolutions, a desk reopening its case when the contact writes again) had to read and
+drop the rest. ADR-146 to ADR-148 built filters by status for campaigns, orders and templates. The
+event's description said a conversation could also be set to pending, which nothing does (ADR-075
+left setting `pending` unbuilt).
+
+Decision:
+
+- **A list of statuses per endpoint,** for `conversation.status_changed` only: null receives every
+  status, as before; a list holds 1 or 2 of `open` and `resolved`, the status the change reached
+  (the event's `conversation.status`, not the one before), in the order the inbox lists them with
+  repeats merged. `pending` cannot be named: nothing sets a conversation pending, so no change
+  reaches it; the feature that first does will widen the list. It is chosen in Settings → Webhooks
+  under "Conversation status" (both ticked to begin with; saving both ticked keeps none) and shown
+  on the endpoint as "Conversation statuses sent: …", with the names the inbox uses, and through
+  the API as `conversationStatuses` on `POST /webhook-endpoints` and
+  `PATCH /webhook-endpoints/{id}` and in every endpoint the API answers.
+- **Only with the event:** statuses given for an endpoint that does not receive
+  `conversation.status_changed` are refused (`conversationStatuses`; 422 through the API). A change
+  that removes the event clears them, and a `PATCH` that leaves them out keeps them; Settings always
+  sends them. A check in the database holds the same rule (null, or 1 or 2 known statuses while the
+  event is among the endpoint's).
+- **Applied when the event is captured:** `app.capture_webhook_event` creates a
+  `conversation.status_changed` delivery only for the active endpoints whose list is null or holds
+  the status the conversation reached, and writes no event when none takes it, as for campaign,
+  order and template statuses. The capture is in the transaction that changes the conversation,
+  from 0070's trigger, whoever changes it. A change of the list applies to changes captured after
+  it; deliveries already created are still sent. Replays, test events and the payload are
+  unchanged; the payload still carries the status before.
+- **The event's description is corrected:** "A conversation was resolved or reopened, by a member,
+  an automation, an API key or the contact writing again", in Settings and the OpenAPI document; the
+  payload's status field keeps the three statuses a conversation row can hold.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `conversationStatuses` when the endpoint has a list, and the company data export carries the
+  column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API. The list names statuses only, never a conversation.
+- **The same control** as campaign, order and template statuses in Settings.
+- **Migration 0113:** `conversation_statuses text[]` on `app.webhook_endpoints` with the check,
+  validated at once (a company has at most 10 endpoints), an update grant on the column for the
+  runtime role (it inserts it with its table grant), and `app.capture_webhook_event` replaced with
+  the same signature (0112's, with the conversation condition), so its owner and grants stay.
+  Existing endpoints keep null; nothing is backfilled.
+
+Not built: filters by the status before a change, by who changed it, by team or member, and setting
+conversations pending.

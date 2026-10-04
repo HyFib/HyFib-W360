@@ -12,6 +12,7 @@ import {
 } from '@w360/db';
 import {
   WEBHOOK_CAMPAIGN_STATUSES,
+  WEBHOOK_CONVERSATION_STATUSES,
   WEBHOOK_CONTACT_PARTS,
   WEBHOOK_EVENT_INFO,
   WEBHOOK_EVENT_KEYS,
@@ -365,6 +366,12 @@ export const apiWebhookEndpointSchema = z.object({
     .nullable()
     .describe(
       'The template statuses the endpoint receives as template.status_changed; null receives every status.',
+    ),
+  conversationStatuses: z
+    .array(z.enum(WEBHOOK_CONVERSATION_STATUSES))
+    .nullable()
+    .describe(
+      'The statuses a conversation reaches that the endpoint receives as conversation.status_changed; null receives every status.',
     ),
   apiKeyId: z.uuid().describe('The API key that added the endpoint.'),
   createdAt: z.iso.datetime(),
@@ -1516,7 +1523,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'conversation.status_changed': webhook(
         'webhookConversationStatusChanged',
         WEBHOOK_EVENT_INFO['conversation.status_changed'].label,
-        WEBHOOK_EVENT_INFO['conversation.status_changed'].description,
+        `${WEBHOOK_EVENT_INFO['conversation.status_changed'].description} An endpoint receives every status unless it names the statuses it takes (its \`conversationStatuses\`, or the statuses ticked in Settings → Webhooks).`,
         'WebhookConversationStatusChanged',
       ),
       'conversation.assignment_changed': webhook(

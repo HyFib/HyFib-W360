@@ -1,6 +1,7 @@
 import type {
   WebhookCampaignStatus,
   WebhookContactPart,
+  WebhookConversationStatus,
   WebhookEventType,
   WebhookMessageStatus,
   WebhookOrderStatus,
@@ -10,6 +11,7 @@ import type {
 export type {
   WebhookCampaignStatus,
   WebhookContactPart,
+  WebhookConversationStatus,
   WebhookEventType,
   WebhookMessageStatus,
   WebhookOrderStatus,
@@ -62,7 +64,7 @@ export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; descr
     'conversation.status_changed': {
       label: 'Conversation status',
       description:
-        'A conversation was resolved, reopened or set to pending, by a member, an automation, an API key or the contact writing again.',
+        'A conversation was resolved or reopened, by a member, an automation, an API key or the contact writing again.',
     },
     'conversation.assignment_changed': {
       label: 'Conversation assignment',
@@ -238,6 +240,21 @@ export const WEBHOOK_TEMPLATE_STATUS_LABELS: Record<WebhookTemplateStatus, strin
   deleted: 'Deleted',
   limit_exceeded: 'Limit exceeded',
   locked: 'Locked',
+};
+
+/**
+ * The statuses a `conversation.status_changed` change reaches, which an endpoint can choose
+ * (ADR-149), in the order the inbox lists them; nothing sets a conversation `pending` (ADR-075).
+ */
+export const WEBHOOK_CONVERSATION_STATUSES = [
+  'open',
+  'resolved',
+] as const satisfies readonly WebhookConversationStatus[];
+
+/** How Settings names each conversation status an endpoint can choose (ADR-149), as the inbox does. */
+export const WEBHOOK_CONVERSATION_STATUS_LABELS: Record<WebhookConversationStatus, string> = {
+  open: 'Open',
+  resolved: 'Resolved',
 };
 
 export const WEBHOOK_LIMITS = {

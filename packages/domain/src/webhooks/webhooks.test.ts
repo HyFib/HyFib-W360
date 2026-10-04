@@ -6,6 +6,7 @@ import {
   CAMPAIGN_COMPLETION_REASONS,
   CAMPAIGN_PAUSE_REASONS,
   CAMPAIGN_STATUSES,
+  CONVERSATION_STATUSES,
   ORDER_STATUSES,
   TEMPLATE_STATUSES,
 } from '@w360/db';
@@ -18,6 +19,8 @@ import {
   WEBHOOK_CAMPAIGN_STATUSES,
   WEBHOOK_CONTACT_PART_LABELS,
   WEBHOOK_CONTACT_PARTS,
+  WEBHOOK_CONVERSATION_STATUS_LABELS,
+  WEBHOOK_CONVERSATION_STATUSES,
   WEBHOOK_EVENT_INFO,
   WEBHOOK_EVENT_KEYS,
   WEBHOOK_LIMITS,
@@ -68,6 +71,8 @@ import {
   webhookCampaignStatusesSchema,
   webhookContactPartsFor,
   webhookContactPartsSchema,
+  webhookConversationStatusesFor,
+  webhookConversationStatusesSchema,
   webhookHeadersAad,
   webhookHeadersSchema,
   webhookMessageStatusesFor,
@@ -1312,6 +1317,55 @@ describe('template status filters (ADR-148)', () => {
     expect(webhookTemplateStatusesFor(['message.status'], ['rejected'], ['paused'])).toBeNull();
     expect(
       webhookTemplateStatusesFor(['campaign.status_changed'], undefined, ['paused']),
+    ).toBeNull();
+  });
+});
+
+describe('conversation status filters (ADR-149)', () => {
+  it('take 1 or 2 of the statuses a conversation change reaches, once each, in the order the inbox lists them; null takes every status', () => {
+    expect(webhookConversationStatusesSchema.parse(['resolved', 'open'])).toEqual([
+      'open',
+      'resolved',
+    ]);
+    expect(webhookConversationStatusesSchema.parse(['resolved', 'resolved'])).toEqual(['resolved']);
+    expect(webhookConversationStatusesSchema.parse(null)).toBeNull();
+    // Every conversation status but `pending`, which nothing sets (ADR-075); the event does not
+    // say otherwise.
+    expect(WEBHOOK_CONVERSATION_STATUSES).toEqual(
+      CONVERSATION_STATUSES.filter((s) => s !== 'pending'),
+    );
+    expect(WEBHOOK_EVENT_INFO['conversation.status_changed'].description).not.toContain('pending');
+    for (const refused of [
+      [],
+      ['pending'],
+      ['closed'],
+      ['Resolved'],
+      'resolved',
+      [null],
+      Array(3).fill('open'),
+    ]) {
+      expect(
+        webhookConversationStatusesSchema.safeParse(refused).success,
+        JSON.stringify(refused),
+      ).toBe(false);
+    }
+    expect(webhookConversationStatusesSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one conversation status, or take every status.',
+    );
+    expect(WEBHOOK_CONVERSATION_STATUS_LABELS).toEqual({ open: 'Open', resolved: 'Resolved' });
+  });
+
+  it('are kept only while the endpoint takes conversation.status_changed: given, kept, or cleared', () => {
+    const both = ['conversation.status_changed', 'conversation.team_changed'] as const;
+    expect(webhookConversationStatusesFor([...both], ['resolved'], null)).toEqual(['resolved']);
+    expect(webhookConversationStatusesFor([...both], undefined, ['open'])).toEqual(['open']);
+    expect(webhookConversationStatusesFor([...both], null, ['open'])).toBeNull();
+    expect(webhookConversationStatusesFor([...both], undefined, null)).toBeNull();
+    expect(
+      webhookConversationStatusesFor(['conversation.team_changed'], ['resolved'], ['open']),
+    ).toBeNull();
+    expect(
+      webhookConversationStatusesFor(['order.status_changed'], undefined, ['open']),
     ).toBeNull();
   });
 });

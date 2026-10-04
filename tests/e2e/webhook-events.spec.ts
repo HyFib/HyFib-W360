@@ -988,3 +988,107 @@ test('template events reach an endpoint: a member submits a template and Meta re
     [templateId, 'approved'],
   ]);
 });
+
+/** A delivered conversation status event, as far as this test reads it. */
+interface ConversationEventBody {
+  type: string;
+  createdAt: string;
+  data: { conversation: { id: string; status: string; previousStatus: string } };
+}
+
+test('conversation status events reach an endpoint: a member resolves and the customer writes again; an endpoint can take chosen statuses only', async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(150_000);
+  const email = uniqueEmail('hookcst');
+  const slug = `hookcst-${Date.now().toString(36)}`;
+  const path = `/conversations/${slug}`;
+  const forUs = () =>
+    received
+      .filter((r) => r.path === path)
+      .map((r) => ({ ...r, json: JSON.parse(r.body) as ConversationEventBody }))
+      // Deliveries are not ordered; the change captured last has the latest createdAt.
+      .sort((a, b) => a.json.createdAt.localeCompare(b.json.createdAt));
+  await signUpAndVerify(page, { name: 'Cora Conversations', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('Conversation Hooks');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+  const { wabaId, phoneNumberId } = await connectTestChannel({ ownerEmail: email, slug });
+
+  // An endpoint for conversation status changes.
+  await page.goto(`/c/${slug}/settings/webhooks`);
+  await page.getByLabel('Endpoint URL').fill(`http://${HOST}:${port}${path}`);
+  await page.getByRole('checkbox', { name: /Conversation status/ }).check();
+  await page.getByRole('button', { name: 'Add endpoint' }).click();
+  const secretField = page.getByLabel('Signing secret');
+  await expect(secretField).toBeVisible();
+  const secret = await secretField.inputValue();
+  await page.getByRole('button', { name: 'I have stored the secret' }).click();
+
+  // A second endpoint takes only resolutions (ADR-149).
+  const resolvedPath = `${path}/resolved`;
+  const forResolved = () =>
+    received
+      .filter((r) => r.path === resolvedPath)
+      .map((r) => JSON.parse(r.body) as ConversationEventBody);
+  await page.getByLabel('Endpoint URL').fill(`http://${HOST}:${port}${resolvedPath}`);
+  await page.getByRole('checkbox', { name: /Conversation status/ }).check();
+  const statusBox = (name: string) => page.getByRole('checkbox', { name, exact: true });
+  await statusBox('Open (open)').uncheck();
+  await expect(statusBox('Resolved (resolved)')).toBeChecked();
+  await page.getByRole('button', { name: 'Add endpoint' }).click();
+  await expect(page.getByLabel('Signing secret')).toBeVisible();
+  await page.getByRole('button', { name: 'I have stored the secret' }).click();
+  // The form starts afresh: the event ticked again takes every status.
+  await page.getByRole('checkbox', { name: /Conversation status/ }).check();
+  await expect(statusBox('Open (open)')).toBeChecked();
+  await page.reload();
+  // Only the second endpoint names statuses: every status ticked keeps none.
+  await expect(page.getByText(/^Conversation statuses sent:/)).toHaveText([
+    'Conversation statuses sent: Resolved',
+  ]);
+  // The endpoint's own page shows the statuses it takes.
+  await page
+    .getByRole('list', { name: 'Endpoints' })
+    .getByRole('listitem')
+    .filter({ hasText: 'Conversation statuses sent: Resolved' })
+    .getByRole('link', { name: /Deliveries and settings/ })
+    .click();
+  await expect(page.getByRole('heading', { name: /^Deliveries to/ })).toBeVisible();
+  await expect(statusBox('Resolved (resolved)')).toBeChecked();
+  await expect(statusBox('Open (open)')).not.toBeChecked();
+
+  // A customer writes: a new conversation is no change of status. A member resolves it.
+  const waId = randomWaId();
+  await sendSignedWebhook(request, inboundMessage(wabaId, phoneNumberId, waId, 'Hello there'));
+  await page.goto(`/c/${slug}/inbox`);
+  await page.getByRole('link', { name: /Priya Customer/ }).click();
+  await expect(page.getByText('Hello there')).toBeVisible();
+  await page.getByRole('button', { name: 'Resolve' }).click();
+  await expect(async () => expect(forUs()).toHaveLength(1)).toPass({ timeout: 30_000 });
+  // The customer writes again, which opens the conversation again.
+  await sendSignedWebhook(request, inboundMessage(wabaId, phoneNumberId, waId, 'One more thing'));
+  await expect(async () => expect(forUs()).toHaveLength(2)).toPass({ timeout: 30_000 });
+  for (const event of forUs()) {
+    expect(signatureValid(event.headers, event.body, secret)).toBe(true);
+    expect(event.headers['w360-event-type']).toBe('conversation.status_changed');
+  }
+  const conversationId = forUs()[0]!.json.data.conversation.id;
+  expect(
+    forUs().map((e) => [
+      e.json.data.conversation.id,
+      e.json.data.conversation.status,
+      e.json.data.conversation.previousStatus,
+    ]),
+  ).toEqual([
+    [conversationId, 'resolved', 'open'],
+    [conversationId, 'open', 'resolved'],
+  ]);
+  // The second endpoint heard only of the resolution.
+  await expect(async () => expect(forResolved()).toHaveLength(1)).toPass({ timeout: 30_000 });
+  expect(forResolved().map((e) => [e.data.conversation.id, e.data.conversation.status])).toEqual([
+    [conversationId, 'resolved'],
+  ]);
+});

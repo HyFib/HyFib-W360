@@ -7,6 +7,8 @@ import {
   WEBHOOK_CAMPAIGN_STATUSES,
   WEBHOOK_CONTACT_PART_LABELS,
   WEBHOOK_CONTACT_PARTS,
+  WEBHOOK_CONVERSATION_STATUS_LABELS,
+  WEBHOOK_CONVERSATION_STATUSES,
   WEBHOOK_EVENT_INFO,
   WEBHOOK_EVENT_KEYS,
   WEBHOOK_LIMITS,
@@ -22,6 +24,7 @@ import {
   type WebhookAutomationChoice,
   type WebhookCampaignStatus,
   type WebhookContactPart,
+  type WebhookConversationStatus,
   type WebhookEventType,
   type WebhookMessageStatus,
   type WebhookOrderStatus,
@@ -116,9 +119,10 @@ function StatusChoices({
 
 /**
  * The statuses a campaign (`campaign.status_changed`, ADR-146), an order
- * (`order.status_changed`, ADR-147) or a template (`template.status_changed`, ADR-148) reaches that
- * an endpoint takes, shown while it takes the event; `statuses` come in the order their pages list
- * them, and a status ticked again keeps that order.
+ * (`order.status_changed`, ADR-147), a template (`template.status_changed`, ADR-148) or a
+ * conversation (`conversation.status_changed`, ADR-149) reaches that an endpoint takes, shown while
+ * it takes the event; `statuses` come in the order their pages list them, and a status ticked again
+ * keeps that order.
  */
 function ReachedStatusChoices<S extends string>({
   prefix,
@@ -129,7 +133,7 @@ function ReachedStatusChoices<S extends string>({
   onChange,
 }: {
   prefix: string;
-  kind: 'campaign' | 'order' | 'template';
+  kind: 'campaign' | 'order' | 'template' | 'conversation';
   statuses: readonly S[];
   labels: Record<S, string>;
   chosen: S[];
@@ -320,6 +324,8 @@ function EventChoices({
   onOrderStatusesChange,
   templateStatuses,
   onTemplateStatusesChange,
+  conversationStatuses,
+  onConversationStatusesChange,
 }: {
   prefix: string;
   chosen: WebhookEventType[];
@@ -334,6 +340,8 @@ function EventChoices({
   onOrderStatusesChange: (next: WebhookOrderStatus[]) => void;
   templateStatuses: WebhookTemplateStatus[];
   onTemplateStatusesChange: (next: WebhookTemplateStatus[]) => void;
+  conversationStatuses: WebhookConversationStatus[];
+  onConversationStatusesChange: (next: WebhookConversationStatus[]) => void;
 }) {
   return (
     <fieldset className="grid gap-2">
@@ -370,6 +378,16 @@ function EventChoices({
                 labels={WEBHOOK_TEMPLATE_STATUS_LABELS}
                 chosen={templateStatuses}
                 onChange={onTemplateStatusesChange}
+              />
+            ) : null}
+            {type === 'conversation.status_changed' && chosen.includes(type) ? (
+              <ReachedStatusChoices
+                prefix={prefix}
+                kind="conversation"
+                statuses={WEBHOOK_CONVERSATION_STATUSES}
+                labels={WEBHOOK_CONVERSATION_STATUS_LABELS}
+                chosen={conversationStatuses}
+                onChange={onConversationStatusesChange}
               />
             ) : null}
             {type === 'contact.updated' && chosen.includes(type) ? (
@@ -497,6 +515,7 @@ export function WebhookEndpointForm({
     campaignStatuses: WebhookCampaignStatus[] | null;
     orderStatuses: WebhookOrderStatus[] | null;
     templateStatuses: WebhookTemplateStatus[] | null;
+    conversationStatuses: WebhookConversationStatus[] | null;
   };
   /** The company's published automations, which an endpoint can choose (ADR-145). */
   automationChoices: WebhookAutomationChoice[];
@@ -520,6 +539,9 @@ export function WebhookEndpointForm({
   );
   const [templateStatuses, setTemplateStatuses] = useState<WebhookTemplateStatus[]>(
     endpoint?.templateStatuses ?? [...WEBHOOK_TEMPLATE_STATUSES],
+  );
+  const [conversationStatuses, setConversationStatuses] = useState<WebhookConversationStatus[]>(
+    endpoint?.conversationStatuses ?? [...WEBHOOK_CONVERSATION_STATUSES],
   );
   const [everyAutomation, setEveryAutomation] = useState(!endpoint?.automationIds);
   const [automationIds, setAutomationIds] = useState<string[]>(endpoint?.automationIds ?? []);
@@ -581,6 +603,12 @@ export function WebhookEndpointForm({
           templateStatuses.length < WEBHOOK_TEMPLATE_STATUSES.length
             ? templateStatuses
             : null;
+        // Every conversation status ticked takes every status (null, ADR-149).
+        const chosenConversationStatuses =
+          eventTypes.includes('conversation.status_changed') &&
+          conversationStatuses.length < WEBHOOK_CONVERSATION_STATUSES.length
+            ? conversationStatuses
+            : null;
         const input = {
           url,
           description,
@@ -591,6 +619,7 @@ export function WebhookEndpointForm({
           campaignStatuses: chosenCampaignStatuses,
           orderStatuses: chosenOrderStatuses,
           templateStatuses: chosenTemplateStatuses,
+          conversationStatuses: chosenConversationStatuses,
         };
         const done = (r: { ok: true } | { ok: false; code: string; message: string }) => {
           setBusy(false);
@@ -622,6 +651,7 @@ export function WebhookEndpointForm({
               setCampaignStatuses([...WEBHOOK_CAMPAIGN_STATUSES]);
               setOrderStatuses([...WEBHOOK_ORDER_STATUSES]);
               setTemplateStatuses([...WEBHOOK_TEMPLATE_STATUSES]);
+              setConversationStatuses([...WEBHOOK_CONVERSATION_STATUSES]);
               setEveryAutomation(true);
               setAutomationIds([]);
               setHeaders([]);
@@ -682,6 +712,8 @@ export function WebhookEndpointForm({
         onOrderStatusesChange={setOrderStatuses}
         templateStatuses={templateStatuses}
         onTemplateStatusesChange={setTemplateStatuses}
+        conversationStatuses={conversationStatuses}
+        onConversationStatusesChange={setConversationStatuses}
       />
       {webhookTakesAutomationRuns(eventTypes) ? (
         <AutomationChoices

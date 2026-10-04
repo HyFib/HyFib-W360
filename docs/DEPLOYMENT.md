@@ -183,6 +183,13 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    none. Web servers from before it neither show nor change the column: until the web rollout ends,
    an old server's change that drops `template.status_changed` from an endpoint with statuses fails
    on the check, and its other changes keep them.
+   Migration 0113 (ADR-149) does the same for `conversation_statuses` and
+   `conversation.status_changed`: a nullable column with a check validated by reading the table,
+   and `app.capture_webhook_event` replaced with the same signature (keeping 0109's to 0112's
+   filters); every endpoint starts with none. Web servers from before it neither show nor change
+   the column: until the web rollout ends, an old server's change that drops
+   `conversation.status_changed` from an endpoint with statuses fails on the check, and its other
+   changes keep them.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

@@ -256,6 +256,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       campaignStatuses: null,
       orderStatuses: null,
       templateStatuses: null,
+      conversationStatuses: null,
       apiKeyId: key.id,
       createdAt: expect.any(String),
       updatedAt: expect.any(String),
@@ -984,6 +985,87 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
     expect(await issueOf(api().update(key.ctx, id, { templateStatuses: [] }))).toMatchObject({
       path: 'templateStatuses',
+    });
+  });
+
+  it('choose the conversation statuses an endpoint receives, kept by changes that leave them out and cleared with the event (ADR-149)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // Statuses need the event, at least one, and each from the list (pending or an unknown one by
+    // place).
+    const refusals = [
+      [['conversation.team_changed'], ['resolved'], 'conversationStatuses'],
+      [['conversation.status_changed'], [], 'conversationStatuses'],
+      [['conversation.status_changed'], ['resolved', 'pending'], 'conversationStatuses.1'],
+      [['conversation.status_changed'], ['closed'], 'conversationStatuses.0'],
+    ] as const;
+    for (const [index, [events, conversationStatuses, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, conversationStatuses },
+            idem(`conversation-statuses-bad-${index}`, JSON.stringify(conversationStatuses)),
+          ),
+        ),
+        JSON.stringify(conversationStatuses),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'conversation-statuses-1', {
+      url: receiverUrl(),
+      events: ['conversation.status_changed', 'message.status'],
+      conversationStatuses: ['resolved', 'open'],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.conversationStatuses).toEqual(['open', 'resolved']);
+    expect((await api().get(key.ctx, id)).conversationStatuses).toEqual(['open', 'resolved']);
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id, id],
+    );
+    expect(audit?.metadata).toMatchObject({ conversationStatuses: ['open', 'resolved'] });
+
+    expect(await api().update(key.ctx, id, { description: 'Conversations' })).toMatchObject({
+      conversationStatuses: ['open', 'resolved'],
+    });
+    expect(await api().update(key.ctx, id, { conversationStatuses: ['resolved'] })).toMatchObject({
+      conversationStatuses: ['resolved'],
+    });
+    const updates = await fx.query<{ metadata: { conversationStatuses?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_updated'
+        ORDER BY occurred_at`,
+      [c.tenant.id, id],
+    );
+    expect(updates.map((u) => u.metadata.conversationStatuses)).toEqual([
+      ['open', 'resolved'],
+      ['resolved'],
+    ]);
+    expect(await api().update(key.ctx, id, { events: ['message.status'] })).toMatchObject({
+      events: ['message.status'],
+      conversationStatuses: null,
+    });
+    expect(
+      await issueOf(api().update(key.ctx, id, { conversationStatuses: ['resolved'] })),
+    ).toMatchObject({ path: 'conversationStatuses' });
+    expect(
+      await api().update(key.ctx, id, {
+        events: ['conversation.status_changed'],
+        conversationStatuses: ['open'],
+      }),
+    ).toMatchObject({ conversationStatuses: ['open'] });
+    expect(await api().update(key.ctx, id, { conversationStatuses: null })).toMatchObject({
+      conversationStatuses: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { conversationStatuses: [] }))).toMatchObject({
+      path: 'conversationStatuses',
     });
   });
 

@@ -1,5 +1,92 @@
 # Progress
 
+## 2026-10-04 — Phase 5: choosing the conversation statuses a webhook endpoint receives (P5-09, ADR-149)
+
+Status: **Implemented and locally verified (test data only).** Since ADR-074 an endpoint that took
+`conversation.status_changed` received every change of every conversation's status: each resolve
+and each reopening, by a member, an automation, an API key or the contact writing again. A receiver
+that acts on one of them (a survey tool or a CRM closing its ticket on resolutions, a desk reopening
+its case when the contact writes again) had to read and drop the rest. ADR-146 to ADR-148 had just
+built filters by status for campaigns, orders and templates. The event's description also said a
+conversation could be set to pending, which nothing does.
+
+### Completed
+
+- **Design (ADR-149):** an endpoint takes every conversation status (null, as before) or 1 or 2 of
+  the statuses a change reaches (`open`, `resolved`; nothing sets a conversation pending, so the
+  list cannot name it), the status reached rather than the one before, kept only while it takes
+  `conversation.status_changed`; applied where events are captured, in the transaction that changes
+  the conversation, whoever changes it; audited and exported; permissions unchanged. The event's
+  description no longer says a conversation can be set to pending.
+- **Migration 0113:** `app.webhook_endpoints.conversation_statuses` (`text[]`, a check: null, or 1
+  or 2 known statuses while `conversation.status_changed` is among the events; containment also
+  refuses a null entry and `pending`), the runtime role's update of the column, and
+  `app.capture_webhook_event` replaced with the same signature (0112's, with the conversation
+  condition in both its existence check and its deliveries).
+- **Domain:** `webhooks/model.ts` (`WEBHOOK_CONVERSATION_STATUSES` in the order the inbox lists
+  them, their labels as the inbox names them, the event's corrected description);
+  `webhooks/service.ts` (`webhookConversationStatusesSchema`, `webhookConversationStatusesFor`, the
+  schemas' rule, `conversationStatuses` on each listed endpoint, create and update storing and
+  auditing the list); `api/webhook-endpoints.ts` (`conversationStatuses` on `POST` and
+  `PATCH /webhook-endpoints` and in every answer, kept or cleared, audited); OpenAPI
+  (`conversationStatuses`, and the event says how the filter applies); the company data export
+  carries the column.
+- **Web:** Settings → Webhooks, under "Conversation status" while it is ticked: "Statuses sent",
+  both statuses ticked to begin with (saving both keeps none); the endpoints list says
+  "Conversation statuses sent: …". The control is the one campaign, order and template statuses
+  use.
+- **Tests:**
+  - Unit (3 new, 1 extended): the list's rules (1 or 2 known statuses, `pending` and an unknown
+    status refused, repeats merged into the order the inbox lists them, null, the empty list's
+    message, the labels, the list matching the inbox's statuses but `pending`, the event's
+    description without pending), keeping and clearing; the API's schemas (only with the event, a
+    list alone is a change) and the OpenAPI entries.
+  - Integration (3 new, 1 changed): an endpoint naming resolutions gets only the resolutions and
+    each of the contact's messages, a reopening no endpoint takes is not recorded, and one taking
+    every status gets each change; refusals of statuses without the event, an empty list, `pending`
+    and an unknown status, keeping, replacing and clearing, the audits, each clause of the database
+    check (an empty list, three entries, `pending`, an unknown status, a null entry, any list
+    without the event) and the column grant (`webhooks.test.ts`, `webhook-events.test.ts`); the
+    same rules through the API, `pending` and an unknown status named by their place
+    (`api-webhook-endpoints.test.ts`, whose endpoint shape now includes `conversationStatuses`).
+  - E2E (1 new in `webhook-events.spec.ts`): conversation events through Settings, the inbox and the
+    worker: a member resolves a conversation and the customer writes again; an endpoint taking every
+    status gets the resolution and the reopening, signed, each with the status before, and a second
+    endpoint added with "Open" unticked gets the resolution alone; the form starts afresh, the
+    endpoints list names its statuses and no other endpoint's, and its page ticks resolutions only.
+- **Docs:** ADR-149 (and ADR-119's, ADR-146's, ADR-147's and ADR-148's "Not built" annotated);
+  SECURITY (Phase 5 rules); THREAT-MODEL T158; ARCHITECTURE; RUNBOOKS; DEPLOYMENT (0113's rollout);
+  DATA-RETENTION; BACKLOG P5-09; feature matrix H-014, W-138 and W-139.
+- **Mutation checks:** 63 deliberate regressions tried, all caught on the first run: 15 by unit
+  tests and 36 by integration tests in the domain, the API and the migration (the statuses, their
+  order and pending refused, the event's description, the list's rules, keeping and clearing, the
+  schemas' rule, each store, read and audit in Settings and the API, the OpenAPI entries, the
+  export, the capture's existence check and deliveries, the null branch, the condition kept to
+  conversation changes in both places, the status reached rather than the one before, each clause of
+  the database check and the column grant), and 12 in the web through the e2e test (the statuses
+  shown, what is sent, every status ticked sent as none, the statuses sent only with their event,
+  ticking and unticking, the page's starting state, the form starting afresh, the names shown in the
+  control, the endpoints list and its labels, the endpoint's page knowing its list, the names the
+  inbox uses).
+
+### Test commands and results (local, 2026-10-04)
+
+| Command                                                                                  | Result                                                                                                                                                                                                                                              |
+| ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`                                       | clean                                                                                                                                                                                                                                               |
+| `pnpm test` (unit)                                                                       | 692 passed (74 files; 3 new)                                                                                                                                                                                                                        |
+| `pnpm test:integration` on PostgreSQL 18.6                                               | 859 passed (56 files; 3 new)                                                                                                                                                                                                                        |
+| `pnpm test:integration` on PostgreSQL 17.11                                              | 859 passed (56 files)                                                                                                                                                                                                                               |
+| `pnpm build`                                                                             | passed                                                                                                                                                                                                                                              |
+| e2e: webhooks, webhook-events, api-contact-fields, api-quota (chromium, mobile-chromium) | 36 passed (6.2 min) on the final build, once the `api.w360-e2e.test` host entry a container restart had removed was restored (a run without it failed each test waiting for a delivery); Firefox and WebKit are not installed here, so CI runs them |
+| Mutation checks                                                                          | 63 tried, all caught (15 by unit, 36 by integration, 12 through the e2e test)                                                                                                                                                                       |
+| gitleaks 8.30.1 on the staged changes                                                    | no leaks found                                                                                                                                                                                                                                      |
+
+### Known gaps
+
+- Filters by the status before a change, by who changed it, or by team or member; setting
+  conversations pending.
+
 ## 2026-10-04 — Phase 5: choosing the template statuses a webhook endpoint receives (P5-09, ADR-148)
 
 Status: **Implemented and locally verified (test data only).** Since ADR-053 an endpoint that took

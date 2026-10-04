@@ -807,6 +807,13 @@ Phase 5 rules (outgoing webhooks, P5-09):
   null entry), and applied in `app.capture_webhook_event`, in the transaction that records the
   status, whoever records it: it narrows what one endpoint receives and never adds an event or a
   delivery for another endpoint or company. Audited with the list. Tested.
+- An endpoint can take `conversation.status_changed` only for some of the statuses a conversation
+  reaches (ADR-149), chosen the same way. The list is checked against the two statuses a change
+  reaches (`open`, `resolved`; nothing sets a conversation pending), kept only while the endpoint
+  takes `conversation.status_changed` (a database check too, which also refuses a null entry), and
+  applied in `app.capture_webhook_event`, in the transaction that changes the conversation: it
+  narrows what one endpoint receives and never adds an event or a delivery for another endpoint or
+  company. Audited with the list. Tested.
 - Conversation and contact events (ADR-074) follow the same rules. Conversation events name the
   member and the team by id only (ADR-094), the ids the API gives `conversations.read` keys
   (ADR-093): names are read through `GET /members` and `GET /teams` with such a key, and no email or

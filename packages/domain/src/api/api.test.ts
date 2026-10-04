@@ -105,6 +105,7 @@ import {
 import {
   WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS,
   WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT,
+  WEBHOOK_CONVERSATION_STATUSES_NEED_THE_EVENT,
   WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT,
   WEBHOOK_TEMPLATE_STATUSES_NEED_THE_EVENT,
 } from '../webhooks/service';
@@ -1322,6 +1323,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'automationIds',
       'campaignStatuses',
       'contactParts',
+      'conversationStatuses',
       'description',
       'enabled',
       'events',
@@ -1401,6 +1403,47 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(webhooks['template.status_changed']?.post?.description).toContain(
       'An endpoint receives every status unless it names the statuses it takes (its `templateStatuses`',
     );
+    // The conversation statuses an endpoint receives (ADR-149): a list, or null.
+    const conversationStatuses = (answered.properties as Record<string, { anyOf?: unknown[] }>)
+      .conversationStatuses;
+    expect(conversationStatuses?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('conversationStatuses');
+    expect(Object.keys(createBody.properties)).toContain('conversationStatuses');
+    expect(webhooks['conversation.status_changed']?.post?.description).toContain(
+      'An endpoint receives every status unless it names the statuses it takes (its `conversationStatuses`',
+    );
+  });
+
+  it('take conversation statuses only with conversation.status_changed, and a list of them alone is a change (ADR-149)', () => {
+    const base = { url: 'https://hooks.example.com/w360', events: ['conversation.status_changed'] };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...base,
+        conversationStatuses: ['resolved', 'open'],
+      }).conversationStatuses,
+    ).toEqual(['open', 'resolved']);
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['conversation.team_changed'],
+      conversationStatuses: ['resolved'],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['conversationStatuses', WEBHOOK_CONVERSATION_STATUSES_NEED_THE_EVENT],
+    ]);
+    for (const body of [
+      { ...base, conversationStatuses: [] },
+      { ...base, conversationStatuses: ['pending'] },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(apiUpdateWebhookEndpointSchema.parse({ conversationStatuses: null })).toEqual({
+      conversationStatuses: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ conversationStatuses: ['resolved'] })).toEqual({
+      conversationStatuses: ['resolved'],
+    });
   });
 
   it('take template statuses only with template.status_changed, and a list of them alone is a change (ADR-148)', () => {

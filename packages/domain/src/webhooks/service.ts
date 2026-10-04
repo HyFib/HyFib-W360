@@ -30,6 +30,7 @@ import { parseInput } from '../validation';
 import {
   WEBHOOK_CAMPAIGN_STATUSES,
   WEBHOOK_CONTACT_PARTS,
+  WEBHOOK_CONVERSATION_STATUSES,
   WEBHOOK_EVENT_KEYS,
   WEBHOOK_LIMITS,
   WEBHOOK_ORDER_STATUSES,
@@ -41,6 +42,7 @@ import {
   type WebhookAutomationChoice,
   type WebhookCampaignStatus,
   type WebhookContactPart,
+  type WebhookConversationStatus,
   type WebhookEndpointAutomation,
   type WebhookMessageStatus,
   type WebhookOrderStatus,
@@ -287,6 +289,36 @@ export function webhookTemplateStatusesFor(
 }
 
 /**
+ * The statuses a conversation reaches that an endpoint takes as `conversation.status_changed`
+ * (ADR-149), in the order the inbox lists them; null takes every status.
+ */
+export const webhookConversationStatusesSchema = z
+  .array(
+    z.enum(WEBHOOK_CONVERSATION_STATUSES, { error: 'Choose conversation statuses from the list.' }),
+  )
+  .min(1, 'Choose at least one conversation status, or take every status.')
+  .max(WEBHOOK_CONVERSATION_STATUSES.length, 'Give each conversation status once.')
+  .transform((chosen) => WEBHOOK_CONVERSATION_STATUSES.filter((status) => chosen.includes(status)))
+  .nullable();
+
+export const WEBHOOK_CONVERSATION_STATUSES_NEED_THE_EVENT =
+  'Choose conversation statuses only for an endpoint that receives Conversation status.';
+
+/**
+ * The conversation statuses an endpoint keeps after it is added or changed: every status (null)
+ * unless it takes `conversation.status_changed`; then those given, or else the ones it had.
+ */
+export function webhookConversationStatusesFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly WebhookConversationStatus[] | null | undefined,
+  current: readonly WebhookConversationStatus[] | null,
+): WebhookConversationStatus[] | null {
+  if (!eventTypes.includes('conversation.status_changed')) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
  * The parts of a contact whose change an endpoint takes as `contact.updated` (ADR-123), in the
  * order Settings lists them; null takes every change, including parts added later.
  */
@@ -420,6 +452,10 @@ const endpointFields = z.object({
   orderStatuses: webhookOrderStatusesSchema.optional(),
   /** Given, the template statuses it takes (null: every status, ADR-148); left out, they stay. */
   templateStatuses: webhookTemplateStatusesSchema.optional(),
+  /**
+   * Given, the conversation statuses it takes (null: every status, ADR-149); left out, they stay.
+   */
+  conversationStatuses: webhookConversationStatusesSchema.optional(),
 });
 /** Statuses are chosen only for an endpoint that takes `message.status`. */
 const statusesNeedTheEvent = {
@@ -457,13 +493,23 @@ const templateStatusesNeedTheEvent = {
     !data.templateStatuses || data.eventTypes.includes('template.status_changed'),
   options: { path: ['templateStatuses'], message: WEBHOOK_TEMPLATE_STATUSES_NEED_THE_EVENT },
 };
+/** Conversation statuses are chosen only for an endpoint that takes their changes (ADR-149). */
+const conversationStatusesNeedTheEvent = {
+  check: (data: { eventTypes: WebhookEventType[]; conversationStatuses?: unknown }) =>
+    !data.conversationStatuses || data.eventTypes.includes('conversation.status_changed'),
+  options: {
+    path: ['conversationStatuses'],
+    message: WEBHOOK_CONVERSATION_STATUSES_NEED_THE_EVENT,
+  },
+};
 const endpointSchema = endpointFields
   .refine(statusesNeedTheEvent.check, statusesNeedTheEvent.options)
   .refine(partsNeedTheEvent.check, partsNeedTheEvent.options)
   .refine(automationsNeedTheEvents.check, automationsNeedTheEvents.options)
   .refine(campaignStatusesNeedTheEvent.check, campaignStatusesNeedTheEvent.options)
   .refine(orderStatusesNeedTheEvent.check, orderStatusesNeedTheEvent.options)
-  .refine(templateStatusesNeedTheEvent.check, templateStatusesNeedTheEvent.options);
+  .refine(templateStatusesNeedTheEvent.check, templateStatusesNeedTheEvent.options)
+  .refine(conversationStatusesNeedTheEvent.check, conversationStatusesNeedTheEvent.options);
 const endpointIdSchema = z.object({ endpointId: z.uuid() });
 const updateSchema = endpointFields
   .extend({ endpointId: z.uuid() })
@@ -472,7 +518,8 @@ const updateSchema = endpointFields
   .refine(automationsNeedTheEvents.check, automationsNeedTheEvents.options)
   .refine(campaignStatusesNeedTheEvent.check, campaignStatusesNeedTheEvent.options)
   .refine(orderStatusesNeedTheEvent.check, orderStatusesNeedTheEvent.options)
-  .refine(templateStatusesNeedTheEvent.check, templateStatusesNeedTheEvent.options);
+  .refine(templateStatusesNeedTheEvent.check, templateStatusesNeedTheEvent.options)
+  .refine(conversationStatusesNeedTheEvent.check, conversationStatusesNeedTheEvent.options);
 const enabledSchema = endpointIdSchema.extend({ enabled: z.boolean() });
 const deliveryIdSchema = z.object({ deliveryId: z.uuid() });
 const replayFailedSchema = endpointIdSchema.extend({
@@ -513,6 +560,8 @@ export interface WebhookEndpointView {
   orderStatuses: WebhookOrderStatus[] | null;
   /** The template statuses it takes (ADR-148); null takes every status. */
   templateStatuses: WebhookTemplateStatus[] | null;
+  /** The conversation statuses it takes (ADR-149); null takes every status. */
+  conversationStatuses: WebhookConversationStatus[] | null;
   createdAt: Date;
   /** The member who added the endpoint in settings (null once their account is gone). */
   createdBy: string | null;
@@ -594,6 +643,7 @@ export async function lockWebhookEndpoint(
       campaignStatuses: webhookEndpoints.campaignStatuses,
       orderStatuses: webhookEndpoints.orderStatuses,
       templateStatuses: webhookEndpoints.templateStatuses,
+      conversationStatuses: webhookEndpoints.conversationStatuses,
     })
     .from(webhookEndpoints)
     .where(
@@ -632,6 +682,7 @@ export async function insertWebhookEndpoint(
     campaignStatuses: WebhookCampaignStatus[] | null;
     orderStatuses: WebhookOrderStatus[] | null;
     templateStatuses: WebhookTemplateStatus[] | null;
+    conversationStatuses: WebhookConversationStatus[] | null;
     creator: WebhookEndpointCreator;
   },
 ): Promise<{ id: string; secret: string }> {
@@ -662,6 +713,7 @@ export async function insertWebhookEndpoint(
     campaignStatuses: input.campaignStatuses,
     orderStatuses: input.orderStatuses,
     templateStatuses: input.templateStatuses,
+    conversationStatuses: input.conversationStatuses,
     createdByUserId: 'userId' in input.creator ? input.creator.userId : null,
     createdByApiKeyId: 'apiKeyId' in input.creator ? input.creator.apiKeyId : null,
   });
@@ -953,6 +1005,7 @@ export function createWebhooksService(deps: {
               campaignStatuses: webhookEndpoints.campaignStatuses,
               orderStatuses: webhookEndpoints.orderStatuses,
               templateStatuses: webhookEndpoints.templateStatuses,
+              conversationStatuses: webhookEndpoints.conversationStatuses,
               createdAt: webhookEndpoints.createdAt,
               createdBy: users.name,
               keyName: apiKeys.name,
@@ -1093,6 +1146,11 @@ export function createWebhooksService(deps: {
           data.templateStatuses,
           null,
         );
+        const conversationStatuses = webhookConversationStatusesFor(
+          data.eventTypes,
+          data.conversationStatuses,
+          null,
+        );
         const { id, secret } = await insertWebhookEndpoint(tx, keyring, ctx.tenant.id, {
           url,
           description: data.description || null,
@@ -1104,6 +1162,7 @@ export function createWebhooksService(deps: {
           campaignStatuses,
           orderStatuses,
           templateStatuses,
+          conversationStatuses,
           creator: { userId: ctx.user.id },
         });
         await recordAudit(
@@ -1123,6 +1182,7 @@ export function createWebhooksService(deps: {
               ...(campaignStatuses ? { campaignStatuses } : {}),
               ...(orderStatuses ? { orderStatuses } : {}),
               ...(templateStatuses ? { templateStatuses } : {}),
+              ...(conversationStatuses ? { conversationStatuses } : {}),
             },
           },
           meta,
@@ -1172,6 +1232,11 @@ export function createWebhooksService(deps: {
           data.templateStatuses,
           endpoint.templateStatuses,
         );
+        const conversationStatuses = webhookConversationStatusesFor(
+          data.eventTypes,
+          data.conversationStatuses,
+          endpoint.conversationStatuses,
+        );
         await tx
           .update(webhookEndpoints)
           .set({
@@ -1184,6 +1249,7 @@ export function createWebhooksService(deps: {
             campaignStatuses,
             orderStatuses,
             templateStatuses,
+            conversationStatuses,
             ...(data.headers
               ? sealWebhookHeaders(keyring, ctx.tenant.id, data.endpointId, data.headers)
               : {}),
@@ -1212,6 +1278,7 @@ export function createWebhooksService(deps: {
               ...(campaignStatuses ? { campaignStatuses } : {}),
               ...(orderStatuses ? { orderStatuses } : {}),
               ...(templateStatuses ? { templateStatuses } : {}),
+              ...(conversationStatuses ? { conversationStatuses } : {}),
             },
           },
           meta,
