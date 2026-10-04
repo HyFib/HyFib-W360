@@ -61,6 +61,9 @@ never for a company that was not sending.
 - **Docs:** ADR-137; research §19 (M-187 to M-189); SECURITY (provider tokens); THREAT-MODEL T22
   and T149; RUNBOOKS (section 6, migration 0104); META-SETUP; ARCHITECTURE; BACKLOG (P2-11 marked
   done by ADR-054, P2-12); feature matrix W-021.
+- **CI:** the end-to-end suite step may run 180 minutes (was 140) and its job 190 (was 150): 344
+  tests took 127.3 minutes on 3695c23, and the 8 added here each wait about a minute for the
+  worker's sweep, which would have left less than one retry of a long test before the limit.
 - **Mutation checks:** 46 deliberate regressions tried, 46 caught: 41 against the access module,
   onboarding, the send and template sync hooks and migration 0104 through unit and integration tests
   (5 of them for the check once an expiry has passed and its wording), and 5 through the e2e test

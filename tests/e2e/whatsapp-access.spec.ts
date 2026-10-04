@@ -10,7 +10,8 @@ test.skip(!messagingConfigured, 'Meta test configuration (stand-in, app secret) 
 
 /**
  * A company whose WhatsApp account holds a token of its own at the Graph stand-in, described by
- * debug_token as given (ADR-137). The worker's minute sweep checks a newly connected account.
+ * debug_token as given (ADR-137). connectTestChannel stores the account directly, never checked, so
+ * the worker's minute sweep checks it within about a minute.
  */
 async function companyWithToken(
   page: Page,
