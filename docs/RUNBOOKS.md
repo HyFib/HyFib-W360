@@ -2340,6 +2340,18 @@ for HyFib-side kinds (accounts not checked for 26 hours, webhooks not subscribed
 failures are the company's to fix, and the company is told of them; HyFib staff contact it when it
 does not act.
 
+**Acknowledging failures (ADR-141).** On Current failures, the administrator who takes a failure
+opens Acknowledge on its row and writes a note of 10 to 500 characters: what was done or found
+("Called the owner: they will reconnect the number today", "Meta's status page reports an outage").
+The row then shows who acknowledged it, when, and the note, so the others need not call the company
+too. A new note replaces it (a colleague taking over, a finding); the platform audit log keeps each
+(`platform.integration_failure_acknowledged`). The acknowledgement lasts while the failure is
+listed in that state: one that changes state (a failing endpoint turned off) is listed again
+unacknowledged, and one that recovers keeps its acknowledgement for an hour, in case it comes back.
+"This integration is no longer failing in that state. Reload the page." means that it recovered or
+changed state since the page loaded. Acknowledging does not stop the alert email, which tells each
+failure once anyway.
+
 **Keys (ADR-134).** The configured encryption key ids, the primary first, and how many stored values
 each key seals, by kind (counts only). While another key is configured the worker seals the values
 it sealed again with the primary key, up to 500 a minute, and logs `sealed values re-encrypted under
@@ -2363,6 +2375,15 @@ whatever the configuration, so it stays counted under the key it names; cancel i
 should not wait for that. After 1,000 such jobs a worker stops signing jobs again until it restarts
 and logs an error naming `W360_JOB_SIGNING_KEY_PREVIOUS`: check that the previous key's value is
 right. "Jobs that will be refused" name a key that is not configured.
+
+**Migration 0107 failed.** It creates `ops.integration_acknowledgements` and
+`ops.platform_acknowledge_integration_failure`, and recreates `ops.platform_ops_integration_failures`
+(with each failure's acknowledgement) and `ops.integration_alerts_due` (which keeps and forgets
+acknowledgements too), in one transaction; a failure rolls it back (usually the bootstrap roles: fix
+them and run the migrations again). Web servers of this release need it before they start, or
+acknowledging a failure fails and the list shows no acknowledgement; web servers and workers of the
+previous release work with it (they do not read the list's new columns, and the check keeps its name
+and result).
 
 **Migration 0106 failed.** It creates `ops.integration_failures` and `ops.integration_alerts`,
 recreates `ops.platform_ops_integration_failures` on the shared list, and adds the alert's two

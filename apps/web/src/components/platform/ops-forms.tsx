@@ -2,6 +2,7 @@
 import { useState } from 'react';
 import { Button, Field, Textarea } from '@w360/ui';
 import {
+  acknowledgeIntegrationFailureAction,
   resolveQuarantineAction,
   retryDeadLetterAction,
   retryWebhookReceiptAction,
@@ -134,6 +135,64 @@ export function ResolveQuarantineForm({ quarantineId }: { quarantineId: string }
         <div>
           <Button type="submit" size="sm" disabled={busy || resolution.trim().length < 10}>
             {busy ? 'Saving…' : 'Mark resolved'}
+          </Button>
+        </div>
+      </ClientForm>
+    </details>
+  );
+}
+
+/**
+ * Acknowledges a company's failing integration with a note, or replaces the note (audited,
+ * ADR-141): the other administrators see who took it.
+ */
+export function AcknowledgeFailureForm({
+  source,
+  subjectId,
+  state,
+  acknowledged,
+}: {
+  source: string;
+  subjectId: string;
+  state: string;
+  acknowledged: boolean;
+}) {
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    const result = await acknowledgeIntegrationFailureAction({ source, subjectId, state, note });
+    setBusy(false);
+    if (!result.ok) setError(result.message);
+    else setNote('');
+  }
+  const id = `acknowledge-${source}-${subjectId}-${state}`;
+  return (
+    <details className="group">
+      <summary className="cursor-pointer text-sm text-primary underline-offset-4 hover:underline">
+        {acknowledged ? 'Replace the note' : 'Acknowledge'}
+      </summary>
+      <ClientForm onSubmit={submit} className="mt-2 grid w-64 max-w-full gap-2">
+        <FormError message={error} />
+        <Field id={id} label="Note (what was done or found)">
+          {(aria) => (
+            <Textarea
+              {...aria}
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              minLength={10}
+              maxLength={500}
+              rows={2}
+              required
+            />
+          )}
+        </Field>
+        <div>
+          <Button type="submit" size="sm" disabled={busy || note.trim().length < 10}>
+            {busy ? 'Saving…' : 'Acknowledge failure'}
           </Button>
         </div>
       </ClientForm>

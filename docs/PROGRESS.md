@@ -1,5 +1,75 @@
 # Progress
 
+## 2026-10-04 — Phase 5: acknowledging companies' failing integrations on the console (P5-10, ADR-141)
+
+Status: **Implemented and locally verified (test data only).** Since ADR-139 every platform
+administrator is emailed about each failure Operations → Integrations lists, and the email names no
+company, so they all open the same list; nothing there said that someone had already taken a
+failure, contacted the company or found the cause.
+
+### Completed
+
+- **Design (ADR-141):** a platform administrator acknowledges a failure Current failures lists with
+  a note of 10 to 500 characters; the row shows who acknowledged it, when, and the note, and another
+  administrator may replace the note. Each acknowledgement is in the platform audit log
+  (`platform.integration_failure_acknowledged`, with the company and the failure's source, subject
+  and state). A failure is acknowledged by its integration and state, as ADR-139 tells it, so a new
+  state starts unacknowledged; only a failure listed at that moment can be acknowledged; an
+  acknowledgement lasts while the failure is listed and is forgotten an hour after it stops being
+  listed, as the alert marks are.
+- **Migration 0107:** `ops.integration_acknowledgements` (definer role only);
+  `ops.platform_acknowledge_integration_failure` (SECURITY DEFINER, platform role only: checks the
+  administrator, the note and that the failure is listed now, and records the acknowledgement and
+  the audit entry in one transaction); `ops.platform_ops_integration_failures` recreated with each
+  failure's acknowledgement (when, the administrator's name, the note); `ops.integration_alerts_due`
+  recreated to keep and forget acknowledgements as it does the alert marks.
+- **Domain** (`platform/ops.ts`): `platformOps.acknowledgeFailure` and the acknowledgement on each
+  listed failure. **Fixed in passing:** the console used a time its definer functions return only
+  when the driver handed over a Date, but drizzle hands raw query results over as text, so the
+  list's "Since", a company's last message and quality check on its platform page and the start of
+  the automation runs' period on Usage were blank, and failed onboarding sessions showed the page
+  view's time as their start; they are now parsed.
+- **Web:** an Acknowledged column on Current failures (who, when, the note) with an Acknowledge
+  form, "Replace the note" once acknowledged; the card says what acknowledging is for.
+- **Tests:**
+  - Integration (7 new in `platform-ops.test.ts`): who and the note listed, replaced by another
+    administrator, each audited with the company and the correlation id; refused for a state not
+    listed, an unknown or recovered failure, a note out of bounds (also padded with spaces) in the
+    service and in the function, which trims it, and a non-administrator; kept while listed, back
+    within the hour with its acknowledgement, forgotten an hour after, a later failure and a new
+    state unacknowledged, an old state's acknowledgement forgotten while another state is listed;
+    the recreated check still counting only failures not told; the console's times compared with
+    the stored ones; the table and the function kept from the runtime roles, run as the definer
+    with a pinned search path. The isolation suite: the function executable by the platform role
+    only.
+  - E2E (1 new in `platform-ops.spec.ts`): a platform owner acknowledges a company's failed number
+    on Current failures; the row shows who and the note and offers to replace it, with no
+    horizontal overflow; the platform audit log lists the acknowledgement.
+- **Docs:** ADR-141; SECURITY; THREAT-MODEL T152; RUNBOOKS (acknowledging failures, migration 0107);
+  ARCHITECTURE; BACKLOG P5-10; DATA-RETENTION (the acknowledgements, and the alert marks of
+  ADR-139, which had no row); feature matrix H-034.
+- **Mutation checks:** 41 deliberate regressions tried, 40 caught: 37 against migration 0107 and the service through integration tests (the acknowledging function's checks, replacement and audit entry, its grants, owner and search path, the console's list, the sweep's check, the service's bounds and the time parsing; the recreated check counting failures already told survived ADR-139's tests and is caught by a test added for it; a REVOKE from PUBLIC that the default privileges already make cannot be observed), and 4 through the e2e test (no acknowledgement shown, no offer to replace the note, the form sending another state, no refresh after acknowledging).
+
+### Test commands and results (local, 2026-10-04)
+
+| Command                                                                           | Result                                                                                                                                                           |
+| --------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`                                | clean                                                                                                                                                            |
+| `pnpm test` (unit)                                                                | 671 passed (74 files)                                                                                                                                            |
+| `pnpm test:integration` on PostgreSQL 18.6                                        | 835 passed (56 files; 7 new, 1 extended)                                                                                                                         |
+| `pnpm test:integration` on PostgreSQL 17.11                                       | 835 passed (56 files)                                                                                                                                            |
+| `pnpm db:migrate` on the e2e database at 0106                                     | 0107 applied (its recorded checksum matches the committed file)                                                                                                  |
+| `pnpm build`                                                                      | passed                                                                                                                                                           |
+| e2e: platform-ops, dead-letter-retry, whatsapp-access (chromium, mobile-chromium) | 12 passed (10.2 min)                                                                                                                                             |
+| Mutation checks                                                                   | 41 tried: 40 caught (36 through integration tests, 4 through the e2e test), 1 cannot be observed (a REVOKE from PUBLIC that the default privileges already make) |
+| gitleaks 8.30.1 on the staged changes                                             | no leaks found                                                                                                                                                   |
+
+### Known gaps
+
+- Assigning a failure to someone, acknowledging the console's other lists (dead letters, receipts,
+  quarantine, late queues), editing or deleting a note (a new acknowledgement replaces it), and
+  leaving acknowledged failures out of the alert email (each failure is emailed once anyway).
+
 ## 2026-10-04 — Phase 5: notices in the app before and at a monthly limit (P5-01, ADR-140)
 
 Status: **Implemented and locally verified (test data only).** Billing managers were emailed at

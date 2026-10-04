@@ -283,6 +283,11 @@ describe('database roles', () => {
     for (const role of ['w360_app', 'w360_auth', 'w360_platform']) {
       expect(await can(role, 'ops.integration_failures()'), role).toBe(false);
     }
+    // Acknowledging those failures on the console (0107): platform staff only.
+    const acknowledge = 'ops.platform_acknowledge_integration_failure(text,uuid,text,text,text)';
+    expect(await can('w360_platform', acknowledge)).toBe(true);
+    expect(await can('w360_app', acknowledge)).toBe(false);
+    expect(await can('w360_auth', acknowledge)).toBe(false);
     const rule = 'ops.webhook_receipt_exhausted(text,integer,timestamp with time zone)';
     expect(await can('w360_app', rule)).toBe(true);
     expect(await can('w360_platform', rule)).toBe(true);

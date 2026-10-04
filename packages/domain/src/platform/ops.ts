@@ -81,7 +81,10 @@ export type UsageWindow = (typeof USAGE_WINDOWS)[number];
 
 type Row = Record<string, unknown>;
 const num = (value: unknown) => Number(value ?? 0);
-const date = (value: unknown) => (value instanceof Date ? value : null);
+// A timestamp the definer functions return: drizzle hands raw query results over as PostgreSQL's
+// text, which a Date parses (the driver gives Dates only to typed selects).
+const date = (value: unknown) =>
+  value instanceof Date ? value : typeof value === 'string' ? new Date(value) : null;
 const text = (value: unknown) => (typeof value === 'string' ? value : null);
 
 function toHealthFacts(r: Row): CompanyHealthFacts {
@@ -184,6 +187,11 @@ export interface IntegrationFailure {
   state: string;
   error: string | null;
   since: Date | null;
+  /**
+   * A platform administrator's acknowledgement of this failure (ADR-141): when, by whom (null once
+   * the account has no name) and the note; null while nobody has taken it.
+   */
+  acknowledgement: { at: Date; byName: string | null; note: string } | null;
 }
 
 export type ReceiptProblem = 'exhausted' | 'waiting';
@@ -271,6 +279,18 @@ const deadLetterRetrySchema = z.object({
   reason: z.string().trim().min(10, 'Give a reason of at least 10 characters').max(2000),
 });
 
+/** A failure the console lists, by its integration and state, and what the administrator noted. */
+const acknowledgeSchema = z.object({
+  source: z.string().trim().min(1).max(40),
+  subjectId: z.uuid(),
+  state: z.string().trim().min(1).max(40),
+  note: z
+    .string()
+    .trim()
+    .min(10, 'Write a note of at least 10 characters')
+    .max(500, 'Write a note of at most 500 characters'),
+});
+
 const resolveSchema = z.object({
   quarantineId: z.uuid(),
   resolution: z
@@ -331,17 +351,27 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
     const result = await tx.execute<Row>(
       sql`select * from ops.platform_ops_integration_failures(${limit})`,
     );
-    return result.rows.map((r) => ({
-      tenantId: String(r.tenant_id),
-      tenantName: String(r.tenant_name),
-      tenantSlug: String(r.tenant_slug),
-      source: String(r.source),
-      subjectId: String(r.subject_id),
-      label: text(r.label),
-      state: String(r.state),
-      error: text(r.error),
-      since: date(r.since),
-    }));
+    return result.rows.map((r) => {
+      const acknowledgedAt = date(r.acknowledged_at);
+      return {
+        tenantId: String(r.tenant_id),
+        tenantName: String(r.tenant_name),
+        tenantSlug: String(r.tenant_slug),
+        source: String(r.source),
+        subjectId: String(r.subject_id),
+        label: text(r.label),
+        state: String(r.state),
+        error: text(r.error),
+        since: date(r.since),
+        acknowledgement: acknowledgedAt
+          ? {
+              at: acknowledgedAt,
+              byName: text(r.acknowledged_by_name),
+              note: String(r.acknowledgement),
+            }
+          : null,
+      };
+    });
   }
 
   /** The last check of each queue's waits, by queue (ADR-096). */
@@ -803,6 +833,20 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
           sql`select ops.platform_retry_dead_letter(${data.deadLetterId}::uuid, ${data.reason}, ${actor.correlationId}) as queue`,
         );
         return { queue: String(result.rows[0]?.queue) };
+      });
+    },
+
+    /**
+     * Records that a platform administrator is handling a failure the console lists now, with a
+     * note, replacing an earlier acknowledgement of it (ADR-141). The definer function checks the
+     * administrator and that the failure is still listed, and audits it in the same transaction.
+     */
+    async acknowledgeFailure(actor: PlatformActor, input: unknown): Promise<void> {
+      const data = parseInput(acknowledgeSchema, input);
+      await platformDb.run(actor.userId, async (tx) => {
+        await tx.execute(
+          sql`select ops.platform_acknowledge_integration_failure(${data.source}, ${data.subjectId}::uuid, ${data.state}, ${data.note}, ${actor.correlationId})`,
+        );
       });
     },
 

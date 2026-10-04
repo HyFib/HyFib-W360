@@ -5576,3 +5576,49 @@ Decision:
 Not built: dismissing a notice, thresholds per company or per member, notices of keys' own limits,
 and notices for limits that refuse additions (seats, numbers, teams, live automations), which the
 forms they limit show.
+
+## ADR-141 Acknowledging companies' failing integrations on the operations console (P5-10) (2026-10-04)
+
+Context: Operations → Integrations lists the companies' integrations that fail now, and since
+ADR-139 every platform administrator is emailed about each new failure. The email names no company,
+so every administrator who reads it opens the same list, and nothing there said that someone had
+already taken a failure, contacted the company or found the cause: two staff could call the same
+company, or each assume that another had.
+
+Decision:
+
+- **Acknowledged with a note:** on Current failures, a platform administrator acknowledges a listed
+  failure with a note of 10 to 500 characters (what was done or found). The list shows who
+  acknowledged it, when, and the note. Another administrator may acknowledge it again, replacing
+  the note; the platform audit log keeps each acknowledgement
+  (`platform.integration_failure_acknowledged`, with the company, the note as its reason and the
+  failure's source, subject and state).
+- **What is acknowledged:** a failure as ADR-139 tells it, by its integration (source and subject)
+  and state, in `ops.integration_acknowledgements` (migration 0107). A new state of the same
+  integration (a failing endpoint turned off) is a new failure and starts unacknowledged. Only a
+  failure the console lists at that moment can be acknowledged: one that recovered or changed state
+  is refused ("no longer failing in that state"), so a page left open cannot acknowledge what the
+  console no longer shows.
+- **How long:** an acknowledgement lasts while the console lists its failure and is forgotten an
+  hour after it stops being listed, as the alert marks are (ADR-139): the minute sweep's check keeps
+  both (refreshed at most every 10 minutes) and forgets both. A failure that comes back within the
+  hour keeps its acknowledgement; one that fails again later starts unacknowledged, and is emailed
+  again.
+- **Where it is enforced:** `ops.platform_acknowledge_integration_failure` (SECURITY DEFINER,
+  executable by the platform role only) checks the platform administrator, the note and that the
+  failure is listed now (`ops.integration_failures`, the console's own rule), then records the
+  acknowledgement and the audit entry in one transaction. The console's
+  `ops.platform_ops_integration_failures` returns each failure's acknowledgement (when, the
+  administrator's name, the note). Only the definer role reads and writes the table, which holds the
+  failure's ids, the administrator and the note; the company never sees it.
+
+Also fixed in passing: the console used a time its definer functions return only when the driver
+handed over a Date, but drizzle hands raw query results over as PostgreSQL's text. The list's
+"Since", a company's last message and quality check on its platform page and the start of the
+automation runs' period on Usage were blank, and failed onboarding sessions showed the time of the
+page view as their start. The console now parses them (an integration test compares them with the
+stored times).
+
+Not built: assigning a failure to someone, acknowledging the console's other lists (dead letters,
+receipts, quarantine, late queues), editing or deleting a note (a new acknowledgement replaces it),
+and leaving acknowledged failures out of the alert email (each failure is emailed once anyway).

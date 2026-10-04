@@ -319,6 +319,19 @@ export async function retryDeadLetterAction(
   });
 }
 
+/**
+ * Acknowledges a company's failing integration on the operations console, with a note (audited,
+ * ADR-141).
+ */
+export async function acknowledgeIntegrationFailureAction(input: unknown): Promise<ActionResult> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    await runtime.platformOps.acknowledgeFailure(actor, input);
+    refresh();
+    return null;
+  });
+}
+
 /** Records how a quarantined webhook event was resolved (audited). */
 export async function resolveQuarantineAction(input: unknown): Promise<ActionResult> {
   return runAction(async () => {

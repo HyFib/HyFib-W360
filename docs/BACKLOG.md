@@ -639,9 +639,13 @@ verification, app review, Embedded Signup configuration).
   while its job tries; deletions and key checks retry longer). **[Alerts for companies' failing
   integrations built, locally verified]** (ADR-139: every platform administrator emailed once about
   each failure the Integrations page lists, by kind and with counts only, at most every 15 minutes,
-  from the console's own list; a failure not listed for an hour is forgotten). Remaining: other
-  alert channels, trends, Meta's quality webhook (unconfirmed), API request counts, exports,
-  acknowledging issues, paging and rollups for many companies.
+  from the console's own list; a failure not listed for an hour is forgotten). **[Acknowledging
+  failing integrations built, locally verified]** (ADR-141: a platform administrator acknowledges a
+  failure Current failures lists with a note, shown with who and when to the other administrators
+  and kept in the platform audit log; replaced by a later note; refused once the failure recovered
+  or changed state; forgotten an hour after the failure stops being listed). Remaining: other alert
+  channels, trends, Meta's quality webhook (unconfirmed), API request counts, exports, assigning
+  failures and acknowledging the console's other lists, paging and rollups for many companies.
 - **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**
   (ADR-055): Settings → Company data for owners. A streamed, gzip-compressed JSON Lines export of
   every company table from one read-only transaction (each table and column exported or excluded

@@ -1431,6 +1431,13 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   for an hour and counts the failures not yet told; `ops.mark_integration_alert` marks them (at most
   every 15 minutes, `ops.platform_alerts` kind `integrations`, 1,000 at a time) in the transaction
   that queues one `platform.notice` email to every platform administrator, with counts by kind only.
+- **Acknowledging failures** (ADR-141, migration 0107): a platform administrator acknowledges a
+  failure on Current failures with a note, through `ops.platform_acknowledge_integration_failure`
+  (definer, platform role only), which checks the administrator and that `ops.integration_failures`
+  lists the failure in that state now, upserts `ops.integration_acknowledgements` (by source,
+  subject and state) and writes the platform audit entry in one transaction; the console's list
+  returns each failure's acknowledgement. `ops.integration_alerts_due` keeps acknowledgements of
+  listed failures and forgets the others after an hour, as it does the alert marks.
 - **Web:** `/platform/ops` (Overview, Onboarding, Integrations, Queues, Signals, Usage over 7, 30 or
   90 days) and a health card on each company's platform page. Every page re-checks the platform
   actor. The functions read every company on each view, which suits the test envelope; paging and
@@ -1438,7 +1445,7 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
 - **Not built yet:** other alert channels, trends,
   quality updates from Meta's quality webhook, API request counts, exports, sweeps for the work of
   `channel.onboard`, `commerce.account` and `template.delete`, retrying several dead letters at
-  once, and acknowledging issues.
+  once, and acknowledging the console's other lists (dead letters, receipts, late queues).
 
 ## 6Q. Company export and deletion **[built — providers verified against the local Graph, Shopify and Razorpay stand-ins only]**
 

@@ -1,5 +1,7 @@
+import pg from 'pg';
 import { expect, test } from './fixtures';
 import {
+  connectTestChannel,
   inboundMessage,
   messagingConfigured,
   randomWaId,
@@ -153,4 +155,71 @@ test('staff read the operations console and repair a quarantined webhook event',
   await expect(page.getByRole('heading', { name: 'Health' })).toBeVisible();
   await expect(page.getByText('0 active of 0')).toBeVisible();
   await expectNoHorizontalOverflow(page);
+});
+
+/** Marks a company's number as failed, as a setup Meta refused leaves it (runtime role, its scope). */
+async function failNumber(tenantId: string, phoneNumberId: string) {
+  const app = new pg.Client({ connectionString: process.env.DATABASE_URL_APP });
+  await app.connect();
+  try {
+    await app.query('BEGIN');
+    await app.query(`SELECT set_config('app.tenant_id', $1, true)`, [tenantId]);
+    const failed = await app.query(
+      `UPDATE app.channel_accounts
+          SET status = 'failed', onboarding_error = 'E2E: Meta refused the number''s registration.'
+        WHERE phone_number_id = $1`,
+      [phoneNumberId],
+    );
+    expect(failed.rowCount).toBe(1);
+    await app.query('COMMIT');
+  } finally {
+    await app.end();
+  }
+}
+
+test('staff acknowledge a company’s failing integration on the console, with a note (ADR-141)', async ({
+  page,
+}) => {
+  test.skip(!platformConfigured, 'needs DATABASE_URL_MIGRATE and E2E_DATABASE_URL_AUTH');
+  test.skip(!messagingConfigured, 'Meta test configuration (stand-in, app secret) not provided');
+  test.setTimeout(150_000);
+  const email = uniqueEmail('ack');
+  const suffix = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`;
+  const slug = `ack-${suffix}`;
+  const companyName = `Ack Co ${suffix}`;
+  await signUpAndVerify(page, { name: 'Anil Staff', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill(companyName);
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page.getByRole('heading', { name: companyName })).toBeVisible();
+  await turnOnTwoFactor(page, PASSWORD);
+  await makePlatformOwner(email);
+
+  // The company's number failed its setup: Operations → Integrations lists it.
+  const { tenantId, phoneNumberId } = await connectTestChannel({ ownerEmail: email, slug });
+  await failNumber(tenantId, phoneNumberId);
+  await page.goto('/platform/ops/integrations');
+  await expect(
+    page.getByText(/acknowledges it with a note, so the others see who took it/),
+  ).toBeVisible();
+  const row = page
+    .getByRole('table', { name: 'Current failures' })
+    .getByRole('row')
+    .filter({ hasText: companyName });
+  await expect(row).toContainText('Failed');
+  await expect(row).not.toContainText('By Anil Staff');
+
+  await row.getByText('Acknowledge', { exact: true }).click();
+  await row
+    .getByLabel('Note (what was done or found)')
+    .fill('Called the owner: they will reconnect the number today.');
+  await row.getByRole('button', { name: 'Acknowledge failure' }).click();
+  await expect(row).toContainText('By Anil Staff');
+  await expect(row).toContainText('Called the owner: they will reconnect the number today.');
+  await expect(row.getByText('Replace the note', { exact: true })).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+
+  // In the platform audit log.
+  await page.goto('/platform');
+  await expect(page.getByText('platform.integration_failure_acknowledged').first()).toBeVisible();
 });

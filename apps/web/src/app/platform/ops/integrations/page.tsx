@@ -21,7 +21,11 @@ import {
   WEBHOOK_PROVIDER_LABELS,
 } from '@w360/domain';
 import { CompanyLink, Utc } from '@/components/platform/ops';
-import { ResolveQuarantineForm, RetryReceiptForm } from '@/components/platform/ops-forms';
+import {
+  AcknowledgeFailureForm,
+  ResolveQuarantineForm,
+  RetryReceiptForm,
+} from '@/components/platform/ops-forms';
 import { getRuntime } from '@/server/runtime';
 import { requirePlatformActor } from '@/server/session';
 
@@ -53,7 +57,10 @@ export default async function OpsIntegrationsPage() {
               </>
             ) : (
               'none has gone out yet.'
-            )}
+            )}{' '}
+            An administrator who takes a failure acknowledges it with a note, so the others see who
+            took it and what was found; the acknowledgement lasts while the failure is listed
+            (ADR-141).
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -68,6 +75,7 @@ export default async function OpsIntegrationsPage() {
                   <TH>State</TH>
                   <TH>Error</TH>
                   <TH>Since</TH>
+                  <TH>Acknowledged</TH>
                 </TR>
               </THead>
               <TBody>
@@ -90,6 +98,25 @@ export default async function OpsIntegrationsPage() {
                     <TD className="max-w-sm text-sm">{f.error ?? '—'}</TD>
                     <TD>
                       <Utc at={f.since} />
+                    </TD>
+                    <TD className="max-w-xs text-sm">
+                      {f.acknowledgement ? (
+                        <div className="mb-2">
+                          <div>
+                            By {f.acknowledgement.byName ?? 'an administrator'},{' '}
+                            <Utc at={f.acknowledgement.at} />
+                          </div>
+                          <div className="break-words text-xs text-muted-foreground">
+                            {f.acknowledgement.note}
+                          </div>
+                        </div>
+                      ) : null}
+                      <AcknowledgeFailureForm
+                        source={f.source}
+                        subjectId={f.subjectId}
+                        state={f.state}
+                        acknowledged={f.acknowledgement !== null}
+                      />
                     </TD>
                   </TR>
                 ))}
