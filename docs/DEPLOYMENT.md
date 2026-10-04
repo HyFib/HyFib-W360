@@ -1,6 +1,6 @@
 # Deployment
 
-Last updated 2026-09-26. Nothing has been deployed to a shared environment yet; this document is the
+Last updated 2026-10-04. Nothing has been deployed to a shared environment yet; this document is the
 deployment design plus the procedures verified locally (Docker images built and run against
 PostgreSQL 18; CI workflow authored).
 
@@ -21,6 +21,10 @@ PostgreSQL 18; CI workflow authored).
   default 9464) and migration runner (`node dist/migrate.js`, SQL files at `/app/migrations`).
 - Builds behind a TLS-intercepting proxy may pass an extra CA as a BuildKit secret
   (`--secret id=extra_ca,src=…`); it is never baked into images.
+- Both runtime images install the updates Debian has released since the Node base image was built
+  (the build fails when `deb.debian.org` cannot be reached), so a fixed vulnerability in a Debian
+  package does not wait for the base image to be rebuilt. CI's image scan (Trivy) fails on any HIGH
+  or CRITICAL vulnerability that has a fix.
 
 ## Production topology (target)
 

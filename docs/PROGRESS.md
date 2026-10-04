@@ -64,6 +64,12 @@ never for a company that was not sending.
 - **CI:** the end-to-end suite step may run 180 minutes (was 140) and its job 190 (was 150): 344
   tests took 127.3 minutes on 3695c23, and the 8 added here each wait about a minute for the
   worker's sweep, which would have left less than one retry of a long test before the limit.
+- **Image scans** (after cf0c0bd): Trivy's database now lists a HIGH vulnerability in Debian's
+  `libpcre2-8-0` 10.42-1+deb12u1 (CVE-2026-103111, fixed in 10.42-1+deb12u2), which the Node base
+  image still ships, so both image scans failed on cf0c0bd after passing on 3695c23. Both runtime
+  images now install the updates Debian has released when they are built, and a failed download
+  fails the build. This environment cannot reach `deb.debian.org`, so the images were not built
+  locally (BuildKit's Dockerfile checks pass); CI's image builds and scans are the check.
 - **Mutation checks:** 46 deliberate regressions tried, 46 caught: 41 against the access module,
   onboarding, the send and template sync hooks and migration 0104 through unit and integration tests
   (5 of them for the check once an expiry has passed and its wording), and 5 through the e2e test

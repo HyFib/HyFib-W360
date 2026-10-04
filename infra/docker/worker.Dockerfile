@@ -42,6 +42,12 @@ FROM ${NODE_IMAGE} AS runtime
 # dependency trees (and any CVEs in them) are not shipped.
 RUN rm -rf /usr/local/lib/node_modules /opt/yarn-* \
     /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack /usr/local/bin/yarn /usr/local/bin/yarnpkg
+# Debian's fixes released after the base image was built (the image scan fails on any HIGH or
+# CRITICAL vulnerability that has a fix). A failed download fails the build instead of shipping the
+# image without them; the package lists are not kept.
+RUN apt-get update --error-on=any \
+ && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
+ && rm -rf /var/lib/apt/lists/*
 ENV NODE_ENV=production W360_MIGRATIONS_DIR=/app/migrations
 WORKDIR /app
 COPY --from=build --chown=node:node /out ./
