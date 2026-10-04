@@ -5441,3 +5441,54 @@ Not built: checking that HyFib's app is still subscribed to the account's webhoo
 (`GET /{waba-id}/subscribed_apps`) and subscribing it again; Meta's deauthorization and uninstall
 callbacks (unconfirmed, M-146); a "check now" button; the account's review and payment status
 (`health_status`); emails to platform staff about companies' lost access (the console lists them).
+
+## ADR-138 Checking and restoring each account's webhook subscription (P2-12) (2026-10-04)
+
+Context: Meta sends a WhatsApp Business Account's messages, delivery statuses and template updates
+to the apps subscribed to the account's webhooks; onboarding subscribes HyFib's app with
+`POST /{WABA_ID}/subscribed_apps` (M-017). If HyFib's app stops being subscribed while its token
+stays valid, nothing tells HyFib: customers' messages stop arriving and the inbox looks quiet. The
+daily access check (ADR-137) confirms the token, not the subscription. Meta's official OpenAPI
+description documents `GET /{WABA-ID}/subscribed_apps` ("Get All Subscriptions for a WABA"): `data`
+lists the subscribed apps and is empty when none is; its examples put each app's `id`, `name` and
+`link` under `whatsapp_business_api_data`, while its `SubscribedApp` schema puts `id` and `name`
+directly in each item (M-190). Disconnecting a number in HyFib does not unsubscribe the app at Meta;
+only deleting a company does (ADR-055).
+
+Decision:
+
+- **Part of the access check**: once Meta admits the token (ADR-137), the same job lists the
+  account's subscribed apps with the account's token. HyFib's app is subscribed when an item's
+  `whatsapp_business_api_data.id`, or its `id`, is HyFib's app id (both documented forms are read).
+  Only a complete, well-formed answer counts: a `data` list without HyFib's app, in which every
+  app's id can be read and after which Meta announces no further page, means the subscription is
+  missing. A list with an app whose id cannot be read, or with a further page, cannot tell (unless
+  it lists HyFib's app); it, any other answer and a failed request are a check that could not be
+  made. A loss of access, or an access that could not be checked, skips this step.
+- **A missing subscription is restored at once** with the call onboarding makes (an empty body;
+  HyFib uses no callback override, M-035). Restoring is safe against a disconnection racing it:
+  disconnecting does not unsubscribe the app, so a restored subscription leaves Meta as a
+  disconnection would. The restoration is audited (`whatsapp.webhooks_restored`) and the owners and
+  administrators are emailed: Meta no longer listed HyFib's app for the account, HyFib subscribed it
+  again, messages and updates Meta sent before then may not have reached HyFib, and disconnecting
+  the numbers is the way to stop HyFib receiving them.
+- **A subscription that could not be restored** (the POST failed): the account records since when
+  HyFib's app is known to be missing and the error's kind, code and title; the first failure is
+  audited (`whatsapp.webhooks_missing`) and emailed to the owners and administrators, every page of
+  the company shows "WhatsApp messages are not reaching HyFib" (HyFib tries again every 30 minutes,
+  and reconnecting also subscribes the app) and the operations console lists the account. When a
+  later check finds the app subscribed again (restored by HyFib or by the business), they are
+  emailed that messages arrive again and that messages sent meanwhile may be missing.
+- **A subscription that could not be checked** (the listing failed or answered something else)
+  changes nothing for the company: the error is kept, the account is checked again after 30
+  minutes, and the console lists it once the subscription has not been confirmed for 26 hours.
+- Channels shows when each account's webhooks were last checked. Reconnecting clears the
+  subscription's state (the number's setup job subscribes the app again).
+
+What follows: a lost subscription is found within a day and restored without anyone's help, and the
+company learns that some messages may be missing; when it cannot be restored, the company and staff
+see it at once. A business that removed HyFib's app from its account on purpose but kept HyFib's
+token valid is subscribed again until it disconnects the numbers in HyFib; the email says so.
+
+Not built: checking which webhook fields the app receives for an account; Meta's deauthorization
+and uninstall callbacks (unconfirmed, M-146); restoring callback overrides (HyFib uses none).

@@ -707,6 +707,41 @@ export class GraphClient {
   }
 
   /**
+   * GET /{waba-id}/subscribed_apps: the ids of the apps subscribed to the account's webhooks
+   * (operation `getAllSubscriptionsForAWaba` in Meta's official OpenAPI description, research
+   * M-190). Its examples put each app under `whatsapp_business_api_data` while its schema puts `id`
+   * in the item itself, so both are read; an answer without a `data` list is not understood. The
+   * list is not `complete` when an app's id cannot be read or Meta says another page follows: such
+   * a list cannot tell that an app is missing from it.
+   */
+  listSubscribedApps(wabaId: string, token: string) {
+    return this.request(
+      'GET',
+      `/${encodeURIComponent(wabaId)}/subscribed_apps`,
+      { token },
+      (json) => {
+        if (!Array.isArray(json.data)) return null;
+        const appIds: string[] = [];
+        let complete = true;
+        for (const item of json.data as unknown[]) {
+          const entry = (typeof item === 'object' && item !== null ? item : {}) as {
+            id?: unknown;
+            whatsapp_business_api_data?: { id?: unknown } | null;
+          };
+          const id = entry.whatsapp_business_api_data?.id ?? entry.id;
+          if (typeof id === 'string' && id.length > 0) appIds.push(id);
+          else if (Number.isSafeInteger(id)) appIds.push(String(id));
+          else complete = false;
+        }
+        if (typeof (json.paging as { next?: unknown } | null | undefined)?.next === 'string') {
+          complete = false;
+        }
+        return { appIds, complete };
+      },
+    );
+  }
+
+  /**
    * DELETE /{waba-id}/subscribed_apps: stops this app's webhooks for the account (operation
    * `unsubscribeFromWabaWebhooks` in Meta's official OpenAPI description). Used when a company is
    * deleted (ADR-055).

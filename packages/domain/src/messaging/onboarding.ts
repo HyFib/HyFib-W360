@@ -20,6 +20,7 @@ import {
   eq,
   gt,
   inArray,
+  isNotNull,
   lte,
   ne,
   or,
@@ -109,6 +110,8 @@ export interface ChannelView {
   accessExpiresAt: string | null;
   /** Whether the expiry Meta reported for the account's access has passed. */
   accessExpired: boolean;
+  /** When the app's webhook subscription to the number's account was last confirmed (ADR-138). */
+  webhooksCheckedAt: string | null;
 }
 
 /** An account whose access needs the company's attention (ADR-137). */
@@ -117,9 +120,10 @@ export interface WhatsAppAccessIssue {
   account: string;
   /**
    * `reconnect`: Meta no longer accepts the access; `expiring`: it expires within 7 days; `expired`:
-   * the expiry Meta reported has passed (the account is checked again at once).
+   * the expiry Meta reported has passed (the account is checked again at once); `webhooks`: HyFib's
+   * app is no longer subscribed to the account's webhooks and subscribing it again failed (ADR-138).
    */
-  kind: 'reconnect' | 'expiring' | 'expired';
+  kind: 'reconnect' | 'expiring' | 'expired' | 'webhooks';
   /** Why Meta no longer accepts the access (`reconnect`), as a clause. */
   reason: string | null;
   problem: AccessProblem | null;
@@ -345,6 +349,9 @@ export function createOnboardingService(deps: OnboardingDeps) {
                 tokenExpiryRemindedAt: null,
                 tokenProblem: null,
                 tokenProblemAt: null,
+                // Its setup job subscribes the app to the account's webhooks again (ADR-138).
+                webhooksCheckError: null,
+                webhooksMissingSince: null,
                 ...(data.businessId ? { businessId: data.businessId } : {}),
               })
               .where(
@@ -668,6 +675,7 @@ export function createOnboardingService(deps: OnboardingDeps) {
               accountStatus: whatsappAccounts.status,
               accessCheckedAt: whatsappAccounts.tokenCheckedAt,
               accessExpiresAt: whatsappAccounts.tokenExpiresAt,
+              webhooksCheckedAt: whatsappAccounts.webhooksCheckedAt,
             })
             .from(channelAccounts)
             .innerJoin(
@@ -688,6 +696,7 @@ export function createOnboardingService(deps: OnboardingDeps) {
         accessCheckedAt: r.accessCheckedAt?.toISOString() ?? null,
         accessExpiresAt: r.accessExpiresAt?.toISOString() ?? null,
         accessExpired: r.accessExpiresAt !== null && r.accessExpiresAt <= now,
+        webhooksCheckedAt: r.webhooksCheckedAt?.toISOString() ?? null,
       }));
     },
 
@@ -713,6 +722,7 @@ export function createOnboardingService(deps: OnboardingDeps) {
               problemAt: whatsappAccounts.tokenProblemAt,
               grantedScopes: whatsappAccounts.grantedScopes,
               expiresAt: whatsappAccounts.tokenExpiresAt,
+              webhooksMissingSince: whatsappAccounts.webhooksMissingSince,
             })
             .from(whatsappAccounts)
             .where(
@@ -722,7 +732,10 @@ export function createOnboardingService(deps: OnboardingDeps) {
                   eq(whatsappAccounts.status, 'needs_reconnect'),
                   and(
                     eq(whatsappAccounts.status, 'connected'),
-                    lte(whatsappAccounts.tokenExpiresAt, soon),
+                    or(
+                      lte(whatsappAccounts.tokenExpiresAt, soon),
+                      isNotNull(whatsappAccounts.webhooksMissingSince),
+                    ),
                   ),
                 ),
               ),
@@ -730,23 +743,42 @@ export function createOnboardingService(deps: OnboardingDeps) {
             .orderBy(asc(whatsappAccounts.createdAt), asc(whatsappAccounts.id)),
         { accessMode: 'read only' },
       );
-      return rows.map((r) => {
-        const reconnect = r.status === 'needs_reconnect';
-        return {
+      return rows.flatMap((r): WhatsAppAccessIssue[] => {
+        const base = {
           whatsappAccountId: r.id,
           account: accountLabel(r),
-          kind: reconnect
-            ? 'reconnect'
-            : r.expiresAt !== null && r.expiresAt <= now
-              ? 'expired'
-              : 'expiring',
-          reason: reconnect
-            ? accessProblemReason(r.problem, missingPermissions(r.grantedScopes))
-            : null,
           problem: r.problem,
-          since: r.problemAt?.toISOString() ?? null,
           expiresAt: r.expiresAt?.toISOString() ?? null,
         };
+        if (r.status === 'needs_reconnect') {
+          return [
+            {
+              ...base,
+              kind: 'reconnect',
+              reason: accessProblemReason(r.problem, missingPermissions(r.grantedScopes)),
+              since: r.problemAt?.toISOString() ?? null,
+            },
+          ];
+        }
+        // A connected account: its webhooks, and its access's expiry, each as their own issue.
+        const issues: WhatsAppAccessIssue[] = [];
+        if (r.webhooksMissingSince) {
+          issues.push({
+            ...base,
+            kind: 'webhooks',
+            reason: null,
+            since: r.webhooksMissingSince.toISOString(),
+          });
+        }
+        if (r.expiresAt && r.expiresAt <= soon) {
+          issues.push({
+            ...base,
+            kind: r.expiresAt <= now ? 'expired' : 'expiring',
+            reason: null,
+            since: null,
+          });
+        }
+        return issues;
       });
     },
   };

@@ -122,6 +122,16 @@ sweep is not running: nobody is emailed about late queues until it does, so star
 5. An expiry Meta reports for a token is shown on Channels; the owners and administrators are
    reminded once 7 days before it, and the account is checked again as soon as it passes.
    Reconnecting gives HyFib a new token.
+6. **WhatsApp messages are not reaching HyFib** (ADR-138): the daily check found HyFib's app missing
+   from the account's subscribed apps and could not subscribe it again. Channels and every page of
+   the company say so, the owners and administrators were emailed once, and the operations
+   console's Integrations page lists the account under "WhatsApp webhooks" with Meta's error
+   (`whatsapp_accounts.webhooks_missing_since`, `webhooks_check_error`). HyFib tries again every 30
+   minutes. Code 200 means Meta refuses the app's permission for the account (ask the company
+   whether it removed HyFib's app); others are usually transient. Reconnecting the account runs
+   onboarding's subscribe step. A subscription HyFib restored by itself is audited
+   (`whatsapp.webhooks_restored`) and the company is told that messages sent before then may be
+   missing.
 
 ## 7. Duplicate-send uncertainty
 
@@ -2339,6 +2349,13 @@ whatever the configuration, so it stays counted under the key it names; cancel i
 should not wait for that. After 1,000 such jobs a worker stops signing jobs again until it restarts
 and logs an error naming `W360_JOB_SIGNING_KEY_PREVIOUS`: check that the previous key's value is
 right. "Jobs that will be refused" name a key that is not configured.
+
+**Migration 0105 failed.** It adds the webhook subscription columns to `app.whatsapp_accounts` and
+recreates `ops.whatsapp_access_checks_due` and `ops.platform_ops_integration_failures`, in one
+transaction; a failure rolls it back (usually the bootstrap roles: fix them and run the migrations
+again). Workers of this release need it before they start, or their access checks fail when they
+store what they found; workers of the previous release check no subscription. Each connected
+account's subscription is first checked at its next daily access check.
 
 **Migration 0104 failed.** It adds the access check columns to `app.whatsapp_accounts`, creates
 `ops.whatsapp_access_checks_due` and recreates `ops.platform_ops_integration_failures`, in one

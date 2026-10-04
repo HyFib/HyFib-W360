@@ -1,7 +1,13 @@
 import { randomBytes } from 'node:crypto';
 import type { APIRequestContext, Page } from '@playwright/test';
 import { expect, test } from './fixtures';
-import { connectTestChannel, messagingConfigured, setStandInToken } from './messaging-support';
+import {
+  connectTestChannel,
+  messagingConfigured,
+  newWabaId,
+  setStandInSubscription,
+  setStandInToken,
+} from './messaging-support';
 import { expectNoHorizontalOverflow, signUpAndVerify, uniqueEmail, waitForEmail } from './support';
 
 const PASSWORD = 'correct horse battery staple 42';
@@ -17,6 +23,7 @@ async function companyWithToken(
   page: Page,
   request: APIRequestContext,
   token: { valid?: boolean; expiresAt?: number },
+  wabaId?: string,
 ) {
   const email = uniqueEmail('access');
   const suffix = `${Date.now().toString(36)}${randomBytes(2).toString('hex')}`;
@@ -28,8 +35,13 @@ async function companyWithToken(
   await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
   const value = `EAAGe2eAccess${randomBytes(12).toString('hex')}`;
   await setStandInToken(request, { token: value, ...token });
-  const { wabaId } = await connectTestChannel({ ownerEmail: email, slug, token: value });
-  return { email, slug, account: `WhatsApp Business Account ${wabaId}` };
+  const connected = await connectTestChannel({
+    ownerEmail: email,
+    slug,
+    token: value,
+    ...(wabaId ? { wabaId } : {}),
+  });
+  return { email, slug, account: `WhatsApp Business Account ${connected.wabaId}` };
 }
 
 /** Reloads the page until the alert appears (the minute sweep checks within about a minute). */
@@ -104,9 +116,46 @@ test('an access that expires within 7 days is shown as a warning and its owner i
   await expect(page.getByText('Active', { exact: true })).toBeVisible();
   await expect(page.getByText(/^Access checked /)).toBeVisible();
   await expect(page.getByText(/^Access expires /)).toBeVisible();
+  await expect(page.getByText(/^Webhooks checked /)).toBeVisible();
   await expectNoHorizontalOverflow(page);
 
   const text = await waitForEmail(email, `HyFib’s access to ${account} expires on`);
   expect(text).toContain(`Meta reports that HyFib’s access to ${account} expires on`);
   expect(text).toContain('Reconnecting gives HyFib a new access token.');
+});
+
+test('an account whose webhooks HyFib’s app cannot be subscribed to again shows that messages are not reaching HyFib', async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(240_000);
+  // Meta no longer lists HyFib's app for the account, and refuses to subscribe it again (ADR-138).
+  const wabaId = newWabaId();
+  await setStandInSubscription(request, { wabaId, subscribed: false, refuse: true });
+  const { email, slug, account } = await companyWithToken(page, request, {}, wabaId);
+  await page.goto(`/c/${slug}/settings/channels`);
+  await waitForAlert(page, 'WhatsApp messages are not reaching HyFib');
+
+  const alert = page.getByRole('alert').filter({ hasText: 'not reaching HyFib' });
+  await expect(alert).toContainText(
+    `Meta no longer sends HyFib the messages and updates of ${account}: HyFib’s app is not subscribed to the account, and subscribing it again failed`,
+  );
+  await expect(alert).toContainText('HyFib tries again every 30 minutes');
+  // The access itself is fine: the number keeps sending.
+  await expect(page.getByText('Active', { exact: true })).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+
+  // Every page of the company shows it, with a way to Channels for an owner.
+  await page.goto(`/c/${slug}/contacts`);
+  const banner = page.getByRole('alert').filter({ hasText: 'not reaching HyFib' });
+  await expect(banner).toContainText(account);
+  await banner.getByRole('link', { name: 'Open Channels' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}/settings/channels$`));
+
+  const text = await waitForEmail(email, `WhatsApp messages for ${account} are not reaching HyFib`);
+  expect(text).toContain(
+    'Until it is subscribed again, messages customers send to +91 90000 12345 do not reach HyFib.',
+  );
+  expect(text).toContain('HyFib tries again every 30 minutes.');
+  await setStandInSubscription(request, { wabaId, subscribed: true, refuse: false });
 });

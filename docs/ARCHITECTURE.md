@@ -210,7 +210,10 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   connected account due one (daily, or asked by a send or template sync Meta refused for the token);
   the job asks `debug_token` and applies onboarding's rules in the company's scope: a loss marks the
   account and its numbers `needs_reconnect`, audits and emails the owners and administrators once;
-  a failed request changes nothing and is retried after 30 minutes.
+  a failed request changes nothing and is retried after 30 minutes. Once Meta admits the token,
+  the same job lists the account's subscribed apps and subscribes HyFib's app again when it is
+  missing (ADR-138): a restoration is audited and emailed; one that fails is emailed once, shown on
+  every page of the company and tried again after 30 minutes.
 - **Not built yet:** media download to private object storage, message search, Meta-side
   deregistration on disconnect (templates and template sends: section 6A).
 

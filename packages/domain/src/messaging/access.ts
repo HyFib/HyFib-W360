@@ -17,7 +17,7 @@ import { enqueueEmail, type OutboxDeps } from '../email/outbox';
 import { deletionRecipients, formatCompanyTime } from '../tenancy/deletion';
 import { credentialAad } from './credentials';
 import { emitTenantEvent } from './events';
-import type { GraphClient } from './graph';
+import type { GraphClient, GraphResult } from './graph';
 
 /**
  * Checking each company's WhatsApp access before sends fail (ADR-137, P2-12). The minute sweep lists
@@ -177,6 +177,55 @@ export function accessExpiryNotice(facts: {
   };
 }
 
+/** The email to owners and administrators when HyFib's app could not be subscribed again (ADR-138). */
+export function webhooksMissingNotice(facts: { account: string; numbers: string[] }): {
+  subject: string;
+  lines: string[];
+} {
+  const account = facts.account.replace(/\s+/g, ' ').trim();
+  return {
+    subject: `WhatsApp messages for ${account} are not reaching HyFib`,
+    lines: [
+      `Meta no longer lists HyFib’s app among the apps that receive ${account}’s WhatsApp messages and updates, and subscribing it again failed.`,
+      facts.numbers.length > 0
+        ? `Until it is subscribed again, messages customers send to ${listNumbers(facts.numbers)} do not reach HyFib.`
+        : 'Until it is subscribed again, messages customers send to its numbers do not reach HyFib.',
+      'HyFib tries again every 30 minutes. Connecting the same account again in Settings → Channels also subscribes it.',
+    ],
+  };
+}
+
+/**
+ * The email to owners and administrators once HyFib's app receives an account's updates again: at
+ * once when the check subscribed it again, or after they were told it could not be (ADR-138).
+ */
+export function webhooksRestoredNotice(facts: {
+  account: string;
+  restoredAt: Date;
+  missingSince: Date | null;
+  timeZone: string;
+}): { subject: string; lines: string[] } {
+  const account = facts.account.replace(/\s+/g, ' ').trim();
+  const restored = formatCompanyTime(facts.restoredAt, facts.timeZone);
+  if (!facts.missingSince) {
+    return {
+      subject: `HyFib was not receiving WhatsApp updates for ${account}`,
+      lines: [
+        `Meta no longer listed HyFib’s app among the apps that receive ${account}’s WhatsApp messages and updates, so HyFib subscribed it again on ${restored}.`,
+        'Messages, delivery updates and template updates that Meta sent before then may not have reached HyFib, so some conversations may be missing from the inbox.',
+        'If HyFib should no longer receive this account’s messages, disconnect its numbers in Settings → Channels.',
+      ],
+    };
+  }
+  return {
+    subject: `WhatsApp messages for ${account} reach HyFib again`,
+    lines: [
+      `HyFib receives ${account}’s WhatsApp messages and updates again since ${restored}.`,
+      `Messages and updates that Meta sent while HyFib’s app was not subscribed (at least since ${formatCompanyTime(facts.missingSince, facts.timeZone)}) may not have reached HyFib, so some conversations may be missing from the inbox.`,
+    ],
+  };
+}
+
 /** Whether an expiry Meta reports for a healthy token is due its reminder. */
 export function accessExpiresSoon(expiresAt: Date | null, now: Date): boolean {
   if (!expiresAt) return false;
@@ -200,12 +249,68 @@ export interface AccessCheckDeps {
  */
 export type AccessCheckOutcome = 'healthy' | 'lost' | 'not_checked' | 'skipped';
 
+/**
+ * The account's webhook subscription, checked once Meta admits the token (ADR-138): `subscribed`:
+ * Meta lists HyFib's app; `restored`: it did not, and subscribing it again succeeded; `missing`: it
+ * did not, and subscribing it again failed; `not_checked`: the listing failed or was not understood.
+ */
+export type SubscriptionFinding =
+  | { state: 'subscribed' }
+  | { state: 'restored' }
+  | { state: 'missing'; error: string }
+  | { state: 'not_checked'; error: string };
+
+/** A failed request as stored: its kind, code and title, never the token or the URL. */
+function failureText(result: Extract<GraphResult<unknown>, { ok: false }>): string {
+  return `${result.kind}${result.code !== undefined ? ` ${result.code}` : ''}: ${result.title}`.slice(
+    0,
+    300,
+  );
+}
+
+/** Lists the account's subscribed apps and subscribes HyFib's app again when it is not among them. */
+async function checkSubscription(
+  deps: AccessCheckDeps,
+  wabaId: string,
+  token: string,
+): Promise<SubscriptionFinding> {
+  const listed = await deps.graph.listSubscribedApps(wabaId, token);
+  if (!listed.ok) return { state: 'not_checked', error: failureText(listed) };
+  if (listed.data.appIds.includes(deps.meta.appId)) return { state: 'subscribed' };
+  // An app whose id could not be read, or a page that follows, may be HyFib's: only a complete list
+  // tells that it is missing.
+  if (!listed.data.complete) return { state: 'not_checked', error: 'unknown: incomplete_app_list' };
+  // The call onboarding makes; a disconnection racing it changes nothing, since disconnecting does
+  // not unsubscribe the app at Meta.
+  const restored = await deps.graph.subscribeApp(wabaId, token);
+  return restored.ok ? { state: 'restored' } : { state: 'missing', error: failureText(restored) };
+}
+
+/** What a finding stores on the account. */
+function subscriptionChanges(finding: SubscriptionFinding, missingSince: Date | null, at: Date) {
+  switch (finding.state) {
+    case 'subscribed':
+      return { webhooksCheckedAt: at, webhooksCheckError: null, webhooksMissingSince: null };
+    case 'restored':
+      return {
+        webhooksCheckedAt: at,
+        webhooksRestoredAt: at,
+        webhooksCheckError: null,
+        webhooksMissingSince: null,
+      };
+    case 'missing':
+      return { webhooksCheckError: finding.error, webhooksMissingSince: missingSince ?? at };
+    case 'not_checked':
+      return { webhooksCheckError: finding.error };
+  }
+}
+
 /** Checks one account's access in its company's scope (the job of the minute sweep's signal). */
 export async function checkWhatsAppAccess(
   deps: AccessCheckDeps,
   scope: TenantScope,
   whatsappAccountId: string,
-): Promise<{ outcome: AccessCheckOutcome; error?: string }> {
+): Promise<{ outcome: AccessCheckOutcome; error?: string; webhooks?: SubscriptionFinding }> {
   const tenantId = scope.tenantId;
   const where = and(
     eq(whatsappAccounts.tenantId, tenantId),
@@ -218,6 +323,7 @@ export async function checkWhatsAppAccess(
     (tx) =>
       tx
         .select({
+          wabaId: whatsappAccounts.wabaId,
           status: whatsappAccounts.status,
           credential: whatsappAccounts.credentialCiphertext,
         })
@@ -229,6 +335,11 @@ export async function checkWhatsAppAccess(
     return { outcome: 'skipped' };
   const token = deps.keyring.decryptString(account.credential, aad);
   const debug = await deps.graph.debugToken(token, deps.meta.appId, deps.meta.appSecret);
+  // The webhook subscription is checked only with a token Meta admits (ADR-138).
+  const subscription =
+    debug.ok && !assessGrant(debug.data, deps.meta.appId, account.wabaId)
+      ? await checkSubscription(deps, account.wabaId, token)
+      : null;
 
   return deps.db.run(scope, async (tx) => {
     // The account as it is now: a disconnection or a reconnection during the check wins.
@@ -239,6 +350,7 @@ export async function checkWhatsAppAccess(
         status: whatsappAccounts.status,
         credential: whatsappAccounts.credentialCiphertext,
         expiryRemindedAt: whatsappAccounts.tokenExpiryRemindedAt,
+        webhooksMissingSince: whatsappAccounts.webhooksMissingSince,
       })
       .from(whatsappAccounts)
       .where(where)
@@ -252,12 +364,7 @@ export async function checkWhatsAppAccess(
       return { outcome: 'skipped' as const };
     }
     if (!debug.ok) {
-      // Kind, code and title only: never the token or the URL.
-      const error =
-        `${debug.kind}${debug.code !== undefined ? ` ${debug.code}` : ''}: ${debug.title}`.slice(
-          0,
-          300,
-        );
+      const error = failureText(debug);
       await tx
         .update(whatsappAccounts)
         .set({ tokenCheckAttemptedAt: startedAt, tokenCheckError: error })
@@ -285,7 +392,13 @@ export async function checkWhatsAppAccess(
         !current.expiryRemindedAt && accessExpiresSoon(grant.expiresAt, deps.clock.now());
       await tx
         .update(whatsappAccounts)
-        .set({ ...checked, ...(remind ? { tokenExpiryRemindedAt: deps.clock.now() } : {}) })
+        .set({
+          ...checked,
+          ...(subscription
+            ? subscriptionChanges(subscription, current.webhooksMissingSince, startedAt)
+            : {}),
+          ...(remind ? { tokenExpiryRemindedAt: deps.clock.now() } : {}),
+        })
         .where(where);
       if (remind && grant.expiresAt && company) {
         const numbers = await numbersOf(tx, tenantId, whatsappAccountId, ['active', 'onboarding']);
@@ -297,7 +410,18 @@ export async function checkWhatsAppAccess(
         });
         await emailManagers(deps, tx, tenantId, company, notice);
       }
-      return { outcome: 'healthy' as const };
+      if (subscription) {
+        await reportSubscription(deps, tx, {
+          tenantId,
+          whatsappAccountId,
+          company,
+          label,
+          finding: subscription,
+          missingSince: current.webhooksMissingSince,
+          at: startedAt,
+        });
+      }
+      return { outcome: 'healthy' as const, ...(subscription ? { webhooks: subscription } : {}) };
     }
 
     // A loss of access: the account and its numbers that send or are being set up need reconnecting.
@@ -354,6 +478,62 @@ export async function checkWhatsAppAccess(
     }
     return { outcome: 'lost' as const };
   });
+}
+
+/**
+ * What a subscription finding tells the company (ADR-138): a restoration is audited and the owners
+ * and administrators are emailed; so is the first failure to subscribe HyFib's app again, and the
+ * subscription found again after that.
+ */
+async function reportSubscription(
+  deps: AccessCheckDeps,
+  tx: Tx,
+  facts: {
+    tenantId: string;
+    whatsappAccountId: string;
+    company: CompanyFacts | null;
+    label: string;
+    finding: SubscriptionFinding;
+    missingSince: Date | null;
+    at: Date;
+  },
+): Promise<void> {
+  const { tenantId, whatsappAccountId, company, finding, missingSince } = facts;
+  if (finding.state === 'restored') {
+    await recordSystemAudit(tx, tenantId, {
+      action: 'whatsapp.webhooks_restored',
+      subjectType: 'whatsapp_account',
+      subjectId: whatsappAccountId,
+      result: 'success',
+      metadata: { missingSince: missingSince?.toISOString() ?? null },
+    });
+  }
+  if (finding.state === 'missing' && !missingSince) {
+    await recordSystemAudit(tx, tenantId, {
+      action: 'whatsapp.webhooks_missing',
+      subjectType: 'whatsapp_account',
+      subjectId: whatsappAccountId,
+      result: 'failure',
+      metadata: { error: finding.error },
+    });
+  }
+  if (!company) return;
+  if (finding.state === 'restored' || (finding.state === 'subscribed' && missingSince)) {
+    const notice = webhooksRestoredNotice({
+      account: facts.label,
+      restoredAt: facts.at,
+      missingSince,
+      timeZone: company.timezone,
+    });
+    await emailManagers(deps, tx, tenantId, company, notice);
+  } else if (finding.state === 'missing' && !missingSince) {
+    const numbers = await numbersOf(tx, tenantId, whatsappAccountId, ['active', 'onboarding']);
+    const notice = webhooksMissingNotice({
+      account: facts.label,
+      numbers: numbers.map((n) => n.label),
+    });
+    await emailManagers(deps, tx, tenantId, company, notice);
+  }
 }
 
 interface CompanyFacts {

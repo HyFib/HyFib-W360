@@ -90,8 +90,9 @@ App-secret rotation: set the new secret as `META_APP_SECRET` and the old one as
   to our private storage under our retention policy.
 - **Tokens:** HyFib checks each connected account's token daily with `debug_token` by the rules of
   step 4 (ADR-137); Meta's answer that it no longer accepts the token marks the account for
-  reconnecting and tells the company. A lost WABA subscription is not checked yet (explicit
-  deauthorization signals are unconfirmed, M-146).
+  reconnecting and tells the company. The same check lists the apps subscribed to the account's
+  webhooks (`GET /{WABA_ID}/subscribed_apps`) and subscribes HyFib's app again when Meta no longer
+  lists it (ADR-138). Explicit deauthorization signals are unconfirmed (M-146).
 - **Restricted capabilities** (coexistence with the WhatsApp Business App, history sync, groups,
   calling, payments, Marketing Messages API) require explicit eligibility checks; never promise
   complete chat history import.

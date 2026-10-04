@@ -1,5 +1,87 @@
 # Progress
 
+## 2026-10-04 — Phase 5: checking and restoring each account's webhook subscription (P2-12, ADR-138)
+
+Status: **Implemented and locally verified against the Graph stand-in (test data only).** The daily
+access check (ADR-137) confirmed each account's token but not that Meta still sends HyFib the
+account's messages: if HyFib's app stopped being subscribed to the account's webhooks, customers'
+messages simply stopped arriving and nobody was told.
+
+### Completed
+
+- **Design (ADR-138):** once Meta admits the token, the same job lists the account's subscribed apps
+  (`GET /{WABA_ID}/subscribed_apps`, documented in Meta's official OpenAPI description, research
+  M-190) and subscribes HyFib's app again with onboarding's call when it is missing; only a
+  complete list HyFib can read (every app's id, no further page) counts as a missing subscription.
+- **Domain** (`messaging/graph.ts`, `messaging/access.ts`): `listSubscribedApps` reads an app's id
+  in both shapes Meta documents and says whether the list is complete; the check stores when the
+  subscription was last confirmed or restored, the error of a listing or a restoration that failed,
+  and since when HyFib's app is known to be missing. A restoration is audited
+  (`whatsapp.webhooks_restored`) and emailed to the owners and administrators; so is the first
+  failure to restore (`whatsapp.webhooks_missing`), and the subscription found again after it.
+  Reconnecting clears the state.
+- **Worker:** the access check job logs subscriptions it could not confirm; the due list asks for
+  the account again 30 minutes after a listing or a restoration failed.
+- **Web:** every page of the company shows "WhatsApp messages are not reaching HyFib" while HyFib's
+  app is known to be missing and could not be subscribed again; Channels shows when each account's
+  webhooks were last checked; the operations console lists accounts whose subscription is missing,
+  and subscriptions not confirmed for 26 hours.
+- **Database** (migration 0105): the subscription columns on `app.whatsapp_accounts` (the
+  application role may update them), and `ops.whatsapp_access_checks_due` and
+  `ops.platform_ops_integration_failures` recreated.
+- **Test stand-in:** `GET /{waba}/subscribed_apps` in the shape of Meta's examples, with every
+  account subscribed unless a test removes it, other apps listed, an app listed without its id, and
+  refusals of the listing or of subscribing again.
+- **Tests:**
+  - Unit (5 new): both documented shapes, empty and malformed answers, lists made incomplete by an
+    app whose id cannot be read or by a further page, a refusal, the three emails.
+  - Integration (7 new, 2 extended): a subscription confirmed with the account's token and nobody
+    told; a missing one restored at once while another app is listed, with the audit entry and one
+    email; a restoration refused: recorded, emailed once, the banner and the console, tried again
+    after 30 minutes and not before, then restored with the second email; a subscription found again
+    after a failure; a listing that failed changing nothing, tried again after 30 minutes and listed
+    by the console after 26 hours; a list with an app HyFib cannot read not taken for a missing
+    subscription; no listing with a token Meta does not admit or an access that could not be
+    checked; reconnecting clearing the state (extended); healthy checks now confirming the
+    subscription (extended).
+  - E2E (1 new, 1 extended; chromium, mobile-chromium): an account whose subscription cannot be
+    restored shows the banner on Channels and on another page, with the email; an expiring access
+    also shows when its webhooks were checked.
+- **Found in review before committing:** a list with an app whose id could not be read was taken for
+  a missing subscription, so an answer in a shape neither documented form describes would have had
+  HyFib subscribe the app again and email every company at each daily check. Only a complete list
+  now counts (every app's id read, no further page); anything else is a check that could not be made
+  (an integration test and 6 mutations cover it).
+- **Docs:** ADR-138; research §20 (M-190); THREAT-MODEL T150; RUNBOOKS (section 6, migration
+  0105); META-SETUP; ARCHITECTURE; BACKLOG P2-12; feature matrix W-021.
+- **Mutation checks:** 30 deliberate regressions tried, 30 caught: 28 against the access module, the
+  reading of Meta's answer (both shapes, incomplete lists, ids too large for a number), onboarding
+  and migration 0105 through unit and integration tests, and 2 through the e2e test (the banner not
+  saying that messages are not reaching HyFib, Channels not saying when the webhooks were checked).
+
+### Test commands and results (local, 2026-10-04)
+
+| Command                                                                                                                                                      | Result                                                                                                                                                                                                                                                                                      |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`                                                                                                           | clean                                                                                                                                                                                                                                                                                       |
+| `pnpm test` (unit)                                                                                                                                           | 659 passed (72 files; 5 new)                                                                                                                                                                                                                                                                |
+| `pnpm test:integration` on PostgreSQL 18.6                                                                                                                   | 820 passed (56 files; 7 new, 2 extended)                                                                                                                                                                                                                                                    |
+| `pnpm test:integration` on PostgreSQL 17.11                                                                                                                  | 820 passed (56 files)                                                                                                                                                                                                                                                                       |
+| `pnpm db:migrate` on an e2e database at 0104 (12 WhatsApp accounts, 10 connected), and on a new database                                                     | 0105 applied: both functions owned by `w360_definer` with `search_path` pinned, the due list executable by the application role only and the console's by the platform role only, neither by PUBLIC; all 105 applied                                                                        |
+| `pnpm build`                                                                                                                                                 | passed                                                                                                                                                                                                                                                                                      |
+| e2e on a new database: whatsapp-access, inbox, templates, onboarding, platform-ops, forms, campaigns, dead-letter-retry, step-up (chromium, mobile-chromium) | 42 passed (10.1 min)                                                                                                                                                                                                                                                                        |
+| Mutation checks                                                                                                                                              | 30 tried, 30 caught (28 against the access module, the reading of Meta's answer, onboarding and migration 0105, through unit and integration tests; 2 through the e2e test: the banner not saying that messages are not reaching HyFib, Channels not saying when the webhooks were checked) |
+| gitleaks 8.30.1 on the staged changes                                                                                                                        | no leaks found                                                                                                                                                                                                                                                                              |
+
+### Known gaps
+
+- Which webhook fields HyFib's app receives for an account is not checked.
+- A business that removed HyFib's app from its account on purpose but kept HyFib's token valid is
+  subscribed again until it disconnects the numbers (the email says how).
+- Meta's listing describes each app in two shapes (its examples and its schema disagree, M-190);
+  both are read, and what Meta answers in production was not seen. A list HyFib cannot fully read
+  is reported as not checked, never as missing, and a further page is not followed.
+
 ## 2026-10-04 — Phase 5: checking each company's WhatsApp access before sends fail (P2-12, ADR-137)
 
 Status: **Implemented and locally verified against the Graph stand-in (test data only).** Each

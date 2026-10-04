@@ -163,6 +163,12 @@ export default async function ChannelsPage({ params }: { params: Promise<{ slug:
                             Access checked {formatDateTime(ch.accessCheckedAt, ctx.tenant.timezone)}
                           </div>
                         ) : null}
+                        {ch.accountStatus === 'connected' && ch.webhooksCheckedAt ? (
+                          <div className="text-xs text-muted-foreground">
+                            Webhooks checked{' '}
+                            {formatDateTime(ch.webhooksCheckedAt, ctx.tenant.timezone)}
+                          </div>
+                        ) : null}
                         {ch.accountStatus === 'connected' && ch.accessExpiresAt ? (
                           <div className="text-xs text-muted-foreground">
                             Access {ch.accessExpired ? 'expired' : 'expires'}{' '}

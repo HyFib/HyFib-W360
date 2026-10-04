@@ -5,9 +5,10 @@ import type { WorkerRuntime } from '../runtime';
 import { RetryableJobError } from './email';
 
 /**
- * Checks one WhatsApp account's access with `debug_token` (ADR-137). A check that could not be
- * made is recorded on the account and logged, and the minute sweep signals it again after 30
- * minutes; only a failure of the job itself (the database, a crash) is retried by pg-boss.
+ * Checks one WhatsApp account's access with `debug_token` (ADR-137) and, once Meta admits the token,
+ * its webhook subscription (ADR-138). A check that could not be made is recorded on the account and
+ * logged, and the minute sweep signals it again after 30 minutes; only a failure of the job itself
+ * (the database, a crash) is retried by pg-boss.
  */
 export function whatsappAccessCheckHandler(rt: WorkerRuntime) {
   return async ([job]: Job<unknown>[]): Promise<void> => {
@@ -39,11 +40,20 @@ export function whatsappAccessCheckHandler(rt: WorkerRuntime) {
       tenantId: auth.scope.tenantId,
       whatsappAccountId: auth.envelope.ref,
       outcome: result.outcome,
+      ...(result.webhooks ? { webhooks: result.webhooks.state } : {}),
     };
+    const webhooksError =
+      result.webhooks && 'error' in result.webhooks ? result.webhooks.error : undefined;
     if (result.outcome === 'not_checked') {
       rt.logger.warn({ ...facts, error: result.error }, 'WhatsApp access could not be checked');
     } else if (result.outcome === 'lost') {
       rt.logger.warn(facts, 'WhatsApp access lost; the company was asked to reconnect');
+    } else if (webhooksError) {
+      // The webhook subscription could not be checked, or could not be restored (ADR-138).
+      rt.logger.warn(
+        { ...facts, error: webhooksError },
+        'WhatsApp webhook subscription not confirmed',
+      );
     } else {
       rt.logger.info(facts, 'WhatsApp access checked');
     }

@@ -26,7 +26,8 @@ import {
  * Checking each company's WhatsApp access before sends fail (ADR-137) against real PostgreSQL and
  * the test-only Graph stand-in: what Meta's debug_token answer does to the account and its numbers,
  * the emails, checks that could not be made, the sweep's due list, checks asked by refused template
- * syncs, races with a reconnection, the expiry reminder, reconnecting, and the operations console.
+ * syncs, races with a reconnection, the expiry reminder, reconnecting, the operations console, and
+ * the check and restoration of each account's webhook subscription (ADR-138).
  */
 let fx: WhatsAppFixture;
 let staffId: string;
@@ -46,6 +47,8 @@ afterAll(async () => {
 });
 
 const BASE_URL = 'https://app.w360.test';
+/** A healthy access, and a subscription Meta lists (the stand-in's default). */
+const HEALTHY = { outcome: 'healthy', webhooks: { state: 'subscribed' } };
 
 function deps(overrides: Partial<AccessCheckDeps> = {}): AccessCheckDeps {
   return {
@@ -193,7 +196,7 @@ describe('a daily check of each connected account', () => {
   it('stores what Meta says about a healthy token and tells nobody', async () => {
     const c = await fx.company();
     const before = new Date();
-    expect(await check(c)).toEqual({ outcome: 'healthy' });
+    expect(await check(c)).toEqual(HEALTHY);
     const row = await account(c);
     expect(row.status).toBe('connected');
     expect(row.token_problem).toBeNull();
@@ -402,14 +405,14 @@ describe('a daily check of each connected account', () => {
         return answer;
       },
     });
-    expect(await check(resealed, { graph: sealing })).toEqual({ outcome: 'healthy' });
+    expect(await check(resealed, { graph: sealing })).toEqual(HEALTHY);
   });
 
   it('reminds the owners once when Meta reports an expiry less than 7 days away', async () => {
     const c = await fx.company();
     const inThreeDays = Math.floor(Date.now() / 1000) + 3 * 86_400;
     setToken(c, { expiresAt: inThreeDays });
-    expect(await check(c)).toEqual({ outcome: 'healthy' });
+    expect(await check(c)).toEqual(HEALTHY);
     const row = await account(c);
     expect(row.token_expires_at?.getTime()).toBe(inThreeDays * 1000);
     expect(row.token_expiry_reminded_at).not.toBeNull();
@@ -420,7 +423,7 @@ describe('a daily check of each connected account', () => {
       'From then on +91 90000 00000 cannot send messages from HyFib until the account is reconnected.',
     );
     // The next check does not remind again.
-    expect(await check(c)).toEqual({ outcome: 'healthy' });
+    expect(await check(c)).toEqual(HEALTHY);
     expect(await notices(c.tenant.id)).toHaveLength(1);
     // The banner and Channels show it.
     const service = createOnboardingService(onboardingDeps());
@@ -464,7 +467,7 @@ describe('a daily check of each connected account', () => {
     // An expiry further away is stored and not reminded.
     const later = await fx.company();
     setToken(later, { expiresAt: Math.floor(Date.now() / 1000) + 10 * 86_400 });
-    expect(await check(later)).toEqual({ outcome: 'healthy' });
+    expect(await check(later)).toEqual(HEALTHY);
     expect((await account(later)).token_expiry_reminded_at).toBeNull();
     expect(await notices(later.tenant.id)).toEqual([]);
   });
@@ -618,6 +621,12 @@ describe('reconnecting', () => {
     const gone = await addNumber(c, 'active', { step: 'done' });
     setToken(c, { valid: false });
     expect(await check(c)).toEqual({ outcome: 'lost' });
+    // The app's webhook subscription had been found missing before (ADR-138).
+    await fx.query(
+      `UPDATE app.whatsapp_accounts SET webhooks_missing_since = now(),
+              webhooks_check_error = 'permanent 200: OAuthException' WHERE id = $1`,
+      [c.whatsappAccountId],
+    );
 
     // Embedded Signup again with the same account: Meta lists the first two numbers only.
     const code = `code-${randomBytes(8).toString('hex')}`;
@@ -651,6 +660,12 @@ describe('reconnecting', () => {
       token_expiry_reminded_at: null,
     });
     expect(row.token_expires_at?.getTime()).toBe(expiresAt * 1000);
+    const [subscription] = await fx.query<{ missing: Date | null; error: string | null }>(
+      `SELECT webhooks_missing_since AS missing, webhooks_check_error AS error
+         FROM app.whatsapp_accounts WHERE id = $1`,
+      [c.whatsappAccountId],
+    );
+    expect(subscription).toEqual({ missing: null, error: null });
     expect(row.token_check_attempted_at).toEqual(row.token_checked_at);
     // The chosen number is set up again from the start; the other listed one only resumes.
     expect(await number(c.channelAccountId)).toMatchObject({
@@ -744,5 +759,279 @@ describe('the operations console', () => {
       { source: 'whatsapp_access_check', state: 'not_checked', error: 'auth 190: OAuthException' },
     ]);
     expect(of(quiet)).toEqual([]);
+  });
+});
+
+describe('the account’s webhook subscription (ADR-138)', () => {
+  async function webhooks(c: Company) {
+    const [row] = await fx.query<{
+      webhooks_checked_at: Date | null;
+      webhooks_check_error: string | null;
+      webhooks_missing_since: Date | null;
+      webhooks_restored_at: Date | null;
+      token_checked_at: Date | null;
+    }>(
+      `SELECT webhooks_checked_at, webhooks_check_error, webhooks_missing_since,
+              webhooks_restored_at, token_checked_at
+         FROM app.whatsapp_accounts WHERE id = $1`,
+      [c.whatsappAccountId],
+    );
+    return row!;
+  }
+  const calls = (c: Company, method: string) =>
+    fx.standIn.state.requests.filter(
+      (r) => r.method === method && r.path === `/v26.0/${c.wabaId}/subscribed_apps`,
+    );
+  async function audits(c: Company, action: string) {
+    return fx.query<{ result: string; metadata: Record<string, unknown> }>(
+      `SELECT result, metadata FROM app.audit_events WHERE tenant_id = $1 AND action = $2`,
+      [c.tenant.id, action],
+    );
+  }
+  async function consoleRows(c: Company) {
+    const rows = (
+      await fx.dbs.platform.run(staffId, (tx) =>
+        tx.execute<{ tenant_id: string; source: string; state: string; error: string | null }>(
+          sql`select * from ops.platform_ops_integration_failures(1000)`,
+        ),
+      )
+    ).rows;
+    return rows
+      .filter((r) => r.tenant_id === c.tenant.id && r.source === 'whatsapp_webhooks')
+      .map(({ state, error }) => ({ state, error }));
+  }
+  /** As if the last attempt was more than 30 minutes ago. */
+  async function laterThan30Minutes(c: Company) {
+    await fx.query(
+      `UPDATE app.whatsapp_accounts SET token_checked_at = now() - interval '31 minutes',
+              token_check_attempted_at = now() - interval '31 minutes' WHERE id = $1`,
+      [c.whatsappAccountId],
+    );
+  }
+
+  it('confirms a subscription Meta lists, with the account’s token, and tells nobody', async () => {
+    const c = await fx.company();
+    expect(await check(c)).toEqual({ outcome: 'healthy', webhooks: { state: 'subscribed' } });
+    const row = await webhooks(c);
+    expect(row.webhooks_checked_at).toEqual(row.token_checked_at);
+    expect(row).toMatchObject({
+      webhooks_check_error: null,
+      webhooks_missing_since: null,
+      webhooks_restored_at: null,
+    });
+    const [listed] = calls(c, 'GET');
+    expect(listed!.authorization).toBe(`Bearer ${c.token}`);
+    expect(listed!.query).toEqual({});
+    expect(calls(c, 'POST')).toEqual([]);
+    expect(await notices(c.tenant.id)).toEqual([]);
+    const ctx = await fx.ctx(c, c.agent);
+    const service = createOnboardingService(onboardingDeps());
+    expect((await service.listChannels(ctx))[0]).toMatchObject({
+      webhooksCheckedAt: row.webhooks_checked_at!.toISOString(),
+    });
+    expect(await service.accessIssues(ctx)).toEqual([]);
+  });
+
+  it('subscribes HyFib’s app again at once when Meta no longer lists it, and tells the owners', async () => {
+    const c = await fx.company();
+    // Meta lists another app only.
+    fx.standIn.state.unsubscribedWabas.add(c.wabaId);
+    fx.standIn.state.otherSubscribedApps.set(c.wabaId, ['2345678901234567']);
+    expect(await check(c)).toEqual({ outcome: 'healthy', webhooks: { state: 'restored' } });
+    expect(fx.standIn.state.unsubscribedWabas.has(c.wabaId)).toBe(false);
+    expect(calls(c, 'POST').map((r) => r.body)).toEqual([{}]);
+    const row = await webhooks(c);
+    expect(row.webhooks_restored_at).toEqual(row.token_checked_at);
+    expect(row.webhooks_checked_at).toEqual(row.token_checked_at);
+    expect(row).toMatchObject({ webhooks_check_error: null, webhooks_missing_since: null });
+    expect(await audits(c, 'whatsapp.webhooks_restored')).toEqual([
+      { result: 'success', metadata: { missingSince: null } },
+    ]);
+    const sent = await notices(c.tenant.id);
+    expect(sent.map((n) => [n.to, n.subject])).toEqual([
+      [c.owner.email, 'HyFib was not receiving WhatsApp updates for Main account'],
+    ]);
+    expect(sent[0]!.lines[1]).toBe(
+      'Messages, delivery updates and template updates that Meta sent before then may not have reached HyFib, so some conversations may be missing from the inbox.',
+    );
+    expect(sent[0]!.url).toBe(`${BASE_URL}/c/${c.tenant.slug}/settings/channels`);
+    // The next check finds it subscribed and tells nobody.
+    await laterThan30Minutes(c);
+    expect((await check(c)).webhooks).toEqual({ state: 'subscribed' });
+    expect(await notices(c.tenant.id)).toHaveLength(1);
+  });
+
+  it('records when subscribing again fails, tells the company once, shows it and tries again every 30 minutes', async () => {
+    const c = await fx.company();
+    fx.standIn.state.unsubscribedWabas.add(c.wabaId);
+    fx.standIn.state.subscribeErrors.set(c.wabaId, {
+      status: 403,
+      code: 200,
+      message: "Your app doesn't have permission to subscribe to this WhatsApp Business Account",
+    });
+    const error = 'permanent 200: OAuthException';
+    expect(await check(c)).toEqual({
+      outcome: 'healthy',
+      webhooks: { state: 'missing', error },
+    });
+    const first = await webhooks(c);
+    expect(first.webhooks_missing_since).toEqual(first.token_checked_at);
+    expect(first).toMatchObject({ webhooks_check_error: error, webhooks_checked_at: null });
+    expect(await audits(c, 'whatsapp.webhooks_missing')).toEqual([
+      { result: 'failure', metadata: { error } },
+    ]);
+    const sent = await notices(c.tenant.id);
+    expect(sent.map((n) => n.subject)).toEqual([
+      'WhatsApp messages for Main account are not reaching HyFib',
+    ]);
+    expect(sent[0]!.lines[1]).toBe(
+      'Until it is subscribed again, messages customers send to +91 90000 00000 do not reach HyFib.',
+    );
+    // Every page of the company and the console show it.
+    const service = createOnboardingService(onboardingDeps());
+    const ctx = await fx.ctx(c, c.agent);
+    expect(await service.accessIssues(ctx)).toEqual([
+      expect.objectContaining({
+        kind: 'webhooks',
+        account: 'Main account',
+        since: first.webhooks_missing_since!.toISOString(),
+      }),
+    ]);
+    expect(await consoleRows(c)).toEqual([{ state: 'not_subscribed', error }]);
+    // Listed once, even when the subscription has not been confirmed for over a day.
+    await fx.query(
+      `UPDATE app.whatsapp_accounts SET webhooks_checked_at = now() - interval '27 hours'
+        WHERE id = $1`,
+      [c.whatsappAccountId],
+    );
+    expect(await consoleRows(c)).toEqual([{ state: 'not_subscribed', error }]);
+
+    // Tried again 30 minutes later, not before; a second failure tells nobody again.
+    expect(await dueAmong([c])).toEqual([]);
+    await laterThan30Minutes(c);
+    expect(await dueAmong([c])).toEqual([c.whatsappAccountId]);
+    expect((await check(c)).webhooks).toEqual({ state: 'missing', error });
+    expect((await webhooks(c)).webhooks_missing_since).toEqual(first.webhooks_missing_since);
+    expect(await notices(c.tenant.id)).toHaveLength(1);
+    expect(await audits(c, 'whatsapp.webhooks_missing')).toHaveLength(1);
+
+    // Once it can be subscribed again, the company hears that messages arrive again.
+    fx.standIn.state.subscribeErrors.delete(c.wabaId);
+    await laterThan30Minutes(c);
+    expect((await check(c)).webhooks).toEqual({ state: 'restored' });
+    expect(await webhooks(c)).toMatchObject({
+      webhooks_check_error: null,
+      webhooks_missing_since: null,
+    });
+    expect(await audits(c, 'whatsapp.webhooks_restored')).toEqual([
+      {
+        result: 'success',
+        metadata: { missingSince: first.webhooks_missing_since!.toISOString() },
+      },
+    ]);
+    const after = await notices(c.tenant.id);
+    expect(after.map((n) => n.subject)).toEqual([
+      'WhatsApp messages for Main account are not reaching HyFib',
+      'WhatsApp messages for Main account reach HyFib again',
+    ]);
+    expect(after[1]!.lines[1]).toContain('(at least since ');
+    expect(await service.accessIssues(ctx)).toEqual([]);
+    expect(await consoleRows(c)).toEqual([]);
+  });
+
+  it('tells the company when the subscription is found again after it could not be restored', async () => {
+    const c = await fx.company();
+    fx.standIn.state.unsubscribedWabas.add(c.wabaId);
+    fx.standIn.state.subscribeErrors.set(c.wabaId, { status: 403, code: 200, message: 'No' });
+    expect((await check(c)).webhooks?.state).toBe('missing');
+    // The business subscribes the app itself meanwhile.
+    fx.standIn.state.subscribeErrors.delete(c.wabaId);
+    fx.standIn.state.unsubscribedWabas.delete(c.wabaId);
+    await laterThan30Minutes(c);
+    expect((await check(c)).webhooks).toEqual({ state: 'subscribed' });
+    expect(await webhooks(c)).toMatchObject({
+      webhooks_missing_since: null,
+      webhooks_check_error: null,
+    });
+    expect((await notices(c.tenant.id)).map((n) => n.subject)).toEqual([
+      'WhatsApp messages for Main account are not reaching HyFib',
+      'WhatsApp messages for Main account reach HyFib again',
+    ]);
+    expect(await audits(c, 'whatsapp.webhooks_restored')).toEqual([]);
+  });
+
+  it('changes nothing for the company when the subscribed apps cannot be listed', async () => {
+    const c = await fx.company();
+    fx.standIn.state.subscribedAppsErrors.set(c.wabaId, {
+      status: 500,
+      code: 2,
+      message: 'An unexpected error occurred. Please retry your request',
+    });
+    const error = 'retryable 2: OAuthException';
+    expect(await check(c)).toEqual({
+      outcome: 'healthy',
+      webhooks: { state: 'not_checked', error },
+    });
+    expect(await webhooks(c)).toMatchObject({
+      webhooks_check_error: error,
+      webhooks_missing_since: null,
+      webhooks_checked_at: null,
+    });
+    expect(calls(c, 'POST')).toEqual([]);
+    expect(await notices(c.tenant.id)).toEqual([]);
+    const ctx = await fx.ctx(c, c.agent);
+    expect(await createOnboardingService(onboardingDeps()).accessIssues(ctx)).toEqual([]);
+    // Tried again after 30 minutes; staff see it once it has not been confirmed for 26 hours.
+    expect(await dueAmong([c])).toEqual([]);
+    await laterThan30Minutes(c);
+    expect(await dueAmong([c])).toEqual([c.whatsappAccountId]);
+    expect(await consoleRows(c)).toEqual([]);
+    await fx.query(
+      `UPDATE app.whatsapp_accounts SET webhooks_checked_at = now() - interval '27 hours'
+        WHERE id = $1`,
+      [c.whatsappAccountId],
+    );
+    expect(await consoleRows(c)).toEqual([{ state: 'not_checked', error }]);
+    // A later confirmation clears the error.
+    fx.standIn.state.subscribedAppsErrors.delete(c.wabaId);
+    expect((await check(c)).webhooks).toEqual({ state: 'subscribed' });
+    expect((await webhooks(c)).webhooks_check_error).toBeNull();
+    expect(await consoleRows(c)).toEqual([]);
+  });
+
+  it('does not take a list with an app it cannot read for a missing subscription', async () => {
+    const c = await fx.company();
+    // Meta lists an app without its id, and not HyFib's: that app may be HyFib's.
+    fx.standIn.state.unsubscribedWabas.add(c.wabaId);
+    fx.standIn.state.unreadableSubscribedApps.add(c.wabaId);
+    const error = 'unknown: incomplete_app_list';
+    expect(await check(c)).toEqual({
+      outcome: 'healthy',
+      webhooks: { state: 'not_checked', error },
+    });
+    expect(calls(c, 'POST')).toEqual([]);
+    expect(await webhooks(c)).toMatchObject({
+      webhooks_check_error: error,
+      webhooks_missing_since: null,
+      webhooks_checked_at: null,
+    });
+    expect(await notices(c.tenant.id)).toEqual([]);
+    // HyFib's app listed beside it is enough.
+    fx.standIn.state.unsubscribedWabas.delete(c.wabaId);
+    expect((await check(c)).webhooks).toEqual({ state: 'subscribed' });
+    expect((await webhooks(c)).webhooks_check_error).toBeNull();
+  });
+
+  it('is not checked with a token Meta does not admit, or when the access could not be checked', async () => {
+    const lost = await fx.company();
+    setToken(lost, { valid: false });
+    expect(await check(lost)).toEqual({ outcome: 'lost' });
+    expect(calls(lost, 'GET')).toEqual([]);
+    const unchecked = await fx.company();
+    expect(
+      (await check(unchecked, { meta: { appId: APP_ID, appSecret: 'rotated-secret' } })).outcome,
+    ).toBe('not_checked');
+    expect(calls(unchecked, 'GET')).toEqual([]);
+    expect((await webhooks(unchecked)).webhooks_checked_at).toBeNull();
   });
 });

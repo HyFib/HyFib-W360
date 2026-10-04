@@ -341,6 +341,20 @@ HyFib's checks (ADR-137) treat only Meta's explicit answer as a loss of access: 
 another `app_id`, a WhatsApp permission missing from `scopes`, or target ids for the management
 permission that leave the account out (onboarding's rules). A failed request concludes nothing.
 
+## 20. Addendum: the apps subscribed to an account's webhooks (read 2026-10-04 for ADR-138)
+
+From Meta's official OpenAPI description (`facebook/openapi`, `business-messaging-api_v23.0.yaml`),
+fetched directly from raw.githubusercontent.com for this addendum.
+
+| ID | Topic | Claim (paraphrased) | Exact identifiers (if shown) | Source URL | Evidence type | Confidence |
+|---|---|---|---|---|---|---|
+| M-190 | Subscribed apps | `GET /{Version}/{WABA-ID}/subscribed_apps` ("Get All Subscriptions for a WABA", operation `getAllSubscriptionsForAWaba`) lists the applications subscribed to the account's webhook events in `data`; `data` is empty when no app is subscribed. The examples put each app's `id`, `name` and `link` under `whatsapp_business_api_data`; the response schema (`SubscribedAppsResponse` with items `SubscribedApp`) puts `id` and `name` directly in each item. Documented errors: 400 (code 100), 401 (190), 403 (200, "Your app doesn't have permission to access this WhatsApp Business Account"), 404 (803), 429 (4), 500 (2). `POST` on the same path ("Subscribe to WABA Webhooks", `subscribeToWabaWebhooks`) takes an optional body (`{}`, or `override_callback_uri` with `verify_token`) and answers `success: true`, optionally with `data`. | `subscribed_apps`, `data[].whatsapp_business_api_data.{id,name,link}`, `success` | https://github.com/facebook/openapi/blob/main/business-messaging-api_v23.0.yaml (path `/{Version}/{WABA-ID}/subscribed_apps`; schemas `SubscribedAppsResponse`, `SubscribedApp`, `SubscriptionRequest`, `SubscriptionResponse`) | OFF-GH-SPEC | High for the path and the empty list; the item's shape conflicts between the examples and the schema |
+
+HyFib's subscription check (ADR-138) reads an app's id from either shape, takes only a complete
+`data` list (every app's id read, no `paging.next`) without HyFib's app id as a missing
+subscription, and subscribes the app again with the `POST` onboarding makes. The description shows
+no paging for this list; HyFib does not follow a further page.
+
 ## Unconfirmed / conflicting
 
 1. **Access verification and the 200-customer cap (M-022 vs M-023).** The changelog says access verification is no longer required. The Embedded Signup overview still ties the rise from 10 to 200 new customers per 7 days to Business Verification, App Review and Access Verification. The current trigger for the higher cap is unknown.
@@ -382,7 +396,7 @@ permission that leave the account out (onboarding's rules). A failed request con
 - **Inbound media:** download within the 7-day media-ID lifetime and re-fetch the URL each time (it is valid for 5 minutes). Store files in our own storage with our own retention policy.
 - **Templates:** sync from the status, category and quality webhooks plus periodic `GET /{WABA_ID}/message_templates`. Handle PAUSED, DISABLED, ARCHIVED and recategorized templates. Upload header media via the Resumable Upload API.
 - **Flows:** keep one RSA key per phone number, uploaded via `whatsapp_business_encryption`. Implement the `ping` health check and the 421, 427 and 432 responses. Monitor flow `health_status` and the BLOCKED and THROTTLED states.
-- **Tokens:** store BISU tokens encrypted and per tenant, and check them periodically with `debug_token` (built: daily, ADR-137). Treat error 190 or a lost WABA subscription as possible deauthorization, since explicit signals are unconfirmed (a lost subscription is not checked yet).
+- **Tokens:** store BISU tokens encrypted and per tenant, and check them periodically with `debug_token` (built: daily, ADR-137). Check that the app is still subscribed to each WABA's webhooks (built: the same daily check lists the subscribed apps and subscribes HyFib's app again when it is missing, ADR-138). Treat error 190 as possible deauthorization, since explicit signals are unconfirmed.
 
 ## Things we must NOT assume
 

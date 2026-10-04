@@ -57,6 +57,11 @@ export const whatsappAccounts = appSchema.table('whatsapp_accounts', {
     enum: ['invalid', 'other_app', 'missing_permission', 'account_not_shared'],
   }),
   tokenProblemAt: tz('token_problem_at'),
+  /** The app's webhook subscription to the account (ADR-138). */
+  webhooksCheckedAt: tz('webhooks_checked_at'),
+  webhooksCheckError: text('webhooks_check_error'),
+  webhooksMissingSince: tz('webhooks_missing_since'),
+  webhooksRestoredAt: tz('webhooks_restored_at'),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });

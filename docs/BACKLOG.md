@@ -53,8 +53,10 @@ verification, app review, Embedded Signup configuration).
   and its numbers for reconnecting, emails the owners and administrators once and shows a banner on
   every page of the company; an expiry Meta reports is reminded 7 days ahead and checked again as
   soon as it passes; reconnecting brings back the account's other numbers that Meta still lists.
-  **Remaining:** checking (and renewing) the app's webhook subscription to the account, Meta's
-  deauthorization callbacks (unconfirmed, M-146).
+  The same check lists the apps subscribed to the account's webhooks and subscribes HyFib's app
+  again when Meta no longer lists it, telling the company; when that fails, every page says that
+  messages are not reaching HyFib (ADR-138). **Remaining:** Meta's deauthorization callbacks
+  (unconfirmed, M-146) and which webhook fields the app receives.
 
 ## Phase 3 — contacts, consent, templates, campaigns, reports
 

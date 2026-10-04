@@ -32,6 +32,8 @@ export async function connectTestChannel(opts: {
   slug: string;
   /** A token registered with the stand-in (`setStandInToken`); the shared test token otherwise. */
   token?: string;
+  /** The account's id, when a test sets up the stand-in for it first (`newWabaId`). */
+  wabaId?: string;
 }) {
   const auth = new pg.Client({ connectionString: process.env.E2E_DATABASE_URL_AUTH });
   await auth.connect();
@@ -49,7 +51,7 @@ export async function connectTestChannel(opts: {
     process.env.W360_ENCRYPTION_KEYS!,
     process.env.W360_ENCRYPTION_PRIMARY_KEY_ID!,
   );
-  const wabaId = digits(15);
+  const wabaId = opts.wabaId ?? digits(15);
   const phoneNumberId = digits(15);
   const whatsappAccountId = randomUUID();
   const channelAccountId = randomUUID();
@@ -391,6 +393,26 @@ export async function setStandInToken(
     {
       data: token,
     },
+  );
+  expect(res.ok()).toBe(true);
+}
+
+/** An id for a WhatsApp Business Account a test sets up at the stand-in before connecting it. */
+export function newWabaId(): string {
+  return digits(15);
+}
+
+/**
+ * Whether the stand-in has HyFib's app subscribed to an account's webhooks, and whether subscribing
+ * it again fails (ADR-138).
+ */
+export async function setStandInSubscription(
+  request: APIRequestContext,
+  subscription: { wabaId: string; subscribed?: boolean; refuse?: boolean },
+) {
+  const res = await request.post(
+    `http://127.0.0.1:${process.env.E2E_GRAPH_PORT}/__stand-in/subscription`,
+    { data: subscription },
   );
   expect(res.ok()).toBe(true);
 }
