@@ -23,6 +23,7 @@ import {
   teamsInUse,
   waitingInvitationCount,
 } from './entitlements';
+import { limitNotices, type LimitNotice } from './limit-notices';
 import { PLAN_MODULE_KEYS, usagePeriod, type PlanAddOnQuantities, type PlanLimits } from './model';
 
 /** What the company uses against its plan's limits (null limit: no limit). */
@@ -115,6 +116,14 @@ export function createPlansService(deps: PlansServiceDeps) {
     async usage(ctx: TenantContext): Promise<PlanUsage> {
       assertCan(ctx, 'tenant.read');
       return db.run(ctx.scope, (tx) => usageIn(tx, ctx.tenant.id), { accessMode: 'read only' });
+    },
+
+    /**
+     * The notices of monthly limits nearly or fully used that this member sees on every page of
+     * the company (ADR-140).
+     */
+    limitNotices(ctx: TenantContext): Promise<LimitNotice[]> {
+      return limitNotices({ db, clock }, ctx);
     },
 
     /** The plan, its state, its price and add-ons, and usage (`billing.read`). */

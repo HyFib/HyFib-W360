@@ -1528,7 +1528,11 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
 WHERE used < limit`), per monthly period from `usage_anchor`; the sweep announces a used-up month
   once (`notified_at`) and warns once at 80% of the limit (`warned_at`, 0036, ADR-062), each time
   locking the counter and checking it against the current limit and period (a counter of an
-  earlier period is marked without an email). The tenant context drops the write permissions of
+  earlier period is marked without an email). The company layout shows notices of those two
+  limits (`plans/limit-notices.ts`, ADR-140): nearly used up (80%) or used up, read per page in one
+  read-only transaction (`app.tenant_entitlements` and the period's counters) for an active company
+  and a member who reads billing, automations (runs used up) or manages API keys (requests used
+  up). The tenant context drops the write permissions of
   modules the plan leaves out (`MODULE_WRITE_PERMISSIONS`); workers check the module before
   starting runs, order messages and cart reminders (`not_in_plan`). Public API requests are counted
   the same way against the version's monthly API requests (0035, ADR-061; §6N). Platform staff see

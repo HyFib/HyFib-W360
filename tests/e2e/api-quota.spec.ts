@@ -73,10 +73,23 @@ test('a plan allows five API requests a month: nearly used up at four, the sixth
   const auth = { Authorization: `Bearer ${token}` };
   const call = () => request.get('/api/v1/contacts', { headers: auth });
   for (let i = 0; i < 4; i += 1) expect((await call()).status()).toBe(200);
+  // Members who read billing see it on every page of the company (ADR-140), with a link to Billing.
+  await page.goto(`/c/${slug}`);
+  const nearly = page
+    .getByRole('status')
+    .filter({ hasText: "This month's API requests are nearly used up" });
+  await expect(nearly).toContainText(
+    'Your company has used 4 of its 5 API requests for this month.',
+  );
+  await expect(nearly.getByRole('link', { name: 'See the plan' })).toBeVisible();
+  await expectNoHorizontalOverflow(page);
   await page.goto(`/c/${slug}/billing`);
   await expect(page.getByRole('row', { name: /API requests this month/ })).toContainText(
     '4 of 5 (nearly used up)',
   );
+  // Billing shows the notice without a link to itself.
+  await expect(nearly).toBeVisible();
+  await expect(nearly.getByRole('link', { name: 'See the plan' })).toHaveCount(0);
   await expectNoHorizontalOverflow(page);
 
   // The fifth passes; the sixth is refused with the reason and when to retry.
@@ -87,9 +100,12 @@ test('a plan allows five API requests a month: nearly used up at four, the sixth
   const body = (await refused.json()) as { error: { code: string; reason: string } };
   expect(body.error).toMatchObject({ code: 'rate_limited', reason: 'quota_exceeded' });
 
-  // The company sees the month's use on the API keys page and its plan.
+  // The company sees the month's use on the API keys page and its plan, and why requests fail.
   await page.goto(`/c/${slug}/settings/api-keys`);
   await expect(page.getByText(/5 of 5\s*API requests/)).toBeVisible();
+  await expect(
+    page.getByRole('alert').filter({ hasText: "This month's API requests are used up" }),
+  ).toContainText('The public API refuses requests (429, reason quota_exceeded) until');
   await page.goto(`/c/${slug}/billing`);
   await expect(page.getByRole('row', { name: /API requests this month/ })).toContainText('5 of 5');
   await expectNoHorizontalOverflow(page);

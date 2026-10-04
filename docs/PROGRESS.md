@@ -1,5 +1,56 @@
 # Progress
 
+## 2026-10-04 — Phase 5: notices in the app before and at a monthly limit (P5-01, ADR-140)
+
+Status: **Implemented and locally verified (test data only).** Billing managers were emailed at
+80% of the month's automation runs or API requests and when they were used up (ADR-062), and the
+Billing plan card marked them; nobody else was told, so a marketer whose automations stopped
+answering or a developer whose integration was refused with 429 learnt why only from a billing
+manager.
+
+### Completed
+
+- **Design (ADR-140):** while the company is active, every page of the company shows a notice when
+  the current usage period's automation runs or API requests are nearly used up (80%, rounded up
+  as ADR-062 rounds it) or used up: members who read billing see both states of both limits, with
+  a link to Billing (not on Billing itself); members who read automations see the runs, and members
+  who manage API keys the requests, once used up, and are asked to ask a member who manages
+  billing. Limits that do not apply (none, 0, automations outside the plan) show nothing.
+- **Domain** (`plans/limit-notices.ts`): which notices a member gets and what they say (the
+  emails' words, the end of the period in the company's time zone), and `plans.limitNotices`, one
+  read-only transaction per page reading the plan's limits (packs included) and the period's two
+  counters, and nothing for a member who would get no notice or a company that is not active.
+- **Web:** the company layout shows the notices after the other notices. No migration.
+- **Tests:**
+  - Unit (7 new): who is told of which state, the threshold and limits that do not apply, the
+    wording, and no read for a member who gets no notice or a company that is not active.
+  - Integration (3 new): each role's notices at 70%, 80% and the limit (owner, administrator,
+    billing manager, marketer, agent); packs, the next period and an earlier period's counter;
+    suspended and restricted companies, complimentary access and a plan without automations.
+  - E2E (1 extended): at four of five API requests the notice on the company's pages with a link
+    to Billing, and on Billing without one; at the limit, why the API refuses requests.
+- **Docs:** ADR-140; ARCHITECTURE; BACKLOG P5-01; feature matrix H-050 (H-040 updated).
+- **Mutation checks:** 26 deliberate regressions tried, 26 caught: 24 against which notices a member gets, what they say and how the counts are read, through unit tests (19) and integration tests (5), and 2 through the e2e test (the layout showing no notice, Billing showing the notice with a link to itself).
+
+### Test commands and results (local, 2026-10-04)
+
+| Command                                                                                                    | Result                                                                                                                                                                                                                           |
+| ---------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`                                                         | clean                                                                                                                                                                                                                            |
+| `pnpm test` (unit)                                                                                         | 671 passed (74 files; 7 new)                                                                                                                                                                                                     |
+| `pnpm test:integration` on PostgreSQL 18.6                                                                 | 828 passed (56 files; 3 new)                                                                                                                                                                                                     |
+| `pnpm test:integration` on PostgreSQL 17.11                                                                | 828 passed (56 files)                                                                                                                                                                                                            |
+| `pnpm build`                                                                                               | passed                                                                                                                                                                                                                           |
+| e2e: api-quota, whatsapp-access, plan-add-ons, api-request-packs, company-data (chromium, mobile-chromium) | 20 passed (12.1 min)                                                                                                                                                                                                             |
+| Mutation checks                                                                                            | 26 tried, 26 caught (19 through unit tests and 5 through integration tests against the rules, the wording and the reads; 2 through the e2e test: the layout showing no notice, Billing showing the notice with a link to itself) |
+| gitleaks 8.30.1 on the staged changes                                                                      | no leaks found                                                                                                                                                                                                                   |
+
+### Known gaps
+
+- Dismissing a notice, thresholds per company or per member, notices of keys' own monthly limits
+  (Settings → API keys shows them and ADR-098 emails them), and notices for limits that refuse
+  additions (seats, numbers, teams, live automations), which their forms show.
+
 ## 2026-10-04 — Phase 5: alerts for companies' failing integrations (P5-10, ADR-139)
 
 Status: **Implemented and locally verified (test data only).** Operations → Integrations lists the

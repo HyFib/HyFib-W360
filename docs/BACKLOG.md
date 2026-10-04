@@ -303,7 +303,11 @@ verification, app review, Embedded Signup configuration).
   for no limit, 0 leaves the public API out; counted atomically, refused with 429 when used up and
   403 without the API, one notice per period); **[a warning at 80% of the month's automation runs
   or API requests built, locally verified]** (ADR-062: one email per counter, marked on the plan
-  card; the used-up notices now skip counters of an earlier period); **[paying for plans by
+  card; the used-up notices now skip counters of an earlier period); **[notices in the app before
+  and at a monthly limit built, locally verified]** (ADR-140: on every page of an active company,
+  automation runs or API requests nearly used up (80%) or used up, for members who read billing,
+  and once used up for members who read automations or manage API keys, with what stops and until
+  when); **[paying for plans by
   Razorpay subscription built, locally verified against the stand-in]** (ADR-063, see P5-07);
   **[API scopes by plan built, locally verified]** (ADR-092, W-137: a version includes every API
   scope or only those chosen; requests needing another are refused with 403 `not_in_plan` whatever
@@ -338,7 +342,7 @@ verification, app review, Embedded Signup configuration).
   used-up notice; limits with packs are bounded at 2,000,000,000 for run packs too, which fixed
   limits past the 32-bit range that failed every company's sweep lookups).
   Remaining: changes that take effect at once and proration, plan invoices, thresholds chosen per
-  company, in-app notices, packs bought once, and AI credits (Phase 6).
+  company, packs bought once, and AI credits (Phase 6).
 - **P5-02 Ledger** **[built, locally verified]**: accounts, append-only journal balanced at commit,
   balances by trigger, holds, settlements, releases (expiry sweep), refunds and chargebacks as
   compensating postings; INR paise; monthly statements computed from the ledger (ADR-057).

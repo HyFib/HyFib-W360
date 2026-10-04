@@ -9,6 +9,7 @@ import {
   consumeAutomationRun,
   createApiKeysService,
   createPlanAdminService,
+  createPlansService,
   dayOf,
   outboxAad,
   sweepPlanStates,
@@ -19,7 +20,7 @@ import {
   type PlanSweepDeps,
   type PlatformActor,
 } from '@w360/domain';
-import { createUser } from './helpers';
+import { acceptInvitation, createUser, invite, type TestUser } from './helpers';
 import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './whatsapp-fixture';
 
 /**
@@ -68,6 +69,7 @@ async function onPlan(
     apiRequestsMonthly?: string;
     runPackSize?: string;
     runPackPrice?: string;
+    modules?: string[];
   },
   addOns: { runPacks?: string } = {},
 ): Promise<Company> {
@@ -368,5 +370,135 @@ describe('warnings before a monthly limit', () => {
     const outcomes = (await both).map((r) => (r.status === 'fulfilled' ? r.value : r.reason));
     expect(outcomes.sort()).toEqual([false, true]);
     expect(await billingNotices(c.tenant.id)).toHaveLength(1);
+  });
+});
+
+describe('notices in the app (ADR-140)', () => {
+  const plans = (clock: Clock = systemClock) => createPlansService({ db: fx.dbs.app, clock });
+
+  async function member(c: Company, role: string): Promise<TestUser> {
+    const user = await createUser(fx.dbs, { name: `A ${role}` });
+    const { token } = await invite(fx.dbs, c.tenant, c.owner, user.email, [role]);
+    await acceptInvitation(fx.dbs, user, token);
+    return user;
+  }
+
+  /**
+   * The notices a member sees, as `metric:state:used/limit`, ending `:ask-billing` for one that asks
+   * the member to ask a member who manages billing (a member who does not read billing).
+   */
+  async function seen(c: Company, user: TestUser, clock?: Clock) {
+    const notices = await plans(clock).limitNotices(await fx.ctx(c, user));
+    return notices.map(
+      (n) => `${n.metric}:${n.state}:${n.used}/${n.limit}${n.forBilling ? '' : ':ask-billing'}`,
+    );
+  }
+
+  /** Sets a counter of the company's current usage period, or of the one before it. */
+  async function counter(c: Company, metric: string, used: number, earlier = false) {
+    const { rows } = await fx.dbs.adminPool.query<{ usage_anchor: Date }>(
+      `SELECT usage_anchor FROM app.tenant_plans WHERE tenant_id = $1`,
+      [c.tenant.id],
+    );
+    const { start } = usagePeriod(rows[0]!.usage_anchor, new Date());
+    const periodStart = earlier ? new Date(start.getTime() - 20 * DAY_MS) : start;
+    await fx.dbs.adminPool.query(
+      `INSERT INTO app.usage_counters (id, tenant_id, metric, period_start, used)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (tenant_id, metric, period_start) DO UPDATE SET used = EXCLUDED.used`,
+      [uuidv7(), c.tenant.id, metric, periodStart, used],
+    );
+  }
+
+  it('shows each member the notices that concern them: nearly from 80%, used up at the limit', async () => {
+    const owner = await platformOwner();
+    const c = await onPlan(owner, { automationRunsMonthly: '10', apiRequestsMonthly: '5' });
+    const billing = await member(c, 'billing');
+    const admin = await member(c, 'admin');
+    const key = await apiKey(c);
+    await runs(c, 7);
+    await requests(key, 3);
+    for (const user of [c.owner, admin, billing, c.marketer, c.agent]) {
+      expect(await seen(c, user)).toEqual([]);
+    }
+
+    // 80%: the members who read billing (an owner, an administrator, a billing manager) are told.
+    await runs(c, 1);
+    await requests(key, 1);
+    const nearly = ['automation_runs:nearly:8/10', 'api_requests:nearly:4/5'];
+    expect(await seen(c, c.owner)).toEqual(nearly);
+    expect(await seen(c, admin)).toEqual(nearly);
+    expect(await seen(c, billing)).toEqual(nearly);
+    expect(await seen(c, c.marketer)).toEqual([]);
+    expect(await seen(c, c.agent)).toEqual([]);
+
+    // At the limits: a marketer, who reads automations, is told of the runs too, and asked to ask
+    // a member who manages billing; agents of neither.
+    await runs(c, 2);
+    await requests(key, 1);
+    const usedUp = ['automation_runs:used_up:10/10', 'api_requests:used_up:5/5'];
+    expect(await seen(c, c.owner)).toEqual(usedUp);
+    expect(await seen(c, admin)).toEqual(usedUp);
+    expect(await seen(c, billing)).toEqual(usedUp);
+    expect(await seen(c, c.marketer)).toEqual(['automation_runs:used_up:10/10:ask-billing']);
+    expect(await seen(c, c.agent)).toEqual([]);
+
+    // Until the usage period ends, as the plan's usage gives it.
+    const ctx = await fx.ctx(c, c.owner);
+    const [first] = await plans().limitNotices(ctx);
+    expect(first!.periodEnd).toEqual((await plans().usage(ctx)).automationRuns.periodEnd);
+  });
+
+  it('counts packs in the limit and reads only the current usage period', async () => {
+    const owner = await platformOwner();
+    const c = await onPlan(
+      owner,
+      { automationRunsMonthly: '10', runPackSize: '10', runPackPrice: '99' },
+      { runPacks: '1' },
+    );
+    await runs(c, 15);
+    expect(await seen(c, c.owner)).toEqual([]);
+    await runs(c, 1);
+    expect(await seen(c, c.owner)).toEqual(['automation_runs:nearly:16/20']);
+    // In the next usage period this period's runs count for nothing.
+    const later: Clock = { now: () => new Date(Date.now() + 40 * DAY_MS) };
+    expect(await seen(c, c.owner, later)).toEqual([]);
+
+    // Nor do an earlier period's requests, though they reached the limit then.
+    const d = await onPlan(owner, { apiRequestsMonthly: '10' });
+    await counter(d, 'api_requests', 10, true);
+    expect(await seen(d, d.owner)).toEqual([]);
+    await counter(d, 'api_requests', 9);
+    expect(await seen(d, d.owner)).toEqual(['api_requests:nearly:9/10']);
+  });
+
+  it('says nothing while the company is not active, without limits, or of runs its plan leaves out', async () => {
+    const owner = await platformOwner();
+    const c = await onPlan(owner, { automationRunsMonthly: '10', apiRequestsMonthly: '5' });
+    await runs(c, 10);
+    expect(await seen(c, c.owner)).toEqual(['automation_runs:used_up:10/10']);
+    for (const status of ['suspended', 'restricted']) {
+      await fx.dbs.adminPool.query(`UPDATE app.tenants SET status = $2 WHERE id = $1`, [
+        c.tenant.id,
+        status,
+      ]);
+      expect(await seen(c, c.owner)).toEqual([]);
+    }
+
+    // Complimentary access has no limits, however much is counted.
+    const free = await fx.company();
+    await counter(free, 'automation_runs', 100_000);
+    await counter(free, 'api_requests', 100_000);
+    expect(await seen(free, free.owner)).toEqual([]);
+
+    // A plan without automations: its run limit is not told of, even reached; its API limit is.
+    const noAutomations = await onPlan(owner, {
+      modules: [],
+      automationRunsMonthly: '10',
+      apiRequestsMonthly: '5',
+    });
+    await counter(noAutomations, 'automation_runs', 10);
+    await counter(noAutomations, 'api_requests', 5);
+    expect(await seen(noAutomations, noAutomations.owner)).toEqual(['api_requests:used_up:5/5']);
   });
 });

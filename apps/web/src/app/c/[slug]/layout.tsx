@@ -7,6 +7,7 @@ import { Brand } from '@/components/brand';
 import { CompanySwitcher } from '@/components/company-switcher';
 import { HiddenOnPath } from '@/components/hidden-on-path';
 import { UserMenu } from '@/components/user-menu';
+import { LimitNotices } from '@/components/billing/limit-notices';
 import { WhatsAppAccessAlerts } from '@/components/settings/whatsapp-access-alerts';
 import { formatDateTime } from '@/lib/format';
 import { visibleModules } from '@/lib/modules';
@@ -34,11 +35,12 @@ export default async function TenantLayout({
   const nav = visibleModules(ctx.permissions);
   const deletion =
     ctx.tenant.status === 'pending_deletion' ? await runtime.companyDeletion.status(ctx) : null;
-  // WhatsApp accounts whose access Meta no longer accepts or that expires soon (ADR-137).
-  const accessIssues =
-    runtime.onboarding && can(ctx, 'channels.read')
-      ? await runtime.onboarding.accessIssues(ctx)
-      : [];
+  const [accessIssues, limitNotices] = await Promise.all([
+    // WhatsApp accounts whose access Meta no longer accepts or that expires soon (ADR-137).
+    runtime.onboarding && can(ctx, 'channels.read') ? runtime.onboarding.accessIssues(ctx) : [],
+    // Monthly limits nearly or fully used, for the members they concern (ADR-140).
+    runtime.plans.limitNotices(ctx),
+  ]);
 
   return (
     <div className="flex min-h-dvh flex-col md:flex-row">
@@ -161,6 +163,11 @@ export default async function TenantLayout({
               canManage={can(ctx, 'channels.manage')}
             />
           </HiddenOnPath>
+          <LimitNotices
+            notices={limitNotices}
+            slug={ctx.tenant.slug}
+            timeZone={ctx.tenant.timezone}
+          />
         </div>
         <main id="main" className="flex-1 px-4 py-6 md:px-8">
           {children}

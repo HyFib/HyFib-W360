@@ -5535,3 +5535,44 @@ listing it, once. The check reads the console's list every minute (twice when so
 which suits the test envelope; paging and precomputed rollups come with growth (ADR-054).
 
 Not built: alerts by kind or by company, choosing which kinds to be told of, digests, and paging.
+
+## ADR-140 Notices in the app when a monthly limit is nearly or fully used (P5-01) (2026-10-04)
+
+Context: automation runs (ADR-051) and public API requests (ADR-061) are limited per monthly usage
+period, packs included (ADR-110). Billing managers are emailed at 80% of a limit (ADR-062) and when
+it is used up, and the Billing plan card marks a counter as nearly used up. Nobody else is told: a
+marketer whose automations stop answering customers, or a developer whose integration is refused
+with 429, learns why only from a billing manager, and a billing manager who missed the email sees
+it only on Billing.
+
+Decision:
+
+- **A notice on every page of the company**, with its other notices, while the company is active
+  and the current usage period's automation runs or API requests are used up (the limit reached)
+  or nearly used up (at least 80% of the limit, rounded up as ADR-062 rounds it, and below it).
+- **To the members it concerns:** members who read billing (owners, administrators and billing
+  managers by default) see both states of both limits; once the runs are used up, members who read
+  automations see it too (supervisors, marketers and analysts), and once the API requests are,
+  members who manage API keys (owners and administrators). Agents see none. The counts are no
+  secret in the company (`plans.usage` gives them to any member, ADR-051), but a notice that can
+  stay for the rest of the month belongs on the pages of those who can act on it or whose work it
+  stops.
+- **Only limits that apply:** the runs while the plan includes automations and allows more than 0
+  of them; the API requests while the plan allows more than 0 (0 leaves the API out of the plan,
+  ADR-061). Complimentary access and unlimited plans show none. A company that is suspended,
+  restricted or being deleted shows its own notice instead, and nothing runs then.
+- **What it says**, as the emails do: how much of the limit is used, what stops at the limit and
+  until when (the end of the usage period, in the company's time zone, to the minute), that runs in
+  progress continue, or that the app, automations and outgoing webhooks are not affected by the
+  API's limit; and whom to ask: members who read billing, HyFib, for more or a larger plan, with a
+  link to Billing (not on Billing itself); the others, a member who manages billing.
+- **Read where the counts are kept:** one read-only transaction in the company's scope per page,
+  reading the plan's limits (`app.tenant_entitlements`, packs included) and the period's two
+  counters, and only for a member who would be shown a notice. No table and no migration: a notice
+  goes away when the period ends or the limit is raised, and cannot be dismissed.
+- **The company's limits only:** a key's own monthly limit (ADR-097) is shown per key on Settings
+  → API keys and emailed when it is nearly or fully used (ADR-098).
+
+Not built: dismissing a notice, thresholds per company or per member, notices of keys' own limits,
+and notices for limits that refuse additions (seats, numbers, teams, live automations), which the
+forms they limit show.
