@@ -1,6 +1,16 @@
-import type { WebhookContactPart, WebhookEventType, WebhookMessageStatus } from '@w360/db';
+import type {
+  WebhookCampaignStatus,
+  WebhookContactPart,
+  WebhookEventType,
+  WebhookMessageStatus,
+} from '@w360/db';
 
-export type { WebhookContactPart, WebhookEventType, WebhookMessageStatus } from '@w360/db';
+export type {
+  WebhookCampaignStatus,
+  WebhookContactPart,
+  WebhookEventType,
+  WebhookMessageStatus,
+} from '@w360/db';
 
 /**
  * Outgoing webhooks (P5-09, ADR-053, ADR-074, ADR-078, ADR-085, ADR-087, ADR-094): the parts the
@@ -145,6 +155,31 @@ export const WEBHOOK_CONTACT_PART_LABELS: Record<WebhookContactPart, string> = {
   email: 'Email',
   tags: 'Tags',
   fields: 'Custom field values',
+};
+
+/**
+ * The statuses a `campaign.status_changed` event reports, which an endpoint can choose (ADR-146),
+ * in the order a campaign reaches them.
+ */
+export const WEBHOOK_CAMPAIGN_STATUSES = [
+  'draft',
+  'pending_approval',
+  'scheduled',
+  'running',
+  'paused',
+  'completed',
+  'canceled',
+] as const satisfies readonly WebhookCampaignStatus[];
+
+/** How Settings names each campaign status an endpoint can choose (ADR-146), as Campaigns does. */
+export const WEBHOOK_CAMPAIGN_STATUS_LABELS: Record<WebhookCampaignStatus, string> = {
+  draft: 'Draft',
+  pending_approval: 'Waiting for approval',
+  scheduled: 'Scheduled',
+  running: 'Sending',
+  paused: 'Paused',
+  completed: 'Completed',
+  canceled: 'Cancelled',
 };
 
 export const WEBHOOK_LIMITS = {

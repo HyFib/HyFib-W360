@@ -3,6 +3,7 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import {
   can,
+  WEBHOOK_CAMPAIGN_STATUS_LABELS,
   WEBHOOK_CONTACT_PART_LABELS,
   WEBHOOK_EVENT_INFO,
   WEBHOOK_LIMITS,
@@ -111,6 +112,14 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                       <p className="text-xs text-muted-foreground">
                         Contact changes sent:{' '}
                         {e.contactParts.map((p) => WEBHOOK_CONTACT_PART_LABELS[p]).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.campaignStatuses ? (
+                      <p className="text-xs text-muted-foreground">
+                        Campaign statuses sent:{' '}
+                        {e.campaignStatuses
+                          .map((c) => WEBHOOK_CAMPAIGN_STATUS_LABELS[c])
+                          .join(', ')}
                       </p>
                     ) : null}
                     {e.automations ? (

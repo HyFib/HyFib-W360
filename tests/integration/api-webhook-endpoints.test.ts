@@ -253,6 +253,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       messageStatuses: null,
       contactParts: null,
       automationIds: null,
+      campaignStatuses: null,
       apiKeyId: key.id,
       createdAt: expect.any(String),
       updatedAt: expect.any(String),
@@ -740,6 +741,85 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
     expect(await issueOf(api().update(key.ctx, id, { contactParts: [] }))).toMatchObject({
       path: 'contactParts',
+    });
+  });
+
+  it('choose the campaign statuses an endpoint receives, kept by changes that leave them out and cleared with the event (ADR-146)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // Statuses need the event, at least one, and each from the list (an unknown one by place).
+    const refusals = [
+      [['message.status'], ['paused'], 'campaignStatuses'],
+      [['campaign.status_changed'], [], 'campaignStatuses'],
+      [['campaign.status_changed'], ['paused', 'sending'], 'campaignStatuses.1'],
+    ] as const;
+    for (const [index, [events, campaignStatuses, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, campaignStatuses },
+            idem(`campaign-statuses-bad-${index}`, JSON.stringify(campaignStatuses)),
+          ),
+        ),
+        JSON.stringify(campaignStatuses),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'campaign-statuses-1', {
+      url: receiverUrl(),
+      events: ['campaign.status_changed', 'message.status'],
+      campaignStatuses: ['completed', 'paused', 'completed'],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.campaignStatuses).toEqual(['paused', 'completed']);
+    expect((await api().get(key.ctx, id)).campaignStatuses).toEqual(['paused', 'completed']);
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id, id],
+    );
+    expect(audit?.metadata).toMatchObject({ campaignStatuses: ['paused', 'completed'] });
+
+    expect(await api().update(key.ctx, id, { description: 'Outcomes' })).toMatchObject({
+      campaignStatuses: ['paused', 'completed'],
+    });
+    expect(await api().update(key.ctx, id, { campaignStatuses: ['canceled'] })).toMatchObject({
+      campaignStatuses: ['canceled'],
+    });
+    const updates = await fx.query<{ metadata: { campaignStatuses?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_updated'
+        ORDER BY occurred_at`,
+      [c.tenant.id, id],
+    );
+    expect(updates.map((u) => u.metadata.campaignStatuses)).toEqual([
+      ['paused', 'completed'],
+      ['canceled'],
+    ]);
+    expect(await api().update(key.ctx, id, { events: ['message.status'] })).toMatchObject({
+      events: ['message.status'],
+      campaignStatuses: null,
+    });
+    expect(
+      await issueOf(api().update(key.ctx, id, { campaignStatuses: ['paused'] })),
+    ).toMatchObject({ path: 'campaignStatuses' });
+    expect(
+      await api().update(key.ctx, id, {
+        events: ['campaign.status_changed'],
+        campaignStatuses: ['running'],
+      }),
+    ).toMatchObject({ campaignStatuses: ['running'] });
+    expect(await api().update(key.ctx, id, { campaignStatuses: null })).toMatchObject({
+      campaignStatuses: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { campaignStatuses: [] }))).toMatchObject({
+      path: 'campaignStatuses',
     });
   });
 

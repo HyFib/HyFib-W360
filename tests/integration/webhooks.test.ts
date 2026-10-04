@@ -844,6 +844,97 @@ describe('contact part filters (ADR-123)', () => {
   });
 });
 
+describe('campaign status filters (ADR-146)', () => {
+  it('are refused without campaign.status_changed, unknown or empty, kept by a change that leaves them out and cleared with the event; the database keeps them to that event', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const url = 'https://hooks.example.com/in';
+    const refused = (eventTypes: string[], campaignStatuses: unknown, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, campaignStatuses }),
+        'validation_failed',
+        message,
+      );
+    await refused(
+      ['message.status'],
+      ['paused'],
+      /only for an endpoint that receives Campaign status/,
+    );
+    await refused(['campaign.status_changed'], [], /at least one campaign status/);
+    await refused(['campaign.status_changed'], ['sending'], /from the list/);
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['campaign.status_changed', 'consent.changed'],
+      campaignStatuses: ['completed', 'paused', 'completed'],
+    });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toMatchObject({ campaignStatuses: ['paused', 'completed'] });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['campaign.status_changed', 'consent.changed'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.campaignStatuses;
+    expect(await current()).toEqual(['paused', 'completed']);
+    await change({ description: 'kept' });
+    expect(await current()).toEqual(['paused', 'completed']);
+    await change({ campaignStatuses: ['canceled'] });
+    expect(await current()).toEqual(['canceled']);
+    const updates = await fx.query<{ metadata: { campaignStatuses?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(updates.map((u) => u.metadata.campaignStatuses)).toEqual([
+      ['paused', 'completed'],
+      ['canceled'],
+    ]);
+    await change({ campaignStatuses: null });
+    expect(await current()).toBeNull();
+    await change({ campaignStatuses: ['running'] });
+    // The database refuses an empty list, more than seven entries, an unknown status or a missing
+    // one from an endpoint taking the event…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET campaign_statuses = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    for (const bad of [
+      `'{}'`,
+      `'{${Array(8).fill('paused').join(',')}}'`,
+      `'{paused,sending}'`,
+      `ARRAY['paused', NULL]::text[]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(/webhook_endpoints_campaign_statuses/);
+    }
+    await change({ eventTypes: ['consent.changed'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['consent.changed'], campaignStatuses: ['paused'] }),
+      'validation_failed',
+      /only for an endpoint that receives Campaign status/,
+    );
+    // …and any list for an endpoint that does not take it.
+    await expect(setInDatabase(`'{paused}'`)).rejects.toThrow(
+      /webhook_endpoints_campaign_statuses/,
+    );
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'campaign_statuses',
+                'UPDATE') AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+});
+
 describe('automation filters (ADR-145)', () => {
   const automationService = () =>
     createAutomationService({

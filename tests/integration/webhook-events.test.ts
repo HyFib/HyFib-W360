@@ -112,14 +112,16 @@ const inbox = () => createInboxService({ db: fx.dbs.app, clock: systemClock });
 const contactsService = () => createContactsService({ db: fx.dbs.app, clock: systemClock });
 
 /**
- * An endpoint of the company taking `eventTypes` (and only the contact parts given, ADR-123, and
- * the runs of the automations given, ADR-145), on a path of the receiver of its own.
+ * An endpoint of the company taking `eventTypes` (and only the contact parts given, ADR-123, the
+ * runs of the automations given, ADR-145, and the campaign statuses given, ADR-146), on a path of
+ * the receiver of its own.
  */
 async function addEndpoint(
   c: Company,
   eventTypes: WebhookEventType[],
   contactParts: WebhookContactPart[] | null = null,
   automationIds: string[] | null = null,
+  campaignStatuses: string[] | null = null,
 ) {
   const path = `/ok/${randomBytes(6).toString('hex')}`;
   const owner = await fx.ctx(c, c.owner);
@@ -128,6 +130,7 @@ async function addEndpoint(
     eventTypes,
     contactParts,
     automationIds,
+    campaignStatuses,
   });
   return { ...created, path };
 }
@@ -2288,6 +2291,81 @@ describe('campaign events (ADR-087)', () => {
     });
     // The other endpoint heard of the campaign's messages, not of the campaign.
     expect(bodiesAt(other.path).some((b) => b.type === 'campaign.status_changed')).toBe(false);
+  });
+
+  it('sends an endpoint that names statuses only those, another every status, and captures no change nobody takes (ADR-146)', async () => {
+    const s = await campaignCompany(1);
+    const { c } = s;
+    const owner = await fx.ctx(c, c.owner);
+    const outcomes = await addEndpoint(
+      c,
+      ['campaign.status_changed', 'message.status'],
+      null,
+      null,
+      ['canceled', 'completed', 'paused'],
+    );
+    const every = await addEndpoint(c, ['campaign.status_changed']);
+    expect((await webhooks().list(owner)).map((e) => [e.id, e.campaignStatuses]).sort()).toEqual(
+      [
+        [outcomes.id, ['paused', 'completed', 'canceled']],
+        [every.id, null],
+      ].sort(),
+    );
+
+    // A campaign that starts, is paused and resumed by members, and completes.
+    const id = await s.draft(owner, 'Weekend sale');
+    await s.campaigns.submitCampaign(owner, id, { expectedVersion: 1 }, {});
+    expect(await s.tick(id)).toMatchObject({ outcome: 'progress', queued: 1 });
+    await s.campaigns.pauseCampaign(owner, id, {});
+    await s.campaigns.resumeCampaign(owner, id, {});
+    expect(await s.tick(id)).toMatchObject({ queued: 1 });
+    expect(await s.dispatch(id)).toEqual(['accepted']);
+    s.clock.advance(11_000);
+    expect(await s.tick(id)).toMatchObject({ outcome: 'completed' });
+    expect(await changesOf(id)).toEqual([
+      ['scheduled', 'draft', null, null, 1],
+      ['running', 'scheduled', null, null, 1],
+      ['paused', 'running', 'manual', null, 2],
+      ['running', 'paused', null, null, 1],
+      ['completed', 'running', null, 'all_processed', 2],
+    ]);
+
+    // With the endpoint taking every status turned off, a campaign scheduled for tomorrow is
+    // captured for nobody until it is cancelled.
+    await webhooks().setEnabled(owner, { endpointId: every.id, enabled: false });
+    const tomorrow = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
+    const later = await s.draft(owner, 'Tomorrow', { kind: 'later', local: `${tomorrow}T09:00` });
+    await s.campaigns.submitCampaign(owner, later, { expectedVersion: 1 }, {});
+    expect(await changesOf(later)).toEqual([]);
+    await s.campaigns.cancelCampaign(owner, later, {});
+    expect(await changesOf(later)).toEqual([['canceled', 'scheduled', null, null, 1]]);
+
+    await deliverDue(c);
+    const statusesAt = (path: string) =>
+      bodiesAt(path)
+        .filter((b) => b.type === 'campaign.status_changed')
+        .map((b) => {
+          const { campaign } = campaignStatusChangedPayloadSchema.parse(b).data;
+          return [campaign.id, campaign.status];
+        })
+        .sort();
+    expect(statusesAt(outcomes.path)).toEqual(
+      [
+        [id, 'paused'],
+        [id, 'completed'],
+        [later, 'canceled'],
+      ].sort(),
+    );
+    // Its other events are not filtered: the campaign's message reached it as message.status,
+    // accepted included (a status no campaign has: `canceled`, which the pause gave the queued
+    // message, is a campaign status too).
+    expect(
+      bodiesAt(outcomes.path)
+        .filter((b) => b.type === 'message.status')
+        .map((b) => (b.data.message as { status: string }).status)
+        .sort(),
+    ).toEqual(['accepted', 'canceled']);
+    expect(statusesAt(every.path)).toEqual([]);
   });
 
   it('sends pauses by the runner and cancellations, captures nothing without an endpoint for campaigns, and fails a delivery whose campaign is gone', async () => {

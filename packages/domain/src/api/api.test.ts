@@ -102,7 +102,10 @@ import {
   createApiWebhookEndpoints,
   endpointAnnouncement,
 } from './webhook-endpoints';
-import { WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS } from '../webhooks/service';
+import {
+  WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS,
+  WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT,
+} from '../webhooks/service';
 
 describe('API tokens', () => {
   it('have a public prefix, a 256-bit secret and only their SHA-256 is kept', () => {
@@ -1315,6 +1318,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     };
     expect(Object.keys(update.properties).sort()).toEqual([
       'automationIds',
+      'campaignStatuses',
       'contactParts',
       'description',
       'enabled',
@@ -1366,6 +1370,47 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(webhooks['automation.run_ended']?.post?.description).toContain(
       'An endpoint that names the automations it takes receives only their runs',
     );
+    // The campaign statuses an endpoint receives (ADR-146): a list, or null.
+    const campaignStatuses = (answered.properties as Record<string, { anyOf?: unknown[] }>)
+      .campaignStatuses;
+    expect(campaignStatuses?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('campaignStatuses');
+    expect(Object.keys(createBody.properties)).toContain('campaignStatuses');
+    expect(webhooks['campaign.status_changed']?.post?.description).toContain(
+      'An endpoint receives every status unless it names the statuses it takes',
+    );
+  });
+
+  it('take campaign statuses only with campaign.status_changed, and a list of them alone is a change (ADR-146)', () => {
+    const base = { url: 'https://hooks.example.com/w360', events: ['campaign.status_changed'] };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...base,
+        campaignStatuses: ['completed', 'paused', 'completed'],
+      }).campaignStatuses,
+    ).toEqual(['paused', 'completed']);
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['message.status'],
+      campaignStatuses: ['paused'],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['campaignStatuses', WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT],
+    ]);
+    for (const body of [
+      { ...base, campaignStatuses: [] },
+      { ...base, campaignStatuses: ['sending'] },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(apiUpdateWebhookEndpointSchema.parse({ campaignStatuses: null })).toEqual({
+      campaignStatuses: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ campaignStatuses: ['canceled'] })).toEqual({
+      campaignStatuses: ['canceled'],
+    });
   });
 
   it('take automations only with an automation run event, and a list of them alone is a change (ADR-145)', () => {

@@ -2074,6 +2074,17 @@ offered; publish a draft first), or `PATCH /webhook-endpoints/{id}` with `automa
 every automation). Removing both automation run events clears the list. An archived automation has
 no runs until it is restored; it stays in the list meanwhile.
 
+**A receiver gets fewer campaign.status_changed events than expected (ADR-146).** An endpoint can
+take only the statuses a campaign reaches that it chose; the endpoints list shows them ("Campaign
+statuses sent: …"), and the API answers `campaignStatuses` (null takes every status). A change to
+another status is never queued for it, and when no endpoint of the company takes a change, no
+event is recorded at all, so there is nothing to replay: changes made before an edit are not sent
+afterwards. Each event still names the status before it (`previousStatus`), so an endpoint taking
+only `completed` learns what a campaign completed from. To take more, tick the statuses under
+"Campaign status" on the endpoint's page (all ticked takes every status, as a new endpoint does),
+or `PATCH /webhook-endpoints/{id}` with `campaignStatuses` (null for every status). Removing the
+`campaign.status_changed` event clears the list.
+
 **An endpoint was turned off automatically.** It failed every attempt for 72 hours; its waiting
 deliveries were marked failed (`endpoint_disabled`), owners and administrators got the
 "Webhook endpoint turned off" email, and the audit log has `webhook.endpoint_auto_disabled`. Fix the

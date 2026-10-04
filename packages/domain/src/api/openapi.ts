@@ -11,6 +11,7 @@ import {
   type MessageStatus,
 } from '@w360/db';
 import {
+  WEBHOOK_CAMPAIGN_STATUSES,
   WEBHOOK_CONTACT_PARTS,
   WEBHOOK_EVENT_INFO,
   WEBHOOK_EVENT_KEYS,
@@ -344,6 +345,12 @@ export const apiWebhookEndpointSchema = z.object({
     .nullable()
     .describe(
       "The automations whose runs the endpoint receives as automation.run_started and automation.run_ended; null receives every automation's runs, including automations published later.",
+    ),
+  campaignStatuses: z
+    .array(z.enum(WEBHOOK_CAMPAIGN_STATUSES))
+    .nullable()
+    .describe(
+      'The statuses a campaign reaches that the endpoint receives as campaign.status_changed; null receives every status.',
     ),
   apiKeyId: z.uuid().describe('The API key that added the endpoint.'),
   createdAt: z.iso.datetime(),
@@ -1555,7 +1562,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'campaign.status_changed': webhook(
         'webhookCampaignStatusChanged',
         WEBHOOK_EVENT_INFO['campaign.status_changed'].label,
-        `${WEBHOOK_EVENT_INFO['campaign.status_changed'].description} campaign.status and campaign.previousStatus are the change, with why it paused or completed; the rest is the campaign when the event is delivered. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
+        `${WEBHOOK_EVENT_INFO['campaign.status_changed'].description} campaign.status and campaign.previousStatus are the change, with why it paused or completed; the rest is the campaign when the event is delivered. Deliveries are not ordered: the latest change is the one with the latest createdAt. An endpoint receives every status unless it names the statuses it takes (its \`campaignStatuses\`, or the statuses ticked in Settings → Webhooks).`,
         'WebhookCampaignStatusChanged',
       ),
       ping: webhook(

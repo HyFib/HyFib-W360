@@ -28,6 +28,7 @@ import { assertCan, type TenantContext } from '../authz/context';
 import { assertRecentSignIn } from '../authz/step-up';
 import { parseInput } from '../validation';
 import {
+  WEBHOOK_CAMPAIGN_STATUSES,
   WEBHOOK_CONTACT_PARTS,
   WEBHOOK_EVENT_KEYS,
   WEBHOOK_LIMITS,
@@ -36,6 +37,7 @@ import {
   webhookHost,
   webhookTakesAutomationRuns,
   type WebhookAutomationChoice,
+  type WebhookCampaignStatus,
   type WebhookContactPart,
   type WebhookEndpointAutomation,
   type WebhookMessageStatus,
@@ -197,6 +199,34 @@ export function webhookMessageStatusesFor(
 }
 
 /**
+ * The statuses a campaign reaches that an endpoint takes as `campaign.status_changed` (ADR-146), in
+ * the order a campaign reaches them; null takes every status.
+ */
+export const webhookCampaignStatusesSchema = z
+  .array(z.enum(WEBHOOK_CAMPAIGN_STATUSES, { error: 'Choose campaign statuses from the list.' }))
+  .min(1, 'Choose at least one campaign status, or take every status.')
+  .max(WEBHOOK_CAMPAIGN_STATUSES.length, 'Give each campaign status once.')
+  .transform((chosen) => WEBHOOK_CAMPAIGN_STATUSES.filter((status) => chosen.includes(status)))
+  .nullable();
+
+export const WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT =
+  'Choose campaign statuses only for an endpoint that receives Campaign status.';
+
+/**
+ * The campaign statuses an endpoint keeps after it is added or changed: every status (null) unless
+ * it takes `campaign.status_changed`; then those given, or else the ones it had.
+ */
+export function webhookCampaignStatusesFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly WebhookCampaignStatus[] | null | undefined,
+  current: readonly WebhookCampaignStatus[] | null,
+): WebhookCampaignStatus[] | null {
+  if (!eventTypes.includes('campaign.status_changed')) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
  * The parts of a contact whose change an endpoint takes as `contact.updated` (ADR-123), in the
  * order Settings lists them; null takes every change, including parts added later.
  */
@@ -322,6 +352,10 @@ const endpointFields = z.object({
    * stay.
    */
   automationIds: webhookAutomationIdsSchema.optional(),
+  /**
+   * Given, the campaign statuses it takes (null: every status, ADR-146); left out, they stay.
+   */
+  campaignStatuses: webhookCampaignStatusesSchema.optional(),
 });
 /** Statuses are chosen only for an endpoint that takes `message.status`. */
 const statusesNeedTheEvent = {
@@ -341,16 +375,24 @@ const automationsNeedTheEvents = {
     !data.automationIds || webhookTakesAutomationRuns(data.eventTypes),
   options: { path: ['automationIds'], message: WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS },
 };
+/** Campaign statuses are chosen only for an endpoint that takes campaign changes (ADR-146). */
+const campaignStatusesNeedTheEvent = {
+  check: (data: { eventTypes: WebhookEventType[]; campaignStatuses?: unknown }) =>
+    !data.campaignStatuses || data.eventTypes.includes('campaign.status_changed'),
+  options: { path: ['campaignStatuses'], message: WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT },
+};
 const endpointSchema = endpointFields
   .refine(statusesNeedTheEvent.check, statusesNeedTheEvent.options)
   .refine(partsNeedTheEvent.check, partsNeedTheEvent.options)
-  .refine(automationsNeedTheEvents.check, automationsNeedTheEvents.options);
+  .refine(automationsNeedTheEvents.check, automationsNeedTheEvents.options)
+  .refine(campaignStatusesNeedTheEvent.check, campaignStatusesNeedTheEvent.options);
 const endpointIdSchema = z.object({ endpointId: z.uuid() });
 const updateSchema = endpointFields
   .extend({ endpointId: z.uuid() })
   .refine(statusesNeedTheEvent.check, statusesNeedTheEvent.options)
   .refine(partsNeedTheEvent.check, partsNeedTheEvent.options)
-  .refine(automationsNeedTheEvents.check, automationsNeedTheEvents.options);
+  .refine(automationsNeedTheEvents.check, automationsNeedTheEvents.options)
+  .refine(campaignStatusesNeedTheEvent.check, campaignStatusesNeedTheEvent.options);
 const enabledSchema = endpointIdSchema.extend({ enabled: z.boolean() });
 const deliveryIdSchema = z.object({ deliveryId: z.uuid() });
 const replayFailedSchema = endpointIdSchema.extend({
@@ -385,6 +427,8 @@ export interface WebhookEndpointView {
    * are archived; null takes every automation.
    */
   automations: WebhookEndpointAutomation[] | null;
+  /** The campaign statuses it takes (ADR-146); null takes every status. */
+  campaignStatuses: WebhookCampaignStatus[] | null;
   createdAt: Date;
   /** The member who added the endpoint in settings (null once their account is gone). */
   createdBy: string | null;
@@ -463,6 +507,7 @@ export async function lockWebhookEndpoint(
       messageStatuses: webhookEndpoints.messageStatuses,
       contactParts: webhookEndpoints.contactParts,
       automationIds: webhookEndpoints.automationIds,
+      campaignStatuses: webhookEndpoints.campaignStatuses,
     })
     .from(webhookEndpoints)
     .where(
@@ -498,6 +543,7 @@ export async function insertWebhookEndpoint(
     messageStatuses: WebhookMessageStatus[] | null;
     contactParts: WebhookContactPart[] | null;
     automationIds: string[] | null;
+    campaignStatuses: WebhookCampaignStatus[] | null;
     creator: WebhookEndpointCreator;
   },
 ): Promise<{ id: string; secret: string }> {
@@ -525,6 +571,7 @@ export async function insertWebhookEndpoint(
     messageStatuses: input.messageStatuses,
     contactParts: input.contactParts,
     automationIds: input.automationIds,
+    campaignStatuses: input.campaignStatuses,
     createdByUserId: 'userId' in input.creator ? input.creator.userId : null,
     createdByApiKeyId: 'apiKeyId' in input.creator ? input.creator.apiKeyId : null,
   });
@@ -813,6 +860,7 @@ export function createWebhooksService(deps: {
               messageStatuses: webhookEndpoints.messageStatuses,
               contactParts: webhookEndpoints.contactParts,
               automationIds: webhookEndpoints.automationIds,
+              campaignStatuses: webhookEndpoints.campaignStatuses,
               createdAt: webhookEndpoints.createdAt,
               createdBy: users.name,
               keyName: apiKeys.name,
@@ -942,6 +990,11 @@ export function createWebhooksService(deps: {
         const contactParts = webhookContactPartsFor(data.eventTypes, data.contactParts, null);
         const automationIds = webhookAutomationIdsFor(data.eventTypes, data.automationIds, null);
         await assertWebhookAutomations(tx, ctx.tenant.id, automationIds);
+        const campaignStatuses = webhookCampaignStatusesFor(
+          data.eventTypes,
+          data.campaignStatuses,
+          null,
+        );
         const { id, secret } = await insertWebhookEndpoint(tx, keyring, ctx.tenant.id, {
           url,
           description: data.description || null,
@@ -950,6 +1003,7 @@ export function createWebhooksService(deps: {
           messageStatuses,
           contactParts,
           automationIds,
+          campaignStatuses,
           creator: { userId: ctx.user.id },
         });
         await recordAudit(
@@ -966,6 +1020,7 @@ export function createWebhooksService(deps: {
               ...(messageStatuses ? { messageStatuses } : {}),
               ...(contactParts ? { contactParts } : {}),
               ...(automationIds ? { automationIds } : {}),
+              ...(campaignStatuses ? { campaignStatuses } : {}),
             },
           },
           meta,
@@ -1000,6 +1055,11 @@ export function createWebhooksService(deps: {
         if (data.automationIds !== undefined) {
           await assertWebhookAutomations(tx, ctx.tenant.id, automationIds);
         }
+        const campaignStatuses = webhookCampaignStatusesFor(
+          data.eventTypes,
+          data.campaignStatuses,
+          endpoint.campaignStatuses,
+        );
         await tx
           .update(webhookEndpoints)
           .set({
@@ -1009,6 +1069,7 @@ export function createWebhooksService(deps: {
             messageStatuses,
             contactParts,
             automationIds,
+            campaignStatuses,
             ...(data.headers
               ? sealWebhookHeaders(keyring, ctx.tenant.id, data.endpointId, data.headers)
               : {}),
@@ -1034,6 +1095,7 @@ export function createWebhooksService(deps: {
               ...(messageStatuses ? { messageStatuses } : {}),
               ...(contactParts ? { contactParts } : {}),
               ...(automationIds ? { automationIds } : {}),
+              ...(campaignStatuses ? { campaignStatuses } : {}),
             },
           },
           meta,

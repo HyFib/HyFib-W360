@@ -1,5 +1,96 @@
 # Progress
 
+## 2026-10-04 — Phase 5: choosing the campaign statuses a webhook endpoint receives (P5-09, ADR-146)
+
+Status: **Implemented and locally verified (test data only).** Since ADR-087 an endpoint that took
+`campaign.status_changed` received every change of every campaign's status, from submissions and
+drafts sent back to each start, pause and resume; a receiver that acts on a few of them (a report
+pulled once a campaign ends, an alert on the runner's pauses) had to read and drop the rest. ADR-119,
+ADR-123 and ADR-145 had let an endpoint take some message statuses, contact changes and automations;
+ADR-087 and ADR-119 left filters for campaigns unbuilt (P5-09 Remaining).
+
+### Completed
+
+- **Design (ADR-146):** an endpoint takes every campaign status (null, as before) or 1 to 7 of
+  the statuses a campaign reaches that it chooses (`draft`, `pending_approval`, `scheduled`,
+  `running`, `paused`, `completed`, `canceled`), the status the change reached and not the one
+  before, kept only while it takes `campaign.status_changed`; applied where events are captured, in
+  the campaign change's own transaction, and no campaign event recorded when no endpoint takes it;
+  audited and exported; permissions unchanged.
+- **Migration 0110:** `app.webhook_endpoints.campaign_statuses` (`text[]`, a check: null, or 1 to 7
+  known statuses while `campaign.status_changed` is among the events; containment also refuses a
+  null entry), the runtime role's update of the column, and `app.capture_webhook_event` replaced
+  with the same signature (0109's, with the campaign condition in both its existence check and its
+  deliveries).
+- **Domain:** `webhooks/model.ts` (`WEBHOOK_CAMPAIGN_STATUSES` in the order a campaign reaches them,
+  their labels as Campaigns names them); `webhooks/service.ts` (`webhookCampaignStatusesSchema`,
+  `webhookCampaignStatusesFor`, the schemas' rule, `campaignStatuses` on each listed endpoint,
+  create and update storing and auditing the list); `api/webhook-endpoints.ts`
+  (`campaignStatuses` on `POST` and `PATCH /webhook-endpoints` and in every answer, kept or
+  cleared, audited); OpenAPI (`campaignStatuses`, and the event says how the filter applies); the
+  company data export carries the column.
+- **Web:** Settings → Webhooks, under "Campaign status" while it is ticked: "Statuses sent", every
+  status ticked to begin with (saving all of them keeps none); the endpoints list says "Campaign
+  statuses sent: …".
+- **Tests:**
+  - Unit (3 new, 1 extended): the list's rules (1 to 7 known statuses, repeats merged into the
+    order a campaign reaches them, null, refusals and the empty list's message, the labels), keeping
+    and clearing; the API's schemas (only with the event, a list alone is a change) and the OpenAPI
+    entries.
+  - Integration (3 new, 1 changed): an endpoint naming paused, completed and cancelled gets only
+    those changes while one taking every status gets each change, no change recorded when no
+    endpoint takes it, and the first endpoint's message statuses (accepted and canceled) unfiltered
+    (`webhook-events.test.ts`, whose endpoint helper takes the statuses); refusals of statuses
+    without the event, an empty list and an unknown status, keeping, replacing and clearing, the
+    audits, each clause of the database check (an empty list, eight entries, an unknown status, a
+    null entry, any list without the event) and the column grant (`webhooks.test.ts`); the same
+    rules through the API, an unknown status named by its place (`api-webhook-endpoints.test.ts`,
+    whose endpoint shape now includes `campaignStatuses`).
+  - E2E (1 extended in `webhook-events.spec.ts`): a second endpoint is added with only completions
+    ticked (every status unticked, then completions ticked again); the form starts afresh, the
+    endpoints list names its statuses and no other endpoint's, its page ticks completions only, and
+    once the campaign has run it has received the completion alone while the first endpoint has
+    every change.
+- **Docs:** ADR-146 (and ADR-087's and ADR-119's "Not built" annotated); SECURITY (Phase 5 rules);
+  THREAT-MODEL T155; ARCHITECTURE; RUNBOOKS; DEPLOYMENT (0110's rollout); DATA-RETENTION; BACKLOG
+  P5-09; feature matrix H-014, W-138 and W-139.
+- **Mutation checks:** 60 deliberate regressions tried, all caught: 13 by unit tests and 35 by
+  integration tests in the domain, the API and the migration (the statuses and their order, the
+  list's rules, keeping and clearing, the schemas' rule, each store, read and audit in Settings and
+  the API, the OpenAPI entries, the export, the capture's existence check and deliveries, the null
+  branch, the condition kept to campaign events in both places, the status reached rather than the
+  one before, each clause of the database check and the column grant), and 12 in the web through
+  the e2e test (the statuses shown, what is sent, every status ticked sent as none, ticking and
+  unticking, the page's starting state, the form starting afresh, the endpoints list and its labels,
+  the endpoint's page knowing its list, the names Campaigns uses). The campaign condition applied to
+  every event type in the deliveries first survived: the test only asked that some message status
+  arrive, and the queued message a pause cancels is `canceled`, a campaign status too. The test now
+  names the statuses (accepted and canceled), and the same regression in the existence check was
+  added and is caught. The e2e test was extended before the web regressions ran so that it
+  exercises the endpoint's page, the form after an add and ticking a status again.
+
+### Test commands and results (local, 2026-10-04)
+
+| Command                                                                                  | Result                                                                                                                     |
+| ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`                                       | clean                                                                                                                      |
+| `pnpm test` (unit)                                                                       | 683 passed (74 files; 3 new)                                                                                               |
+| `pnpm test:integration` on PostgreSQL 18.6                                               | 849 passed (56 files; 3 new)                                                                                               |
+| `pnpm test:integration` on PostgreSQL 17.11                                              | 849 passed (56 files)                                                                                                      |
+| `pnpm build`                                                                             | passed                                                                                                                     |
+| e2e: webhooks, webhook-events, api-contact-fields, api-quota (chromium, mobile-chromium) | 32 passed (6.1 min) on the final build; Firefox and WebKit are not installed here, so CI runs them                         |
+| Mutation checks                                                                          | 60 tried, all caught (13 by unit, 35 by integration, 12 through the e2e test), 1 of them after the test named the statuses |
+| gitleaks 8.30.1 on the staged changes                                                    | no leaks found                                                                                                             |
+
+A formatting-only change to one type alias (`WebhookCampaignStatus` on one line) came after the
+integration and e2e runs; lint, the format check, typecheck, the unit tests and the build ran again
+after it and passed.
+
+### Known gaps
+
+- Filters by campaign, by the status before a change or by why a campaign paused or completed, and
+  filters for template, order or conversation statuses.
+
 ## 2026-10-04 — Phase 5: choosing the automations whose runs a webhook endpoint receives (P5-09, ADR-145)
 
 Status: **Implemented and locally verified (test data only).** Since ADR-078 an endpoint that took

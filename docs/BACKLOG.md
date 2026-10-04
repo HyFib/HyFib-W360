@@ -620,7 +620,10 @@ verification, app review, Embedded Signup configuration).
   `automation.run_started` and `automation.run_ended` only for the automations it chooses, up to
   20 of the company's published automations, in Settings or through the API, or every
   automation's runs as before; applied where events are captured, so a run no endpoint takes is not
-  recorded). Remaining: filters for other event types and on a message's or contact's values (such
+  recorded). **[Campaign status filters built, locally verified]** (ADR-146: an endpoint takes
+  `campaign.status_changed` only for the statuses a campaign reaches that it chooses, in Settings
+  or through the API, or every status as before; applied where events are captured, so a change no
+  endpoint takes is not recorded). Remaining: filters for other event types and on a message's or contact's values (such
   as by campaign, template, tag or field key, or a run's trigger or outcome), which tags were added
   or removed, other authentication (OAuth client credentials, headers
   computed per delivery), mutual TLS, fixed egress addresses, delivery counts in campaign events,

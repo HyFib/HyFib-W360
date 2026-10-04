@@ -18,6 +18,7 @@ import {
   type Database,
   type Tx,
   type WebhookDeliveryState,
+  type WebhookCampaignStatus,
   type WebhookContactPart,
   type WebhookEventType,
   type WebhookMessageStatus,
@@ -45,8 +46,11 @@ import {
   sealWebhookHeaders,
   setWebhookEndpointEnabled,
   WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS,
+  WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT,
   webhookAutomationIdsFor,
   webhookAutomationIdsSchema,
+  webhookCampaignStatusesFor,
+  webhookCampaignStatusesSchema,
   webhookContactPartsFor,
   webhookContactPartsSchema,
   webhookDeliveryColumns,
@@ -111,6 +115,16 @@ const invalidAutomations = () =>
     issues: [{ path: 'automationIds', message: WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS }],
   });
 
+const campaignStatusesField = webhookCampaignStatusesSchema.describe(
+  'The statuses a campaign reaches that the endpoint receives as campaign.status_changed (draft, pending_approval, scheduled, running, paused, completed, canceled), only with the campaign.status_changed event; null receives every status.',
+);
+
+/** Campaign statuses are chosen only for an endpoint that receives campaign changes (ADR-146). */
+const invalidCampaignStatuses = () =>
+  new AppError('validation_failed', WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT, {
+    issues: [{ path: 'campaignStatuses', message: WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT }],
+  });
+
 export const apiCreateWebhookEndpointSchema = z
   .object({
     url: z
@@ -127,6 +141,7 @@ export const apiCreateWebhookEndpointSchema = z
     messageStatuses: messageStatusesField.optional(),
     contactParts: contactPartsField.optional(),
     automationIds: automationIdsField.optional(),
+    campaignStatuses: campaignStatusesField.optional(),
   })
   .strict()
   .refine((data) => !data.messageStatuses || data.events.includes('message.status'), {
@@ -140,6 +155,10 @@ export const apiCreateWebhookEndpointSchema = z
   .refine((data) => !data.automationIds || webhookTakesAutomationRuns(data.events), {
     path: ['automationIds'],
     message: WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS,
+  })
+  .refine((data) => !data.campaignStatuses || data.events.includes('campaign.status_changed'), {
+    path: ['campaignStatuses'],
+    message: WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT,
   });
 
 export const apiUpdateWebhookEndpointSchema = z
@@ -174,6 +193,11 @@ export const apiUpdateWebhookEndpointSchema = z
       .describe(
         "The automations whose runs the endpoint receives (the company's published automations); null receives every automation's runs. Left out, they stay, unless the events no longer include automation.run_started or automation.run_ended, which clears them.",
       ),
+    campaignStatuses: campaignStatusesField
+      .optional()
+      .describe(
+        'The statuses a campaign reaches that the endpoint receives as campaign.status_changed; null receives every status. Left out, they stay, unless the events no longer include campaign.status_changed, which clears them.',
+      ),
   })
   .strict()
   .refine(
@@ -184,8 +208,9 @@ export const apiUpdateWebhookEndpointSchema = z
       data.headers !== undefined ||
       data.messageStatuses !== undefined ||
       data.contactParts !== undefined ||
-      data.automationIds !== undefined,
-    'Give the events, the description, the headers, the message statuses, the contact parts, the automations or whether the endpoint is enabled',
+      data.automationIds !== undefined ||
+      data.campaignStatuses !== undefined,
+    'Give the events, the description, the headers, the message statuses, the contact parts, the automations, the campaign statuses or whether the endpoint is enabled',
   );
 
 export interface ApiWebhookEndpoint {
@@ -210,6 +235,8 @@ export interface ApiWebhookEndpoint {
   contactParts: WebhookContactPart[] | null;
   /** The automations whose runs it receives (ADR-145); null receives every automation's runs. */
   automationIds: string[] | null;
+  /** The campaign statuses it receives (ADR-146); null receives every status. */
+  campaignStatuses: WebhookCampaignStatus[] | null;
   /** The key that added the endpoint. */
   apiKeyId: string;
   createdAt: string;
@@ -294,6 +321,7 @@ const columns = {
   messageStatuses: webhookEndpoints.messageStatuses,
   contactParts: webhookEndpoints.contactParts,
   automationIds: webhookEndpoints.automationIds,
+  campaignStatuses: webhookEndpoints.campaignStatuses,
   apiKeyId: webhookEndpoints.createdByApiKeyId,
   createdAt: webhookEndpoints.createdAt,
   updatedAt: webhookEndpoints.updatedAt,
@@ -316,6 +344,7 @@ type EndpointRow = Pick<
   | 'messageStatuses'
   | 'contactParts'
   | 'automationIds'
+  | 'campaignStatuses'
   | 'createdAt'
   | 'updatedAt'
 > & { apiKeyId: string | null };
@@ -343,6 +372,7 @@ function toApiEndpoint(row: EndpointRow, now: Date): ApiWebhookEndpoint {
     messageStatuses: row.messageStatuses,
     contactParts: row.contactParts,
     automationIds: row.automationIds,
+    campaignStatuses: row.campaignStatuses,
     apiKeyId: row.apiKeyId,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -543,6 +573,11 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
             const contactParts = webhookContactPartsFor(data.events, data.contactParts, null);
             const automationIds = webhookAutomationIdsFor(data.events, data.automationIds, null);
             await assertWebhookAutomations(tx, ctx.tenant.id, automationIds);
+            const campaignStatuses = webhookCampaignStatusesFor(
+              data.events,
+              data.campaignStatuses,
+              null,
+            );
             const { id, secret } = await insertWebhookEndpoint(tx, deps.keyring, ctx.tenant.id, {
               url,
               description: data.description || null,
@@ -551,6 +586,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               messageStatuses,
               contactParts,
               automationIds,
+              campaignStatuses,
               creator: { apiKeyId: ctx.key.id },
             });
             await audit(tx, ctx, 'webhook.endpoint_created', id, {
@@ -560,6 +596,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               ...(messageStatuses ? { messageStatuses } : {}),
               ...(contactParts ? { contactParts } : {}),
               ...(automationIds ? { automationIds } : {}),
+              ...(campaignStatuses ? { campaignStatuses } : {}),
             });
             await announce(tx, ctx, { host, events: data.events, at: now });
             const endpoint = await readEndpoint(tx, ctx, id, now);
@@ -588,6 +625,9 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         if (data.messageStatuses && !events.includes('message.status')) throw invalidStatuses();
         if (data.contactParts && !events.includes('contact.updated')) throw invalidParts();
         if (data.automationIds && !webhookTakesAutomationRuns(events)) throw invalidAutomations();
+        if (data.campaignStatuses && !events.includes('campaign.status_changed')) {
+          throw invalidCampaignStatuses();
+        }
         // Only a list given now is checked: the automations kept were checked when chosen.
         if (data.automationIds !== undefined) {
           await assertWebhookAutomations(tx, ctx.tenant.id, data.automationIds);
@@ -598,7 +638,8 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
           data.headers !== undefined ||
           data.messageStatuses !== undefined ||
           data.contactParts !== undefined ||
-          data.automationIds !== undefined
+          data.automationIds !== undefined ||
+          data.campaignStatuses !== undefined
         ) {
           const [changed] = await tx
             .update(webhookEndpoints)
@@ -623,6 +664,11 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
                 data.automationIds,
                 endpoint.automationIds,
               ),
+              campaignStatuses: webhookCampaignStatusesFor(
+                events,
+                data.campaignStatuses,
+                endpoint.campaignStatuses,
+              ),
               updatedAt: now,
             })
             .where(and(eq(webhookEndpoints.tenantId, ctx.tenant.id), eq(webhookEndpoints.id, id)))
@@ -631,6 +677,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               messageStatuses: webhookEndpoints.messageStatuses,
               contactParts: webhookEndpoints.contactParts,
               automationIds: webhookEndpoints.automationIds,
+              campaignStatuses: webhookEndpoints.campaignStatuses,
             });
           if (!changed) throw new Error('A locked endpoint was not updated');
           await audit(tx, ctx, 'webhook.endpoint_updated', id, {
@@ -640,6 +687,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
             ...(changed.messageStatuses ? { messageStatuses: changed.messageStatuses } : {}),
             ...(changed.contactParts ? { contactParts: changed.contactParts } : {}),
             ...(changed.automationIds ? { automationIds: changed.automationIds } : {}),
+            ...(changed.campaignStatuses ? { campaignStatuses: changed.campaignStatuses } : {}),
           });
         }
         if (data.enabled !== undefined) {

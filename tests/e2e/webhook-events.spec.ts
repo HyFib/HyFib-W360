@@ -614,11 +614,11 @@ interface CampaignEventBody {
   };
 }
 
-test('campaign events reach an endpoint: a member starts a campaign, and the runner starts and completes it', async ({
+test('campaign events reach an endpoint: a member starts a campaign, and the runner starts and completes it; an endpoint can take chosen statuses only', async ({
   page,
   request,
 }) => {
-  test.setTimeout(180_000);
+  test.setTimeout(210_000);
   const standIn = `http://127.0.0.1:${process.env.E2E_GRAPH_PORT}`;
   const email = uniqueEmail('hookcmp');
   const slug = `hookcmp-${Date.now().toString(36)}`;
@@ -645,6 +645,49 @@ test('campaign events reach an endpoint: a member starts a campaign, and the run
   await expect(secretField).toBeVisible();
   const secret = await secretField.inputValue();
   await page.getByRole('button', { name: 'I have stored the secret' }).click();
+
+  // A second endpoint takes only completions (ADR-146).
+  const completedPath = `${path}/completed`;
+  const forCompleted = () =>
+    received
+      .filter((r) => r.path === completedPath)
+      .map((r) => JSON.parse(r.body) as CampaignEventBody);
+  await page.getByLabel('Endpoint URL').fill(`http://${HOST}:${port}${completedPath}`);
+  await page.getByRole('checkbox', { name: /Campaign status/ }).check();
+  const statusBox = (name: string) => page.getByRole('checkbox', { name, exact: true });
+  for (const name of [
+    'Draft (draft)',
+    'Waiting for approval (pending_approval)',
+    'Scheduled (scheduled)',
+    'Sending (running)',
+    'Paused (paused)',
+    'Completed (completed)',
+    'Cancelled (canceled)',
+  ]) {
+    await statusBox(name).uncheck();
+  }
+  await statusBox('Completed (completed)').check();
+  await page.getByRole('button', { name: 'Add endpoint' }).click();
+  await expect(page.getByLabel('Signing secret')).toBeVisible();
+  await page.getByRole('button', { name: 'I have stored the secret' }).click();
+  // The form starts afresh: the event ticked again takes every status.
+  await page.getByRole('checkbox', { name: /Campaign status/ }).check();
+  await expect(statusBox('Draft (draft)')).toBeChecked();
+  await page.reload();
+  // Only the second endpoint names statuses: every status ticked keeps none.
+  await expect(page.getByText(/^Campaign statuses sent:/)).toHaveText([
+    'Campaign statuses sent: Completed',
+  ]);
+  // The endpoint's own page shows the statuses it takes.
+  await page
+    .getByRole('list', { name: 'Endpoints' })
+    .getByRole('listitem')
+    .filter({ hasText: 'Campaign statuses sent: Completed' })
+    .getByRole('link', { name: /Deliveries and settings/ })
+    .click();
+  await expect(page.getByRole('heading', { name: /^Deliveries to/ })).toBeVisible();
+  await expect(statusBox('Completed (completed)')).toBeChecked();
+  await expect(statusBox('Draft (draft)')).not.toBeChecked();
 
   // An approved marketing template and a tagged contact who opted in.
   await page.goto(`/c/${slug}/templates/new`);
@@ -736,6 +779,11 @@ test('campaign events reach an endpoint: a member starts a campaign, and the run
     },
     channel: { id: expect.any(String) },
   });
+  // The second endpoint heard only of the completion.
+  await expect(async () => expect(forCompleted()).toHaveLength(1)).toPass({ timeout: 30_000 });
+  expect(forCompleted().map((e) => [e.data.campaign.id, e.data.campaign.status])).toEqual([
+    [campaignId, 'completed'],
+  ]);
   await page.reload();
   await expect(page.getByText('Completed', { exact: true }).first()).toBeVisible();
 });

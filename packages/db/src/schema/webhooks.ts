@@ -37,6 +37,10 @@ export type WebhookMessageStatus =
  */
 export type WebhookContactPart = 'name' | 'phone' | 'email' | 'tags' | 'fields';
 
+/** The statuses a `campaign.status_changed` event reports, which an endpoint can choose (ADR-146). */
+export type WebhookCampaignStatus =
+  'draft' | 'pending_approval' | 'scheduled' | 'running' | 'paused' | 'completed' | 'canceled';
+
 export const WEBHOOK_DELIVERY_STATES = ['pending', 'delivering', 'succeeded', 'failed'] as const;
 export type WebhookDeliveryState = (typeof WEBHOOK_DELIVERY_STATES)[number];
 
@@ -70,6 +74,11 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    * (ADR-145); null takes every automation. Set only while one of those is among its events.
    */
   automationIds: uuid('automation_ids').array(),
+  /**
+   * The statuses a campaign reaches that it takes as `campaign.status_changed` (ADR-146); null
+   * takes every status. Set only while `campaign.status_changed` is among its events.
+   */
+  campaignStatuses: text('campaign_statuses').array().$type<WebhookCampaignStatus[]>(),
   state: text('state', { enum: ['active', 'disabled'] })
     .notNull()
     .default('active'),

@@ -1332,6 +1332,13 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   other types, replays and test events are unchanged. Settings and the API (`automationIds`) set
   it, Settings from `automationChoices` (the company's published automations by name); a change
   that drops both events clears it.
+- **Campaign status filters** (migration 0110, ADR-146): `campaign_statuses` on an endpoint lists
+  the statuses a campaign reaches that it takes as `campaign.status_changed`, null for every
+  status; a check keeps it to 1 to 7 known statuses and to endpoints that take the event.
+  `app.capture_webhook_event` (replaced with the same signature) creates a campaign event's
+  delivery only for endpoints whose list is null or holds the status reached, and writes no event
+  when none does; other types, replays and test events are unchanged. Settings and the API
+  (`campaignStatuses`) set it; a change that drops the event clears it.
 - **Health:** a success clears the failing state; a failure when the endpoint has been failing for
   72 hours without a success turns it off (`failing`), fails its waiting deliveries as
   `endpoint_disabled`, records a system audit entry and emails the company's active owners and
@@ -1341,11 +1348,11 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   only in the page's memory); sending a test event (`ping`); rotating the secret; turning off and
   on; deleting. Each endpoint's page lists its latest 100 deliveries (or only failed ones) with
   attempts, result and timings, replays finished ones (a new delivery of the same event, audited)
-  and edits the URL, description, events, the message statuses, contact parts and automations it
-  takes and headers (names shown, values never; replacing gives each again). The OpenAPI document describes
-  every event under `webhooks`. Audit entries name the endpoint's host, never its full URL or
-  secret.
-- **Not built yet:** filters for other event types (campaigns, templates, orders) or on a message's
+  and edits the URL, description, events, the message statuses, contact parts, automations and
+  campaign statuses it takes and headers (names shown, values never; replacing gives each again).
+  The OpenAPI document describes every event under `webhooks`. Audit entries name the endpoint's
+  host, never its full URL or secret.
+- **Not built yet:** filters for other event types (templates, orders) or on a message's
   or contact's values, ordering,
   other authentication (OAuth client credentials, headers computed per delivery), mutual TLS, fixed
   egress addresses for receivers' allowlists, endpoints per number, and events for conversations

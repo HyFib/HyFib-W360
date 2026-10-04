@@ -785,6 +785,13 @@ Phase 5 rules (outgoing webhooks, P5-09):
   it narrows what one endpoint receives and never adds an event or a delivery for another endpoint
   or company. The API answers and audits ids only; Settings names them to members with
   `developer.manage`, who can read automations anyway. Audited with the list. Tested.
+- An endpoint can take `campaign.status_changed` only for some of the statuses a campaign reaches
+  (ADR-146), chosen the same way. The list is checked against the seven campaign statuses, kept
+  only while the endpoint takes `campaign.status_changed` (a database check too, which also refuses
+  a null entry), and applied in `app.capture_webhook_event`, in the campaign change's own
+  transaction: it narrows what one endpoint receives and never adds an event or a delivery for
+  another endpoint or company, and a status no endpoint takes is not recorded. Statuses are not
+  personal data. Audited with the list. Tested.
 - Conversation and contact events (ADR-074) follow the same rules. Conversation events name the
   member and the team by id only (ADR-094), the ids the API gives `conversations.read` keys
   (ADR-093): names are read through `GET /members` and `GET /teams` with such a key, and no email or

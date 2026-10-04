@@ -2883,7 +2883,8 @@ Decision:
 
 Not built: delivery and read counts in the payload (they change with every message status; the
 reports have them), the campaign in `message.status`, events for each recipient, test sends and
-drafts, reading campaigns through the public API, and filters by campaign.
+drafts, reading campaigns through the public API, and filters by campaign (filters by the status
+reached built by ADR-146).
 
 ## ADR-088 A message feed across conversations through the public API (2026-09-30)
 
@@ -4521,7 +4522,7 @@ Decision:
   nothing is backfilled.
 
 Not built: filters for other event types (conversation statuses, automations (built by ADR-145),
-campaigns), filters on a message's fields (its template, number or sender), and retry settings per
+campaigns (built by ADR-146)), filters on a message's fields (its template, number or sender), and retry settings per
 status.
 
 ## ADR-120 Changing many conversations in one call through the public API (2026-10-03)
@@ -5805,3 +5806,48 @@ Decision:
 Not built: filters on other facts of a run (its trigger, how it ended, the key that started it),
 choosing automations by tag or folder, and filters for campaigns, templates, orders or conversations
 by team or channel.
+
+## ADR-146 Choosing the campaign statuses a webhook endpoint receives (P5-09) (2026-10-04)
+
+Context: since ADR-087 an endpoint that takes `campaign.status_changed` receives every change of
+every campaign's status: submitted, sent back to draft, scheduled, started, paused, resumed,
+completed and cancelled. Most receivers act on a few of them: a reporting job that pulls a
+campaign's results once it ends wants completions and cancellations, and an alert wants the
+runner's pauses (a spending or message cap, the template no longer approved). ADR-119 lets an
+endpoint take some message statuses; ADR-087 and ADR-119 left filters for campaigns unbuilt (P5-09
+Remaining).
+
+Decision:
+
+- **A list of statuses per endpoint,** for `campaign.status_changed` only: null receives every
+  status, as before; a list holds 1 to 7 of `draft`, `pending_approval`, `scheduled`, `running`,
+  `paused`, `completed` and `canceled`, the status the change reached (the event's
+  `campaign.status`, not the one before), in the order a campaign reaches them with repeats merged.
+  It is chosen in Settings → Webhooks under "Campaign status" (every status ticked to begin with;
+  saving all of them ticked keeps none) and shown on the endpoint as "Campaign statuses sent: …",
+  with the names Campaigns uses, and through the API as `campaignStatuses` on
+  `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in every endpoint the API
+  answers.
+- **Only with the event:** statuses given for an endpoint that does not receive
+  `campaign.status_changed` are refused (`campaignStatuses`; 422 through the API). A change that
+  removes the event clears them, and a `PATCH` that leaves them out keeps them; Settings always
+  sends them. A check in the database holds the same rule (null, or 1 to 7 known statuses while the
+  event is among the endpoint's).
+- **Applied when the event is captured:** `app.capture_webhook_event` creates a
+  `campaign.status_changed` delivery only for the active endpoints whose list is null or holds the
+  status the campaign reached, and writes no event when none takes it, as for message statuses. The
+  capture is in the transaction that changes the campaign's status, from 0065's trigger. A change of
+  the list applies to changes captured after it; deliveries already created are still sent.
+  Replays, test events and the payload are unchanged; the payload still carries the status before.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `campaignStatuses` when the endpoint has a list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API. The list names statuses only, never a campaign.
+- **Migration 0110:** `campaign_statuses text[]` on `app.webhook_endpoints` with the check,
+  validated at once (a company has at most 10 endpoints), an update grant on the column for the
+  runtime role (it inserts it with its table grant), and `app.capture_webhook_event` replaced with
+  the same signature (0109's, with the campaign condition), so its owner and grants stay. Existing
+  endpoints keep null; nothing is backfilled.
+
+Not built: filters by campaign, by the status before a change or by why a campaign paused or
+completed, and filters for template, order or conversation statuses.

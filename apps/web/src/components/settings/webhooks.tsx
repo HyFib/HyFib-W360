@@ -3,6 +3,8 @@ import { useId, useState } from 'react';
 import { Alert, Button, Checkbox, Field, Input, Label, Select } from '@w360/ui';
 import { ConfirmDialog } from '@w360/ui/client';
 import {
+  WEBHOOK_CAMPAIGN_STATUS_LABELS,
+  WEBHOOK_CAMPAIGN_STATUSES,
   WEBHOOK_CONTACT_PART_LABELS,
   WEBHOOK_CONTACT_PARTS,
   WEBHOOK_EVENT_INFO,
@@ -14,6 +16,7 @@ import {
   webhookReplaySummary,
   webhookTakesAutomationRuns,
   type WebhookAutomationChoice,
+  type WebhookCampaignStatus,
   type WebhookContactPart,
   type WebhookEventType,
   type WebhookMessageStatus,
@@ -96,6 +99,51 @@ function StatusChoices({
             />
             <Label htmlFor={id} className="font-normal">
               {WEBHOOK_MESSAGE_STATUS_LABELS[status]}{' '}
+              <span className="font-mono text-xs">({status})</span>
+            </Label>
+          </div>
+        );
+      })}
+    </fieldset>
+  );
+}
+
+/**
+ * The statuses a campaign reaches that an endpoint takes as `campaign.status_changed` (ADR-146),
+ * shown while it takes the event.
+ */
+function CampaignStatusChoices({
+  prefix,
+  chosen,
+  onChange,
+}: {
+  prefix: string;
+  chosen: WebhookCampaignStatus[];
+  onChange: (next: WebhookCampaignStatus[]) => void;
+}) {
+  return (
+    <fieldset className="ml-6 grid gap-1">
+      <legend className="mb-1 text-xs text-muted-foreground">
+        Statuses sent (all of them unless you untick some; an event is the status a campaign
+        reached)
+      </legend>
+      {WEBHOOK_CAMPAIGN_STATUSES.map((status) => {
+        const id = `${prefix}-campaign-status-${status}`;
+        return (
+          <div key={status} className="flex items-center gap-2">
+            <Checkbox
+              id={id}
+              checked={chosen.includes(status)}
+              onChange={(e) =>
+                onChange(
+                  e.target.checked
+                    ? WEBHOOK_CAMPAIGN_STATUSES.filter((s) => s === status || chosen.includes(s))
+                    : chosen.filter((s) => s !== status),
+                )
+              }
+            />
+            <Label htmlFor={id} className="font-normal">
+              {WEBHOOK_CAMPAIGN_STATUS_LABELS[status]}{' '}
               <span className="font-mono text-xs">({status})</span>
             </Label>
           </div>
@@ -253,6 +301,8 @@ function EventChoices({
   onStatusesChange,
   parts,
   onPartsChange,
+  campaignStatuses,
+  onCampaignStatusesChange,
 }: {
   prefix: string;
   chosen: WebhookEventType[];
@@ -261,6 +311,8 @@ function EventChoices({
   onStatusesChange: (next: WebhookMessageStatus[]) => void;
   parts: WebhookContactPart[];
   onPartsChange: (next: WebhookContactPart[]) => void;
+  campaignStatuses: WebhookCampaignStatus[];
+  onCampaignStatusesChange: (next: WebhookCampaignStatus[]) => void;
 }) {
   return (
     <fieldset className="grid gap-2">
@@ -291,6 +343,13 @@ function EventChoices({
             ) : null}
             {type === 'contact.updated' && chosen.includes(type) ? (
               <PartChoices prefix={prefix} chosen={parts} onChange={onPartsChange} />
+            ) : null}
+            {type === 'campaign.status_changed' && chosen.includes(type) ? (
+              <CampaignStatusChoices
+                prefix={prefix}
+                chosen={campaignStatuses}
+                onChange={onCampaignStatusesChange}
+              />
             ) : null}
           </div>
         );
@@ -391,6 +450,7 @@ export function WebhookEndpointForm({
     messageStatuses: WebhookMessageStatus[] | null;
     contactParts: WebhookContactPart[] | null;
     automationIds: string[] | null;
+    campaignStatuses: WebhookCampaignStatus[] | null;
   };
   /** The company's published automations, which an endpoint can choose (ADR-145). */
   automationChoices: WebhookAutomationChoice[];
@@ -405,6 +465,9 @@ export function WebhookEndpointForm({
   );
   const [parts, setParts] = useState<WebhookContactPart[]>(
     endpoint?.contactParts ?? [...WEBHOOK_CONTACT_PARTS],
+  );
+  const [campaignStatuses, setCampaignStatuses] = useState<WebhookCampaignStatus[]>(
+    endpoint?.campaignStatuses ?? [...WEBHOOK_CAMPAIGN_STATUSES],
   );
   const [everyAutomation, setEveryAutomation] = useState(!endpoint?.automationIds);
   const [automationIds, setAutomationIds] = useState<string[]>(endpoint?.automationIds ?? []);
@@ -448,6 +511,12 @@ export function WebhookEndpointForm({
         // Every automation's runs unless the automations ticked are chosen (ADR-145).
         const chosenAutomations =
           webhookTakesAutomationRuns(eventTypes) && !everyAutomation ? automationIds : null;
+        // Every campaign status ticked takes every status (null, ADR-146).
+        const chosenCampaignStatuses =
+          eventTypes.includes('campaign.status_changed') &&
+          campaignStatuses.length < WEBHOOK_CAMPAIGN_STATUSES.length
+            ? campaignStatuses
+            : null;
         const input = {
           url,
           description,
@@ -455,6 +524,7 @@ export function WebhookEndpointForm({
           messageStatuses,
           contactParts,
           automationIds: chosenAutomations,
+          campaignStatuses: chosenCampaignStatuses,
         };
         const done = (r: { ok: true } | { ok: false; code: string; message: string }) => {
           setBusy(false);
@@ -483,6 +553,7 @@ export function WebhookEndpointForm({
               setEventTypes([]);
               setStatuses([...WEBHOOK_MESSAGE_STATUSES]);
               setParts([...WEBHOOK_CONTACT_PARTS]);
+              setCampaignStatuses([...WEBHOOK_CAMPAIGN_STATUSES]);
               setEveryAutomation(true);
               setAutomationIds([]);
               setHeaders([]);
@@ -537,6 +608,8 @@ export function WebhookEndpointForm({
         onStatusesChange={setStatuses}
         parts={parts}
         onPartsChange={setParts}
+        campaignStatuses={campaignStatuses}
+        onCampaignStatusesChange={setCampaignStatuses}
       />
       {webhookTakesAutomationRuns(eventTypes) ? (
         <AutomationChoices

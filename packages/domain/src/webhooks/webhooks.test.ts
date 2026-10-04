@@ -13,6 +13,8 @@ import { buildOpenApiDocument } from '../api/openapi';
 import { renderEmail } from '../email/templates';
 import {
   WEBHOOK_AUTOMATION_EVENTS,
+  WEBHOOK_CAMPAIGN_STATUS_LABELS,
+  WEBHOOK_CAMPAIGN_STATUSES,
   WEBHOOK_CONTACT_PART_LABELS,
   WEBHOOK_CONTACT_PARTS,
   WEBHOOK_EVENT_INFO,
@@ -57,6 +59,8 @@ import {
   sealWebhookHeaders,
   webhookAutomationIdsFor,
   webhookAutomationIdsSchema,
+  webhookCampaignStatusesFor,
+  webhookCampaignStatusesSchema,
   webhookContactPartsFor,
   webhookContactPartsSchema,
   webhookHeadersAad,
@@ -1160,5 +1164,46 @@ describe('automation filters (ADR-145)', () => {
     ]);
     expect(webhookAutomationIdsFor(['consent.changed'], [greeter], [farewell])).toBeNull();
     expect(webhookAutomationIdsFor(['message.received'], undefined, [farewell])).toBeNull();
+  });
+});
+
+describe('campaign status filters (ADR-146)', () => {
+  it('take 1 to 7 campaign statuses, once each, in the order a campaign reaches them; null takes every status', () => {
+    expect(webhookCampaignStatusesSchema.parse(['completed', 'paused', 'completed'])).toEqual([
+      'paused',
+      'completed',
+    ]);
+    expect(webhookCampaignStatusesSchema.parse(null)).toBeNull();
+    expect(webhookCampaignStatusesSchema.parse([...WEBHOOK_CAMPAIGN_STATUSES].reverse())).toEqual([
+      ...WEBHOOK_CAMPAIGN_STATUSES,
+    ]);
+    expect(WEBHOOK_CAMPAIGN_STATUSES).toEqual([...CAMPAIGN_STATUSES]);
+    for (const refused of [
+      [],
+      ['sending'],
+      ['Paused'],
+      'paused',
+      [null],
+      Array(8).fill('paused'),
+    ]) {
+      expect(
+        webhookCampaignStatusesSchema.safeParse(refused).success,
+        JSON.stringify(refused),
+      ).toBe(false);
+    }
+    expect(webhookCampaignStatusesSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one campaign status, or take every status.',
+    );
+    expect(Object.keys(WEBHOOK_CAMPAIGN_STATUS_LABELS)).toEqual([...WEBHOOK_CAMPAIGN_STATUSES]);
+  });
+
+  it('are kept only while the endpoint takes campaign.status_changed: given, kept, or cleared', () => {
+    const both = ['campaign.status_changed', 'message.status'] as const;
+    expect(webhookCampaignStatusesFor([...both], ['paused'], null)).toEqual(['paused']);
+    expect(webhookCampaignStatusesFor([...both], undefined, ['completed'])).toEqual(['completed']);
+    expect(webhookCampaignStatusesFor([...both], null, ['completed'])).toBeNull();
+    expect(webhookCampaignStatusesFor([...both], undefined, null)).toBeNull();
+    expect(webhookCampaignStatusesFor(['message.status'], ['paused'], ['completed'])).toBeNull();
+    expect(webhookCampaignStatusesFor(['order.status_changed'], undefined, ['paused'])).toBeNull();
   });
 });
