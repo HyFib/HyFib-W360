@@ -646,6 +646,8 @@ export class GraphClient {
               targetIds: Array.isArray(g.target_ids) ? g.target_ids.map(String) : [],
             }))
           : [];
+        // `error`: what a request with the token would get (research M-187); its code only.
+        const error = data.error as { code?: unknown } | undefined;
         return {
           appId: typeof data.app_id === 'string' ? data.app_id : String(data.app_id ?? ''),
           isValid: data.is_valid === true,
@@ -655,6 +657,7 @@ export class GraphClient {
             typeof data.expires_at === 'number' && data.expires_at > 0
               ? new Date(data.expires_at * 1000)
               : null,
+          errorCode: num(error?.code),
         };
       },
     );

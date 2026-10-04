@@ -5,7 +5,9 @@ import { Alert, Button } from '@w360/ui';
 import { AppNav } from '@/components/app-nav';
 import { Brand } from '@/components/brand';
 import { CompanySwitcher } from '@/components/company-switcher';
+import { HiddenOnPath } from '@/components/hidden-on-path';
 import { UserMenu } from '@/components/user-menu';
+import { WhatsAppAccessAlerts } from '@/components/settings/whatsapp-access-alerts';
 import { formatDateTime } from '@/lib/format';
 import { visibleModules } from '@/lib/modules';
 import { getRuntime } from '@/server/runtime';
@@ -32,6 +34,11 @@ export default async function TenantLayout({
   const nav = visibleModules(ctx.permissions);
   const deletion =
     ctx.tenant.status === 'pending_deletion' ? await runtime.companyDeletion.status(ctx) : null;
+  // WhatsApp accounts whose access Meta no longer accepts or that expires soon (ADR-137).
+  const accessIssues =
+    runtime.onboarding && can(ctx, 'channels.read')
+      ? await runtime.onboarding.accessIssues(ctx)
+      : [];
 
   return (
     <div className="flex min-h-dvh flex-col md:flex-row">
@@ -145,6 +152,15 @@ export default async function TenantLayout({
                 : `Your role requires two-factor authentication. Enable it before ${ctx.mfa.graceEndsAt?.toUTCString() ?? 'the deadline'}.`}
             </Alert>
           ) : null}
+          {/* Channels explains these itself, with how to reconnect there. */}
+          <HiddenOnPath suffix="/settings/channels">
+            <WhatsAppAccessAlerts
+              issues={accessIssues}
+              slug={ctx.tenant.slug}
+              timeZone={ctx.tenant.timezone}
+              canManage={can(ctx, 'channels.manage')}
+            />
+          </HiddenOnPath>
         </div>
         <main id="main" className="flex-1 px-4 py-6 md:px-8">
           {children}

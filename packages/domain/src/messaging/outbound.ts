@@ -47,6 +47,7 @@ import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
 import { buildTemplateSend, sendSpecFor, templateParamsSchema } from '../templates/definition';
 import { markTemplateFromSendError } from '../templates/service';
+import { requestAccessCheck } from './access';
 import { credentialAad } from './credentials';
 import { emitTenantEvent } from './events';
 import type { GraphClient } from './graph';
@@ -923,8 +924,8 @@ export async function processSendIntent(
     return { outcome: 'retry_scheduled', retryAt, channelAccountId: intent.channelAccountId };
   }
   if (result.kind === 'auth') {
-    await deps.db.run(scope, (tx) =>
-      tx
+    await deps.db.run(scope, async (tx) => {
+      await tx
         .update(channelAccounts)
         .set({ status: 'needs_reconnect' })
         .where(
@@ -932,8 +933,10 @@ export async function processSendIntent(
             eq(channelAccounts.tenantId, scope.tenantId),
             eq(channelAccounts.id, intent.channelAccountId),
           ),
-        ),
-    );
+        );
+      // Meta refused the token: check the account's access at once (ADR-137).
+      await requestAccessCheck(tx, scope.tenantId, claimed.whatsappAccountId, deps.clock.now());
+    });
   }
   const code = result.code;
   await fail(

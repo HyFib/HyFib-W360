@@ -28,6 +28,7 @@ export * from './messaging/outbound';
 export * from './messaging/inbox';
 export * from './messaging/interactive';
 export * from './messaging/onboarding';
+export * from './messaging/access';
 export * from './billing/razorpay';
 export * from './billing/notices';
 export * from './billing/payments';

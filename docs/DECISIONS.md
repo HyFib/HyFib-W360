@@ -5363,3 +5363,81 @@ account only would let whoever tries tell, by how long a sign-in takes, whether 
 one, and anyone could fill a person's history), emails about sign-ins from new devices, signing a
 sign-in's session out from the history, and purging security events after the retention period
 (DATA-RETENTION proposes a year).
+
+## ADR-137 Checking each company's WhatsApp access before sends fail (P2-12) (2026-10-04)
+
+Context: each connected WhatsApp Business Account holds the business token Embedded Signup gave
+HyFib, encrypted with the keyring (ADR-010). Onboarding checks it once with `debug_token` (our app,
+valid, both WhatsApp permissions, the account among the target ids Meta lists for the management
+permission). Nothing checks it afterwards: a token Meta stops accepting is found only when a send
+fails (that number turns `needs_reconnect`; the account and its other numbers stay connected and
+nobody is told), and never for a company that is not sending. Meta's deauthorization signals and
+token lifetimes are unconfirmed (M-146); the research recommends checking with `debug_token`
+periodically and treating error 190 as a possible loss of access. Templates are listed every six
+hours with the same token, and a rejection there is recorded as a failed sync only.
+
+Decision:
+
+- **A daily check of each connected account**: the minute sweep lists, through a definer function
+  (ids only), the connected accounts of active companies whose access was not checked in the last
+  24 hours, or for which a check was asked since the last one, and signals one
+  `whatsapp.access_check` job per account (at most 100 a minute). The job runs in the company's
+  scope: it decrypts the token and asks `GET /debug_token` with HyFib's app access token, as at
+  onboarding (the token goes in the query string as Meta documents; URLs are never logged).
+- **What Meta's answer means**, by the rules onboarding applies (one function for both): the
+  token is not valid; it belongs to another app; a WhatsApp permission is missing from its scopes;
+  or Meta lists target ids for the management permission and the account is not among them. Any
+  of these is a **loss of access**. Otherwise the access is healthy: the check time, the
+  permissions Meta lists and the expiry Meta reports (none for 0) are stored.
+- **A loss of access**, in one transaction with the account locked and only if it is still
+  connected with the same token: the account turns `needs_reconnect` with the reason and its time;
+  its numbers that are active or being set up turn `needs_reconnect` with a message saying why
+  (failed and disconnected numbers are left as they are); a system audit entry
+  `whatsapp.access_lost` (the reason, the missing permissions, how many numbers); a live
+  `channel.updated` event per number; and an email to the company's owners and administrators
+  (the roles that can reconnect) with the account, the reason, the numbers that stopped sending
+  and how to reconnect. The account leaves the checks until it is reconnected, so the email is
+  sent once per loss.
+- **A check that could not be made** (no answer, a rate limit, a server error, or an error about
+  the request itself, such as HyFib's app access token being refused) changes nothing for the
+  company: the attempt and the error (kind, code and title; never the token) are stored and the
+  worker logs it; the account is checked again after 30 minutes. An account whose access has not
+  been checked successfully for more than 26 hours while attempts failed is listed among the
+  integration failures on the operations console, which also shows the reason of an account that
+  needs reconnecting.
+- **Checks asked at once**: a send rejected for the token (codes 190, 102, 10 or HTTP 401) already
+  marks its number `needs_reconnect`; it now also asks for a check of the account's access, and so
+  does a template sync rejected that way. The check finds within a minute whether the account lost
+  its access (then the other numbers and the email follow) or the token is fine (the number keeps
+  its state, as before).
+- **Expiry**: when Meta reports an expiry for a healthy token and it is less than 7 days away, the
+  owners and administrators are emailed once, with the date and how to reconnect; the Channels
+  page shows the date. Once that date has passed, the account is checked again at once instead of
+  at the next daily check, and until the check answers, the banner and Channels say the access
+  expired. Meta's guides describe business integration tokens as long-lived (M-188),
+  so this is expected to be rare.
+- **Reconnecting** is Embedded Signup again with the same account (unchanged): it stores the new
+  token, clears the reason, the expiry reminder and any asked check, stores the expiry Meta
+  reports, and sets the chosen number up again. The account's other numbers that need
+  reconnecting and that the new token lists under the account now resume their setup from the
+  step they had completed (an active number only has its health read again: Meta counts
+  registration attempts), each through its own job; numbers Meta no longer lists stay as they are.
+- **Prompts in HyFib**: while an account needs reconnecting, every page of the company shows a
+  banner to members who can see channels: the account, the reason, that its numbers cannot send,
+  and a link to Channels for owners and administrators (others are told to ask one); an expiry
+  within 7 days shows a warning the same way. The Channels page explains each account that needs
+  reconnecting and shows, for each number, when its account's access was last checked and when it
+  expires. The banner comes with each page load (the company layout is not re-run on client
+  navigation; the Channels page reads the state itself).
+
+What follows: a company learns within a day (within minutes when a send or a template sync is
+refused) that Meta no longer accepts HyFib's access, before campaigns or replies fail one by one,
+and one reconnection brings back every number Meta still lists. A false loss would stop the
+company's sends until it reconnects; the check uses only Meta's explicit answer and the rules that
+admitted the token at onboarding, and never concludes anything from a failed request. Accounts of
+companies that are not active are not checked (as for template syncs).
+
+Not built: checking that HyFib's app is still subscribed to the account's webhooks
+(`GET /{waba-id}/subscribed_apps`) and subscribing it again; Meta's deauthorization and uninstall
+callbacks (unconfirmed, M-146); a "check now" button; the account's review and payment status
+(`health_status`); emails to platform staff about companies' lost access (the console lists them).

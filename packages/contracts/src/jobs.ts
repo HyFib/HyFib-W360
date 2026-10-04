@@ -219,6 +219,22 @@ export const QUEUES = {
     deleteAfterHours: 72,
     maxWaitMinutes: 60,
   },
+  /**
+   * Checks a WhatsApp account's access with `debug_token` (ADR-137). A check that cannot be made is
+   * recorded and the minute sweep signals the account again after 30 minutes, so only a failure of
+   * the job itself is retried here.
+   */
+  whatsappAccessCheck: {
+    name: 'whatsapp.access_check',
+    policy: 'exclusive',
+    retryLimit: 2,
+    retryDelaySeconds: 60,
+    retryBackoff: true,
+    retryDelayMaxSeconds: 600,
+    expireInSeconds: 120,
+    deadLetter: 'dead-letter',
+    deleteAfterHours: 72,
+  },
   campaignRun: {
     name: 'campaign.run',
     policy: 'exclusive',

@@ -33,6 +33,7 @@ import {
 } from './handlers/templates';
 import { deadLetterHandler } from './handlers/dead-letters';
 import { tenantDeleteHandler } from './handlers/tenancy';
+import { whatsappAccessCheckHandler } from './handlers/whatsapp-access';
 import { webhookDeliverHandler } from './handlers/webhooks';
 import { logFailures } from './job-log';
 import { createWorkerRuntime } from './runtime';
@@ -109,6 +110,11 @@ async function main(): Promise<void> {
     QUEUES.templateSync.name,
     { localConcurrency: 2, batchSize: 1 },
     logFailures(rt, QUEUES.templateSync.name, templateSyncHandler(rt)),
+  );
+  await rt.boss.work(
+    QUEUES.whatsappAccessCheck.name,
+    { localConcurrency: 2, batchSize: 1 },
+    logFailures(rt, QUEUES.whatsappAccessCheck.name, whatsappAccessCheckHandler(rt)),
   );
   await rt.boss.work(
     QUEUES.campaignRun.name,

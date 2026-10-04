@@ -263,6 +263,7 @@ export function signalFlags(activity: CompanyActivity, qualityRating: string | n
 export const INTEGRATION_SOURCE_LABELS: Record<string, string> = {
   whatsapp_number: 'WhatsApp number',
   whatsapp_account: 'WhatsApp account',
+  whatsapp_access_check: 'WhatsApp access check',
   store: 'Store',
   payment_account: 'Payment account',
   catalog_sync: 'Catalog sync',
@@ -277,6 +278,7 @@ export const INTEGRATION_STATE_LABELS: Record<string, string> = {
   webhook_error: 'Webhook error',
   failing: 'Failing',
   disabled: 'Turned off for failing',
+  not_checked: 'Could not be checked',
 };
 
 export const QUARANTINE_REASON_LABELS: Record<string, string> = {

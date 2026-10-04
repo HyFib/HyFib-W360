@@ -47,6 +47,16 @@ export const whatsappAccounts = appSchema.table('whatsapp_accounts', {
   connectedByUserId: text('connected_by_user_id'),
   templatesSyncRequestedAt: tz('templates_sync_requested_at'),
   templatesSyncedAt: tz('templates_synced_at'),
+  /** The access checks of ADR-137 (migration 0104). */
+  tokenCheckAttemptedAt: tz('token_check_attempted_at'),
+  tokenCheckRequestedAt: tz('token_check_requested_at'),
+  tokenCheckError: text('token_check_error'),
+  tokenExpiresAt: tz('token_expires_at'),
+  tokenExpiryRemindedAt: tz('token_expiry_reminded_at'),
+  tokenProblem: text('token_problem', {
+    enum: ['invalid', 'other_app', 'missing_permission', 'account_not_shared'],
+  }),
+  tokenProblemAt: tz('token_problem_at'),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });

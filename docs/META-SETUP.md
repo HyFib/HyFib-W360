@@ -88,8 +88,10 @@ App-secret rotation: set the new secret as `META_APP_SECRET` and the old one as
   Record the `pricing` object from status webhooks; reconcile with pricing analytics.
 - **Media:** webhook media ids downloadable for 7 days; download URLs valid ~5 minutes; copy media
   to our private storage under our retention policy.
-- **Tokens:** check with `debug_token` periodically; treat error 190 or a lost WABA subscription as
-  possible deauthorization (explicit deauthorization signals are unconfirmed, M-146).
+- **Tokens:** HyFib checks each connected account's token daily with `debug_token` by the rules of
+  step 4 (ADR-137); Meta's answer that it no longer accepts the token marks the account for
+  reconnecting and tells the company. A lost WABA subscription is not checked yet (explicit
+  deauthorization signals are unconfirmed, M-146).
 - **Restricted capabilities** (coexistence with the WhatsApp Business App, history sync, groups,
   calling, payments, Marketing Messages API) require explicit eligibility checks; never promise
   complete chat history import.

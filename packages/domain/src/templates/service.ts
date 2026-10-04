@@ -24,6 +24,7 @@ import { recordAudit, recordSystemAudit, type RequestMeta } from '../audit';
 import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
 import type { GraphClient, RemoteTemplate } from '../messaging/graph';
+import { requestAccessCheck } from '../messaging/access';
 import { credentialAad } from '../messaging/credentials';
 import { parseInput } from '../validation';
 import {
@@ -1021,6 +1022,10 @@ export async function syncTemplates(
         result: 'failure',
         metadata: { kind: listing.kind, detail: listing.detail.slice(0, 200) },
       });
+      // Meta refused the token: check the account's access at once (ADR-137).
+      if (listing.kind === 'auth') {
+        await requestAccessCheck(tx, scope.tenantId, whatsappAccountId, startedAt);
+      }
     });
     return 'done';
   }

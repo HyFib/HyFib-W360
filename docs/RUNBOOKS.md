@@ -100,12 +100,28 @@ sweep is not running: nobody is emailed about late queues until it does, so star
 
 ## 6. Expired or revoked provider credentials
 
-1. Symptoms: Graph error 190/102/10 or HTTP 401 on sends or setup steps; the number shows
-   **Reconnect needed** in Settings → Channels (`channel_accounts.status = 'needs_reconnect'`).
-2. The failing send is marked failed with the provider error; later sends to that number fail fast at
-   the channel check until it is reconnected. Tell company admins.
-3. The company re-runs Embedded Signup (Connect WhatsApp number); the same WABA and number re-bind
-   to the same records, the token is replaced and setup re-runs from the first step.
+1. Symptoms: the daily check of the account's access (ADR-137) found that Meta no longer accepts it,
+   or Graph error 190/102/10 or HTTP 401 on sends, template syncs or setup steps. The account and
+   its numbers show **Reconnect needed** in Settings → Channels (`whatsapp_accounts.status` and
+   `channel_accounts.status = 'needs_reconnect'`, the reason in `whatsapp_accounts.token_problem`),
+   every page of the company shows a banner, and the owners and administrators were emailed once. A
+   send or template sync refused for the token asks for a check at once
+   (`whatsapp_accounts.token_check_requested_at`), so the account follows within about a minute.
+2. The failing send is marked failed with the provider error; later sends to that number fail fast
+   at the channel check until it is reconnected.
+3. The company re-runs Embedded Signup (Connect WhatsApp number) with the same account and one of
+   its numbers: the token is replaced and the reason cleared, that number's setup re-runs from the
+   first step, and the account's other numbers that Meta still lists resume their setup (an active
+   number only has its health read again; one Meta no longer lists stays as it is).
+4. A check that could not be made changes nothing for the company: `token_check_error` keeps the
+   error's kind, code and title and the account is tried again after 30 minutes. When many accounts
+   fail at once, check `META_APP_SECRET` (Meta refuses HyFib's app access token with error 190
+   `OAuthException`) and egress to `graph.facebook.com`. The operations console's Integrations page
+   lists an account whose access has not been checked successfully for 26 hours ("WhatsApp access
+   check").
+5. An expiry Meta reports for a token is shown on Channels; the owners and administrators are
+   reminded once 7 days before it, and the account is checked again as soon as it passes.
+   Reconnecting gives HyFib a new token.
 
 ## 7. Duplicate-send uncertainty
 
@@ -2323,6 +2339,13 @@ whatever the configuration, so it stays counted under the key it names; cancel i
 should not wait for that. After 1,000 such jobs a worker stops signing jobs again until it restarts
 and logs an error naming `W360_JOB_SIGNING_KEY_PREVIOUS`: check that the previous key's value is
 right. "Jobs that will be refused" name a key that is not configured.
+
+**Migration 0104 failed.** It adds the access check columns to `app.whatsapp_accounts`, creates
+`ops.whatsapp_access_checks_due` and recreates `ops.platform_ops_integration_failures`, in one
+transaction; a failure rolls it back (usually the bootstrap roles: fix them and run the migrations
+again). The migration runner declares the `whatsapp.access_check` queue: workers of this release
+need both before they start, or their minute sweep fails at the access checks; workers and web
+servers of the previous release check no access.
 
 **Migration 0103 failed.** It only creates `ops.my_sign_ins` and an index of sign-in events, in one
 transaction; a failure rolls it back (usually the bootstrap roles: fix them and run the migrations

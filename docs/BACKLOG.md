@@ -44,9 +44,17 @@ verification, app review, Embedded Signup configuration).
   picker (phase 3).
 - **P2-10 Channel settings UI** — done: connect (Embedded Signup), setup progress and errors, retry,
   disconnect, quality and health time. Remaining: messaging limits and granted permissions display.
-- **P2-11 Platform quarantine view** — new: list and resolve quarantined webhooks in the platform area
-  (today the platform role can read and resolve them in the database only).
-- **P2-12 Token health** — new: periodic `debug_token` checks and reconnect prompts before sends fail.
+- **P2-11 Platform quarantine view** — done with P5-10 (ADR-054): the operations console's
+  Integrations page lists quarantined webhooks without their content and platform administrators
+  resolve them, or retry their receipts, with a reason in the platform audit log.
+- **P2-12 Token health** — _implemented and locally verified against the Graph stand-in (ADR-137)_:
+  each connected WhatsApp account's token is checked daily with `debug_token` by onboarding's rules,
+  and at once when Meta refuses it for a send or a template sync; a loss of access marks the account
+  and its numbers for reconnecting, emails the owners and administrators once and shows a banner on
+  every page of the company; an expiry Meta reports is reminded 7 days ahead and checked again as
+  soon as it passes; reconnecting brings back the account's other numbers that Meta still lists.
+  **Remaining:** checking (and renewing) the app's webhook subscription to the account, Meta's
+  deauthorization callbacks (unconfirmed, M-146).
 
 ## Phase 3 — contacts, consent, templates, campaigns, reports
 

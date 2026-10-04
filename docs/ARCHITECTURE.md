@@ -206,8 +206,13 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   minutes; clients fall back to polling with the same cursor and resynchronise after reconnects.
 - **Retention:** raw webhook bodies erased after 7 days, receipt rows deleted after 90, live events
   pruned after 7 (definer functions run by the messaging sweep).
-- **Not built yet:** media download to private object storage, templates and template sends,
-  message search, token health checks via `debug_token`, Meta-side deregistration on disconnect.
+- **Access checks (ADR-137):** the minute sweep signals a `whatsapp.access_check` job for each
+  connected account due one (daily, or asked by a send or template sync Meta refused for the token);
+  the job asks `debug_token` and applies onboarding's rules in the company's scope: a loss marks the
+  account and its numbers `needs_reconnect`, audits and emails the owners and administrators once;
+  a failed request changes nothing and is retried after 30 minutes.
+- **Not built yet:** media download to private object storage, message search, Meta-side
+  deregistration on disconnect (templates and template sends: section 6A).
 
 ## 6A. Contacts, consent and templates **[built — templates verified against a local Graph stand-in only]**
 

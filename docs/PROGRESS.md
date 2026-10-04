@@ -1,5 +1,107 @@
 # Progress
 
+## 2026-10-04 — Phase 5: checking each company's WhatsApp access before sends fail (P2-12, ADR-137)
+
+Status: **Implemented and locally verified against the Graph stand-in (test data only).** Each
+connected WhatsApp account's token was checked once, at onboarding. A token Meta stopped accepting
+was found only when a send failed (that number turned `needs_reconnect`, nobody was told), and
+never for a company that was not sending.
+
+### Completed
+
+- **Design (ADR-137):** a daily `debug_token` check of every connected account of an active company,
+  by the rules that admitted the token at onboarding (one function for both); checks asked at once
+  when Meta refuses the token for a send or a template sync; only Meta's explicit answer counts as a
+  loss of access, and a failed request changes nothing.
+- **Domain** (`messaging/access.ts`): `assessGrant` (not valid, another app, a WhatsApp permission
+  missing, the account left out of the management permission's target ids), the reasons and the two
+  emails, `checkWhatsAppAccess` (applied with the account locked and only while it is connected with
+  the same token; a loss marks the account and its active and setting-up numbers `needs_reconnect`,
+  audits `whatsapp.access_lost`, emits `channel.updated` and emails the owners and administrators
+  once; an expiry less than 7 days away is reminded once, and an access whose reported expiry has
+  passed is checked again at once; a failed check stores the attempt and the error's kind, code and
+  title), `findAccessChecksDue` and `requestAccessCheck`. Onboarding uses the same rules, stores the
+  expiry Meta reports and clears the reason; reconnecting brings back the account's other numbers
+  that need reconnecting and that Meta still lists, from the step they had completed (an active
+  number only has its health read again). Sends and template syncs refused for the token ask for a
+  check.
+- **Worker:** the minute sweep signals a `whatsapp.access_check` job per account due (at most 100 a
+  minute); the job logs checks that could not be made and losses.
+- **Web:** every page of the company shows a banner while an account needs reconnecting (or its
+  access expires within 7 days, or has expired), with a link to Channels for owners and
+  administrators; Channels explains each one with how to reconnect, and shows when each number's
+  account access was last checked and when it expires. The operations console's Integrations page
+  shows why an account needs reconnecting and lists accounts whose access could not be checked for
+  26 hours.
+- **Database** (migration 0104): the access columns on `app.whatsapp_accounts` (application role
+  may update them), `ops.whatsapp_access_checks_due` (definer, application role only) and
+  `ops.platform_ops_integration_failures` recreated with the reason and the failing checks.
+- **Test stand-in:** a control that registers a business token or changes what `debug_token` says
+  about it (validity, permissions, expiry), and `error` in the answer for an invalid token (M-187).
+- **Tests:**
+  - Unit (9 new): the rules in onboarding's order, target ids that include the account or none, the
+    missing permissions, the reasons, the account's name, the two emails (one-line subject, the
+    numbers listed, the company's time zone), the 7-day window and its edges, the numbers' message.
+  - Integration (real PostgreSQL; 11 new, 1 extended): a healthy token stored and nobody told; a
+    loss marking the account and its active and setting-up numbers (failed and disconnected numbers
+    untouched), the audit entry, live events and one email to the owner, then no further check; a
+    removed permission, another app and an account no longer shared named as such; checks that could
+    not be made (HyFib's app access token refused, Meta out of reach) changing nothing and tried
+    again after 30 minutes; a reconnection racing the check recording nothing, and the same token
+    sealed again still checked; the expiry reminded once, and once it has passed the banner saying
+    so and the account checked again at once; the due list (never checked, over a day old, asked,
+    not for accounts needing reconnecting, disconnected or of suspended companies); a template sync
+    refused for the token asking for a check; privileges; reconnecting storing the new token clean
+    and bringing back the listed number without registering it again; the console's rows; a refused
+    send asking for a check (extended).
+  - E2E (new; chromium, mobile-chromium): a company whose token Meta no longer accepts sees the
+    alert on Channels, the banner on another page with its link to Channels, and the email, all
+    within about a minute of connecting; a token that expires in 3 days shows the warning, the
+    access check and expiry times, and the reminder email.
+- **Docs:** ADR-137; research §19 (M-187 to M-189); SECURITY (provider tokens); THREAT-MODEL T22
+  and T149; RUNBOOKS (section 6, migration 0104); META-SETUP; ARCHITECTURE; BACKLOG (P2-11 marked
+  done by ADR-054, P2-12); feature matrix W-021.
+- **Mutation checks:** 46 deliberate regressions tried, 46 caught: 41 against the access module,
+  onboarding, the send and template sync hooks and migration 0104 through unit and integration tests
+  (5 of them for the check once an expiry has passed and its wording), and 5 through the e2e test
+  (no banner on the company's pages, the banner only on Channels, Channels not explaining the loss,
+  the worker never checking, Channels not showing the expiry).
+
+### Test commands and results (local, 2026-10-04)
+
+| Command                                                                                                                                                      | Result                                                                                                                                                                                                                                                                                                                                       |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`                                                                                                           | clean                                                                                                                                                                                                                                                                                                                                        |
+| `pnpm test` (unit)                                                                                                                                           | 654 passed (72 files; 9 new)                                                                                                                                                                                                                                                                                                                 |
+| `pnpm test:integration` on PostgreSQL 18.6                                                                                                                   | 813 passed (56 files; 11 new, 1 extended)                                                                                                                                                                                                                                                                                                    |
+| `pnpm test:integration` on PostgreSQL 17.11                                                                                                                  | 813 passed (56 files)                                                                                                                                                                                                                                                                                                                        |
+| `pnpm db:migrate` on an e2e database at 0103 (22 connected accounts), and on a new database                                                                  | 0104 applied and the `whatsapp.access_check` queue declared, all 22 accounts then due their first check; all 104 applied                                                                                                                                                                                                                     |
+| `pnpm build`                                                                                                                                                 | passed                                                                                                                                                                                                                                                                                                                                       |
+| e2e on a new database: whatsapp-access, inbox, templates, onboarding, platform-ops, forms, campaigns, dead-letter-retry, step-up (chromium, mobile-chromium) | 40 passed                                                                                                                                                                                                                                                                                                                                    |
+| Mutation checks                                                                                                                                              | 46 tried, 46 caught (41 against the access module, onboarding, the send and template sync hooks and migration 0104, through unit and integration tests; 5 through the e2e test: no banner on the company's pages, the banner only on Channels, Channels not explaining the loss, the worker never checking, Channels not showing the expiry) |
+| gitleaks 8.30.1 on the staged changes                                                                                                                        | no leaks found                                                                                                                                                                                                                                                                                                                               |
+
+The first local e2e run failed: the local database's pg-boss queues had been declared before the new
+queue existed, so the worker's minute sweep failed at the access checks ("Queue
+whatsapp.access_check does not exist"). Running `pnpm db:migrate` again declared it, and the run
+above is clean; deployments run the migrations, which declare it, before the workers start
+(RUNBOOKS, migration 0104). One mutation survived at first (accounts of suspended companies
+checked): the test had left those accounts with a recent attempt, so the 30-minute wait kept them
+out for another reason; the test now clears it and the mutation is caught. Reviewing the change
+before committing found that once an expiry Meta reported had passed, the banner still said the
+access "expires" on a date in the past and nothing checked the account before the next daily check;
+the due list now asks for a check as soon as the expiry passes, and the banner and Channels say the
+access expired.
+
+### Known gaps
+
+- The app's webhook subscription to an account (`GET /{waba-id}/subscribed_apps`) is not checked or
+  renewed; Meta's deauthorization and uninstall callbacks are unconfirmed (M-146).
+- No "check now" button; accounts of companies that are not active are not checked; the account's
+  review and payment status (`health_status`) are not read.
+- What `debug_token` answers for a normal Embedded Signup token, and when Meta stops accepting one,
+  was seen only through search snippets (M-187 to M-189), not in Meta's documentation itself.
+
 ## 2026-10-04 — Phase 5: sign-in history for each person (SEC-9, ADR-136)
 
 Status: **Implemented and locally verified (test data only).** Account & security listed a

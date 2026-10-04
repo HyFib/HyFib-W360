@@ -27,7 +27,12 @@ function digits(length: number): string {
  * runtime role under the company's RLS scope. Embedded Signup itself needs Meta's popup and is
  * covered by integration tests against the stand-in.
  */
-export async function connectTestChannel(opts: { ownerEmail: string; slug: string }) {
+export async function connectTestChannel(opts: {
+  ownerEmail: string;
+  slug: string;
+  /** A token registered with the stand-in (`setStandInToken`); the shared test token otherwise. */
+  token?: string;
+}) {
   const auth = new pg.Client({ connectionString: process.env.E2E_DATABASE_URL_AUTH });
   await auth.connect();
   let ownerId: string;
@@ -64,7 +69,7 @@ export async function connectTestChannel(opts: { ownerEmail: string; slug: strin
     await app.query("SELECT set_config('app.tenant_id', $1, true)", [tenantId]);
     // Same associated data as credentialAad() in @w360/domain.
     const credential = keyring.encrypt(
-      E2E_CHANNEL_TOKEN,
+      opts.token ?? E2E_CHANNEL_TOKEN,
       `tenant:${tenantId}|whatsapp_account:${whatsappAccountId}`,
     );
     await app.query(
@@ -370,6 +375,24 @@ export async function sendSignedWebhook(request: APIRequestContext, body: unknow
     headers: { 'content-type': 'application/json', 'x-hub-signature-256': signature },
   });
   expect(res.status()).toBe(200);
+}
+
+/**
+ * TEST-ONLY: registers a business token with the Graph stand-in, or changes what its debug_token
+ * says about one (validity, permissions, expiry in Unix seconds), as a business changing HyFib's
+ * access in Meta's tools would.
+ */
+export async function setStandInToken(
+  request: APIRequestContext,
+  token: { token: string; valid?: boolean; scopes?: string[]; expiresAt?: number },
+) {
+  const res = await request.post(
+    `http://127.0.0.1:${process.env.E2E_GRAPH_PORT}/__stand-in/token`,
+    {
+      data: token,
+    },
+  );
+  expect(res.ok()).toBe(true);
 }
 
 export async function standInRequests(request: APIRequestContext) {

@@ -75,6 +75,8 @@ export interface StandInState {
       valid: boolean;
       scopes: string[];
       granular?: { scope: string; target_ids?: string[] }[];
+      /** Unix seconds; 0 or absent: the token reports no expiry. */
+      expiresAt?: number;
     }
   >;
   wabaNumbers: Map<string, string[]>;
@@ -424,6 +426,27 @@ export async function startGraphStandIn(options: {
         state.catalogProducts.set(b.catalog.id, b.products);
         return json(res, 200, { ok: true });
       }
+      // Test control: register a business token, or change what debug_token says about one (valid,
+      // the app, permissions, shared accounts, expiry), as a business changing HyFib's access would.
+      if (req.method === 'POST' && url.pathname === '/__stand-in/token') {
+        const b = (body ?? {}) as {
+          token?: string;
+          valid?: boolean;
+          appId?: string;
+          scopes?: string[];
+          granular?: { scope: string; target_ids?: string[] }[];
+          expiresAt?: number;
+        };
+        if (typeof b.token !== 'string' || !b.token) return json(res, 400, { ok: false });
+        state.tokens.set(b.token, {
+          appId: b.appId ?? state.appId,
+          valid: b.valid ?? true,
+          scopes: b.scopes ?? ['whatsapp_business_management', 'whatsapp_business_messaging'],
+          ...(b.granular ? { granular: b.granular } : {}),
+          ...(b.expiresAt ? { expiresAt: b.expiresAt } : {}),
+        });
+        return json(res, 200, { ok: true });
+      }
       // Test control: set a template's review status, as Meta's review would.
       if (req.method === 'POST' && url.pathname === '/__stand-in/template-status') {
         const b = (body ?? {}) as { wabaId?: string; name?: string; status?: string };
@@ -471,7 +494,10 @@ export async function startGraphStandIn(options: {
             is_valid: info.valid,
             scopes: info.scopes,
             ...(info.granular ? { granular_scopes: info.granular } : {}),
-            expires_at: 0,
+            expires_at: info.expiresAt ?? 0,
+            ...(info.valid
+              ? {}
+              : { error: { code: 190, message: 'The access token is invalid.' } }),
           },
         });
       }

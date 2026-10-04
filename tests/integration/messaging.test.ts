@@ -629,6 +629,13 @@ describe('outbound sends', () => {
       [c.channelAccountId],
     );
     expect(channel!.status).toBe('needs_reconnect');
+    // The account's access is checked at once (ADR-137); until then it stays connected.
+    const [account] = await adminQuery<{ status: string; requested: Date | null }>(
+      'SELECT status, token_check_requested_at AS requested FROM app.whatsapp_accounts WHERE id = $1',
+      [c.whatsappAccountId],
+    );
+    expect(account!.status).toBe('connected');
+    expect(account!.requested).not.toBeNull();
   });
 
   it('never resends automatically when no response arrived; a member decides', async () => {

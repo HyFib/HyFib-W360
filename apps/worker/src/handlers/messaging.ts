@@ -37,6 +37,7 @@ import { sweepTaskReminders } from './crm';
 import { signalDueCampaigns } from './campaigns';
 import { RetryableJobError } from './email';
 import { signalDueTemplateSyncs } from './templates';
+import { signalDueAccessChecks } from './whatsapp-access';
 import { sweepCommerceWork } from './commerce';
 import { sweepStoreMessages, sweepStoreWork } from './stores';
 import { sweepFlowWork } from './flows';
@@ -159,12 +160,13 @@ export function channelOnboardHandler(rt: WorkerRuntime) {
 /**
  * Every minute: re-signal webhook receipts and send intents whose signal was lost, settle send
  * intents whose worker died (before dispatch: re-queued; after dispatch: unknown outcome, never an
- * automatic resend), signal automation runs and task reminders that are due or lost their
- * signal, route waiting conversations of round-robin teams, remind companies of API keys that
- * expire soon, delete rate limit buckets that are full again, end work whose job ran out of
- * retries where its company sees it, re-encrypt stored secrets under the primary key while another
- * key is configured, sign queued jobs again while a previous job signing key is configured, alert
- * platform staff to work that failed for good, and check how long jobs wait in each queue.
+ * automatic resend), signal template syncs and checks of WhatsApp access that are due, signal
+ * automation runs and task reminders that are due or lost their signal, route waiting conversations
+ * of round-robin teams, remind companies of API keys that expire soon, delete rate limit buckets
+ * that are full again, end work whose job ran out of retries where its company sees it, re-encrypt
+ * stored secrets under the primary key while another key is configured, sign queued jobs again
+ * while a previous job signing key is configured, alert platform staff to work that failed for
+ * good, and check how long jobs wait in each queue.
  */
 export function messagingSweepHandler(rt: WorkerRuntime) {
   // Values this worker could not open and when it next looks for values to re-encrypt (ADR-134).
@@ -205,6 +207,9 @@ export function messagingSweepHandler(rt: WorkerRuntime) {
     }
     const templateSyncs = await signalDueTemplateSyncs(rt);
     if (templateSyncs > 0) rt.logger.info({ templateSyncs }, 'template syncs signalled');
+    // WhatsApp accounts whose access is due a check (ADR-137).
+    const accessChecks = await signalDueAccessChecks(rt);
+    if (accessChecks > 0) rt.logger.info({ accessChecks }, 'WhatsApp access checks signalled');
     const flowWork = await sweepFlowWork(rt);
     if (flowWork > 0) rt.logger.info({ flowWork }, 'flow work signalled');
     const commerceWork = await sweepCommerceWork(rt);
