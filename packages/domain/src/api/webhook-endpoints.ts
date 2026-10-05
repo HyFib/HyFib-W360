@@ -44,6 +44,7 @@ import {
   insertWebhookEndpoint,
   lockWebhookEndpoint,
   queueWebhookTest,
+  replayFailedAcrossEndpoints,
   replayFailedWebhookDeliveries,
   replayWebhookDelivery,
   rotateWebhookEndpointSecret,
@@ -1112,6 +1113,56 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
           return {
             status: 200,
             body: { data: { queued: replayed.queued, more: replayed.more } },
+          };
+        }),
+      );
+    },
+
+    /**
+     * POST /api/v1/webhook-endpoints/replay-failed: the failed deliveries of every endpoint the key
+     * added that is on, chosen at each as `replayFailed` chooses them, at most 500 per call across
+     * them and once per `Idempotency-Key` (ADR-160). Answered with what each endpoint queued and
+     * whether more remain. Audited as the key, once per endpoint.
+     */
+    async replayAllFailed(
+      ctx: ApiContext,
+      input: unknown,
+      idempotency: IdempotencyInput,
+    ): Promise<ApiResponse> {
+      assertScope(ctx, 'webhooks.manage');
+      const { since, events, failures } = parseInput(apiReplayFailedDeliveriesSchema, input);
+      const now = clock.now();
+      const from = new Date(since);
+      if (from.getTime() > now.getTime()) {
+        throw invalidSince('Give a time in the past.');
+      }
+      return db.run(ctx.scope, (tx) =>
+        idempotent(tx, ctx, idempotency, now, async () => {
+          const replayed = await replayFailedAcrossEndpoints(tx, ctx.tenant.id, from, {
+            keysOnly: true,
+            events,
+            failures,
+          });
+          for (const endpoint of replayed.endpoints) {
+            await audit(tx, ctx, 'webhook.deliveries_replayed', endpoint.id, {
+              host: webhookHost(endpoint.url),
+              since: from.toISOString(),
+              ...(events ? { events } : {}),
+              ...(failures ? { failures } : {}),
+              queued: endpoint.queued,
+              more: endpoint.more,
+              allEndpoints: true,
+            });
+          }
+          return {
+            status: 200,
+            body: {
+              data: {
+                queued: replayed.queued,
+                more: replayed.more,
+                endpoints: replayed.endpoints.map(({ id, queued, more }) => ({ id, queued, more })),
+              },
+            },
           };
         }),
       );

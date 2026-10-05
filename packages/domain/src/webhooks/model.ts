@@ -377,6 +377,27 @@ export function webhookReplaySummary(result: { queued: number; more: boolean }):
     : queued;
 }
 
+/**
+ * What a replay of every endpoint's failed deliveries did (ADR-160), with how many deliveries each
+ * endpoint that queued some will receive, by its host, in the words Settings → Webhooks shows it.
+ */
+export function webhookReplayAllSummary(result: {
+  queued: number;
+  more: boolean;
+  endpoints: readonly { host: string | null; queued: number }[];
+}): string {
+  if (result.queued === 0) return webhookReplaySummary(result);
+  const queued =
+    result.queued === 1 ? 'Replaying 1 delivery' : `Replaying ${result.queued} deliveries`;
+  const where = result.endpoints
+    .filter((e) => e.queued > 0)
+    .map((e) => `${e.queued} to ${e.host ?? 'an endpoint'}`)
+    .join(', ');
+  return result.more
+    ? `${queued}: ${where}. More failed deliveries remain: replay again to queue the next ones.`
+    : `${queued}: ${where}.`;
+}
+
 /** The wait after each failed attempt: after the first, 1 minute; after the seventh, 24 hours. */
 export const WEBHOOK_RETRY_SECONDS = [60, 300, 1_800, 7_200, 21_600, 43_200, 86_400] as const;
 

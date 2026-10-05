@@ -1076,7 +1076,13 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   fail (`webhook_deliveries_event_idx`), and inserts up to `WEBHOOK_LIMITS.replayBatch` (500) new
   deliveries oldest event first, reading one more row to say whether more remain. Settings
   (`webhooks.replayFailed`, a period) and the API (`POST /webhook-endpoints/{id}/replay-failed`,
-  `since`, inside `idempotent`, `keysOnly`) call it and audit once per call.
+  `since`, inside `idempotent`, `keysOnly`) call it and audit once per call. A replay of every
+  endpoint (ADR-160, `replayFailedAcrossEndpoints`) locks the company's endpoints (with `keysOnly`,
+  those keys added) in the order they were added, in one `FOR NO KEY UPDATE` statement, then runs
+  each endpoint that is on through the same step (`replayLockedEndpoint`) with what is left of the
+  batch, a limit of 0 only finding whether an endpoint has more; Settings
+  (`webhooks.replayAllFailed`) and the API (`POST /webhook-endpoints/replay-failed`) audit once per
+  endpoint.
 - **Notes through the API (0060–0062, ADR-084):** `POST /conversations/{id}/notes` with
   `conversations.write` (`apiAddConversationNote`, `api/conversations.ts`) runs inside `idempotent`:
   it locks the conversation `FOR UPDATE` (the order erasure takes), checks that it is visible (the

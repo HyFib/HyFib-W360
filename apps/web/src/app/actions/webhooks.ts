@@ -1,6 +1,6 @@
 'use server';
 import { refresh } from 'next/cache';
-import type { WebhookReplayPeriod } from '@w360/domain/webhook-model';
+import { webhookHost, type WebhookReplayPeriod } from '@w360/domain/webhook-model';
 import { getRuntime } from '@/server/runtime';
 import { runAction, type ActionResult } from '@/server/action';
 import { requestMeta } from '@/server/session';
@@ -154,6 +154,43 @@ export async function replayFailedWebhookDeliveriesAction(
     );
     refresh();
     return replayed;
+  });
+}
+
+/**
+ * Replays the failed deliveries of every endpoint that is on (ADR-160). Each endpoint goes back to
+ * the browser by its host only, with what it queued.
+ */
+export async function replayAllFailedWebhookDeliveriesAction(
+  slug: string,
+  period: WebhookReplayPeriod,
+  event: string | null,
+  failure: string | null,
+): Promise<
+  ActionResult<{
+    queued: number;
+    more: boolean;
+    endpoints: { host: string | null; queued: number }[];
+  }>
+> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { webhooks } = await getRuntime();
+    const replayed = await webhooks.replayAllFailed(
+      ctx,
+      {
+        period,
+        ...(event ? { events: [event] } : {}),
+        ...(failure ? { failures: [failure] } : {}),
+      },
+      await requestMeta(),
+    );
+    refresh();
+    return {
+      queued: replayed.queued,
+      more: replayed.more,
+      endpoints: replayed.endpoints.map((e) => ({ host: webhookHost(e.url), queued: e.queued })),
+    };
   });
 }
 

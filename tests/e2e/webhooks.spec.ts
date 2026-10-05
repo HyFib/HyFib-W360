@@ -203,7 +203,7 @@ test('a receiver that was down gets its failed events again with one replay from
   page,
   request,
 }) => {
-  test.setTimeout(180_000);
+  test.setTimeout(240_000);
   const email = uniqueEmail('hookdown');
   const slug = `hookdown-${Date.now().toString(36)}`;
   const path = `/hooks/${slug}`;
@@ -298,6 +298,40 @@ test('a receiver that was down gets its failed events again with one replay from
   await page.getByRole('button', { name: 'Replay failed deliveries' }).click();
   await expect(page.getByText('No failed deliveries to replay from that period.')).toBeVisible();
   expect(forUs()).toHaveLength(4);
+
+  // Every endpoint at once (ADR-160): the receiver is down again while a third customer writes,
+  // the endpoint is turned off and on, and one replay from the Webhooks page sends the message.
+  down.add(path);
+  await sendSignedWebhook(
+    request,
+    inboundMessage(wabaId, phoneNumberId, randomWaId(), 'Has it shipped yet?'),
+  );
+  await expect(async () => expect(forUs()).toHaveLength(5)).toPass({ timeout: 30_000 });
+  const thirdId = String(forUs()[4]!.headers['w360-event-id']);
+  await page.goto(`/c/${slug}/settings/webhooks`);
+  const replayAll = page.getByRole('form', { name: 'Replay every endpoint’s failed deliveries' });
+  await page.getByRole('button', { name: `Turn off ${HOST}` }).click();
+  await page.getByRole('button', { name: 'Turn off', exact: true }).click();
+  await expect(page.getByText('Off', { exact: true })).toBeVisible();
+  // With no endpoint on, there is nothing to replay to.
+  await expect(replayAll).toHaveCount(0);
+  down.delete(path);
+  await page.getByRole('button', { name: `Turn on ${HOST}` }).click();
+  await expect(page.getByText('On', { exact: true })).toBeVisible();
+  await replayAll.getByLabel('Failed deliveries from').selectOption({ label: 'the last hour' });
+  await expect(replayAll.getByLabel('Events', { exact: true }).getByRole('option')).toHaveText([
+    'Every event',
+    'Message received (message.received)',
+    'Template status (template.status_changed)',
+  ]);
+  await replayAll
+    .getByRole('button', { name: 'Replay every endpoint’s failed deliveries' })
+    .click();
+  const host = new URL(`http://${HOST}:${port}${path}`).hostname;
+  await expect(page.getByText(`Replaying 1 delivery: 1 to ${host}.`)).toBeVisible();
+  await expect(async () => expect(forUs()).toHaveLength(6)).toPass({ timeout: 30_000 });
+  expect(String(forUs()[5]!.headers['w360-event-id'])).toBe(thirdId);
+  await expectNoHorizontalOverflow(page);
 });
 
 test('an API key adds its own endpoint over HTTP: owners are emailed, settings name the key, events arrive signed with its secret, and the key turns it off and deletes it (ADR-081)', async ({

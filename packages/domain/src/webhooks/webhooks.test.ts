@@ -44,6 +44,7 @@ import {
   WEBHOOK_TEMPLATE_STATUSES,
   webhookErrorLabel,
   webhookHost,
+  webhookReplayAllSummary,
   webhookReplaySummary,
   webhookRetryDelaySeconds,
   webhookTakesAutomationRuns,
@@ -889,6 +890,36 @@ describe('replaying failed deliveries (ADR-095)', () => {
     expect(webhookReplaySummary({ queued: 12, more: false })).toBe('Replaying 12 deliveries.');
     expect(webhookReplaySummary({ queued: 500, more: true })).toBe(
       'Replaying 500 deliveries. More failed deliveries remain: replay again to queue the next ones.',
+    );
+  });
+
+  it('says what a replay of every endpoint queued, by endpoint host (ADR-160)', () => {
+    const at = (host: string | null, queued: number) => ({ host, queued });
+    expect(
+      webhookReplayAllSummary({ queued: 0, more: false, endpoints: [at('a.example.com', 0)] }),
+    ).toBe('No failed deliveries to replay from that period.');
+    expect(
+      webhookReplayAllSummary({
+        queued: 1,
+        more: false,
+        endpoints: [at('a.example.com', 0), at('b.example.com', 1)],
+      }),
+    ).toBe('Replaying 1 delivery: 1 to b.example.com.');
+    expect(
+      webhookReplayAllSummary({
+        queued: 12,
+        more: false,
+        endpoints: [at('a.example.com', 7), at(null, 5)],
+      }),
+    ).toBe('Replaying 12 deliveries: 7 to a.example.com, 5 to an endpoint.');
+    expect(
+      webhookReplayAllSummary({
+        queued: 500,
+        more: true,
+        endpoints: [at('a.example.com', 500), at('b.example.com', 0)],
+      }),
+    ).toBe(
+      'Replaying 500 deliveries: 500 to a.example.com. More failed deliveries remain: replay again to queue the next ones.',
     );
   });
 });

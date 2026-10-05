@@ -23,6 +23,7 @@ import {
   WEBHOOK_RUN_END_STATUSES,
   WEBHOOK_TEMPLATE_STATUS_LABELS,
   WEBHOOK_TEMPLATE_STATUSES,
+  webhookReplayAllSummary,
   webhookReplaySummary,
   webhookTakesAutomationRuns,
   type WebhookAutomationChoice,
@@ -40,6 +41,7 @@ import {
 import {
   createWebhookEndpointAction,
   deleteWebhookEndpointAction,
+  replayAllFailedWebhookDeliveriesAction,
   replayFailedWebhookDeliveriesAction,
   replayWebhookDeliveryAction,
   rotateWebhookSecretAction,
@@ -967,7 +969,8 @@ export function ReplayDeliveryButton({
 /**
  * Replays the endpoint's failed deliveries from a chosen period, 500 at most at a time (ADR-095):
  * one new delivery per event whose deliveries all failed, of every event or of one the endpoint
- * receives (ADR-156).
+ * receives (ADR-156), of every failure or of one kind (ADR-159). Without an endpoint, those of
+ * every endpoint that is on, 500 at most across them (ADR-160).
  */
 export function ReplayFailedDeliveriesForm({
   slug,
@@ -975,8 +978,9 @@ export function ReplayFailedDeliveriesForm({
   events,
 }: {
   slug: string;
-  endpointId: string;
-  /** The events the endpoint receives, offered as a choice beside every event. */
+  /** The endpoint, or null for every endpoint that is on. */
+  endpointId: string | null;
+  /** The events the endpoints receive, offered as a choice beside every event. */
   events: readonly WebhookEventType[];
 }) {
   const selectId = useId();
@@ -988,24 +992,37 @@ export function ReplayFailedDeliveriesForm({
   const [error, setError] = useState<ActionFailureState | null>(null);
   const [done, setDone] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const name = endpointId
+    ? 'Replay failed deliveries'
+    : 'Replay every endpoint’s failed deliveries';
   return (
     <ClientForm
       className="grid gap-2"
-      aria-label="Replay failed deliveries"
+      aria-label={name}
       onSubmit={(event) => {
         event.preventDefault();
         setBusy(true);
         setError(null);
         setDone(null);
-        void replayFailedWebhookDeliveriesAction(
-          slug,
-          endpointId,
-          period,
-          eventType || null,
-          failure || null,
-        ).then((r) => {
+        const replayed = endpointId
+          ? replayFailedWebhookDeliveriesAction(
+              slug,
+              endpointId,
+              period,
+              eventType || null,
+              failure || null,
+            ).then((r) => (r.ok ? { ok: true as const, summary: webhookReplaySummary(r.data) } : r))
+          : replayAllFailedWebhookDeliveriesAction(
+              slug,
+              period,
+              eventType || null,
+              failure || null,
+            ).then((r) =>
+              r.ok ? { ok: true as const, summary: webhookReplayAllSummary(r.data) } : r,
+            );
+        void replayed.then((r) => {
           setBusy(false);
-          if (r.ok) setDone(webhookReplaySummary(r.data));
+          if (r.ok) setDone(r.summary);
           else setError(r);
         });
       }}
@@ -1059,7 +1076,7 @@ export function ReplayFailedDeliveriesForm({
           </Select>
         </div>
         <Button type="submit" size="sm" variant="outline" disabled={busy}>
-          Replay failed deliveries
+          {name}
         </Button>
       </div>
       <FormSuccess message={done} />

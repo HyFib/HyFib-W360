@@ -6342,3 +6342,33 @@ Decision:
   that chooses the deliveries.
 
 Not built: replays by one status or error code, replays across endpoints.
+
+## ADR-160 Replaying the failed deliveries of every endpoint at once (P5-09) (2026-10-05)
+
+Context: since ADR-095 a replay works on one endpoint. A company whose endpoints all failed for the
+same reason (its gateway was down for an hour, or a certificate expired on a host they share)
+replayed each endpoint in turn, up to ten times, with the same period, events and failures. P5-09's
+Remaining listed replays across endpoints.
+
+Decision:
+
+- **Every endpoint that is on, in one call:** Settings → Webhooks gains "Replay failed deliveries"
+  under the endpoints, with an endpoint's period, events (every event, or one an endpoint that is on
+  receives) and failures. Through the API, `POST /api/v1/webhook-endpoints/replay-failed` takes the
+  `since`, `events` and `failures` of an endpoint's call, for the endpoints keys added (scope
+  `webhooks.manage`, once per `Idempotency-Key`). Endpoints that are off are left out; when none is
+  on, the call is refused (412), as an endpoint's is.
+- **One batch, endpoint by endpoint:** at most 500 new deliveries per call across the endpoints, in
+  the order they were added, each one's oldest event first; at each endpoint the events an
+  endpoint's own replay would choose (ADR-095, ADR-156, ADR-159). `more` says whether another call
+  would queue more: once the batch is used up, each endpoint left is only asked whether it has any.
+  The answer gives each endpoint's `queued` and `more`; Settings says how many deliveries go to each
+  endpoint's host.
+- **Locked together:** every endpoint is locked, in that order, before any is read, so an endpoint's
+  own replay at the same time queues each event once, and two replays of every endpoint cannot
+  deadlock.
+- **Audit:** one `webhook.deliveries_replayed` entry per endpoint that is on, as an endpoint's own
+  replay writes it, marked `allEndpoints`.
+- **No migration:** an endpoint's replay is now one step that both calls share.
+
+Not built: replays across companies for staff, replays of a chosen list of endpoints.

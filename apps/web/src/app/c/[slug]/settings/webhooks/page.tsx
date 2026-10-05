@@ -7,6 +7,7 @@ import {
   WEBHOOK_CONTACT_PART_LABELS,
   WEBHOOK_CONVERSATION_STATUS_LABELS,
   WEBHOOK_EVENT_INFO,
+  WEBHOOK_EVENT_KEYS,
   WEBHOOK_LIMITS,
   WEBHOOK_ORDER_STATUS_LABELS,
   WEBHOOK_RUN_END_STATUS_LABELS,
@@ -16,7 +17,11 @@ import {
   type WebhookEndpointView,
 } from '@w360/domain';
 import { Badge, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
-import { WebhookEndpointActions, WebhookEndpointForm } from '@/components/settings/webhooks';
+import {
+  ReplayFailedDeliveriesForm,
+  WebhookEndpointActions,
+  WebhookEndpointForm,
+} from '@/components/settings/webhooks';
 import { formatDateTime } from '@/lib/format';
 import { getRuntime } from '@/server/runtime';
 import { requireTenant } from '@/server/session';
@@ -44,6 +49,9 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
   ]);
   const tz = ctx.tenant.timezone;
   const base = `/c/${ctx.tenant.slug}/settings/webhooks`;
+  // A replay of every endpoint (ADR-160) offers the events the endpoints that are on receive.
+  const on = endpoints.filter((e) => e.state === 'active');
+  const onEvents = WEBHOOK_EVENT_KEYS.filter((t) => on.some((e) => e.eventTypes.includes(t)));
   return (
     <div className="grid grid-cols-1 gap-6">
       <Card>
@@ -249,6 +257,28 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
           )}
         </CardContent>
       </Card>
+
+      {on.length > 0 ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Replay failed deliveries</CardTitle>
+            <CardDescription>
+              Sends every event whose deliveries to an endpoint that is on all failed in the period
+              to that endpoint again, or only those of one event or whose last failure was of one
+              kind, as each endpoint’s own replay does: {WEBHOOK_LIMITS.replayBatch} at a time
+              across the endpoints, in the order they were added. Endpoints that are off are left
+              out.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <ReplayFailedDeliveriesForm
+              slug={ctx.tenant.slug}
+              endpointId={null}
+              events={onEvents}
+            />
+          </CardContent>
+        </Card>
+      ) : null}
 
       <Card>
         <CardHeader>

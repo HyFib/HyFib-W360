@@ -110,7 +110,7 @@ import {
   WEBHOOK_RUN_END_STATUSES_NEED_THE_EVENT,
   WEBHOOK_TEMPLATE_STATUSES_NEED_THE_EVENT,
 } from '../webhooks/service';
-import { WEBHOOK_FAILURE_KINDS } from '../webhooks/model';
+import { WEBHOOK_FAILURE_KINDS, WEBHOOK_LIMITS } from '../webhooks/model';
 
 describe('API tokens', () => {
   it('have a public prefix, a 256-bit secret and only their SHA-256 is kept', () => {
@@ -1767,6 +1767,83 @@ describe("replaying an endpoint's failed deliveries through the API (ADR-095)", 
       'more',
     ]);
   });
+
+  it('refuses a time still to come for every endpoint too, before anything is read (ADR-160)', async () => {
+    const endpoints = createApiWebhookEndpoints({
+      clock: { now: () => new Date('2026-09-30T08:00:00Z') },
+    } as never);
+    const ctx = {
+      tenant: { id: 't', status: 'active' },
+      key: { id: 'k', scopes: new Set(['webhooks.manage']) },
+      planScopes: null,
+    } as unknown as ApiContext;
+    const error: unknown = await endpoints
+      .replayAllFailed(ctx, { since: '2026-09-30T08:00:01Z' }, { key: 'k-1', requestHash: 'h' })
+      .catch((caught: unknown) => caught);
+    expect(isAppError(error) && error.code).toBe('validation_failed');
+    expect(isAppError(error) && error.issues).toEqual([
+      { path: 'since', message: 'Give a time in the past.' },
+    ]);
+  });
+
+  it('describes the replay of every endpoint: the same body, 500 across the endpoints that are on, what each queued (ADR-160)', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const op = (
+      doc.paths as unknown as Record<
+        string,
+        Record<
+          string,
+          {
+            operationId: string;
+            description: string;
+            parameters: unknown[];
+            requestBody: unknown;
+            responses: Record<string, { content?: unknown }>;
+          }
+        >
+      >
+    )['/webhook-endpoints/replay-failed']?.post;
+    expect(op?.operationId).toBe('replayAllFailedWebhookDeliveries');
+    expect(op?.parameters).toEqual([{ $ref: '#/components/parameters/IdempotencyKey' }]);
+    expect(op?.requestBody).toEqual({
+      required: true,
+      content: {
+        'application/json': { schema: { $ref: '#/components/schemas/ReplayFailedDeliveries' } },
+      },
+    });
+    expect(Object.keys(op?.responses ?? {})).toEqual(expect.arrayContaining(['200', '412', '422']));
+    expect(Object.keys(op?.responses ?? {})).not.toContain('404');
+    expect(op?.responses['200']?.content).toEqual({
+      'application/json': {
+        schema: {
+          type: 'object',
+          properties: { data: { $ref: '#/components/schemas/FailedReplayAcrossEndpoints' } },
+          required: ['data'],
+        },
+      },
+    });
+    for (const words of [
+      'every endpoint the API key added that is on',
+      'at most 500 new deliveries per call across them',
+      'in the order they were added',
+      'Endpoints that are off are left out; when none is on, the call is refused (412)',
+      'once per endpoint',
+    ]) {
+      expect(op?.description).toContain(words);
+    }
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const across = schemas.FailedReplayAcrossEndpoints as {
+      properties: Record<string, { maxItems?: number; items?: { properties: object } }>;
+    };
+    expect(Object.keys(across.properties)).toEqual(['queued', 'more', 'endpoints']);
+    expect(across.properties.endpoints?.maxItems).toBe(WEBHOOK_LIMITS.endpoints);
+    expect(Object.keys(across.properties.endpoints?.items?.properties ?? {})).toEqual([
+      'id',
+      'queued',
+      'more',
+    ]);
+  });
 });
 
 describe('webhook deliveries through the API (ADR-083)', () => {
@@ -1784,6 +1861,7 @@ describe('webhook deliveries through the API (ADR-083)', () => {
       () => endpoints.sendTest(ctx, 'e', idempotency),
       () => endpoints.replay(ctx, 'd', idempotency),
       () => endpoints.replayFailed(ctx, 'e', { since: 'x' }, idempotency),
+      () => endpoints.replayAllFailed(ctx, { since: 'x' }, idempotency),
     ]) {
       const error: unknown = await call().catch((caught: unknown) => caught);
       expect(isAppError(error) && error.code).toBe('forbidden');

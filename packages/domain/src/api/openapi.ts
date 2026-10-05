@@ -429,6 +429,16 @@ export const apiFailedReplaySchema = z.object({
     .describe('Whether more failed deliveries remain: call again to queue the next ones.'),
 });
 
+/** What a replay of every endpoint's failed deliveries queued (ADR-160). */
+export const apiFailedReplayAcrossSchema = apiFailedReplaySchema.extend({
+  endpoints: z
+    .array(z.object({ id: z.uuid().describe('The endpoint.'), ...apiFailedReplaySchema.shape }))
+    .max(WEBHOOK_LIMITS.endpoints)
+    .describe(
+      'What each endpoint that is on queued, in the order the endpoints were added. Endpoints that are off are left out.',
+    ),
+});
+
 export const apiWebhookEndpointWithSecretSchema = apiWebhookEndpointSchema.extend({
   secret: z
     .string()
@@ -1293,6 +1303,23 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
         },
       },
+      '/webhook-endpoints/replay-failed': {
+        post: {
+          operationId: 'replayAllFailedWebhookDeliveries',
+          summary: "Deliver every endpoint's failed events again",
+          description: `${scopeNote('webhooks.manage')} What POST /webhook-endpoints/{id}/replay-failed does for one endpoint, for every endpoint the API key added that is on, with the same \`since\`, \`events\` and \`failures\`: at most ${WEBHOOK_LIMITS.replayBatch} new deliveries per call across them, endpoint by endpoint in the order they were added, each one's oldest event first. \`more\` says whether another call would queue more, and \`endpoints\` what each endpoint queued. Endpoints that are off are left out; when none is on, the call is refused (412). One call per \`Idempotency-Key\`; audited as the key, once per endpoint.`,
+          parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }],
+          requestBody: { required: true, content: json(ref('ReplayFailedDeliveries')) },
+          responses: {
+            '200': {
+              description:
+                'How many deliveries were queued, at each endpoint, and whether more remain.',
+              content: json(dataOf(ref('FailedReplayAcrossEndpoints'))),
+            },
+            ...errors(400, 401, 403, 412, 422, 423, 429, 500),
+          },
+        },
+      },
       '/webhook-endpoints/{id}': {
         get: {
           operationId: 'getWebhookEndpoint',
@@ -1732,6 +1759,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         UpdateWebhookEndpoint: jsonSchema(apiUpdateWebhookEndpointSchema, 'input'),
         ReplayFailedDeliveries: jsonSchema(apiReplayFailedDeliveriesSchema, 'input'),
         FailedReplay: jsonSchema(apiFailedReplaySchema),
+        FailedReplayAcrossEndpoints: jsonSchema(apiFailedReplayAcrossSchema),
         Error: jsonSchema(apiErrorSchema),
         WebhookMessageReceived: jsonSchema(messageReceivedPayloadSchema),
         WebhookMessageStatus: jsonSchema(messageStatusPayloadSchema),
@@ -1793,6 +1821,7 @@ export const API_ROUTES = [
   ['post', '/automation-runs/{id}/stop'],
   ['get', '/webhook-endpoints'],
   ['post', '/webhook-endpoints'],
+  ['post', '/webhook-endpoints/replay-failed'],
   ['get', '/webhook-endpoints/{id}'],
   ['patch', '/webhook-endpoints/{id}'],
   ['delete', '/webhook-endpoints/{id}'],

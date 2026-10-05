@@ -650,11 +650,14 @@ verification, app review, Embedded Signup configuration).
   built; their database tests run only in CI]** (ADR-159: only the events whose latest failed
   delivery was answered with a server error, refused, answered otherwise, not validly answered or
   not attempted, as chosen, `failures` through the API or one kind in Settings, audited with them).
+  **[Replays of every endpoint built; their database tests run only in CI]** (ADR-160: one replay
+  for every endpoint that is on, 500 across them in the order they were added, in Settings or
+  `POST /webhook-endpoints/replay-failed` for the endpoints keys added, audited once per endpoint).
   Remaining: filters for other event types and on a message's or contact's values (such as by
   campaign, template, tag or field key, or a run's trigger or end reason), which tags were added or
   removed, other authentication (OAuth client credentials, headers computed per delivery), mutual
   TLS, fixed egress addresses, events for store orders, Payment Links and each step of a run,
-  `createdAt` finer than the millisecond, replays across endpoints, load tests.
+  `createdAt` finer than the millisecond, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,

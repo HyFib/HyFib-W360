@@ -1,5 +1,62 @@
 # Progress
 
+## 2026-10-05 — Phase 5: replaying the failed deliveries of every endpoint at once (P5-09, ADR-160)
+
+Status: **Implemented; its database tests run in CI only (test data only).** A company whose
+endpoints all failed for the same reason replayed each endpoint in turn. The local PostgreSQL is
+unavailable (its Docker daemon stopped), so the integration and e2e tests below were written but not
+run here.
+
+### Completed
+
+- **Design (ADR-160):** one replay for every endpoint that is on, 500 across them in the order they
+  were added, the endpoints locked together first; "Replay failed deliveries" on Settings → Webhooks
+  and `POST /webhook-endpoints/replay-failed` for keys; audited once per endpoint.
+- **Domain:** `webhooks/service.ts` (an endpoint's replay is now one shared step,
+  `replayLockedEndpoint`, taking a limit; `replayFailedAcrossEndpoints`; the settings
+  `replayAllFailed`); `webhooks/model.ts` (`webhookReplayAllSummary`); `api/webhook-endpoints.ts`
+  (`replayAllFailed`); `api/openapi.ts` (the operation, `FailedReplayAcrossEndpoints`, the route
+  list).
+- **Web:** the route `api/v1/webhook-endpoints/replay-failed`; the replay form for every endpoint
+  (the events the endpoints that are on receive) on Settings → Webhooks, shown while one is on, and
+  its server action, which sends each endpoint back by its host only.
+- **Tests:**
+  - Unit (3 new, 1 extended in `api.test.ts` and `webhooks.test.ts`): the scope and a time still to
+    come refused before anything is read; the operation, its body, its answer and its words; the
+    summary by host, with an endpoint that queued nothing left out and more said.
+  - Integration (2 new in `webhooks.test.ts`, 1 new in `api-webhook-endpoints.test.ts`): the first
+    endpoint taking the whole batch while the second says it has more, then the second's events of
+    one event and one kind of failure; an endpoint that is off left out; one audit entry per
+    endpoint and call; refusals (a member without the permission, a period or a kind not in the
+    list, no endpoint on); a replay of every endpoint waiting for an endpoint's own and queuing each
+    event once; through the API, only the key's endpoints, once per Idempotency-Key, audited as the
+    key. Written for CI; not run here.
+  - E2E (`webhooks.spec.ts` extended): with no endpoint on, nothing is offered; a message that
+    failed while the receiver was down is sent again from the Webhooks page, with the same event id.
+    Written for CI; not run here.
+- **Docs:** ADR-160; SECURITY (the webhook rules); ARCHITECTURE; BACKLOG P5-09; feature matrix H-014
+  and W-139.
+- **Mutation checks:** 16 tried, all caught on the unit-tested parts (the scope or the time not
+  checked, the route unlisted or answering another method, the operation taking an id, its answer
+  without the endpoints, its words, the endpoints without a maximum or with the id last, and five in
+  the summary). The shared step, the locks, the audit and the form need the database, so their
+  regressions are left to the integration and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 724 passed (75 files; 3 new, 1 extended)                        |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 16 tried, all caught on the unit-tested parts                   |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- Replays across companies for staff, replays of a chosen list of endpoints.
+
 ## 2026-10-05 — Phase 5: replaying an endpoint's failed deliveries by how they failed (P5-09, ADR-159)
 
 Status: **Implemented; its database tests run in CI only (test data only).** A replay of an
@@ -18,7 +75,8 @@ below were written but not run here.
   delivery's code and status; the settings schema and audit); `api/webhook-endpoints.ts` (the body's
   `failures`, described kind by kind, passed and audited); `api/openapi.ts` (the operation's
   description).
-- **Web:** the replay form's "Failures" choice (every failure, or one kind) and its server action.
+- **Web:** the replay form's "Failures" choice (every failure, or one kind) and its server action;
+  the endpoint page's description of its replay mentions the kinds of failure.
 - **Tests:**
   - Unit (1 new and 2 extended in `api.test.ts`): the kinds kept once each in the list's order; an
     empty list, an unknown kind and a string refused; the schema's properties, the field's kinds and
