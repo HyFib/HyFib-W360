@@ -206,6 +206,7 @@ test('a catalog is read from Meta, products are sent in a chat and an order is p
   await page
     .getByRole('checkbox', { name: /Reply with text, buttons, lists, products and reactions/ })
     .check();
+  await page.getByRole('checkbox', { name: /Read WhatsApp orders/ }).check();
   await page.getByRole('button', { name: 'Create API key' }).click();
   const token = await page.getByLabel('API key', { exact: true }).inputValue();
   await page.getByRole('button', { name: 'I have stored the key' }).click();
@@ -328,6 +329,39 @@ test('a catalog is read from Meta, products are sent in a chat and an order is p
   ).toBe(200);
   // A check that found the link busy is retried after 30 seconds.
   await reloadUntil(page, () => page.getByRole('button', { name: 'Mark fulfilled' }), 60_000);
+
+  // An order system reads the paid order through the API with the same key (ADR-167): the cart,
+  // the total in paise and when it was paid, never the Payment Link.
+  const auth = { Authorization: `Bearer ${token}` };
+  const paidOrders = await request.get('/api/v1/orders?status=paid', { headers: auth });
+  expect(paidOrders.status()).toBe(200);
+  const listed = (await paidOrders.json()) as {
+    data: {
+      id: string;
+      status: string;
+      subtotalMinor: number | null;
+      customerNote: string | null;
+      paidAt: string | null;
+      items: { retailerId: string; quantity: number; unitPriceMinor: number | null }[];
+    }[];
+    nextCursor: string | null;
+  };
+  expect(listed.data).toHaveLength(1);
+  const apiOrder = listed.data[0]!;
+  expect(new URL(orderUrl).pathname.endsWith(`/commerce/orders/${apiOrder.id}`)).toBe(true);
+  expect(apiOrder).toMatchObject({
+    status: 'paid',
+    subtotalMinor: 32050,
+    customerNote: 'Please deliver after 6 pm',
+    paidAt: expect.any(String),
+  });
+  expect(apiOrder.items.map((i) => [i.retailerId, i.quantity, i.unitPriceMinor])).toEqual([
+    ['chai-1', 2, 12000],
+    ['chai-2', 1, 8050],
+  ]);
+  expect(JSON.stringify(listed)).not.toContain(shortUrl);
+  const one = await request.get(`/api/v1/orders/${apiOrder.id}`, { headers: auth });
+  expect(((await one.json()) as { data: unknown }).data).toEqual(apiOrder);
   await expect(page.getByText('Paid', { exact: true }).first()).toBeVisible();
   await page.getByRole('button', { name: 'Mark fulfilled' }).click();
   await expect(page.getByText('Fulfilled', { exact: true }).first()).toBeVisible();

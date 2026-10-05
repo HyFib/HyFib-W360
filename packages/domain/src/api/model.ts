@@ -21,6 +21,7 @@ export const API_SCOPE_KEYS = [
   'campaigns.read',
   'campaigns.stop',
   'automations.start',
+  'orders.read',
   'webhooks.manage',
 ] as const satisfies readonly ApiScope[];
 
@@ -113,6 +114,13 @@ export const API_SCOPE_INFO: Record<
       'Start published automations made to start through the API, for one contact at a time with the inputs they need, and read and stop the runs keys started. They message contacts who have not written first, with templates.',
     permission: 'automations.publish',
     writes: true,
+  },
+  'orders.read': {
+    label: 'Read WhatsApp orders',
+    description:
+      "List the orders customers send from the company's WhatsApp catalog and read each one's items, total, note and status, with its conversation and contact ids. Never Payment Links or payment ids. Needs Commerce in the company's plan.",
+    permission: 'commerce.read',
+    writes: false,
   },
   'webhooks.manage': {
     label: 'Manage webhook endpoints',

@@ -450,9 +450,10 @@ Phase 5 rules (Public API, P5-08):
   ADR-070), `campaigns.send` for `messages.send_marketing`, `inbox.read_all` for
   `conversations.read` (ADR-072), `inbox.supervise` for `conversations.write` (ADR-075),
   `automations.publish` for `automations.start` (ADR-077), `tenant.settings.manage` for
-  `contact_fields.manage` (ADR-115), `campaigns.read` for the scope of the same name (ADR-125), and
-  `campaigns.send` for `campaigns.stop` (ADR-128). Nobody grants a key more than they hold, and
-  rotating needs the same. A key keeps the scopes it was created with.
+  `contact_fields.manage` (ADR-115), `campaigns.read` for the scope of the same name (ADR-125),
+  `campaigns.send` for `campaigns.stop` (ADR-128), and `commerce.read` for `orders.read` (ADR-167).
+  Nobody grants a key more than they hold, and rotating needs the same. A key keeps the scopes it
+  was created with.
 - A request acts for the key's company only, as the key: its company comes from the key found by
   the token's hash, never from the path, body or headers, and data access runs in that company's
   scope (RLS). Audit rows name the key (`api_key`). Writing scopes are refused while the company is
@@ -614,6 +615,14 @@ Phase 5 rules (Public API, P5-08):
   another WhatsApp account's, another company's or a disconnected catalog are refused like unknown
   ids, and the catalog sent to Meta is always the one found, never taken from the request
   unchecked.
+- Reading orders (ADR-167): `GET /orders` and `GET /orders/{id}` need `orders.read`, granted only
+  with `commerce.read`, and Commerce in the company's plan, both checked before an order is read.
+  They read in the key's company only (row security and an explicit company condition): another
+  company's order answers 404 as an unknown one does, an id that is not a UUID is refused before any
+  query, and every filter is typed (a status from the list, UUIDs, the reference's eight-capital
+  pattern, an ISO time). Orders name the contact, conversation and number by id only, never the
+  customer's number or name, the Payment Link or Razorpay's payment ids; an erased contact's orders
+  are read without the note erasure clears (unit tests; integration and e2e tests, run in CI only).
 - The message feed (ADR-088) needs `conversations.read`, checked before its query is read, and
   reads only in the key's company scope: other companies' messages are never in it, erased
   contacts' conversations are left out, internal notes are not messages and media is never

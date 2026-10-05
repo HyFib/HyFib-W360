@@ -6626,3 +6626,44 @@ Decision:
 Not built: filters `GET /conversations` does not have (such as the time of the last message),
 counting the conversations a change would reach, every page in one call, and notes for many
 conversations.
+
+## ADR-167 Reading WhatsApp orders through the public API (P5-08) (2026-10-05)
+
+Context: customers send carts from the company's WhatsApp catalog as orders (M-170); members
+confirm, fulfil or cancel them and ask for payment with a Payment Link (ADR-046). Order systems hear
+each order and each change through `order.received` and `order.status_changed` (ADR-085) but could
+not read orders: a missed delivery, a new integration or a nightly reconciliation had no way to list
+them. ADR-085 left reading orders through the public API unbuilt.
+
+Decision:
+
+- **A new reading scope, `orders.read`** ("Read WhatsApp orders"), granted with `commerce.read`, the
+  permission members read orders with; only owners and administrators create keys, and both hold it.
+  It only reads, so it works while the company is suspended or restricted, as every reading scope
+  does. Existing keys keep their scopes, and a plan version that chose its scopes (ADR-092) leaves
+  it out until a new version includes it.
+- **Commerce in the plan:** orders are Commerce's, so a plan without it reads none (403, reason
+  `not_in_plan`), as it sends no products (ADR-086); checked first in the transaction.
+- **Endpoints:** `GET /api/v1/orders` (`listOrders`) pages the company's orders newest first by when
+  they were received, on exact keyset pages (`commerce_orders_list_idx`), filtered by `status`,
+  `contactId`, `conversationId`, `reference` (the eight capitals members and customers quote) and
+  `updatedSince`; `GET /api/v1/orders/{id}` (`getOrder`) reads one. Another company's order and an
+  unknown id answer 404, and an id that is not a UUID is refused before any query.
+- **An order as the webhook describes it, with ids only:** reference, status and when it last
+  changed; the conversation, contact, number and order message by id; the Meta catalog; the
+  currency, subtotal and each item's content id, name, quantity and unit price, amounts as integers
+  in minor units (null where HyFib could not work them out); the items left out; the customer's
+  note; when it was received, paid and last changed. Not the customer's number or name, which a key
+  reads with `contacts.read`, and never the Payment Link or Razorpay's payment ids, which the
+  company's Razorpay account reports itself.
+- **Erased contacts:** orders are kept until the company is deleted (ADR-085), so an erased
+  contact's orders are still read, without the note erasure clears; their contact id names a contact
+  the API no longer finds.
+- **Reads only:** one read-only transaction per call. Items are written with their order and never
+  change, so they are read beside it without a shared snapshot. A call counts as one request.
+- **Migration 0115** replaces the key and plan scope checks with ones that also accept
+  `orders.read`, validated at once (one row per key and per plan version), as 0100 did.
+
+Not built: changing orders through the API (confirming, fulfilling, cancelling, asking for payment),
+store orders (the Shopify and WooCommerce copies, which the store reports itself), Payment Links,
+refunds and order reports.

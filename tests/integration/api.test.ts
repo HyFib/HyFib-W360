@@ -17,6 +17,7 @@ import {
   apiGetAutomationRun,
   apiGetContact,
   apiGetConversation,
+  apiGetOrder,
   apiGetMessage,
   apiKeyReminderNotice,
   apiListAutomations,
@@ -26,6 +27,7 @@ import {
   apiListConversations,
   apiListMembers,
   apiListMessages,
+  apiListOrders,
   apiListTeams,
   apiListTemplates,
   apiRecordConsent,
@@ -2258,6 +2260,45 @@ describe('quotes and reactions (ADR-082)', () => {
   });
 });
 
+let planCodes = 0;
+/** Puts the company on a published plan with the given modules (P5-01), as platform staff would. */
+async function onPlan(c: Company, modules: string[]) {
+  const staff = await createUser(fx.dbs, { twoFactor: true });
+  await fx.dbs.ownerPool.query(
+    `INSERT INTO ops.platform_admins (user_id, role) VALUES ($1, 'platform_owner')`,
+    [staff.id],
+  );
+  const actor: PlatformActor = {
+    userId: staff.id,
+    role: 'platform_owner',
+    correlationId: uuidv7(),
+  };
+  const plans = createPlanAdminService({ platformDb: fx.dbs.platform, clock: systemClock });
+  planCodes += 1;
+  const { id } = await plans.createPlan(actor, {
+    code: `shop-api-${Date.now().toString(36)}-${planCodes}`,
+    name: 'Shop plan',
+    price: '999',
+    intervalMonths: '1',
+    trialDays: '0',
+    graceDays: '7',
+    seatsIncluded: '10',
+    numbersIncluded: '5',
+    modules,
+  });
+  await plans.publishPlan(actor, id);
+  const view = await plans.tenantPlan(actor, c.tenant.id);
+  await plans.setTenantPlan(actor, {
+    tenantId: c.tenant.id,
+    version: view.state.version,
+    status: 'active',
+    planId: id,
+    periodStart: dayOf(new Date(), 'Asia/Kolkata'),
+    periodEnd: dayOf(new Date(Date.now() + 30 * 86_400_000), 'Asia/Kolkata'),
+    reason: 'Plan for the API Commerce tests',
+  });
+}
+
 describe('product messages (ADR-086)', () => {
   const commerce = () =>
     createCommerceService({
@@ -2354,45 +2395,6 @@ describe('product messages (ADR-086)', () => {
   const issuesOf = (error: unknown) =>
     (apiErrorResponse(error, 'r').body.error as { issues?: { path: string; message: string }[] })
       .issues ?? [];
-
-  let planCodes = 0;
-  /** Puts the company on a published plan with the given modules (P5-01), as platform staff would. */
-  async function onPlan(c: Company, modules: string[]) {
-    const staff = await createUser(fx.dbs, { twoFactor: true });
-    await fx.dbs.ownerPool.query(
-      `INSERT INTO ops.platform_admins (user_id, role) VALUES ($1, 'platform_owner')`,
-      [staff.id],
-    );
-    const actor: PlatformActor = {
-      userId: staff.id,
-      role: 'platform_owner',
-      correlationId: uuidv7(),
-    };
-    const plans = createPlanAdminService({ platformDb: fx.dbs.platform, clock: systemClock });
-    planCodes += 1;
-    const { id } = await plans.createPlan(actor, {
-      code: `shop-api-${Date.now().toString(36)}-${planCodes}`,
-      name: 'Shop plan',
-      price: '999',
-      intervalMonths: '1',
-      trialDays: '0',
-      graceDays: '7',
-      seatsIncluded: '10',
-      numbersIncluded: '5',
-      modules,
-    });
-    await plans.publishPlan(actor, id);
-    const view = await plans.tenantPlan(actor, c.tenant.id);
-    await plans.setTenantPlan(actor, {
-      tenantId: c.tenant.id,
-      version: view.state.version,
-      status: 'active',
-      planId: id,
-      periodStart: dayOf(new Date(), 'Asia/Kolkata'),
-      periodEnd: dayOf(new Date(Date.now() + 30 * 86_400_000), 'Asia/Kolkata'),
-      reason: 'Plan for the API product message tests',
-    });
-  }
 
   it('send a product, several products and the catalog once per Idempotency-Key, as the inbox sends them', async () => {
     const c = await fx.company();
@@ -2737,6 +2739,216 @@ describe('product messages (ADR-086)', () => {
       'send-whole',
       'with-commerce',
     ]);
+  });
+});
+
+describe('WhatsApp orders (ADR-167)', () => {
+  const commerce = () =>
+    createCommerceService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+      keyring: fx.keyring,
+      appBaseUrl: 'https://app.example.test',
+      allowLiveKeys: false,
+    });
+
+  /** A cart the customer sends from the catalog through the Meta webhook pipeline; its order. */
+  async function sendCart(
+    c: Company,
+    waId: string,
+    items: { retailerId: string; quantity: number; price: number }[],
+    text = '',
+  ) {
+    await inbound(c, waId, [
+      {
+        type: 'order',
+        extra: {
+          order: {
+            catalog_id: '5558701',
+            text,
+            product_items: items.map((i) => ({
+              product_retailer_id: i.retailerId,
+              quantity: i.quantity,
+              item_price: i.price,
+              currency: 'INR',
+            })),
+          },
+        },
+      },
+    ]);
+    const [order] = await fx.query<{
+      id: string;
+      reference: string;
+      conversation_id: string;
+      contact_id: string;
+      message_id: string;
+    }>(
+      `SELECT o.id, o.reference, o.conversation_id, o.contact_id, o.message_id
+         FROM app.commerce_orders o
+         JOIN app.contacts ct ON ct.tenant_id = o.tenant_id AND ct.id = o.contact_id
+        WHERE o.tenant_id = $1 AND ct.phone_e164 = $2
+        ORDER BY o.received_at DESC, o.id DESC LIMIT 1`,
+      [c.tenant.id, `+${waId}`],
+    );
+    if (!order) throw new Error('order not recorded');
+    return order;
+  }
+
+  const versionOf = async (orderId: string) =>
+    (
+      await fx.query<{ version: number }>('SELECT version FROM app.commerce_orders WHERE id = $1', [
+        orderId,
+      ])
+    )[0]!.version;
+
+  it('list the company’s orders newest first on exact pages, with their items, filtered, and one by id', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const reader = await apiKey(c, ['orders.read'], 'Order sync');
+    const list = (query: Record<string, string | null | undefined>) =>
+      apiListOrders(deps(), reader.ctx, query);
+    const first = await sendCart(
+      c,
+      '919811100701',
+      [
+        { retailerId: 'sku-1', quantity: 2, price: 19.99 },
+        { retailerId: 'sku-2', quantity: 1, price: 250 },
+      ],
+      'Please gift wrap',
+    );
+    const second = await sendCart(c, '919811100702', [
+      { retailerId: 'sku-3', quantity: 1, price: 99 },
+    ]);
+    const third = await sendCart(c, '919811100701', [
+      { retailerId: 'sku-1', quantity: 1, price: 19.99 },
+    ]);
+    await sendCart(other, '919811100703', [{ retailerId: 'sku-1', quantity: 1, price: 10 }]);
+
+    // Newest first, two to a page and the last on the next; another company's order never.
+    const page = await list({ limit: '2' });
+    expect(page.data.map((o) => o.id)).toEqual([third.id, second.id]);
+    expect(page.nextCursor).toEqual(expect.any(String));
+    const last = await list({ limit: '2', cursor: page.nextCursor });
+    expect(last.data.map((o) => o.id)).toEqual([first.id]);
+    expect(last.nextCursor).toBeNull();
+
+    // The order as the webhook describes it: money in minor units, items in cart order, ids only.
+    const [stored] = await fx.query<{ received_at: Date }>(
+      'SELECT received_at FROM app.commerce_orders WHERE id = $1',
+      [first.id],
+    );
+    expect(last.data[0]).toEqual({
+      id: first.id,
+      reference: first.reference,
+      status: 'received',
+      statusChangedAt: expect.any(String),
+      conversationId: first.conversation_id,
+      contactId: first.contact_id,
+      channelId: c.channelAccountId,
+      messageId: first.message_id,
+      catalogId: '5558701',
+      currency: 'INR',
+      subtotalMinor: 28_998,
+      itemCount: 2,
+      droppedItems: 0,
+      customerNote: 'Please gift wrap',
+      items: [
+        { retailerId: 'sku-1', name: null, quantity: 2, unitPriceMinor: 1_999, currency: 'INR' },
+        { retailerId: 'sku-2', name: null, quantity: 1, unitPriceMinor: 25_000, currency: 'INR' },
+      ],
+      receivedAt: stored!.received_at.toISOString(),
+      paidAt: null,
+      updatedAt: expect.any(String),
+    });
+    expect(await apiGetOrder(deps(), reader.ctx, first.id)).toEqual(last.data[0]);
+
+    // Filters by contact, conversation and reference.
+    expect((await list({ contactId: first.contact_id })).data.map((o) => o.id)).toEqual([
+      third.id,
+      first.id,
+    ]);
+    expect((await list({ conversationId: second.conversation_id })).data.map((o) => o.id)).toEqual([
+      second.id,
+    ]);
+    expect((await list({ reference: second.reference })).data.map((o) => o.id)).toEqual([
+      second.id,
+    ]);
+
+    // A member confirms the first order: it is found by its status and as changed since.
+    const before = new Date(Date.now() - 1_000).toISOString();
+    await commerce().setOrderStatus(owner, {
+      id: first.id,
+      expectedVersion: await versionOf(first.id),
+      status: 'confirmed',
+    });
+    expect((await list({ status: 'confirmed' })).data.map((o) => [o.id, o.status])).toEqual([
+      [first.id, 'confirmed'],
+    ]);
+    expect((await list({ status: 'received' })).data.map((o) => o.id)).toEqual([
+      third.id,
+      second.id,
+    ]);
+    expect((await list({ updatedSince: before })).data.map((o) => o.id)).toContain(first.id);
+    expect(
+      (await list({ updatedSince: new Date(Date.now() + 60_000).toISOString() })).data,
+    ).toEqual([]);
+
+    // Another company's order is not found by its id; nor is one that does not exist.
+    const [theirs] = await fx.query<{ id: string }>(
+      'SELECT id FROM app.commerce_orders WHERE tenant_id = $1',
+      [other.tenant.id],
+    );
+    await expectAppError(apiGetOrder(deps(), reader.ctx, theirs!.id), 'not_found');
+    await expectAppError(apiGetOrder(deps(), reader.ctx, uuidv7()), 'not_found');
+  });
+
+  it('keep an erased contact’s orders without the note, and need the scope and Commerce in the plan', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const reader = await apiKey(c, ['orders.read']);
+    const order = await sendCart(
+      c,
+      '919811100711',
+      [{ retailerId: 'sku-1', quantity: 1, price: 19.99 }],
+      'Leave at the door',
+    );
+    await createContactsService({ db: fx.dbs.app, clock: systemClock }).eraseContact(owner, {
+      contactId: order.contact_id,
+      suppress: false,
+    });
+    const kept = await apiGetOrder(deps(), reader.ctx, order.id);
+    expect([kept.customerNote, kept.contactId, kept.items.length]).toEqual([
+      null,
+      order.contact_id,
+      1,
+    ]);
+    expect((await apiListOrders(deps(), reader.ctx, {})).data.map((o) => o.id)).toEqual([order.id]);
+
+    // A key without the scope is refused before anything is read; reading is allowed while the
+    // company is suspended, as every read is.
+    const others = await apiKey(c, ['conversations.read', 'contacts.read']);
+    await expectAppError(apiListOrders(deps(), others.ctx, {}), 'forbidden', /orders\.read/);
+    await expectAppError(apiGetOrder(deps(), others.ctx, order.id), 'forbidden', /orders\.read/);
+    const suspended = {
+      ...reader.ctx,
+      tenant: { ...reader.ctx.tenant, status: 'suspended' as const },
+    };
+    expect((await apiListOrders(deps(), suspended, {})).data).toHaveLength(1);
+
+    // A plan without Commerce reads no orders; with it again, it does.
+    await onPlan(c, []);
+    for (const read of [
+      apiListOrders(deps(), reader.ctx, {}),
+      apiGetOrder(deps(), reader.ctx, order.id),
+    ]) {
+      const error = await expectAppError(read, 'forbidden', /does not include Commerce/);
+      expect(isAppError(error) && error.details).toEqual({ apiReason: 'not_in_plan' });
+    }
+    await onPlan(c, ['commerce']);
+    expect((await apiGetOrder(deps(), reader.ctx, order.id)).id).toBe(order.id);
   });
 });
 

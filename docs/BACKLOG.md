@@ -588,6 +588,11 @@ verification, app review, Embedded Signup configuration).
   `POST /conversations/update-matching` changes the conversations of one page of
   `GET /conversations` per call, at least one filter, each as `PATCH` changes one, with the filter
   checked again under the rows' locks; it needs `conversations.read` and `conversations.write`).
+  **[Reading WhatsApp orders built; its database tests run only in CI]** (ADR-167: `GET /orders` and
+  `GET /orders/{id}` with the new `orders.read` scope, granted with `commerce.read`, and Commerce in
+  the plan: the orders customers send from the catalog, newest first on exact pages, filtered by
+  status, contact, conversation, reference or time of change, with their items, amounts in minor
+  units and ids only, never Payment Links; migration 0115).
   Remaining: media messages, call-to-action messages through the API, taking reactions back,
   media downloads, a contact card's contacts (Meta's
   contact object is not confirmed), changing a field's type, changing

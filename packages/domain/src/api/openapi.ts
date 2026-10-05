@@ -7,6 +7,7 @@ import {
   MESSAGE_STATUSES,
   TEAM_ASSIGNMENT_MODES,
   MESSAGE_TYPES,
+  ORDER_STATUSES,
   WEBHOOK_DELIVERY_STATES,
   type MessageStatus,
 } from '@w360/db';
@@ -46,6 +47,7 @@ import {
 } from '../webhooks/payloads';
 import { RECIPIENT_OUTCOMES } from '../campaigns/outcomes';
 import { SEGMENT_LIMITS } from '../campaigns/segments';
+import { ORDER_REFERENCE_RE } from '../commerce/model';
 import { CONTACT_FIELD_KEY_RE } from '../contacts/field-definitions';
 import { MAX_CONTACT_FIELDS } from '../contacts/fields';
 import {
@@ -205,6 +207,74 @@ export const apiConversationSchema = z.object({
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime().describe('When anything about the conversation last changed.'),
   resolvedAt: z.iso.datetime().nullable(),
+});
+
+const ORDER_REFERENCE_PATTERN = ORDER_REFERENCE_RE.source;
+
+/** A WhatsApp order a customer sent from the company's catalog (ADR-167). */
+export const apiOrderSchema = z.object({
+  id: z.uuid(),
+  reference: z
+    .string()
+    .describe('The short reference members and the customer quote, like K7M2QX9P.'),
+  status: z
+    .enum(ORDER_STATUSES)
+    .describe(
+      'As the Orders page shows it: received as the customer sent it, then confirmed, awaiting_payment (a Payment Link was sent), paid, fulfilled or cancelled.',
+    ),
+  statusChangedAt: z.iso.datetime(),
+  conversationId: z.uuid().describe('The conversation the order was sent in.'),
+  contactId: z
+    .uuid()
+    .describe('The customer, as GET /contacts/{id} reads them with `contacts.read`.'),
+  channelId: z.uuid().describe('The WhatsApp number the order was sent to.'),
+  messageId: z
+    .uuid()
+    .describe('The order message, as the conversation’s messages and `message.received` name it.'),
+  catalogId: z.string().describe('The Meta catalog the cart came from.'),
+  currency: z
+    .string()
+    .nullable()
+    .describe('ISO 4217, like INR; null when the items are in different currencies.'),
+  subtotalMinor: z
+    .number()
+    .int()
+    .nullable()
+    .describe(
+      'The items’ total in the currency’s minor units (paise for INR); null when a price could not be read, the currencies differ or items were left out.',
+    ),
+  itemCount: z.number().int().describe('The items read from the cart.'),
+  droppedItems: z
+    .number()
+    .int()
+    .describe(
+      'Cart items that could not be read or were beyond the limit of items an order keeps.',
+    ),
+  customerNote: z
+    .string()
+    .nullable()
+    .describe(
+      'The note the customer sent with the cart; null if none or once the contact is erased.',
+    ),
+  items: z.array(
+    z.object({
+      retailerId: z.string().describe('The item’s content id (SKU) in the catalog.'),
+      name: z
+        .string()
+        .nullable()
+        .describe('The product’s name when the order was received; null if it was not known.'),
+      quantity: z.number().int(),
+      unitPriceMinor: z
+        .number()
+        .int()
+        .nullable()
+        .describe('In the currency’s minor units; null when the price could not be read.'),
+      currency: z.string().nullable(),
+    }),
+  ),
+  receivedAt: z.iso.datetime(),
+  paidAt: z.iso.datetime().nullable().describe('When Razorpay reported its Payment Link paid.'),
+  updatedAt: z.iso.datetime().describe('When anything about the order last changed.'),
 });
 
 /** A member conversations can be assigned to (ADR-093). */
@@ -531,7 +601,7 @@ const errors = (...statuses: number[]) =>
           {
             400: 'The request is malformed (for example invalid JSON or a missing header).',
             401: 'No valid API key: missing, unknown, revoked or expired.',
-            403: "The key lacks the scope this needs, the company's plan does not include the API, the scope this needs, automations when starting one or Commerce when sending products (reason not_in_plan), or the key, or its company for all its keys, does not accept requests from the client's address (reason ip_not_allowed).",
+            403: "The key lacks the scope this needs, the company's plan does not include the API, the scope this needs, automations when starting one or Commerce when sending products or reading orders (reason not_in_plan), or the key, or its company for all its keys, does not accept requests from the client's address (reason ip_not_allowed).",
             404: 'Not found in the company.',
             409: 'The request conflicts with the current state. Starting an automation: another automation handles the conversation (reason automation_busy), a member is assigned to it (conversation_assigned), or it had as many runs in the last hour as allowed (automation_limit). Pausing or cancelling a campaign: its status does not allow it, and the message names the status.',
             412: "A condition for sending or saving is not met (consent, suppression, state). With reason window_closed, the number has not written to the WhatsApp number in the last 24 hours, so only templates can be sent to it. Starting an automation: it is not published, archived or not started through the API (automation_unavailable), paused (automation_paused), its number is not active (channel_unavailable), or the plan's automation runs for the month are used up (automation_quota).",
@@ -1413,6 +1483,67 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
         },
       },
+      '/orders': {
+        get: {
+          operationId: 'listOrders',
+          summary: 'WhatsApp orders, newest first',
+          description: [
+            `${scopeNote('orders.read')} The carts customers send from the company’s WhatsApp catalog, as the Orders page lists them, newest first by when they were received; pages never skip or repeat an order. Each order has its items, total and note, with its conversation, contact and number by id. Needs Commerce in the company’s plan (403, reason not_in_plan).`,
+            'Amounts are integers in the currency’s minor units (paise for INR). Payment Links and Razorpay’s payment ids are never read here: the company’s Razorpay account reports those. An erased contact’s orders are listed without the note, which erasure clears. To catch up on changes, ask for `updatedSince` a little before your previous pass began (a minute, say) and expect to see some orders again: a change carries the time it began to be saved, so one still being saved while you read can carry an earlier time.',
+          ].join('\n\n'),
+          parameters: [
+            ...pageParams,
+            {
+              name: 'status',
+              in: 'query',
+              schema: { type: 'string', enum: [...ORDER_STATUSES] },
+              description: 'Only orders in this status.',
+            },
+            {
+              name: 'contactId',
+              in: 'query',
+              schema: { type: 'string', format: 'uuid' },
+              description: 'Only the orders of this contact.',
+            },
+            {
+              name: 'conversationId',
+              in: 'query',
+              schema: { type: 'string', format: 'uuid' },
+              description: 'Only the orders sent in this conversation.',
+            },
+            {
+              name: 'reference',
+              in: 'query',
+              schema: { type: 'string', pattern: ORDER_REFERENCE_PATTERN },
+              description:
+                'Only the order with this reference, in capitals as members and customers see it.',
+            },
+            {
+              name: 'updatedSince',
+              in: 'query',
+              schema: { type: 'string', format: 'date-time' },
+              description:
+                'Only orders changed at or after this time (received, a new status, or the note cleared when the contact was erased).',
+            },
+          ],
+          responses: {
+            '200': { description: 'A page of orders.', content: pageOf('Order') },
+            ...errors(401, 403, 422, 429, 500),
+          },
+        },
+      },
+      '/orders/{id}': {
+        get: {
+          operationId: 'getOrder',
+          summary: 'A WhatsApp order',
+          description: `${scopeNote('orders.read')} With its items, total and note. Needs Commerce in the company’s plan (403, reason not_in_plan).`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': { description: 'The order.', content: json(dataOf(ref('Order'))) },
+            ...errors(401, 403, 404, 429, 500),
+          },
+        },
+      },
       '/webhook-endpoints': {
         get: {
           operationId: 'listWebhookEndpoints',
@@ -1896,6 +2027,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         AddConversationNote: jsonSchema(apiAddNoteSchema, 'input'),
         ConversationNote: jsonSchema(apiConversationNoteSchema),
         Campaign: jsonSchema(apiCampaignSchema),
+        Order: jsonSchema(apiOrderSchema),
         CampaignWithResults: jsonSchema(apiCampaignWithResultsSchema),
         CampaignRecipient: jsonSchema(apiCampaignRecipientSchema),
         Automation: jsonSchema(apiAutomationSchema),
@@ -1976,6 +2108,8 @@ export const API_ROUTES = [
   ['get', '/automation-runs/{id}'],
   ['post', '/automation-runs/{id}/stop'],
   ['post', '/automation-runs/stop-many'],
+  ['get', '/orders'],
+  ['get', '/orders/{id}'],
   ['get', '/webhook-endpoints'],
   ['post', '/webhook-endpoints'],
   ['post', '/webhook-endpoints/replay-failed'],

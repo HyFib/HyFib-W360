@@ -201,6 +201,11 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    every endpoint starts with none. Web servers from before it neither show nor change the column:
    until the web rollout ends, an old server's change that drops `automation.run_ended` from an
    endpoint with a list fails on the check, and its other changes keep it.
+   Migration 0115 (ADR-167) widens the same scope checks as 0100, with the same brief locks. Web
+   servers from before it do not know the new scope: until the web rollout ends, an old server
+   answers Settings → API keys with an error for a company with a key holding `orders.read` (and the
+   platform plan pages for a plan version including it), and `/api/v1/orders` with 404; rolling web
+   servers back to an image from before it does the same.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

@@ -1146,6 +1146,12 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   share an id). `productInteractive` (`commerce/model.ts`) builds the Graph `interactive` object for
   the inbox and the API alike, and the message stores `content.products` as the inbox's product
   sends do.
+- **Orders through the API (ADR-167):** `GET /orders` and `GET /orders/{id}` (`api/orders.ts`,
+  `orders.read`) check Commerce in the plan first (`loadEntitlements`, reason `not_in_plan`), then
+  read `commerce_orders` in the company, newest first by `received_at` on exact keyset cursors
+  (`commerce_orders_list_idx`), the filters as plain equalities and `updated_at >= updatedSince`,
+  and the page's items in one query (`itemsOf`, by order and position). `toApiOrder` gives the order
+  the `order.*` webhooks describe (ADR-085), with ids in place of the contact and number objects.
 - **Message feed (ADR-088):** `GET /messages` (`apiListMessages`, `conversations.read`) pages the
   company's messages across conversations newest first on exact keyset cursors, joined to their
   conversation and contact (erased contacts' conversations left out), with `direction`,

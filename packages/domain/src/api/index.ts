@@ -18,6 +18,7 @@ export * from './expiry-reminders';
 export * from './key-usage-notices';
 export * from './rate-limits';
 export * from './conversations';
+export * from './orders';
 export * from './message-changes';
 export * from './members';
 export * from './automations';

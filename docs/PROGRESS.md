@@ -1,5 +1,57 @@
 # Progress
 
+## 2026-10-05 — Phase 5: reading WhatsApp orders through the API (P5-08, ADR-167)
+
+Status: **Implemented; its database tests run in CI only (test data only).** Order systems heard
+orders only through webhooks. The local PostgreSQL is unavailable (its Docker daemon stopped), so
+migration 0115, the integration tests and the e2e step below were written but not run here.
+
+### Completed
+
+- **Design (ADR-167):** a new reading scope, `orders.read`, granted with `commerce.read`; Commerce
+  in the plan; `GET /orders` (newest first, exact pages, filters) and `GET /orders/{id}`; the order
+  as the webhook describes it, with ids only and never Payment Links.
+- **Database:** migration 0115 widens the key and plan scope checks; `API_SCOPES` (`packages/db`).
+- **Domain:** `api/orders.ts` (`apiOrderListQuerySchema`, `apiListOrders`, `apiGetOrder`); the
+  scope's label, description and permission (`api/model.ts`); `api/openapi.ts` (the two operations,
+  `Order`, the route list, the 403's words).
+- **Web:** the routes `api/v1/orders` and `api/v1/orders/[id]`; Settings → API keys and the platform
+  plan pages list the scope from the shared list.
+- **Tests:**
+  - Unit (5 new in `orders.test.ts`): the scope, its permission and its words; the query; refusals
+    before anything is read; read-only transactions, while the company is suspended too; the
+    operations, their parameters, the order schema and words.
+  - Integration (2 new in `api.test.ts`; the plan helper moved to the file's top): three orders over
+    two pages, as the webhook describes them, filtered and read by id, another company's and an
+    unknown id not found; an erased contact's order, the scope, a suspended company and a plan
+    without Commerce. Written for CI; not run here.
+  - E2E (`commerce.spec.ts` extended): a key created in Settings reads the paid order and that order
+    by id over HTTP, without its Payment Link. Written for CI; not run here.
+- **Docs:** ADR-167; SECURITY (scopes, orders); ARCHITECTURE; THREAT-MODEL T162; DEPLOYMENT
+  (migration 0115); RUNBOOKS; BACKLOG P5-08; feature matrix H-033 and W-134.
+- **Mutation checks:** 25 tried, all caught on the unit-tested parts (another scope or none needed,
+  a malformed id or cursor reaching the database, a writable transaction, the page's maximum or
+  default, any reference, time or conversation taken, other parameters taken, another permission,
+  refused while suspended, the scope's words, the database list without the scope, the operations'
+  responses, parameters, words, schema and routes). The plan check, the company scoping, erasure and
+  paging need the database, so their regressions are left to the integration and e2e tests, which
+  run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 751 passed (77 files; 5 new)                                    |
+| `pnpm test:integration`, e2e, migration 0115       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 25 tried, all caught on the unit-tested parts                   |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- Changing orders through the API, store orders, Payment Links, refunds and order reports.
+
 ## 2026-10-05 — Phase 5: changing the conversations a filter finds (P5-08, ADR-166)
 
 Status: **Implemented; its database tests run in CI only (test data only).** A key changed

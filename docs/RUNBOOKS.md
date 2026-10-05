@@ -1785,6 +1785,15 @@ are not cancelled through the API. 423 means the company is suspended or its pla
 sends then anyway). To stop a key from stopping campaigns, revoke it and create one without the
 scope.
 
+**`GET /api/v1/orders` answers 403 or 404, or an order seems missing (ADR-167).** 403 `forbidden`
+names the scope the key lacks, `orders.read` (keys keep the scopes they were created with: create a
+key with it); reason `not_in_plan` means the company's plan leaves out Commerce or the scope
+(ADR-092). 404 means the id is not one of the key's company's orders. Orders are listed newest first
+by when they were received, and filters narrow them: an order missing from a pass with
+`updatedSince` changed while the pass ran, so ask from a little before the previous pass began. An
+erased contact's orders have no note: erasure cleared it. Payment Links and payment ids are never in
+these answers; the company's Razorpay account has them.
+
 **A search with `POST /api/v1/contacts/search` gives short or empty pages, or a 422 (ADR-117).**
 Its pages read at most 2,000 contacts, as filtered lists do (entry above): the integration sends the
 same conditions with each `nextCursor` until it is `null`. A 422 names the condition's part:
