@@ -64,6 +64,7 @@ export async function signalDueTemplateSyncs(rt: WorkerRuntime): Promise<number>
   if (!rt.graph) return 0;
   const due = await findTemplateSyncsDue(rt.db);
   for (const item of due) {
+    const singletonKey = `sync:${item.whatsappAccountId}`;
     // Tenant ids come from the database (SECURITY DEFINER sweep query), not from a payload.
     await rt.jobs.enqueue(
       null,
@@ -75,12 +76,21 @@ export async function signalDueTemplateSyncs(rt: WorkerRuntime): Promise<number>
         ref: item.whatsappAccountId,
       }),
       {
-        singletonKey: `sync:${item.whatsappAccountId}`,
+        singletonKey,
         priority: item.requested
           ? TEMPLATE_SYNC_PRIORITY.requested
           : TEMPLATE_SYNC_PRIORITY.routine,
       },
     );
+    // A routine sync queued earlier and still waiting stands for one asked for since: raised.
+    if (item.requested) {
+      await rt.jobs.raisePriority(
+        null,
+        QUEUES.templateSync.name,
+        singletonKey,
+        TEMPLATE_SYNC_PRIORITY.requested,
+      );
+    }
   }
   return due.length;
 }

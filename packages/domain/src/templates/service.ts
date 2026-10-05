@@ -205,6 +205,8 @@ export function createTemplatesService(deps: TemplateDeps) {
       singletonKey,
       ...(priority !== undefined ? { priority } : {}),
     });
+    // A job already waiting under the key stands for this one, at the priority asked (ADR-178).
+    if (priority !== undefined) await deps.jobs.raisePriority(tx, queue, singletonKey, priority);
   }
 
   return {

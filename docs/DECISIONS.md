@@ -7184,6 +7184,15 @@ Decision:
 Not built: a refresh for one template rather than the account's whole list, and showing on the
 Templates page when the refresh ran.
 
+Amended (2026-10-05, found in review): the template.sync queue is exclusive, so a job sent under the
+key of a sync already waiting collapses into it, and the waiting job kept its own priority: a
+refresh, or the sweep's sync of an account asked for, that found a routine sync still waiting waited
+at routine priority after all. Both now raise the waiting job to the priority asked for
+(`JobQueue.raisePriority`: a job created or due a retry, under the account's key, never lowered; a
+running job is left alone, and the next sweep queues what was asked meanwhile, as before). The
+refresh raises it in its own transaction, after the account is found in the member's company; the
+runtime role already writes pg-boss's tables, so there is no migration.
+
 ## ADR-179 Acknowledging webhook receipts on the operations console (P5-10) (2026-10-05)
 
 Context: Operations → Integrations lists the Meta and Razorpay receipts that used all their attempts

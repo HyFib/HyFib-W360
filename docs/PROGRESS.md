@@ -1,5 +1,33 @@
 # Progress
 
+## 2026-10-05 — Phase 5: a waiting template sync takes the priority asked for (ADR-178 amended)
+
+Status: **Fixed; its database test runs in CI only.** A review of PR #33 found that a member's
+refresh, or the sweep's sync of an account asked for, collapsed into a routine sync already waiting
+for the account and kept its routine priority, so it did not go first as ADR-178 meant. The local
+PostgreSQL is unavailable, so the integration test below was written but not run here.
+
+### Completed
+
+- **Domain:** `JobQueue.raisePriority` (pg-boss: the waiting job of the queue under the key, raised
+  only when lower; the recording queue of service tests the same); the templates service's refresh
+  and the worker's sweep raise a waiting sync to the requested priority.
+- **Tests:** unit (2 new in `jobs/queue.test.ts`: the statement and its clauses, the recording
+  queue); integration (1 new in `templates.test.ts`: a routine sync still waiting raised by a
+  refresh, one job, and a higher priority kept; written for CI, not run here); the two queue stubs
+  of `automations.test.ts` pass the new method through.
+- **Docs:** the amendment under ADR-178.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 860 passed (82 files)                                         |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-05 — Phase 5: reviewing campaign drafts through the public API (P5-08, ADR-193)
 
 Status: **Implemented; its database and browser tests run in CI only.** Keys created and edited

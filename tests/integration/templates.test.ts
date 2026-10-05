@@ -11,6 +11,7 @@ import {
   processTemplateSubmit,
   queueTemplateMessage,
   syncTemplates,
+  TEMPLATE_SYNC_PRIORITY,
   type TemplateDefinition,
   type TemplatesService,
 } from '@w360/domain';
@@ -428,6 +429,42 @@ describe('template sync', () => {
         (d) => d.whatsappAccountId === c.whatsappAccountId,
       ),
     ).toBe(false);
+  });
+
+  it('raises a routine sync still waiting to the priority of a refresh it stands for, and never lowers one (ADR-178)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    await syncTemplates(workerDeps(), scopeOf(c), c.whatsappAccountId);
+    const key = `sync:${c.whatsappAccountId}`;
+    const waiting = async () =>
+      fx.query<{ priority: number }>(
+        `SELECT priority FROM pgboss.job
+          WHERE name = 'template.sync' AND singleton_key = $1 AND state < 'active'`,
+        [key],
+      );
+    // The sweep queued a routine sync, which no worker has taken yet.
+    await fx.jobs().enqueue(
+      null,
+      'template.sync',
+      fx.signer.sign({
+        kind: 'template.sync',
+        tenantId: c.tenant.id,
+        actorUserId: null,
+        ref: c.whatsappAccountId,
+      }),
+      { singletonKey: key, priority: TEMPLATE_SYNC_PRIORITY.routine },
+    );
+    expect(await waiting()).toEqual([{ priority: TEMPLATE_SYNC_PRIORITY.routine }]);
+    // The refresh's own job collapses into it, which now goes first, still one sync.
+    await templates.requestSync(owner, c.whatsappAccountId);
+    expect(await waiting()).toEqual([{ priority: TEMPLATE_SYNC_PRIORITY.requested }]);
+    // A priority above the refresh's is kept.
+    await fx.query(
+      `UPDATE pgboss.job SET priority = 20 WHERE name = 'template.sync' AND singleton_key = $1`,
+      [key],
+    );
+    await templates.requestSync(owner, c.whatsappAccountId);
+    expect(await waiting()).toEqual([{ priority: 20 }]);
   });
 
   it('deletes a template at Meta and marks it deleted', async () => {
