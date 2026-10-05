@@ -1325,6 +1325,14 @@ message text, contact details, payloads, email addresses, secrets or full URLs:
   list returns the administrator's name and the note to platform administrators only, and the
   company never sees them. An acknowledgement is forgotten an hour after its failure stops being
   listed.
+- Acknowledging dead letters (ADR-169): through `ops.platform_acknowledge_dead_letter` (SECURITY
+  DEFINER, executable only by the platform role), which checks the platform administrator, the note
+  (10 to 500 characters, trimmed) and the dead letter, and writes the platform audit entry
+  (`platform.dead_letter_acknowledged`, the note as its reason; the company only when the job's
+  signature verified) in the same transaction. Only the definer role writes the acknowledgement
+  columns of `ops.dead_letters`, which a check keeps together; the platform role reads them on the
+  console, the company never sees them, and the CSV export gives the time only, never who or the
+  note (unit tests; integration and e2e tests, run in CI only).
 
 Company export and deletion (Settings → Company data, ADR-055):
 

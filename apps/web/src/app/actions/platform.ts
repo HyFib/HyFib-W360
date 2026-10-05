@@ -320,6 +320,19 @@ export async function retryDeadLetterAction(
 }
 
 /**
+ * Acknowledges a dead letter on the operations console, with a note, or replaces the note
+ * (audited, ADR-169).
+ */
+export async function acknowledgeDeadLetterAction(input: unknown): Promise<ActionResult> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    await runtime.platformOps.acknowledgeDeadLetter(actor, input);
+    refresh();
+    return null;
+  });
+}
+
+/**
  * Acknowledges a company's failing integration on the operations console, with a note (audited,
  * ADR-141).
  */

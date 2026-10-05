@@ -1851,6 +1851,169 @@ describe('acknowledging companies’ failing integrations (ADR-141)', () => {
   });
 });
 
+describe('acknowledging dead letters (ADR-169)', () => {
+  /** A dead letter already emailed about, so the alert tests of this file count only theirs. */
+  async function letter(verified: boolean, tenantId: string | null = company.tenant.id) {
+    const id = uuidv7();
+    await fx.query(
+      `INSERT INTO ops.dead_letters (id, source_queue, kind, tenant_id, ref, verified, error_code,
+         failed_at, alerted_at)
+       VALUES ($1, 'template.submit', 'template.submit', $2, 'tpl-ack', $3, 'provider_rejected',
+         now(), now())`,
+      [id, tenantId, verified],
+    );
+    return id;
+  }
+  async function namedStaff(name: string): Promise<PlatformActor> {
+    const user = await createUser(fx.dbs, { twoFactor: true, name });
+    await fx.dbs.ownerPool.query(
+      `INSERT INTO ops.platform_admins (user_id, role) VALUES ($1, 'platform_operator')`,
+      [user.id],
+    );
+    return { userId: user.id, role: 'platform_operator', correlationId: uuidv7() };
+  }
+  const listed = async (id: string) =>
+    (await ops().queues(staff)).deadLetters.find((d) => d.id === id);
+  const acknowledge = (actor: PlatformActor, deadLetterId: string, note: string) =>
+    ops().acknowledgeDeadLetter(actor, { deadLetterId, note });
+  const audits = (id: string) =>
+    fx.query<{
+      actor_user_id: string;
+      reason: string;
+      target_tenant_id: string | null;
+      metadata: unknown;
+      correlation_id: string;
+    }>(
+      `SELECT actor_user_id, reason, target_tenant_id, metadata, correlation_id
+         FROM ops.platform_audit_events
+        WHERE action = 'platform.dead_letter_acknowledged' AND metadata->>'deadLetterId' = $1
+        ORDER BY occurred_at, id`,
+      [id],
+    );
+
+  it('records who looked at a dead letter and their note; another administrator replaces it; each is audited', async () => {
+    const id = await letter(true);
+    const before = (await listed(id))!;
+    expect(before).toMatchObject({
+      acknowledgedAt: null,
+      acknowledgedByName: null,
+      acknowledgement: null,
+    });
+    const asha = await namedStaff('Asha Ops');
+    await acknowledge(asha, id, '  Template fixed upstream; no retry needed.  ');
+    const first = (await listed(id))!;
+    expect([first.acknowledgedByName, first.acknowledgement]).toEqual([
+      'Asha Ops',
+      'Template fixed upstream; no retry needed.',
+    ]);
+    expect(Date.now() - first.acknowledgedAt!.getTime()).toBeLessThan(60_000);
+    // Acknowledging changes nothing about the job or whether it can be retried.
+    expect([first.retriedAt, first.retryBlock]).toEqual([null, before.retryBlock]);
+
+    const ravi = await namedStaff('Ravi Ops');
+    await acknowledge(ravi, id, 'The company resubmitted it themselves.');
+    expect(await listed(id)).toMatchObject({
+      acknowledgedByName: 'Ravi Ops',
+      acknowledgement: 'The company resubmitted it themselves.',
+    });
+    const audited = await audits(id);
+    expect(audited.map((a) => [a.actor_user_id, a.reason, a.correlation_id])).toEqual([
+      [asha.userId, 'Template fixed upstream; no retry needed.', asha.correlationId],
+      [ravi.userId, 'The company resubmitted it themselves.', ravi.correlationId],
+    ]);
+    expect(audited[0]!.target_tenant_id).toBe(company.tenant.id);
+    expect(audited[0]!.metadata).toEqual({ deadLetterId: id, queue: 'template.submit' });
+
+    // The Queues tab's CSV gives when, never who or the note.
+    const file = await ops().exportList(staff, 'dead-letters', 30);
+    const line = file.body.split('\r\n').find((l) => l.includes(id))!;
+    expect(line).toMatch(/,\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
+    for (const left of ['Ravi', 'Asha', 'resubmitted', 'upstream']) {
+      expect(file.body).not.toContain(left);
+    }
+  });
+
+  it('names a company in the audit only through a verified signature, and refuses unknown dead letters, bad notes and anyone who is not an administrator', async () => {
+    // A job whose signature did not verify: its company id is not trusted, so none is named.
+    const unverified = await letter(false);
+    await acknowledge(staff, unverified, 'Forged or stale envelope; nothing to retry.');
+    expect((await audits(unverified))[0]!.target_tenant_id).toBeNull();
+    const platformJob = await letter(true, null);
+    await acknowledge(staff, platformJob, 'Platform job; Meta was down for an hour.');
+    expect((await audits(platformJob))[0]!.target_tenant_id).toBeNull();
+
+    const id = await letter(true);
+    await expectCode(acknowledge(staff, uuidv7(), 'Looking into this dead letter.'), 'not_found');
+    await expectCode(acknowledge(staff, id, 'Too short'), 'validation_failed');
+    await expectCode(acknowledge(staff, id, '      Too short      '), 'validation_failed');
+    await expectCode(acknowledge(staff, id, 'x'.repeat(501)), 'validation_failed');
+    await expectCode(
+      acknowledge(staff, 'not-a-uuid', 'Looking into this dead letter.'),
+      'validation_failed',
+    );
+    // The function checks the note itself too, whatever calls it, and trims it.
+    const direct = (deadLetterId: string, note: string) =>
+      fx.dbs.platform.run(staff.userId, (tx) =>
+        tx.execute(
+          sql`select ops.platform_acknowledge_dead_letter(${deadLetterId}::uuid, ${note}, 'c')`,
+        ),
+      );
+    await expectCode(direct(id, '   short   '), 'precondition_failed');
+    await expectCode(direct(id, 'x'.repeat(501)), 'precondition_failed');
+    await expectCode(direct(uuidv7(), 'Looking into this dead letter.'), 'not_found');
+    await direct(id, '   Noted straight in SQL.   ');
+    expect((await listed(id))?.acknowledgement).toBe('Noted straight in SQL.');
+    const outsider = await createUser(fx.dbs, { twoFactor: true });
+    const asOutsider = {
+      userId: outsider.id,
+      role: 'platform_operator' as const,
+      correlationId: uuidv7(),
+    };
+    await expectCode(acknowledge(asOutsider, id, 'Looking into this dead letter.'), 'forbidden');
+    expect((await listed(id))?.acknowledgement).toBe('Noted straight in SQL.');
+  });
+
+  it('keeps the writing to the definer function and the acknowledging to platform staff', async () => {
+    const id = await letter(true);
+    // The console reads the columns; neither runtime role writes them.
+    for (const pool of [fx.dbs.appPool, fx.dbs.platformPool]) {
+      await expect(
+        pool.query(
+          `UPDATE ops.dead_letters SET acknowledged_at = now(), acknowledgement = 'Changed by hand here.' WHERE id = $1`,
+          [id],
+        ),
+      ).rejects.toThrow(/permission denied for table/);
+    }
+    await expect(
+      fx.dbs.appPool.query(
+        `SELECT ops.platform_acknowledge_dead_letter($1::uuid, 'Looking into this dead letter.', 'c')`,
+        [id],
+      ),
+    ).rejects.toThrow(/permission denied for function/);
+    const [fn] = await fx.query<{ owner: string; definer: boolean; config: unknown }>(
+      `SELECT pg_get_userbyid(p.proowner) AS owner, p.prosecdef AS definer, p.proconfig AS config
+         FROM pg_proc p
+        WHERE p.oid = 'ops.platform_acknowledge_dead_letter(uuid,text,text)'::regprocedure`,
+    );
+    expect(fn).toEqual({
+      owner: 'w360_definer',
+      definer: true,
+      config: ['search_path=pg_catalog, pg_temp'],
+    });
+    // A note, its author and its time go together, and a note keeps to its length.
+    await expect(
+      fx.query(`UPDATE ops.dead_letters SET acknowledged_at = now() WHERE id = $1`, [id]),
+    ).rejects.toThrow(/dead_letters_acknowledged/);
+    await expect(
+      fx.query(
+        `UPDATE ops.dead_letters SET acknowledged_at = now(), acknowledged_by_user_id = $2,
+                acknowledgement = 'short' WHERE id = $1`,
+        [id, staff.userId],
+      ),
+    ).rejects.toThrow(/dead_letters_acknowledged/);
+  });
+});
+
 describe('exports of the onboarding, integrations and queues lists (ADR-158)', () => {
   const MINUTE = '\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}';
   const csvLines = (body: string) => body.replace(/^\uFEFF/, '').split('\r\n');

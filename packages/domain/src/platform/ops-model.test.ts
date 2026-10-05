@@ -703,7 +703,7 @@ describe('the onboarding, integrations and queues lists as CSV (ADR-158)', () =>
     ]);
   });
 
-  it('writes dead letters with what became of each job, and never who retried it', () => {
+  it('writes dead letters with what became of each job and when one was acknowledged, never who retried or acknowledged it or the note', () => {
     const letter: DeadLetterLine = {
       id: 'd1',
       sourceQueue: 'template.submit',
@@ -724,12 +724,18 @@ describe('the onboarding, integrations and queues lists as CSV (ADR-158)', () =>
       retryable: false,
       retryableUntil: at('2026-10-08T03:00:00Z'),
       retryBlock: 'retried',
+      acknowledgedAt: at('2026-10-05T05:00:00Z'),
+      acknowledgedByName: 'Ravi Ops',
+      acknowledgement: 'Template fixed upstream; the retry went through.',
     };
     const fresh = {
       ...letter,
       retriedAt: null,
       retriedByName: null,
       alertedAt: null,
+      acknowledgedAt: null,
+      acknowledgedByName: null,
+      acknowledgement: null,
     };
     const csv = deadLettersCsv([
       letter,
@@ -771,16 +777,18 @@ describe('the onboarding, integrations and queues lists as CSV (ADR-158)', () =>
     ]);
     expect(lines(csv)).toEqual([
       DEAD_LETTERS_CSV_COLUMNS.join(','),
-      '2026-10-05 03:00,d1,template.submit,Yes,Acme,acme,tpl-1,AppError,provider_rejected,5,2026-10-05 03:10,2026-10-05 04:00,,Retried,',
-      '2026-10-05 03:00,d2,template.submit,Yes,Acme,acme,tpl-1,AppError,provider_rejected,5,,,2026-10-05 03:01,"Work ended for its company, which can start it again",',
-      '2026-10-05 03:00,d3,template.submit,Yes,Acme,acme,tpl-1,AppError,provider_rejected,5,,,2026-10-05 03:01,Nothing left to end: the work had finished or was started again,',
-      '2026-10-05 03:00,d4,template.submit,Yes,Acme,acme,tpl-1,AppError,provider_rejected,5,,,,Can be retried,2026-10-06 03:00',
-      '2026-10-05 03:00,d5,template.submit,No,,,,,,,,,,"Its signature did not verify, so the worker would refuse it again",',
+      '2026-10-05 03:00,d1,template.submit,Yes,Acme,acme,tpl-1,AppError,provider_rejected,5,2026-10-05 03:10,2026-10-05 04:00,,Retried,,2026-10-05 05:00',
+      '2026-10-05 03:00,d2,template.submit,Yes,Acme,acme,tpl-1,AppError,provider_rejected,5,,,2026-10-05 03:01,"Work ended for its company, which can start it again",,',
+      '2026-10-05 03:00,d3,template.submit,Yes,Acme,acme,tpl-1,AppError,provider_rejected,5,,,2026-10-05 03:01,Nothing left to end: the work had finished or was started again,,',
+      '2026-10-05 03:00,d4,template.submit,Yes,Acme,acme,tpl-1,AppError,provider_rejected,5,,,,Can be retried,2026-10-06 03:00,',
+      '2026-10-05 03:00,d5,template.submit,No,,,,,,,,,,"Its signature did not verify, so the worker would refuse it again",,',
       // A platform job without a company, and nothing the console says about its retry.
-      '2026-10-05 03:00,d6,template.submit,Yes,,,tpl-1,AppError,provider_rejected,5,,,,,',
+      '2026-10-05 03:00,d6,template.submit,Yes,,,tpl-1,AppError,provider_rejected,5,,,,,,',
       '',
     ]);
-    expect(csv).not.toContain('Priya');
+    for (const left of ['Priya', 'Ravi', 'Template fixed upstream']) {
+      expect(csv).not.toContain(left);
+    }
   });
 
   it('heads each file with its columns, one for each value of a line', () => {
@@ -809,7 +817,7 @@ describe('the onboarding, integrations and queues lists as CSV (ADR-158)', () =>
         'Staff emailed (UTC),Waits checked (UTC),Dead letters (24 hours),Dead letters (7 days)',
       'Failed (UTC),Dead letter,Queue,Signature verified,Company,Address,Reference,Error,' +
         'Error code,Retries,Staff emailed (UTC),Retried (UTC),Work settled (UTC),Retry,' +
-        'Can be retried until (UTC)',
+        'Can be retried until (UTC),Acknowledged (UTC)',
     ]);
   });
 

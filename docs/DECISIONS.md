@@ -6711,3 +6711,39 @@ Decision:
 Not built: asking for payment or cancelling a Payment Link through the API, refunds, changing many
 orders in one call, a reason or note with the change, `order.status_changed` naming who changed the
 order, and store orders.
+
+## ADR-169 Acknowledging dead letters on the operations console (P5-10) (2026-10-05)
+
+Context: every platform administrator is emailed about each dead letter (ADR-091), and Operations →
+Queues lists the latest 100 with a Retry for the jobs that can be sent back once (ADR-108). Many
+need no retry: the work is obsolete, the company started it again, or the sweep ended it for the
+company (ADR-111). Nothing on the tab said that someone had already looked at a dead letter or what
+they found, so every administrator who read the email opened the same rows. ADR-141 left
+acknowledging the console's other lists unbuilt.
+
+Decision:
+
+- **Acknowledged with a note:** on Recent dead letters, a platform administrator acknowledges a dead
+  letter with a note of 10 to 500 characters (what was found or done), retried or not. The row shows
+  who acknowledged it, when, and the note; another administrator may acknowledge it again, replacing
+  the note. The platform audit log keeps each (`platform.dead_letter_acknowledged`, the note as its
+  reason, the dead letter and its queue in the metadata, and the company only when the job's
+  signature verified and the company still exists, as the console names it, ADR-054).
+- **Kept with the dead letter:** the time, the administrator and the note are columns of
+  `ops.dead_letters` (migration 0117), set together or not at all, so an acknowledgement lasts as
+  long as its dead letter: 30 days after the job failed (ADR-054's purge). A later failure of the
+  same work has a dead letter of its own and starts unacknowledged. Unlike a failing integration
+  (ADR-141), a dead letter does not recover, so nothing forgets an acknowledgement sooner.
+- **Where it is enforced:** `ops.platform_acknowledge_dead_letter` (SECURITY DEFINER, executable by
+  the platform role only) checks the administrator, the note (trimmed) and the dead letter, then
+  writes the columns and the audit entry in one transaction. Only the definer role writes the
+  columns; the platform role reads them with the rest of the row, as the console already read dead
+  letters. The company never sees them.
+- **Nothing else changes:** acknowledging neither retries the job nor changes whether it can be
+  retried, and the alert email (ADR-091) still tells each dead letter once, before anyone could
+  acknowledge it.
+- **The CSV** of Recent dead letters (ADR-158) gains "Acknowledged (UTC)": when, never who or the
+  note, as for failures.
+
+Not built: acknowledging receipts, quarantine entries and late queues; assigning a dead letter to
+someone; filtering the list by acknowledgement; deleting a note (a new acknowledgement replaces it).

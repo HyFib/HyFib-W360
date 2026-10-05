@@ -1584,6 +1584,12 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   subject and state) and writes the platform audit entry in one transaction; the console's list
   returns each failure's acknowledgement. `ops.integration_alerts_due` keeps acknowledgements of
   listed failures and forgets the others after an hour, as it does the alert marks.
+- **Acknowledging dead letters** (ADR-169, migration 0117): `acknowledged_at`,
+  `acknowledged_by_user_id` and `acknowledgement` on `ops.dead_letters`, set together (the check
+  `dead_letters_acknowledged`) and written only by `ops.platform_acknowledge_dead_letter` (definer,
+  platform role only) with the platform audit entry in one transaction. The Queues tab's read
+  (`recentDeadLetters`) joins the administrator's name through `acknowledgers`, an alias of
+  `auth.users` beside the one for who retried; the CSV writes the time only.
 - **Web:** `/platform/ops` (Overview, Onboarding, Integrations, Queues, Signals, Usage over 7, 30 or
   90 days) and a health card on each company's platform page. Every page re-checks the platform
   actor. The functions read every company on each view, which suits the test envelope; paging and

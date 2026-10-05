@@ -2,6 +2,7 @@
 import { useState } from 'react';
 import { Button, Field, Textarea } from '@w360/ui';
 import {
+  acknowledgeDeadLetterAction,
   acknowledgeIntegrationFailureAction,
   resolveQuarantineAction,
   retryDeadLetterAction,
@@ -135,6 +136,60 @@ export function ResolveQuarantineForm({ quarantineId }: { quarantineId: string }
         <div>
           <Button type="submit" size="sm" disabled={busy || resolution.trim().length < 10}>
             {busy ? 'Saving…' : 'Mark resolved'}
+          </Button>
+        </div>
+      </ClientForm>
+    </details>
+  );
+}
+
+/**
+ * Acknowledges a dead letter with a note, or replaces the note (audited, ADR-169): the other
+ * administrators see that someone looked at it, and what they found.
+ */
+export function AcknowledgeDeadLetterForm({
+  deadLetterId,
+  acknowledged,
+}: {
+  deadLetterId: string;
+  acknowledged: boolean;
+}) {
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    const result = await acknowledgeDeadLetterAction({ deadLetterId, note });
+    setBusy(false);
+    if (!result.ok) setError(result.message);
+    else setNote('');
+  }
+  const id = `acknowledge-dead-letter-${deadLetterId}`;
+  return (
+    <details className="group">
+      <summary className="cursor-pointer text-sm text-primary underline-offset-4 hover:underline">
+        {acknowledged ? 'Replace the note' : 'Acknowledge'}
+      </summary>
+      <ClientForm onSubmit={submit} className="mt-2 grid w-64 max-w-full gap-2">
+        <FormError message={error} />
+        <Field id={id} label="Note (what was found or done)">
+          {(aria) => (
+            <Textarea
+              {...aria}
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              minLength={10}
+              maxLength={500}
+              rows={2}
+              required
+            />
+          )}
+        </Field>
+        <div>
+          <Button type="submit" size="sm" disabled={busy || note.trim().length < 10}>
+            {busy ? 'Saving…' : 'Acknowledge dead letter'}
           </Button>
         </div>
       </ClientForm>

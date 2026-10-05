@@ -2400,6 +2400,16 @@ Retry); a receipt queue (`webhook.process`, `billing.event-process`: retry the r
 Integrations page instead); the company is being deleted or is gone; or its work was ended for the
 company (ADR-111).
 
+**Acknowledging a dead letter (ADR-169).** The administrator who looks at a dead letter opens
+Acknowledge on its row and writes a note of 10 to 500 characters: what was found or done ("Meta's
+outage is over; retried it", "The company submitted the template again"). The row then shows who,
+when and the note, so the others need not look again; a later note replaces it, and the platform
+audit log keeps each (`platform.dead_letter_acknowledged`). An acknowledgement lasts as long as the
+dead letter (30 days after its job failed); a later failure of the same work is a new,
+unacknowledged dead letter. Acknowledging neither retries the job nor changes whether it can be
+retried, and does not stop the alert email, which tells each dead letter once anyway. "Dead letter
+not found." means it was purged since the page loaded.
+
 **A dead letter of those three queues stays unsettled.** The sweep leaves one alone while its
 company is being deleted, while a job for the same work waits or runs (the company started it again,
 or a retry), and when its envelope did not verify. Otherwise look for `ending stranded work failed;
@@ -2554,6 +2564,13 @@ denied for table job", run the migrations again. Workers of the previous release
 web servers of the previous release offer Retry on a settled dead letter, which the function
 refuses. The new retry settings of `template.delete` and `commerce.account` apply to jobs queued
 after the runner updated the queues.
+
+**Migration 0117 failed.** It adds `acknowledged_at`, `acknowledged_by_user_id` and
+`acknowledgement` to `ops.dead_letters` (with the check `dead_letters_acknowledged`) and creates
+`ops.platform_acknowledge_dead_letter`, in one transaction; a failure rolls it all back (usually the
+bootstrap roles: fix them and run the migrations again). Web servers of this release need it before
+they start, or the Queues tab fails to load; web servers and workers of the previous release work
+with it.
 
 **Migration 0072 failed.** It creates `ops.queue_waits`, adds `queues` to the kinds of
 `ops.platform_alerts` (replacing its check `platform_alerts_kind_check`) and creates

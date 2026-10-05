@@ -1,5 +1,55 @@
 # Progress
 
+## 2026-10-05 — Phase 5: acknowledging dead letters on the operations console (P5-10, ADR-169)
+
+Status: **Implemented; its database tests run in CI only (test data only).** Administrators could
+retry a dead letter but not say that they had looked at one. The local PostgreSQL is unavailable
+(its Docker daemon stopped), so migration 0117, the integration tests and the e2e step below were
+written but not run here.
+
+### Completed
+
+- **Design (ADR-169):** a note of 10 to 500 characters on a dead letter, retried or not, shown with
+  who and when, replaced by a later note, audited; kept with the dead letter for its 30 days; the
+  CSV gives the time only.
+- **Database:** migration 0117 (three columns and a check on `ops.dead_letters`,
+  `ops.platform_acknowledge_dead_letter`); the schema's columns (`packages/db`).
+- **Domain:** `acknowledgeDeadLetter` in the ops service; the Queues tab's read with the
+  acknowledgement; "Acknowledged (UTC)" in the dead letters' CSV (`platform/ops-model.ts`).
+- **Web:** the Acknowledged column of Recent dead letters, with the form and the action.
+- **Tests:**
+  - Unit (3 new in `dead-letter-acknowledgements.test.ts`, 2 changed in `ops-model.test.ts`):
+    refusals before any query, the definer call with the trimmed note and the correlation id, the
+    CSV column, never who or the note.
+  - Integration (3 new in `platform-ops.test.ts`, 1 changed in `tenant-isolation.test.ts`): who and
+    the note listed, replaced and audited, the company only through a verified signature; refusals;
+    the grants, the function and the check. Written for CI; not run here.
+  - E2E (`dead-letter-retry.spec.ts` extended): an administrator acknowledges the retried dead
+    letter and the audit log shows it. Written for CI; not run here.
+- **Docs:** ADR-169; SECURITY; ARCHITECTURE; THREAT-MODEL T164; DEPLOYMENT and RUNBOOKS (migration
+  0117, acknowledging); DATA-RETENTION; BACKLOG P5-10; feature matrix H-034.
+- **Mutation checks:** 12 tried, all caught on the unit-tested parts (any id, short or long notes,
+  the note untrimmed, the input unchecked, no correlation id, another function, another user, the
+  CSV column missing, another time, who or the note written). The function, the grants, the check
+  and the list need the database, so their regressions are left to the integration and e2e tests,
+  which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 759 passed (78 files; 3 new)                                    |
+| `pnpm test:integration`, e2e, migration 0117       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 12 tried, all caught on the unit-tested parts                   |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- Acknowledging receipts, quarantine entries and late queues; assigning; filtering by
+  acknowledgement.
+
 ## 2026-10-05 — Phase 5: confirming, fulfilling and cancelling WhatsApp orders through the API (P5-08, ADR-168)
 
 Status: **Implemented; its database tests run in CI only (test data only).** Order systems read

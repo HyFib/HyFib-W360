@@ -745,6 +745,10 @@ export interface DeadLetterLine {
   retryable: boolean;
   retryableUntil: Date | null;
   retryBlock: DeadLetterRetryBlock | null;
+  /** When an administrator acknowledged it (ADR-169); who and the note stay in the console. */
+  acknowledgedAt: Date | null;
+  acknowledgedByName: string | null;
+  acknowledgement: string | null;
 }
 
 /*
@@ -987,6 +991,7 @@ export const DEAD_LETTERS_CSV_COLUMNS = [
   'Work settled (UTC)',
   'Retry',
   'Can be retried until (UTC)',
+  'Acknowledged (UTC)',
 ] as const;
 
 /** What became of a dead letter's job, or whether it can be retried, as the Queues tab says. */
@@ -1021,6 +1026,7 @@ export function deadLettersCsv(rows: readonly DeadLetterLine[]): string {
       csvMinute(d.settledAt),
       deadLetterRetry(d),
       d.retryable ? csvMinute(d.retryableUntil) : null,
+      csvMinute(d.acknowledgedAt),
     ]),
   );
 }

@@ -41,7 +41,7 @@ async function companyId(slug: string): Promise<string> {
   }
 }
 
-test('platform staff send a dead-lettered job back to its queue once, with a reason', async ({
+test('platform staff send a dead-lettered job back to its queue once, with a reason, and acknowledge it', async ({
   page,
 }) => {
   test.setTimeout(240_000);
@@ -96,6 +96,17 @@ test('platform staff send a dead-lettered job back to its queue once, with a rea
     await expect(row.getByText('Retry', { exact: true })).toHaveCount(0);
     await expectNoHorizontalOverflow(page);
 
+    // Acknowledged with a note for the other administrators (ADR-169): who, when and what.
+    await row.getByText('Acknowledge', { exact: true }).click();
+    await row
+      .getByLabel('Note (what was found or done)')
+      .fill('Meta confirmed the outage is over; watching the retry.');
+    await row.getByRole('button', { name: 'Acknowledge dead letter' }).click();
+    await expect(row).toContainText('By Rita Retry');
+    await expect(row).toContainText('Meta confirmed the outage is over; watching the retry.');
+    await expect(row.getByText('Replace the note', { exact: true })).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+
     // pg-boss's own retry: waiting again, with one more attempt allowed.
     const [job] = await asOwner<{ state: string; retry_limit: number; completed_on: Date | null }>(
       `SELECT state::text AS state, retry_limit, completed_on FROM pgboss.job WHERE id = $1`,
@@ -106,6 +117,7 @@ test('platform staff send a dead-lettered job back to its queue once, with a rea
     // In the platform audit log.
     await page.goto('/platform');
     await expect(page.getByText('platform.dead_letter_retried').first()).toBeVisible();
+    await expect(page.getByText('platform.dead_letter_acknowledged').first()).toBeVisible();
 
     // The company's template deletion that ran out of retries: the worker's minute sweep ends
     // such work for the company (ADR-111). This template is gone, so nothing is left to end. A

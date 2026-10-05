@@ -211,6 +211,10 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    answers Settings → API keys with an error for a company with a key holding it (and the platform
    plan pages for a plan version including it), and `PATCH /api/v1/orders/{id}` with 405 (404 on an
    image from before 0115); rolling web servers back to an image from before it does the same.
+   Migration 0117 (ADR-169) adds three nullable columns and a check to `ops.dead_letters` (a brief
+   lock on a table of at most 30 days of dead letters) and the acknowledging function. Web servers
+   from before it neither show nor write acknowledgements, and their Queues CSV has no "Acknowledged
+   (UTC)" column; web servers of this release need it, or the Queues tab fails to load.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
