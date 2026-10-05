@@ -1,5 +1,56 @@
 # Progress
 
+## 2026-10-05 — Phase 5: resuming through the public API the campaigns keys paused (P5-08, ADR-176)
+
+Status: **Implemented; its database and browser tests run in CI only (Graph stand-in only).** A key
+paused campaigns, but only members resumed them. The local PostgreSQL is unavailable (its Docker
+daemon stopped), so migration 0124, the integration tests and the e2e steps below were written but
+not run here.
+
+### Completed
+
+- **Design (ADR-176):** `campaigns.resume`, granted with `campaigns.send`; only a pause with the
+  reason `api` is lifted, after members' checks; the campaign keeps the member who launched it, who
+  must still be allowed to send campaigns.
+- **Database:** migration 0124 (the key and plan scope checks with 17 scopes).
+- **Domain:** `apiResumeCampaign` (`api/campaigns.ts`); `resumeLockedCampaign` and
+  `campaignLauncherStanding` (`campaigns/service.ts`), shared with members' resume and the runner;
+  the scope in the API model and the database's scope list; the OpenAPI path, the 409 wording and
+  the overview.
+- **Web:** `POST /api/v1/campaigns/{id}/resume`; Settings → API keys and the platform plan pages
+  offer the scope from the shared list.
+- **Tests:**
+  - Unit (3 new and 3 changed in `api.test.ts`): the scope, the refusals before anything is read and
+    the OpenAPI entry.
+  - Integration (2 new in `api-campaigns.test.ts`): the resume and what it records, and each
+    refusal. Written for CI; not run here.
+  - E2E (`campaigns.spec.ts` extended): a key resumes what another key paused, and the history names
+    it. Written for CI; not run here.
+- **Docs:** ADR-176 (and ADR-128's "Not built" annotated); SECURITY; ARCHITECTURE; THREAT-MODEL T171
+  (and T141); DEPLOYMENT and RUNBOOKS (migration 0124, a campaign resumed through the API); BACKLOG
+  P5-08; feature matrix H-033 and W-134.
+- **Mutation checks:** 14 deliberate regressions tried, all caught on the unit-tested parts (the
+  scope's permission, writing, place and words, the stopping scope's words, the scope checked, a bad
+  id read, the route, the 412, the refused pauses, the overview, the 409, the pause's words and the
+  operation id). The pause reason and launcher checks, the shared resume and the runner need the
+  database, so their regressions are left to the integration and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 802 passed (80 files)                                                |
+| `pnpm test:integration`, e2e, migration 0124       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 14 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Resuming what members or HyFib paused through the API; a key as a campaign's launcher; raising
+  caps, approving, scheduling, creating or editing campaigns through the API.
+
 ## 2026-10-05 — Phase 5: choosing the templates whose message statuses and changes a webhook endpoint receives (P5-09, ADR-175)
 
 Status: **Implemented; its database and browser tests run in CI only (test receivers only).** Every

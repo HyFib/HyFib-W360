@@ -21,6 +21,7 @@ export const API_SCOPE_KEYS = [
   'conversations.write',
   'campaigns.read',
   'campaigns.stop',
+  'campaigns.resume',
   'automations.start',
   'orders.read',
   'orders.write',
@@ -113,7 +114,14 @@ export const API_SCOPE_INFO: Record<
   'campaigns.stop': {
     label: 'Pause and cancel campaigns',
     description:
-      "Pause a scheduled or sending campaign and cancel one that has not finished, as members who send campaigns can. Resuming, approving, scheduling and editing stay in the app, under a member's authority.",
+      "Pause a scheduled or sending campaign and cancel one that has not finished, as members who send campaigns can. Approving, scheduling and editing stay in the app, under a member's authority, and so does resuming, except a campaign a key paused.",
+    permission: 'campaigns.send',
+    writes: true,
+  },
+  'campaigns.resume': {
+    label: 'Resume campaigns keys paused',
+    description:
+      'Resume a campaign a key paused, after the checks members’ resuming makes: the template still approved, the number active, neither cap reached. It sends again under the authority of the member who launched it, who must still be allowed to send campaigns. A campaign a member or HyFib paused stays for members to resume in the app.',
     permission: 'campaigns.send',
     writes: true,
   },

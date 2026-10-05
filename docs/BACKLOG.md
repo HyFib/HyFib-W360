@@ -602,12 +602,18 @@ verification, app review, Embedded Signup configuration).
   with the new `channels.read` scope, granted with the permission of the same name: every number of
   the company oldest first on exact pages, filtered by status, with its number, verified name and
   status and the id the rest of the API names it by, never Meta's ids; migration 0119).
+  **[Resuming the campaigns keys paused built; its database tests run only in CI]** (ADR-176:
+  `POST /campaigns/{id}/resume` with the new `campaigns.resume` scope, granted with
+  `campaigns.send`: a campaign a key paused runs again after members' checks, under the
+  authority of the member who launched it, who must still be allowed to send campaigns; what
+  members or HyFib paused stays with members; migration 0124).
   Remaining: media messages, call-to-action messages through the API, taking reactions back,
   media downloads, a contact card's contacts (Meta's
   contact object is not confirmed), changing a field's type, changing
   numbers,
   which fields of a contact changed in the contact feed (webhooks name them since ADR-121),
-  resuming, approving, scheduling, creating and editing campaigns through the API, campaign
+  resuming what members or HyFib paused, approving, scheduling, creating and editing campaigns
+  through the API, campaign
   recipients through webhooks, limits per endpoint, availability per single endpoint (plans choose
   per scope since ADR-092). The one-argument key lookup kept for rolling deploys (0051) is dropped
   (0074). Replaying many deliveries in one call is built with P5-09 (ADR-095).

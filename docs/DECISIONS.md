@@ -4941,9 +4941,10 @@ Decision:
 - **Migration 0100** replaces the key and plan scope checks with the 13 scopes (as 0099 did) and the
   campaigns' pause reason check with `api` added; existing rows already satisfy them.
 
-Not built: resuming, approving, scheduling, creating or editing campaigns through the API,
-cancelling drafts, stopping many campaigns in one call, a reason or note given with the call, and
-`campaign.status_changed` naming who cancelled a campaign.
+Not built: resuming (built by ADR-176 for the campaigns keys paused), approving, scheduling,
+creating or editing campaigns through the API, cancelling drafts, stopping many campaigns in one
+call, a reason or note given with the call, and `campaign.status_changed` naming who cancelled a
+campaign.
 
 ## ADR-129 Database errors without the data they quote (SEC-11) (2026-10-03)
 
@@ -7057,3 +7058,54 @@ Decision:
 
 Not built: filters by a template's category or language, by campaign or automation (a list names
 templates, not who sent them), and templates chosen per event type (one list serves both events).
+
+## ADR-176 Resuming through the public API the campaigns keys paused (P5-08) (2026-10-05)
+
+Context: since ADR-128 a key pauses a campaign, for example when a product sells out or a price
+changes, but only members resume it: an integration that paused a campaign for stock had someone
+resume it by hand once the stock was back. ADR-128 kept resuming with members because a resumed
+campaign sends under the authority of the member who resumed it (`launched_by_user_id`, which the
+runner checks before each batch), and a key is not a member.
+
+Decision:
+
+- **A new writing scope, `campaigns.resume`** ("Resume campaigns keys paused"), granted only by
+  members holding `campaigns.send`, the permission members resume campaigns with. Existing keys gain
+  nothing, and `campaigns.stop` does not resume. A plan version that chose its scopes (ADR-092)
+  leaves it out until a new version includes it; one with every scope (`NULL`) includes it. As a
+  writing scope it is refused while the company is suspended or restricted (423, ADR-052).
+- **Only what keys paused:** `POST /campaigns/{id}/resume`, without a body, resumes a campaign whose
+  pause reason is `api`. A campaign a member paused (`manual`), or HyFib paused (a cap reached, the
+  template no longer approved, the number inactive, the launcher gone or no longer permitted, no
+  rate card), is refused with 409 naming its `pauseReason`: members decided that pause, or fix its
+  cause, in the app. A scheduled or running campaign is answered as it is, so a retry changes
+  nothing; a draft, one waiting for approval, a completed or a cancelled one is refused with 409
+  naming its status.
+- **Under the launcher's authority:** the key lifts the pause and nothing else. The campaign keeps
+  `launched_by_user_id`, so it sends under the authority of the member who launched it, as before
+  the pause, and the runner keeps checking that member before each batch. The resume is refused
+  (412) while that member has left or can no longer send campaigns, which the runner would answer
+  with a pause of its own; a member who can resumes it in the app, under their own authority.
+- **Members' checks:** the template still approved by Meta, the number active, neither cap reached
+  (counted again first) and a rate card for a spending cap's currency, each refused with 412 as
+  members are refused. A campaign that started runs again at once; one that never started waits for
+  its scheduled time, or starts at once if that has passed. Its recipients waiting since the pause
+  are queued again as it runs.
+- **One implementation:** members' resume and the API's call `resumeLockedCampaign`
+  (`campaigns/service.ts`) once the campaign row is locked; a member's resume puts the campaign
+  under the resuming member's authority as before, and a key's leaves it. The runner's launcher
+  check and the key's share `campaignLauncherStanding`. Members' resume no longer checks
+  `campaigns.send` a second time for marketing templates after asserting it first (that check could
+  not fail).
+- **Who did it:** the `resumed` event names no member and carries the key's id in its detail
+  (`apiKeyId`), and members' history names the key ("Resumed through the API, key “name”"); the
+  audit row `campaign.resumed` is the key's (`api_key`), with the request's id and `source` `api`;
+  `campaign.status_changed` fires from the status trigger as for members.
+- **The answer** is the campaign as `GET /campaigns/{id}` describes it, without `results`. No
+  idempotency key: the call answers the state the campaign is in, so repeating it changes nothing.
+- **Migration 0124** replaces the key and plan scope checks with the 17 scopes (as 0119 did);
+  existing rows already satisfy them.
+
+Not built: resuming through the API what members or HyFib paused, a key as a campaign's launcher,
+raising caps, approving, scheduling, creating or editing campaigns through the API, and resuming
+many campaigns in one call.

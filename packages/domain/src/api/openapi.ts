@@ -663,7 +663,7 @@ const errors = (...statuses: number[]) =>
             401: 'No valid API key: missing, unknown, revoked or expired.',
             403: "The key lacks the scope this needs, the company's plan does not include the API, the scope this needs, automations when starting one or Commerce when sending products or reading or changing orders (reason not_in_plan), or the key, or its company for all its keys, does not accept requests from the client's address (reason ip_not_allowed).",
             404: 'Not found in the company.',
-            409: 'The request conflicts with the current state. Starting an automation: another automation handles the conversation (reason automation_busy), a member is assigned to it (conversation_assigned), or it had as many runs in the last hour as allowed (automation_limit). Pausing or cancelling a campaign: its status does not allow it, and the message names the status.',
+            409: 'The request conflicts with the current state. Starting an automation: another automation handles the conversation (reason automation_busy), a member is assigned to it (conversation_assigned), or it had as many runs in the last hour as allowed (automation_limit). Pausing, resuming or cancelling a campaign: its status does not allow it, or, resuming, a member or HyFib paused it; the message names the status or the pause reason.',
             412: "A condition for sending or saving is not met (consent, suppression, state). With reason window_closed, the number has not written to the WhatsApp number in the last 24 hours, so only templates can be sent to it. Starting an automation: it is not published, archived or not started through the API (automation_unavailable), paused (automation_paused), its number is not active (channel_unavailable), or the plan's automation runs for the month are used up (automation_quota).",
             415: 'The body must be JSON (Content-Type: application/json).',
             422: 'The request body or parameters are invalid.',
@@ -736,7 +736,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       title: 'HyFib W360 API',
       version: '1.0.0',
       description: [
-        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations, their messages (one conversation or all of them) and their notes, resolve, reopen and assign conversations or move them between teams, manage contacts and consent, read campaigns, their results and their recipients, pause and cancel campaigns, list your WhatsApp numbers, and read message status for your company.',
+        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations, their messages (one conversation or all of them) and their notes, resolve, reopen and assign conversations or move them between teams, manage contacts and consent, read campaigns, their results and their recipients, pause and cancel campaigns and resume the ones you paused, list your WhatsApp numbers, and read message status for your company.',
         '',
         'Authenticate with `Authorization: Bearer <API key>`; keys are created in Settings → API keys and belong to the company. A key, and the company for all its keys, can be limited to the addresses its systems call from: a request from any other address is refused with 403 (reason `ip_not_allowed`).',
         `Scopes: ${API_SCOPE_KEYS.map((s) => `\`${s}\` (${API_SCOPE_INFO[s].label.toLowerCase()})`).join(', ')}. A company's plan may include only some of them: a request that needs a scope the plan leaves out is refused with 403 (reason \`not_in_plan\`), whatever scopes its key has.`,
@@ -1427,7 +1427,7 @@ export function buildOpenApiDocument(serverUrl: string) {
           operationId: 'pauseCampaign',
           summary: 'Pause a campaign',
           description: [
-            `${scopeNote('campaigns.stop')} Pauses a scheduled or running campaign as a member pauses it, and its \`pauseReason\` is \`api\`: messages it queued that are not yet on their way to WhatsApp are not sent, and their recipients wait again. A message already on its way cannot be recalled and ends as it ends. Members resume the campaign in the app; a key cannot.`,
+            `${scopeNote('campaigns.stop')} Pauses a scheduled or running campaign as a member pauses it, and its \`pauseReason\` is \`api\`: messages it queued that are not yet on their way to WhatsApp are not sent, and their recipients wait again. A message already on its way cannot be recalled and ends as it ends. Members resume the campaign in the app, and so can a key with \`campaigns.resume\` (POST /campaigns/{id}/resume).`,
             'A paused campaign is answered as it is, whatever paused it, so a retry is harmless. A draft, a campaign waiting for approval, a completed and a cancelled one are refused with 409, naming the status. No `Idempotency-Key` is needed. `campaign.status_changed` webhooks report the change.',
           ].join('\n\n'),
           parameters: [{ $ref: '#/components/parameters/Id' }],
@@ -1437,6 +1437,24 @@ export function buildOpenApiDocument(serverUrl: string) {
               content: json(dataOf(ref('Campaign'))),
             },
             ...errors(401, 403, 404, 409, 423, 429, 500),
+          },
+        },
+      },
+      '/campaigns/{id}/resume': {
+        post: {
+          operationId: 'resumeCampaign',
+          summary: 'Resume a campaign a key paused',
+          description: [
+            `${scopeNote('campaigns.resume')} Resumes a campaign whose \`pauseReason\` is \`api\`, after the checks members' resuming makes: the template is still approved by Meta and the number active (412 otherwise), neither the message cap nor the spending cap is reached (412: members raise them in the app), and a rate card is published for a spending cap's currency (412). It sends again, or waits for its scheduled time if it never started, under the authority of the member who launched it, who must still be allowed to send campaigns (412 otherwise: a member who can resumes it in the app). Its recipients waiting since the pause are queued again.`,
+            'A scheduled or running campaign is answered as it is, so a retry is harmless. A campaign a member or HyFib paused (any other `pauseReason`) is refused with 409, naming it: members resume it in the app. A draft, a campaign waiting for approval, a completed and a cancelled one are refused with 409, naming the status. No `Idempotency-Key` is needed. `campaign.status_changed` webhooks report the change.',
+          ].join('\n\n'),
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': {
+              description: 'The campaign, as it is now.',
+              content: json(dataOf(ref('Campaign'))),
+            },
+            ...errors(401, 403, 404, 409, 412, 423, 429, 500),
           },
         },
       },
@@ -2203,6 +2221,7 @@ export const API_ROUTES = [
   ['get', '/campaigns/{id}'],
   ['get', '/campaigns/{id}/recipients'],
   ['post', '/campaigns/{id}/pause'],
+  ['post', '/campaigns/{id}/resume'],
   ['post', '/campaigns/{id}/cancel'],
   ['get', '/automations'],
   ['post', '/automations/{id}/runs'],

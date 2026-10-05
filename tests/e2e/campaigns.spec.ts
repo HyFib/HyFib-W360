@@ -322,6 +322,37 @@ test('a campaign is drafted, reviewed, started by the worker and reported per re
     code: 'conflict',
     message: expect.stringContaining("This campaign's status is completed."),
   });
+  // A key that resumes what keys paused resumes it (ADR-176): it never started, so it is scheduled
+  // again, and the history names that key. The stopping key does not resume.
+  await page.goto(`/c/${slug}/settings/api-keys`);
+  await page.getByLabel('Name', { exact: true }).fill('Campaign resumer');
+  await page.getByRole('checkbox', { name: /Resume campaigns keys paused/ }).check();
+  await page.getByRole('button', { name: 'Create API key' }).click();
+  const resumeField = page.getByLabel('API key', { exact: true });
+  await expect(resumeField).toBeVisible();
+  const resumeAuth = { Authorization: `Bearer ${await resumeField.inputValue()}` };
+  await page.getByRole('button', { name: 'I have stored the key' }).click();
+  const stopperResumes = await request.post(`/api/v1/campaigns/${autumnId}/resume`, {
+    headers: stopAuth,
+  });
+  expect(stopperResumes.status()).toBe(403);
+  const resumed = await request.post(`/api/v1/campaigns/${autumnId}/resume`, {
+    headers: resumeAuth,
+  });
+  expect(resumed.status()).toBe(200);
+  expect(((await resumed.json()) as { data: unknown }).data).toMatchObject({
+    id: autumnId,
+    status: 'scheduled',
+    pauseReason: null,
+  });
+  await page.goto(`/c/${slug}/campaigns/${autumnId}`);
+  await expect(page.getByText('Scheduled', { exact: true }).first()).toBeVisible();
+  await expect(
+    page
+      .getByRole('listitem')
+      .filter({ hasText: 'Resumed' })
+      .filter({ hasText: 'through the API, key “Campaign resumer”' }),
+  ).toHaveCount(1);
   // Cancelled through the API, and a retry answers it as it is.
   for (let i = 0; i < 2; i += 1) {
     const canceled = await request.post(`/api/v1/campaigns/${autumnId}/cancel`, {

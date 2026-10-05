@@ -15,6 +15,7 @@ import {
   exactTimestamp,
   inArray,
   isNull,
+  memberships,
   messageTemplates,
   messagingSettings,
   rateCards,
@@ -25,9 +26,11 @@ import {
   type CampaignStatus,
   type Database,
   type SQL,
+  type TenantRole,
   type Tx,
 } from '@w360/db';
 import { assertCan, can, type TenantContext } from '../authz/context';
+import { permissionsForRoles } from '../authz/permissions';
 import { recordAudit, type RequestMeta } from '../audit';
 import {
   consentPurposeFor,
@@ -295,6 +298,114 @@ export async function pauseLockedCampaign(
     ...event.detail,
   });
   return { released: released.length };
+}
+
+/**
+ * Whether the member whose authority a campaign sends under may still send campaigns: an active
+ * member holding `campaigns.send`. The runner checks it before each batch, and a key's resume
+ * before it lifts its pause (ADR-176).
+ */
+export async function campaignLauncherStanding(
+  tx: Tx,
+  tenantId: string,
+  launchedByUserId: string | null,
+): Promise<'permitted' | 'launcher_removed' | 'launcher_not_permitted'> {
+  if (!launchedByUserId) return 'launcher_removed';
+  const [membership] = await tx
+    .select({ roles: memberships.roles })
+    .from(memberships)
+    .where(
+      and(
+        eq(memberships.tenantId, tenantId),
+        eq(memberships.userId, launchedByUserId),
+        eq(memberships.status, 'active'),
+      ),
+    );
+  if (!membership) return 'launcher_removed';
+  return permissionsForRoles(membership.roles as TenantRole[]).has('campaigns.send')
+    ? 'permitted'
+    : 'launcher_not_permitted';
+}
+
+/**
+ * Who resumes a paused campaign: a member, whose authority it then sends under, or a key (ADR-176),
+ * which only lifts its pause, so it keeps sending under the authority of the member who launched it.
+ */
+export type CampaignResumer = { userId: string } | { apiKeyId: string };
+
+/**
+ * Resumes a paused campaign whose row the caller has locked, once members' checks pass: the
+ * template still approved by Meta, the number active, neither cap reached (counted again first)
+ * and a rate card for a spending cap's currency. It runs again, or waits for its scheduled time if
+ * it never started; the event names who resumed it. Callers check the statuses and reasons they
+ * allow, and write their own audit row.
+ */
+export async function resumeLockedCampaign(
+  deps: Pick<CampaignDeps, 'jobs' | 'signer'>,
+  tx: Tx,
+  c: CampaignRow,
+  by: CampaignResumer,
+  now: Date,
+): Promise<void> {
+  const template = await loadTemplate(tx, c.tenantId, c.templateId);
+  if (!template || template.status !== 'approved')
+    throw new AppError('precondition_failed', 'The template is not approved by Meta.');
+  const channel = await loadChannel(tx, c.tenantId, c.channelAccountId);
+  if (!channel || channel.status !== 'active')
+    throw new AppError('precondition_failed', 'The WhatsApp number is not active.');
+  const [counts] = await tx
+    .update(campaigns)
+    .set(recountedCounters(c.tenantId, c.id))
+    .where(and(eq(campaigns.tenantId, c.tenantId), eq(campaigns.id, c.id)))
+    .returning({
+      queuedCount: campaigns.queuedCount,
+      spentEstimateMicros: campaigns.spentEstimateMicros,
+    });
+  const queuedCount = counts?.queuedCount ?? c.queuedCount;
+  const spentEstimateMicros = counts?.spentEstimateMicros ?? c.spentEstimateMicros;
+  if (
+    c.pauseReason === 'message_cap_reached' ||
+    (c.maxMessages !== null && queuedCount >= c.maxMessages)
+  )
+    throw new AppError(
+      'precondition_failed',
+      'The message cap is reached. Raise it before resuming.',
+    );
+  if (
+    c.pauseReason === 'budget_reached' ||
+    (c.budgetMicros !== null && spentEstimateMicros >= c.budgetMicros)
+  )
+    throw new AppError(
+      'precondition_failed',
+      'The spending cap is reached. Raise it before resuming.',
+    );
+  if (c.budgetCurrency && !(await loadRateTable(tx, c.budgetCurrency, now)))
+    throw new AppError(
+      'precondition_failed',
+      `No ${c.budgetCurrency} rate card is published, so the spending cap cannot be checked.`,
+    );
+  const status: CampaignStatus = c.startedAt ? 'running' : 'scheduled';
+  const at = c.startedAt ? now : c.scheduledAt && c.scheduledAt > now ? c.scheduledAt : now;
+  await tx
+    .update(campaigns)
+    .set({
+      status,
+      pauseReason: null,
+      pausedAt: null,
+      // A member's resume puts the campaign under their authority; a key's leaves it as it was.
+      ...('userId' in by ? { launchedByUserId: by.userId } : {}),
+      nextRunAt: at,
+      version: sql`${campaigns.version} + 1`,
+    })
+    .where(and(eq(campaigns.tenantId, c.tenantId), eq(campaigns.id, c.id)));
+  const event = stopperEvent(by);
+  await recordCampaignEvent(tx, c.tenantId, c.id, 'resumed', event.actorUserId, event.detail);
+  await signalCampaignRunner(deps, tx, {
+    tenantId: c.tenantId,
+    campaignId: c.id,
+    actorUserId: 'userId' in by ? by.userId : c.launchedByUserId,
+    at,
+  });
 }
 
 /**
@@ -1389,64 +1500,7 @@ export function createCampaignsService(deps: CampaignDeps) {
       await db.run(ctx.scope, async (tx) => {
         const c = await lockCampaign(tx, ctx.tenant.id, campaignId);
         if (c.status !== 'paused') throw new AppError('conflict', 'This campaign is not paused.');
-        const template = await loadTemplate(tx, ctx.tenant.id, c.templateId);
-        if (!template || template.status !== 'approved')
-          throw new AppError('precondition_failed', 'The template is not approved by Meta.');
-        if (template.category === 'MARKETING' && !can(ctx, 'campaigns.send'))
-          throw forbidden('Sending marketing templates needs the campaign sending permission.');
-        const channel = await loadChannel(tx, ctx.tenant.id, c.channelAccountId);
-        if (!channel || channel.status !== 'active')
-          throw new AppError('precondition_failed', 'The WhatsApp number is not active.');
-        const [counts] = await tx
-          .update(campaigns)
-          .set(recountedCounters(ctx.tenant.id, campaignId))
-          .where(and(eq(campaigns.tenantId, ctx.tenant.id), eq(campaigns.id, campaignId)))
-          .returning({
-            queuedCount: campaigns.queuedCount,
-            spentEstimateMicros: campaigns.spentEstimateMicros,
-          });
-        if (counts) Object.assign(c, counts);
-        if (
-          c.pauseReason === 'message_cap_reached' ||
-          (c.maxMessages !== null && c.queuedCount >= c.maxMessages)
-        )
-          throw new AppError(
-            'precondition_failed',
-            'The message cap is reached. Raise it before resuming.',
-          );
-        if (
-          c.pauseReason === 'budget_reached' ||
-          (c.budgetMicros !== null && c.spentEstimateMicros >= c.budgetMicros)
-        )
-          throw new AppError(
-            'precondition_failed',
-            'The spending cap is reached. Raise it before resuming.',
-          );
-        if (c.budgetCurrency && !(await loadRateTable(tx, c.budgetCurrency, now)))
-          throw new AppError(
-            'precondition_failed',
-            `No ${c.budgetCurrency} rate card is published, so the spending cap cannot be checked.`,
-          );
-        const status: CampaignStatus = c.startedAt ? 'running' : 'scheduled';
-        const at = c.startedAt ? now : c.scheduledAt && c.scheduledAt > now ? c.scheduledAt : now;
-        await tx
-          .update(campaigns)
-          .set({
-            status,
-            pauseReason: null,
-            pausedAt: null,
-            launchedByUserId: ctx.user.id,
-            nextRunAt: at,
-            version: sql`${campaigns.version} + 1`,
-          })
-          .where(and(eq(campaigns.tenantId, ctx.tenant.id), eq(campaigns.id, campaignId)));
-        await recordCampaignEvent(tx, ctx.tenant.id, campaignId, 'resumed', ctx.user.id);
-        await signalCampaignRunner(deps, tx, {
-          tenantId: ctx.tenant.id,
-          campaignId,
-          actorUserId: ctx.user.id,
-          at,
-        });
+        await resumeLockedCampaign(deps, tx, c, { userId: ctx.user.id }, now);
         await recordAudit(
           tx,
           ctx,

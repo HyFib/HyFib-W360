@@ -926,6 +926,14 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `canceled_by_user_id` null. The audit row is the key's (`recordSystemAudit` with `apiActor`), and
   `campaign.status_changed` comes from the status trigger (0065). Members' campaign history joins
   the key's name on the event's `apiKeyId`.
+- **Resuming campaigns keys paused (0124, ADR-176):** `apiResumeCampaign` (`api/campaigns.ts`,
+  `campaigns.resume`, writing) locks the campaign row, answers a scheduled or running campaign as it
+  is, refuses any status but paused and any pause reason but `api`, checks the launcher with
+  `campaignLauncherStanding` (which the runner uses before each batch too) and calls
+  `resumeLockedCampaign` (`campaigns/service.ts`), which members' resume calls too: members' checks,
+  the counters counted again, the status and next run set and the runner signalled, with the event
+  naming the key (`apiKeyId`, no member) and `launched_by_user_id` kept. The audit row is the key's,
+  and `campaign.status_changed` comes from the status trigger.
 - **Searching contacts (ADR-117):** `POST /contacts/search` (`api/contact-search.ts`) parses
   segments' conditions (`last_message` with `conversations.read` and `campaign` with
   `campaigns.read` since ADR-126, a named campaign checked to be the company's, `name` since

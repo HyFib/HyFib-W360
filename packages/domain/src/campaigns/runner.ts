@@ -11,7 +11,6 @@ import {
   conversations,
   eq,
   inArray,
-  memberships,
   messages,
   sendIntents,
   sql,
@@ -20,10 +19,8 @@ import {
   type CampaignPauseReason,
   type Database,
   type SkipReason,
-  type TenantRole,
   type TenantScope,
 } from '@w360/db';
-import { permissionsForRoles } from '../authz/permissions';
 import { recordSystemAudit } from '../audit';
 import { consentPurposeFor, loadMessagingSettings } from '../consent/service';
 import { phoneFromWaId, waRecipientFromPhone } from '../contacts/phone';
@@ -36,6 +33,7 @@ import { loadRateTable, marketFor, priceFor, rateCategoryFor } from './costs';
 import { parseTimeOfDay, sendingWindow } from './schedule';
 import {
   CAMPAIGN_TICK_MS,
+  campaignLauncherStanding,
   loadCampaignSettings,
   recordCampaignEvent,
   recountedCounters,
@@ -210,20 +208,8 @@ export async function runCampaignTick(
     }
 
     // The member whose authority the sends use must still be allowed to send campaigns.
-    if (!c.launchedByUserId) return pause('launcher_removed');
-    const [membership] = await tx
-      .select({ roles: memberships.roles })
-      .from(memberships)
-      .where(
-        and(
-          eq(memberships.tenantId, tenantId),
-          eq(memberships.userId, c.launchedByUserId),
-          eq(memberships.status, 'active'),
-        ),
-      );
-    if (!membership) return pause('launcher_removed');
-    if (!permissionsForRoles(membership.roles as TenantRole[]).has('campaigns.send'))
-      return pause('launcher_not_permitted');
+    const standing = await campaignLauncherStanding(tx, tenantId, c.launchedByUserId);
+    if (standing !== 'permitted') return pause(standing);
 
     const [channel] = c.channelAccountId
       ? await tx

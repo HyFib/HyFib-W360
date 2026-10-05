@@ -17,6 +17,7 @@ import {
   apiListCampaignRecipients,
   apiListCampaigns,
   apiPauseCampaign,
+  apiResumeCampaign,
 } from './campaigns';
 import { RECIPIENT_OUTCOMES } from '../campaigns/outcomes';
 import { allowedNetworksSchema, bearerToken, generateApiToken, networkEntryProblem } from './keys';
@@ -192,6 +193,7 @@ describe('API scopes', () => {
       'messages.reply',
       'conversations.write',
       'campaigns.stop',
+      'campaigns.resume',
       'automations.start',
       'orders.write',
       'webhooks.manage',
@@ -210,6 +212,8 @@ describe('API scopes', () => {
     expect(API_SCOPE_INFO['contact_fields.manage'].permission).toBe('tenant.settings.manage');
     // Members pause and cancel campaigns with campaigns.send (ADR-128).
     expect(API_SCOPE_INFO['campaigns.stop'].permission).toBe('campaigns.send');
+    // And resume them with it (ADR-176).
+    expect(API_SCOPE_INFO['campaigns.resume'].permission).toBe('campaigns.send');
     expect(API_SCOPE_INFO['conversations.read'].permission).toBe('inbox.read_all');
     expect(API_SCOPE_INFO['conversations.write'].permission).toBe('inbox.supervise');
     expect(API_SCOPE_INFO['automations.start'].permission).toBe('automations.publish');
@@ -3370,7 +3374,7 @@ describe('pausing and cancelling campaigns (ADR-128)', () => {
       writes: true,
     });
     expect(API_SCOPE_INFO['campaigns.stop'].description).toContain(
-      "Resuming, approving, scheduling and editing stay in the app, under a member's authority.",
+      "Approving, scheduling and editing stay in the app, under a member's authority, and so does resuming, except a campaign a key paused.",
     );
     // Reading them stays its own scope: stopping does not read results or recipients.
     expect(API_SCOPE_INFO['campaigns.read'].writes).toBe(false);
@@ -3422,7 +3426,9 @@ describe('pausing and cancelling campaigns (ADR-128)', () => {
       );
     }
     expect(pause?.description).toContain('its `pauseReason` is `api`');
-    expect(pause?.description).toContain('Members resume the campaign in the app; a key cannot.');
+    expect(pause?.description).toContain(
+      'Members resume the campaign in the app, and so can a key with `campaigns.resume`',
+    );
     expect(pause?.description).toContain(
       'A draft, a campaign waiting for approval, a completed and a cancelled one are refused with 409',
     );
@@ -3433,7 +3439,7 @@ describe('pausing and cancelling campaigns (ADR-128)', () => {
       { description: string }
     >;
     expect(responses['409']?.description).toContain(
-      'Pausing or cancelling a campaign: its status does not allow it, and the message names the status.',
+      'Pausing, resuming or cancelling a campaign: its status does not allow it, or, resuming, a member or HyFib paused it; the message names the status or the pause reason.',
     );
     expect(doc.info.description).toContain('pause and cancel campaigns');
     const schemas = doc.components.schemas as unknown as Record<
@@ -3453,6 +3459,98 @@ describe('pausing and cancelling campaigns (ADR-128)', () => {
         ['post', '/campaigns/{id}/cancel'],
       ]),
     );
+  });
+});
+
+describe('resuming campaigns keys paused (ADR-176)', () => {
+  const ctx = (scopes: string[], status = 'active', planScopes: string[] | null = null) =>
+    ({
+      tenant: { id: 't', status },
+      key: { id: 'k', scopes: new Set(scopes) },
+      planScopes: planScopes ? new Set(planScopes) : null,
+    }) as unknown as ApiContext;
+  const code = (promise: Promise<unknown>) =>
+    promise.then(
+      () => 'done',
+      (error: unknown) => (isAppError(error) ? error.code : String(error)),
+    );
+  const id = '0190a000-0000-7000-8000-000000000002';
+
+  it("have their own writing scope, which members who resume campaigns grant, keeping the launcher's authority", () => {
+    expect(API_SCOPE_KEYS.indexOf('campaigns.resume')).toBe(
+      API_SCOPE_KEYS.indexOf('campaigns.stop') + 1,
+    );
+    expect(API_SCOPE_INFO['campaigns.resume']).toMatchObject({
+      label: 'Resume campaigns keys paused',
+      permission: 'campaigns.send',
+      writes: true,
+    });
+    for (const words of [
+      'Resume a campaign a key paused',
+      'the template still approved, the number active, neither cap reached',
+      'under the authority of the member who launched it, who must still be allowed to send campaigns',
+      'A campaign a member or HyFib paused stays for members to resume in the app.',
+    ]) {
+      expect(API_SCOPE_INFO['campaigns.resume'].description).toContain(words);
+    }
+  });
+
+  it('are refused before anything is read: without the scope (stopping is not enough), outside the plan, while the company is not active, and a bad id is not found', async () => {
+    for (const scopes of [['campaigns.read'], ['campaigns.stop']]) {
+      expect(await code(apiResumeCampaign({} as never, ctx(scopes), id))).toBe('forbidden');
+    }
+    await expect(apiResumeCampaign({} as never, ctx(['campaigns.stop']), id)).rejects.toThrow(
+      'This API key does not have the campaigns.resume scope.',
+    );
+    await expect(
+      apiResumeCampaign({} as never, ctx(['campaigns.resume'], 'active', ['campaigns.stop']), id),
+    ).rejects.toMatchObject({ code: 'forbidden', details: { apiReason: 'not_in_plan' } });
+    for (const status of ['suspended', 'restricted']) {
+      expect(
+        await code(apiResumeCampaign({} as never, ctx(['campaigns.resume'], status), id)),
+      ).toBe('tenant_suspended');
+    }
+    expect(await code(apiResumeCampaign({} as never, ctx(['campaigns.resume']), 'not-an-id'))).toBe(
+      'not_found',
+    );
+  });
+
+  it('are described: the scope, the checks, the pauses it lifts and refuses, and the campaign as the answer', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    type Operation = {
+      operationId: string;
+      description: string;
+      parameters: Record<string, unknown>[];
+      requestBody?: unknown;
+      responses: Record<string, unknown>;
+    };
+    const paths = doc.paths as unknown as Record<string, Record<string, Operation>>;
+    const resume = paths['/campaigns/{id}/resume']?.post;
+    expect(resume?.operationId).toBe('resumeCampaign');
+    for (const words of [
+      'Scope: `campaigns.resume`.',
+      'Resumes a campaign whose `pauseReason` is `api`',
+      'the template is still approved by Meta and the number active (412 otherwise)',
+      'neither the message cap nor the spending cap is reached (412',
+      'under the authority of the member who launched it, who must still be allowed to send campaigns (412 otherwise',
+      'A scheduled or running campaign is answered as it is, so a retry is harmless.',
+      'A campaign a member or HyFib paused (any other `pauseReason`) is refused with 409, naming it',
+      'A draft, a campaign waiting for approval, a completed and a cancelled one are refused with 409',
+      'No `Idempotency-Key` is needed.',
+      '`campaign.status_changed` webhooks report the change.',
+    ]) {
+      expect(resume?.description).toContain(words);
+    }
+    expect(resume?.parameters.map((p) => p.$ref)).toEqual(['#/components/parameters/Id']);
+    expect(resume?.requestBody).toBeUndefined();
+    expect(JSON.stringify(resume?.responses['200'])).toContain('#/components/schemas/Campaign"');
+    expect(Object.keys(resume?.responses ?? {})).toEqual(
+      expect.arrayContaining(['403', '404', '409', '412', '423']),
+    );
+    expect(doc.info.description).toContain(
+      'pause and cancel campaigns and resume the ones you paused',
+    );
+    expect(API_ROUTES).toEqual(expect.arrayContaining([['post', '/campaigns/{id}/resume']]));
   });
 });
 

@@ -257,6 +257,12 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    neither show nor change the column: until the web rollout ends, an old server's change that drops
    both `message.status` and `template.status_changed` from an endpoint with a list fails on the
    check, and its other changes keep it.
+   Migration 0124 (ADR-176) widens the same scope checks again, with the same brief locks. Web
+   servers from before it do not know `campaigns.resume`: until the web rollout ends, an old server
+   answers Settings → API keys with an error for a company with a key holding it (and the platform
+   plan pages for a plan version including it), and `/api/v1/campaigns/{id}/resume` with 404;
+   rolling web servers back to an image from before it does the same. Workers are not affected: the
+   runner checks a campaign's launcher as before.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

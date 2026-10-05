@@ -451,10 +451,10 @@ Phase 5 rules (Public API, P5-08):
   `conversations.read` (ADR-072), `inbox.supervise` for `conversations.write` (ADR-075),
   `automations.publish` for `automations.start` (ADR-077), `tenant.settings.manage` for
   `contact_fields.manage` (ADR-115), `campaigns.read` for the scope of the same name (ADR-125),
-  `campaigns.send` for `campaigns.stop` (ADR-128), `commerce.read` for `orders.read` (ADR-167),
-  `inbox.reply` for `orders.write` (ADR-168), and `channels.read` for the scope of the same name
-  (ADR-171). Nobody grants a key more than they hold, and rotating needs the same. A key keeps the
-  scopes it was created with.
+  `campaigns.send` for `campaigns.stop` (ADR-128) and `campaigns.resume` (ADR-176), `commerce.read`
+  for `orders.read` (ADR-167), `inbox.reply` for `orders.write` (ADR-168), and `channels.read` for
+  the scope of the same name (ADR-171). Nobody grants a key more than they hold, and rotating needs
+  the same. A key keeps the scopes it was created with.
 - A request acts for the key's company only, as the key: its company comes from the key found by
   the token's hash, never from the path, body or headers, and data access runs in that company's
   scope (RLS). Audit rows name the key (`api_key`). Writing scopes are refused while the company is
@@ -708,13 +708,28 @@ Phase 5 rules (Public API, P5-08):
   members pause and cancel with) and refused while the company is suspended or restricted. They only
   stop sending: a pause releases the sends no worker claimed, a cancel also cancels waiting
   recipients; neither sends a message, spends or resumes anything (resuming needs a member, under
-  whose authority the campaign then sends). The campaign is locked in the key's company (RLS and an
-  explicit filter): another company's campaign answers 404 as an unknown one does, and an id that is
-  not a UUID is refused before any query. The audit row names the key (`api_key`) with the request's
-  id, members' campaign history names the key, and `campaign.status_changed` reports the change. A
+  whose authority the campaign then sends, or, for a pause a key made, a key with
+  `campaigns.resume`: ADR-176). The campaign is locked in the key's company (RLS and an explicit
+  filter): another company's campaign answers 404 as an unknown one does, and an id that is not a
+  UUID is refused before any query. The audit row names the key (`api_key`) with the request's id,
+  members' campaign history names the key, and `campaign.status_changed` reports the change. A
   leaked key with the scope can stop the company's campaigns until it is revoked (members resume a
   paused one; a cancelled one stays cancelled), so only integrations that must stop campaigns should
   get it.
+- Resuming the campaigns keys paused (ADR-176): `POST /campaigns/{id}/resume` needs
+  `campaigns.resume`, a writing scope of its own (`campaigns.stop` does not resume) granted only by
+  members holding `campaigns.send` and refused while the company is suspended or restricted. It
+  lifts only a pause whose reason is `api`: what a member paused, or HyFib paused for a reason
+  members must fix (caps, the template, the number, the launcher, the rate card), stays for members.
+  The key never becomes the authority the campaign sends under: the campaign keeps the member who
+  launched it, the resume is refused while that member has left or can no longer send campaigns, and
+  the runner keeps checking them before each batch, so a key cannot send what no current member with
+  the permission launched. Members' checks run before anything changes (the template approved, the
+  number active, the caps, the rate card). The campaign is locked in the key's company (RLS and an
+  explicit filter): another company's campaign answers 404 as an unknown one does. The audit row
+  names the key with the request's id, and members' history names it. A leaked key with the scope
+  can undo the pauses keys made until it is revoked; members can pause again, which such a key
+  cannot lift.
 - Following contact changes (ADR-114): `GET /contact-changes` reads the key's company's changes
   only (`contacts.read`, RLS and an explicit company filter). Its cursor, a database transaction id
   and a row id, is sealed with the keyring (AES-256-GCM) with the company in the associated data, so

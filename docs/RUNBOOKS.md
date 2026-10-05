@@ -1785,6 +1785,20 @@ are not cancelled through the API. 423 means the company is suspended or its pla
 sends then anyway). To stop a key from stopping campaigns, revoke it and create one without the
 scope.
 
+**A campaign was resumed through the API, or `POST /api/v1/campaigns/{id}/resume` answers 403, 404,
+409, 412 or 423 (ADR-176).** Its history names the key ("Resumed through the API, key “name”"), and
+Settings → Audit log lists `campaign.resumed` with the key as the actor and the request's id; it
+sends under the authority of the member who launched it, as before the pause. 403 `forbidden` names
+the scope the key lacks, `campaigns.resume` (a key with `campaigns.stop` only does not resume;
+create a key with it), or `not_in_plan` (ADR-092). 404 means the id is not one of the key's
+company's campaigns. 409 names the campaign's status, or its `pauseReason` when a member or HyFib
+paused it: only a key's pause (`api`) is lifted through the API, and members resume the rest in the
+app. 412 names the check that failed: the template no longer approved, the number not active, a cap
+reached (members raise it in the app), no rate card for the spending cap's currency, or the member
+who launched the campaign has left or can no longer send campaigns (a member who can resumes it in
+the app, under their own authority). 423 means the company is suspended or its plan ended. To stop a
+key from resuming campaigns, revoke it and create one without the scope.
+
 **`GET /api/v1/orders` answers 403 or 404, or an order seems missing (ADR-167).** 403 `forbidden`
 names the scope the key lacks, `orders.read` (keys keep the scopes they were created with: create a
 key with it); reason `not_in_plan` means the company's plan leaves out Commerce or the scope
@@ -2684,6 +2698,12 @@ roles, or a lock held on the table: fix it and run the migrations again). Web se
 release need it before they start, or Settings → Webhooks and the endpoints API fail (their reads of
 endpoints name the column); workers of either release and web servers of the previous release work
 with it.
+
+**Migration 0124 failed.** It replaces `api_keys_scopes_check` on `app.api_keys` and
+`plans_api_scopes_check` on `ops.plans` with checks that also accept `campaigns.resume`, in one
+transaction; a failure rolls it all back (usually a lock held on one of the tables: run the
+migrations again). Web servers of this release need it before a key or plan version holds the new
+scope; those of the previous release work with it.
 
 **Migration 0072 failed.** It creates `ops.queue_waits`, adds `queues` to the kinds of
 `ops.platform_alerts` (replacing its check `platform_alerts_kind_check`) and creates

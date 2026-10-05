@@ -32,9 +32,11 @@ import {
 } from '../campaigns/results';
 import {
   campaignAnalytics,
+  campaignLauncherStanding,
   cancelLockedCampaign,
   lockCampaign,
   pauseLockedCampaign,
+  resumeLockedCampaign,
 } from '../campaigns/service';
 import type { OutboundDeps } from '../messaging/outbound';
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
@@ -406,7 +408,7 @@ const statusRefusal = (message: string, status: CampaignStatus) =>
  * locked: a scheduled or running campaign pauses with the reason `api`, sends no worker claimed are
  * released and their recipients wait again. A paused campaign is answered as it is, whatever paused
  * it, so a retry changes nothing; any other status is refused with 409, naming it. Members resume it
- * in the app.
+ * in the app, and keys with `campaigns.resume` (ADR-176).
  */
 export async function apiPauseCampaign(
   deps: Pick<OutboundDeps, 'db' | 'clock'>,
@@ -439,6 +441,56 @@ export async function apiPauseCampaign(
       );
     } else if (c.status !== 'paused') {
       throw statusRefusal('Only a scheduled or running campaign can be paused.', c.status);
+    }
+    return readApiCampaign(tx, ctx.tenant.id, campaignId);
+  });
+}
+
+/**
+ * Resumes one of the company's campaigns that a key paused (ADR-176), with the campaign row locked:
+ * a campaign paused with the reason `api` runs again, or waits for its scheduled time, after the
+ * checks members' resuming makes, and keeps sending under the authority of the member who launched
+ * it, who must still be allowed to send campaigns. A scheduled or running campaign is answered as it
+ * is, so a retry changes nothing; a campaign a member or HyFib paused is refused with 409, naming
+ * why (members resume it in the app), and so is any other status.
+ */
+export async function apiResumeCampaign(
+  deps: OutboundDeps,
+  ctx: ApiContext,
+  campaignId: string,
+): Promise<ApiCampaign> {
+  assertScope(ctx, 'campaigns.resume');
+  if (!z.uuid().safeParse(campaignId).success) throw notFound('Campaign');
+  return deps.db.run(ctx.scope, async (tx) => {
+    const c = await lockCampaign(tx, ctx.tenant.id, campaignId);
+    if (c.status === 'paused') {
+      if (c.pauseReason !== 'api') {
+        throw new AppError(
+          'conflict',
+          `Only a campaign a key paused is resumed through the API: members resume this one in the app. This campaign's pauseReason is ${c.pauseReason ?? 'unknown'}.`,
+        );
+      }
+      if ((await campaignLauncherStanding(tx, ctx.tenant.id, c.launchedByUserId)) !== 'permitted') {
+        throw new AppError(
+          'precondition_failed',
+          'The member who launched this campaign can no longer send campaigns, so it is not resumed through the API: a member who can resumes it in the app.',
+        );
+      }
+      await resumeLockedCampaign(deps, tx, c, { apiKeyId: ctx.key.id }, deps.clock.now());
+      await recordSystemAudit(
+        tx,
+        ctx.tenant.id,
+        {
+          action: 'campaign.resumed',
+          subjectType: 'campaign',
+          subjectId: campaignId,
+          metadata: { source: 'api' },
+          correlationId: ctx.requestId,
+        },
+        apiActor(ctx),
+      );
+    } else if (c.status !== 'scheduled' && c.status !== 'running') {
+      throw statusRefusal('Only a paused campaign can be resumed.', c.status);
     }
     return readApiCampaign(tx, ctx.tenant.id, campaignId);
   });
