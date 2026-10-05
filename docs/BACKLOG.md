@@ -633,12 +633,15 @@ verification, app review, Embedded Signup configuration).
   captured, whoever records the status). **[Conversation status filters built, locally
   verified]** (ADR-149: an endpoint takes `conversation.status_changed` only for the statuses a
   conversation reaches that it chooses, `open` or `resolved`, in Settings or through the API, or
-  every status as before; applied where events are captured). Remaining: filters for other event types and on a message's or contact's values (such
-  as by campaign, template, tag or field key, or a run's trigger or outcome), which tags were added
-  or removed, other authentication (OAuth client credentials, headers
-  computed per delivery), mutual TLS, fixed egress addresses, delivery counts in campaign events,
-  events for store orders, Payment Links and each step of a run, `createdAt` finer than the
-  millisecond, replays across endpoints or by event type, load tests.
+  every status as before; applied where events are captured). **[Campaign results in campaign events
+  built, locally verified]** (ADR-150: `campaign.status_changed` carries the campaign's results as
+  `GET /campaigns/{id}` counts them, counted when each event is delivered, so a retry or a replay
+  counts again; null while it is a draft; counts only, never costs). Remaining: filters for other
+  event types and on a message's or contact's values (such as by campaign, template, tag or field
+  key, or a run's trigger or outcome), which tags were added or removed, other authentication (OAuth
+  client credentials, headers computed per delivery), mutual TLS, fixed egress addresses, events for
+  store orders, Payment Links and each step of a run, `createdAt` finer than the millisecond,
+  replays across endpoints or by event type, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,

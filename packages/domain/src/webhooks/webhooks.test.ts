@@ -10,8 +10,14 @@ import {
   ORDER_STATUSES,
   TEMPLATE_STATUSES,
 } from '@w360/db';
+import { apiCampaignResultsSchema } from '../api/campaigns';
 import { apiContactSchema } from '../api/contact-view';
 import { buildOpenApiDocument } from '../api/openapi';
+import {
+  campaignResultsSchema,
+  toCampaignResults,
+  type CampaignAnalytics,
+} from '../campaigns/results';
 import { renderEmail } from '../email/templates';
 import {
   WEBHOOK_AUTOMATION_EVENTS,
@@ -681,6 +687,24 @@ describe('webhook payload schemas', () => {
       audienceCount: 1_200,
       queuedCount: 350,
       skippedCount: 12,
+      results: {
+        audience: 1_200,
+        pending: 838,
+        skipped: 12,
+        canceled: 0,
+        queued: 350,
+        inProgress: 50,
+        sent: 300,
+        delivered: 290,
+        read: 120,
+        failed: 0,
+        unknown: 0,
+        messagesCanceled: 0,
+        replied: 14,
+        optedOut: 2,
+        skipReasons: [{ reason: 'no_marketing_opt_in', count: 12 }],
+        failureCodes: [],
+      },
     };
     const channel = { id: base.id, phone: '+91 98765 43210' };
     const event = { ...base, type: 'campaign.status_changed', data: { campaign, channel } };
@@ -740,18 +764,23 @@ describe('webhook payload schemas', () => {
             audienceCount: 0,
             queuedCount: 0,
             skippedCount: 0,
+            results: null,
           },
           channel: null,
         },
       }).success,
     ).toBe(true);
-    // An unknown status or reason, a fractional count or another type is not described.
+    // An unknown status or reason, a fractional count, results left out or not counted as the API
+    // counts them (ADR-150), or another type is not described.
     for (const change of [
       { status: 'archived' },
       { previousStatus: 'sent' },
       { pauseReason: 'tired' },
       { completionReason: 'done' },
       { queuedCount: 1.5 },
+      { results: undefined },
+      { results: { ...campaign.results, delivered: 2.5 } },
+      { results: { ...campaign.results, skipReasons: [{ reason: 'tired', count: 1 }] } },
     ]) {
       expect(
         campaignStatusChangedPayloadSchema.safeParse({
@@ -919,6 +948,73 @@ describe('the OpenAPI document', () => {
     expect(data.properties.changes?.anyOf).toContainEqual({ type: 'null' });
     const webhooks = doc.webhooks as Record<string, { post?: { description?: string } }>;
     expect(webhooks['contact.updated']?.post?.description).toContain('The event says which.');
+  });
+
+  it('carry a campaign’s results as the API answers them, without the cost estimate members see (ADR-150)', () => {
+    const counted: CampaignAnalytics = {
+      audience: 10,
+      pending: 1,
+      skipped: 2,
+      canceled: 0,
+      queued: 7,
+      inProgress: 1,
+      sent: 5,
+      delivered: 4,
+      read: 3,
+      failed: 1,
+      unknown: 0,
+      messageCanceled: 1,
+      replied: 2,
+      optedOut: 1,
+      estimateMicros: 123_000,
+      estimateMissing: 1,
+      skipReasons: [{ reason: 'no_marketing_opt_in', count: 2 }],
+      failureCodes: [{ code: '131049', count: 1 }],
+    };
+    expect(toCampaignResults(counted)).toEqual({
+      audience: 10,
+      pending: 1,
+      skipped: 2,
+      canceled: 0,
+      queued: 7,
+      inProgress: 1,
+      sent: 5,
+      delivered: 4,
+      read: 3,
+      failed: 1,
+      unknown: 0,
+      messagesCanceled: 1,
+      replied: 2,
+      optedOut: 1,
+      skipReasons: [{ reason: 'no_marketing_opt_in', count: 2 }],
+      failureCodes: [{ code: '131049', count: 1 }],
+    });
+    // The API answers the same schema, and the event describes its results with it.
+    expect(apiCampaignResultsSchema).toBe(campaignResultsSchema);
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = doc.components.schemas as Record<string, unknown>;
+    const event = schemas.WebhookCampaignStatusChanged as {
+      properties: {
+        data: {
+          properties: {
+            campaign: {
+              required?: string[];
+              properties: { results?: { anyOf?: unknown[]; description?: string } };
+            };
+          };
+        };
+      };
+    };
+    const campaign = event.properties.data.properties.campaign;
+    expect(campaign.required).toContain('results');
+    expect(campaign.properties.results?.anyOf).toContainEqual({ type: 'null' });
+    expect(campaign.properties.results?.description).toContain(
+      'counted when this request was built (the t of its W360-Signature)',
+    );
+    const webhooks = doc.webhooks as Record<string, { post?: { description?: string } }>;
+    expect(webhooks['campaign.status_changed']?.post?.description).toContain(
+      'campaign.results are its results as GET /campaigns/{id} counts them, counted when the request is built',
+    );
   });
 });
 

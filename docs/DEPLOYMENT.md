@@ -190,6 +190,11 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    the column: until the web rollout ends, an old server's change that drops
    `conversation.status_changed` from an endpoint with statuses fails on the check, and its other
    changes keep them.
+   ADR-150 adds no migration. Workers build each payload when they deliver it: until the worker
+   rollout ends, a `campaign.status_changed` delivered by a worker from before it has no
+   `campaign.results` (a retry or a replay a newer worker delivers has them), and rolling workers
+   back to an image from before it does the same; until the web rollout ends, an old server's
+   OpenAPI document does not describe them.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

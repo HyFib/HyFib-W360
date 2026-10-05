@@ -26,6 +26,11 @@ import { recordSystemAudit } from '../audit';
 import { ATTRIBUTION_WINDOW_HOURS } from '../campaigns/attribution';
 import { RECIPIENT_OUTCOMES, RECIPIENT_OUTCOME_SQL } from '../campaigns/outcomes';
 import {
+  campaignResultsSchema,
+  toCampaignResults,
+  type CampaignResults,
+} from '../campaigns/results';
+import {
   campaignAnalytics,
   cancelLockedCampaign,
   lockCampaign,
@@ -95,37 +100,9 @@ export const apiCampaignSchema = z.object({
 });
 export type ApiCampaign = z.infer<typeof apiCampaignSchema>;
 
-const count = (description: string) => z.number().int().describe(description);
-
-export const apiCampaignResultsSchema = z.object({
-  audience: count('Recipients: the contacts in the audience taken when it was submitted.'),
-  pending: count('Recipients not processed yet.'),
-  skipped: count('Recipients skipped, with the reasons in skipReasons.'),
-  canceled: count('Recipients left out because the campaign was canceled before their turn.'),
-  queued: count('Recipients whose message was queued.'),
-  inProgress: count('Queued messages not sent yet.'),
-  sent: count('Messages WhatsApp sent (delivered and read ones included).'),
-  delivered: count('Messages delivered (read ones included).'),
-  read: count('Messages read (or played).'),
-  failed: count('Messages that failed, with the commonest codes in failureCodes.'),
-  unknown: count(
-    'Messages whose sending outcome is unknown: the call to WhatsApp ended without an answer, and they are never sent again blindly.',
-  ),
-  messagesCanceled: count('Queued messages canceled before they were sent.'),
-  replied: count(
-    `Delivered recipients who replied. A reply counts once, for the last campaign message (of any campaign) sent to the contact from the same number in the ${ATTRIBUTION_WINDOW_HOURS} hours before it.`,
-  ),
-  optedOut: count(
-    `Delivered recipients who opted out of marketing. An opt-out counts once, for the last campaign message (of any campaign) sent to the contact in the ${ATTRIBUTION_WINDOW_HOURS} hours before it.`,
-  ),
-  skipReasons: z
-    .array(z.object({ reason: z.enum(SKIP_REASONS), count: z.number().int() }))
-    .describe('Skipped recipients by reason, the commonest first.'),
-  failureCodes: z
-    .array(z.object({ code: z.string(), count: z.number().int() }))
-    .describe('Failed messages by WhatsApp error code, the 10 commonest, the commonest first.'),
-});
-export type ApiCampaignResults = z.infer<typeof apiCampaignResultsSchema>;
+/** The results `GET /campaigns/{id}` answers, as campaign events carry them too (ADR-150). */
+export const apiCampaignResultsSchema = campaignResultsSchema;
+export type ApiCampaignResults = CampaignResults;
 
 export const apiCampaignWithResultsSchema = apiCampaignSchema.extend({
   results: apiCampaignResultsSchema
@@ -260,27 +237,7 @@ export async function apiGetCampaign(
       if (!row) throw notFound('Campaign');
       if (row.status === 'draft') return { ...toApiCampaign(row), results: null };
       const counted = await campaignAnalytics(tx, ctx.tenant.id, campaignId);
-      return {
-        ...toApiCampaign(row),
-        results: {
-          audience: counted.audience,
-          pending: counted.pending,
-          skipped: counted.skipped,
-          canceled: counted.canceled,
-          queued: counted.queued,
-          inProgress: counted.inProgress,
-          sent: counted.sent,
-          delivered: counted.delivered,
-          read: counted.read,
-          failed: counted.failed,
-          unknown: counted.unknown,
-          messagesCanceled: counted.messageCanceled,
-          replied: counted.replied,
-          optedOut: counted.optedOut,
-          skipReasons: counted.skipReasons,
-          failureCodes: counted.failureCodes,
-        },
-      };
+      return { ...toApiCampaign(row), results: toCampaignResults(counted) };
     },
     { isolationLevel: 'repeatable read', accessMode: 'read only' },
   );

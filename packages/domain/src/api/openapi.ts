@@ -1583,7 +1583,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'campaign.status_changed': webhook(
         'webhookCampaignStatusChanged',
         WEBHOOK_EVENT_INFO['campaign.status_changed'].label,
-        `${WEBHOOK_EVENT_INFO['campaign.status_changed'].description} campaign.status and campaign.previousStatus are the change, with why it paused or completed; the rest is the campaign when the event is delivered. Deliveries are not ordered: the latest change is the one with the latest createdAt. An endpoint receives every status unless it names the statuses it takes (its \`campaignStatuses\`, or the statuses ticked in Settings → Webhooks).`,
+        `${WEBHOOK_EVENT_INFO['campaign.status_changed'].description} campaign.status and campaign.previousStatus are the change, with why it paused or completed; the rest is the campaign when the event is delivered. campaign.results are its results as GET /campaigns/{id} counts them, counted when the request is built, so a retry or a replay counts again; null while it is a draft. Deliveries are not ordered: the latest change is the one with the latest createdAt. An endpoint receives every status unless it names the statuses it takes (its \`campaignStatuses\`, or the statuses ticked in Settings → Webhooks).`,
         'WebhookCampaignStatusChanged',
       ),
       ping: webhook(

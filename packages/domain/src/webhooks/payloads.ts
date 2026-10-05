@@ -24,6 +24,7 @@ import {
   type WebhookEventType,
 } from '@w360/db';
 import { apiContactColumns, apiContactSchema, toApiContact } from '../api/contact-view';
+import { campaignAnalytics, campaignResultsSchema, toCampaignResults } from '../campaigns/results';
 import { COMMERCE_LIMITS } from '../commerce/model';
 import { findAnsweredMessageId } from '../messaging/reply-context';
 import { WEBHOOK_MESSAGE_STATUSES } from './model';
@@ -443,6 +444,11 @@ const webhookCampaignSchema = z.object({
     .number()
     .int()
     .describe('Recipients skipped: no consent, suppressed, erased, over a cap and the like.'),
+  results: campaignResultsSchema
+    .nullable()
+    .describe(
+      'Its results as GET /campaigns/{id} counts them, counted when this request was built (the t of its W360-Signature), so a retry or a replay counts again. Null while it is a draft, which has no recipients yet.',
+    ),
 });
 
 export const campaignStatusChangedPayloadSchema = envelope(
@@ -751,6 +757,7 @@ async function campaignOf(tx: Tx, tenantId: string, campaignId: string | null) {
     .select({
       id: campaigns.id,
       name: campaigns.name,
+      status: campaigns.status,
       templateId: campaigns.templateId,
       templateName: messageTemplates.name,
       scheduledAt: campaigns.scheduledAt,
@@ -962,9 +969,13 @@ export async function buildWebhookPayload(
     }
     case 'campaign.status_changed': {
       // The status, the one before it and why it paused or completed as captured; the rest as it
-      // is now.
+      // is now, its results counted now in one statement (ADR-150).
       const campaign = await campaignOf(tx, tenantId, str(event.detail.campaignId));
       if (!campaign) throw new WebhookEventGoneError();
+      const results =
+        campaign.status === 'draft'
+          ? null
+          : toCampaignResults(await campaignAnalytics(tx, tenantId, campaign.id));
       return {
         ...base,
         data: {
@@ -984,6 +995,7 @@ export async function buildWebhookPayload(
             audienceCount: campaign.audienceCount,
             queuedCount: campaign.queuedCount,
             skippedCount: campaign.skippedCount,
+            results,
           },
           channel: campaign.channelId
             ? { id: campaign.channelId, phone: campaign.channelPhone ?? null }

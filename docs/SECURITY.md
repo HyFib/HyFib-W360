@@ -849,7 +849,12 @@ Phase 5 rules (outgoing webhooks, P5-09):
   changes a campaign's status (only the runtime role, in the company's scope), so each event stays
   in the campaign's company and holds the campaign id, the statuses and a pause or completion reason
   only. Payloads carry the campaign's name, template, times and counters, never a recipient, a
-  contact's data or the member who acted.
+  contact's data or the member who acted. Since ADR-150 they also carry its results as
+  `GET /campaigns/{id}` counts them, counted in the company's scope when the request is built and
+  stored nowhere: counts, skip reasons and failure codes only, never costs. Who receives them is
+  unchanged: owners and administrators, who manage endpoints, read campaigns anyway, and keys with
+  `webhooks.manage` are granted only by them and already receive the campaign's counters and the
+  company's messages.
 
 Phase 5 rules (billing history, P5-07, ADR-057):
 

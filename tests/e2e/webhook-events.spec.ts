@@ -822,9 +822,24 @@ test('campaign events reach an endpoint: a member starts a campaign, and the run
       queuedCount: 1,
       skippedCount: 0,
       completedAt: expect.any(String),
+      // Its results as GET /campaigns/{id} counts them when each event is delivered (ADR-150); how
+      // far WhatsApp got with the message by then is not fixed, so only the settled counts are.
+      results: {
+        audience: 1,
+        pending: 0,
+        skipped: 0,
+        canceled: 0,
+        queued: 1,
+        failed: 0,
+        unknown: 0,
+        skipReasons: [],
+        failureCodes: [],
+      },
     },
     channel: { id: expect.any(String) },
   });
+  // Every change was delivered once the campaign had left its draft, so each carries results.
+  for (const event of forUs()) expect(event.json.data.campaign.results).not.toBeNull();
   // The second endpoint heard only of the completion.
   await expect(async () => expect(forCompleted()).toHaveLength(1)).toPass({ timeout: 30_000 });
   expect(forCompleted().map((e) => [e.data.campaign.id, e.data.campaign.status])).toEqual([

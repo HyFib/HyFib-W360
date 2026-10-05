@@ -2122,6 +2122,14 @@ the statuses under "Conversation status" on the endpoint's page (both ticked tak
 a new endpoint does), or `PATCH /webhook-endpoints/{id}` with `conversationStatuses` (null for every
 status). Removing the `conversation.status_changed` event clears the list.
 
+**A campaign event's results differ from the campaign page (ADR-150).** `campaign.results` are
+counted when the request is built (the `t` of its `W360-Signature`), as `GET /campaigns/{id}` counts
+them, and a retry or a replay counts again: an event delivered while the campaign's messages were on
+their way shows them in progress, and a replay of it later shows how they went. Members' campaign
+page counts the same numbers when it is read. The status, the status before it and the reasons are
+as captured. An event delivered while the campaign is a draft (submitted and then rejected, say) has
+`results: null`, whatever status it reports. Costs are never sent.
+
 **An endpoint was turned off automatically.** It failed every attempt for 72 hours; its waiting
 deliveries were marked failed (`endpoint_disabled`), owners and administrators got the
 "Webhook endpoint turned off" email, and the audit log has `webhook.endpoint_auto_disabled`. Fix the

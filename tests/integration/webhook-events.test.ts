@@ -16,6 +16,7 @@ import {
 } from '@w360/db';
 import {
   advanceAutomationRun,
+  apiGetCampaign,
   apiStartAutomationRun,
   apiUpdateConversation,
   authenticateApiToken,
@@ -2390,6 +2391,25 @@ describe('campaign events (ADR-087)', () => {
       audienceCount: 2,
       queuedCount: 2,
       skippedCount: 0,
+      // Counted when delivered (ADR-150): both messages accepted by WhatsApp, not yet sent.
+      results: {
+        audience: 2,
+        pending: 0,
+        skipped: 0,
+        canceled: 0,
+        queued: 2,
+        inProgress: 2,
+        sent: 0,
+        delivered: 0,
+        read: 0,
+        failed: 0,
+        unknown: 0,
+        messagesCanceled: 0,
+        replied: 0,
+        optedOut: 0,
+        skipReasons: [],
+        failureCodes: [],
+      },
     };
     const channel = { id: c.channelAccountId, phone: '+91 90000 00000' };
     expect(bodies[5]!.data).toEqual({
@@ -2414,6 +2434,135 @@ describe('campaign events (ADR-087)', () => {
     });
     // The other endpoint heard of the campaign's messages, not of the campaign.
     expect(bodiesAt(other.path).some((b) => b.type === 'campaign.status_changed')).toBe(false);
+  });
+
+  it('carries the campaign’s results as GET /campaigns/{id} counts them when each event is delivered, and none while it is a draft (ADR-150)', async () => {
+    const s = await campaignCompany(3);
+    const { c } = s;
+    const owner = await fx.ctx(c, c.owner);
+    const marketer = await fx.ctx(c, c.marketer);
+    const hook = await addEndpoint(c, ['campaign.status_changed']);
+    await s.campaigns.updateSettings(
+      owner,
+      { approvalRequired: true, cap: null, costCurrency: null },
+      {},
+    );
+    /** Each delivered body's status and results, from the `from`th on, sorted by status. */
+    const delivered = (from = 0) =>
+      bodiesAt(hook.path)
+        .slice(from)
+        .map((b) => {
+          const campaign = b.data.campaign as { status: string; results: unknown };
+          return [campaign.status, campaign.results] as const;
+        })
+        .sort((a, b) => a[0].localeCompare(b[0]));
+    const counts = {
+      audience: 3,
+      pending: 0,
+      skipped: 0,
+      canceled: 0,
+      queued: 3,
+      inProgress: 0,
+      sent: 0,
+      delivered: 0,
+      read: 0,
+      failed: 0,
+      unknown: 0,
+      messagesCanceled: 0,
+      replied: 0,
+      optedOut: 0,
+      skipReasons: [],
+      failureCodes: [],
+    };
+
+    // Submitted and rejected, both delivered while it is a draft again: a draft has no results.
+    const id = await s.draft(marketer, 'Festive sale');
+    await s.campaigns.submitCampaign(marketer, id, { expectedVersion: 1 }, {});
+    await s.campaigns.rejectCampaign(owner, id, { note: 'Add the store address' }, {});
+    await deliverDue(c);
+    expect(delivered()).toEqual([
+      ['draft', null],
+      ['pending_approval', null],
+    ]);
+
+    // Submitted again, approved and started: delivered while its messages are on their way, each
+    // change, whatever its status, carries the results counted then.
+    const view = await s.campaigns.getCampaign(owner, id);
+    await s.campaigns.submitCampaign(marketer, id, { expectedVersion: view.campaign.version }, {});
+    await s.campaigns.approveCampaign(owner, id, { note: 'Looks good' }, {});
+    expect(await s.tick(id)).toMatchObject({ outcome: 'progress', queued: 3 });
+    expect(await s.dispatch(id)).toEqual(['accepted', 'accepted', 'accepted']);
+    await deliverDue(c);
+    const onTheirWay = { ...counts, inProgress: 3 };
+    expect(delivered(2)).toEqual([
+      ['pending_approval', onTheirWay],
+      ['running', onTheirWay],
+      ['scheduled', onTheirWay],
+    ]);
+
+    // Meta delivers one message, the second is read and the third fails; the runner completes it.
+    const sent = await fx.query<{ external_message_id: string; phone: string }>(
+      `SELECT m.external_message_id, ct.phone_e164 AS phone FROM app.messages m
+         JOIN app.conversations cv ON cv.tenant_id = m.tenant_id AND cv.id = m.conversation_id
+         JOIN app.contacts ct ON ct.tenant_id = cv.tenant_id AND ct.id = cv.contact_id
+        WHERE m.campaign_id = $1 ORDER BY ct.display_name`,
+      [id],
+    );
+    const now = String(Math.floor(Date.now() / 1000));
+    const status = (i: number, value: string, extra: Record<string, unknown> = {}) => ({
+      id: sent[i]!.external_message_id,
+      status: value,
+      timestamp: now,
+      recipient_id: sent[i]!.phone.slice(1),
+      ...extra,
+    });
+    await fx.deliver(
+      fx.messagesBody(c, {
+        statuses: [
+          status(0, 'delivered'),
+          status(1, 'read'),
+          status(2, 'failed', {
+            errors: [{ code: 131049, title: 'Not delivered to maintain healthy engagement.' }],
+          }),
+        ],
+      }),
+    );
+    s.clock.advance(11_000);
+    expect(await s.tick(id)).toMatchObject({ outcome: 'completed' });
+    await deliverDue(c);
+    const finished = {
+      ...counts,
+      sent: 2,
+      delivered: 2,
+      read: 1,
+      failed: 1,
+      failureCodes: [{ code: '131049', count: 1 }],
+    };
+    expect(delivered(5)).toEqual([['completed', finished]]);
+    // As GET /campaigns/{id} counts them.
+    const created = await createApiKeysService({ db: fx.dbs.app, clock: systemClock }).create(
+      owner,
+      { name: 'Campaign results', scopes: ['campaigns.read'], expiresInDays: 0 },
+    );
+    const key = await authenticateApiToken(fx.dbs.app, created.token, uuidv7());
+    if (!key) throw new Error('a new key does not authenticate');
+    expect((await apiGetCampaign({ db: fx.dbs.app }, key, id)).results).toEqual(finished);
+
+    // A replay counts again: the start, delivered while its messages were on their way, now says
+    // how they went.
+    const [start] = await fx.query<{ id: string }>(
+      `SELECT d.id FROM app.webhook_deliveries d
+         JOIN app.webhook_events e ON e.tenant_id = d.tenant_id AND e.id = d.event_id
+        WHERE e.type = 'campaign.status_changed' AND e.status = 'running'
+          AND e.detail->>'campaignId' = $1`,
+      [id],
+    );
+    await webhooks().replay(owner, { deliveryId: start!.id });
+    await deliverDue(c);
+    expect(delivered(6)).toEqual([['running', finished]]);
+    for (const body of bodiesAt(hook.path)) {
+      expect(campaignStatusChangedPayloadSchema.safeParse(body).success).toBe(true);
+    }
   });
 
   it('sends an endpoint that names statuses only those, another every status, and captures no change nobody takes (ADR-146)', async () => {

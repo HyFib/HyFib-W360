@@ -24,7 +24,6 @@ import {
   type CampaignEventType,
   type CampaignStatus,
   type Database,
-  type SkipReason,
   type SQL,
   type Tx,
 } from '@w360/db';
@@ -54,7 +53,7 @@ import {
 } from './audience';
 import { loadRateTable, marketFor, parseAmountToMicros, priceFor, rateCategoryFor } from './costs';
 import { recountedCounters } from './counters';
-import { RECIPIENT_OUTCOME_SQL } from './outcomes';
+import { campaignAnalytics, type CampaignAnalytics } from './results';
 import {
   formatTimeOfDay,
   isValidTimeZone,
@@ -657,95 +656,8 @@ async function estimateCost(
   };
 }
 
-export interface CampaignAnalytics {
-  audience: number;
-  pending: number;
-  skipped: number;
-  canceled: number;
-  queued: number;
-  inProgress: number;
-  sent: number;
-  delivered: number;
-  read: number;
-  failed: number;
-  unknown: number;
-  messageCanceled: number;
-  replied: number;
-  optedOut: number;
-  estimateMicros: number;
-  estimateMissing: number;
-  skipReasons: { reason: SkipReason; count: number }[];
-  failureCodes: { code: string; count: number }[];
-}
-
-export async function campaignAnalytics(
-  tx: Tx,
-  tenantId: string,
-  campaignId: string,
-): Promise<CampaignAnalytics> {
-  const o = RECIPIENT_OUTCOME_SQL;
-  const res = await tx.execute<Record<string, number | string | null>>(sql`
-    select count(*)::int as audience,
-      (count(*) filter (where ${o.pending}))::int as pending,
-      (count(*) filter (where ${o.skipped}))::int as skipped,
-      (count(*) filter (where ${o.canceled}))::int as canceled,
-      (count(*) filter (where ${o.queued}))::int as queued,
-      (count(*) filter (where ${o.in_progress}))::int as in_progress,
-      (count(*) filter (where ${o.sent}))::int as sent,
-      (count(*) filter (where ${o.delivered}))::int as delivered,
-      (count(*) filter (where ${o.read}))::int as read,
-      (count(*) filter (where ${o.failed}))::int as failed,
-      (count(*) filter (where ${o.unknown}))::int as unknown,
-      (count(*) filter (where ${o.message_canceled}))::int as message_canceled,
-      (count(*) filter (where ${o.replied}))::int as replied,
-      (count(*) filter (where ${o.opted_out}))::int as opted_out,
-      coalesce(sum(r.estimated_cost_micros) filter (where r.state = 'queued'), 0)::bigint as estimate_micros,
-      (count(*) filter (where r.state = 'queued' and r.estimated_cost_micros is null))::int as estimate_missing
-    from app.campaign_recipients r
-    left join app.messages m on m.tenant_id = r.tenant_id and m.id = r.message_id
-    where r.tenant_id = ${tenantId} and r.campaign_id = ${campaignId}`);
-  const row = res.rows[0] ?? {};
-  const n = (k: string) => Number(row[k] ?? 0);
-  const reasons = await tx
-    .select({ reason: campaignRecipients.skipReason, count: sql<number>`count(*)::int` })
-    .from(campaignRecipients)
-    .where(
-      and(
-        eq(campaignRecipients.tenantId, tenantId),
-        eq(campaignRecipients.campaignId, campaignId),
-        eq(campaignRecipients.state, 'skipped'),
-      ),
-    )
-    .groupBy(campaignRecipients.skipReason);
-  const failures = await tx.execute<{ code: string | null; count: number }>(sql`
-    select m.error_code as code, count(*)::int as count
-      from app.campaign_recipients r
-      join app.messages m on m.tenant_id = r.tenant_id and m.id = r.message_id
-     where r.tenant_id = ${tenantId} and r.campaign_id = ${campaignId} and m.status = 'failed'
-     group by m.error_code order by count(*) desc limit 10`);
-  return {
-    audience: n('audience'),
-    pending: n('pending'),
-    skipped: n('skipped'),
-    canceled: n('canceled'),
-    queued: n('queued'),
-    inProgress: n('in_progress'),
-    sent: n('sent'),
-    delivered: n('delivered'),
-    read: n('read'),
-    failed: n('failed'),
-    unknown: n('unknown'),
-    messageCanceled: n('message_canceled'),
-    replied: n('replied'),
-    optedOut: n('opted_out'),
-    estimateMicros: n('estimate_micros'),
-    estimateMissing: n('estimate_missing'),
-    skipReasons: reasons
-      .filter((r): r is { reason: SkipReason; count: number } => r.reason !== null)
-      .sort((a, b) => b.count - a.count),
-    failureCodes: failures.rows.map((r) => ({ code: r.code ?? 'unknown', count: r.count })),
-  };
-}
+// Counted in one statement in ./results (ADR-150); exported here as before.
+export { campaignAnalytics, type CampaignAnalytics };
 
 function toScheduledLocal(local: string | undefined): string | null {
   if (!local) return null;

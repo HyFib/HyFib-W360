@@ -1267,7 +1267,10 @@ true`); the same key with another request (method, path and body hashed) answers
   it and a pause or completion reason, in `detail`), stamped with `clock_timestamp()` so that a
   start and a pause made in one runner transaction keep their order. Their payloads are built when
   delivered: the campaign's name, template, times and counters now, the statuses and reason as
-  captured, and the number; never a recipient or a member.
+  captured, and the number; never a recipient or a member. Since ADR-150 they also carry `results`,
+  as `GET /campaigns/{id}` counts them, counted in the delivery's claim by `campaignAnalytics`
+  (`campaigns/results.ts`), which counts in one statement so its numbers agree at any isolation;
+  null while the campaign is a draft.
 - **Dispatch:** the worker's LISTEN connection (`apps/worker/src/webhook-listener.ts`) turns a
   notification into a lookup of active companies with due deliveries (`ops.webhook_dispatch_due`,
   SECURITY DEFINER), at most one lookup every 250 ms; the per-minute messaging sweep does the same

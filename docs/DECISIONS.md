@@ -2882,9 +2882,9 @@ Decision:
   once this release's web app runs, after the migrations and the workers.
 
 Not built: delivery and read counts in the payload (they change with every message status; the
-reports have them), the campaign in `message.status`, events for each recipient, test sends and
-drafts, reading campaigns through the public API, and filters by campaign (filters by the status
-reached built by ADR-146).
+reports have them; built by ADR-150 as the results counted when each event is delivered), the
+campaign in `message.status`, events for each recipient, test sends and drafts, reading campaigns
+through the public API, and filters by campaign (filters by the status reached built by ADR-146).
 
 ## ADR-088 A message feed across conversations through the public API (2026-09-30)
 
@@ -4779,7 +4779,8 @@ Decision:
 Not built: changing campaigns through the API (creating, submitting, approving, pausing, resuming or
 cancelling them; pausing and cancelling since ADR-128), each recipient's outcome (since ADR-127),
 costs, filters by template, number or time, results for a time range or grouped by day, and campaign
-results in `campaign.status_changed` (ADR-087 left them out: they change with every message status).
+results in `campaign.status_changed` (ADR-087 left them out: they change with every message status;
+built by ADR-150, counted when each event is delivered).
 
 ## ADR-126 Conversation and campaign conditions in contact searches through the public API (2026-10-03)
 
@@ -6004,3 +6005,41 @@ Decision:
 
 Not built: filters by the status before a change, by who changed it, by team or member, and setting
 conversations pending.
+
+## ADR-150 Campaign results in campaign events (P5-09) (2026-10-05)
+
+Context: `campaign.status_changed` (ADR-087) carries a campaign's counters (the audience taken, the
+recipients queued and skipped) but not what happened to its messages: ADR-087 left delivery and read
+counts out because they change with every message status. Since ADR-125 `GET /campaigns/{id}`
+answers the campaign's results counted when read, so a receiver that hears a campaign completed had
+to call it, with a key holding `campaigns.read`, to learn how it went. The results were counted in
+three statements (the counts, the skip reasons, the failure codes), which agree only in one
+snapshot: the API reads them at repeatable read, members' campaign page at read committed.
+
+Decision:
+
+- **`campaign.results` in every `campaign.status_changed`:** the results `GET /campaigns/{id}`
+  answers, the same object members' campaign page counts (recipients pending, skipped, cancelled and
+  queued; messages in progress, sent, delivered, read, failed, of unknown outcome and cancelled;
+  replies and opt-outs among delivered recipients; skip reasons and the 10 commonest failure codes),
+  counted when the request is built, like the campaign's name and counters (ADR-087): the `t` of the
+  request's `W360-Signature` is that time, and a retry, a replay or a later delivery counts again.
+  Null while the campaign is a draft, which has no recipients yet, as the API answers. The status,
+  the status before it and the reasons stay as captured.
+- **One statement:** `campaignAnalytics` counts in a single statement, the skip reasons and failure
+  codes in scalar subqueries, so its numbers agree whatever the caller's isolation: members'
+  campaign page, the API (still repeatable read) and the delivery's claim (read committed). Ties
+  among reasons and codes are ordered by reason and code, failures without a code after the codes
+  they tie with, which also decides the tenth code when the tenth place is tied. The counting moved
+  to `campaigns/results.ts` with the results schema and its mapping, which the service, the API and
+  the payloads share.
+- **Counts only:** no recipient, member or cost (the page's cost estimate stays out, as in the API).
+  Who receives them is unchanged: endpoints are managed by owners and administrators
+  (`developer.manage`), who read campaigns anyway, and by keys with `webhooks.manage`, which only
+  they grant and which already receive the campaign's counters and the company's messages.
+- **No migration:** nothing is stored; the payload is built when delivered (ADR-053). The OpenAPI
+  document's `WebhookCampaignStatusChanged` gains `results` (the schema of the results
+  `GET /campaigns/{id}` answers), and the event says when they are counted.
+
+Not built: results as they were at the change (a snapshot stored with the event), results for a time
+range or by day, the campaign in `message.status`, events for each recipient, and costs.

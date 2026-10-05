@@ -1,5 +1,87 @@
 # Progress
 
+## 2026-10-05 — Phase 5: campaign results in campaign events (P5-09, ADR-150)
+
+Status: **Implemented and locally verified (test data only).** Since ADR-087 `campaign.status_changed`
+carried a campaign's counters (the audience taken, the recipients queued and skipped) but not what
+happened to its messages: ADR-087 left delivery and read counts out because they change with every
+message status. A receiver that heard a campaign completed had to call `GET /campaigns/{id}`
+(ADR-125), with a key holding `campaigns.read`, to learn how it went. The results were also counted
+in three statements (the counts, the skip reasons, the failure codes), which agree only within one
+snapshot: the API reads them at repeatable read, members' campaign page at read committed.
+
+### Completed
+
+- **Design (ADR-150):** every `campaign.status_changed` carries `campaign.results`, the object
+  `GET /campaigns/{id}` answers (recipients pending, skipped, cancelled and queued; messages in
+  progress, sent, delivered, read, failed, of unknown outcome and cancelled; replies and opt-outs;
+  skip reasons and the 10 commonest failure codes), counted when the request is built (the `t` of
+  its `W360-Signature`), so a retry or a replay counts again; null while the campaign is a draft;
+  never the cost estimate members see; stored nowhere, so no migration; who receives them is
+  unchanged.
+- **Domain:** `campaigns/results.ts` (new): `campaignAnalytics` counts in one statement, the skip
+  reasons and failure codes in scalar subqueries, the commonest first, ties in the reasons' or
+  codes' order with no code after the codes it ties with; the results schema and
+  `toCampaignResults`, moved from `api/campaigns.ts`, shared by the API (`apiGetCampaign`), members'
+  campaign page (`campaigns/service.ts`, which re-exports `campaignAnalytics`) and the payloads.
+  `webhooks/payloads.ts`: `results` on the campaign of `campaign.status_changed`, counted in the
+  delivery's claim from the campaign's current status. OpenAPI: `WebhookCampaignStatusChanged`
+  gains `results`, and the event says when they are counted.
+- **Tests:**
+  - Unit (1 new, 1 extended): the payload schema (results required and nullable, refused when left
+    out, fractional or with an unknown skip reason); the mapping (`messagesCanceled`, no cost
+    estimate), the API sharing the schema, and the OpenAPI entries.
+  - Integration (2 new, 2 extended): a campaign submitted and rejected sends both changes with null
+    results; resubmitted, approved, ticked and dispatched, its changes carry the results counted at
+    each delivery, whatever status the change reports; once WhatsApp reports deliveries, a read and
+    a failure, its completion carries them, equal to `GET /campaigns/{id}`, and a replay of an
+    earlier change counts them again; every body passes the payload schema; the first campaign
+    events test's results (`webhook-events.test.ts`). The results counted in one statement: the
+    commonest skip reasons and failure codes first, ties in the reasons' or codes' order with no
+    code after the codes it ties with, the 10 commonest codes kept, no code the one left out when
+    the tenth place is tied, only the campaign's own recipients and messages counted; the lifecycle
+    test's tied skip reasons (`campaigns.test.ts`).
+  - E2E (1 extended in `webhook-events.spec.ts`): the campaign events test's completed change
+    carries the campaign's settled counts, and every change, all delivered after its draft, carries
+    results.
+- **Docs:** ADR-150 (and ADR-087's and ADR-125's "Not built" annotated); SECURITY (Phase 5 rules);
+  THREAT-MODEL T159; ARCHITECTURE; RUNBOOKS; DEPLOYMENT (no migration; workers from before it);
+  BACKLOG P5-09; feature matrix H-014 and W-138.
+- **Mutation checks:** 30 deliberate regressions tried. 29 were caught on the first run: 8 by unit
+  tests and 19 by integration tests in the domain and the API (the skip reasons' and failure codes'
+  order and ties, no code after the codes it ties with and the one left out at a tied tenth place,
+  the 10-code limit, `unknown` for a failure without a code, each subquery kept to the campaign and
+  to skipped recipients or failed messages, the mapping and the cost estimate it leaves out, the
+  schema the API shares, the payload's results, the draft rule decided by the campaign's status
+  rather than the change's, the payload schema and the OpenAPI entries), and 2 through the e2e test
+  (results never sent, results left out). 1 was not observable: without the skip reasons' tie-break
+  PostgreSQL still returned tied reasons in their order, as its plan groups them by sorting them;
+  the tie-break stays so that the order does not depend on the plan.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                                              | Result                                                                                       |
+| -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`                   | clean                                                                                        |
+| `pnpm test` (unit)                                                   | 693 passed (74 files; 1 new)                                                                 |
+| `pnpm test:integration` on PostgreSQL 18.6                           | 861 passed (56 files; 2 new)                                                                 |
+| `pnpm test:integration` on PostgreSQL 17.11                          | 861 passed (56 files)                                                                        |
+| `pnpm build`                                                         | passed                                                                                       |
+| e2e: webhooks, webhook-events, campaigns (chromium, mobile-chromium) | 30 passed (6.4 min); Firefox and WebKit are not installed here, so CI runs them              |
+| Mutation checks                                                      | 30 tried: 29 caught (8 by unit, 19 by integration, 2 through the e2e test), 1 not observable |
+| gitleaks 8.30.1 on the staged changes                                | no leaks found                                                                               |
+
+A first run of the integration suites was cut short when the local Docker daemon stopped (its
+background task reached its time limit) and its databases went with it; the results above are
+from the complete rerun once Docker was restarted.
+
+### Known gaps
+
+- Results as they were at the change (a snapshot stored with the event), results for a time range
+  or by day, the campaign in `message.status`, events for each recipient, and costs.
+- That the counts, skip reasons and failure codes come from one snapshot follows from counting them
+  in one statement; no test writes concurrently with a count.
+
 ## 2026-10-04 — Phase 5: choosing the conversation statuses a webhook endpoint receives (P5-09, ADR-149)
 
 Status: **Implemented and locally verified (test data only).** Since ADR-074 an endpoint that took
