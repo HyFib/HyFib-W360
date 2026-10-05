@@ -668,6 +668,8 @@ export interface ReceiptNeedingAttention {
   retryable: boolean;
   /** When platform staff were emailed that it used all its attempts (ADR-091). */
   alertedAt: Date | null;
+  /** Who noted that they looked at it, when, and what they noted (ADR-179). */
+  acknowledgement: { at: Date; byName: string | null; note: string } | null;
 }
 
 /** An open quarantine entry, with only the provider ids staff may see (`quarantineExternalIds`). */
@@ -869,9 +871,13 @@ export const RECEIPTS_CSV_COLUMNS = [
   'Last error',
   'Staff emailed (UTC)',
   'Retry',
+  'Acknowledged (UTC)',
 ] as const;
 
-/** Meta and Razorpay receipts that failed all their attempts or have waited too long. */
+/**
+ * Meta and Razorpay receipts that failed all their attempts or have waited too long, and when one
+ * was acknowledged (never who or the note, ADR-179).
+ */
 export function receiptsCsv(rows: readonly ReceiptNeedingAttention[]): string {
   return csvFile(
     RECEIPTS_CSV_COLUMNS,
@@ -890,6 +896,7 @@ export function receiptsCsv(rows: readonly ReceiptNeedingAttention[]): string {
         : r.problem === 'waiting'
           ? 'Retried by the sweep'
           : 'Body erased',
+      csvMinute(r.acknowledgement?.at ?? null),
     ]),
   );
 }

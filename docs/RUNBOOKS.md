@@ -2502,6 +2502,15 @@ it, and the next time it falls behind it starts unacknowledged and is emailed ag
 changes neither the lateness nor the alert. "This queue is no longer late since then." means the
 queue recovered, or fell behind again, since the page loaded: reload it.
 
+**Acknowledging a webhook receipt (ADR-179).** The administrator who looks at a receipt that needs
+attention opens Acknowledge on its row and writes a note of 10 to 500 characters: what was found or
+done ("Malformed body from a Meta test account; not retrying", "Parser fixed in 1.4.3; retried").
+The row then shows who, when and the note, so the others need not look again; a later note replaces
+it, and the platform audit log keeps each (`platform.webhook_receipt_acknowledged`). The note stays
+with the receipt, retried or not, and is deleted with it after 90 days. Acknowledging neither
+retries the receipt nor stops the alert email. "Receipt not found." means it was deleted since the
+page loaded.
+
 **A dead letter of those three queues stays unsettled.** The sweep leaves one alone while its
 company is being deleted, while a job for the same work waits or runs (the company started it again,
 or a retry), and when its envelope did not verify. Otherwise look for `ending stranded work failed;
@@ -2728,6 +2737,11 @@ of either release and web servers of the previous release work with it.
 the `requested` column and the new order, in one transaction; a failure rolls it all back (usually
 the bootstrap roles: fix them and run the migrations again). Workers of this release need it before
 they start (their sweep reads the column); workers of the previous release work with it.
+
+**Migration 0127 failed.** It creates `ops.receipt_acknowledgements` and
+`ops.platform_acknowledge_webhook_receipt`, in one transaction; a failure rolls it all back (usually
+the bootstrap roles: fix them and run the migrations again). Web servers of this release need it
+before they show the Integrations tab; workers and web servers of the previous release work with it.
 
 **Migration 0072 failed.** It creates `ops.queue_waits`, adds `queues` to the kinds of
 `ops.platform_alerts` (replacing its check `platform_alerts_kind_check`) and creates

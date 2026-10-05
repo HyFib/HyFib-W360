@@ -1412,6 +1412,14 @@ message text, contact details, payloads, email addresses, secrets or full URLs:
   queue on time clears them. The platform role reads them on the console; the worker's role, which
   read the whole table, now reads only the check's columns; companies never see them; the CSV gives
   the time only (unit tests; integration tests, run in CI only).
+- Acknowledging webhook receipts (ADR-179): through `ops.platform_acknowledge_webhook_receipt`
+  (SECURITY DEFINER, executable only by the platform role), which checks the platform administrator,
+  the note (10 to 500 characters, trimmed) and the receipt, and writes the platform audit entry
+  (`platform.webhook_receipt_acknowledged`, the note as its reason, no company) in the same
+  transaction. Notes live in `ops.receipt_acknowledgements`, which only the definer role writes and
+  only the platform role reads (the runtime role, which writes receipts, has no grant on it); they
+  are deleted with their receipt; the CSV gives the time only (unit tests; integration tests, run in
+  CI only).
 
 Company export and deletion (Settings → Company data, ADR-055):
 

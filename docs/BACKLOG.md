@@ -773,10 +773,14 @@ verification, app review, Embedded Signup configuration).
   **[Acknowledging late queues built; its database tests run only in CI]** (ADR-177: a platform
   administrator acknowledges a late queue on the Queues tab with a note, shown with who and when
   to the other administrators, replaced by a later note and kept in the platform audit log; it
-  lasts while the queue stays late, and the CSV gives when, never who or the note). Remaining:
+  lasts while the queue stays late, and the CSV gives when, never who or the note).
+  **[Acknowledging webhook receipts built; its database tests run only in CI]** (ADR-179: a
+  platform administrator acknowledges a Meta or Razorpay receipt that needs attention with a
+  note, shown with who and when, replaced by a later note, audited and deleted with the
+  receipt; the CSV gives when, never who or the note). Remaining:
   other alert channels, longer trends and charts, Meta's quality webhook (unconfirmed), exports
-  beyond the rows a tab lists, assigning failures and acknowledging receipts and quarantine
-  entries, paging and rollups for many companies.
+  beyond the rows a tab lists, assigning failures and acknowledging quarantine entries, paging
+  and rollups for many companies.
 - **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**
   (ADR-055): Settings → Company data for owners. A streamed, gzip-compressed JSON Lines export of
   every company table from one read-only transaction (each table and column exported or excluded

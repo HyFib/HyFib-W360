@@ -5626,9 +5626,9 @@ page view as their start. The console now parses them (an integration test compa
 stored times).
 
 Not built: assigning a failure to someone, acknowledging the console's other lists (dead letters,
-built by ADR-169; receipts; quarantine; late queues, built by ADR-177), editing or deleting a note
-(a new acknowledgement replaces it), and leaving acknowledged failures out of the alert email (each
-failure is emailed once anyway).
+built by ADR-169; receipts, built by ADR-179; quarantine; late queues, built by ADR-177), editing or
+deleting a note (a new acknowledgement replaces it), and leaving acknowledged failures out of the
+alert email (each failure is emailed once anyway).
 
 ## ADR-142 Clearing the braces advisory from the Next.js ESLint plugin (2026-10-04)
 
@@ -6748,9 +6748,9 @@ Decision:
 - **The CSV** of Recent dead letters (ADR-158) gains "Acknowledged (UTC)": when, never who or the
   note, as for failures.
 
-Not built: acknowledging receipts and quarantine entries (late queues: built by ADR-177); assigning
-a dead letter to someone; filtering the list by acknowledgement; deleting a note (a new
-acknowledgement replaces it).
+Not built: acknowledging quarantine entries (late queues: built by ADR-177; receipts: built by
+ADR-179); assigning a dead letter to someone; filtering the list by acknowledgement; deleting a note
+(a new acknowledgement replaces it).
 
 ## ADR-170 Choosing the WhatsApp numbers whose events a webhook endpoint receives (P5-09) (2026-10-05)
 
@@ -7147,9 +7147,9 @@ Decision:
 - **The CSV** of Job queues (ADR-158) gains "Acknowledged (UTC)" after "Staff emailed (UTC)": when,
   never who or the note, as for dead letters.
 
-Not built: acknowledging receipts and quarantine entries, assigning a late queue to someone, a
-reminder while an acknowledged queue stays late, and deleting a note (a new acknowledgement replaces
-it).
+Not built: acknowledging quarantine entries (receipts: built by ADR-179), assigning a late queue to
+someone, a reminder while an acknowledged queue stays late, and deleting a note (a new
+acknowledgement replaces it).
 
 ## ADR-178 Template syncs asked for go first (2026-10-05)
 
@@ -7177,3 +7177,36 @@ Decision:
 
 Not built: a refresh for one template rather than the account's whole list, and showing on the
 Templates page when the refresh ran.
+
+## ADR-179 Acknowledging webhook receipts on the operations console (P5-10) (2026-10-05)
+
+Context: Operations → Integrations lists the Meta and Razorpay receipts that used all their attempts
+or have waited too long, and every platform administrator is emailed about the first kind (ADR-091).
+As for dead letters (ADR-169) and late queues (ADR-177), nothing there said that someone had already
+looked at a receipt, whether its retry was pointless (a malformed body, a test account), or what was
+fixed before retrying it.
+
+Decision:
+
+- **Acknowledged with a note:** in the receipts list, a platform administrator acknowledges a
+  receipt with a note of 10 to 500 characters, retried or not. The row shows who acknowledged it,
+  when, and the note; another administrator may acknowledge it again, replacing the note. The
+  platform audit log keeps each (`platform.webhook_receipt_acknowledged`, the note as its reason,
+  the receipt, its provider and status in the metadata, no company: a receipt is not yet a
+  company's).
+- **Kept with the receipt:** notes live in `ops.receipt_acknowledgements` (migration 0127), one per
+  receipt, deleted with it (a foreign key that cascades), so the retention sweep's deletion of
+  receipts after 90 days takes their notes too. A retried receipt keeps its note while it is listed.
+  A table of its own, because the runtime role writes receipts (table grants since 0003) and must
+  not write notes.
+- **Where it is enforced:** `ops.platform_acknowledge_webhook_receipt` (SECURITY DEFINER, executable
+  by the platform role only) checks the administrator, the note (trimmed) and the receipt, then
+  writes the note and the audit entry in one transaction. Platform staff read the notes; the runtime
+  and auth roles cannot read or write them.
+- **Nothing else changes:** acknowledging neither retries the receipt nor changes whether it can be
+  retried, and the alert email still tells each receipt that used its attempts once.
+- **The CSV** of the receipts list (ADR-158) gains "Acknowledged (UTC)" as its last column: when,
+  never who or the note.
+
+Not built: acknowledging quarantine entries (they are resolved with a resolution instead), assigning
+a receipt to someone, and deleting a note (a new acknowledgement replaces it).

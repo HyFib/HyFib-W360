@@ -550,7 +550,7 @@ describe('the onboarding, integrations and queues lists as CSV (ADR-158)', () =>
     expect(csv).not.toContain('server is down');
   });
 
-  it('writes receipts, quarantine entries and email counts as the Integrations tab words them', () => {
+  it('writes receipts (when one was acknowledged, never who or the note), quarantine entries and email counts as the Integrations tab words them', () => {
     const receipt = {
       id: 'r1',
       provider: 'meta_whatsapp',
@@ -561,6 +561,11 @@ describe('the onboarding, integrations and queues lists as CSV (ADR-158)', () =>
       problem: 'exhausted' as const,
       retryable: true,
       alertedAt: at('2026-10-05T01:30:00Z'),
+      acknowledgement: {
+        at: at('2026-10-05T02:10:40Z'),
+        byName: 'Asha Ops',
+        note: 'Razorpay sent a malformed body; ignoring it.',
+      },
     };
     expect(
       lines(
@@ -575,6 +580,7 @@ describe('the onboarding, integrations and queues lists as CSV (ADR-158)', () =>
             lastError: null,
             retryable: false,
             alertedAt: null,
+            acknowledgement: null,
           },
           {
             ...receipt,
@@ -587,16 +593,21 @@ describe('the onboarding, integrations and queues lists as CSV (ADR-158)', () =>
             problem: 'waiting',
             retryable: false,
             alertedAt: null,
+            acknowledgement: null,
           },
         ]),
       ),
     ).toEqual([
       RECEIPTS_CSV_COLUMNS.join(','),
-      '2026-10-05 01:02,r1,Meta (WhatsApp),Failed all attempts,12,"boom, again",2026-10-05 01:30,Can be retried',
-      '2026-09-20 00:00,r2,Razorpay,Failed all attempts: its worker stopped during the last one,12,,,Body erased',
-      '2026-10-05 07:00,r3,shopify,Still waiting,3,,,Retried by the sweep',
+      '2026-10-05 01:02,r1,Meta (WhatsApp),Failed all attempts,12,"boom, again",2026-10-05 01:30,Can be retried,2026-10-05 02:10',
+      '2026-09-20 00:00,r2,Razorpay,Failed all attempts: its worker stopped during the last one,12,,,Body erased,',
+      '2026-10-05 07:00,r3,shopify,Still waiting,3,,,Retried by the sweep,',
       '',
     ]);
+    expect(RECEIPTS_CSV_COLUMNS.at(-1)).toBe('Acknowledged (UTC)');
+    for (const left of ['Asha', 'malformed', 'ignoring']) {
+      expect(receiptsCsv([receipt])).not.toContain(left);
+    }
     expect(
       lines(
         quarantineCsv([
@@ -826,7 +837,7 @@ describe('the onboarding, integrations and queues lists as CSV (ADR-158)', () =>
       'Company,Address,Number,State,Step,Error,Since (UTC)',
       'Company,Address,Status,Created (UTC),Number being set up',
       'Company,Address,What,Label,State,Error,Since (UTC),Acknowledged (UTC)',
-      'Received (UTC),Receipt,From,Problem,Attempts,Last error,Staff emailed (UTC),Retry',
+      'Received (UTC),Receipt,From,Problem,Attempts,Last error,Staff emailed (UTC),Retry,Acknowledged (UTC)',
       'Quarantined (UTC),Receipt,From,Reason,Provider ids,Staff emailed (UTC),Receipt can be retried',
       'Kind,Failed,Waiting',
       'Queue,Declared by this release,Retries,Dead-lettered after its retries,Wait limit (minutes),' +

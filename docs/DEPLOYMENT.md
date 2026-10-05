@@ -275,6 +275,10 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    start (this step does); workers from before it select the columns they know and queue every sync
    at the default priority, as before. Web servers are not involved beyond queueing a member's
    refresh at the higher priority, which workers of either release run.
+   Migration 0127 (ADR-179) creates `ops.receipt_acknowledgements` (empty) and
+   `ops.platform_acknowledge_webhook_receipt`. Workers are not involved. Web servers of this release
+   need it, as the Integrations tab reads the table; web servers from before it show no
+   acknowledgements.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

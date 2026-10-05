@@ -1,5 +1,55 @@
 # Progress
 
+## 2026-10-05 — Phase 5: acknowledging webhook receipts on the operations console (P5-10, ADR-179)
+
+Status: **Implemented; its database tests run in CI only (test data only).** Nothing on the
+Integrations tab said that someone had already looked at a receipt that needed attention. The local
+PostgreSQL is unavailable (its Docker daemon stopped), so migration 0127 and the integration tests
+below were written but not run here.
+
+### Completed
+
+- **Design (ADR-179):** a note of 10 to 500 characters on a receipt, replaced by a later one,
+  audited, kept with the receipt (deleted with it after 90 days); the CSV gives the time only.
+- **Database:** migration 0127 (`ops.receipt_acknowledgements`,
+  `ops.platform_acknowledge_webhook_receipt`); the schema's table (`packages/db`).
+- **Domain:** `acknowledgeReceipt` and the receipts read with the administrator's name
+  (`platform/ops.ts`); the acknowledgement on `ReceiptNeedingAttention` and the CSV column
+  (`ops-model.ts`).
+- **Web:** Acknowledge on each receipt of the Integrations tab, with who, when and the note; the
+  action.
+- **Tests:**
+  - Unit (3 new in `receipt-acknowledgements.test.ts`, 2 changed in `ops-model.test.ts`): the input,
+    the definer call and the CSV column.
+  - Integration (3 new and 1 changed in `platform-ops.test.ts`, 1 changed in
+    `tenant-isolation.test.ts`): the acknowledgement's life, the refusals, the deletion with the
+    receipt, the grants and the function. Written for CI; not run here.
+  - E2E (`platform-ops.spec.ts`): the receipts CSV header. No receipt needs attention in an e2e run,
+    so the form is not exercised end to end. Written for CI; not run here.
+- **Docs:** ADR-179 (and the "Not built" of ADR-141, ADR-169 and ADR-177 annotated); SECURITY;
+  ARCHITECTURE; THREAT-MODEL T173; DEPLOYMENT and RUNBOOKS (migration 0127, acknowledging a
+  receipt); DATA-RETENTION; BACKLOG P5-10; feature matrix H-034.
+- **Mutation checks:** 8 deliberate regressions tried, all caught on the unit-tested parts (the
+  receipt id and the note taken, the note untrimmed, the arguments swapped, another function asked,
+  the CSV value left out, misplaced or taken from the email). The function, the table and the form
+  need the database or a browser, so their regressions are left to the integration tests, which run
+  in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                              |
+| -------------------------------------------------- | ------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                               |
+| `pnpm test` (unit)                                 | 808 passed (82 files)                                               |
+| `pnpm test:integration`, e2e, migration 0127       | not run here: the local PostgreSQL is unavailable; CI runs them     |
+| `pnpm build`                                       | passed                                                              |
+| Mutation checks                                    | 8 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                      |
+
+### Known gaps
+
+- Acknowledging quarantine entries (they are resolved instead); assigning a receipt to someone.
+
 ## 2026-10-05 — Template syncs asked for go first (ADR-178)
 
 Status: **Implemented; its database tests run in CI only (Graph stand-in only).** A member's

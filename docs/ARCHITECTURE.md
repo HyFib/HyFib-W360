@@ -1660,6 +1660,12 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   when the check finds the queue back on time, as it clears the alert's mark. The Queues tab's read
   (`queueWaitsByName`) joins the administrator's name through `acknowledgers`; the worker's grant
   covers the check's columns only; the CSV writes the time only.
+- **Acknowledging webhook receipts** (ADR-179, migration 0127): `ops.receipt_acknowledgements`, one
+  note per receipt (who, when, the note), deleted with the receipt through a cascading foreign key,
+  written only by `ops.platform_acknowledge_webhook_receipt` (definer, platform role only) with the
+  platform audit entry in one transaction and read by the platform role. The Integrations tab's read
+  (`receiptsNeedingAttention`) joins it and the administrator's name through `acknowledgers`; the
+  CSV writes the time only.
 - **Web:** `/platform/ops` (Overview, Onboarding, Integrations, Queues, Signals, Usage over 7, 30 or
   90 days) and a health card on each company's platform page. Every page re-checks the platform
   actor. The functions read every company on each view, which suits the test envelope; paging and

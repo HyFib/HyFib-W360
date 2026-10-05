@@ -165,7 +165,7 @@ test('staff read the operations console and repair a quarantined webhook event',
     [
       'Meta and Razorpay webhook receipts',
       'receipts',
-      'Received (UTC),Receipt,From,Problem,Attempts,Last error,Staff emailed (UTC),Retry',
+      'Received (UTC),Receipt,From,Problem,Attempts,Last error,Staff emailed (UTC),Retry,Acknowledged (UTC)',
     ],
     ['Email delivery (7 days)', 'emails-7-days', 'Kind,Failed,Waiting'],
   ] as const) {

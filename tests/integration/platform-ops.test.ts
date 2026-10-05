@@ -2264,6 +2264,181 @@ describe('acknowledging dead letters (ADR-169)', () => {
   });
 });
 
+describe('acknowledging webhook receipts (ADR-179)', () => {
+  /** A receipt already emailed about, so the alert tests of this file count only theirs. */
+  async function receipt(status: string, attempts: number, age = '1 hour') {
+    const id = uuidv7();
+    await fx.query(
+      `INSERT INTO ops.webhook_receipts (id, provider, received_at, body_sha256, body_ciphertext,
+         body_size, status, attempts, last_error, exhausted_alerted_at)
+       VALUES ($1, 'meta_whatsapp', now() - $5::interval, $2, 'sealed-body', 10, $3, $4, 'boom',
+         now())`,
+      [id, randomBytes(32).toString('hex'), status, attempts, age],
+    );
+    return id;
+  }
+  async function namedStaff(name: string): Promise<PlatformActor> {
+    const user = await createUser(fx.dbs, { twoFactor: true, name });
+    await fx.dbs.ownerPool.query(
+      `INSERT INTO ops.platform_admins (user_id, role) VALUES ($1, 'platform_operator')`,
+      [user.id],
+    );
+    return { userId: user.id, role: 'platform_operator', correlationId: uuidv7() };
+  }
+  const listed = async (id: string) =>
+    (await ops().integrations(staff)).receipts.find((r) => r.id === id);
+  const acknowledge = (actor: PlatformActor, receiptId: string, note: string) =>
+    ops().acknowledgeReceipt(actor, { receiptId, note });
+  const audits = (id: string) =>
+    fx.query<{
+      actor_user_id: string;
+      reason: string;
+      target_tenant_id: string | null;
+      metadata: unknown;
+      correlation_id: string;
+    }>(
+      `SELECT actor_user_id, reason, target_tenant_id, metadata, correlation_id
+         FROM ops.platform_audit_events
+        WHERE action = 'platform.webhook_receipt_acknowledged' AND metadata->>'receiptId' = $1
+        ORDER BY occurred_at, id`,
+      [id],
+    );
+  const notes = async (id: string) =>
+    (
+      await fx.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM ops.receipt_acknowledgements WHERE receipt_id = $1`,
+        [id],
+      )
+    )[0]!.n;
+
+  it('records who looked at a receipt and their note; another administrator replaces it; each is audited; a retry keeps it', async () => {
+    const id = await receipt('failed', 12);
+    expect((await listed(id))?.acknowledgement).toBeNull();
+    const asha = await namedStaff('Asha Ops');
+    await acknowledge(asha, id, '  Malformed body from a test account; ignoring.  ');
+    const first = (await listed(id))!.acknowledgement!;
+    expect([first.byName, first.note]).toEqual([
+      'Asha Ops',
+      'Malformed body from a test account; ignoring.',
+    ]);
+    expect(Date.now() - first.at.getTime()).toBeLessThan(60_000);
+    const ravi = await namedStaff('Ravi Ops');
+    await acknowledge(ravi, id, 'Parser fixed in 1.4.3; retrying it now.');
+    expect((await listed(id))?.acknowledgement).toMatchObject({
+      byName: 'Ravi Ops',
+      note: 'Parser fixed in 1.4.3; retrying it now.',
+    });
+    const audited = await audits(id);
+    expect(audited.map((a) => [a.actor_user_id, a.reason, a.correlation_id])).toEqual([
+      [asha.userId, 'Malformed body from a test account; ignoring.', asha.correlationId],
+      [ravi.userId, 'Parser fixed in 1.4.3; retrying it now.', ravi.correlationId],
+    ]);
+    expect(audited[0]!.target_tenant_id).toBeNull();
+    expect(audited[0]!.metadata).toEqual({
+      receiptId: id,
+      provider: 'meta_whatsapp',
+      status: 'failed',
+    });
+    // The tab's CSV gives when, never who or the note.
+    const file = await ops().exportList(staff, 'receipts', 30);
+    const line = file.body.split('\r\n').find((l) => l.includes(`,${id},`))!;
+    expect(line).toMatch(/,\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
+    for (const left of ['Ravi', 'Asha', 'Malformed', 'Parser fixed']) {
+      expect(file.body).not.toContain(left);
+    }
+    // Retried, it waits again and is still listed: the note stays with the receipt.
+    await ops().retryReceipt(staff, { receiptId: id, reason: 'Parser fixed in 1.4.3' });
+    expect(await listed(id)).toMatchObject({
+      problem: 'waiting',
+      acknowledgement: { byName: 'Ravi Ops' },
+    });
+  });
+
+  it('refuses unknown receipts, bad notes and anyone who is not an administrator, and deletes a note with its receipt', async () => {
+    const id = await receipt('failed', 12);
+    await expectCode(acknowledge(staff, uuidv7(), 'Looking into this receipt now.'), 'not_found');
+    await expectCode(acknowledge(staff, id, 'Too short'), 'validation_failed');
+    await expectCode(acknowledge(staff, id, 'x'.repeat(501)), 'validation_failed');
+    await expectCode(
+      acknowledge(staff, 'not-a-uuid', 'Looking into this receipt now.'),
+      'validation_failed',
+    );
+    // The function checks the note itself too, whatever calls it, and trims it.
+    const direct = (receiptId: string, note: string) =>
+      fx.dbs.platform.run(staff.userId, (tx) =>
+        tx.execute(
+          sql`select ops.platform_acknowledge_webhook_receipt(${receiptId}::uuid, ${note}, 'c')`,
+        ),
+      );
+    await expectCode(direct(id, '   short   '), 'precondition_failed');
+    await expectCode(direct(id, 'x'.repeat(501)), 'precondition_failed');
+    const outsider = await createUser(fx.dbs, { twoFactor: true });
+    await expectCode(
+      acknowledge(
+        { userId: outsider.id, role: 'platform_operator', correlationId: uuidv7() },
+        id,
+        'Looking into this receipt now.',
+      ),
+      'forbidden',
+    );
+    expect(await notes(id)).toBe(0);
+    expect(await audits(id)).toEqual([]);
+    await direct(id, '   Noted straight in SQL.   ');
+    expect((await listed(id))?.acknowledgement?.note).toBe('Noted straight in SQL.');
+
+    // Any receipt still kept can be acknowledged; the retention sweep deletes its note with it.
+    const old = await receipt('processed', 1, '91 days');
+    await direct(old, 'An old one, noted before it goes.');
+    expect(await notes(old)).toBe(1);
+    await fx.dbs.appPool.query(`SELECT * FROM ops.apply_webhook_retention(5000)`);
+    expect(await notes(old)).toBe(0);
+    expect(await notes(id)).toBe(1);
+  });
+
+  it('keeps the writing to the definer function and the reading to platform staff', async () => {
+    const id = await receipt('failed', 12);
+    const privilege = async (role: string, action: string) =>
+      (
+        await fx.query<{ ok: boolean }>(
+          `SELECT has_table_privilege($1, 'ops.receipt_acknowledgements', $2) AS ok`,
+          [role, action],
+        )
+      )[0]!.ok;
+    expect(await privilege('w360_platform', 'SELECT')).toBe(true);
+    for (const action of ['INSERT', 'UPDATE', 'DELETE']) {
+      expect(await privilege('w360_platform', action), action).toBe(false);
+    }
+    for (const action of ['SELECT', 'INSERT', 'UPDATE', 'DELETE']) {
+      expect(await privilege('w360_app', action), action).toBe(false);
+      expect(await privilege('w360_auth', action), action).toBe(false);
+    }
+    await expect(
+      fx.dbs.appPool.query(
+        `SELECT ops.platform_acknowledge_webhook_receipt($1::uuid, 'Looking into this receipt now.', 'c')`,
+        [id],
+      ),
+    ).rejects.toThrow(/permission denied for function/);
+    const [fn] = await fx.query<{ owner: string; definer: boolean; config: unknown }>(
+      `SELECT pg_get_userbyid(p.proowner) AS owner, p.prosecdef AS definer, p.proconfig AS config
+         FROM pg_proc p
+        WHERE p.oid = 'ops.platform_acknowledge_webhook_receipt(uuid,text,text)'::regprocedure`,
+    );
+    expect(fn).toEqual({
+      owner: 'w360_definer',
+      definer: true,
+      config: ['search_path=pg_catalog, pg_temp'],
+    });
+    // A note keeps to its length.
+    await expect(
+      fx.query(
+        `INSERT INTO ops.receipt_acknowledgements (receipt_id, acknowledged_by_user_id,
+           acknowledged_at, note) VALUES ($1, $2, now(), 'short')`,
+        [id, staff.userId],
+      ),
+    ).rejects.toThrow(/receipt_acknowledgements_note_check/);
+  });
+});
+
 describe('exports of the onboarding, integrations and queues lists (ADR-158)', () => {
   const MINUTE = '\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}';
   const csvLines = (body: string) => body.replace(/^\uFEFF/, '').split('\r\n');
@@ -2430,7 +2605,8 @@ describe('exports of the onboarding, integrations and queues lists (ADR-158)', (
     expect(receiptLines.filter((l) => l.includes(`,${receiptId},`))).toEqual([
       expect.stringMatching(
         new RegExp(
-          `^${MINUTE},${receiptId},Meta \\(WhatsApp\\),Failed all attempts,12,"boom, twice",,Can be retried$`,
+          // Not acknowledged (ADR-179): the last column is empty.
+          `^${MINUTE},${receiptId},Meta \\(WhatsApp\\),Failed all attempts,12,"boom, twice",,Can be retried,$`,
         ),
       ),
     ]);

@@ -333,6 +333,19 @@ export async function acknowledgeDeadLetterAction(input: unknown): Promise<Actio
 }
 
 /**
+ * Acknowledges a webhook receipt on the operations console, with a note, or replaces the note
+ * (audited, ADR-179).
+ */
+export async function acknowledgeReceiptAction(input: unknown): Promise<ActionResult> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    await runtime.platformOps.acknowledgeReceipt(actor, input);
+    refresh();
+    return null;
+  });
+}
+
+/**
  * Acknowledges a queue that is late now on the operations console, with a note, or replaces the
  * note (audited, ADR-177).
  */
