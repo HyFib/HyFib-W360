@@ -27,6 +27,8 @@ import {
   WEBHOOK_RUN_TRIGGERS,
   WEBHOOK_CONSENT_CHANGE_LABELS,
   WEBHOOK_CONSENT_CHANGES,
+  WEBHOOK_CONTACT_SOURCE_LABELS,
+  WEBHOOK_CONTACT_SOURCES,
   WEBHOOK_TEMPLATE_STATUS_LABELS,
   WEBHOOK_TEMPLATE_STATUSES,
   webhookAssigneeText,
@@ -66,6 +68,7 @@ import {
   type WebhookRunEndStatus,
   type WebhookRunTrigger,
   type WebhookConsentChange,
+  type ContactSource,
   type WebhookTeamChoice,
   type WebhookTemplateChoice,
   type WebhookTemplateStatus,
@@ -380,6 +383,50 @@ function ConsentChoices({
             <Label htmlFor={id} className="font-normal">
               {WEBHOOK_CONSENT_CHANGE_LABELS[change]}{' '}
               <span className="font-mono text-xs">({change})</span>
+            </Label>
+          </div>
+        );
+      })}
+    </fieldset>
+  );
+}
+
+/**
+ * Where the contacts whose `contact.created` an endpoint takes came from (ADR-190), shown while it
+ * takes the event.
+ */
+function ContactSourceChoices({
+  prefix,
+  chosen,
+  onChange,
+}: {
+  prefix: string;
+  chosen: ContactSource[];
+  onChange: (next: ContactSource[]) => void;
+}) {
+  return (
+    <fieldset className="ml-6 grid gap-1">
+      <legend className="mb-1 text-xs text-muted-foreground">
+        New contacts sent, by where they came from (all of them unless you untick some)
+      </legend>
+      {WEBHOOK_CONTACT_SOURCES.map((source) => {
+        const id = `${prefix}-contact-source-${source}`;
+        return (
+          <div key={source} className="flex items-center gap-2">
+            <Checkbox
+              id={id}
+              checked={chosen.includes(source)}
+              onChange={(e) =>
+                onChange(
+                  e.target.checked
+                    ? WEBHOOK_CONTACT_SOURCES.filter((s) => s === source || chosen.includes(s))
+                    : chosen.filter((s) => s !== source),
+                )
+              }
+            />
+            <Label htmlFor={id} className="font-normal">
+              {WEBHOOK_CONTACT_SOURCE_LABELS[source]}{' '}
+              <span className="font-mono text-xs">({source})</span>
             </Label>
           </div>
         );
@@ -1094,6 +1141,8 @@ function EventChoices({
   onRunEndStatusesChange,
   consentChanges,
   onConsentChangesChange,
+  contactSources,
+  onContactSourcesChange,
 }: {
   prefix: string;
   chosen: WebhookEventType[];
@@ -1116,6 +1165,8 @@ function EventChoices({
   onRunEndStatusesChange: (next: WebhookRunEndStatus[]) => void;
   consentChanges: WebhookConsentChange[];
   onConsentChangesChange: (next: WebhookConsentChange[]) => void;
+  contactSources: ContactSource[];
+  onContactSourcesChange: (next: ContactSource[]) => void;
 }) {
   return (
     <fieldset className="grid gap-2">
@@ -1182,6 +1233,13 @@ function EventChoices({
                 prefix={prefix}
                 chosen={consentChanges}
                 onChange={onConsentChangesChange}
+              />
+            ) : null}
+            {type === 'contact.created' && chosen.includes(type) ? (
+              <ContactSourceChoices
+                prefix={prefix}
+                chosen={contactSources}
+                onChange={onContactSourcesChange}
               />
             ) : null}
             {type === 'contact.updated' && chosen.includes(type) ? (
@@ -1482,6 +1540,8 @@ export function WebhookEndpointForm({
     runTriggers: WebhookRunTrigger[] | null;
     /** The consent changes it takes (ADR-189); null for every change. */
     consentChanges: WebhookConsentChange[] | null;
+    /** Where the contacts it takes as `contact.created` came from (ADR-190); null for every one. */
+    contactSources: ContactSource[] | null;
     channelIds: string[] | null;
     /** The teams it names (ADR-174), deleted ones without a name; null for every team. */
     teams: WebhookEndpointTeam[] | null;
@@ -1542,6 +1602,9 @@ export function WebhookEndpointForm({
   );
   const [consentChanges, setConsentChanges] = useState<WebhookConsentChange[]>(
     endpoint?.consentChanges ?? [...WEBHOOK_CONSENT_CHANGES],
+  );
+  const [contactSources, setContactSources] = useState<ContactSource[]>(
+    endpoint?.contactSources ?? [...WEBHOOK_CONTACT_SOURCES],
   );
   const [everyAutomation, setEveryAutomation] = useState(!endpoint?.automationIds);
   const [automationIds, setAutomationIds] = useState<string[]>(endpoint?.automationIds ?? []);
@@ -1655,6 +1718,12 @@ export function WebhookEndpointForm({
           consentChanges.length < WEBHOOK_CONSENT_CHANGES.length
             ? consentChanges
             : null;
+        // Every source ticked takes every new contact (null, ADR-190).
+        const chosenContactSources =
+          eventTypes.includes('contact.created') &&
+          contactSources.length < WEBHOOK_CONTACT_SOURCES.length
+            ? contactSources
+            : null;
         // Every number's events unless the numbers ticked are chosen (ADR-170).
         const chosenChannels =
           webhookTakesChannelEvents(eventTypes) && !everyChannel ? channelIds : null;
@@ -1685,6 +1754,7 @@ export function WebhookEndpointForm({
           runEndStatuses: chosenRunEndStatuses,
           runTriggers: chosenRunTriggers,
           consentChanges: chosenConsentChanges,
+          contactSources: chosenContactSources,
           channelIds: chosenChannels,
           teamIds: chosenTeams,
           templateIds: chosenTemplates,
@@ -1744,6 +1814,7 @@ export function WebhookEndpointForm({
               setRunEndStatuses([...WEBHOOK_RUN_END_STATUSES]);
               setRunTriggers([...WEBHOOK_RUN_TRIGGERS]);
               setConsentChanges([...WEBHOOK_CONSENT_CHANGES]);
+              setContactSources([...WEBHOOK_CONTACT_SOURCES]);
               setEveryAutomation(true);
               setAutomationIds([]);
               setEveryChannel(true);
@@ -1826,6 +1897,8 @@ export function WebhookEndpointForm({
         onRunEndStatusesChange={setRunEndStatuses}
         consentChanges={consentChanges}
         onConsentChangesChange={setConsentChanges}
+        contactSources={contactSources}
+        onContactSourcesChange={setContactSources}
       />
       {webhookTakesFieldChanges(eventTypes, parts) ? (
         <FieldChoices

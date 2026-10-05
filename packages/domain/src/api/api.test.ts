@@ -120,6 +120,7 @@ import {
   WEBHOOK_FIELDS_NEED_THE_PART,
   WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS,
   WEBHOOK_CONSENT_CHANGES_NEED_THE_EVENT,
+  WEBHOOK_CONTACT_SOURCES_NEED_THE_EVENT,
   WEBHOOK_ASSIGNEES_NEED_THE_EVENTS,
   WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS,
   WEBHOOK_CAMPAIGNS_NEED_THE_EVENTS,
@@ -1379,6 +1380,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'consentChanges',
       'contactFieldKeys',
       'contactParts',
+      'contactSources',
       'conversationStatuses',
       'description',
       'enabled',
@@ -1871,6 +1873,64 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(
       Object.keys((schemas.CreateWebhookEndpoint as { properties: object }).properties),
     ).toContain('consentChanges');
+  });
+
+  it('take where contacts came from only with contact.created, each once, and a list of them alone is a change (ADR-190)', () => {
+    const base = { url: 'https://hooks.example.com/w360', events: ['contact.created'] };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...base,
+        contactSources: ['store', 'whatsapp', 'store'],
+      }).contactSources,
+    ).toEqual(['whatsapp', 'store']);
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['contact.updated', 'contact.erased'],
+      contactSources: ['whatsapp'],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['contactSources', WEBHOOK_CONTACT_SOURCES_NEED_THE_EVENT],
+    ]);
+    for (const body of [
+      { ...base, contactSources: [] },
+      { ...base, contactSources: ['agent'] },
+      { ...base, contactSources: ['flow'] },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(
+      apiCreateWebhookEndpointSchema.parse({ ...base, contactSources: null }).contactSources,
+    ).toBe(null);
+    expect(apiUpdateWebhookEndpointSchema.parse({ contactSources: null })).toEqual({
+      contactSources: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ contactSources: ['import', 'api'] })).toEqual({
+      contactSources: ['import', 'api'],
+    });
+    // Answered as a list of sources, or null.
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: { items?: { enum?: unknown } }[] }>;
+      required?: string[];
+    };
+    expect(answered.properties.contactSources?.anyOf?.find((c) => c.items)?.items?.enum).toEqual([
+      'whatsapp',
+      'manual',
+      'import',
+      'api',
+      'store',
+    ]);
+    expect(answered.required).toContain('contactSources');
+    const create = schemas.CreateWebhookEndpoint as {
+      properties: Record<string, { description?: string }>;
+    };
+    expect(create.properties.contactSources?.description).toContain(
+      'Leave out `api` not to hear of the contacts your own keys add.',
+    );
   });
 
   it('take members only with an event of a conversation, each once, and a list of them alone is a change (ADR-181)', () => {

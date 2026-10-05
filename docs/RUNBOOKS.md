@@ -2265,6 +2265,15 @@ to replay. To take more, tick the templates under "Templates" on the endpoint's 
 `templateIds` (null for every template). Removing both Message status and Template status clears the
 list.
 
+**A receiver misses added contacts (ADR-190).** An endpoint can take the `contact.created` of the
+contacts from chosen sources only. The endpoints list shows them ("New contacts sent: …"), and the
+API answers `contactSources` (null takes every contact). An added contact goes by its source
+(`contact.source`): one from another source is never queued for the endpoint, and its later changes
+are `contact.updated` events, which the list does not narrow. To take more, tick the sources under
+"Contact added" on the endpoint's page, or `PATCH /webhook-endpoints/{id}` with `contactSources`
+(null for every contact). Removing Contact added clears the list. A receiver that is sent its own
+contacts back should leave out `api`.
+
 **A receiver misses consent changes (ADR-189).** An endpoint can take chosen consent changes only.
 The endpoints list shows them ("Consent changes sent: …"), and the API answers `consentChanges`
 (null takes every change). A change goes by its purpose and action (`marketing_opt_out`): the others
@@ -2888,6 +2897,14 @@ roles, or a lock held on the table: fix it and run the migrations again). Web se
 release need it before they start, or Settings → Webhooks and the endpoints API fail (their reads of
 endpoints name the column); workers of either release and web servers of the previous release work
 with it.
+
+**Migration 0136 failed.** It adds `contact_sources` to `app.webhook_endpoints` with the check
+`webhook_endpoints_contact_sources`, grants its update to the runtime role, and replaces
+`app.capture_contact_webhook_event`, in one transaction; a failure rolls it all back (usually the
+bootstrap roles, or a lock held on the table: fix it and run the migrations again). Web servers of
+this release need it before they start, or Settings → Webhooks and the endpoints API fail (their
+reads of endpoints name the column); workers of either release and web servers of the previous
+release work with it.
 
 **Migration 0072 failed.** It creates `ops.queue_waits`, adds `queues` to the kinds of
 `ops.platform_alerts` (replacing its check `platform_alerts_kind_check`) and creates

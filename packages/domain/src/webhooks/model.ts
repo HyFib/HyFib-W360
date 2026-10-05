@@ -1,5 +1,6 @@
 import type {
   ChannelStatus,
+  ContactSource,
   WebhookCampaignStatus,
   WebhookConsentChange,
   WebhookContactPart,
@@ -14,6 +15,7 @@ import type {
 } from '@w360/db';
 
 export type {
+  ContactSource,
   WebhookCampaignStatus,
   WebhookConsentChange,
   WebhookContactPart,
@@ -374,6 +376,27 @@ export const WEBHOOK_CONSENT_CHANGE_LABELS: Record<WebhookConsentChange, string>
   marketing_opt_out: 'Marketing opt-outs',
   utility_opt_in: 'Utility opt-ins',
   utility_opt_out: 'Utility opt-outs',
+};
+
+/**
+ * Where a contact came from (`contact.source`), which an endpoint taking `contact.created` can
+ * choose (ADR-190), in the order contacts' sources are defined.
+ */
+export const WEBHOOK_CONTACT_SOURCES = [
+  'whatsapp',
+  'manual',
+  'import',
+  'api',
+  'store',
+] as const satisfies readonly ContactSource[];
+
+/** How Settings names where a contact came from (ADR-190). */
+export const WEBHOOK_CONTACT_SOURCE_LABELS: Record<ContactSource, string> = {
+  whatsapp: 'Wrote on WhatsApp',
+  manual: 'Added in the app',
+  import: 'Imported from a file',
+  api: 'Added through the API',
+  store: 'From a store',
 };
 
 export const WEBHOOK_LIMITS = {

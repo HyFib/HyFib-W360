@@ -25,6 +25,7 @@ import {
   WEBHOOK_RUN_END_STATUSES,
   WEBHOOK_RUN_TRIGGERS,
   WEBHOOK_CONSENT_CHANGES,
+  WEBHOOK_CONTACT_SOURCES,
   WEBHOOK_RETRY_SECONDS,
   WEBHOOK_TEMPLATE_STATUSES,
 } from '../webhooks/model';
@@ -545,6 +546,12 @@ export const apiWebhookEndpointSchema = z.object({
     .nullable()
     .describe(
       'The consent changes the endpoint receives as consent.changed, by the event’s purpose and action; null receives every change.',
+    ),
+  contactSources: z
+    .array(z.enum(WEBHOOK_CONTACT_SOURCES))
+    .nullable()
+    .describe(
+      'Where the contacts whose contact.created the endpoint receives came from, as contact.source names it; null receives every contact.',
     ),
   channelIds: z
     .array(z.uuid())

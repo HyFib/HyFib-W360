@@ -749,7 +749,9 @@ verification, app review, Embedded Signup configuration).
   company's campaigns, in Settings or through the API, or every campaign's as before). **[Consent
   change filters built; their database tests run only in CI]** (ADR-189: an endpoint takes the
   consent changes it chooses, by purpose and action, in Settings or through the API, or every change
-  as before). Remaining:
+  as before). **[Contact source filters built; their database tests run only in CI]** (ADR-190: an
+  endpoint takes the `contact.created` of the contacts from the sources it chooses, such as all but
+  `api` for an integration that adds contacts itself, or every contact's as before). Remaining:
   filters for other event types and on a message's or contact's values (such as by tag or a field's
   value, or a run's end reason or key), other authentication (headers computed
   per delivery, other OAuth grants),

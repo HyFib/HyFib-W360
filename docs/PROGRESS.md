@@ -1,5 +1,57 @@
 # Progress
 
+## 2026-10-05 — Phase 5: choosing where the added contacts a webhook endpoint receives came from (P5-09, ADR-190)
+
+Status: **Implemented; its database and browser tests run in CI only (test receivers only).** Every
+endpoint taking `contact.created` received every added contact, an integration's own included. The
+local PostgreSQL is unavailable (its Docker daemon stopped), so migration 0136, the integration
+tests and the changed e2e test below were written but not run here.
+
+### Completed
+
+- **Design (ADR-190):** `contactSources`, null for every contact or 1 to 5 of `whatsapp`, `manual`,
+  `import`, `api` and `store`, only with `contact.created`, matched to the source of the contact the
+  insert added.
+- **Database:** migration 0136 (the column and its check, the column grant,
+  `app.capture_contact_webhook_event`); the schema's column (`packages/db`).
+- **Domain:** the list's schema, keeping and refining (`webhookContactSourcesSchema`,
+  `webhookContactSourcesFor`); the sources and their labels in the model; `contactSources` in the
+  settings service, the API (create, update, answers) and the OpenAPI document; the export column.
+- **Web:** "New contacts sent, by where they came from" under Contact added in the endpoint form
+  (all ticked unless some are unticked) and "New contacts sent: …" on the endpoints list.
+- **Tests:**
+  - Unit (3 new in `webhooks.test.ts`, 1 new and 1 changed in `api.test.ts`): the list's rules, its
+    sources and labels, keeping and clearing, the API schemas and the OpenAPI entries.
+  - Integration (2 new in `webhooks.test.ts`, 1 new and 1 changed in
+    `api-webhook-endpoints.test.ts`): refusals, keeping and clearing, audits, the check and the
+    grant, capture by source, the API. Written for CI; not run here.
+  - E2E (1 changed in `webhook-events.spec.ts`): an endpoint for contacts who wrote on WhatsApp
+    hears of the customer, not of a contact added in the app. Written for CI; not run here.
+- **Docs:** ADR-190 (and the "Not built" of ADR-123 and ADR-189 annotated); SECURITY; ARCHITECTURE;
+  THREAT-MODEL T184; DEPLOYMENT and RUNBOOKS (migration 0136, a receiver missing added contacts);
+  DATA-RETENTION; BACKLOG P5-09; feature matrix H-014, W-138 and W-139.
+- **Mutation checks:** 13 deliberate regressions tried, all caught on the unit-tested parts (the
+  order or repeats kept, an empty list, a list kept without the event, for another event or by a
+  null, a source left out, a label, the API's refinement, change rule, field and description, the
+  OpenAPI field). The services' checks, the capture and the form need the database or a browser, so
+  their regressions are left to the integration and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 845 passed (82 files)                                                |
+| `pnpm test:integration`, e2e, migration 0136       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 13 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Filters on which key added a contact; the source for `contact.updated` and `contact.erased`;
+  filters for `order.received`.
+
 ## 2026-10-05 — Phase 5: choosing the consent changes a webhook endpoint receives (P5-09, ADR-189)
 
 Status: **Implemented; its database and browser tests run in CI only (test receivers only).** Every

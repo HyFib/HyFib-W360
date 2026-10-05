@@ -1,5 +1,6 @@
 import { integer, smallint, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 import { jsonb } from './columns';
+import type { ContactSource } from './messaging';
 import { appSchema } from './tenancy';
 
 const tz = (name: string) => timestamp(name, { withTimezone: true, mode: 'date' });
@@ -206,6 +207,11 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    * every change. Set only while `consent.changed` is among its events.
    */
   consentChanges: text('consent_changes').array().$type<WebhookConsentChange[]>(),
+  /**
+   * Where the contacts whose `contact.created` it takes came from (ADR-190), as the payload's
+   * `contact.source`; null takes every contact. Set only while `contact.created` is among its events.
+   */
+  contactSources: text('contact_sources').array().$type<ContactSource[]>(),
   /**
    * The endpoint's OAuth client (ADR-173): its authorization server's token endpoint, the client
    * identifier, the secret encrypted by the keyring and the scope to ask for (null: none). All

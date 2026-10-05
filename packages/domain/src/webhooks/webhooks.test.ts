@@ -9,6 +9,7 @@ import {
   CAMPAIGN_PAUSE_REASONS,
   CAMPAIGN_STATUSES,
   CHANNEL_STATUSES,
+  CONTACT_SOURCES,
   CONVERSATION_STATUSES,
   ORDER_STATUSES,
   TEMPLATE_STATUSES,
@@ -38,6 +39,8 @@ import {
   WEBHOOK_RUN_TRIGGERS,
   WEBHOOK_CONSENT_CHANGE_LABELS,
   WEBHOOK_CONSENT_CHANGES,
+  WEBHOOK_CONTACT_SOURCE_LABELS,
+  WEBHOOK_CONTACT_SOURCES,
   WEBHOOK_CAMPAIGN_EVENTS,
   WEBHOOK_TEAM_EVENTS,
   WEBHOOK_TEMPLATE_EVENTS,
@@ -132,6 +135,8 @@ import {
   webhookRunTriggersSchema,
   webhookConsentChangesFor,
   webhookConsentChangesSchema,
+  webhookContactSourcesFor,
+  webhookContactSourcesSchema,
   webhookHeadersAad,
   webhookHeadersSchema,
   webhookMessageSendersFor,
@@ -2592,6 +2597,62 @@ describe('consent change filters (ADR-189)', () => {
         ['utility_opt_in'],
         ['utility_opt_in'],
       ),
+    ).toBeNull();
+  });
+});
+
+describe('contact source filters (ADR-190)', () => {
+  it('take 1 to 5 of the places contacts come from, once each in their order; null takes every contact', () => {
+    expect(WEBHOOK_CONTACT_SOURCES).toEqual(['whatsapp', 'manual', 'import', 'api', 'store']);
+    expect(webhookContactSourcesSchema.parse(['store', 'whatsapp'])).toEqual(['whatsapp', 'store']);
+    expect(webhookContactSourcesSchema.parse([...WEBHOOK_CONTACT_SOURCES].reverse())).toEqual([
+      ...WEBHOOK_CONTACT_SOURCES,
+    ]);
+    expect(webhookContactSourcesSchema.parse(null)).toBeNull();
+    for (const refused of [
+      [],
+      ['agent'],
+      ['WhatsApp'],
+      ['api', null],
+      'api',
+      [...WEBHOOK_CONTACT_SOURCES, 'api'],
+    ]) {
+      expect(webhookContactSourcesSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(webhookContactSourcesSchema.safeParse(['agent']).error?.issues[0]?.message).toBe(
+      'Choose where contacts came from from the list.',
+    );
+    expect(webhookContactSourcesSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one place contacts come from, or take every contact.',
+    );
+    expect(
+      webhookContactSourcesSchema.safeParse([...WEBHOOK_CONTACT_SOURCES, 'api']).error?.issues[0]
+        ?.message,
+    ).toBe('Give each place contacts come from once.');
+  });
+
+  it('are every source a contact has, each named', () => {
+    expect([...WEBHOOK_CONTACT_SOURCES]).toEqual([...CONTACT_SOURCES]);
+    expect(WEBHOOK_CONTACT_SOURCE_LABELS).toEqual({
+      whatsapp: 'Wrote on WhatsApp',
+      manual: 'Added in the app',
+      import: 'Imported from a file',
+      api: 'Added through the API',
+      store: 'From a store',
+    });
+  });
+
+  it('are kept only while the endpoint takes contact.created: given, kept, or cleared', () => {
+    expect(webhookContactSourcesFor(['contact.created'], ['whatsapp'], null)).toEqual(['whatsapp']);
+    expect(
+      webhookContactSourcesFor(['contact.created', 'contact.updated'], undefined, ['import']),
+    ).toEqual(['import']);
+    expect(webhookContactSourcesFor(['contact.created'], null, ['import'])).toBeNull();
+    expect(webhookContactSourcesFor(['contact.created'], undefined, null)).toBeNull();
+    expect(
+      webhookContactSourcesFor(['contact.updated', 'contact.erased'], ['api'], ['api']),
     ).toBeNull();
   });
 });

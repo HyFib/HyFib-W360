@@ -50,6 +50,8 @@ export async function createWebhookEndpointAction(
     runTriggers: string[] | null;
     /** The consent changes it takes as `consent.changed` (ADR-189); null takes every change. */
     consentChanges: string[] | null;
+    /** Where the contacts whose `contact.created` it takes came from (ADR-190); null: every one. */
+    contactSources: string[] | null;
     /** The WhatsApp numbers whose events it takes (ADR-170); null takes every number. */
     channelIds: string[] | null;
     /** The teams whose conversations' events it takes (ADR-174); null takes every one's. */
@@ -106,6 +108,8 @@ export async function updateWebhookEndpointAction(
     runTriggers: string[] | null;
     /** The consent changes it takes as `consent.changed` (ADR-189); null takes every change. */
     consentChanges: string[] | null;
+    /** Where the contacts whose `contact.created` it takes came from (ADR-190); null: every one. */
+    contactSources: string[] | null;
     /** The WhatsApp numbers whose events it takes (ADR-170); null takes every number. */
     channelIds: string[] | null;
     /** The teams whose conversations' events it takes (ADR-174); null takes every one's. */

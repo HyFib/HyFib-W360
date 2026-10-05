@@ -265,6 +265,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       runEndStatuses: null,
       runTriggers: null,
       consentChanges: null,
+      contactSources: null,
       channelIds: null,
       teamIds: null,
       templateIds: null,
@@ -1714,6 +1715,92 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
     expect(await issueOf(api().update(key.ctx, id, { consentChanges: [] }))).toMatchObject({
       path: 'consentChanges',
+    });
+  });
+
+  it('choose where the added contacts an endpoint receives came from, kept by changes that leave them out and cleared with the event (ADR-190)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // The sources need contact.created, at least one, and each from the list, by place.
+    const refusals = [
+      [['contact.updated'], ['whatsapp'], 'contactSources'],
+      [['contact.created'], [], 'contactSources'],
+      [['contact.created'], ['whatsapp', 'agent'], 'contactSources.1'],
+      [['contact.created'], ['flow'], 'contactSources.0'],
+    ] as const;
+    for (const [index, [events, contactSources, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, contactSources },
+            idem(`contact-sources-bad-${index}`, JSON.stringify(contactSources)),
+          ),
+        ),
+        JSON.stringify(contactSources),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    // An integration that adds contacts itself leaves out `api`.
+    const created = await addThroughApi(key.ctx, 'contact-sources-1', {
+      url: receiverUrl(),
+      events: ['contact.created', 'contact.updated'],
+      contactSources: ['store', 'whatsapp', 'manual', 'import'],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.contactSources).toEqual(['whatsapp', 'manual', 'import', 'store']);
+    expect((await api().get(key.ctx, id)).contactSources).toEqual([
+      'whatsapp',
+      'manual',
+      'import',
+      'store',
+    ]);
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id, id],
+    );
+    expect(audit?.metadata).toMatchObject({
+      contactSources: ['whatsapp', 'manual', 'import', 'store'],
+    });
+
+    expect(await api().update(key.ctx, id, { description: 'CRM sync' })).toMatchObject({
+      contactSources: ['whatsapp', 'manual', 'import', 'store'],
+    });
+    expect(await api().update(key.ctx, id, { contactSources: ['whatsapp'] })).toMatchObject({
+      contactSources: ['whatsapp'],
+    });
+    const updates = await fx.query<{ metadata: { contactSources?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_updated'
+        ORDER BY occurred_at`,
+      [c.tenant.id, id],
+    );
+    expect(updates.map((u) => u.metadata.contactSources)).toEqual([
+      ['whatsapp', 'manual', 'import', 'store'],
+      ['whatsapp'],
+    ]);
+    // Dropping the event clears the list.
+    expect(await api().update(key.ctx, id, { events: ['contact.updated'] })).toMatchObject({
+      events: ['contact.updated'],
+      contactSources: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { contactSources: ['import'] }))).toMatchObject({
+      path: 'contactSources',
+    });
+    expect(
+      await api().update(key.ctx, id, { events: ['contact.created'], contactSources: ['import'] }),
+    ).toMatchObject({ contactSources: ['import'] });
+    expect(await api().update(key.ctx, id, { contactSources: null })).toMatchObject({
+      contactSources: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { contactSources: [] }))).toMatchObject({
+      path: 'contactSources',
     });
   });
 

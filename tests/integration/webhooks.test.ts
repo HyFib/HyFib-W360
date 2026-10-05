@@ -3757,6 +3757,154 @@ describe('consent change filters (ADR-189)', () => {
   });
 });
 
+describe('contact source filters (ADR-190)', () => {
+  it('are refused without contact.created, unknown or empty, kept by a change that leaves them out and cleared with the event; the database keeps them to the event', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const url = 'https://hooks.example.com/in';
+    const refused = (eventTypes: string[], contactSources: unknown, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, contactSources }),
+        'validation_failed',
+        message,
+      );
+    const needsTheEvent = /only for an endpoint that receives Contact added/;
+    await refused(['contact.updated', 'contact.erased'], ['whatsapp'], needsTheEvent);
+    await refused(['contact.created'], [], /at least one place contacts come from/);
+    await refused(['contact.created'], ['agent'], /from the list/);
+    await refused(['contact.created'], ['flow'], /from the list/);
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['contact.created', 'contact.updated'],
+      contactSources: ['store', 'whatsapp', 'store'],
+    });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toMatchObject({ contactSources: ['whatsapp', 'store'] });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['contact.created', 'contact.updated'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.contactSources;
+    expect(await current()).toEqual(['whatsapp', 'store']);
+    await change({ description: 'kept' });
+    expect(await current()).toEqual(['whatsapp', 'store']);
+    await change({ contactSources: ['api'] });
+    expect(await current()).toEqual(['api']);
+    const updates = await fx.query<{ metadata: { contactSources?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(updates.map((u) => u.metadata.contactSources)).toEqual([['whatsapp', 'store'], ['api']]);
+    await change({ contactSources: null });
+    expect(await current()).toBeNull();
+    await change({ contactSources: ['import'] });
+    // The database refuses an empty list, more than five entries, an unknown source or a missing
+    // one from an endpoint taking the event…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET contact_sources = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    for (const bad of [
+      `'{}'`,
+      `'{whatsapp,manual,import,api,store,store}'`,
+      `'{whatsapp,agent}'`,
+      `'{flow}'`,
+      `ARRAY['import', NULL]::text[]`,
+      `ARRAY[['import']]::text[]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(/webhook_endpoints_contact_sources/);
+    }
+    await change({ eventTypes: ['contact.updated'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['contact.updated'], contactSources: ['import'] }),
+      'validation_failed',
+      needsTheEvent,
+    );
+    // …and any list for an endpoint that does not take it.
+    await expect(setInDatabase(`'{import}'`)).rejects.toThrow(/webhook_endpoints_contact_sources/);
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'contact_sources', 'UPDATE')
+                AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+
+  it('sends an endpoint that names sources the added contacts from them only, others every contact, and narrows no other contact event (ADR-190)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const path = `/ok/${randomBytes(6).toString('hex')}`;
+    const fromWhatsApp = await webhooks().create(owner, {
+      url: `http://${HOST}:${port}${path}`,
+      eventTypes: ['contact.created', 'contact.updated'],
+      contactSources: ['whatsapp'],
+    });
+    const every = await addEndpoint(c, 'ok', ['contact.created']);
+    const contacts = createContactsService({ db: fx.dbs.app, clock: systemClock });
+    // A customer writes on WhatsApp; a member adds a contact in the app, tagged in the same
+    // transaction, which folds into its added event as before.
+    const { contact_id: wrote } = await inbound(c, waId(), 'Hello');
+    const { id: added } = await contacts.createContact(owner, {
+      phone: `+${waId()}`,
+      displayName: 'Meena',
+      tags: ['vip'],
+    });
+    const created = (await eventsOf(c)).filter((e) => e.type === 'contact.created');
+    expect(created).toHaveLength(2);
+    const takenBy = async (endpointId: string) =>
+      (await deliveriesOf(endpointId)).map((d) => [d.type, d.event_id]);
+    const [wroteEvent, addedEvent] = created.map((e) => e.id);
+    expect(await takenBy(fromWhatsApp.id)).toEqual([['contact.created', wroteEvent]]);
+    expect(await takenBy(every.id)).toEqual([
+      ['contact.created', wroteEvent],
+      ['contact.created', addedEvent],
+    ]);
+    // A later change of the member's contact is not narrowed by where it came from.
+    await contacts.updateContact(owner, added, { displayName: 'Meena Rao' });
+    const updates = (await deliveriesOf(fromWhatsApp.id)).filter(
+      (d) => d.type === 'contact.updated',
+    );
+    expect(updates).toHaveLength(1);
+
+    await deliverDue(c);
+    const sourcesAt = (to: string) =>
+      requestsTo(to)
+        .map(
+          (r) =>
+            JSON.parse(r.body) as {
+              type: string;
+              data: { contact: { id: string; source: string } };
+            },
+        )
+        .map((b) => [b.type, b.data.contact.id, b.data.contact.source]);
+    expect(sourcesAt(path)).toEqual(
+      expect.arrayContaining([
+        ['contact.created', wrote, 'whatsapp'],
+        ['contact.updated', added, 'manual'],
+      ]),
+    );
+    expect(sourcesAt(path)).toHaveLength(2);
+    expect(sourcesAt(every.path).sort()).toEqual(
+      [
+        ['contact.created', added, 'manual'],
+        ['contact.created', wrote, 'whatsapp'],
+      ].sort(),
+    );
+  });
+});
+
 describe('event capture', () => {
   it('records an event only for subscribed types, with one delivery per active subscribed endpoint, and none from a rolled-back change', async () => {
     const c = await fx.company();

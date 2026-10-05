@@ -1589,6 +1589,13 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   `app.capture_webhook_event` (replaced with the same signature) matches the purpose and action the
   consent trigger stores in the detail against the list. Settings (checkboxes under "Consent
   changed") and the API (`consentChanges`) set it; a change that drops the event clears it.
+- **Contact source filters** (migration 0136, ADR-190): `contact_sources` on an endpoint lists where
+  the contacts whose `contact.created` it takes came from (`contact.source`), null for every
+  contact; a check keeps it to 1 to 5 known sources and to endpoints taking the event.
+  `app.capture_contact_webhook_event` (replaced with the same signature) reads the contact's source
+  when an active endpoint of the company names sources and creates a `contact.created` delivery only
+  where it is listed. Settings (checkboxes under "Contact added") and the API (`contactSources`) set
+  it; a change that drops the event clears it.
 - **Health:** a success clears the failing state; a failure when the endpoint has been failing for
   72 hours without a success turns it off (`failing`), fails its waiting deliveries as
   `endpoint_disabled`, records a system audit entry and emails the company's active owners and

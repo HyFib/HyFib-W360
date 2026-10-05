@@ -4681,8 +4681,9 @@ Decision:
   endpoints per company), the runtime role's update of the column, and
   `app.capture_contact_webhook_event` replaced with the same signature.
 
-Not built: field keys chosen one by one (built by ADR-184), filters for `contact.created` or
-`contact.erased`, and filters on a contact's values (a tag, a field's value).
+Not built: field keys chosen one by one (built by ADR-184), filters for `contact.created` (by where
+the contact came from: built by ADR-190) or `contact.erased`, and filters on a contact's values (a
+tag, a field's value).
 
 ## ADR-124 Finding contacts by name through the public API (2026-10-03)
 
@@ -7643,5 +7644,48 @@ Decision:
   Existing endpoints keep null; nothing is backfilled.
 
 Not built: filters on what recorded a change (its source: a keyword, a member, an import, Meta, a
-key, a store or an erasure), on the contact's other consent, and for `contact.created`,
-`contact.erased` and `order.received`.
+key, a store or an erasure), on the contact's other consent, and for `contact.created` (by where the
+contact came from: built by ADR-190), `contact.erased` and `order.received`.
+
+## ADR-190 Choosing where the added contacts a webhook endpoint receives came from (P5-09) (2026-10-05)
+
+Context: an endpoint that takes `contact.created` receives every contact the company adds, wherever
+it came from: a customer writing on WhatsApp, a member in the app, a CSV import, an API key, a
+store's customer. An integration that adds contacts itself through the API was sent each of them
+back and had to recognise its own, or risk adding them again; a receiver that follows people who
+wrote on WhatsApp was sent every import. ADR-123 and ADR-189 left filters for `contact.created`
+unbuilt.
+
+Decision:
+
+- **A list of sources per endpoint,** for `contact.created` only: `whatsapp`, `manual`, `import`,
+  `api` and `store`, the source the payload reports as `contact.source`. Null receives every
+  contact, as before; a list holds 1 to 5 of them, kept in that order. It is chosen in Settings →
+  Webhooks under "Contact added" ("New contacts sent, by where they came from": all ticked unless
+  some are unticked; saving them all ticked keeps none) and shown on the endpoint as "New contacts
+  sent: …", and through the API as `contactSources` on `POST /webhook-endpoints` and
+  `PATCH /webhook-endpoints/{id}` and in every endpoint the API answers, whose description advises
+  leaving out `api` not to hear of the contacts the integration's own keys add.
+- **Only with the event:** a list given for an endpoint that does not take `contact.created` is
+  refused (`contactSources`; 422 through the API). A change that removes the event clears it, and a
+  `PATCH` that leaves it out keeps it; Settings always sends it. A check in the database holds the
+  same rule (null, or 1 to 5 known sources, one dimension, without a null, while `contact.created`
+  is among the endpoint's events).
+- **Matched as captured:** `app.capture_contact_webhook_event` creates a `contact.created` delivery
+  only for the active endpoints whose list is null or holds the contact's source, read from the
+  contact (the trigger runs after the insert, so the row is there) and only when an active endpoint
+  of the company names sources. A contact's source is set when it is added and never changes. The
+  event is still written when an endpoint takes `contact.created` or `contact.updated`, so changes
+  later in the same transaction fold into it as before, reaching no endpoint the source left out;
+  later changes are `contact.updated` events, which the list does not narrow, nor `contact.erased`.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `contactSources` when the endpoint has a list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+- **Migration 0136:** `contact_sources text[]` on `app.webhook_endpoints` with the check, validated
+  at once (a company has at most 10 endpoints), an update grant on the column for the runtime role,
+  and `app.capture_contact_webhook_event` replaced with the same signature, so its owner and grants
+  stay. Existing endpoints keep null; nothing is backfilled.
+
+Not built: filters on which key added a contact (one integration's key among several), on the source
+for `contact.updated` and `contact.erased`, and filters for `order.received`.

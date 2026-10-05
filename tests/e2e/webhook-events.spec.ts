@@ -68,7 +68,7 @@ function signatureValid(headers: IncomingHttpHeaders, body: string, secret: stri
     });
 }
 
-test('conversation and contact events reach an endpoint: a customer writes, a member resolves, tags, renames and erases; an endpoint can take chosen consent changes only (ADR-189)', async ({
+test('conversation and contact events reach an endpoint: a customer writes, a member resolves, tags, renames and erases; an endpoint can take chosen consent changes only (ADR-189), and another the contacts from chosen sources only (ADR-190)', async ({
   page,
   request,
 }) => {
@@ -127,6 +127,30 @@ test('conversation and contact events reach an endpoint: a customer writes, a me
   await page.reload();
   await expect(page.getByText('Consent changes sent: Marketing opt-outs')).toBeVisible();
 
+  // A third endpoint takes the contacts who wrote on WhatsApp only (ADR-190).
+  const wrotePath = `${path}/wrote`;
+  const wroteOnly = () =>
+    received
+      .filter((r) => r.path === wrotePath)
+      .map((r) => JSON.parse(r.body) as { type: string; data: Record<string, unknown> });
+  const sourceBox = (name: string) => page.getByRole('checkbox', { name, exact: true });
+  await page.getByLabel('Endpoint URL').fill(`http://${HOST}:${port}${wrotePath}`);
+  await page.getByRole('checkbox', { name: /Contact added/ }).check();
+  for (const name of [
+    'Added in the app (manual)',
+    'Imported from a file (import)',
+    'Added through the API (api)',
+    'From a store (store)',
+  ]) {
+    await sourceBox(name).uncheck();
+  }
+  await expect(sourceBox('Wrote on WhatsApp (whatsapp)')).toBeChecked();
+  await page.getByRole('button', { name: 'Add endpoint' }).click();
+  await expect(secretField).toBeVisible();
+  await page.getByRole('button', { name: 'I have stored the secret' }).click();
+  await page.reload();
+  await expect(page.getByText('New contacts sent: Wrote on WhatsApp')).toBeVisible();
+
   // A customer writes for the first time: the contact is added.
   const waId = randomWaId();
   await sendSignedWebhook(request, inboundMessage(wabaId, phoneNumberId, waId, 'Hello there'));
@@ -141,6 +165,12 @@ test('conversation and contact events reach an endpoint: a customer writes, a me
     },
   });
   const contactId = added.json.data.contact!.id;
+  // The third endpoint hears of the contact too: it wrote on WhatsApp.
+  await expect(async () => expect(wroteOnly()).toHaveLength(1)).toPass({ timeout: 30_000 });
+  expect(wroteOnly()[0]).toMatchObject({
+    type: 'contact.created',
+    data: { contact: { id: contactId, source: 'whatsapp' } },
+  });
 
   // A member resolves the conversation in the inbox.
   await page.goto(`/c/${slug}/inbox`);
@@ -246,6 +276,30 @@ test('conversation and contact events reach an endpoint: a customer writes, a me
   await expect(consentBox('Marketing opt-outs (marketing_opt_out)')).toBeChecked();
   await expect(consentBox('Marketing opt-ins (marketing_opt_in)')).not.toBeChecked();
   expect(optOuts()).toHaveLength(2);
+
+  // A member adds a contact in the app: the first endpoint hears of it, the third does not.
+  await page.goto(`/c/${slug}/contacts/new`);
+  await page.getByLabel('Name').fill('Meena Manual');
+  await page.getByLabel('Phone number').fill(`+${randomWaId()}`);
+  await page.getByRole('button', { name: 'Add contact' }).click();
+  await expect(page.getByRole('heading', { name: 'Meena Manual', level: 1 })).toBeVisible();
+  await expect(async () => expect(forUs()).toHaveLength(6)).toPass({ timeout: 30_000 });
+  expect(forUs()[5]!.json).toMatchObject({
+    type: 'contact.created',
+    data: { contact: { name: 'Meena Manual', source: 'manual' } },
+  });
+  await page.goto(`/c/${slug}/settings/webhooks`);
+  await page
+    .getByRole('list', { name: 'Endpoints' })
+    .getByRole('listitem')
+    .filter({ hasText: 'New contacts sent: Wrote on WhatsApp' })
+    .getByRole('link', { name: /Deliveries and settings/ })
+    .click();
+  await expect(page.getByRole('heading', { name: /^Deliveries to/ })).toBeVisible();
+  await expect(page.getByRole('list', { name: 'Deliveries' }).getByRole('listitem')).toHaveCount(1);
+  await expect(sourceBox('Wrote on WhatsApp (whatsapp)')).toBeChecked();
+  await expect(sourceBox('Added in the app (manual)')).not.toBeChecked();
+  expect(wroteOnly()).toHaveLength(1);
 });
 
 test('conversation team and assignment events name the team and the member: a member moves and assigns a conversation, and deleting the team sends its change', async ({

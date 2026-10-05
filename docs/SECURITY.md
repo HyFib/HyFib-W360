@@ -1027,6 +1027,13 @@ Phase 5 rules (outgoing webhooks, P5-09):
   purpose and action the consent trigger stores: it narrows what one endpoint receives and never
   adds an event or a delivery for another endpoint or company, and an event still holds no personal
   data. Audited with the list (unit tests; integration and e2e tests, run in CI only).
+- An endpoint can take the added contacts from chosen sources only (ADR-190), chosen the same way. A
+  list holds only the five known sources, is kept only while the endpoint takes `contact.created` (a
+  database check too, which also refuses a null entry), and is applied in
+  `app.capture_contact_webhook_event` to the source of the contact the insert added, read in the
+  company's scope: it narrows what one endpoint receives and never adds an event or a delivery for
+  another endpoint or company. Audited with the list (unit tests; integration and e2e tests, run in
+  CI only).
 - Conversation and contact events (ADR-074) follow the same rules. Conversation events name the
   member and the team by id only (ADR-094), the ids the API gives `conversations.read` keys
   (ADR-093): names are read through `GET /members` and `GET /teams` with such a key, and no email or
