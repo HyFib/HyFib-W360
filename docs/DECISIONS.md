@@ -5808,9 +5808,9 @@ Decision:
   signature (0095's, with the automation condition), so its owner and grants stay. Existing
   endpoints keep null; nothing is backfilled.
 
-Not built: filters on other facts of a run (its trigger, how it ended (built by ADR-151), the key
-that started it), choosing automations by tag or folder, and filters for campaigns, templates,
-orders or conversations by team or channel (by number: built by ADR-170).
+Not built: filters on other facts of a run (its trigger (built by ADR-183), how it ended (built by
+ADR-151), the key that started it), choosing automations by tag or folder, and filters for
+campaigns, templates, orders or conversations by team or channel (by number: built by ADR-170).
 
 ## ADR-146 Choosing the campaign statuses a webhook endpoint receives (P5-09) (2026-10-04)
 
@@ -6094,8 +6094,8 @@ Decision:
   signature (0113's, with the run end condition), so its owner and grants stay. Existing endpoints
   keep null; nothing is backfilled.
 
-Not built: filters on a run's end reason, its trigger or the key that started it, on how long it
-ran, or by tag or folder.
+Not built: filters on a run's end reason, its trigger (built by ADR-183) or the key that started it,
+on how long it ran, or by tag or folder.
 
 ## ADR-152 An API reference page made from the OpenAPI document (P5-08) (2026-10-05)
 
@@ -7343,3 +7343,45 @@ Decision:
 Not built: the tags in `GET /contact-changes` (ADR-114 merges a contact's changes), the values a
 change replaced for other parts (they stay out of events), and endpoints taking the changes of
 chosen tags only.
+
+## ADR-183 Choosing what started the runs a webhook endpoint receives (P5-09) (2026-10-05)
+
+Context: an endpoint that takes `automation.run_started` or `automation.run_ended` receives the
+events of every live run, or of the automations it names (ADR-145), and of the ends it chooses
+(ADR-151). A receiver often follows some runs only: a shop the runs its own calls start through the
+API, a store connector those its order messages start, a chatbot dashboard the runs customers'
+messages start. Each was sent every run and had to read `run.trigger` and drop the rest. ADR-145 and
+ADR-151 left filters on a run's trigger unbuilt.
+
+Decision:
+
+- **A list of triggers per endpoint,** for both run events: `keyword`, `conversation_started`,
+  `any_message`, `store_event` and `api`, the trigger the payload reports as `run.trigger`. Null
+  receives every run, as before; a list holds 1 to 5 of them, kept in the order the automation
+  builder lists triggers. It is chosen in Settings → Webhooks ("Runs started by": all ticked unless
+  some are unticked, named as the automation pages name triggers) and shown on the endpoint as
+  "Automation runs started by: …", and through the API as `runTriggers` on `POST /webhook-endpoints`
+  and `PATCH /webhook-endpoints/{id}` and in every endpoint the API answers.
+- **Only with a run event:** a list given for an endpoint that takes neither is refused
+  (`runTriggers`; 422 through the API). A change that removes both clears it, and a `PATCH` that
+  leaves it out keeps it; Settings always sends it. A check in the database holds the same rule
+  (null, or 1 to 5 known triggers without a null while a run event is among the endpoint's).
+  Members' test runs send no events, so `test` is not a choice.
+- **Matched as captured:** the run trigger passes what started the run as `runTrigger` in the
+  event's detail, and `app.capture_webhook_event` takes it out with the number and the sender before
+  the event is stored (ADR-172's way), so stored events stay as they were; the payload reads the
+  trigger from the run. A run's trigger is set when it starts and no role can change it, so the
+  start and the end of a run always match the same endpoints' lists. Applied with the endpoints'
+  other filters (automations, ends, numbers); no event is written when no endpoint takes it.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `runTriggers` when the endpoint has a list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+- **Migration 0131:** `run_triggers text[]` on `app.webhook_endpoints` with the check, validated at
+  once (a company has at most 10 endpoints), an update grant on the column for the runtime role, and
+  `app.capture_webhook_event` and the run trigger function replaced with the same signatures, so
+  their owners, grants and triggers stay. Existing endpoints keep null; nothing is backfilled.
+
+Not built: filters on the key that started a run, on a store event's kind (placed, shipped,
+delivered, cancelled), on a run's end reason, and triggers chosen per event (one list serves both
+run events).

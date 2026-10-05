@@ -27,7 +27,7 @@ import { apiContactColumns, apiContactSchema, toApiContact } from '../api/contac
 import { campaignAnalytics, campaignResultsSchema, toCampaignResults } from '../campaigns/results';
 import { COMMERCE_LIMITS } from '../commerce/model';
 import { findAnsweredMessageId } from '../messaging/reply-context';
-import { WEBHOOK_MESSAGE_STATUSES } from './model';
+import { WEBHOOK_MESSAGE_STATUSES, WEBHOOK_RUN_TRIGGERS } from './model';
 
 /**
  * The JSON bodies of outgoing webhooks (ADR-053, ADR-074, ADR-078, ADR-085, ADR-087). The zod schemas
@@ -296,15 +296,6 @@ export const contactErasedPayloadSchema = envelope(
   'contact.erased',
   z.object({ contact: webhookContactSchema }),
 );
-
-/** What starts a live run; members' test runs send no events. */
-export const WEBHOOK_RUN_TRIGGERS = [
-  'keyword',
-  'conversation_started',
-  'any_message',
-  'store_event',
-  'api',
-] as const;
 
 const webhookRunSchema = z.object({
   id: z.uuid(),

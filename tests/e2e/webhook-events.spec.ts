@@ -699,6 +699,28 @@ test('automation run events reach an endpoint: a live run starts and ends, a mem
   await expect(endBox('Handed off (handed_off)')).toBeChecked();
   await expect(endBox('Failed (failed)')).toBeChecked();
 
+  // A third endpoint takes the starts of the runs started through the API only (ADR-183).
+  const apiPath = `${path}/api`;
+  const forApi = () => received.filter((r) => r.path === apiPath);
+  const triggerBox = (name: string) => page.getByRole('checkbox', { name, exact: true });
+  await page.goto(`/c/${slug}/settings/webhooks`);
+  await page.getByLabel('Endpoint URL').fill(`http://${HOST}:${port}${apiPath}`);
+  await page.getByRole('checkbox', { name: /Automation started/ }).check();
+  for (const name of [
+    'Keyword (keyword)',
+    'New conversation (conversation_started)',
+    'Any message (any_message)',
+    'Order messages (store_event)',
+  ]) {
+    await triggerBox(name).uncheck();
+  }
+  await expect(triggerBox('API (api)')).toBeChecked();
+  await page.getByRole('button', { name: 'Add endpoint' }).click();
+  await expect(page.getByLabel('Signing secret')).toBeVisible();
+  await page.getByRole('button', { name: 'I have stored the secret' }).click();
+  await page.reload();
+  await expect(page.getByText('Automation runs started by: API')).toBeVisible();
+
   // A fifth customer writes "bye": Farewell's run starts and completes, and the first endpoint
   // hears both. The completion is captured for no other endpoint: the second has no delivery.
   const fifth = randomWaId();
@@ -716,6 +738,19 @@ test('automation run events reach an endpoint: a live run starts and ends, a mem
   await page.goto(endsUrl);
   await expect(page.getByText('No deliveries yet.')).toBeVisible();
   expect(forEnds()).toEqual([]);
+  // A keyword started that run, so the third endpoint has nothing either.
+  await page.goto(`/c/${slug}/settings/webhooks`);
+  await page
+    .getByRole('list', { name: 'Endpoints' })
+    .getByRole('listitem')
+    .filter({ hasText: 'Automation runs started by:' })
+    .getByRole('link', { name: /Deliveries and settings/ })
+    .click();
+  await expect(page.getByRole('heading', { name: /^Deliveries to/ })).toBeVisible();
+  await expect(page.getByText('No deliveries yet.')).toBeVisible();
+  await expect(triggerBox('API (api)')).toBeChecked();
+  await expect(triggerBox('Keyword (keyword)')).not.toBeChecked();
+  expect(forApi()).toEqual([]);
 
   // Both automations are archived: Greeter, not chosen, is no longer offered; Farewell, chosen,
   // stays listed and ticked, marked archived.

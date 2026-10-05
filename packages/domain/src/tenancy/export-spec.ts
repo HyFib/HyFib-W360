@@ -1539,6 +1539,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'template_statuses',
       'conversation_statuses',
       'run_end_statuses',
+      'run_triggers',
       'channel_account_ids',
       'team_ids',
       'template_ids',

@@ -1538,6 +1538,13 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   does. Settings (radio buttons and checkboxes under "Members") and the API (`assigneeIds`) set it;
   the services check that the members a list adds take conversations; a change that drops the events
   clears it.
+- **Run trigger filters** (migration 0131, ADR-183): `run_triggers` on an endpoint lists what
+  started the runs whose `automation.run_started` and `automation.run_ended` it takes, null for
+  every run; a check keeps it to 1 to 5 known triggers and to endpoints that take a run event. The
+  run trigger passes `runTrigger` in the detail, and `app.capture_webhook_event` (replaced with the
+  same signature) creates a delivery of a run event only for endpoints whose list is null or holds
+  it, taking it out of the detail before the event is stored. Settings (checkboxes under "Runs
+  started by") and the API (`runTriggers`) set it; a change that drops both events clears it.
 - **Health:** a success clears the failing state; a failure when the endpoint has been failing for
   72 hours without a success turns it off (`failing`), fails its waiting deliveries as
   `endpoint_disabled`, records a system audit entry and emails the company's active owners and

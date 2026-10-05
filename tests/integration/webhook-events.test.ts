@@ -129,6 +129,7 @@ async function addEndpoint(
   conversationStatuses: string[] | null = null,
   runEndStatuses: string[] | null = null,
   channelIds: string[] | null = null,
+  runTriggers: string[] | null = null,
 ) {
   const path = `/ok/${randomBytes(6).toString('hex')}`;
   const owner = await fx.ctx(c, c.owner);
@@ -142,6 +143,7 @@ async function addEndpoint(
     conversationStatuses,
     runEndStatuses,
     channelIds,
+    runTriggers,
   });
   return { ...created, path };
 }
@@ -1957,6 +1959,76 @@ describe('automation run events (ADR-078)', () => {
         .filter((e) => e.detail.runId === later)
         .map((e) => [e.type, e.deliveries]),
     ).toEqual([['automation.run_started', 1]]);
+  });
+
+  it('sends an endpoint that names what started the runs only those runs, others every run, and captures no run event nobody takes (ADR-183)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    await publishAutomation(owner, 'Brochure', keyword('brochure'), sayGraph('Here it is.'));
+    await publishAutomation(
+      owner,
+      'Welcome',
+      { type: 'conversation_started', hours: 'any', cooldownMinutes: 0 },
+      sayGraph('Welcome!'),
+    );
+    // Both events of keyword runs only; the start of every run.
+    const keywords = await addEndpoint(
+      c,
+      ['automation.run_started', 'automation.run_ended'],
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      ['keyword'],
+    );
+    const everyStart = await addEndpoint(c, ['automation.run_started']);
+    const runOf = async (text: string) => {
+      const { conversation_id: conversationId } = await inbound(c, waId(), text);
+      const [run] = await runsIn(conversationId);
+      if (!run) throw new Error(`no run started by “${text}”`);
+      expect(await driveRun(c, run.id)).toBe('ended');
+      return run.id;
+    };
+    // A keyword in a new conversation starts Brochure; a greeting starts Welcome.
+    const brochure = await runOf('Send the brochure');
+    const welcome = await runOf('Good morning');
+    // Welcome's end is taken by no endpoint, so it is not captured; what started a run is not
+    // stored with its events.
+    const events = await eventsOf(c, 'automation.');
+    expect(events.map((e) => [e.type, e.detail.runId, e.deliveries])).toEqual([
+      ['automation.run_started', brochure, 2],
+      ['automation.run_ended', brochure, 1],
+      ['automation.run_started', welcome, 1],
+    ]);
+    for (const event of events) expect(event.detail).not.toHaveProperty('runTrigger');
+
+    await deliverDue(c);
+    const runsAt = (path: string) =>
+      bodiesAt(path)
+        .map((b) => {
+          const { run } = (
+            b.type === 'automation.run_started'
+              ? automationRunStartedPayloadSchema
+              : automationRunEndedPayloadSchema
+          ).parse(b).data;
+          return [b.type, run.id, run.trigger];
+        })
+        .sort();
+    expect(runsAt(keywords.path)).toEqual(
+      [
+        ['automation.run_ended', brochure, 'keyword'],
+        ['automation.run_started', brochure, 'keyword'],
+      ].sort(),
+    );
+    expect(runsAt(everyStart.path)).toEqual(
+      [
+        ['automation.run_started', brochure, 'keyword'],
+        ['automation.run_started', welcome, 'conversation_started'],
+      ].sort(),
+    );
   });
 
   it('names the key that started a run through the API', async () => {

@@ -3115,6 +3115,99 @@ describe('assignee filters (ADR-181)', () => {
   });
 });
 
+describe('run trigger filters (ADR-183)', () => {
+  it('are refused without a run event, unknown or empty, kept by a change that leaves them out and cleared with the events; the database keeps them to those events', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const url = 'https://hooks.example.com/in';
+    const refused = (eventTypes: string[], runTriggers: unknown, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, runTriggers }),
+        'validation_failed',
+        message,
+      );
+    const needsTheEvents =
+      /only for an endpoint that receives Automation started or Automation ended/;
+    await refused(['message.received', 'order.received'], ['api'], needsTheEvents);
+    await refused(['automation.run_started'], [], /at least one way a run starts/);
+    // Members' test runs send no events, so `test` is not a choice.
+    await refused(['automation.run_started'], ['test'], /from the list/);
+    await refused(['automation.run_ended'], ['webhook'], /from the list/);
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['automation.run_started', 'consent.changed'],
+      runTriggers: ['api', 'keyword', 'api'],
+    });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toMatchObject({ runTriggers: ['keyword', 'api'] });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['automation.run_started', 'consent.changed'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.runTriggers;
+    expect(await current()).toEqual(['keyword', 'api']);
+    await change({ description: 'kept' });
+    expect(await current()).toEqual(['keyword', 'api']);
+    await change({ runTriggers: ['store_event'] });
+    expect(await current()).toEqual(['store_event']);
+    const updates = await fx.query<{ metadata: { runTriggers?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(updates.map((u) => u.metadata.runTriggers)).toEqual([
+      ['keyword', 'api'],
+      ['store_event'],
+    ]);
+    await change({ runTriggers: null });
+    expect(await current()).toBeNull();
+    await change({ runTriggers: ['conversation_started'] });
+    // Either run event keeps the list.
+    await change({ eventTypes: ['automation.run_ended'] });
+    expect(await current()).toEqual(['conversation_started']);
+    // The database refuses an empty list, more than five entries, `test`, an unknown trigger or a
+    // missing one from an endpoint taking a run event…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET run_triggers = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    for (const bad of [
+      `'{}'`,
+      `'{keyword,conversation_started,any_message,store_event,api,api}'`,
+      `'{api,test}'`,
+      `'{api,webhook}'`,
+      `ARRAY['api', NULL]::text[]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(/webhook_endpoints_run_triggers/);
+    }
+    await change({ eventTypes: ['consent.changed'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['consent.changed'], runTriggers: ['api'] }),
+      'validation_failed',
+      needsTheEvents,
+    );
+    // …and any list for an endpoint that takes neither.
+    await expect(setInDatabase(`'{api}'`)).rejects.toThrow(/webhook_endpoints_run_triggers/);
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'run_triggers', 'UPDATE')
+                AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+});
+
 describe('event capture', () => {
   it('records an event only for subscribed types, with one delivery per active subscribed endpoint, and none from a rolled-back change', async () => {
     const c = await fx.company();

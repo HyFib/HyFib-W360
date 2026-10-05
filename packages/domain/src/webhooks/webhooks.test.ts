@@ -34,6 +34,8 @@ import {
   WEBHOOK_CONVERSATION_STATUSES,
   WEBHOOK_RUN_END_STATUS_LABELS,
   WEBHOOK_RUN_END_STATUSES,
+  WEBHOOK_RUN_TRIGGER_LABELS,
+  WEBHOOK_RUN_TRIGGERS,
   WEBHOOK_TEAM_EVENTS,
   WEBHOOK_TEMPLATE_EVENTS,
   WEBHOOK_EVENT_INFO,
@@ -117,6 +119,8 @@ import {
   webhookConversationStatusesSchema,
   webhookRunEndStatusesFor,
   webhookRunEndStatusesSchema,
+  webhookRunTriggersFor,
+  webhookRunTriggersSchema,
   webhookHeadersAad,
   webhookHeadersSchema,
   webhookMessageSendersFor,
@@ -2278,5 +2282,72 @@ describe('assignee filters (ADR-181)', () => {
     expect(webhookAssigneeText({ id: ravi, name: null, assignable: false })).toBe(
       'Unknown member (no longer takes conversations)',
     );
+  });
+});
+
+describe('run trigger filters (ADR-183)', () => {
+  it('take 1 to 5 of the ways a live run starts, once each in the builder’s order; null takes every run', () => {
+    expect(WEBHOOK_RUN_TRIGGERS).toEqual([
+      'keyword',
+      'conversation_started',
+      'any_message',
+      'store_event',
+      'api',
+    ]);
+    expect(webhookRunTriggersSchema.parse(['api', 'keyword'])).toEqual(['keyword', 'api']);
+    expect(webhookRunTriggersSchema.parse([...WEBHOOK_RUN_TRIGGERS].reverse())).toEqual([
+      ...WEBHOOK_RUN_TRIGGERS,
+    ]);
+    expect(webhookRunTriggersSchema.parse(null)).toBeNull();
+    // Members' test runs send no events, so `test` is not a choice; nor is anything else.
+    for (const refused of [
+      [],
+      ['test'],
+      ['API'],
+      ['keyword', null],
+      'api',
+      [...WEBHOOK_RUN_TRIGGERS, 'api'],
+    ]) {
+      expect(webhookRunTriggersSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(webhookRunTriggersSchema.safeParse(['test']).error?.issues[0]?.message).toBe(
+      'Choose what started the runs from the list.',
+    );
+    expect(webhookRunTriggersSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one way a run starts, or take every run.',
+    );
+    expect(
+      webhookRunTriggersSchema.safeParse([...WEBHOOK_RUN_TRIGGERS, 'api']).error?.issues[0]
+        ?.message,
+    ).toBe('Give each way a run starts once.');
+  });
+
+  it('are the triggers the run events report, each named as the automation pages name it', () => {
+    for (const schema of [automationRunStartedPayloadSchema, automationRunEndedPayloadSchema]) {
+      expect(schema.shape.data.shape.run.shape.trigger.options).toEqual([...WEBHOOK_RUN_TRIGGERS]);
+    }
+    expect(WEBHOOK_RUN_TRIGGER_LABELS).toEqual({
+      keyword: 'Keyword',
+      conversation_started: 'New conversation',
+      any_message: 'Any message',
+      store_event: 'Order messages',
+      api: 'API',
+    });
+  });
+
+  it('are kept only while the endpoint takes a run event: given, kept, or cleared', () => {
+    expect(webhookRunTriggersFor(['automation.run_started'], ['api'], null)).toEqual(['api']);
+    expect(webhookRunTriggersFor(['automation.run_ended'], undefined, ['keyword'])).toEqual([
+      'keyword',
+    ]);
+    expect(
+      webhookRunTriggersFor(['automation.run_started', 'message.received'], null, ['api']),
+    ).toBeNull();
+    expect(webhookRunTriggersFor(['automation.run_ended'], undefined, null)).toBeNull();
+    expect(
+      webhookRunTriggersFor(['message.received', 'order.received'], ['api'], ['api']),
+    ).toBeNull();
   });
 });

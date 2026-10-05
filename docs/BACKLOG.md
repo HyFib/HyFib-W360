@@ -728,9 +728,12 @@ verification, app review, Embedded Signup configuration).
   before; by the member a conversation is assigned to when the event is captured, a change of
   assignee also reaching the member it left). **[Tag changes built; their database tests run only in
   CI]** (ADR-182: a `contact.updated` names the tags its change added and removed, net within the
-  change, cleared from stored events when the contact is erased). Remaining: filters for other event
-  types and on a message's or contact's values (such as by campaign, tag or field key, or a run's
-  trigger or end reason), other authentication (headers computed per delivery, other OAuth grants),
+  change, cleared from stored events when the contact is erased). **[Run trigger filters built;
+  their database tests run only in CI]** (ADR-183: an endpoint takes the run events of the runs
+  started by the triggers it chooses, in Settings or through the API, or every run's as before).
+  Remaining: filters for other event types and on a message's or contact's values (such as by
+  campaign, tag or field key, or a run's end reason or key), other authentication (headers computed
+  per delivery, other OAuth grants),
   mutual TLS, fixed egress addresses, events for store orders, Payment Links and each step of a run,
   `createdAt` finer than the millisecond, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):

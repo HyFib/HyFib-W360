@@ -262,6 +262,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       templateStatuses: null,
       conversationStatuses: null,
       runEndStatuses: null,
+      runTriggers: null,
       channelIds: null,
       teamIds: null,
       templateIds: null,
@@ -1442,6 +1443,88 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
     expect(await issueOf(api().update(key.ctx, id, { messageSenders: [] }))).toMatchObject({
       path: 'messageSenders',
+    });
+  });
+
+  it('choose what started the runs whose events an endpoint receives, kept by changes that leave them out and cleared with the events (ADR-183)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // What started the runs needs a run event, at least one, and each from the list (a test run,
+    // which sends nothing, or an unknown trigger, by place).
+    const refusals = [
+      [['message.received'], ['api'], 'runTriggers'],
+      [['automation.run_started'], [], 'runTriggers'],
+      [['automation.run_started'], ['api', 'test'], 'runTriggers.1'],
+      [['automation.run_ended'], ['webhook'], 'runTriggers.0'],
+    ] as const;
+    for (const [index, [events, runTriggers, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, runTriggers },
+            idem(`run-triggers-bad-${index}`, JSON.stringify(runTriggers)),
+          ),
+        ),
+        JSON.stringify(runTriggers),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'run-triggers-1', {
+      url: receiverUrl(),
+      events: ['automation.run_started', 'automation.run_ended'],
+      runTriggers: ['api', 'store_event'],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.runTriggers).toEqual(['store_event', 'api']);
+    expect((await api().get(key.ctx, id)).runTriggers).toEqual(['store_event', 'api']);
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id, id],
+    );
+    expect(audit?.metadata).toMatchObject({ runTriggers: ['store_event', 'api'] });
+
+    expect(await api().update(key.ctx, id, { description: 'Our own runs' })).toMatchObject({
+      runTriggers: ['store_event', 'api'],
+    });
+    expect(await api().update(key.ctx, id, { runTriggers: ['api'] })).toMatchObject({
+      runTriggers: ['api'],
+    });
+    const updates = await fx.query<{ metadata: { runTriggers?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_updated'
+        ORDER BY occurred_at`,
+      [c.tenant.id, id],
+    );
+    expect(updates.map((u) => u.metadata.runTriggers)).toEqual([['store_event', 'api'], ['api']]);
+    // Either run event keeps the list; neither clears it.
+    expect(await api().update(key.ctx, id, { events: ['automation.run_ended'] })).toMatchObject({
+      runTriggers: ['api'],
+    });
+    expect(await api().update(key.ctx, id, { events: ['message.received'] })).toMatchObject({
+      events: ['message.received'],
+      runTriggers: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { runTriggers: ['api'] }))).toMatchObject({
+      path: 'runTriggers',
+    });
+    expect(
+      await api().update(key.ctx, id, {
+        events: ['automation.run_started'],
+        runTriggers: ['keyword'],
+      }),
+    ).toMatchObject({ runTriggers: ['keyword'] });
+    expect(await api().update(key.ctx, id, { runTriggers: null })).toMatchObject({
+      runTriggers: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { runTriggers: [] }))).toMatchObject({
+      path: 'runTriggers',
     });
   });
 

@@ -44,6 +44,8 @@ export async function createWebhookEndpointAction(
     conversationStatuses: string[] | null;
     /** How the runs it takes as `automation.run_ended` ended (ADR-151); null takes every end. */
     runEndStatuses: string[] | null;
+    /** What started the runs whose events it takes (ADR-183); null takes every run's. */
+    runTriggers: string[] | null;
     /** The WhatsApp numbers whose events it takes (ADR-170); null takes every number. */
     channelIds: string[] | null;
     /** The teams whose conversations' events it takes (ADR-174); null takes every one's. */
@@ -92,6 +94,8 @@ export async function updateWebhookEndpointAction(
     conversationStatuses: string[] | null;
     /** How the runs it takes as `automation.run_ended` ended (ADR-151); null takes every end. */
     runEndStatuses: string[] | null;
+    /** What started the runs whose events it takes (ADR-183); null takes every run's. */
+    runTriggers: string[] | null;
     /** The WhatsApp numbers whose events it takes (ADR-170); null takes every number. */
     channelIds: string[] | null;
     /** The teams whose conversations' events it takes (ADR-174); null takes every one's. */

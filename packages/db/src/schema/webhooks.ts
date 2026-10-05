@@ -84,6 +84,13 @@ export type WebhookConversationStatus = 'open' | 'resolved';
  */
 export type WebhookRunEndStatus = 'completed' | 'handed_off' | 'taken_over' | 'stopped' | 'failed';
 
+/**
+ * What started a live automation run (ADR-078), which an endpoint taking run events can choose
+ * (ADR-183), as the event's `run.trigger` says; members' test runs send no events.
+ */
+export type WebhookRunTrigger =
+  'keyword' | 'conversation_started' | 'any_message' | 'store_event' | 'api';
+
 export const WEBHOOK_DELIVERY_STATES = ['pending', 'delivering', 'succeeded', 'failed'] as const;
 export type WebhookDeliveryState = (typeof WEBHOOK_DELIVERY_STATES)[number];
 
@@ -150,6 +157,11 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    * every end. Set only while `automation.run_ended` is among its events.
    */
   runEndStatuses: text('run_end_statuses').array().$type<WebhookRunEndStatus[]>(),
+  /**
+   * What started the runs whose events it takes (ADR-183); null takes every run's. Set only while
+   * `automation.run_started` or `automation.run_ended` is among its events.
+   */
+  runTriggers: text('run_triggers').array().$type<WebhookRunTrigger[]>(),
   /**
    * The WhatsApp numbers (channel accounts) whose events it takes (ADR-170): message,
    * conversation, automation run, order and campaign events; null takes every number. Set only

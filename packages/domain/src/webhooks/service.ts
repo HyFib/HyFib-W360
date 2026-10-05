@@ -41,6 +41,7 @@ import {
   WEBHOOK_LIMITS,
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_RUN_END_STATUSES,
+  WEBHOOK_RUN_TRIGGERS,
   WEBHOOK_MESSAGE_SENDERS,
   WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_REPLAY_PERIODS,
@@ -67,6 +68,7 @@ import {
   type WebhookMessageStatus,
   type WebhookOrderStatus,
   type WebhookRunEndStatus,
+  type WebhookRunTrigger,
   type WebhookTeamChoice,
   type WebhookTemplateChoice,
   type WebhookTemplateStatus,
@@ -455,6 +457,34 @@ export function webhookRunEndStatusesFor(
   current: readonly WebhookRunEndStatus[] | null,
 ): WebhookRunEndStatus[] | null {
   if (!eventTypes.includes('automation.run_ended')) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * What started the runs whose events an endpoint takes (ADR-183), in the order the automation
+ * builder lists triggers; null takes every run's.
+ */
+export const webhookRunTriggersSchema = z
+  .array(z.enum(WEBHOOK_RUN_TRIGGERS, { error: 'Choose what started the runs from the list.' }))
+  .min(1, 'Choose at least one way a run starts, or take every run.')
+  .max(WEBHOOK_RUN_TRIGGERS.length, 'Give each way a run starts once.')
+  .transform((chosen) => WEBHOOK_RUN_TRIGGERS.filter((trigger) => chosen.includes(trigger)))
+  .nullable();
+
+export const WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS =
+  'Choose what started the runs only for an endpoint that receives Automation started or Automation ended.';
+
+/**
+ * The run triggers an endpoint keeps after it is added or changed: every run (null) unless it takes
+ * a run event; then those given, or else the ones it had.
+ */
+export function webhookRunTriggersFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly WebhookRunTrigger[] | null | undefined,
+  current: readonly WebhookRunTrigger[] | null,
+): WebhookRunTrigger[] | null {
+  if (!webhookTakesAutomationRuns(eventTypes)) return null;
   const kept = given === undefined ? current : given;
   return kept ? [...kept] : null;
 }
@@ -864,6 +894,8 @@ const endpointFields = z.object({
   conversationStatuses: webhookConversationStatusesSchema.optional(),
   /** Given, how the runs it takes ended (null: every end, ADR-151); left out, they stay. */
   runEndStatuses: webhookRunEndStatusesSchema.optional(),
+  /** Given, what started the runs it takes (null: every run, ADR-183); left out, they stay. */
+  runTriggers: webhookRunTriggersSchema.optional(),
   /**
    * Given, the numbers whose events it takes (null: every number, ADR-170); left out, they stay.
    */
@@ -943,6 +975,12 @@ const runEndStatusesNeedTheEvent = {
     !data.runEndStatuses || data.eventTypes.includes('automation.run_ended'),
   options: { path: ['runEndStatuses'], message: WEBHOOK_RUN_END_STATUSES_NEED_THE_EVENT },
 };
+/** What started the runs is chosen only for an endpoint that takes run events (ADR-183). */
+const runTriggersNeedTheEvents = {
+  check: (data: { eventTypes: WebhookEventType[]; runTriggers?: unknown }) =>
+    !data.runTriggers || webhookTakesAutomationRuns(data.eventTypes),
+  options: { path: ['runTriggers'], message: WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS },
+};
 /** Numbers are chosen only for an endpoint that takes events of numbers (ADR-170). */
 const channelsNeedTheEvents = {
   check: (data: { eventTypes: WebhookEventType[]; channelIds?: unknown }) =>
@@ -977,6 +1015,7 @@ const endpointSchema = endpointFields
   .refine(templateStatusesNeedTheEvent.check, templateStatusesNeedTheEvent.options)
   .refine(conversationStatusesNeedTheEvent.check, conversationStatusesNeedTheEvent.options)
   .refine(runEndStatusesNeedTheEvent.check, runEndStatusesNeedTheEvent.options)
+  .refine(runTriggersNeedTheEvents.check, runTriggersNeedTheEvents.options)
   .refine(channelsNeedTheEvents.check, channelsNeedTheEvents.options)
   .refine(teamsNeedTheEvents.check, teamsNeedTheEvents.options)
   .refine(templatesNeedTheEvents.check, templatesNeedTheEvents.options)
@@ -993,6 +1032,7 @@ const updateSchema = endpointFields
   .refine(templateStatusesNeedTheEvent.check, templateStatusesNeedTheEvent.options)
   .refine(conversationStatusesNeedTheEvent.check, conversationStatusesNeedTheEvent.options)
   .refine(runEndStatusesNeedTheEvent.check, runEndStatusesNeedTheEvent.options)
+  .refine(runTriggersNeedTheEvents.check, runTriggersNeedTheEvents.options)
   .refine(channelsNeedTheEvents.check, channelsNeedTheEvents.options)
   .refine(teamsNeedTheEvents.check, teamsNeedTheEvents.options)
   .refine(templatesNeedTheEvents.check, templatesNeedTheEvents.options)
@@ -1046,6 +1086,8 @@ export interface WebhookEndpointView {
   conversationStatuses: WebhookConversationStatus[] | null;
   /** How the runs it takes as `automation.run_ended` ended (ADR-151); null takes every end. */
   runEndStatuses: WebhookRunEndStatus[] | null;
+  /** What started the runs whose events it takes (ADR-183); null takes every run's. */
+  runTriggers: WebhookRunTrigger[] | null;
   /** The numbers whose events it takes (ADR-170), as stored, named; null takes every number. */
   channels: WebhookEndpointChannel[] | null;
   /**
@@ -1288,6 +1330,7 @@ export async function lockWebhookEndpoint(
       templateStatuses: webhookEndpoints.templateStatuses,
       conversationStatuses: webhookEndpoints.conversationStatuses,
       runEndStatuses: webhookEndpoints.runEndStatuses,
+      runTriggers: webhookEndpoints.runTriggers,
       channelAccountIds: webhookEndpoints.channelAccountIds,
       teamIds: webhookEndpoints.teamIds,
       templateIds: webhookEndpoints.templateIds,
@@ -1338,6 +1381,7 @@ export async function insertWebhookEndpoint(
     templateStatuses: WebhookTemplateStatus[] | null;
     conversationStatuses: WebhookConversationStatus[] | null;
     runEndStatuses: WebhookRunEndStatus[] | null;
+    runTriggers: WebhookRunTrigger[] | null;
     channelAccountIds: string[] | null;
     teamIds: string[] | null;
     templateIds: string[] | null;
@@ -1377,6 +1421,7 @@ export async function insertWebhookEndpoint(
     templateStatuses: input.templateStatuses,
     conversationStatuses: input.conversationStatuses,
     runEndStatuses: input.runEndStatuses,
+    runTriggers: input.runTriggers,
     channelAccountIds: input.channelAccountIds,
     teamIds: input.teamIds,
     templateIds: input.templateIds,
@@ -1765,6 +1810,7 @@ export function createWebhooksService(deps: {
               templateStatuses: webhookEndpoints.templateStatuses,
               conversationStatuses: webhookEndpoints.conversationStatuses,
               runEndStatuses: webhookEndpoints.runEndStatuses,
+              runTriggers: webhookEndpoints.runTriggers,
               channelAccountIds: webhookEndpoints.channelAccountIds,
               teamIds: webhookEndpoints.teamIds,
               templateIds: webhookEndpoints.templateIds,
@@ -2097,6 +2143,7 @@ export function createWebhooksService(deps: {
           null,
         );
         const runEndStatuses = webhookRunEndStatusesFor(data.eventTypes, data.runEndStatuses, null);
+        const runTriggers = webhookRunTriggersFor(data.eventTypes, data.runTriggers, null);
         const channelIds = webhookChannelIdsFor(data.eventTypes, data.channelIds, null);
         await assertWebhookChannels(tx, ctx.tenant.id, channelIds);
         const teamIds = webhookTeamIdsFor(data.eventTypes, data.teamIds, null);
@@ -2127,6 +2174,7 @@ export function createWebhooksService(deps: {
           templateStatuses,
           conversationStatuses,
           runEndStatuses,
+          runTriggers,
           channelAccountIds: channelIds,
           teamIds,
           templateIds,
@@ -2154,6 +2202,7 @@ export function createWebhooksService(deps: {
               ...(templateStatuses ? { templateStatuses } : {}),
               ...(conversationStatuses ? { conversationStatuses } : {}),
               ...(runEndStatuses ? { runEndStatuses } : {}),
+              ...(runTriggers ? { runTriggers } : {}),
               ...(channelIds ? { channelIds } : {}),
               ...(teamIds ? { teamIds } : {}),
               ...(templateIds ? { templateIds } : {}),
@@ -2223,6 +2272,11 @@ export function createWebhooksService(deps: {
           data.runEndStatuses,
           endpoint.runEndStatuses,
         );
+        const runTriggers = webhookRunTriggersFor(
+          data.eventTypes,
+          data.runTriggers,
+          endpoint.runTriggers,
+        );
         const channelIds = webhookChannelIdsFor(
           data.eventTypes,
           data.channelIds,
@@ -2279,6 +2333,7 @@ export function createWebhooksService(deps: {
             templateStatuses,
             conversationStatuses,
             runEndStatuses,
+            runTriggers,
             channelAccountIds: channelIds,
             teamIds,
             templateIds,
@@ -2317,6 +2372,7 @@ export function createWebhooksService(deps: {
               ...(templateStatuses ? { templateStatuses } : {}),
               ...(conversationStatuses ? { conversationStatuses } : {}),
               ...(runEndStatuses ? { runEndStatuses } : {}),
+              ...(runTriggers ? { runTriggers } : {}),
               ...(channelIds ? { channelIds } : {}),
               ...(teamIds ? { teamIds } : {}),
               ...(templateIds ? { templateIds } : {}),

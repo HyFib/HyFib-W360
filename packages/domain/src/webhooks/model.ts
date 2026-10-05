@@ -8,6 +8,7 @@ import type {
   WebhookMessageStatus,
   WebhookOrderStatus,
   WebhookRunEndStatus,
+  WebhookRunTrigger,
   WebhookTemplateStatus,
 } from '@w360/db';
 
@@ -20,6 +21,7 @@ export type {
   WebhookMessageStatus,
   WebhookOrderStatus,
   WebhookRunEndStatus,
+  WebhookRunTrigger,
   WebhookTemplateStatus,
 } from '@w360/db';
 
@@ -302,6 +304,27 @@ export const WEBHOOK_RUN_END_STATUS_LABELS: Record<WebhookRunEndStatus, string> 
   taken_over: 'Taken over',
   stopped: 'Stopped',
   failed: 'Failed',
+};
+
+/**
+ * What starts a live run (ADR-078), which an endpoint taking run events can choose (ADR-183), in the
+ * order the automation builder lists triggers; members' test runs send no events.
+ */
+export const WEBHOOK_RUN_TRIGGERS = [
+  'keyword',
+  'conversation_started',
+  'any_message',
+  'store_event',
+  'api',
+] as const satisfies readonly WebhookRunTrigger[];
+
+/** How Settings names what started a run (ADR-183), as the automation pages name triggers. */
+export const WEBHOOK_RUN_TRIGGER_LABELS: Record<WebhookRunTrigger, string> = {
+  keyword: 'Keyword',
+  conversation_started: 'New conversation',
+  any_message: 'Any message',
+  store_event: 'Order messages',
+  api: 'API',
 };
 
 export const WEBHOOK_LIMITS = {

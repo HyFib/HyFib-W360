@@ -11,6 +11,7 @@ import {
   WEBHOOK_LIMITS,
   WEBHOOK_ORDER_STATUS_LABELS,
   WEBHOOK_RUN_END_STATUS_LABELS,
+  WEBHOOK_RUN_TRIGGER_LABELS,
   WEBHOOK_MESSAGE_SENDER_LABELS,
   WEBHOOK_MESSAGE_STATUS_LABELS,
   WEBHOOK_TEMPLATE_STATUS_LABELS,
@@ -198,6 +199,12 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                       <p className="text-xs text-muted-foreground">
                         Automation ends sent:{' '}
                         {e.runEndStatuses.map((s) => WEBHOOK_RUN_END_STATUS_LABELS[s]).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.runTriggers ? (
+                      <p className="text-xs text-muted-foreground">
+                        Automation runs started by:{' '}
+                        {e.runTriggers.map((t) => WEBHOOK_RUN_TRIGGER_LABELS[t]).join(', ')}
                       </p>
                     ) : null}
                     {e.channels ? (

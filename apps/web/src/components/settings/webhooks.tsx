@@ -23,6 +23,8 @@ import {
   WEBHOOK_REPLAY_PERIODS,
   WEBHOOK_RUN_END_STATUS_LABELS,
   WEBHOOK_RUN_END_STATUSES,
+  WEBHOOK_RUN_TRIGGER_LABELS,
+  WEBHOOK_RUN_TRIGGERS,
   WEBHOOK_TEMPLATE_STATUS_LABELS,
   WEBHOOK_TEMPLATE_STATUSES,
   webhookAssigneeText,
@@ -52,6 +54,7 @@ import {
   type WebhookOrderStatus,
   type WebhookReplayPeriod,
   type WebhookRunEndStatus,
+  type WebhookRunTrigger,
   type WebhookTeamChoice,
   type WebhookTemplateChoice,
   type WebhookTemplateStatus,
@@ -179,6 +182,52 @@ function SenderChoices({
             <Label htmlFor={id} className="font-normal">
               {WEBHOOK_MESSAGE_SENDER_LABELS[sender]}{' '}
               <span className="font-mono text-xs">({sender})</span>
+            </Label>
+          </div>
+        );
+      })}
+    </fieldset>
+  );
+}
+
+/**
+ * What started the runs whose events an endpoint takes (ADR-183), shown while it takes a run event:
+ * every run unless some are unticked.
+ */
+function TriggerChoices({
+  prefix,
+  chosen,
+  onChange,
+}: {
+  prefix: string;
+  chosen: WebhookRunTrigger[];
+  onChange: (next: WebhookRunTrigger[]) => void;
+}) {
+  return (
+    <fieldset className="grid gap-1">
+      <legend className="mb-1 text-sm font-medium">Runs started by</legend>
+      <p className="text-xs text-muted-foreground">
+        Automation started and Automation ended are sent for the runs started by the ways ticked
+        (all of them unless you untick some).
+      </p>
+      {WEBHOOK_RUN_TRIGGERS.map((trigger) => {
+        const id = `${prefix}-run-trigger-${trigger}`;
+        return (
+          <div key={trigger} className="flex items-center gap-2">
+            <Checkbox
+              id={id}
+              checked={chosen.includes(trigger)}
+              onChange={(e) =>
+                onChange(
+                  e.target.checked
+                    ? WEBHOOK_RUN_TRIGGERS.filter((t) => t === trigger || chosen.includes(t))
+                    : chosen.filter((t) => t !== trigger),
+                )
+              }
+            />
+            <Label htmlFor={id} className="font-normal">
+              {WEBHOOK_RUN_TRIGGER_LABELS[trigger]}{' '}
+              <span className="font-mono text-xs">({trigger})</span>
             </Label>
           </div>
         );
@@ -1152,6 +1201,8 @@ export function WebhookEndpointForm({
     templateStatuses: WebhookTemplateStatus[] | null;
     conversationStatuses: WebhookConversationStatus[] | null;
     runEndStatuses: WebhookRunEndStatus[] | null;
+    /** What started the runs it takes (ADR-183); null for every run. */
+    runTriggers: WebhookRunTrigger[] | null;
     channelIds: string[] | null;
     /** The teams it names (ADR-174), deleted ones without a name; null for every team. */
     teams: WebhookEndpointTeam[] | null;
@@ -1200,6 +1251,9 @@ export function WebhookEndpointForm({
   );
   const [runEndStatuses, setRunEndStatuses] = useState<WebhookRunEndStatus[]>(
     endpoint?.runEndStatuses ?? [...WEBHOOK_RUN_END_STATUSES],
+  );
+  const [runTriggers, setRunTriggers] = useState<WebhookRunTrigger[]>(
+    endpoint?.runTriggers ?? [...WEBHOOK_RUN_TRIGGERS],
   );
   const [everyAutomation, setEveryAutomation] = useState(!endpoint?.automationIds);
   const [automationIds, setAutomationIds] = useState<string[]>(endpoint?.automationIds ?? []);
@@ -1291,6 +1345,11 @@ export function WebhookEndpointForm({
           runEndStatuses.length < WEBHOOK_RUN_END_STATUSES.length
             ? runEndStatuses
             : null;
+        // Every way a run starts ticked takes every run (null, ADR-183).
+        const chosenRunTriggers =
+          webhookTakesAutomationRuns(eventTypes) && runTriggers.length < WEBHOOK_RUN_TRIGGERS.length
+            ? runTriggers
+            : null;
         // Every number's events unless the numbers ticked are chosen (ADR-170).
         const chosenChannels =
           webhookTakesChannelEvents(eventTypes) && !everyChannel ? channelIds : null;
@@ -1315,6 +1374,7 @@ export function WebhookEndpointForm({
           templateStatuses: chosenTemplateStatuses,
           conversationStatuses: chosenConversationStatuses,
           runEndStatuses: chosenRunEndStatuses,
+          runTriggers: chosenRunTriggers,
           channelIds: chosenChannels,
           teamIds: chosenTeams,
           templateIds: chosenTemplates,
@@ -1371,6 +1431,7 @@ export function WebhookEndpointForm({
               setTemplateStatuses([...WEBHOOK_TEMPLATE_STATUSES]);
               setConversationStatuses([...WEBHOOK_CONVERSATION_STATUSES]);
               setRunEndStatuses([...WEBHOOK_RUN_END_STATUSES]);
+              setRunTriggers([...WEBHOOK_RUN_TRIGGERS]);
               setEveryAutomation(true);
               setAutomationIds([]);
               setEveryChannel(true);
@@ -1458,6 +1519,9 @@ export function WebhookEndpointForm({
           chosen={automationIds}
           onChange={setAutomationIds}
         />
+      ) : null}
+      {webhookTakesAutomationRuns(eventTypes) ? (
+        <TriggerChoices prefix={prefix} chosen={runTriggers} onChange={setRunTriggers} />
       ) : null}
       {webhookTakesChannelEvents(eventTypes) ? (
         <ChannelChoices

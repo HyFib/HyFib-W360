@@ -2235,6 +2235,15 @@ to replay. To take more, tick the templates under "Templates" on the endpoint's 
 `templateIds` (null for every template). Removing both Message status and Template status clears the
 list.
 
+**A receiver misses a run's events (ADR-183).** An endpoint can take the run events of the runs
+started by chosen triggers only. The endpoints list shows them ("Automation runs started by: …"),
+and the API answers `runTriggers` (null takes every run). A run's events go by what started it, as
+`run.trigger` names it: those of a run started otherwise are never queued for the endpoint, and when
+no endpoint of the company takes an event, it is not recorded at all, so there is nothing to replay.
+To take more, tick the triggers under "Runs started by" on the endpoint's page, or
+`PATCH /webhook-endpoints/{id}` with `runTriggers` (null for every run). Removing both Automation
+started and Automation ended clears the list.
+
 **A receiver misses the events of a member's conversations (ADR-181).** An endpoint can take the
 message and conversation events of the conversations assigned to chosen members only. The endpoints
 list shows them ("Members whose conversations’ events are sent: …"), and the API answers
@@ -2790,6 +2799,14 @@ must exist to own the function) or a function of that name created by hand. 0130
 without blocking captures; it fails only if a stored event has a list, which nothing wrote before
 0129: look for rows with `tags_added IS NOT NULL OR tags_removed IS NOT NULL` before running it
 again.
+
+**Migration 0131 failed.** It adds `run_triggers` to `app.webhook_endpoints` with the check
+`webhook_endpoints_run_triggers`, grants its update to the runtime role, and replaces
+`app.capture_webhook_event` and `app.webhook_capture_automation_run`, in one transaction; a failure
+rolls it all back (usually the bootstrap roles, or a lock held on the table: fix it and run the
+migrations again). Web servers of this release need it before they start, or Settings → Webhooks and
+the endpoints API fail (their reads of endpoints name the column); workers of either release and web
+servers of the previous release work with it.
 
 **Migration 0072 failed.** It creates `ops.queue_waits`, adds `queues` to the kinds of
 `ops.platform_alerts` (replacing its check `platform_alerts_kind_check`) and creates

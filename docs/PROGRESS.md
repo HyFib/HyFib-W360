@@ -1,5 +1,58 @@
 # Progress
 
+## 2026-10-05 — Phase 5: choosing what started the runs a webhook endpoint receives (P5-09, ADR-183)
+
+Status: **Implemented; its database and browser tests run in CI only (test receivers only).** Every
+endpoint taking run events received every run, whatever started it. The local PostgreSQL is
+unavailable (its Docker daemon stopped), so migration 0131, the integration tests and the changed
+e2e test below were written but not run here.
+
+### Completed
+
+- **Design (ADR-183):** `runTriggers`, null for every run or 1 to 5 of `keyword`,
+  `conversation_started`, `any_message`, `store_event` and `api`, only with a run event; the run
+  trigger passes what started the run and the capture takes it out before storing.
+- **Database:** migration 0131 (the column and its check, the column grant,
+  `app.capture_webhook_event` and the run trigger function); the schema's column and type
+  (`packages/db`).
+- **Domain:** the list's schema, keeping and refining (`webhookRunTriggersSchema`,
+  `webhookRunTriggersFor`); the triggers and their labels in the model, shared with the payload;
+  `runTriggers` in the settings service, the API (create, update, answers) and the OpenAPI document;
+  the export column.
+- **Web:** "Runs started by" in the endpoint form (all ticked unless some are unticked) and
+  "Automation runs started by: …" on the endpoints list.
+- **Tests:**
+  - Unit (3 new in `webhooks.test.ts`, 1 new and 1 changed in `api.test.ts`): the list's rules, its
+    triggers and labels, keeping and clearing, the API schemas and the OpenAPI entries.
+  - Integration (1 new in `webhooks.test.ts`, 1 new and 1 changed in `webhook-events.test.ts`, 1 new
+    and 1 changed in `api-webhook-endpoints.test.ts`): refusals, keeping and clearing, audits, the
+    check and the grant, capture by trigger, the API. Written for CI; not run here.
+  - E2E (1 changed in `webhook-events.spec.ts`): an endpoint for runs started through the API hears
+    nothing of keyword runs. Written for CI; not run here.
+- **Docs:** ADR-183 (and ADR-145's and ADR-151's "Not built" annotated); SECURITY; ARCHITECTURE;
+  THREAT-MODEL T177; DEPLOYMENT and RUNBOOKS (migration 0131, a receiver missing a run's events);
+  DATA-RETENTION; BACKLOG P5-09; feature matrix H-014, W-138 and W-139.
+- **Mutation checks:** 14 deliberate regressions tried, all caught on the unit-tested parts (an
+  empty list, repeats or the order kept, any text taken, a list kept without its events or by a
+  null, a trigger left out, a label, the API's refinement, change rule and fields, the OpenAPI
+  field). The services' checks, the capture and the form need the database or a browser, so their
+  regressions are left to the integration and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 819 passed (82 files)                                                |
+| `pnpm test:integration`, e2e, migration 0131       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 14 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Filters on the key that started a run, a store event's kind or an end reason; triggers per event.
+
 ## 2026-10-05 — Phase 5: naming the tags a contact.updated added and removed (P5-09, ADR-182)
 
 Status: **Implemented; its database and browser tests run in CI only (test receivers only).** A

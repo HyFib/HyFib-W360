@@ -23,6 +23,7 @@ import {
   WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_RUN_END_STATUSES,
+  WEBHOOK_RUN_TRIGGERS,
   WEBHOOK_RETRY_SECONDS,
   WEBHOOK_TEMPLATE_STATUSES,
 } from '../webhooks/model';
@@ -523,6 +524,12 @@ export const apiWebhookEndpointSchema = z.object({
     .nullable()
     .describe(
       'The statuses a run ended with that the endpoint receives as automation.run_ended; null receives every end.',
+    ),
+  runTriggers: z
+    .array(z.enum(WEBHOOK_RUN_TRIGGERS))
+    .nullable()
+    .describe(
+      'What started the runs whose events (automation.run_started and automation.run_ended) the endpoint receives, as run.trigger names it; null receives every run.',
     ),
   channelIds: z
     .array(z.uuid())

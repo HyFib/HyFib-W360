@@ -106,6 +106,7 @@ import {
   endpointAnnouncement,
 } from './webhook-endpoints';
 import {
+  WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS,
   WEBHOOK_ASSIGNEES_NEED_THE_EVENTS,
   WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS,
   WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT,
@@ -1367,6 +1368,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'oauth',
       'orderStatuses',
       'runEndStatuses',
+      'runTriggers',
       'teamIds',
       'templateIds',
       'templateStatuses',
@@ -1617,6 +1619,66 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(doc.info.description).toContain(
       'And it can name templates (its `templateIds`): then it receives the statuses of the messages sent with them and their changes only.',
     );
+  });
+
+  it('take what started the runs only with a run event, each once, and a list of them alone is a change (ADR-183)', () => {
+    const base = { url: 'https://hooks.example.com/w360', events: ['contact.created'] };
+    for (const event of ['automation.run_started', 'automation.run_ended']) {
+      expect(
+        apiCreateWebhookEndpointSchema.parse({
+          ...base,
+          events: ['contact.created', event],
+          runTriggers: ['api', 'keyword', 'api'],
+        }).runTriggers,
+        event,
+      ).toEqual(['keyword', 'api']);
+    }
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['message.received', 'order.received'],
+      runTriggers: ['api'],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['runTriggers', WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS],
+    ]);
+    const runs = { ...base, events: ['automation.run_started'] };
+    for (const body of [
+      { ...runs, runTriggers: [] },
+      { ...runs, runTriggers: ['test'] },
+      { ...runs, runTriggers: ['webhook'] },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(apiCreateWebhookEndpointSchema.parse({ ...runs, runTriggers: null }).runTriggers).toBe(
+      null,
+    );
+    expect(apiUpdateWebhookEndpointSchema.parse({ runTriggers: null })).toEqual({
+      runTriggers: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ runTriggers: ['api'] })).toEqual({
+      runTriggers: ['api'],
+    });
+    // Answered as a list of the triggers run events name, or null.
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: { items?: { enum?: unknown } }[] }>;
+      required?: string[];
+    };
+    expect(answered.properties.runTriggers?.anyOf?.find((s) => s.items)?.items?.enum).toEqual([
+      'keyword',
+      'conversation_started',
+      'any_message',
+      'store_event',
+      'api',
+    ]);
+    expect(answered.required).toContain('runTriggers');
+    expect(
+      Object.keys((schemas.CreateWebhookEndpoint as { properties: object }).properties),
+    ).toContain('runTriggers');
   });
 
   it('take members only with an event of a conversation, each once, and a list of them alone is a change (ADR-181)', () => {

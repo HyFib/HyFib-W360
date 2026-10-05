@@ -26,6 +26,7 @@ import {
   type WebhookMessageStatus,
   type WebhookOrderStatus,
   type WebhookRunEndStatus,
+  type WebhookRunTrigger,
   type WebhookTemplateStatus,
 } from '@w360/db';
 import { recordSystemAudit } from '../audit';
@@ -68,6 +69,7 @@ import {
   WEBHOOK_CONVERSATION_STATUSES_NEED_THE_EVENT,
   WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT,
   WEBHOOK_RUN_END_STATUSES_NEED_THE_EVENT,
+  WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS,
   WEBHOOK_SENDERS_NEED_THE_EVENT,
   WEBHOOK_TEAMS_NEED_THE_EVENTS,
   WEBHOOK_TEMPLATES_NEED_THE_EVENTS,
@@ -84,6 +86,8 @@ import {
   webhookConversationStatusesSchema,
   webhookRunEndStatusesFor,
   webhookRunEndStatusesSchema,
+  webhookRunTriggersFor,
+  webhookRunTriggersSchema,
   webhookTeamIdsFor,
   webhookTeamIdsSchema,
   webhookTemplateIdsFor,
@@ -225,6 +229,16 @@ const invalidRunEndStatuses = () =>
     issues: [{ path: 'runEndStatuses', message: WEBHOOK_RUN_END_STATUSES_NEED_THE_EVENT }],
   });
 
+const runTriggersField = webhookRunTriggersSchema.describe(
+  'What started the runs whose events the endpoint receives, as `run.trigger` names it (keyword, conversation_started, any_message, store_event, api), only with automation.run_started or automation.run_ended; both events are narrowed alike. null receives every run.',
+);
+
+/** What started the runs is chosen only for an endpoint that receives run events (ADR-183). */
+const invalidRunTriggers = () =>
+  new AppError('validation_failed', WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS, {
+    issues: [{ path: 'runTriggers', message: WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS }],
+  });
+
 const channelIdsField = webhookChannelIdsSchema.describe(
   `The WhatsApp numbers whose events the endpoint receives: 1 to ${WEBHOOK_LIMITS.channels} ids of the company's numbers (messages, conversations and orders give a number's id as \`channelId\`, templates in \`channels\` and webhook events as \`channel.id\`), only with an event that happens on a number: message.received, message.status, conversation.status_changed, conversation.assignment_changed, conversation.team_changed, automation.run_started, automation.run_ended, order.received, order.status_changed or campaign.status_changed. A campaign's events are those of the number it sends from; a campaign without a number yet is on none. Consent, contact and template events belong to no number: an endpoint that names numbers still receives every one of them it takes. null receives the events of every number, including numbers connected later.`,
 );
@@ -291,6 +305,7 @@ export const apiCreateWebhookEndpointSchema = z
     templateStatuses: templateStatusesField.optional(),
     conversationStatuses: conversationStatusesField.optional(),
     runEndStatuses: runEndStatusesField.optional(),
+    runTriggers: runTriggersField.optional(),
     channelIds: channelIdsField.optional(),
     teamIds: teamIdsField.optional(),
     templateIds: templateIdsField.optional(),
@@ -333,6 +348,10 @@ export const apiCreateWebhookEndpointSchema = z
   .refine((data) => !data.runEndStatuses || data.events.includes('automation.run_ended'), {
     path: ['runEndStatuses'],
     message: WEBHOOK_RUN_END_STATUSES_NEED_THE_EVENT,
+  })
+  .refine((data) => !data.runTriggers || webhookTakesAutomationRuns(data.events), {
+    path: ['runTriggers'],
+    message: WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS,
   })
   .refine((data) => !data.channelIds || webhookTakesChannelEvents(data.events), {
     path: ['channelIds'],
@@ -413,6 +432,11 @@ export const apiUpdateWebhookEndpointSchema = z
       .describe(
         'The statuses a run ended with that the endpoint receives as automation.run_ended; null receives every end. Left out, they stay, unless the events no longer include automation.run_ended, which clears them.',
       ),
+    runTriggers: runTriggersField
+      .optional()
+      .describe(
+        'What started the runs whose events the endpoint receives; null receives every run. Left out, they stay, unless the events no longer include automation.run_started or automation.run_ended, which clears them.',
+      ),
     channelIds: channelIdsField
       .optional()
       .describe(
@@ -456,12 +480,13 @@ export const apiUpdateWebhookEndpointSchema = z
       data.templateStatuses !== undefined ||
       data.conversationStatuses !== undefined ||
       data.runEndStatuses !== undefined ||
+      data.runTriggers !== undefined ||
       data.channelIds !== undefined ||
       data.teamIds !== undefined ||
       data.templateIds !== undefined ||
       data.assigneeIds !== undefined ||
       data.oauth !== undefined,
-    'Give the events, the description, the headers, the message statuses, who sent the messages, the contact parts, the automations, the campaign statuses, the order statuses, the template statuses, the conversation statuses, the run end statuses, the numbers, the teams, the templates, the members, the OAuth client or whether the endpoint is enabled',
+    'Give the events, the description, the headers, the message statuses, who sent the messages, the contact parts, the automations, the campaign statuses, the order statuses, the template statuses, the conversation statuses, the run end statuses, what started the runs, the numbers, the teams, the templates, the members, the OAuth client or whether the endpoint is enabled',
   );
 
 export interface ApiWebhookEndpoint {
@@ -498,6 +523,8 @@ export interface ApiWebhookEndpoint {
   conversationStatuses: WebhookConversationStatus[] | null;
   /** How the runs it receives as `automation.run_ended` ended (ADR-151); null receives every end. */
   runEndStatuses: WebhookRunEndStatus[] | null;
+  /** What started the runs whose events it receives (ADR-183); null receives every run. */
+  runTriggers: WebhookRunTrigger[] | null;
   /** The numbers whose events it receives (ADR-170); null receives every number's. */
   channelIds: string[] | null;
   /** The teams whose conversations' events it receives (ADR-174); null receives every one's. */
@@ -608,6 +635,7 @@ const columns = {
   templateStatuses: webhookEndpoints.templateStatuses,
   conversationStatuses: webhookEndpoints.conversationStatuses,
   runEndStatuses: webhookEndpoints.runEndStatuses,
+  runTriggers: webhookEndpoints.runTriggers,
   channelAccountIds: webhookEndpoints.channelAccountIds,
   teamIds: webhookEndpoints.teamIds,
   templateIds: webhookEndpoints.templateIds,
@@ -643,6 +671,7 @@ type EndpointRow = Pick<
   | 'templateStatuses'
   | 'conversationStatuses'
   | 'runEndStatuses'
+  | 'runTriggers'
   | 'channelAccountIds'
   | 'teamIds'
   | 'templateIds'
@@ -683,6 +712,7 @@ function toApiEndpoint(row: EndpointRow, now: Date): ApiWebhookEndpoint {
     templateStatuses: row.templateStatuses,
     conversationStatuses: row.conversationStatuses,
     runEndStatuses: row.runEndStatuses,
+    runTriggers: row.runTriggers,
     channelIds: row.channelAccountIds,
     teamIds: row.teamIds,
     templateIds: row.templateIds,
@@ -917,6 +947,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               null,
             );
             const runEndStatuses = webhookRunEndStatusesFor(data.events, data.runEndStatuses, null);
+            const runTriggers = webhookRunTriggersFor(data.events, data.runTriggers, null);
             const channelIds = webhookChannelIdsFor(data.events, data.channelIds, null);
             await assertWebhookChannels(tx, ctx.tenant.id, channelIds);
             const teamIds = webhookTeamIdsFor(data.events, data.teamIds, null);
@@ -939,6 +970,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               templateStatuses,
               conversationStatuses,
               runEndStatuses,
+              runTriggers,
               channelAccountIds: channelIds,
               teamIds,
               templateIds,
@@ -959,6 +991,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               ...(templateStatuses ? { templateStatuses } : {}),
               ...(conversationStatuses ? { conversationStatuses } : {}),
               ...(runEndStatuses ? { runEndStatuses } : {}),
+              ...(runTriggers ? { runTriggers } : {}),
               ...(channelIds ? { channelIds } : {}),
               ...(teamIds ? { teamIds } : {}),
               ...(templateIds ? { templateIds } : {}),
@@ -1008,6 +1041,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         if (data.runEndStatuses && !events.includes('automation.run_ended')) {
           throw invalidRunEndStatuses();
         }
+        if (data.runTriggers && !webhookTakesAutomationRuns(events)) throw invalidRunTriggers();
         if (data.channelIds && !webhookTakesChannelEvents(events)) throw invalidChannels();
         if (data.teamIds && !webhookTakesTeamEvents(events)) throw invalidTeams();
         if (data.templateIds && !webhookTakesTemplateEvents(events)) throw invalidTemplates();
@@ -1054,6 +1088,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
           data.templateStatuses !== undefined ||
           data.conversationStatuses !== undefined ||
           data.runEndStatuses !== undefined ||
+          data.runTriggers !== undefined ||
           data.channelIds !== undefined ||
           data.teamIds !== undefined ||
           data.templateIds !== undefined ||
@@ -1116,6 +1151,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
                 data.runEndStatuses,
                 endpoint.runEndStatuses,
               ),
+              runTriggers: webhookRunTriggersFor(events, data.runTriggers, endpoint.runTriggers),
               channelAccountIds: webhookChannelIdsFor(
                 events,
                 data.channelIds,
@@ -1138,6 +1174,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               templateStatuses: webhookEndpoints.templateStatuses,
               conversationStatuses: webhookEndpoints.conversationStatuses,
               runEndStatuses: webhookEndpoints.runEndStatuses,
+              runTriggers: webhookEndpoints.runTriggers,
               channelAccountIds: webhookEndpoints.channelAccountIds,
               teamIds: webhookEndpoints.teamIds,
               templateIds: webhookEndpoints.templateIds,
@@ -1159,6 +1196,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               ? { conversationStatuses: changed.conversationStatuses }
               : {}),
             ...(changed.runEndStatuses ? { runEndStatuses: changed.runEndStatuses } : {}),
+            ...(changed.runTriggers ? { runTriggers: changed.runTriggers } : {}),
             ...(changed.channelAccountIds ? { channelIds: changed.channelAccountIds } : {}),
             ...(changed.teamIds ? { teamIds: changed.teamIds } : {}),
             ...(changed.templateIds ? { templateIds: changed.templateIds } : {}),
